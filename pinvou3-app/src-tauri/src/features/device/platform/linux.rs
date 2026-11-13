@@ -942,9 +942,10 @@ mod tests {
             crate::features::model_store::set_storage_settings(
                 None,
                 Some(vec![scan_root.to_string_lossy().into_owned()]),
+                None,
             )
             .expect("add scan dir");
-            crate::features::model_store::set_storage_settings(None, Some(Vec::new()))
+            crate::features::model_store::set_storage_settings(None, Some(Vec::new()), None)
                 .expect("remove scan dir");
 
             let error = remove_external_model(
@@ -1113,6 +1114,7 @@ mod tests {
             crate::features::model_store::set_storage_settings(
                 None,
                 Some(vec![swap.to_string_lossy().into_owned()]),
+                None,
             )
             .expect("swap scan dir");
         }
@@ -1746,5 +1748,322 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn registered_card_version_and_inflight_roots_survive_device_weight_deletion() {
+        use crate::features::device::{external_models::registry_dir, remove_external_model};
+        use crate::features::model_store::platform::linux::{
+            config, db, store_client::DeployTopology, version_store,
+        };
+        for source in ["card", "version", "download"] {
+            let _home = config::TempHome::new();
+            point_ollama_at_dead_port();
+            db::init_db().unwrap();
+            let weights = crate::platform::paths::user_home_dir()
+                .join("registered-only")
+                .join(source)
+                .join("opaque-location");
+            std::fs::create_dir_all(&weights).unwrap();
+            std::fs::write(weights.join("opaque.bin"), b"keep").unwrap();
+            let mut reservation = None;
+            match source {
+                "card" => {
+                    db::add_store_model_with_root(
+                        db::AddStoreModelParams {
+                            card_id: "registered-card",
+                            model_name: "owned-model",
+                            card_name: "owned-model",
+                            org: None,
+                            description: None,
+                            engine_name: "e",
+                            engine_version: None,
+                            size_bytes: 4,
+                            quantization: None,
+                            source_repo_id: None,
+                            source_filename: None,
+                            scripts: &Default::default(),
+                            status: "downloaded",
+                            profiles: &[],
+                            deploy_topology: DeployTopology::default(),
+                            card_source: "store",
+                        },
+                        weights.to_str().unwrap(),
+                    )
+                    .unwrap();
+                }
+                "version" => version_store::put(&version_store::Version {
+                    card_id: "retained-card".into(),
+                    version_id: "previous".into(),
+                    state: "retained".into(),
+                    record: None,
+                    models_root: Some(weights.to_string_lossy().into_owned()),
+                    runtime_card_id: "retained-runtime".into(),
+                    resource_dir: Some(weights.to_string_lossy().into_owned()),
+                    managed: true,
+                    created_at: "2026-11-11".into(),
+                    error: None,
+                    planned_bytes: 0,
+                    measured_bytes: Some(4),
+                })
+                .unwrap(),
+                "download" => {
+                    let lease = version_store::DownloadReservation::acquire(
+                        "pending-card",
+                        &weights,
+                        || false,
+                        || (),
+                    )
+                    .unwrap();
+                    lease.publish(4).unwrap();
+                    reservation = Some(lease);
+                }
+                _ => unreachable!(),
+            }
+            // No matching configured/history root, store name, marker, known
+            // weight filename, symlink or .env exists. Only the persisted
+            // authoritative root can reject this otherwise valid deep target.
+            let dir = registry_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            let record = dir.join("m-authoritative.json");
+            std::fs::write(&record, serde_json::to_vec(&serde_json::json!({
+                "schema": 1, "id": "m-authoritative", "name": "unrelated-alias", "kind": "other", "weights_path": weights,
+            })).unwrap()).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let error = remove_external_model(
+                    "m-authoritative".into(),
+                    true,
+                    "unrelated-alias".into(),
+                    None,
+                )
+                .await
+                .unwrap_err();
+                assert!(error.contains("模型商店"), "{source}: {error}");
+                assert_eq!(std::fs::read(weights.join("opaque.bin")).unwrap(), b"keep");
+                assert!(
+                    record.exists(),
+                    "a rejected physical deletion must retain the registry record"
+                );
+                let removed = remove_external_model(
+                    "m-authoritative".into(),
+                    false,
+                    "unrelated-alias".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+                assert!(removed.removed_registry);
+                assert!(!removed.removed_weights);
+                assert!(weights.exists(), "unregister-only must preserve weights");
+            });
+            drop(reservation);
+        }
+    }
+
+    fn write_removal_lock_fixture(
+        id: &str,
+        name: &str,
+        weights: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let dir = crate::features::device::external_models::registry_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = dir.join(format!("{id}.json"));
+        std::fs::write(
+            &record,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 1, "id": id, "name": name, "kind": "other", "weights_path": weights,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        record
+    }
+
+    #[test]
+    fn device_physical_removal_refuses_active_store_resources_but_unregister_does_not_wait() {
+        use crate::features::device::remove_external_model;
+        use crate::features::model_store::platform::linux::{config, db, version_store};
+        let _home = config::TempHome::new();
+        point_ollama_at_dead_port();
+        db::init_db().unwrap();
+        let weights = crate::platform::paths::user_home_dir()
+            .join("external-lock")
+            .join("deep")
+            .join("weights");
+        std::fs::create_dir_all(&weights).unwrap();
+        std::fs::write(weights.join("opaque.bin"), b"keep").unwrap();
+        let record = write_removal_lock_fixture("m-lock01", "external-lock-model", &weights);
+        let shared = version_store::resource_operation_lock(false).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let error =
+                remove_external_model("m-lock01".into(), true, "external-lock-model".into(), None)
+                    .await
+                    .unwrap_err();
+            assert_eq!(error, "model_store_weight_removal_busy");
+            assert_eq!(std::fs::read(weights.join("opaque.bin")).unwrap(), b"keep");
+            assert!(record.exists());
+            let removed =
+                remove_external_model("m-lock01".into(), false, "external-lock-model".into(), None)
+                    .await
+                    .unwrap();
+            assert!(removed.removed_registry);
+            assert!(!removed.removed_weights);
+            assert!(weights.exists());
+            write_removal_lock_fixture("m-lock01", "external-lock-model", &weights);
+            drop(shared);
+            let removed =
+                remove_external_model("m-lock01".into(), true, "external-lock-model".into(), None)
+                    .await
+                    .unwrap();
+            assert!(removed.removed_registry && removed.removed_weights);
+            assert!(!weights.exists());
+        });
+    }
+
+    #[test]
+    fn device_final_guard_and_delete_hold_the_store_lock_until_filesystem_retirement() {
+        use crate::features::device::{
+            external_models::weight_removal_test_hooks, remove_external_model,
+        };
+        use crate::features::model_store::platform::linux::{config, db, version_store};
+        let _home = config::TempHome::new();
+        point_ollama_at_dead_port();
+        db::init_db().unwrap();
+        let weights = crate::platform::paths::user_home_dir()
+            .join("external-retirement")
+            .join("deep")
+            .join("weights");
+        std::fs::create_dir_all(&weights).unwrap();
+        std::fs::write(weights.join("opaque.bin"), b"keep").unwrap();
+        let record = write_removal_lock_fixture("m-lock02", "external-retirement-model", &weights);
+        let (arrived, release) = weight_removal_test_hooks::arm(&weights.canonicalize().unwrap());
+        let removal = std::thread::spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(remove_external_model(
+                "m-lock02".into(),
+                true,
+                "external-retirement-model".into(),
+                None,
+            ))
+        });
+        arrived
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            weights.exists() && record.exists(),
+            "barrier precedes filesystem deletion"
+        );
+        assert!(
+            version_store::resource_operation_lock(false).is_err(),
+            "download/stage shared admission must fail after final guard until deletion ends"
+        );
+        assert!(version_store::resource_operation_lock(true).is_err());
+        release.send(()).unwrap();
+        let removed = removal.join().unwrap().unwrap();
+        assert!(removed.removed_registry && removed.removed_weights);
+        assert!(!weights.exists() && !record.exists());
+        assert!(
+            version_store::resource_operation_lock(false).is_ok(),
+            "shared operations resume after deletion retired"
+        );
+    }
+
+    #[test]
+    fn authoritative_path_errors_reach_device_unchanged_before_any_deletion() {
+        use crate::features::device::remove_external_model;
+        use crate::features::model_store::platform::linux::{config, db, version_store};
+        use std::os::unix::fs::PermissionsExt;
+        for fault in ["relative", "unreadable"] {
+            let _home = config::TempHome::new();
+            point_ollama_at_dead_port();
+            db::init_db().unwrap();
+            let parent = crate::platform::paths::user_home_dir()
+                .join("path-fault")
+                .join(fault);
+            let weights = parent.join("opaque-location");
+            std::fs::create_dir_all(&weights).unwrap();
+            std::fs::write(weights.join("opaque.bin"), b"keep").unwrap();
+            let record = write_removal_lock_fixture("m-patherr", "external-path-error", &weights);
+            let root = if fault == "relative" {
+                "relative/unknown".into()
+            } else {
+                weights.to_string_lossy().into_owned()
+            };
+            version_store::put(&version_store::Version {
+                card_id: "path-error-card".into(),
+                version_id: "history".into(),
+                state: "history".into(),
+                record: None,
+                models_root: Some(root),
+                runtime_card_id: "path-error-runtime".into(),
+                resource_dir: None,
+                managed: true,
+                created_at: "2026-11-11".into(),
+                error: None,
+                planned_bytes: 0,
+                measured_bytes: None,
+            })
+            .unwrap();
+            struct RestoreMode(std::path::PathBuf, std::fs::Permissions);
+            impl Drop for RestoreMode {
+                fn drop(&mut self) {
+                    std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+                }
+            }
+            let restore = if fault == "unreadable" {
+                let previous = std::fs::metadata(&parent).unwrap().permissions();
+                std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+                Some(RestoreMode(parent, previous))
+            } else {
+                None
+            };
+            let expected_io_error = if fault == "unreadable" {
+                Some(weights.canonicalize().unwrap_err().to_string())
+            } else {
+                None
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let error = runtime
+                .block_on(remove_external_model(
+                    "m-patherr".into(),
+                    true,
+                    "external-path-error".into(),
+                    None,
+                ))
+                .unwrap_err();
+            if fault == "relative" {
+                assert_eq!(error, "model_store_weight_path_invalid");
+            } else {
+                assert!(
+                    error.starts_with("model_store_weight_path_unavailable: "),
+                    "{error}"
+                );
+                assert_eq!(
+                    error,
+                    format!(
+                        "model_store_weight_path_unavailable: {}",
+                        expected_io_error.unwrap()
+                    ),
+                    "the actual OS diagnosis must be retained without a wrapper"
+                );
+            }
+            drop(restore);
+            assert_eq!(std::fs::read(weights.join("opaque.bin")).unwrap(), b"keep");
+            assert!(record.exists());
+        }
     }
 }
