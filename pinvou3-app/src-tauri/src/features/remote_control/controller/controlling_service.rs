@@ -619,7 +619,7 @@ async fn serve_controlling_lane_with_evidence_context(
     let owned_sender = lane.transport_sender();
     let registration = owned_sender
         .as_ref()
-        .map(|sender| sender.disconnect_context());
+        .map(|sender| sender.keeper_registration());
     let Some(registration) = registration else {
         return;
     };
@@ -1956,7 +1956,7 @@ mod tests {
         let new_running = manager.is_running() && !next_sender.is_stopped();
         let new_status = projection(&manager.status());
         let new_code_retained = manager.pending_code(next).is_ok();
-        manager.stop();
+        manager.stop(&business);
         assert!(old_result.is_err());
         assert!(
             statuses.is_empty(),
@@ -2279,6 +2279,21 @@ mod tests {
         assert_actual_adapter_case("replacement").await;
     }
 
+    #[tokio::test]
+    async fn actual_adapter_task_retirement_before_first_keeper_poll_closes_owned_state() {
+        assert_actual_adapter_case("task_ended").await;
+    }
+
+    #[tokio::test]
+    async fn actual_adapter_task_retirement_preserves_connected_replacement_owner() {
+        assert_actual_adapter_case("task_ended_replacement").await;
+    }
+
+    #[tokio::test]
+    async fn actual_adapter_requested_stop_before_first_keeper_poll_keeps_cleanup_identity() {
+        assert_actual_adapter_case("task_stopped").await;
+    }
+
     async fn assert_actual_adapter_case(case: &str) {
         let manager = ControllingDeviceManager::default();
         let business = ControllingLaneState::default();
@@ -2295,6 +2310,7 @@ mod tests {
         let mut lease = adapter_fixture_lease();
         lease.context = context.clone();
         lease.negotiated_capabilities.push("resume_v1".into());
+        lease.negotiated_capabilities.sort();
         let (sender, receiver) = transport_channels(
             ControllerRole::ControllerA,
             &context.remote_control_generation,
@@ -2320,19 +2336,27 @@ mod tests {
         }
         let expected = sender.disconnect_context();
         let sink_tx = ingress_tx.clone();
-        let sink = move |event: ControllerTransportEvent| {
-            let ControllerTransportEvent::Disconnected { context, .. } = &event else {
-                panic!("expected the actual transport disconnect producer");
-            };
-            assert_eq!(context, &expected);
-            sink_tx.enqueue(event);
-        };
+        let sink: Arc<dyn super::super::relay_transport::ControllerEventSink> =
+            Arc::new(move |event: ControllerTransportEvent| {
+                let ControllerTransportEvent::Disconnected { context, .. } = &event else {
+                    panic!("expected the actual transport disconnect producer");
+                };
+                assert_eq!(context, &expected);
+                sink_tx.enqueue(event);
+            });
         // Exercise the actual transport producer, suspension, production
         // adapter, inbox, production port and keeper. The WebSocket driver
         // itself is outside this A adapter test's scope.
-        super::super::relay_transport::disconnect_test_transport_to_sink(&sender, &sink);
-        drop(sink);
-        drop(ingress_tx);
+        let task_ended = matches!(
+            case,
+            "task_ended" | "task_ended_replacement" | "task_stopped"
+        );
+        if !task_ended {
+            super::super::relay_transport::disconnect_test_transport_to_sink(
+                &sender,
+                sink.as_ref(),
+            );
+        }
         if case == "pre_auth" {
             install_sender();
         }
@@ -2345,11 +2369,71 @@ mod tests {
         manager
             .complete_connected(operation.clone(), lease)
             .unwrap();
+        if task_ended {
+            // Deterministic handoff boundary: authenticated state is committed,
+            // but the keeper has never been polled. Use the real lifetime guard
+            // and real adapter inbox, not a manufactured None registration.
+            if case == "task_stopped" {
+                sender.request_stop();
+            }
+            super::super::relay_transport::retire_test_transport_to_sink(&sender, sink.clone());
+            assert!(sender.is_stopped());
+            assert!(sender.authenticated_lease().is_none());
+            assert_eq!(sender.keeper_registration().lease.as_ref(), Some(&context));
+        }
+        drop(sink);
+        drop(ingress_tx);
         let mut port = ControllerTransportPort::new(sender.clone(), inbound);
+        let mut connected_replacement = None;
         let replacement = if case == "replacement" {
             manager.disconnect();
             business.clear();
             Some(manager.connect("345-6789").unwrap())
+        } else if case == "task_ended_replacement" {
+            manager.disconnect();
+            business.clear();
+            let next = manager.connect("345-6789").unwrap();
+            manager.complete_reserved(next.clone()).unwrap();
+            let mut next_fixture = pairing_fixture("relay-task-retired-replacement");
+            super::super::test_support::bind_pairing_generation(
+                &mut next_fixture,
+                &context.remote_control_generation,
+            );
+            assert_eq!(lease_context(&next_fixture.reservation), context);
+            let (next_session, _) = paired_session_keys(
+                next_fixture.a_keys,
+                next_fixture.b_keys,
+                &next_fixture.reservation,
+            );
+            let (next_sender, next_receiver) = transport_channels(
+                ControllerRole::ControllerA,
+                &context.remote_control_generation,
+                8,
+                2,
+                8192,
+                1024,
+            );
+            let mut next_lease = adapter_fixture_lease();
+            next_lease.context = context.clone();
+            next_lease.negotiated_capabilities.push("resume_v1".into());
+            next_lease.negotiated_capabilities.sort();
+            next_sender
+                .install_authenticated_lease(AuthenticatedLease {
+                    context: context.clone(),
+                    negotiated_capabilities: next_lease.negotiated_capabilities.clone(),
+                })
+                .unwrap();
+            manager
+                .replace_owned_transport(&next, next_sender.clone(), &business)
+                .unwrap();
+            business
+                .install(HandshakeRole::A, &context, next_session)
+                .unwrap();
+            manager
+                .complete_connected(next.clone(), next_lease)
+                .unwrap();
+            connected_replacement = Some((next_sender, next_receiver));
+            Some(next)
         } else {
             None
         };
@@ -2411,6 +2495,40 @@ mod tests {
                     0,
                     "None lease context cannot acquire resume authority"
                 );
+            }
+            "task_ended" => {
+                assert_eq!(
+                    seen,
+                    vec![
+                        ControllingStatusKind::Reconnecting,
+                        ControllingStatusKind::Error
+                    ]
+                );
+                assert_eq!(manager.status().kind(), ControllingStatusKind::Error);
+                assert!(!business.is_installed());
+                assert_eq!(
+                    receiver.pending_control_for_test(),
+                    0,
+                    "retired metadata must not restore prepare sending authority"
+                );
+            }
+            "task_stopped" => {
+                assert_eq!(seen, vec![ControllingStatusKind::Error]);
+                assert_eq!(manager.status().kind(), ControllingStatusKind::Error);
+                assert!(!business.is_installed());
+                assert_eq!(receiver.pending_control_for_test(), 0);
+            }
+            "task_ended_replacement" => {
+                assert!(seen.is_empty());
+                assert_eq!(manager.status().kind(), ControllingStatusKind::Connected);
+                assert!(business.is_installed());
+                let (next_sender, _) = connected_replacement.as_ref().unwrap();
+                assert!(!next_sender.is_stopped());
+                assert_eq!(next_sender.authenticated_lease().unwrap().context, context);
+                assert_ne!(next_sender.owner(), sender.owner());
+                assert_eq!(receiver.pending_control_for_test(), 0);
+                manager.disconnect();
+                business.clear();
             }
             "replacement" => {
                 assert!(seen.is_empty());

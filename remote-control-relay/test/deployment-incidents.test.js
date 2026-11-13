@@ -30,6 +30,11 @@ function fragment(source, pattern) {
   assert.ok(match, 'actual deployment fragment must exist');
   return match[0];
 }
+// Manual recovery runs before normal deployment and contains its own health
+// checks. Select the actual normal-deployment entry rather than the first check
+// anywhere in the script.
+const productionDeployment = fragment(production,
+  /^node "\$RELAY_DIR\/scripts\/validate-deploy-hardening\.cjs" "\$HARDENING_FILE"[^]*$/m);
 
 test('actual production confirmation and base gates reject before any operations', () => {
   const confirmation = fragment(production, /^if \[\[ "\$\{PINVOU_CONFIRM_PRODUCTION_DEPLOY[^]*?^fi/m);
@@ -88,9 +93,9 @@ test('actual Darwin system temporary roots accept hardening input and reject ope
   });
 
 test('actual production baseline failure stops before build, upload, or SSH', () => {
-  const gate = fragment(production, /^if ! verify_public baseline; then[^]*?^fi/m);
-  assert.ok(production.indexOf(gate) < production.indexOf('node --check'));
-  assert.ok(production.indexOf(gate) < production.indexOf('scp -i'));
+  const gate = fragment(productionDeployment, /^if ! verify_public baseline; then[^]*?^fi/m);
+  assert.ok(productionDeployment.indexOf(gate) < productionDeployment.indexOf('node --check'));
+  assert.ok(productionDeployment.indexOf(gate) < productionDeployment.indexOf('scp -i'));
   const result = shell('VERIFY_ERROR=TEST_ONLY_BASELINE_FAILURE\nverify_public() { return 1; }\n'
     + gate + '\necho unexpected_operation');
   assert.equal(result.status, 1);
@@ -108,7 +113,10 @@ test('actual remote health loops retry transient failures and bound permanent fa
     { source: testing, expectedSuccess: 3, expectedFailure: 45 },
   ];
   for (const { source, expectedSuccess, expectedFailure } of cases) {
-    const health = fragment(source, /^healthy=0[^]*?(?=^echo "(?:backup=|测试 relay))/m);
+    const remote = source === production
+      ? fragment(source, /^deploy_output="\$\(ssh[^\n]*<<'REMOTE'\r?\n[^]*?^REMOTE$/m)
+      : source;
+    const health = fragment(remote, /^healthy=0[^]*?(?=^echo "(?:backup=|测试 relay))/m);
     // Execute only the real health/rollback section. All IO boundaries are
     // functions; only a private fixture counter persists across the real curl
     // command substitution. No SSH, network, service or deployed filesystem IO.
@@ -251,7 +259,8 @@ test('private hardening input is explicit, validated and uploaded as a snapshot'
   assert.match(production, /HARDENING_FILE="\$\{PINVOU_REMOTE_HARDENING_FILE:-\}"/);
   assert.doesNotMatch(production, /scp[^\n]*10-hardening\.conf/);
   const check = 'node "$RELAY_DIR/scripts/validate-deploy-hardening.cjs" "$HARDENING_FILE"';
-  assert.ok(production.indexOf(check) < production.indexOf('if ! verify_public baseline'));
+  assert.equal(productionDeployment.indexOf(check), 0);
+  assert.ok(productionDeployment.indexOf(check) < productionDeployment.indexOf('if ! verify_public baseline'));
   assert.match(production, /scp -i "\$SSH_KEY" -o BatchMode=yes "\$HARDENING_SNAPSHOT"/);
   assert.match(production, /node "\$RELAY_DIR\/scripts\/validate-deploy-hardening.cjs" "\$HARDENING_SNAPSHOT"/);
   assert.equal((production.match(/cp -a "\$backup\/10-hardening.conf"/g) ?? []).length, 2);
