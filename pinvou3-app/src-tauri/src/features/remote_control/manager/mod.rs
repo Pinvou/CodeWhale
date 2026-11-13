@@ -621,6 +621,49 @@ impl ControllerRelayChannel {
             .send_controller_message(&self.generation, self.binding, message, &self.owner)
     }
 
+    pub(crate) fn resume_socket_epoch(&self, lease: &LeaseContext) -> Option<u64> {
+        let inner = self.manager.inner.lock();
+        if inner.controller_binding != Some(self.binding)
+            || inner.controller_relay_generation.as_deref() != Some(self.generation.as_str())
+            || !inner
+                .endpoint
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.sender.same_channel(&self.owner))
+        {
+            return None;
+        }
+        self.owner
+            .controller_authority
+            .resume_socket_epoch(&self.generation, self.binding, lease)
+    }
+
+    pub(crate) fn try_send_resume_prepare(
+        &self,
+        message: Value,
+        epoch: u64,
+        deadline_b: u64,
+    ) -> Result<bool, String> {
+        let inner = self.manager.inner.lock();
+        if inner.controller_binding != Some(self.binding)
+            || inner.controller_relay_generation.as_deref() != Some(self.generation.as_str())
+            || !inner
+                .endpoint
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.sender.same_channel(&self.owner))
+        {
+            return Ok(false);
+        }
+        self.owner
+            .try_send_resume_prepare_owned(
+                &self.generation,
+                self.binding,
+                message,
+                epoch,
+                deadline_b,
+            )
+            .map_err(|error| error.controller_send_code().to_owned())
+    }
+
     /// 可克隆的发送句柄（E2E-05）：B 端 worker 之外（例如权威 journal 的旁路）
     /// 需要把消息投到同一代 endpoint lane，而接收端仍由 worker 独占。
     pub fn sender(&self) -> ControllerRelaySender {
@@ -1443,6 +1486,31 @@ impl RemoteControlManager {
             binding,
             last_receipt: Arc::new(Mutex::new(None)),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_prepare_write_failure_for_test(&self) -> bool {
+        let inner = self.inner.lock();
+        if inner.controller_relay_generation.is_none() || inner.controller_binding.is_none() {
+            return false;
+        }
+        let Some(endpoint) = inner.endpoint.as_ref() else {
+            return false;
+        };
+        endpoint
+            .sender
+            .controller_authority
+            .arm_prepare_write_failure();
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failed_prepare_digest_for_test(&self) -> Option<[u8; 32]> {
+        self.inner
+            .lock()
+            .endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.sender.controller_authority.failed_prepare_digest())
     }
 
     pub fn controller_endpoint_id(&self) -> Result<String, String> {

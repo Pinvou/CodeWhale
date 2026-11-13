@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager as _};
 use tokio::sync::oneshot;
+use zeroize::Zeroize;
 
 use crate::features::behavior_telemetry::{
     RemoteControlEvent, RemoteOutcome, RemoteReason, RemoteStage, track_remote_control,
@@ -862,6 +863,17 @@ impl Drop for ProcessedControllerFrame {
 #[async_trait::async_trait]
 pub(crate) trait ControlledRelayPort: Send {
     fn try_send(&self, message: Value) -> Result<(), String>;
+    fn resume_socket_epoch(&self, _lease: &LeaseContext) -> Option<u64> {
+        None
+    }
+    fn try_send_resume_prepare(
+        &self,
+        _message: Value,
+        _epoch: u64,
+        _deadline_b: u64,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
     async fn recv(&mut self) -> Option<Value>;
 }
 
@@ -869,6 +881,23 @@ pub(crate) trait ControlledRelayPort: Send {
 impl ControlledRelayPort for crate::features::remote_control::manager::ControllerRelayChannel {
     fn try_send(&self, message: Value) -> Result<(), String> {
         crate::features::remote_control::manager::ControllerRelayChannel::try_send(self, message)
+    }
+
+    fn resume_socket_epoch(&self, lease: &LeaseContext) -> Option<u64> {
+        crate::features::remote_control::manager::ControllerRelayChannel::resume_socket_epoch(
+            self, lease,
+        )
+    }
+
+    fn try_send_resume_prepare(
+        &self,
+        message: Value,
+        epoch: u64,
+        deadline_b: u64,
+    ) -> Result<bool, String> {
+        crate::features::remote_control::manager::ControllerRelayChannel::try_send_resume_prepare(
+            self, message, epoch, deadline_b,
+        )
     }
 
     async fn recv(&mut self) -> Option<Value> {
@@ -2592,7 +2621,8 @@ pub(crate) struct ControlledResumeAttempt {
     owner: Option<ControlledTransportOwner>,
     #[cfg(test)]
     activation_probe: Option<Box<dyn FnOnce() + Send + Sync>>,
-    // Five actual send points in the frozen resume exchange, never peer IDs.
+    // At most five local request identities, never peer IDs. Prepare reserves
+    // one slot before socket readiness; retries never allocate another slot.
     request_ids: Vec<String>,
     lease: Option<LeaseContext>,
     activation_id: Option<String>,
@@ -2604,6 +2634,7 @@ pub(crate) struct ControlledResumeAttempt {
     ack_sent: bool,
     liveness_sent: bool,
     ready_sent: bool,
+    prepare_epoch: Option<u64>,
 }
 
 impl ControlledResumeAttempt {
@@ -2649,32 +2680,23 @@ fn begin_owned_controlled_resume<P: ControlledRelayPort + ?Sized>(
     let Ok(material) = manager.begin_owned_resume(owner, now_b) else {
         return false;
     };
-    prepare_controlled_resume(port, resume, owner, material)
+    prepare_controlled_resume(port, manager, resume, owner, material)
 }
 
 fn prepare_controlled_resume<P: ControlledRelayPort + ?Sized>(
     port: &P,
+    manager: &ControlledDeviceManager,
     resume: &mut ControlledResumeAttempt,
     owner: &ControlledTransportOwner,
-    material: ControlledResumeMaterial,
+    mut material: ControlledResumeMaterial,
 ) -> bool {
+    material.resume_token.zeroize();
     let Ok(challenge) = new_resume_challenge() else {
         return false;
     };
     let request_id = format!("request-resume-{}", uuid::Uuid::new_v4().simple());
-    let Ok(frame) = build_controller_resume_prepare(
-        &material.lease,
-        super::relay_transport::ControllerRole::ControlledB,
-        &request_id,
-        &material.resume_token,
-        &challenge,
-        material.relay_deadline_identity_ms,
-    ) else {
-        return false;
-    };
-    if port.try_send(frame).is_err() {
-        return false;
-    }
+    // Keep only public attempt identity locally. The lifecycle owner lends
+    // its current token under its lock when a real controller socket is ready.
     resume.operation = Some(owner.operation().clone());
     resume.owner = Some(owner.clone());
     resume.request_ids = vec![request_id];
@@ -2689,7 +2711,64 @@ fn prepare_controlled_resume<P: ControlledRelayPort + ?Sized>(
     resume.ack_sent = false;
     resume.liveness_sent = false;
     resume.ready_sent = false;
-    true
+    resume.prepare_epoch = None;
+    retry_controlled_resume_prepare(port, manager, resume, controlled_monotonic_millis)
+        != ControlledResumeOutcome::Failed
+}
+
+/// Reconstruct rather than retarget. The original request/challenge are reused
+/// for Relay's exact-prepare idempotency; only a new socket epoch can enqueue
+/// again, and neither this read nor the send renews the original frozen cutoff.
+fn retry_controlled_resume_prepare<P: ControlledRelayPort + ?Sized>(
+    port: &P,
+    manager: &ControlledDeviceManager,
+    resume: &mut ControlledResumeAttempt,
+    clock: impl FnOnce() -> u64,
+) -> ControlledResumeOutcome {
+    let Some(owner) = resume.owner.clone() else {
+        return ControlledResumeOutcome::Ignored;
+    };
+    let Some(request_id) = resume.request_ids.first() else {
+        return ControlledResumeOutcome::Failed;
+    };
+    let result = manager.with_owned_prepared_resume(
+        &owner,
+        clock,
+        |lease, token, wire_deadline, deadline_b| {
+            if resume.lease.as_ref() != Some(lease)
+                || resume.relay_deadline_identity_ms != wire_deadline
+            {
+                return Err("desktop_remote_resume_invalid".to_owned());
+            }
+            let Some(epoch) = port.resume_socket_epoch(lease) else {
+                return Ok(None);
+            };
+            if resume.prepare_epoch == Some(epoch) {
+                return Ok(None);
+            }
+            let frame = build_controller_resume_prepare(
+                lease,
+                super::relay_transport::ControllerRole::ControlledB,
+                request_id,
+                token,
+                &resume.challenge_b64,
+                wire_deadline,
+            )
+            .map_err(|error| error.to_string())?;
+            port.try_send_resume_prepare(frame, epoch, deadline_b)
+                .map(|sent| sent.then_some(epoch))
+        },
+    );
+    match result {
+        Ok(Some(Ok(Some(epoch)))) => {
+            resume.prepare_epoch = Some(epoch);
+            ControlledResumeOutcome::Ignored
+        }
+        Ok(Some(Err(_))) => ControlledResumeOutcome::Failed,
+        // Retired owners, later phases, expired budgets and not-ready/racing
+        // sockets cannot send. Existing expiry/retirement still owns cleanup.
+        _ => ControlledResumeOutcome::Ignored,
+    }
 }
 
 /// E2E-06：按 Relay/A 的恢复帧推进 B 端相位。任何相位不符、对端确认验签失败或
@@ -2717,6 +2796,11 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
         return ControlledResumeOutcome::Ignored;
     }
     let advance = |step, now| manager.advance_owned_resume(&owner, step, now);
+    if kind == "desktop_relay_connection"
+        && message.get("connected").and_then(Value::as_bool) == Some(true)
+    {
+        return retry_controlled_resume_prepare(port, manager, resume, controlled_monotonic_millis);
+    }
     // Relay errors deliberately have no lease tuple. Authority comes from
     // strict protocol validation and this operation's locally sent request.
     if kind == "error" {
@@ -3079,6 +3163,9 @@ pub(crate) mod reader_resume_tests;
 
 #[cfg(test)]
 mod owner_interleaving_tests;
+
+#[cfg(test)]
+mod resume_prepare_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3577,6 +3664,19 @@ mod tests {
         fn try_send(&self, message: Value) -> Result<(), String> {
             self.sent.lock().unwrap().push(message);
             Ok(())
+        }
+
+        fn resume_socket_epoch(&self, _lease: &LeaseContext) -> Option<u64> {
+            Some(0)
+        }
+
+        fn try_send_resume_prepare(
+            &self,
+            message: Value,
+            _epoch: u64,
+            _deadline_b: u64,
+        ) -> Result<bool, String> {
+            self.try_send(message).map(|()| true)
         }
 
         async fn recv(&mut self) -> Option<Value> {
