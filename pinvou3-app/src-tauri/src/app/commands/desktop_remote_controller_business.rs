@@ -133,11 +133,17 @@ impl ControlledCleanupSink for DesktopControlledCleanup {
             return;
         };
         let now_b = controlled_monotonic_millis();
-        let _ = runtime.service().interrupt_generation_and_clear_sessions(
+        let report = runtime.service().interrupt_generation_and_clear_sessions(
             generation,
             "remote_control_stopped",
             now_b,
         );
+        if let Some((_, failure)) = report.failed.first() {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_interrupt_persistence_failed",
+                failure.code,
+            );
+        }
     }
 }
 
