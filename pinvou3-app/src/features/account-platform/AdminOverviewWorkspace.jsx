@@ -37,6 +37,6 @@ function DomainOverview({ domain, client, copy, language, permissions, navigatio
 }
 export function AdminOverviewWorkspace(props) {
   return <section><div className="adm-overview-grid">{Object.keys(definitions).map(domain => <DomainOverview key={domain} domain={domain} {...props} />)}</div>
-    {props.permissions.includes('platform.system.status.read') && <AdminSystemStatusWorkspace client={props.client} copy={props.copy} language={props.language} permissions={props.permissions} compact />}
+    {props.permissions.includes('platform.system.status.read') && <AdminSystemStatusWorkspace client={props.client} copy={props.copy} language={props.language} permissions={props.permissions} onOpenReconciliation={props.onOpenReconciliation} compact />}
   </section>;
 }

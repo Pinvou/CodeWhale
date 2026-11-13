@@ -18,6 +18,14 @@ use super::super::UNSUPPORTED_REASON;
 #[derive(Default)]
 pub struct ModelStoreService;
 
+pub(crate) fn matches_current_model_route(_card_id: &str, _base_url: &str, _model: &str) -> bool {
+    false
+}
+
+impl ModelStoreService {
+    pub fn set_models_changed_handler(&self, _handler: super::super::ModelsChangedHandler) {}
+}
+
 pub(crate) fn available() -> bool {
     false
 }
@@ -34,11 +42,47 @@ pub async fn list_cards(_test_mode: bool) -> Result<Value, String> {
     nope()
 }
 
-pub async fn library() -> Result<Value, String> {
+pub async fn library(_service: Arc<ModelStoreService>) -> Result<Value, String> {
     nope()
 }
 
 pub async fn model_detail(_card_id: String) -> Result<Value, String> {
+    nope()
+}
+
+pub async fn follow_deployment_context(
+    _service: Arc<ModelStoreService>,
+    _card_id: String,
+    _model_id: String,
+) -> Result<Value, String> {
+    nope()
+}
+
+pub async fn check_card_update(_card_id: String) -> Result<Value, String> {
+    nope()
+}
+
+pub async fn startup_update_check(_service: Arc<ModelStoreService>) -> Result<Value, String> {
+    Ok(serde_json::json!({"checked":0,"skipped":0,"updates":[]}))
+}
+
+pub async fn versions(_card_id: String, _measure: Option<bool>) -> Result<Value, String> {
+    nope()
+}
+pub fn start_version_action(
+    _service: &Arc<ModelStoreService>,
+    _card_id: String,
+    _action: String,
+    _version_id: String,
+) -> Result<Value, String> {
+    nope()
+}
+
+pub fn start_card_update(
+    _service: &Arc<ModelStoreService>,
+    _card_id: String,
+    _revision: String,
+) -> Result<Value, String> {
     nope()
 }
 
@@ -130,6 +174,7 @@ pub fn storage_settings() -> Result<Value, String> {
 pub fn set_storage_settings(
     _models_dir: Option<String>,
     _import_scan_dirs: Option<Vec<String>>,
+    _startup_update_check_enabled: Option<bool>,
 ) -> Result<Value, String> {
     nope()
 }
@@ -139,7 +184,7 @@ pub fn set_storage_settings(
 pub fn run_startup_cleanup(_service: &Arc<ModelStoreService>) {}
 
 /// 非 Linux 上没有内置卡片库可刷，直接返回。同样不报错——这是启动路径。
-pub fn run_startup_refresh() {}
+pub fn run_startup_refresh(_service: &Arc<ModelStoreService>) {}
 
 pub fn take_startup_cleanup(_service: &Arc<ModelStoreService>) -> Result<Value, String> {
     nope()
@@ -171,9 +216,51 @@ pub(crate) fn store_weights_roots_checked() -> Result<Vec<std::path::PathBuf>, S
     Ok(store_weights_roots())
 }
 
+/// There are no store download/stage writers on this backend, hence no store
+/// resources to exclude. Preserve the device feature's existing platform guards
+/// and development override: this does not enable the unsupported model store,
+/// nor borrow a Linux lock implementation for another host.
+pub(crate) fn with_weight_removal_boundary<T>(
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    operation()
+}
+
+#[cfg(test)]
+mod weight_removal_boundary_tests {
+    #[test]
+    fn absent_store_writers_do_not_disable_existing_device_operations() {
+        let called = std::cell::Cell::new(0);
+        let result = super::with_weight_removal_boundary(|| {
+            called.set(called.get() + 1);
+            Ok("device operation result")
+        })
+        .unwrap();
+        assert_eq!(result, "device operation result");
+        assert_eq!(called.get(), 1);
+    }
+
+    #[test]
+    fn device_guard_errors_remain_authoritative_without_store_writers() {
+        let result = super::with_weight_removal_boundary(|| {
+            Err::<(), _>("original device path/identity guard failure".to_owned())
+        });
+        assert_eq!(
+            result.unwrap_err(),
+            "original device path/identity guard failure"
+        );
+    }
+}
+
 /// 非 Linux 没有商店：空引用集合（设备守卫的该臂恒不命中）。
 pub(crate) fn installed_weight_paths_checked() -> Result<Vec<std::path::PathBuf>, String> {
     Ok(Vec::new())
+}
+
+pub(crate) fn installed_weight_paths_for_removal_checked(
+    _include_persisted_roots: bool,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    installed_weight_paths_checked()
 }
 
 /// 非 Linux 没有商店：空约定名集合（设备守卫的零痕迹旧根名字臂恒不命中）。

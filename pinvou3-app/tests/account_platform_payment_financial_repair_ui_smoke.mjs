@@ -38,10 +38,27 @@ async function create(page) {
   await page.type('.adm-financial-repair-draft textarea', 'Controlled payment-repair justification'); await page.type('.adm-financial-repair-draft input', 'controlled-payment-repair');
   await page.click('.adm-financial-repair-draft button');
 }
+async function activateReauthentication(page) {
+  const selector='.adm-payment-repair-reauthentication button';
+  await page.waitForFunction(selector=>{const button=document.querySelector(selector);return button&&!button.disabled;},{},selector);
+  // The target may lie underneath the sticky portal header after the snapshot
+  // disappears. Expose it and verify the real mouse hit before activating it.
+  await page.$eval(selector,button=>button.scrollIntoView({block:'center',inline:'nearest'}));
+  await page.waitForFunction(selector=>{const button=document.querySelector(selector),rect=button.getBoundingClientRect(),hit=document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2);return hit&&button.contains(hit);},{},selector);
+  await page.click(selector);await page.waitForFunction(()=>window.f12.reauthentication==='/admin.html');
+}
 async function center(page, view) {
   await page.waitForSelector('nav button[data-section="approvals"]');
   await page.click('nav button[data-section="approvals"]');
-  if (view) await page.evaluate(view => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f12.adminPlatformCopy[window.f12.language].approvalCenter[view]).click(), view);
+  if (view) {
+    await page.waitForFunction(view => [...document.querySelectorAll('.adm-approval-tabs button')].some(button => button.textContent === window.f12.adminPlatformCopy[window.f12.language].approvalCenter[view] && !button.disabled), {}, view);
+    await page.evaluate(view => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f12.adminPlatformCopy[window.f12.language].approvalCenter[view]).click(), view);
+    await page.waitForFunction(view => [...document.querySelectorAll('.adm-approval-tabs button')].some(button => button.textContent === window.f12.adminPlatformCopy[window.f12.language].approvalCenter[view] && button.getAttribute('aria-current') === 'page'), {}, view);
+    if (view === 'directory') {
+      await page.waitForSelector('.adm-approval-directory-toolbar');
+      assert.equal(await page.evaluate(() => window.f12.calls.some(call => call.url === '/api/admin/approvals/directory')), true);
+    }
+  }
 }
 try {
   for (const language of ['zh', 'en', 'ja']) {
@@ -77,7 +94,17 @@ try {
     });
   }
   for (const language of ['zh', 'en', 'ja']) await run(`PaymentRepair real host/precheck/create/submit ${language}`, `language=${language}`, async page => {
-    await openForm(page); await create(page); await page.waitForFunction(() => window.f12.status === 'SUBMITTED' && document.querySelector('nav button[data-section="approvals"][aria-current="page"]') && [...document.querySelectorAll('.adm-financial-repair')].every(form => form.closest('[hidden]')));
+    await openForm(page); await page.waitForSelector('.adm-repair-impact');
+    const presentation=await page.evaluate(()=>{const c=window.f12,words=c.ledgerRepairCopy[c.language],impact=document.querySelector('.adm-repair-impact');return {relationship:[...document.querySelectorAll('.adm-repair-relationship:not(.adm-repair-impact) dd')].map(node=>node.textContent),values:[...impact.querySelectorAll('dd')].map(node=>node.textContent),missing:words.paymentImpact.missing,points:words.paymentImpact.unit,amount:words.paymentImpact.amount,ids:[1, 2].map(c.id),accountIDs:[3].map(c.id)};});
+    assert.deepEqual(presentation.relationship,[...presentation.ids,...['controlled-provider-tx', '9007199254740993']]);
+    const expectedNumbers=['922337203685477.5807', '900719925474.0993'];
+    for(const [index,value] of expectedNumbers.entries())assert.equal(presentation.values[index],value+' '+presentation.points);
+    assert.deepEqual(presentation.values.slice(expectedNumbers.length,expectedNumbers.length+presentation.accountIDs.length),presentation.accountIDs);
+    assert.deepEqual(presentation.values.slice(expectedNumbers.length+presentation.accountIDs.length),[presentation.missing],'unavailable current balance must not be invented');
+    await create(page); await page.waitForFunction(() => window.f12.status === 'SUBMITTED' && document.querySelector('nav button[data-section="approvals"][aria-current="page"]') && [...document.querySelectorAll('.adm-financial-repair')].every(form => form.closest('[hidden]')));
+    await page.waitForSelector('.adm-repair-approval-receipt');
+    const receipt=await page.$eval('.adm-repair-approval-receipt',node=>({text:node.textContent,id:window.f12.id(9),status:window.f12.ledgerRepairCopy[window.f12.language].paymentImpact.states.SUBMITTED}));
+    assert.ok(receipt.text.includes(receipt.id));assert.ok(receipt.text.includes(receipt.status));
     const calls = await page.evaluate(() => window.f12.calls); const precheck = calls.find(call => call.url.endsWith('/approval-command-prechecks'));
     assert.equal(JSON.parse(precheck.body).target_resource_id, await page.evaluate(() => window.f12.id(1))); assert.equal(JSON.parse(precheck.body).payment_evidence_id, await page.evaluate(() => window.f12.id(2)));
     const draft = calls.find(call => call.url === '/api/admin/approvals/requests' && call.method === 'POST'); assert.ok(draft.body.includes('"wallet_version":9223372036854775806')); assert.ok(draft.body.includes('"applied_to_receivables":9007199254740993'));
@@ -85,8 +112,8 @@ try {
     assert.ok(calls.some(call => call.url.endsWith('/actions/submit'))); assert.equal(calls.some(call => call.url.includes('/api/admin/billing/')), false);
   });
   await run('PaymentRepair directory/filter/typed EDIT/current proof/drilldown preserves original order and evidence', 'existing=1', async page => {
-    await center(page, 'directory'); await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes('PAYMENT_FINANCIAL_REPAIR'));
-    assert.equal(await page.evaluate(() => document.querySelector('tbody').textContent.includes('UNKNOWN_REPAIR')), false);
+    await center(page, 'directory'); await page.waitForFunction(() => document.querySelector('.adm-approval-policy-table tbody')?.textContent.includes('PAYMENT_FINANCIAL_REPAIR'));
+    assert.equal(await page.evaluate(() => document.querySelector('.adm-approval-policy-table tbody').textContent.includes('UNKNOWN_REPAIR')), false);
     await page.evaluate(() => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f12.adminPlatformCopy.zh.approvalCenter.mine).click());
     await page.waitForSelector('.adm-approval-toolbar select'); await page.select('.adm-approval-toolbar select', 'PAYMENT_FINANCIAL_REPAIR');
     await page.type('.adm-approval-toolbar input', await page.evaluate(() => window.f12.id(1))); await page.click('.adm-approval-toolbar button');
@@ -100,15 +127,34 @@ try {
     assert.ok(calls.some(call => call.url.includes('command_type=PAYMENT_FINANCIAL_REPAIR') && call.url.includes('target=')));
     await page.waitForFunction(() => [...document.querySelectorAll('article button')].some(button => button.textContent === window.f12.adminPlatformCopy.zh.approvalCenter.openBusinessArea && !button.disabled));
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f12.adminPlatformCopy.zh.approvalCenter.openBusinessArea).click());
-    await page.waitForSelector('[data-workspace="paymentrepair"]:not([hidden]) .adm-financial-repair-target select', { visible: true }); assert.equal(await page.$eval('[data-workspace="paymentrepair"]:not([hidden]) .adm-financial-repair-target select', select => select.value), 'PAYMENT_FINANCIAL_REPAIR');
+    await page.waitForSelector('[data-workspace="paymentrepair"]:not([hidden]) .adm-financial-repair-target input', {visible:true});
+    assert.equal(await page.$eval('[data-workspace="paymentrepair"]:not([hidden]) .adm-repair-task-code code', code=>code.textContent),'PAYMENT_FINANCIAL_REPAIR');
+    assert.equal(await page.$$eval('[data-workspace="paymentrepair"]:not([hidden]) .adm-financial-repair-target input', inputs=>inputs.length),2);
   });
   await run('PaymentRepair approver-only real detail decide without requester or wallet calls', 'approve=1&existing=1', async page => {
+    // The approver's own directory is valid and empty; another requester's
+    // application is accessed through the independent pending-approval queue.
+    await page.waitForSelector('.adm-approval-mine-read time');
+    assert.equal(await page.$('.adm-approval-mine-read [role=alert]'), null);
+    assert.equal(await page.$('tbody tr'), null);
+    assert.equal(await page.evaluate(() => window.f12.calls.some(call => call.method === 'GET' && call.url.startsWith('/api/admin/approvals/requests?') && new URL(call.url, location.origin).searchParams.get('requester_user_id') === window.f12.id(7))), true);
+
+    await page.evaluate(()=>{window.f12.status='SUBMITTED';});await center(page,'pending');
     await page.waitForSelector('tbody tr button'); assert.equal(await page.$('.adm-financial-repair'), null);
-    await page.evaluate(() => { window.f12.status = 'SUBMITTED'; }); await page.click('tbody tr button'); await page.waitForSelector('article textarea');
+    await page.click('tbody tr button'); await page.waitForSelector('article textarea');
+    assert.equal(await page.evaluate(() => window.f12.calls.some(call => call.method === 'GET' && call.url.startsWith('/api/admin/approvals/requests?') && new URL(call.url, location.origin).searchParams.get('status') === 'SUBMITTED' && !new URL(call.url, location.origin).searchParams.has('requester_user_id'))), true);
+    assert.equal(await page.$eval('article h4', node => node.textContent), await page.evaluate(() => window.f12.id(9)));
     await page.type('article textarea', 'Independent approved payment-repair review');
     await page.evaluate(() => [...document.querySelectorAll('article button')].find(button => button.textContent === window.f12.financeCopy.zh.approve).click());
     await page.waitForFunction(() => document.querySelector('article')?.textContent.includes('EXECUTED'));
     assert.equal(await page.evaluate(() => window.f12.calls.some(call => call.url.includes('/billing/') || call.url.endsWith('/approval-command-prechecks') || call.method === 'PUT')), false);
+    const decisions = await page.evaluate(() => window.f12.calls.filter(call => call.method === 'POST' && call.url.endsWith('/actions/decide')));
+    assert.equal(decisions.length, 1);
+    assert.equal(JSON.parse(decisions[0].body).decision, 'APPROVED');
+    assert.equal(JSON.parse(decisions[0].body).expected_version, 1);
+    assert.equal(decisions[0].headers['X-CSRF-Token'], 'controlled-csrf');
+    assert.equal(decisions[0].headers['X-Pinvou-Approval-Action-Control-Version'], '1');
+    assert.equal(await page.evaluate(() => window.f12.calls.some(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests')), false);
   });
   await run('No repair permission hides PaymentRepair and does not call its receiver', 'deny=1', async page => {
     await page.waitForFunction(message => document.querySelector('[role="alert"]')?.textContent === message, {}, adminLayoutCopy.zh.unauthorized); assert.equal(await page.$('.adm-financial-repair'), null);
@@ -132,7 +178,7 @@ try {
     assert.equal(await page.$eval('.adm-financial-repair-draft input', input => input.disabled), false); assert.equal(await page.evaluate(() => window.f12.created), false);
   });
   await run('Directory retirement releases only old child; current EDIT UNKNOWN keeps navigation locked', 'existing=1&edit-lost=1', async page => {
-    await center(page, 'directory'); await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes('PAYMENT_FINANCIAL_REPAIR'));
+    await center(page, 'directory'); await page.waitForFunction(() => document.querySelector('.adm-approval-policy-table tbody')?.textContent.includes('PAYMENT_FINANCIAL_REPAIR'));
     await page.evaluate(() => [...document.querySelectorAll('.adm-approval-tabs button')].find(button => button.textContent === window.f12.adminPlatformCopy.zh.approvalCenter.mine).click());
     await page.waitForSelector('tbody tr button'); await page.click('tbody tr button'); await page.waitForSelector('article textarea');
     await page.type('article textarea', 'Current original-intent controlled EDIT');
@@ -155,7 +201,7 @@ try {
       assert.equal(await page.$eval('.adm-payment-repair-reauthentication p', node => node.textContent), await page.evaluate(() => window.f12.ledgerRepairCopy[window.f12.language].writeOffRecentAuthenticationRequired));
       const first = await page.evaluate(() => window.f12.calls.find(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests').body);
       assert.equal(await page.evaluate(() => window.f12.created), false);
-      await page.click('.adm-payment-repair-reauthentication button');
+      await activateReauthentication(page);
       assert.equal(await page.evaluate(() => window.f12.reauthentication), '/admin.html');
       assert.equal(await page.$eval('.adm-financial-repair-draft input', input => input.value), 'controlled-payment-repair');
       await page.evaluate(() => { window.f12.authenticatedAgain = true; });
@@ -169,7 +215,7 @@ try {
       await openForm(page); await page.waitForSelector('.adm-payment-repair-reauthentication button');
       assert.equal(await page.$('.adm-financial-repair-draft'), null);
       assert.equal(await page.evaluate(() => window.f12.calls.some(call => call.method === 'POST' && call.url === '/api/admin/approvals/requests')), false);
-      await page.click('.adm-payment-repair-reauthentication button'); assert.equal(await page.evaluate(() => window.f12.reauthentication), '/admin.html');
+      await activateReauthentication(page); assert.equal(await page.evaluate(() => window.f12.reauthentication), '/admin.html');
     });
   }
   await run('PaymentRepair unknown recent-auth denial retains original frozen facts and explicit replay', 'lost-recent=1', async page => {
