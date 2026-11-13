@@ -32,7 +32,7 @@ function installFeature(onInvoke, withUploadLimit = true, timers = { setTimeout,
   const calls = [];
   const listeners = new Map();
   const state = { desktopRemoteControl: root.__PINVOU_REMOTE_CONTROL_STATE__.createState() };
-  const feature = root.__PINVOU_TAURI_BRIDGE_FEATURES__['desktop-remote-control']({
+  const context = {
     state,
     notify() {},
     can: () => true,
@@ -49,9 +49,96 @@ function installFeature(onInvoke, withUploadLimit = true, timers = { setTimeout,
       if (command === 'desktop_remote_controller_status') return Promise.resolve({ status: 'idle' });
       return Promise.resolve({ state: 'queued' });
     },
-  });
-  return { feature, calls, state, listeners, logic: root.__PINVOU_REMOTE_CONTROL_STATE__ };
+  };
+  const create = () => root.__PINVOU_TAURI_BRIDGE_FEATURES__['desktop-remote-control'](context);
+  const feature = create();
+  return { feature, calls, state, listeners, logic: root.__PINVOU_REMOTE_CONTROL_STATE__, rebuild: create };
 }
+
+test('128 unresolved actions fail closed before send and survive bridge stop and rebuild', async () => {
+  let succeed = false;
+  const { feature, calls, rebuild } = installFeature(command => command === 'desktop_remote_action_a'
+    // eslint-disable-next-line prefer-promise-reject-errors -- Tauri IPC preserves string rejection payloads.
+    ? (succeed ? Promise.resolve({ transfer_id: 'download-1', chunk_bytes: 5, total_bytes: 5 }) : Promise.reject('result_unknown')) : undefined);
+  for (let i = 0; i < 128; i++) {
+    await assert.rejects(feature.artifactDownloadBegin('local', 'remote', 'task-' + i, 'artifact'), { code: 'result_unknown' });
+  }
+  const actions = () => calls.filter(call => call.command === 'desktop_remote_action_a');
+  assert.equal(actions().length, 256);
+  const original = actions()[0].args.requestId;
+  await assert.rejects(feature.artifactDownloadBegin('local', 'remote', 'overflow', 'artifact'), { code: 'remote_action_capacity' });
+  assert.equal(actions().length, 256);
+  feature.stop();
+  const rebuilt = rebuild();
+  await assert.rejects(rebuilt.artifactDownloadBegin('local', 'remote', 'overflow', 'artifact'), { code: 'remote_action_capacity' });
+  assert.equal(actions().length, 256);
+  succeed = true;
+  assert.equal((await rebuilt.artifactDownloadBegin('local', 'remote', 'task-0', 'artifact')).transferId, 'download-1');
+  assert.equal(actions().at(-1).args.requestId, original);
+  assert.equal((await rebuilt.artifactDownloadBegin('local', 'remote', 'overflow', 'artifact')).transferId, 'download-1');
+  assert.notEqual(actions().at(-1).args.requestId, original);
+});
+
+test('concurrent duplicate actions share one flight and preserve unknown identity across local failure', async () => {
+  const pending = Promise.withResolvers();
+  let mode = 'pending';
+  const { feature, calls } = installFeature(command => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    if (mode === 'pending') return pending.promise;
+    // eslint-disable-next-line prefer-promise-reject-errors -- Exercise the native IPC string error contract.
+    if (mode === 'local') return Promise.reject('remote_action_capacity');
+    // eslint-disable-next-line prefer-promise-reject-errors -- Exercise the native IPC structured error contract.
+    if (mode === 'terminal') return Promise.reject({ code: 'permission_denied', authoritative: true });
+    return Promise.resolve({ transfer_id: 'fresh', chunk_bytes: 1, total_bytes: 1 });
+  });
+  const begin = () => feature.artifactDownloadBegin('local', 'remote', 'task', 'artifact');
+  const first = begin(); const second = begin();
+  const actions = () => calls.filter(call => call.command === 'desktop_remote_action_a');
+  assert.equal(actions().length, 1);
+  const original = actions()[0].args.requestId;
+  pending.reject('result_unknown');
+  await Promise.all([assert.rejects(first, { code: 'result_unknown' }), assert.rejects(second, { code: 'result_unknown' })]);
+  assert.equal(actions().length, 2); // one shared automatic retry
+  mode = 'local';
+  await assert.rejects(begin(), { code: 'remote_action_capacity' });
+  assert.equal(actions().at(-1).args.requestId, original);
+  mode = 'terminal';
+  await assert.rejects(begin(), { code: 'permission_denied' });
+  assert.equal(actions().at(-1).args.requestId, original);
+  mode = 'success';
+  assert.equal((await begin()).transferId, 'fresh');
+  assert.notEqual(actions().at(-1).args.requestId, original);
+});
+
+test('late unknown generic action never retries into the next lease', async () => {
+  const old = Promise.withResolvers();
+  let first = true;
+  const { feature, calls, state } = installFeature(command => command === 'desktop_remote_action_a'
+    ? (first ? (first = false, old.promise) : Promise.resolve({ transfer_id: 'new', chunk_bytes: 1, total_bytes: 1 })) : undefined);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const lease = generation => ({ connectionId: 'connection', controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation });
+  state.desktopRemoteControl.controllerConnection = lease('old');
+  const pending = feature.artifactDownloadBegin('local', 'remote', 'task', 'artifact');
+  state.desktopRemoteControl.controllerConnection = lease('new');
+  assert.equal((await feature.artifactDownloadBegin('local', 'remote', 'task', 'artifact')).transferId, 'new');
+  old.reject('result_unknown');
+  await assert.rejects(pending, { code: 'result_unknown' });
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 2);
+});
+
+test('native canonical request identity survives a fresh renderer candidate', async () => {
+  const { feature, calls } = installFeature((command, args) => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    // eslint-disable-next-line prefer-promise-reject-errors -- Keep native request identity on the actual IPC payload shape.
+    if (args.requestId !== 'native-original') return Promise.reject({ code: 'result_unknown', requestId: 'native-original', authoritative: false });
+    return Promise.resolve({ transfer_id: 'download', chunk_bytes: 1, total_bytes: 1 });
+  });
+  assert.equal((await feature.artifactDownloadBegin('local', 'remote', 'task', 'artifact')).transferId, 'download');
+  const actions = calls.filter(call => call.command === 'desktop_remote_action_a');
+  assert.equal(actions.length, 2);
+  assert.notEqual(actions[0].args.requestId, 'native-original');
+  assert.equal(actions[1].args.requestId, 'native-original');
+});
 
 test('attachment bridge uses the shared boundary and fails closed without it', async () => {
   const onInvoke = command => command === 'desktop_remote_action_a'
@@ -799,15 +886,31 @@ test('unknown attachment actions are fenced rather than replayed as new uploads'
     () => feature.attachmentChunk('remote-1', 'ref-1', 'task-1', 'transfer-1', 0, 'YQ==', 1),
     () => feature.attachmentAbort('remote-1', 'ref-1', 'task-1', 'transfer-1'),
   ];
-  for (const action of actions) {
+  for (const [index, action] of actions.entries()) {
     const before = calls.filter(call => call.command === 'desktop_remote_action_a').length;
     await assert.rejects(action(), { code: 'result_unknown' });
     await assert.rejects(action(), { code: 'result_unknown' });
-    assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, before + 1);
+    assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, before + (index === 2 ? 2 : 1));
   }
   const before = calls.length;
   await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-2', 'big.bin', 'application/octet-stream', 20 * 1024 * 1024 + 1, digest), { code: 'remote_attachment_size_invalid' });
   assert.equal(calls.length, before);
+});
+
+test('explicit unknown attachment cleanup retries its original id after bridge rebuild', async () => {
+  let first = true;
+  const { feature, calls, rebuild } = installFeature(command => command === 'desktop_remote_action_a'
+    // eslint-disable-next-line prefer-promise-reject-errors -- A native unknown-result string must retain the original abort identity.
+    ? (first ? (first = false, Promise.reject('result_unknown')) : Promise.resolve({ aborted: false, already_absent: true })) : undefined);
+  const abort = api => api.attachmentAbort('local', 'remote', 'task', 'transfer');
+  await assert.rejects(abort(feature), { code: 'result_unknown' });
+  const actions = () => calls.filter(call => call.command === 'desktop_remote_action_a');
+  assert.equal(actions().length, 1); // no automatic cleanup retry
+  const original = actions()[0].args.requestId;
+  feature.stop();
+  assert.equal((await abort(rebuild())).already_absent, true);
+  assert.equal(actions().length, 2);
+  assert.equal(actions()[1].args.requestId, original);
 });
 
 test('unconfirmed begin IPC result fences the upload batch across task identities', async () => {
@@ -839,9 +942,9 @@ test('attachment action saturation blocks the same lease and resets on a new lea
   const lease = id => ({ connectionId: id, controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: id });
   state.desktopRemoteControl.controllerConnection = lease('saturated-old');
   for (let i = 0; i < 130; i += 1) {
-    await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-' + i, 'a.txt', 'text/plain', 1, 'a'.repeat(64)), { code: 'result_unknown' });
+    await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-' + i, 'a.txt', 'text/plain', 1, 'a'.repeat(64)), { code: i < 128 ? 'result_unknown' : 'remote_action_capacity' });
   }
-  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 129);
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 128);
   state.desktopRemoteControl.controllerConnection = lease('saturated-new');
   succeed = true;
   assert.equal((await feature.attachmentBegin('remote-1', 'ref-1', 'new-task', 'a.txt', 'text/plain', 1, 'a'.repeat(64))).transferId, 'fresh');
