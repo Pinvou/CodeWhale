@@ -116,7 +116,7 @@ try {
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
   });
   await run('user detail heading keeps real identity and the applied directory context', async () => {
-    const target = '22222222-2222-4222-8222-222222222222', name = '用于验证用户详情标题和返回入口布局的测试用户名称';
+    const target = '22222222-2222-4222-8222-222222222222', name = '用于验证用户详情标题和返回入口布局的测试用户名称 WWWWWWWWWWWWWWWWWWWW';
     const cursor = 'eyJ1cGRhdGVkX2F0IjoiMjAyNi0xMC0wMVQwMDowMDowMFoiLCJ1c2VyX2lkIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIn0';
     const directoryCalls = () => page.evaluate(() => window.restored.calls.filter(call => call.method === 'GET' && new URL(call.url, location.origin).pathname === '/api/admin/account/admin/v1/users'));
     await fresh(`?mode=admin&userDetailHeader=1&section=users&user_q=${encodeURIComponent('验证')}&user_cursor=${cursor}`);
@@ -515,6 +515,9 @@ try {
     assert.ok(!(await text()).includes((await copy()).closure.listEmpty));
     await page.evaluate(() => window.restored.releaseClosureRead()); await settled();
     assert.ok((await text()).includes(target)); assert.ok(!(await text()).includes((await copy()).closure.listEmpty));
+    assert.equal(await page.$$eval(`${directory} tr[data-closure-source="server"]`, nodes => nodes.length), 0, 'the confirmed empty result stays separate from local recovery');
+    assert.equal(await page.$$eval(`${directory} tr[data-closure-source="local"]`, nodes => nodes.length), 1, 'the original local recovery remains visible');
+    assert.ok(await page.$(`${directory} [data-closure-empty] [role=status]`), 'successful server empty has a separate state');
     await page.waitForFunction(selector => { const textarea = document.querySelector(`${selector} textarea`); return textarea?.disabled && textarea.value === 'Controlled original recovery'; }, {}, directory);
     assert.deepEqual(await page.evaluate(() => window.restored.readClosureRecovery()), proof);
     await plan({ code: 'ACCOUNT_CLOSURE_UNAVAILABLE' }, 503); await refresh(); await settled();
@@ -532,7 +535,7 @@ try {
     assert.equal(await page.evaluate(key => document.defaultView.sessionStorage.getItem(key), stored[0]), '{', 'failed recovery read never deletes evidence');
     await page.evaluate(([key, value]) => document.defaultView.sessionStorage.setItem(key, value), stored);
     await plan({ items: [row], next_cursor: null }); await refresh(); await settled();
-    assert.equal(await page.$$eval(`${directory} > article`, nodes => nodes.length), 1, 'server duplicate and local intent merge once');
+    assert.equal(await page.$$eval(`${directory} tr[data-closure-id]`, nodes => nodes.length), 1, 'server duplicate and local intent share one action');
     assert.deepEqual(await page.evaluate(() => window.restored.readClosureRecovery()), proof);
     await plan({ items: [row], next_cursor: null }, 200, true); await refresh();
     await page.waitForFunction(() => window.restored.pendingClosureReads.length === 1);
@@ -560,20 +563,21 @@ try {
     await page.goto(`${origin}/tests/account_platform_audit_fixture.html?section=audit&readOnly=1&longAction=1`, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForSelector('.adm-table tbody tr:nth-child(3)');
     const expected = ['APPROVAL_EXISTING_BROKER_INITIALIZATION', `UNKNOWN_${'X'.repeat(160)}`, 'user.active_context.set'];
+    const displayed = await page.evaluate(codes => codes.map(code => window.f17.auditLabels[code] || code), expected);
     const measure = async () => {
       const rows = await page.$$eval('.adm-table tbody tr', rows => rows.map(row => {
-        const cell = row.cells[0], button = cell.querySelector('button'), box = cell.getBoundingClientRect();
-        const range = document.createRange(); range.selectNodeContents(button);
-        const fragments = [...range.getClientRects()], buttonBox = button.getBoundingClientRect();
+        const cell = row.cells[0], action = cell.querySelector('.adm-audit-action'), box = cell.getBoundingClientRect();
+        const range = document.createRange(); range.selectNodeContents(action);
+        const fragments = [...range.getClientRects()], actionBox = action.getBoundingClientRect();
         const lineTops = [];
         for (const fragment of fragments) if (!lineTops.some(top => Math.abs(top - fragment.top) <= 0.5)) lineTops.push(fragment.top);
         const style = getComputedStyle(cell), contentWidth = box.width - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth);
         const valid = rect => [rect.left, rect.top, rect.right, rect.bottom, rect.width, rect.height].every(Number.isFinite) && rect.width > 0 && rect.height > 0;
         const contained = rect => valid(rect) && rect.left >= box.left - 0.5 && rect.right <= box.right + 0.5 && rect.top >= box.top - 0.5 && rect.bottom <= box.bottom + 0.5;
-        return { text: button.textContent, lines: lineTops.length, cellWidth: box.width, contentWidth, validCell: valid(box) && Number.isFinite(contentWidth) && contentWidth > 0, buttonFits: contained(buttonBox), textFits: fragments.length > 0 && fragments.every(contained), beforeResource: fragments.every(rect => rect.right <= row.cells[1].getBoundingClientRect().left + 0.5) };
+        return { text: action.textContent, lines: lineTops.length, cellWidth: box.width, contentWidth, validCell: valid(box) && Number.isFinite(contentWidth) && contentWidth > 0, actionFits: contained(actionBox), textFits: fragments.length > 0 && fragments.every(contained), beforeResource: fragments.every(rect => rect.right <= row.cells[1].getBoundingClientRect().left + 0.5) };
       }));
-      assert.deepEqual(rows.map(row => row.text), expected, 'full known, unknown and short operation strings are retained');
-      assert.ok(rows.every(row => row.validCell && row.buttonFits && row.textFits && row.beforeResource), `audit text stays within its own cell: ${JSON.stringify(rows)}`);
+      assert.deepEqual(rows.map(row => row.text), displayed, 'known operations use their localized label; unknown operation codes remain complete');
+      assert.ok(rows.every(row => row.validCell && row.actionFits && row.textFits && row.beforeResource), `audit text stays within its own cell: ${JSON.stringify(rows)}`);
       assert.ok(rows.every((row, index) => row.lines <= [2, 8, 1][index]), `fixed audit samples remain readable without text pillars: ${JSON.stringify(rows)}`);
       console.log('AUDIT_LAYOUT', JSON.stringify({ viewport: await page.evaluate(() => innerWidth), rows }));
     };
@@ -589,14 +593,14 @@ try {
         await page.screenshot({ path: path.join(process.env.UI_ARTIFACT_DIR, `admin-audit-actions-${width}.png`), fullPage: true });
       }
       for (const [index, suffix] of [[0, '17'], [1, '18']]) {
-        const action = await page.$(`.adm-table tbody tr:nth-child(${index + 1}) td:first-child button`);
+        const action = await page.$(`.adm-table tbody tr:nth-child(${index + 1}) button.adm-audit-row-detail`);
         if (index === 0) await action.click();
         else { await action.focus(); await page.keyboard.press('Enter'); }
         await action.dispose();
         await page.waitForSelector('.adm-detail-drawer');
         assert.equal(await page.evaluate(({ action, suffix }) => {
           const reads = window.f17.calls.filter(call => /\/audit-logs\/[^/?]+$/.test(call.url));
-          return reads.at(-1)?.method === 'GET' && reads.at(-1).url.endsWith(`/audit-logs/00000000-0000-4000-8000-0000000000${suffix}`) && [...document.querySelectorAll('.adm-detail-list dd')].some(node => node.textContent === action);
+          return reads.at(-1)?.method === 'GET' && reads.at(-1).url.endsWith(`/audit-logs/00000000-0000-4000-8000-0000000000${suffix}`) && [...document.querySelectorAll('.adm-audit-action-code code')].some(node => node.textContent === action);
         }, { action: expected[index], suffix }), true, 'pointer and keyboard open the original canonical audit record');
         await page.keyboard.press('Escape'); await page.waitForSelector('.adm-table tbody tr:nth-child(3)');
       }
@@ -1606,8 +1610,9 @@ try {
       if (operation === 'deleteUnit') assert.ok(target.includes('Sample unit') && target.includes(unitID), 'unit deletion identifies both parent and unit');
       assert.equal(await page.$$eval('[role=dialog] fieldset', nodes => nodes.length), 0, 'fieldless actions must not show an empty fieldset');
       const description = words[operation === 'deleteUnit' ? 'deleteUnitDescription' : operation === 'disable' ? 'disableOrganizationDescription' : 'enableOrganizationDescription'];
-      const precheckDescription = operation === 'disable' ? await page.evaluate(() => window.restored.copy().adminLayout.organization.lifecycleTasks.disablePrecheckInfo) : '';
-      assert.equal(await page.$eval('[role=dialog] .ap-org-action-description', node => node.textContent), [description, precheckDescription].filter(Boolean).join(' '));
+      const precheckInfo = operation === 'disable' ? await page.evaluate(() => window.restored.copy().adminLayout.organization.lifecycleTasks.disablePrecheckInfo) : '';
+      const initialDescription = [description, precheckInfo].filter(Boolean).join(' ');
+      assert.equal(await page.$eval('[role=dialog] .ap-org-action-description', node => node.textContent), initialDescription);
       assert.deepEqual(await page.$$eval('[role=dialog] .ap-org-action-footer>button', nodes => nodes.map(node => node.textContent)), [words.cancelConfirmation, words[operation]]);
       const actionColor = operation === 'enable' ? 'rgb(49, 89, 232)' : 'rgb(195, 59, 70)';
       assert.equal(await page.$eval('[role=dialog] .ap-org-action-footer>button[type=submit]', node => getComputedStyle(node).backgroundColor), actionColor);
@@ -1630,8 +1635,16 @@ try {
       assert.equal(await page.$eval('[role=alertdialog]', node => getComputedStyle(node).fontSize), '14px', 'body-portalled confirmation uses the standard dialog font');
       assert.equal(await page.$eval('[role=alertdialog] footer>button:last-child', node => getComputedStyle(node).backgroundColor), actionColor);
       assert.equal(await page.$eval('[role=alertdialog] footer>button:first-child', node => getComputedStyle(node).backgroundColor), 'rgb(255, 255, 255)');
-      assert.ok((await page.$eval('[role=alertdialog]', node => node.textContent)).includes(description), 'final confirmation retains impact explanation');
-      if (operation === 'deleteUnit') assert.ok((await page.$eval('[role=alertdialog]', node => node.textContent)).includes(await page.evaluate(() => window.restored.copy().adminLayout.organization.unitDeleteImpact.confirmRequest)), 'unit-specific request explanation is also retained');
+      const finalText = await page.$eval('[role=alertdialog]', node => node.textContent);
+      if (operation === 'deleteUnit') {
+        const impact = await page.evaluate(() => window.restored.copy().adminLayout.organization.unitDeleteImpact);
+        assert.ok(finalText.includes(impact.confirmRequest), 'unit deletion confirms a request with server-side resource checks');
+        const facts = await page.$eval('[role=alertdialog] .ap-admin-unit-delete-facts', node => node.textContent);
+        assert.ok(facts.includes(impact.children) && facts.includes(impact.scope), 'unit deletion retains the direct-child facts and deletion scope');
+        const finalTarget = await page.$eval('[role=alertdialog] dd', node => node.textContent);
+        assert.ok(finalTarget.includes(orgID) && finalTarget.includes(unitID), 'unit deletion identifies both canonical targets at final confirmation');
+      } else assert.ok(finalText.includes(description), 'final confirmation retains impact explanation');
+      assert.ok(finalText.includes(description), 'final confirmation retains the original impact explanation alongside the request facts');
       assert.ok((await page.$eval('[role=alertdialog] dd', node => node.textContent)).includes('Sample organization'));
       assert.equal((await writes()).length, 0, 'first submit still requires confirmation');
       await page.keyboard.press('Escape'); await page.waitForSelector('[role=dialog] .ap-org-action-target');
@@ -1721,7 +1734,7 @@ try {
     await page.waitForSelector('[data-workspace=refunds] tbody tr');
     assert.equal(await page.$$eval('[data-workspace=refunds] tbody tr', nodes => nodes.length), 2);
     assert.ok((await page.$eval('[data-workspace=refunds]', node => node.textContent)).includes('90,071,992,547,409.93'));
-    const details = await page.$$('[data-workspace=refunds] tbody button'); await details[1].click();
+    const details = await page.$$('[data-workspace=refunds] tbody tr > td:last-child > button'); assert.equal(details.length, 2); await details[1].click();
     await page.waitForFunction(() => new URL(location.href).searchParams.get('refund_id')?.startsWith('FORCED:'));
     await page.reload({ waitUntil: 'domcontentloaded' }); await page.waitForSelector('[data-workspace=refunds] dl');
     assert.ok((await page.$eval('[data-workspace=refunds] dl', node => node.textContent)).includes('强制退款'));
@@ -1820,11 +1833,14 @@ try {
     assert.equal(await page.$('[data-workspace=orders] article'), null, 'late A must not populate the pending B visit');
     await page.evaluate(id => window.restored.pendingAdminOrderDetails[id](), second);
     await page.waitForSelector('[data-workspace=orders] .adm-order-status-summary');
+    assert.equal(await page.$eval('[data-workspace=orders] .adm-order-detail-header code',node=>node.textContent),second,'the accepted B visit owns the separate detail header');
     const detail = await page.$eval('[data-workspace=orders] article', node => node.textContent);
-    assert.ok(detail.includes(second) && !detail.includes(first));
+    assert.ok(!detail.includes(first));
+    assert.ok(await page.$eval('[data-workspace=orders] .adm-order-detail-header',node=>node.textContent.includes('2.02')&&!node.textContent.includes('1.01')),'the displayed amount comes from B, not the retired A response');
     await page.evaluate(() => { window.restored.delayAdminOrderDetail = []; });
     await navigate(first);
-    await page.waitForFunction(id => document.querySelector('[data-workspace=orders] article')?.textContent.includes(id), {}, first);
+    await page.waitForFunction(id => document.querySelector('[data-workspace=orders] .adm-order-detail-header code')?.textContent===id&&!!document.querySelector('[data-workspace=orders] article'), {}, first);
+    assert.ok(await page.$eval('[data-workspace=orders] .adm-order-detail-header',node=>node.textContent.includes('1.01')&&!node.textContent.includes('2.02')),'a fresh A visit accepts only A facts');
     assert.equal(await page.$$eval('.adm-order-status-summary dd', nodes => nodes.length), 4, 'a new visit remains usable after retiring the old response');
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0, 'detail navigation performs no business writes');
   });
@@ -1869,16 +1885,22 @@ try {
     await fresh('?mode=admin&section=payments&finance_tab=orders&order_status=PAID&order_provider_id=controlled-provider&order_channel=ALIPAY&order_created_from=2026-10-01T00%3A00%3A12.345Z&order_limit=50&order_id=00000000-0000-4000-8000-000000000002');
     await page.waitForFunction(() => window.restored.calls.some(call => call.url.includes('/payment-orders?') && call.url.includes('status=PAID') && call.url.includes('provider_id=controlled-provider') && call.url.includes('channel=ALIPAY') && call.url.includes('limit=50') && call.url.includes('created_from=')));
     await page.waitForSelector('[data-workspace=orders] article');
-    assert.ok((await page.$eval('[data-workspace=orders] article', node => node.textContent)).includes('00000000-0000-4000-8000-000000000002'));
+    assert.equal(await page.$eval('[data-workspace=orders] .adm-order-detail-header code', node => node.textContent), '00000000-0000-4000-8000-000000000002');
+    assert.ok(await page.$eval('[data-workspace=orders] article', node => Boolean(node.getAttribute('aria-labelledby')) && node.getAttribute('aria-labelledby') === node.closest('[data-workspace=orders]').querySelector('.adm-order-detail-header h3').id));
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.waitForSelector('[data-workspace=orders] article');
     await page.waitForFunction(() => window.restored.calls.some(call => call.url.includes('/payment-orders?') && call.url.includes('status=PAID')));
+    assert.equal(await page.$eval('[data-workspace=orders] .adm-order-detail-header code', node => node.textContent), '00000000-0000-4000-8000-000000000002');
     assert.equal(new URL(page.url()).searchParams.get('order_channel'), 'ALIPAY');
   });
   await run('history during a pending filtered read coalesces the latest URL without stale rows', async () => {
     await fresh('?mode=admin&section=payments&finance_tab=orders&order_status=PENDING');
     await reloadPortalFixture(() => { window.restored.filteredOrders = true; window.restored.reload(); });
-    await page.waitForFunction(() => document.querySelector('[data-workspace=orders] tbody')?.textContent.includes('PENDING'));
+    const expected = await page.evaluate(() => ({ orderID: '00000000-0000-4000-8000-000000000002', pending: window.restored.copy().accountLayout.statuses.PENDING, paid: window.restored.copy().accountLayout.statuses.PAID }));
+    await page.waitForFunction(({ orderID, pending }) => {
+      const rows = document.querySelectorAll('[data-workspace=orders] tbody tr');
+      return rows.length === 1 && rows[0].cells[0]?.querySelector('code')?.textContent === orderID && rows[0].cells[6]?.textContent === pending;
+    }, {}, expected);
     await page.waitForFunction(() => !document.querySelector('[data-workspace=orders] .adm-filter-row button').disabled);
     await page.evaluate(() => { window.restored.delayAdminOrders = true; });
     await page.select('[data-workspace=orders] .adm-filter-row select', 'PAID'); await page.$eval('[data-workspace=orders] .adm-filter-row', form => form.requestSubmit());
@@ -1886,22 +1908,29 @@ try {
     const before = await page.evaluate(() => window.restored.calls.filter(call => call.url.includes('/payment-orders?') && new URL(call.url, location.origin).searchParams.get('status') === 'PENDING').length);
     await page.goBack(); await page.waitForFunction(() => new URLSearchParams(location.search).get('order_status') === 'PENDING');
     await page.evaluate(() => window.restored.releaseAdminOrders());
-    await page.waitForFunction(before => window.restored.calls.filter(call => call.url.includes('/payment-orders?') && new URL(call.url, location.origin).searchParams.get('status') === 'PENDING').length === before + 1 && document.querySelector('[data-workspace=orders] tbody')?.textContent.includes('PENDING'), {}, before);
-    assert.ok(!(await page.$eval('[data-workspace=orders] tbody', node => node.textContent)).includes('PAID'));
+    await page.waitForFunction(({ before, orderID, pending }) => {
+      const rows = document.querySelectorAll('[data-workspace=orders] tbody tr');
+      return window.restored.calls.filter(call => call.url.includes('/payment-orders?') && new URL(call.url, location.origin).searchParams.get('status') === 'PENDING').length === before + 1 && rows.length === 1 && rows[0].cells[0]?.querySelector('code')?.textContent === orderID && rows[0].cells[6]?.textContent === pending;
+    }, {}, { ...expected, before });
+    assert.notEqual(await page.$eval('[data-workspace=orders] tbody tr td:nth-child(7)', node => node.textContent), expected.paid);
     assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method !== 'GET' && !call.url.endsWith('/account/bootstrap')).length), 0);
   });
   await run('review detail failure and mismatched receipt never expose the previously selected case', async () => {
     const first = '22222222-2222-4222-8222-222222222222', second = '33333333-3333-4333-8333-333333333333';
+    const failedDetailReady = ({ tab, endpoint, second, count }) => {
+      const retry = [...document.querySelectorAll(`[data-workspace=${tab}] nav button`)].find(node => node.textContent.trim() === window.restored.copy().finance.retry);
+      return window.restored.calls.filter(call => call.url.endsWith('/' + endpoint + '/' + second)).length === count && document.querySelector(`[data-workspace=${tab}] [role=alert]`) && Boolean(retry && retry.getClientRects().length && !retry.disabled);
+    };
     for (const [tab, prefix, endpoint] of [['late', 'late', 'late-payment-reviews'], ['anomalies', 'anomaly', 'payment-anomalies']]) {
       await fresh(`?mode=admin&section=payments&finance_tab=${tab}`);
       await reloadPortalFixture(({ tab, prefix, first }) => { window.restored.reviewFixture = true; window.restored.permissions = ['platform.billing.wallets.read', 'platform.billing.orders.sync', 'platform.billing.repairs.request']; history.replaceState({}, '', `?mode=admin&section=payments&finance_tab=${tab}&${prefix}_id=${first}`); dispatchEvent(new PopStateEvent('popstate')); window.restored.reload(); }, { tab, prefix, first });
       await page.waitForFunction(({ tab, first }) => document.querySelector(`[data-workspace=${tab}] article h4`)?.textContent === first, {}, { tab, first });
       await page.evaluate(({ tab, prefix, second }) => { window.restored.failReviewID = second; history.pushState({}, '', `?mode=admin&section=payments&finance_tab=${tab}&${prefix}_id=${second}`); dispatchEvent(new PopStateEvent('popstate')); }, { tab, prefix, second });
-      await page.waitForFunction(({ tab, endpoint, second }) => window.restored.calls.some(call => call.url.endsWith('/' + endpoint + '/' + second)) && document.querySelector(`[data-workspace=${tab}] [role=alert]`) && !document.querySelector(`[data-workspace=${tab}] .adm-filter-row button`).disabled, {}, { tab, endpoint, second });
+      await page.waitForFunction(failedDetailReady, {}, { tab, endpoint, second, count: 1 });
       assert.equal(await page.$(`[data-workspace=${tab}] article`), null);
       await page.evaluate(first => { window.restored.failReviewID = ''; window.restored.reviewAckID = first; }, first);
       await click(`[data-workspace=${tab}] nav button`, await page.evaluate(() => window.restored.copy().finance.retry));
-      await page.waitForFunction(({ tab, endpoint, second }) => window.restored.calls.filter(call => call.url.endsWith('/' + endpoint + '/' + second)).length === 2 && !document.querySelector(`[data-workspace=${tab}] .adm-filter-row button`).disabled, {}, { tab, endpoint, second });
+      await page.waitForFunction(failedDetailReady, {}, { tab, endpoint, second, count: 2 });
       assert.equal(await page.$(`[data-workspace=${tab}] article`), null);
       await page.evaluate(() => { window.restored.reviewAckID = ''; });
       await click(`[data-workspace=${tab}] nav button`, await page.evaluate(() => window.restored.copy().finance.retry));
@@ -1975,10 +2004,15 @@ try {
   await run('submitting displayed date filters sends timezone-bearing RFC3339', async () => {
     for (const [section, tab, prefix, endpoint] of [['payments', 'orders', 'order', 'payment-orders'], ['payments', 'late', 'late', 'late-payment-reviews'], ['payments', 'anomalies', 'anomaly', 'payment-anomalies']]) {
       await fresh(`?mode=admin&section=${section}&finance_tab=${tab}&${prefix}_created_from=2026-10-01T00%3A00%3A12.345Z`);
-      await page.waitForSelector(`[data-workspace=${tab}] .adm-filter-row input[type=datetime-local]`);
-      await page.waitForFunction(selector => !document.querySelector(selector).disabled, {}, `[data-workspace=${tab}] .adm-filter-row button`);
+      const formSelector = `[data-workspace=${tab}] form`;
+      await page.waitForSelector(`${formSelector} input[type=datetime-local]`);
+      assert.equal(await page.$$eval(formSelector, forms => forms.length), 1, 'the read workspace exposes one filter form');
+      await page.waitForFunction(selector => {
+        const submit = document.querySelector(selector)?.querySelector('button[type=submit], button:not([type])');
+        return Boolean(submit && !submit.matches(':disabled'));
+      }, {}, formSelector);
       const before = await page.evaluate(endpoint => window.restored.calls.filter(call => call.url.includes('/' + endpoint + '?')).length, endpoint);
-      await page.$eval(`[data-workspace=${tab}] .adm-filter-row`, form => form.requestSubmit());
+      await page.$eval(formSelector, form => form.requestSubmit());
       await page.waitForFunction(({ endpoint, before }) => window.restored.calls.filter(call => call.url.includes('/' + endpoint + '?')).length > before, {}, { endpoint, before });
       const value = await page.evaluate(endpoint => new URL(window.restored.calls.filter(call => call.url.includes('/' + endpoint + '?')).at(-1).url, location.origin).searchParams.get('created_from'), endpoint);
       assert.match(value, /Z$/); assert.equal(value, '2026-10-01T00:00:12.345Z');
@@ -2053,6 +2087,78 @@ try {
     await page.waitForSelector('[role=dialog] .adm-role-preview');
     return words;
   };
+  await run('roles: grant drawer keeps three steps reachable with native focus at normal and short heights', async () => {
+    for (const sample of [{ language: 'zh', width: 1440, height: 900 }, { language: 'en', width: 390, height: 844 }, { language: 'ja', width: 1024, height: 420 }]) {
+      await readyRoles();
+      await page.evaluate(language => { window.restored.language = language; window.restored.reload(); }, sample.language);
+      await page.waitForSelector('.adm-role-workspace-head .adm-role-primary');
+      await page.setViewport({ width: sample.width, height: sample.height });
+      const words = await roleWords();
+      const trigger = '.adm-role-workspace-head .adm-role-primary';
+      await page.focus(trigger); await page.keyboard.press('Enter');
+      await page.waitForSelector('.adm-role-grant-drawer .adm-grant-step');
+      const measure = async step => {
+        await page.$eval('.adm-grant-step .adm-role-drawer-foot button:last-child', node => node.scrollIntoView({ block: 'nearest' }));
+        const geometry = await page.evaluate(() => {
+          const drawer = document.querySelector('.adm-role-grant-drawer'), body = drawer.querySelector('.adm-grant-step-body'), footer = drawer.querySelector('.adm-role-drawer-foot');
+          const box = footer.getBoundingClientRect(), outer = drawer.getBoundingClientRect();
+          const clip = { top: 0, bottom: innerHeight, left: 0, right: innerWidth };
+          let scrollHost = null;
+          for (let node = footer.parentElement; node; node = node.parentElement) {
+            const style = getComputedStyle(node), rect = node.getBoundingClientRect();
+            if (!scrollHost && ['auto', 'scroll', 'overlay'].includes(style.overflowY)) scrollHost = node;
+            if (['auto', 'scroll', 'hidden', 'clip', 'overlay'].includes(style.overflowY)) {
+              clip.top = Math.max(clip.top, rect.top + node.clientTop);
+              clip.bottom = Math.min(clip.bottom, rect.top + node.clientTop + node.clientHeight);
+            }
+            if (['auto', 'scroll', 'hidden', 'clip', 'overlay'].includes(style.overflowX)) {
+              clip.left = Math.max(clip.left, rect.left + node.clientLeft);
+              clip.right = Math.min(clip.right, rect.left + node.clientLeft + node.clientWidth);
+            }
+          }
+          const controls = [...footer.querySelectorAll('button')].map(node => {
+            const rect = node.getBoundingClientRect(), range = document.createRange(); range.selectNodeContents(node);
+            const label = range.getBoundingClientRect(), hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+            return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, width: rect.width, height: rect.height, label: { top: label.top, bottom: label.bottom, left: label.left, right: label.right, width: label.width, height: label.height }, hit: hit === node || node.contains(hit) };
+          });
+          return { top: box.top, bottom: box.bottom, left: box.left, right: box.right, outerTop: outer.top, outerBottom: outer.bottom, bodyOverflow: getComputedStyle(body).overflowY, footerFlex: getComputedStyle(footer).flexShrink, height: innerHeight, width: innerWidth, clip, controls, outerScrollHost: scrollHost === drawer };
+        });
+        assert.ok(geometry.top >= -1 && geometry.bottom <= geometry.height + 1 && geometry.left >= -1 && geometry.right <= geometry.width + 1, JSON.stringify({ sample, step, geometry }));
+        const inside = (rect, tolerance) => rect.width > 0 && rect.height > 0 && rect.top >= geometry.clip.top - tolerance && rect.bottom <= geometry.clip.bottom + tolerance && rect.left >= geometry.clip.left - tolerance && rect.right <= geometry.clip.right + tolerance;
+        assert.ok(geometry.controls.length > 0 && geometry.controls.every(control => inside(control, 1) && inside(control.label, 0.5) && control.hit), 'footer controls and labels must remain visible and hittable within their actual scroll host: ' + JSON.stringify({ sample, step, geometry }));
+        if (sample.height > 580) {
+          assert.equal(geometry.bodyOverflow, 'auto'); assert.equal(geometry.footerFlex, '0');
+          const before = geometry.top;
+          await page.$eval('.adm-grant-step-body', node => { node.scrollTop = node.scrollHeight; });
+          assert.ok(Math.abs(await page.$eval('.adm-role-drawer-foot', node => node.getBoundingClientRect().top) - before) <= 1, 'body scrolling keeps the footer in its slot');
+        } else {
+          assert.equal(geometry.bodyOverflow, 'visible', 'short-height mode keeps one outer scroll area');
+          assert.equal(geometry.outerScrollHost, true, 'short-height controls scroll in the drawer itself');
+        }
+        console.log('GRANT_LAYOUT', JSON.stringify({ sample, step, geometry }));
+      };
+      await measure(1);
+      await page.focus('.adm-role-grant-drawer > header button');
+      await page.keyboard.press('Tab');
+      assert.equal(await page.evaluate(() => Boolean(document.activeElement.closest('.adm-role-grant-drawer'))), true);
+      await typeGrantTarget('22222222-2222-4222-8222-222222222222');
+      await click('[role=dialog] button', words.next);
+      await page.waitForSelector('[role=dialog] select'); await measure(2);
+      await page.select('[role=dialog] select', 'PLATFORM_BILLING_OPERATOR');
+      await page.type('[role=dialog] textarea', 'Synthetic drawer review');
+      await click('[role=dialog] button', words.next);
+      await page.waitForSelector('[role=dialog] .adm-role-preview'); await measure(3);
+      await page.focus('.adm-grant-step .adm-role-drawer-foot button:last-child');
+      await page.keyboard.press('Tab');
+      assert.equal(await page.$eval('.adm-role-grant-drawer > header button', node => document.activeElement === node), true, 'last Tab stays inside the native dialog');
+      await page.keyboard.down('Shift'); await page.keyboard.press('Tab'); await page.keyboard.up('Shift');
+      assert.equal(await page.$eval('.adm-grant-step .adm-role-drawer-foot button:last-child', node => document.activeElement === node), true);
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => !document.querySelector('[role=dialog]'));
+      assert.equal(await page.$eval(trigger, node => document.activeElement === node), true);
+      assert.equal(await page.evaluate(() => window.restored.calls.filter(call => call.method === 'POST' && call.url.endsWith('/role-bindings')).length), 0, 'review and cancellation never grant a role');
+    }
+  });
   await run('roles: original catalog and permission groups fit desktop and narrow viewports', async () => {
     await readyRoles();
     for (const language of ['zh', 'en', 'ja']) {

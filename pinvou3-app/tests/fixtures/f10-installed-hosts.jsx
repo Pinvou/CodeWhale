@@ -14,7 +14,8 @@ const receipt = { closure_request_id:id(9), status:'IN_PROGRESS', stage:'CLOSURE
 const grant = { grant_id:id(4), organization_id:id(2), member_user_id:id(3), package_id:id(5), component_id:id(6), status:'SUSPENDED', suspension_reason:'ACCOUNT_CLOSED', original_microcredits:'9007199254740993', available_microcredits:'9007199254740993', reserved_microcredits:0, used_microcredits:0, expired_microcredits:0, revoked_microcredits:0, membership_version:1, allocation_version:1, expires_at:'2099-01-01T00:00:00Z' };
 const reclaimedGrant = { ...grant, status:'RECLAIMED_ACCOUNT_CLOSED', suspension_reason:null, available_microcredits:0, revoked_microcredits:grant.available_microcredits, allocation_version:2 };
 const ent = { facts:entitlementHostFacts(),created:q.has('approve-only'),status:q.has('approve-only')?'SUBMITTED':'DRAFT',version:1,precheckError:q.has('precheck-error'), holdCreate:q.has('hold-entitlement-create'), loseEdit:q.has('lose-entitlement-edit'), loseCreate:q.has('lose-entitlement-create'), edits:0, effects:0 };
-const entDetail = () => ({approval_request_id:id(9),command_type:'ENTITLEMENT_COMPONENT_ADJUSTMENT',status:ent.status,version:ent.version,action_control_version:1,detail_availability:'AVAILABLE',allowed_actions:ent.status==='DRAFT'?['EDIT','SUBMIT']:['APPROVE','REJECT'],target:{resource_type:'ENTITLEMENT_PACKAGE',resource_id:id(5)},command:ent.facts.normalized_command,reason:'Verified payment product split evidence'});
+const entRequester = q.has('approve-only') ? id(7) : id(1);
+const entDetail = () => ({approval_request_id:id(9),requester:{user_id:entRequester},command_type:'ENTITLEMENT_COMPONENT_ADJUSTMENT',status:ent.status,version:ent.version,action_control_version:1,detail_availability:'AVAILABLE',allowed_actions:ent.status==='DRAFT'?['EDIT','SUBMIT']:['APPROVE','REJECT'],target:{resource_type:'ENTITLEMENT_PACKAGE',resource_id:id(5)},command:ent.facts.normalized_command,reason:'Verified payment product split evidence'});
 const state = window.installed = { calls:[], language, mode, id, ent, entDetail, adminPlatformCopy, receipt, grant, accountClosureCopy, entitlementCorrectionCopy, accountClosedGrantCopy, financeCopy, organizationCopy, user:id(1), platformVersion:1, delayed:q.has('delay'), queryError:q.has('error'), denied:q.has('deny') };
 const permissions = () => mode === 'admin' ? ['platform.account-closures.read', ...(q.has('ops-navigation') ? ['platform.registration-bonus.read'] : [])] : mode === 'ent' ? q.has('approve-only') ? ['platform.billing.repairs.approve'] : ['platform.billing.repairs.request'] : [];
 const profile = () => ({ user_id:state.user, status:'ACTIVE', personal_permissions:state.denied ? [] : mode === 'personal' ? ['personal.account.close.read', 'personal.account.close.request'] : [], platform_permissions:state.denied?[]:permissions(), active_context:{ context_type:mode === 'org' ? 'ORGANIZATION':'PERSONAL', organization_id:mode === 'org'?id(2):null, membership_version:1, context_version:1, organization_authorization_version:1, permissions:mode==='org'&&!state.denied?['org.grants.reclaim_closed','org.quota.read.self']:[] }, platform_authorization_version:state.platformVersion });
@@ -34,7 +35,7 @@ window.fetch = async (url, options = {}) => {
  if (url===`/api/token/v1/organizations/${id(2)}/quota-grants`) return Response.json({items:[state.reclaimed ? reclaimedGrant : grant]});
  if (url===`/api/token/v1/organizations/${id(2)}/account-closed-grants/${id(4)}/reclaim`) { state.reclaimIntent=state.reclaimProof(); state.reclaimed=true; return Response.json({grant:reclaimedGrant,amount_microcredits:'9007199254740993',subject_lifecycle_version:2,replayed:false}); }
  if (url==='/api/admin/approvals/capability') return Response.json({session_approval_wire_version:2,control:{version:1,epoch:1,authorization_relay_epoch:1}});
- if (url==='/api/admin/approvals/directory') return Response.json({schema_version:1,platform_authorization_version:state.platformVersion,items:[{command_type:'ENTITLEMENT_COMPONENT_ADJUSTMENT',policy_version:2,risk_class:'FINANCIAL_FACT_CHANGE',requestable:true},{command_type:'UNKNOWN_REPAIR',policy_version:1,risk_class:'FINANCIAL_FACT_CHANGE',requestable:true}]},{headers:{'X-Platform-Authorization-Version':String(state.platformVersion)}});
+ if (url==='/api/admin/approvals/directory') return Response.json({schema_version:1,platform_authorization_version:state.platformVersion,items:[{command_type:'ENTITLEMENT_COMPONENT_ADJUSTMENT',policy_version:2,risk_class:'FINANCIAL_FACT_CHANGE',visible:true,requestable:true},{command_type:'UNKNOWN_REPAIR',policy_version:1,risk_class:'FINANCIAL_FACT_CHANGE',visible:true,requestable:true}]},{headers:{'X-Platform-Authorization-Version':String(state.platformVersion)}});
  if (url==='/api/admin/account/admin/v2/approval-command-prechecks') return ent.precheckError ? Response.json({code:'OWNER_UNAVAILABLE'},{status:503}) : Response.json(ent.facts);
  if (url==='/api/admin/approvals/requests'&&options.method==='POST') {
   if (!ent.created) ent.effects++;
@@ -54,7 +55,11 @@ window.fetch = async (url, options = {}) => {
  if (url===`/api/admin/approvals/requests/${id(9)}/actions/decide`) {ent.status='APPROVED';ent.version++;return new Response(null,{status:204});}
  if (url===`/api/admin/approvals/requests/${id(9)}/actions/submit`) {ent.status='SUBMITTED';ent.version++;return new Response(null,{status:204});}
  if (url===`/api/admin/approvals/requests/${id(9)}`) return Response.json(entDetail());
- if (String(url).startsWith('/api/admin/approvals/requests?')) return Response.json({items:ent.created?[entDetail()]:[],has_more:false});
+ if (String(url).startsWith('/api/admin/approvals/requests?')) {
+  const query=new URL(url,location.href).searchParams;
+  const items=ent.created?[entDetail()]:[];
+  return Response.json({items:items.filter(item=>(!query.get('requester_user_id')||item.requester.user_id===query.get('requester_user_id'))&&(!query.get('status')||item.status===query.get('status'))),has_more:false});
+ }
  throw new Error(`Unexpected controlled route: ${url}`);
 };
 window.prompt=()=> 'CLOSE_MY_ACCOUNT'; window.confirm=()=>true;
