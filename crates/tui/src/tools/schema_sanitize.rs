@@ -204,17 +204,16 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
 /// verbatim because no record rejects them. Root composition branch
 /// properties are merged into the object and the dropped exactly-one /
 /// at-least-one constraint is surfaced as a description note so the model
-/// still knows which parameter groups apply. Where the stripped composition
-/// leaves a root with no declared `type`, the object type is restored — the
-/// previous release line always forced it, and the model-facing contract
-/// otherwise loses its object shape even when the branches carried no
-/// properties to merge (an `allOf` of `$ref`s, required-only or boolean
-/// branches). Whenever no specific required-group note exists, the dropped
-/// composition is surfaced as a generic note — merged properties or not
-/// (review 4539837534): a union of `additionalProperties:false` branches
-/// whose properties merge into the root accepts a mixture no original
-/// branch admits, so the model must still be told the branch contract was
-/// relaxed.
+/// still knows which parameter groups apply. Every stripped composition is
+/// surfaced: its specific required-group note when the branches carry two
+/// or more labeled groups, otherwise the generic sentence — merged
+/// properties or not (review 4539837534): a union of
+/// `additionalProperties:false` branches whose properties merge into the
+/// root accepts a mixture no original branch admits, so the model must
+/// still be told the branch contract was relaxed. The notes aggregate
+/// across all stripped keywords (review 5898539144): a first-match note
+/// left a root stacking `oneOf` and `anyOf` advertising only the
+/// exactly-one contract while the wire schema dropped both.
 ///
 /// The shared [`sanitize`] normalization still applies first, so a root
 /// nullable union can collapse (rewriting the root `type`), a bare object
@@ -227,9 +226,38 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
 ///
 /// Returns the same style of description note as [`sanitize_for_responses`].
 pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
-    let constraint_note = schema
-        .as_object()
-        .and_then(root_composition_constraint_note);
+    // The specific required-group sentences for the keywords that carry
+    // two or more labeled groups, captured at entry exactly as the
+    // first-match note read them; which keywords actually SURVIVE to be
+    // stripped is decided after the shared normalization (a nullable-union
+    // collapse can erase a composition entirely, and a composition that
+    // never reaches the wire takes no note with it).
+    let mut specific_notes: std::collections::HashMap<&'static str, String> =
+        std::collections::HashMap::new();
+    if let Some(obj) = schema.as_object() {
+        for (key, prefix) in [
+            ("oneOf", "Exactly one"),
+            ("anyOf", "At least one"),
+            ("allOf", "All"),
+        ] {
+            let Some(items) = obj.get(key).and_then(Value::as_array) else {
+                continue;
+            };
+            let mut groups: Vec<String> =
+                items.iter().filter_map(required_group_label).collect();
+            groups.sort();
+            groups.dedup();
+            if groups.len() >= 2 {
+                specific_notes.insert(
+                    key,
+                    format!(
+                        "{prefix} of these parameter groups must be provided: {}.",
+                        groups.join(" | ")
+                    ),
+                );
+            }
+        }
+    }
 
     sanitize(schema);
 
@@ -238,45 +266,44 @@ pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
     }
 
     let Some(obj) = schema.as_object_mut() else {
-        return constraint_note;
+        return specific_notes.values().next().cloned();
     };
 
-    let stripped_composition = ["oneOf", "anyOf", "allOf"]
+    let stripped_compositions: Vec<&'static str> = ["oneOf", "anyOf", "allOf"]
         .iter()
-        .find(|key| obj.contains_key(**key))
-        .copied();
+        .filter(|key| obj.contains_key(**key))
+        .copied()
+        .collect();
     merge_root_composition_properties(obj);
     obj.remove("oneOf");
     obj.remove("anyOf");
     obj.remove("allOf");
-    if stripped_composition.is_some() && !obj.contains_key("type") {
+    if !stripped_compositions.is_empty() && !obj.contains_key("type") {
         obj.insert("type".into(), Value::String("object".to_string()));
     }
     prune_dangling_required(schema, &[]);
-    constraint_note.or_else(|| {
-        // Merged properties do not compensate for the dropped composition:
-        // a union of `additionalProperties:false` branches merges its branch
-        // properties into the root and then accepts a mixture no original
-        // branch admits (review 4539837534), and a property-less
-        // composition (an allOf of $refs, required-only or boolean branches)
-        // erases the argument contract outright. Whenever the specific
-        // required-group note is missing, surface the generic note so the
-        // model always learns the branch contract was relaxed.
-        stripped_composition.map(|key| match key {
-                "oneOf" => {
-                    "Exactly one of the original argument alternatives must be provided (top-level `oneOf` is not supported by this API and was removed)."
-                        .to_string()
-                }
-                "anyOf" => {
-                    "At least one of the original argument alternatives must be provided (top-level `anyOf` is not supported by this API and was removed)."
-                        .to_string()
-                }
-                _ => {
-                    "All of the original argument alternatives must be satisfied (top-level `allOf` is not supported by this API and was removed)."
-                        .to_string()
-                }
-            })
-    })
+    // One note per STRIPPED root composition keyword, in the recorded
+    // keyword order: the specific sentence when that keyword carried two or
+    // more labeled groups, otherwise the generic sentence (review 4539837534
+    // — merged properties do not compensate for the dropped composition, and
+    // a property-less composition erases the argument contract outright).
+    // Aggregating across ALL stripped keywords keeps the model informed of
+    // every dropped constraint (review 5898539144: the pass strips all
+    // three, but a first-match note advertised only the first).
+    let notes: Vec<String> = stripped_compositions
+        .iter()
+        .map(|key| {
+            specific_notes
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| root_composition_generic_note(key).to_string())
+        })
+        .collect();
+    if notes.is_empty() {
+        None
+    } else {
+        Some(notes.join(" "))
+    }
 }
 
 fn strict_schema_supported(schema: &Value) -> bool {
@@ -551,6 +578,13 @@ fn merge_root_composition_properties(obj: &mut Map<String, Value>) {
 }
 
 fn root_composition_constraint_note(obj: &Map<String, Value>) -> Option<String> {
+    // Aggregate the required-group note for EVERY root composition keyword,
+    // in the recorded keyword order: this pass strips all three keywords
+    // but a first-match note left the model ignorant of every dropped
+    // constraint after the first (review 5898539144 — a root stacking
+    // `oneOf` and `anyOf` advertised only the exactly-one contract on the
+    // wire).
+    let mut notes: Vec<String> = Vec::new();
     for (key, prefix) in [
         ("oneOf", "Exactly one"),
         ("anyOf", "At least one"),
@@ -563,13 +597,34 @@ fn root_composition_constraint_note(obj: &Map<String, Value>) -> Option<String> 
         groups.sort();
         groups.dedup();
         if groups.len() >= 2 {
-            return Some(format!(
+            notes.push(format!(
                 "{prefix} of these parameter groups must be provided: {}.",
                 groups.join(" | ")
             ));
         }
     }
-    None
+    if notes.is_empty() {
+        None
+    } else {
+        Some(notes.join(" "))
+    }
+}
+
+/// The generic sentence for one stripped root composition keyword: the
+/// model-facing compensation for a composition whose branches carry no
+/// labeled required groups (review 4539837534).
+fn root_composition_generic_note(key: &str) -> &'static str {
+    match key {
+        "oneOf" => {
+            "Exactly one of the original argument alternatives must be provided (top-level `oneOf` is not supported by this API and was removed)."
+        }
+        "anyOf" => {
+            "At least one of the original argument alternatives must be provided (top-level `anyOf` is not supported by this API and was removed)."
+        }
+        _ => {
+            "All of the original argument alternatives must be satisfied (top-level `allOf` is not supported by this API and was removed)."
+        }
+    }
 }
 
 /// Strip `dependentSchemas` / `dependentRequired` from every node.
@@ -1954,12 +2009,13 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_messages_sanitize_notes_only_the_first_composition_keyword() {
-        // A root carrying two compositions strips both, but the note
-        // machinery surfaces only the first keyword's constraint (oneOf
-        // before anyOf before allOf, the recorded-keyword order); pin the
-        // precedence so a reordering cannot silently change model-facing
-        // copy.
+    fn anthropic_messages_sanitize_notes_every_stripped_composition_keyword() {
+        // A root carrying two compositions strips both, and the notes
+        // aggregate in the recorded keyword order (review 5898539144: the
+        // first-match note told the model only about `a` | `b` while the
+        // wire schema also dropped the at-least-one `c` | `d` constraint,
+        // so the model could emit arguments outside the original
+        // contract).
         let mut both = json!({
             "oneOf": [
                 {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
@@ -1975,12 +2031,34 @@ mod tests {
 
         assert_eq!(
             note.as_deref(),
-            Some("Exactly one of these parameter groups must be provided: `a` | `b`."),
-            "the oneOf note wins the fixed keyword precedence: {note:?}"
+            Some("Exactly one of these parameter groups must be provided: `a` | `b`. At least one of these parameter groups must be provided: `c` | `d`."),
+            "both dropped constraints must be surfaced: {note:?}"
         );
         assert!(
-            both.get("anyOf").is_none(),
+            both.get("oneOf").is_none() && both.get("anyOf").is_none(),
             "both compositions are stripped: {both}"
+        );
+
+        // A stripped keyword whose branches carry no labeled groups
+        // contributes its generic sentence beside the sibling's specific
+        // one instead of being silently dropped by the aggregation.
+        let mut mixed = json!({
+            "oneOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
+                {"type": "object", "properties": {"b": {"type": "string"}}, "required": ["b"]}
+            ],
+            "anyOf": [
+                {"type": "object", "properties": {"e": {"type": "string"}}},
+                {"type": "object", "properties": {"f": {"type": "string"}}}
+            ]
+        });
+
+        let note = sanitize_for_anthropic_messages(&mut mixed);
+
+        assert_eq!(
+            note.as_deref(),
+            Some("Exactly one of these parameter groups must be provided: `a` | `b`. At least one of the original argument alternatives must be provided (top-level `anyOf` is not supported by this API and was removed)."),
+            "the generic sentence fills in for the group-less keyword: {note:?}"
         );
     }
 
