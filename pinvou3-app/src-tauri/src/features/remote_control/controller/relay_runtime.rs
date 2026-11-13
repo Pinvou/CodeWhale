@@ -539,6 +539,7 @@ fn log_stage(value: &str) -> &'static str {
         "attachment_uploads_expired",
         "artifact_downloads_expired",
         "task_terminal_persist_failed",
+        "controller_inbound_retired",
         "task_rejected_persist_failed",
         "task_dispatch_rejected",
         "task_session_discard_failed",
@@ -604,6 +605,8 @@ fn log_detail(value: &str) -> &'static str {
         "session_mapping_missing",
         "status_unavailable",
         "outbound_unavailable",
+        "desktop_controller_inbound_full",
+        "desktop_controller_inbound_closed",
         "seal_failed",
         "queue_failed",
         "inbound_item_capacity",
@@ -3249,6 +3252,16 @@ mod tests {
             assert_eq!(log_remote_action_operation(sentinel), "other");
         }
         assert_eq!(log_stage("controlled_status"), "controlled_status");
+        assert_eq!(
+            log_stage("controller_inbound_retired"),
+            "controller_inbound_retired"
+        );
+        for detail in [
+            "desktop_controller_inbound_full",
+            "desktop_controller_inbound_closed",
+        ] {
+            assert_eq!(log_detail(detail), detail);
+        }
         assert_eq!(log_stage("preconnect_expired"), "preconnect_expired");
         for detail in [
             "desktop_remote_pairing_expired",
