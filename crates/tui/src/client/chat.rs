@@ -1155,20 +1155,69 @@ fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
 /// characters the pattern cannot express at any position. Only the Moonshot
 /// path applies this — no other provider's documents carry the
 /// leading-character ban.
-fn prefix_digit_led_tool_names_for_moonshot(chat_tools: &mut [Value]) {
-    for tool in chat_tools.iter_mut() {
-        let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) else {
-            continue;
+///
+/// The mapping must stay reversible: when the catalog already carries the
+/// minted spelling (registry keys `3d_render` and `_3d_render` are distinct
+/// and can coexist — review 5886233560), both would advertise as
+/// `_3d_render` and every response call spelling `_3d_render` would resolve
+/// onto the underscore sibling through exact-match precedence. The digit-led
+/// tool is dropped from THIS request instead, like the schema-incompatible
+/// drops: advertisement stays collision-free and response resolution stays
+/// exact. Returns the dropped tools' REGISTRY spellings, so the forced-choice
+/// check can refuse the shadowed registry name while still allowing a force
+/// of the surviving underscore spelling.
+fn prefix_digit_led_tool_names_for_moonshot(chat_tools: &mut Vec<Value>) -> Vec<String> {
+    let wire_names: Vec<String> = chat_tools
+        .iter()
+        .filter_map(|tool| {
+            tool.get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    let mut dropped = Vec::new();
+    chat_tools.retain_mut(|tool| {
+        let Some(function) = tool
+            .as_object_mut()
+            .and_then(|tool| tool.get_mut("function"))
+            .and_then(Value::as_object_mut)
+        else {
+            return true;
         };
-        prefix_digit_led_function_name(function);
-    }
+        let Some(name) = function
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            return true;
+        };
+        if !name.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            return true;
+        }
+        let minted = format!("_{name}");
+        if wire_names.iter().any(|existing| existing == &minted) {
+            tracing::warn!(
+                tool = %name,
+                wire = %minted,
+                "dropping Moonshot tool from this request: the minted wire name collides with an existing catalog tool"
+            );
+            dropped.push(name);
+            return false;
+        }
+        function.insert("name".into(), json!(minted));
+        true
+    });
+    dropped
 }
 
 /// Prefix one `function` object's `name` in place when it starts with an
-/// ASCII digit. Shared by the tools array and the replayed assistant
-/// `tool_calls`, which must carry the same wire spelling; dispatch resolves
-/// the prefixed spelling back to the registry name (see the digit-led wire
-/// recovery in the engine's tool resolution).
+/// ASCII digit. The tools array goes through the collision-aware
+/// [`prefix_digit_led_tool_names_for_moonshot`] instead; this variant
+/// rewrites the replayed assistant `tool_calls`, which must carry the same
+/// wire spelling; dispatch resolves the prefixed spelling back to the
+/// registry name (see the digit-led wire recovery in the engine's tool
+/// resolution).
 fn prefix_digit_led_function_name(function: &mut serde_json::Map<String, Value>) {
     let digit_led = function
         .get("name")
@@ -1289,8 +1338,8 @@ pub(crate) fn build_chat_wire_body(
         // whose parameters cannot pass MFJS validation so one incompatible
         // tool never sinks the whole request.
         if matches!(provider, crate::config::ApiProvider::Moonshot) {
-            prefix_digit_led_tool_names_for_moonshot(&mut chat_tools);
-            omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools);
+            omitted_tool_names = prefix_digit_led_tool_names_for_moonshot(&mut chat_tools);
+            omitted_tool_names.extend(sanitize_moonshot_chat_tools(&mut chat_tools));
         }
         // xAI rejects a parameters root that is not a plain object schema
         // (e.g. apply_patch's root `oneOf` required-groups) with a 400.
@@ -1345,7 +1394,7 @@ pub(crate) fn build_chat_wire_body(
             let wire_name = if digit_led {
                 format!("_{forced}")
             } else {
-                forced
+                forced.clone()
             };
             if wire_name
                 != *mapped
@@ -1356,10 +1405,17 @@ pub(crate) fn build_chat_wire_body(
             {
                 function.insert("name".into(), json!(wire_name.clone()));
             }
-            if omitted_tool_names
-                .iter()
-                .any(|omitted| omitted == &wire_name)
-            {
+            // Schema drops record the wire spelling they were advertised
+            // under; collision drops (see
+            // `prefix_digit_led_tool_names_for_moonshot`) record the REGISTRY
+            // spelling, because the minted wire name stays advertised by the
+            // surviving underscore tool. Refuse either form: a forced call
+            // naming a dropped tool — directly or through its digit-led
+            // spelling — would otherwise ask the model for a tool this
+            // request never offered.
+            if omitted_tool_names.iter().any(|omitted| {
+                omitted == &wire_name || omitted == &forced
+            }) {
                 bail!(
                     "Moonshot cannot force tool '{wire_name}' because its input schema is incompatible with this route"
                 );
@@ -6722,6 +6778,110 @@ mod alias_thinking_detection_tests {
             body.body["tools"][0]["function"]["name"],
             json!("3d_render"),
             "other providers are not touched"
+        );
+    }
+
+    #[test]
+    fn moonshot_wire_drops_the_digit_led_tool_when_its_wire_name_collides() {
+        // Registry keys `3d_render` and `_3d_render` are distinct and can
+        // coexist; minting both onto `_3d_render` would advertise two
+        // schemas under one wire name, and dispatch's exact-match precedence
+        // would then route every `_3d_render` call onto the underscore
+        // sibling regardless of which description the model read (review
+        // 5886233560). The digit-led tool is dropped from THIS request
+        // instead: the array carries only the genuine underscore tool, the
+        // drop is reported like the schema drops, and forcing either
+        // spelling bails instead of dispatching ambiguously.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut underscore_probe = digit_led_name_probe_tool("_3d_render");
+        underscore_probe.description = "underscore probe".to_string();
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            underscore_probe,
+        ]);
+
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+
+        let tools = body.body["tools"].as_array().expect("tools on the wire");
+        assert_eq!(
+            tools.len(),
+            1,
+            "the colliding digit-led tool must be dropped: {tools:?}"
+        );
+        assert_eq!(tools[0]["function"]["name"], json!("_3d_render"));
+        assert_eq!(
+            tools[0]["function"]["description"],
+            json!("underscore probe"),
+            "the surviving entry must be the genuine underscore tool: {tools:?}"
+        );
+        assert_eq!(
+            body.omitted_tool_names,
+            vec!["3d_render".to_string()],
+            "the drop must be reported under its registry spelling so forced \
+             choice can refuse the shadowed name"
+        );
+    }
+
+    #[test]
+    fn moonshot_wire_refuses_forcing_the_shadowed_name_but_allows_the_survivor() {
+        // With the digit-led twin dropped for the collision, the wire name
+        // `_3d_render` stays advertised by the surviving underscore tool, so
+        // forcing THAT spelling proceeds unambiguously. Forcing the dropped
+        // digit-led registry name bails: it would map onto a wire name this
+        // request's drop shadows (review 5886233560).
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut underscore_probe = digit_led_name_probe_tool("_3d_render");
+        underscore_probe.description = "underscore probe".to_string();
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            underscore_probe,
+        ]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "3d_render"}));
+
+        let error = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .err()
+        .expect("forcing the shadowed registry spelling must bail");
+        let message = error.to_string();
+        assert!(
+            message.contains("_3d_render"),
+            "the bail must name the shadowed wire spelling: {message}"
+        );
+
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut underscore_probe = digit_led_name_probe_tool("_3d_render");
+        underscore_probe.description = "underscore probe".to_string();
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            underscore_probe,
+        ]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "_3d_render"}));
+
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("forcing the surviving underscore tool must proceed");
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!("_3d_render"),
+            "the surviving tool stays forceable under its own spelling"
+        );
+        assert!(
+            body.body["tools"].as_array().expect("tools on the wire").len() == 1,
+            "only the underscore tool is advertised"
         );
     }
 

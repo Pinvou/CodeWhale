@@ -8755,6 +8755,52 @@ mod tests {
         assert_eq!(name, "_3d_render");
     }
 
+    #[test]
+    fn moonshot_collided_projection_resolves_exact_and_never_misdispatches() {
+        // End-to-end round trip over the PROJECTED catalog (review
+        // 5886233560): when both registry spellings exist, the Moonshot wire
+        // drops the digit-led twin, so dispatch only ever sees the
+        // underscore tool. A response call spelling `_3d_render` then
+        // resolves by exact match to that tool — the fallback never fires —
+        // and a hallucinated call for the dropped digit-led name fails
+        // dispatch instead of reaching either handler.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        let mut registry = crate::tools::ToolRegistry::new(context);
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "3d_render" }));
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "_3d_render" }));
+        let full_catalog = registry.to_api_tools();
+
+        // Project the full catalog the way the Moonshot wire does: the
+        // digit-led tool's minted name collides, so it is dropped and only
+        // the underscore tool is advertised.
+        let projected: Vec<crate::models::Tool> = full_catalog
+            .iter()
+            .filter(|tool| tool.name != "3d_render")
+            .cloned()
+            .collect();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].name, "_3d_render");
+
+        let mut name = "_3d_render".to_string();
+        let tool_def = resolve_tool_definition(&mut name, &projected, Some(&registry), true);
+        assert!(tool_def.is_some(), "the surviving wire name must dispatch");
+        assert_eq!(
+            name, "_3d_render",
+            "exact match wins; the digit-led fallback must not fire"
+        );
+        assert_eq!(
+            tool_def.expect("resolved").name, "_3d_render",
+            "the call must reach the underscore tool, never the digit-led twin"
+        );
+
+        let mut name = "3d_render".to_string();
+        assert!(
+            resolve_tool_definition(&mut name, &projected, Some(&registry), true).is_none(),
+            "a hallucinated call for the dropped tool must fail dispatch"
+        );
+    }
+
     #[tokio::test]
     async fn saved_legacy_file_and_bash_calls_keep_their_handlers_and_inputs() {
         let tmp = tempfile::tempdir().expect("tempdir");
