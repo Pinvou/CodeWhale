@@ -103,6 +103,7 @@ ACCOUNT_REQUIRED = {
     "TestTokenAuthorizationWriterToBillingNonTargetPostgres",
     "TestOwnerCombinedActualHTTPPostgres",
     "TestApprovalRecoveryQueryAllRegisteredCommandsPostgres",
+    "TestUnstartedApprovalGrantInventoryPostgres",
     "TestApprovalRecoveryQueryForwardMigrationPostgres",
     "TestApprovalAuthorizationWallClockPostgres",
     "TestApprovalMutationWallClockPostgres",
@@ -121,6 +122,7 @@ ACCOUNT_REQUIRED = {
 # These Account roots are real named leaf tests; all other required roots
 # still need completed child-case evidence. Root run/pass and no-skip stay mandatory.
 ACCOUNT_LEAF_REQUIRED = {
+    "TestUnstartedApprovalGrantInventoryPostgres",
     "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
     "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
     "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
@@ -156,7 +158,7 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres"}
+SCHEMA_REQUIRED = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres"}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -195,6 +197,7 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestRetainedOrganizationOrderHistoryPagination",
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
     "TestExpiredHoldProofRetryDiagnosticsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
@@ -207,6 +210,7 @@ RETAINED_REQUIRED = {
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestReceivableSettlementGuardedWritesPostgres",
     "TestPostgresManagedPricePagination",
+    "TestPriceFallbackMissingBindingPostgres",
     "TestLedgerRepairProofHistoricalUpgradePostgres",
     "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres",
     "TestLedgerRepairAuthorityCrossDatePostgres",
@@ -285,6 +289,10 @@ EXACT_REQUIRED_CHILDREN = {
     "TestBillingManualAdjustmentProofRollbackPostgres": {
         f"{state}/{entry}" for state in ("empty", "retained-proof") for entry in ("public-api", "actual-cli", "renamed-history-cli")
     },
+    "TestOrphanPaidOrderIndexPublicMigration": {
+        "fresh-failure-atomicity-and-retry",
+        "populated-upgrade-replay-and-own-ddl-rollback",
+    },
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)
@@ -299,6 +307,12 @@ EXACT_REQUIRED_CHILDREN = {
         "valid-proof", "persistence-failure", "operator",
     },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
+    "TestPriceFallbackMissingBindingPostgres": {
+        "missing-binding-and-rollback",
+        "permission-denied-before-mutation",
+        "binding-read-fault-and-later-retry",
+        "valid-binding-fallback-and-receipt-replay",
+    },
     "TestPostgresManagedPricePagination": {
         "bounded-batch-queries",
         *{f"bounded-batch-queries/{kind}-{size}" for kind in ("list", "namespace") for size in (1, 100, 200)},
@@ -340,6 +354,10 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres": {
         "account_closure_grant_isolations", "account_closed_grant_reclaim_commands",
+    },
+    "TestRetainedOrganizationOrderHistoryPagination": {
+        "same-timestamp-cursor-and-owner-isolation",
+        "concurrent-new-order-does-not-shift-older-pages",
     },
     "TestManagementPublicMigrationInstallation": {
         "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",

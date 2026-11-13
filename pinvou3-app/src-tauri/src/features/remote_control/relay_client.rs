@@ -247,19 +247,35 @@ impl RelaySender {
     }
 
     fn serialize_message(&self, value: Value) -> Result<SerializedFrame, RelayTrySendError> {
-        self.serialize_message_owned(value, None)
+        self.serialize_message_owned(value, None, None)
     }
 
     fn serialize_message_owned(
         &self,
         value: Value,
         owner: Option<(&str, u64)>,
+        resume_prepare: Option<(u64, u64)>,
     ) -> Result<SerializedFrame, RelayTrySendError> {
         let controller_v1 = value.get("v").and_then(Value::as_u64) == Some(1);
         if controller_v1 && self.socket_mode.load(Ordering::Acquire) == SOCKET_MODE_LEGACY_V2 {
             return Err(RelayTrySendError::ControllerProtocolUnavailable);
         }
-        let controller_scope = if controller_v1 {
+        let controller_scope = if let Some((epoch, deadline_b)) = resume_prepare {
+            let (generation, binding) =
+                owner.ok_or(RelayTrySendError::ControllerAuthorityUnavailable)?;
+            Some(
+                self.controller_authority
+                    .resume_prepare_scope(
+                        &value,
+                        generation,
+                        binding,
+                        epoch,
+                        deadline_b,
+                        super::controller::relay_runtime::controlled_monotonic_millis(),
+                    )
+                    .map_err(|_| RelayTrySendError::ControllerAuthorityUnavailable)?,
+            )
+        } else if controller_v1 {
             self.controller_authority
                 .outbound_scope_owned(&value, owner)
                 .map_err(|_| RelayTrySendError::ControllerAuthorityUnavailable)?
@@ -359,8 +375,33 @@ impl RelaySender {
         if value["v"].as_u64() != Some(1) {
             return Err(RelayTrySendError::ControllerAuthorityUnavailable);
         }
-        let frame = self.serialize_message_owned(value, Some((generation, binding)))?;
+        let frame = self.serialize_message_owned(value, Some((generation, binding)), None)?;
         self.try_send_serialized(frame)
+    }
+
+    pub(crate) fn try_send_resume_prepare_owned(
+        &self,
+        generation: &str,
+        binding: u64,
+        value: Value,
+        epoch: u64,
+        deadline_b: u64,
+    ) -> Result<bool, RelayTrySendError> {
+        let frame = match self.serialize_message_owned(
+            value,
+            Some((generation, binding)),
+            Some((epoch, deadline_b)),
+        ) {
+            Ok(frame) => frame,
+            // A socket can change between readiness and enqueue. Its next
+            // connection event retries the same candidate, never a new budget.
+            Err(
+                RelayTrySendError::ControllerAuthorityUnavailable
+                | RelayTrySendError::ControllerProtocolUnavailable,
+            ) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        self.try_send_serialized(frame).map(|()| true)
     }
 
     /// Queue a stream-reset barrier without spawning one waiter per failure.
@@ -737,6 +778,26 @@ async fn wait_reconnect_delay(
     }
 }
 
+#[cfg(test)]
+fn injected_prepare_write_failure(
+    authority: &SharedControllerAuthority,
+    frame: &OutboundFrame,
+) -> Option<WebSocketError> {
+    use sha2::Digest as _;
+    let scope = frame.controller_scope.as_ref()?;
+    if !authority
+        .take_prepare_write_failure(scope, sha2::Sha256::digest(frame.text.as_bytes()).into())
+    {
+        return None;
+    }
+    // One exact instance, before bytes reach the socket: exercise the actual
+    // retained-frame/reconnect branch without a timing-dependent TCP reset.
+    Some(WebSocketError::Io(std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "isolated prepare write fault",
+    )))
+}
+
 async fn run_loop(
     config: WebAccessConfig,
     tx_in: mpsc::Sender<RelayInbound>,
@@ -888,17 +949,24 @@ async fn run_loop(
                 }
                 continue;
             }
-            if frame
-                .controller_scope
-                .as_ref()
-                .is_some_and(|scope| !controller_authority.frame_is_current(scope))
-            {
+            if frame.controller_scope.as_ref().is_some_and(|scope| {
+                !controller_authority.frame_is_current(
+                    scope,
+                    super::controller::relay_runtime::controlled_monotonic_millis(),
+                )
+            }) {
                 continue;
             }
             let send_result = tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => return,
-                result = write.send(Message::Text(frame.text.clone().into())) => result,
+                result = async {
+                    #[cfg(test)]
+                    if let Some(error) = injected_prepare_write_failure(&controller_authority, &frame) {
+                        return Err(error);
+                    }
+                    write.send(Message::Text(frame.text.clone().into())).await
+                } => result,
             };
             if let Err(error) = send_result {
                 push_pending_front(&mut pending, frame);
@@ -961,11 +1029,17 @@ async fn run_loop(
                                 continue;
                             }
                             if frame.controller_scope.as_ref().is_some_and(|scope|
-                                !controller_authority.frame_is_current(scope)) { continue; }
+                                !controller_authority.frame_is_current(scope, super::controller::relay_runtime::controlled_monotonic_millis())) { continue; }
                             let send_result = tokio::select! {
                                 biased;
                                 _ = shutdown.cancelled() => return,
-                                result = write.send(Message::Text(frame.text.clone().into())) => result,
+                                result = async {
+                                    #[cfg(test)]
+                                    if let Some(error) = injected_prepare_write_failure(&controller_authority, &frame) {
+                                        return Err(error);
+                                    }
+                                    write.send(Message::Text(frame.text.clone().into())).await
+                                } => result,
                             };
                             if send_result.is_err() {
                                 push_pending_front(&mut pending, frame);
