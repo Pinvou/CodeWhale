@@ -388,11 +388,12 @@ test('a download whose chunks exceed the declared total stops before unbounded g
   let aborts = 0;
   const api = {
     artifactDownloadBegin: async () => ({
-      transferId: 'download-lying-stream', chunkBytes: 3, totalBytes: 3,
+      transferId: 'download-lying-stream', chunkBytes: 3, totalBytes: 4,
     }),
     artifactDownloadChunk: async () => {
       calls += 1;
-      return { chunkB64: chunk, chunkBytes: 3, completed: false, nextChunk: calls };
+      return { chunkIndex: calls - 1, chunkB64: chunk, chunkBytes: 3,
+        receivedBytes: calls * 3, completed: false, nextChunk: calls };
     },
     artifactDownloadAbort: async () => { aborts += 1; },
   };
