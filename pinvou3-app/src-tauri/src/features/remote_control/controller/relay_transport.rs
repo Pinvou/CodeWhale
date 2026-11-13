@@ -6,7 +6,7 @@
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
@@ -19,9 +19,8 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use super::protocol::{
-    LeaseContext, MAX_CONTROL_MESSAGE_BYTES, MAX_ENCRYPTED_WIRE_BYTES, RuntimeValidationContext,
+    LeaseContext, MAX_CONTROL_MESSAGE_BYTES, MAX_ENCRYPTED_WIRE_BYTES, ParsedControllerMessage,
     SenderRole, is_valid_identifier, validate_controller_message_json,
-    validate_controller_runtime_message_json,
 };
 use crate::features::remote_control::relay_client::{
     MAX_RELAY_FRAME_BYTES, ReconnectBackoff, controller_websocket_request, relay_websocket_config,
@@ -37,6 +36,12 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(250);
+const MAX_OUTBOUND_BATCH: usize = 8;
+mod connected_poll;
+mod task_lifecycle;
+use connected_poll::ConnectedEvent;
+#[cfg(test)]
+mod availability_tests;
 const MAX_CONTROLLER_INBOUND_TEXT_BYTES: usize = if MAX_ENCRYPTED_WIRE_BYTES < MAX_RELAY_FRAME_BYTES
 {
     MAX_ENCRYPTED_WIRE_BYTES
@@ -377,12 +382,16 @@ pub(crate) struct ControllerTransportSender {
     business_tx: mpsc::Sender<QueuedFrame>,
     total_budget: Arc<Semaphore>,
     business_budget: Arc<Semaphore>,
-    lease: Arc<RwLock<Option<AuthenticatedLease>>>,
+    lease: Arc<RwLock<Option<Arc<AuthenticatedLease>>>>,
     // A disconnected lease is a resume-frame binding only, never business or TX authority.
-    resume_lease: Arc<RwLock<Option<AuthenticatedLease>>>,
+    resume_lease: Arc<RwLock<Option<Arc<AuthenticatedLease>>>>,
     resume_install: Arc<RwLock<Option<ResumeInstallAuthority>>>,
     transport_epoch: Arc<AtomicU64>,
     shutdown: CancellationToken,
+    stopping: Arc<AtomicBool>,
+    // Provenance for a keeper that has not started polling when this task
+    // retires. This contains public identity only, never runtime authority.
+    retired_task_registration: Arc<RwLock<Option<ControllerDisconnectContext>>>,
     #[cfg(test)]
     before_initial_install: Arc<parking_lot::Mutex<Option<InitialLeaseInstallHook>>>,
 }
@@ -407,6 +416,34 @@ impl ControllerTransportSender {
                 .or(saved.as_ref())
                 .map(|lease| lease.context.clone()),
         }
+    }
+
+    pub(crate) fn keeper_registration(&self) -> ControllerDisconnectContext {
+        let current = self.disconnect_context();
+        if current.lease.is_none() && self.is_stopped() {
+            self.retired_task_registration
+                .read()
+                .clone()
+                .unwrap_or(current)
+        } else {
+            current
+        }
+    }
+
+    pub(super) fn retire_task(&self) -> Option<ControllerDisconnectContext> {
+        let notify = !self.stopping.swap(true, Ordering::AcqRel);
+        let registration = self.disconnect_context();
+        if registration.lease.is_some() {
+            // Publish before clearing active/saved. Also preserve provenance
+            // when an ingress failure already requested Stop before the keeper
+            // started: its queued failure still needs the original registration.
+            let mut retired = self.retired_task_registration.write();
+            if retired.is_none() {
+                *retired = Some(registration.clone());
+            }
+        }
+        self.stop();
+        notify.then_some(registration)
     }
 
     /// E2E-02 受控绑定：A 端在验签 transcript 之后才有权把 transport 的
@@ -457,7 +494,7 @@ impl ControllerTransportSender {
         if self.is_stopped() {
             return Err(ControllerSendError::Closed);
         }
-        *current = Some(lease);
+        *current = Some(Arc::new(lease));
         *self.resume_lease.write() = None;
         *self.resume_install.write() = None;
         Ok(())
@@ -508,7 +545,7 @@ impl ControllerTransportSender {
         {
             return Err(ControllerSendError::Unauthenticated);
         }
-        *current = Some(lease);
+        *current = Some(Arc::new(lease));
         *saved = None;
         *authority = None;
         Ok(())
@@ -559,7 +596,7 @@ impl ControllerTransportSender {
             .clone()
             .filter(|saved| &saved.context == context)
             .ok_or(ControllerSendError::Unauthenticated)?;
-        self.install_authenticated_lease_after_resume(saved, activation_id, request_id)
+        self.install_authenticated_lease_after_resume((*saved).clone(), activation_id, request_id)
     }
 
     pub(crate) fn clear_authenticated_lease(&self) {
@@ -590,7 +627,7 @@ impl ControllerTransportSender {
         if self.is_stopped() {
             None
         } else {
-            lease.clone()
+            lease.as_deref().cloned()
         }
     }
 
@@ -636,17 +673,16 @@ impl ControllerTransportSender {
             .clone()
             .ok_or(ControllerSendError::Unauthenticated)?;
         let lease_context = lease.context.clone();
-        let context = RuntimeValidationContext {
-            lease: Some(lease.context),
-            negotiated_capabilities: lease.negotiated_capabilities,
-        };
-        let validated = validate_controller_runtime_message_json(
-            &text,
-            self.role.sender_role(),
-            Some(&context),
-        )
-        .map_err(|error| ControllerSendError::InvalidFrame(error.field))?;
-        if validated.get("type").and_then(Value::as_str) == Some("encrypted_frame") {
+        let parsed = ParsedControllerMessage::parse(&text)
+            .map_err(|error| ControllerSendError::InvalidFrame(error.field))?;
+        let validated = parsed
+            .validate_runtime(
+                self.role.sender_role(),
+                Some(&lease.context),
+                &lease.negotiated_capabilities,
+            )
+            .map_err(|error| ControllerSendError::InvalidFrame(error.field))?;
+        if validated.value().get("type").and_then(Value::as_str) == Some("encrypted_frame") {
             return Err(ControllerSendError::InvalidFrame("message.type".into()));
         }
         self.try_enqueue_with_receipt(
@@ -729,17 +765,16 @@ impl ControllerTransportSender {
             .clone()
             .ok_or(ControllerSendError::Unauthenticated)?;
         let lease_context = lease.context.clone();
-        let context = RuntimeValidationContext {
-            lease: Some(lease.context),
-            negotiated_capabilities: lease.negotiated_capabilities,
-        };
-        let validated = validate_controller_runtime_message_json(
-            &text,
-            self.role.sender_role(),
-            Some(&context),
-        )
-        .map_err(|error| ControllerSendError::InvalidFrame(error.field))?;
-        if validated.get("type").and_then(Value::as_str) != Some("encrypted_frame") {
+        let parsed = ParsedControllerMessage::parse(&text)
+            .map_err(|error| ControllerSendError::InvalidFrame(error.field))?;
+        let validated = parsed
+            .validate_runtime(
+                self.role.sender_role(),
+                Some(&lease.context),
+                &lease.negotiated_capabilities,
+            )
+            .map_err(|error| ControllerSendError::InvalidFrame(error.field))?;
+        if validated.value().get("type").and_then(Value::as_str) != Some("encrypted_frame") {
             return Err(ControllerSendError::InvalidFrame("message.type".into()));
         }
         self.try_enqueue(
@@ -758,6 +793,7 @@ impl ControllerTransportSender {
     /// synchronous mutation's lease guard. The owner later retires its keys via
     /// `stop`; the socket worker also observes this cancellation token.
     pub(super) fn request_stop(&self) {
+        self.stopping.store(true, Ordering::Release);
         self.shutdown.cancel();
     }
 
@@ -781,7 +817,7 @@ impl ControllerTransportSender {
     }
 
     pub(crate) fn is_stopped(&self) -> bool {
-        self.shutdown.is_cancelled()
+        self.stopping.load(Ordering::Acquire) || self.shutdown.is_cancelled()
     }
 
     fn validate_control(&self, text: &str) -> Result<Value, ControllerSendError> {
@@ -806,7 +842,7 @@ impl ControllerTransportSender {
         flushed: Option<tokio::sync::oneshot::Sender<()>>,
         resume_only: bool,
     ) -> Result<(), ControllerSendError> {
-        if self.shutdown.is_cancelled() {
+        if self.is_stopped() {
             return Err(ControllerSendError::Closed);
         }
         let bytes = payload.as_str().len();
@@ -937,6 +973,8 @@ fn transport_channels_shared(
             resume_install: Arc::new(RwLock::new(None)),
             transport_epoch: Arc::new(AtomicU64::new(0)),
             shutdown,
+            stopping: Arc::new(AtomicBool::new(false)),
+            retired_task_registration: Arc::new(RwLock::new(None)),
             #[cfg(test)]
             before_initial_install: Arc::new(parking_lot::Mutex::new(None)),
         },
@@ -960,7 +998,10 @@ pub(crate) fn spawn_controller_transport(
         CONTROL_RESERVED_BYTES,
     );
     let task_sender = sender.clone();
+    // Construct before spawn: an unpolled/aborted task also owns retirement.
+    let lifetime = task_lifecycle::TaskLifetimeGuard::new(sender.clone(), sink.clone());
     tauri::async_runtime::spawn(async move {
+        let _lifetime = lifetime;
         run_transport(config, sink, task_sender, receiver).await;
     });
     sender
@@ -1142,6 +1183,30 @@ impl ConnectedTransportLiveness {
     }
 }
 
+#[derive(Default)]
+struct StableAdmission {
+    first: Option<(Arc<AuthenticatedLease>, tokio::time::Instant)>,
+}
+
+impl StableAdmission {
+    fn observe(
+        &mut self,
+        lease: Arc<AuthenticatedLease>,
+        now: tokio::time::Instant,
+        window: Duration,
+    ) -> bool {
+        match self.first.as_ref() {
+            Some((previous, first)) if Arc::ptr_eq(previous, &lease) => {
+                now.duration_since(*first) >= window
+            }
+            _ => {
+                self.first = Some((lease, now));
+                false
+            }
+        }
+    }
+}
+
 /// Neither an in-flight write nor its progress may postpone inbound silence.
 async fn bounded_connected_write<S>(
     write: &mut S,
@@ -1186,28 +1251,57 @@ where
 {
     let heartbeat_period = liveness.heartbeat_period;
     let mut last_inbound = tokio::time::Instant::now();
+    let mut stable = StableAdmission::default();
+    let mut outbound_batch = 0_usize;
+    let mut ping_sequence = 0_u64;
+    let mut pending_ping: Option<[u8; 16]> = None;
     let mut heartbeat = tokio::time::interval(heartbeat_period);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat.tick().await;
     let disconnected = loop {
-        tokio::select! {
-            biased;
-            _ = sender.shutdown.cancelled() => {
+        match connected_poll::next_event(
+            &sender.shutdown,
+            receiver,
+            read,
+            &mut heartbeat,
+            last_inbound + heartbeat_period * 2,
+            outbound_batch >= MAX_OUTBOUND_BATCH,
+        )
+        .await
+        {
+            ConnectedEvent::Shutdown => {
                 // Stop is authoritative. Close gets its own short budget,
                 // never the already-cancelled token or an unbounded flush.
-                let _ = bounded_write(write, Message::Close(None), &CancellationToken::new(), CLOSE_TIMEOUT).await;
+                let _ = bounded_write(
+                    write,
+                    Message::Close(None),
+                    &CancellationToken::new(),
+                    CLOSE_TIMEOUT,
+                )
+                .await;
                 return None;
             }
-            _ = tokio::time::sleep_until(last_inbound + heartbeat_period * 2) => {
+            ConnectedEvent::Silence => {
                 break "Relay inbound silence deadline expired".to_owned();
             }
-            frame = receiver.recv_prioritized() => {
-                let Some(frame) = frame else { return None; };
+            ConnectedEvent::Outgoing(frame) => {
+                outbound_batch = outbound_batch.saturating_add(1).min(MAX_OUTBOUND_BATCH);
+                let Some(frame) = frame else {
+                    return None;
+                };
                 if !frame_is_current(&sender, &frame) {
                     continue;
                 }
-                let result = bounded_connected_write(write, Message::Text(frame.text().to_owned().into()), &sender.shutdown, last_inbound + heartbeat_period * 2).await;
-                if sender.is_stopped() { return None; }
+                let result = bounded_connected_write(
+                    write,
+                    Message::Text(frame.text().to_owned().into()),
+                    &sender.shutdown,
+                    last_inbound + heartbeat_period * 2,
+                )
+                .await;
+                if sender.is_stopped() {
+                    return None;
+                }
                 match result {
                     Ok(()) => {
                         if frame_is_task_submit(frame.text()) {
@@ -1231,11 +1325,11 @@ where
                     }
                 }
             }
-            message = read.next() => {
+            ConnectedEvent::Incoming(message) => {
+                outbound_batch = 0;
                 let Some(message) = message else {
                     break "Relay connection closed".to_string();
                 };
-                last_inbound = tokio::time::Instant::now();
                 match message {
                     Ok(Message::Text(text)) => {
                         if text.len() > MAX_CONTROLLER_INBOUND_TEXT_BYTES {
@@ -1243,20 +1337,44 @@ where
                                 "Relay frame exceeds {MAX_CONTROLLER_INBOUND_TEXT_BYTES} bytes"
                             );
                         }
-                        // Only current positive controller admission resets backoff;
-                        // transport pongs and bare handshakes are not admission.
-                        if dispatch_inbound(config, sender, sink, text.as_str()) {
-                            liveness.reconnect.reset();
+                        let evidence =
+                            dispatch_inbound_evidence(config, sender, sink, text.as_str());
+                        if evidence.accepted {
+                            last_inbound = tokio::time::Instant::now();
+                        }
+                        if let Some(lease) = evidence.positive_lease {
+                            // Two current admissions must span an existing heartbeat
+                            // window on this socket and the same installed lease.
+                            if stable.observe(lease, tokio::time::Instant::now(), heartbeat_period)
+                            {
+                                liveness.reconnect.reset();
+                            }
                         }
                     }
                     Ok(Message::Ping(payload)) => {
-                        if let Err(error) = bounded_connected_write(write, Message::Pong(payload), &sender.shutdown, last_inbound + heartbeat_period * 2).await {
-                            if sender.is_stopped() { return None; }
+                        last_inbound = tokio::time::Instant::now();
+                        if let Err(error) = bounded_connected_write(
+                            write,
+                            Message::Pong(payload),
+                            &sender.shutdown,
+                            last_inbound + heartbeat_period * 2,
+                        )
+                        .await
+                        {
+                            if sender.is_stopped() {
+                                return None;
+                            }
                             break format!("send Relay pong: {error}");
                         }
                     }
                     Ok(Message::Pong(payload)) => {
-                        if let Some(millis) = rtt_sample(config.clock.as_ref(), payload.as_ref()) {
+                        if pending_ping
+                            .as_ref()
+                            .is_some_and(|probe| payload.as_ref() == probe)
+                        {
+                            let probe = pending_ping.take().unwrap();
+                            last_inbound = tokio::time::Instant::now();
+                            let millis = rtt_sample(config.clock.as_ref(), &probe[..8]).unwrap();
                             sink.emit(ControllerTransportEvent::RttSample {
                                 remote_control_generation: config.generation(),
                                 millis,
@@ -1268,12 +1386,28 @@ where
                     Err(error) => break format!("read Relay frame: {error}"),
                 }
             }
-            _ = heartbeat.tick() => {
-                let payload = config.clock.now_millis().to_be_bytes().to_vec();
-                if let Err(error) = bounded_connected_write(write, Message::Ping(payload.into()), &sender.shutdown, last_inbound + heartbeat_period * 2).await {
-                    if sender.is_stopped() { return None; }
+            ConnectedEvent::Heartbeat => {
+                let Some(sequence) = ping_sequence.checked_add(1) else {
+                    break "Relay heartbeat sequence exhausted".to_owned();
+                };
+                ping_sequence = sequence;
+                let mut probe = [0_u8; 16];
+                probe[..8].copy_from_slice(&config.clock.now_millis().to_be_bytes());
+                probe[8..].copy_from_slice(&sequence.to_be_bytes());
+                if let Err(error) = bounded_connected_write(
+                    write,
+                    Message::Ping(probe.to_vec().into()),
+                    &sender.shutdown,
+                    last_inbound + heartbeat_period * 2,
+                )
+                .await
+                {
+                    if sender.is_stopped() {
+                        return None;
+                    }
                     break format!("send Relay heartbeat: {error}");
                 }
+                pending_ping = Some(probe);
             }
         }
     };
@@ -1335,21 +1469,48 @@ async fn wait_reconnect(shutdown: &CancellationToken, backoff: &mut ReconnectBac
     }
 }
 
+struct InboundEvidence {
+    accepted: bool,
+    positive_lease: Option<Arc<AuthenticatedLease>>,
+}
+
+impl InboundEvidence {
+    fn rejected() -> Self {
+        Self {
+            accepted: false,
+            positive_lease: None,
+        }
+    }
+}
+
+#[cfg(test)]
 fn dispatch_inbound(
     config: &ControllerTransportConfig,
     sender: &ControllerTransportSender,
     sink: &dyn ControllerEventSink,
     text: &str,
 ) -> bool {
+    dispatch_inbound_evidence(config, sender, sink, text)
+        .positive_lease
+        .is_some()
+}
+
+fn dispatch_inbound_evidence(
+    config: &ControllerTransportConfig,
+    sender: &ControllerTransportSender,
+    sink: &dyn ControllerEventSink,
+    text: &str,
+) -> InboundEvidence {
     if sender.is_stopped() {
-        return false;
+        return InboundEvidence::rejected();
     }
     let inbound_epoch = sender.transport_epoch.load(Ordering::Acquire);
-    let Ok(shape) = serde_json::from_str::<Value>(text) else {
-        return false;
+    let Ok(parsed) = ParsedControllerMessage::parse(text) else {
+        return InboundEvidence::rejected();
     };
-    if !generation_admits(&config.generation(), &shape) {
-        return false;
+    let shape = parsed.value();
+    if !generation_admits(&config.generation(), shape) {
+        return InboundEvidence::rejected();
     }
     let kind = shape.get("type").and_then(Value::as_str);
     let priority = if kind == Some("encrypted_frame") {
@@ -1365,29 +1526,33 @@ fn dispatch_inbound(
     };
     let validated = if priority == FramePriority::Business {
         let Some(lease) = lease.as_ref() else {
-            return false;
+            return InboundEvidence::rejected();
         };
-        let context = RuntimeValidationContext {
-            lease: Some(lease.context.clone()),
-            negotiated_capabilities: lease.negotiated_capabilities.clone(),
-        };
-        validate_controller_runtime_message_json(text, config.role.peer_role(), Some(&context))
-            .is_ok()
+        parsed.validate_runtime(
+            config.role.peer_role(),
+            Some(&lease.context),
+            &lease.negotiated_capabilities,
+        )
     } else {
-        validate_controller_message_json(text, SenderRole::Relay).is_ok()
-            || validate_controller_message_json(text, config.role.peer_role()).is_ok()
+        parsed
+            .validate(SenderRole::Relay, None)
+            .or_else(|_| parsed.validate(config.role.peer_role(), None))
     };
-    let context_matches = inbound_context_matches(&shape, lease.as_ref())
+    let Ok(validated) = validated else {
+        return InboundEvidence::rejected();
+    };
+    let frame = validated.value();
+    let context_matches = inbound_context_matches(frame, lease.as_deref())
         || (lease.is_none()
             && is_inbound_resume_frame(kind, config.role)
-            && sender.resume_lease.read().as_ref().is_some_and(|saved| {
-                super::resume::resume_frame_matches_lease(&saved.context, &shape)
+            && resume_lease.as_ref().is_some_and(|saved| {
+                super::resume::resume_frame_matches_lease(&saved.context, frame)
             }));
-    if !validated || !context_matches {
-        return false;
+    if !context_matches {
+        return InboundEvidence::rejected();
     }
-    if kind == Some("controller_resumed") && !sender.record_resume_install(&shape, inbound_epoch) {
-        return false;
+    if kind == Some("controller_resumed") && !sender.record_resume_install(frame, inbound_epoch) {
+        return InboundEvidence::rejected();
     }
     sink.emit(ControllerTransportEvent::Frame {
         priority,
@@ -1398,7 +1563,23 @@ fn dispatch_inbound(
             .map(|value| value.context.lease_epoch.clone()),
         json: text.to_owned(),
     });
-    kind != Some("error")
+    // A legal pre-authentication/bare frame is delivered, but cannot establish
+    // stable admitted runtime traffic or reset reconnection backoff.
+    let positive_lease = lease.filter(|snapshot| {
+        !matches!(kind, Some("error" | "controller_joined"))
+            && frame.get("controller_lease_id").is_some()
+            && !sender.is_stopped()
+            && inbound_epoch == sender.transport_epoch.load(Ordering::Acquire)
+            && sender
+                .lease
+                .read()
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, snapshot))
+    });
+    InboundEvidence {
+        accepted: true,
+        positive_lease,
+    }
 }
 
 /// Test adapters exercise the real suspension and reader validation paths;
@@ -1416,6 +1597,14 @@ pub(super) fn disconnect_test_transport_to_sink(
     let config =
         ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
     emit_disconnected(&config, sender, sink, "test socket closed".into());
+}
+
+#[cfg(test)]
+pub(super) fn retire_test_transport_to_sink(
+    sender: &ControllerTransportSender,
+    sink: Arc<dyn ControllerEventSink>,
+) {
+    drop(task_lifecycle::TaskLifetimeGuard::new(sender.clone(), sink));
 }
 
 #[cfg(test)]
@@ -2602,7 +2791,7 @@ mod tests {
         }
     }
 
-    fn lease(epoch: &str, generation: &str) -> AuthenticatedLease {
+    pub(super) fn lease(epoch: &str, generation: &str) -> AuthenticatedLease {
         AuthenticatedLease {
             context: LeaseContext {
                 connection_id: "connection-0001".into(),
@@ -2619,7 +2808,7 @@ mod tests {
         }
     }
 
-    fn control(marker: &str) -> Value {
+    pub(super) fn control(marker: &str) -> Value {
         json!({
             "v": 1,
             "type": "controller_capabilities",
@@ -3631,7 +3820,7 @@ mod tests {
             &sink,
             &invalid.to_string()
         ));
-        assert!(dispatch_inbound(
+        assert!(!dispatch_inbound(
             &config,
             &sender,
             &sink,
@@ -3658,20 +3847,52 @@ mod tests {
                     .await
                     .unwrap();
                 accepted.push(Instant::now());
-                // A transport pong is life, but never controller admission.
+                let bare = control("request-preauth-bare");
+                validate_controller_message_json(&bare.to_string(), SenderRole::ControllerA)
+                    .unwrap();
+                socket
+                    .send(Message::Text(bare.to_string().into()))
+                    .await
+                    .unwrap();
+                // An unsolicited pong is neither a current probe response nor
+                // positive controller admission.
                 socket.send(Message::Pong(Vec::new().into())).await.unwrap();
                 socket.send(Message::Close(None)).await.unwrap();
             }
             accepted
         });
+        let admitted = Arc::new(AtomicU64::new(0));
+        let observed = admitted.clone();
+        let delivered = Arc::new(tokio::sync::Notify::new());
+        let signal = delivered.clone();
         let sender = spawn_controller_transport(
-            ControllerTransportConfig::new(url, ControllerRole::ControllerA, "generation-0001"),
-            Arc::new(|_| {}),
+            ControllerTransportConfig::new(url, ControllerRole::ControlledB, "generation-0001"),
+            Arc::new(move |event| {
+                if matches!(event, ControllerTransportEvent::Frame { .. }) {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    signal.notify_one();
+                }
+            }),
         );
         let result = tokio::time::timeout(Duration::from_secs(8), &mut server).await;
+        let observed = tokio::time::timeout(Duration::from_secs(3), async {
+            while admitted.load(Ordering::SeqCst) < 3 {
+                delivered.notified().await;
+            }
+        })
+        .await;
         sender.stop();
-        server.abort();
+        if result.is_err() {
+            server.abort();
+            let _ = server.await;
+        }
         let accepted = result.expect("three bounded attempts").unwrap();
+        observed.expect("all three bare controls reached the production reader before Stop");
+        assert_eq!(
+            admitted.load(Ordering::SeqCst),
+            3,
+            "bare controls must actually be admitted, without resetting backoff"
+        );
         // Second failure is attempt 2: base500 *2 *jitter[.8,1.2].
         assert!(
             accepted[2].duration_since(accepted[1]) >= Duration::from_millis(790),
