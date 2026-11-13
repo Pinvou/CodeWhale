@@ -45,6 +45,16 @@ pub fn sanitize(schema: &mut Value) {
 /// different instance, so the context resets there and only genuinely
 /// dangling names are pruned.
 fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
+    // Whether THIS schema declared a properties map before normalization:
+    // `inject_properties_on_bare_objects` below inserts a synthetic empty
+    // map on a bare typed object, and a nullable-union collapse can merge an
+    // arm's map in — only a pre-existing declaration is a real property
+    // scope (review thread on 5897491074: treating the injected map as
+    // declared discarded the inherited context for typed-object
+    // intermediates).
+    let declared_properties = schema
+        .as_object()
+        .is_some_and(|obj| obj.contains_key("properties"));
     collapse_nullable_unions(schema);
     inject_properties_on_bare_objects(schema);
     prune_dangling_required(schema, enclosing_properties);
@@ -52,20 +62,29 @@ fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
     // Recurse into all sub-schemas
     if let Some(obj) = schema.as_object_mut() {
         // The context this scope hands its same-instance applicators: a
-        // local `properties` map replaces the inherited names, while an
-        // object with NO local declaration introduces no property scope of
-        // its own and passes the inherited names through — a nested
-        // composition inside a bare `{oneOf: [...]}` branch still resolves
-        // against the ancestor that declared the properties (review
-        // thread on 5896057559: dropping the inheritance there pruned the
-        // inner required-only branches into `{}` and left no valid
-        // argument).
+        // DECLARED `properties` map replaces the inherited names, while an
+        // object with no declaration of its own introduces no property
+        // scope and passes the inherited names through — a nested
+        // composition inside an untyped or bare-typed `{oneOf: [...]}`
+        // branch still resolves against the ancestor that declared the
+        // properties (review threads on 5896057559 and 5897491074: the
+        // injected compatibility map must not read as a declaration, or
+        // the inner required-only branches prune into `{}` and no valid
+        // argument survives).
         let local_properties: Vec<String> = match obj.get("properties") {
-            Some(props) => props
+            Some(props) if declared_properties => props
                 .as_object()
                 .map(|props| props.keys().cloned().collect())
                 .unwrap_or_default(),
-            None => enclosing_properties.to_vec(),
+            Some(props) if props.as_object().is_some_and(|m| !m.is_empty()) => {
+                // A collapse merged a union arm's real property map into
+                // this scope: that map is the schema's own declaration.
+                props
+                    .as_object()
+                    .map(|props| props.keys().cloned().collect())
+                    .unwrap_or_default()
+            }
+            _ => enclosing_properties.to_vec(),
         };
         for (key, v) in obj.iter_mut() {
             if matches!(
@@ -818,6 +837,51 @@ mod tests {
             schema["oneOf"][0]["oneOf"],
             json!([{"required": ["a"]}, {"required": ["b"]}]),
             "the nested required-only branches must resolve against the root properties: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the sanitized schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x"})),
+            "the object form must stay valid after sanitization: {schema}"
+        );
+    }
+
+    #[test]
+    fn injected_compatibility_map_is_not_a_declared_property_scope() {
+        // `inject_properties_on_bare_objects` inserts a synthetic empty
+        // `properties` map on a bare typed object BEFORE the context is
+        // derived, so an intermediate `{type: "object", oneOf: [...]}`
+        // branch carries Some(empty) even though the schema declared
+        // nothing locally: reading that map as a declaration discarded the
+        // inherited names and the inner required-only branches pruned into
+        // `{}` — the inner union became unsatisfiable and the sibling
+        // non-object branch is incompatible with the object root (review
+        // 5897491074). `{"a":"x"}` is valid before sanitization and must
+        // stay valid after.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {
+                    "type": "object",
+                    "oneOf": [
+                        {"required": ["a"]},
+                        {"required": ["b"]}
+                    ]
+                },
+                {"type": "string"}
+            ]
+        });
+        sanitize(&mut schema);
+        assert_eq!(
+            schema["oneOf"][0]["oneOf"],
+            json!([{"required": ["a"]}, {"required": ["b"]}]),
+            "the typed-object intermediate must forward the inherited names: {schema}"
         );
         let validator = jsonschema::options()
             .with_draft(jsonschema::Draft::Draft202012)
