@@ -120,6 +120,42 @@ def literal(value):
     return re.split(r'\s+#', value, maxsplit=1)[0].rstrip()
 
 
+def queue_runner(runner):
+    """Recognize only the reviewed same-repository Windows routing recipe.
+
+    Successful same-repository PR proofs and the queue use the same pool. The
+    source job's actual labels must still match it, and the original workflow
+    blob and all configuration remain in the proof fingerprint. A source with
+    missing identity metadata may run hosted instead; it cannot witness a
+    configured private queue pool. Unknown context-dependent recipes stay live.
+    """
+    if 'github.' not in runner:
+        return runner
+    trusted = ("(github.event_name == 'push' || github.event_name == 'merge_group' || "
+               "(github.event_name == 'pull_request' && github.repository != '' && "
+               "github.repository_id != '' && "
+               "github.event.pull_request.head.repo.full_name == github.repository && "
+               "github.event.pull_request.base.repo.full_name == github.repository && "
+               "github.event.pull_request.head.repo.id == github.repository_id && "
+               "github.event.pull_request.base.repo.id == github.repository_id))")
+    for pool in ('LIGHT', 'MEDIUM', 'HEAVY'):
+        windows = (f"vars.PINVOU_WINDOWS_{pool}_RUNNER || "
+                   "vars.PINVOU_WINDOWS_RUNNER || '[\"windows-latest\"]'")
+        guarded = f"fromJSON({trusted} && ({windows}) || '[\"windows-latest\"]')"
+        ordinary = f"fromJSON({windows})"
+        if runner == '${{ ' + guarded + ' }}':
+            return '${{ ' + ordinary + ' }}'
+        if pool in ('LIGHT', 'MEDIUM'):
+            prefix = ("${{ matrix.os == 'ubuntu-22.04' && "
+                      f"fromJSON(vars.PINVOU_LINUX_{pool}_RUNNER || "
+                      "vars.PINVOU_LINUX_RUNNER || '[\"ubuntu-22.04\"]') || "
+                      "matrix.os == 'windows-latest' && ")
+            suffix = ' || matrix.os }}'
+            if runner == prefix + guarded + suffix:
+                return prefix + ordinary + suffix
+    return None
+
+
 def catalog(workflow, *, jobs=None):
     body = workflow.split('\njobs:\n', 1)[1]
     allowed = CONTENT_JOBS if jobs is None else jobs
@@ -129,9 +165,9 @@ def catalog(workflow, *, jobs=None):
         if name not in allowed or name in CONTEXT_JOBS or re.search(r'^    (?:outputs|uses):', block, re.M): continue
         # Per-run outputs and context-dependent matrix/runner selection require
         # a separate producer/consumer or input contract, not result reuse.
-        runner = scalar(block, 'runs-on', 4) or ''
+        runner = queue_runner(scalar(block, 'runs-on', 4) or '')
         strategy = re.search(r'^    strategy:\n(.*?)(?=^    \S|\Z)', block, re.M | re.S)
-        if 'github.' in runner or (strategy and 'github.' in strategy[1]): continue
+        if runner is None or (strategy and 'github.' in strategy[1]): continue
         display = scalar(block, 'name', 4) or name
         pattern, fields, offset = '', [], 0
         for expression in re.finditer(r'\$\{\{\s*matrix\.([\w-]+)\s*\}\}', display):

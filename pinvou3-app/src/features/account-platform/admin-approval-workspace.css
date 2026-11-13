@@ -52,3 +52,52 @@
 @media(max-width:768px){.adm-approval-detail dl{grid-template-columns:1fr}}
 @media(max-width:768px){.adm-financial-repair{padding:16px}.adm-financial-repair form{grid-template-columns:1fr}}
 @media(max-width:360px){.adm-approval-toolbar label{min-width:100%}.adm-approval-tabs button{flex:1}}
+.adm-approval-execution-scope{margin:0;color:var(--adm-text);font-size:14px;line-height:1.6;overflow-wrap:anywhere}
+.adm-approval-execution-scope small,.adm-approval-workspace .adm-approval-status-code{display:block;margin-top:4px;color:var(--adm-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.adm-restored-shell .adm-approval-workspace>.adm-approval-policy-wrap{margin:0}
+.adm-approval-workspace .adm-approval-policy-table{margin:0;width:100%}
+.adm-approval-policy-table td{vertical-align:top}
+.adm-approval-policy-table strong{font-size:14px;font-weight:600;overflow-wrap:anywhere}
+.adm-approval-policy-table code,.adm-approval-policy-table small{display:block;max-width:100%;margin-top:4px;color:var(--adm-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.adm-approval-policy-risk{display:inline-block;max-width:100%;padding:2px 8px;border:1px solid var(--adm-line);border-radius:6px;color:var(--adm-text);background:var(--adm-soft);line-height:1.5;overflow-wrap:anywhere}
+
+.adm-financial-repair .adm-financial-repair-code{display:block;max-width:100%;color:var(--adm-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+
+.adm-financial-repair .adm-reconciliation-date-mode{grid-column:1/-1;display:grid;justify-items:start;gap:6px;min-width:0}
+.adm-financial-repair .adm-reconciliation-date-mode button{min-height:32px;max-width:100%;padding:4px 0;border-color:transparent;color:var(--adm-primary);white-space:normal;text-align:start}
+
+.adm-approval-mine-read:empty{display:none}
+.adm-approval-mine-read p{padding:10px 12px;margin:8px 0;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-soft);color:var(--adm-text);overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-approval-mine-read [role=alert]{color:var(--adm-danger);background:var(--adm-danger-soft)}
+
+.adm-approval-query-actions,.adm-approval-mine-tools{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.adm-approval-toolbar .adm-approval-query{border-color:var(--adm-primary);color:#fff;background:var(--adm-primary)}
+.adm-approval-toolbar .adm-approval-query:hover:not(:disabled){border-color:var(--adm-primary-strong);background:var(--adm-primary-strong)}
+.adm-approval-toolbar .adm-approval-query:disabled{opacity:.6;cursor:default}
+.adm-approval-mine-tools:not(:empty){margin:8px 0 12px}
+.adm-approval-mine-tools small{color:var(--adm-muted);overflow-wrap:anywhere}
+.adm-approval-mine-tools time{font-variant-numeric:tabular-nums}
+.adm-approval-mine-tools button{margin-left:auto}
+
+.adm-approval-target-help{font-size:12px;line-height:1.5;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-approval-workspace .adm-approval-mine-status{max-width:100%;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-approval-mine-status::before{flex:none}
+
+.adm-approval-expiry-help{flex:1 1 100%;color:var(--adm-muted);font-size:12px;line-height:1.5}
+.adm-approval-expiry-help p{margin:4px 0;color:var(--adm-danger)}
+.adm-approval-current-page-count{display:block;margin:6px 0;color:var(--adm-muted)}
+
+.adm-approval-toolbar.adm-approval-pending-toolbar .adm-approval-query-actions{align-self:center}
+
+.adm-approval-execution-facts{margin:12px 0;padding:12px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-soft);overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-approval-execution-facts h5{margin:0 0 8px;color:var(--adm-text)}
+.adm-approval-execution-facts dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;margin:0}
+.adm-approval-execution-facts dt{color:var(--adm-muted)}.adm-approval-execution-facts dd{margin:3px 0 0}
+.adm-approval-execution-facts time{font-variant-numeric:tabular-nums}
+@media(max-width:560px){.adm-approval-execution-facts dl{grid-template-columns:1fr}}
+
+.adm-restored-shell .adm-approval-requestability .adm-status{white-space:normal;max-width:100%;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-approval-requestability button{margin-top:8px}
+
+.adm-approval-directory-state{margin:0;padding:10px 12px;border:1px solid var(--adm-line);border-radius:8px;background:var(--adm-soft)}
+.adm-approval-directory-state[role=alert]{color:var(--adm-danger);background:var(--adm-danger-soft)}

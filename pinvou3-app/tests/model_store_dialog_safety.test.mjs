@@ -111,7 +111,7 @@ test('详情页的错误态有重试按钮，重试就是再跑一次 load()', (
   assert.match(retry[1], /await load\(\)/, 'retry() 没有重新调用 load()');
   // 重试自己一个忙态，不借用 busy（那是建 Key / 接入品悟的）。
   assert.match(retry[1], /setRetrying\(true\)/, 'retry() 没有自己的忙态');
-  assert.match(retry[1], /finally \{\s*setRetrying\(false\);/, 'retry() 的忙态没有在 finally 里归位');
+  assert.match(retry[1], /finally \{\s*if \(viewToken === viewTokenRef\.current\) setRetrying\(false\);/, 'retry() 的忙态没有在当前卡片的 finally 里归位');
 });
 
 test('详情页错误态同时留有关闭入口', () => {
