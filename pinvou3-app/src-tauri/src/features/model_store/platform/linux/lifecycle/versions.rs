@@ -1307,11 +1307,18 @@ impl ModelManager {
             env.insert("LMM_STORAGE_CARD_ID".into(), storage_id.clone());
             let probe = self.engine_probe(&source, card_id, &env);
             self.install_engine(&source, &env, on_progress, control.clone(), probe.need_root)?;
+            // PR 并集：第 5 参固化独立清理脚本（uninstall_engine），缺失不阻断
+            // （老卡片没有它；缺失只是不开放“删除原生引擎”）。
+            let cleanup_script = source
+                .optional_script_blob("uninstall_engine")
+                .ok()
+                .flatten();
             db::mark_engine_installed(
                 &card.summary.engine_name,
                 card.summary.engine_version.as_deref(),
                 None,
                 source.script_hash("install_engine").as_deref(),
+                cleanup_script.as_ref(),
             )
             .map_err(|e| fail(e.to_string()))?;
             self.run_card_script_with_retry(
@@ -1519,11 +1526,25 @@ impl ModelManager {
         if !probe.installed {
             let lines =
                 self.install_engine(&source, &env, on_progress, control.clone(), probe.need_root)?;
+            // PR 并集：第 5 参固化独立清理脚本（uninstall_engine），缺失不阻断。
+            let cleanup_script = source
+                .optional_script_blob("uninstall_engine")
+                .ok()
+                .flatten();
+            // r38 P1-3：第 6 处镜像记录构造点，同收白名单守卫（父模块
+            // `super::engine_image_to_record` 直接可见）——switch_version 臂
+            // 不能是 6 处里唯一裸传脚本自报 marker 的两处之一。
+            let docker_image = super::engine_image_to_record(
+                &rec.engine_name,
+                rec.engine_version.as_deref(),
+                extract_marker(&lines, "LMM_ENGINE_IMAGE="),
+            );
             db::mark_engine_installed(
                 &rec.engine_name,
                 rec.engine_version.as_deref(),
-                extract_marker(&lines, "LMM_ENGINE_IMAGE=").as_deref(),
+                docker_image.as_deref(),
                 source.script_hash("install_engine").as_deref(),
+                cleanup_script.as_ref(),
             )
             .map_err(|e| fail(format!("记录引擎安装状态失败：{e}")))?;
         }

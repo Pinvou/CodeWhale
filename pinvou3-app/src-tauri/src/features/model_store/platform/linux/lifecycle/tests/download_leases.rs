@@ -221,12 +221,9 @@ fn download_lease_survives_app_sigkill_and_protects_second_process_admission() {
             "orphan writes after app SIGKILL",
         );
         assert!(version_store::try_download_lease(OWNER).unwrap().is_none());
-        let same_card = service::start_download(
-            &Arc::new(service::ModelStoreService::new()),
-            OWNER.into(),
-            false,
-        )
-        .unwrap_err();
+        let same_card =
+            service::start_download(&Arc::new(service::ModelStoreService::new()), OWNER.into())
+                .unwrap_err();
         assert!(same_card.contains("下载脚本运行"), "{same_card}");
         let rejected = command(root, "reject").output().unwrap();
         assert!(
