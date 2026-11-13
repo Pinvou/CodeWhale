@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
-	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/jackc/pgx/v5"
@@ -71,13 +70,7 @@ func withLegacyEntitlementAdmission(ctx context.Context, connection *pgx.Conn, i
 		return err
 	}
 	defer func() {
-		clean, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		var released bool
-		releaseErr := connection.QueryRow(clean, `SELECT pg_advisory_unlock(hashtext('pinvou_account_platform_migrations'))`).Scan(&released)
-		if releaseErr == nil && !released {
-			releaseErr = errors.New("billing entitlement admission lock was not held")
-		}
+		releaseErr := migrations.Unlock(ctx, connection)
 		if releaseErr != nil {
 			err = errors.Join(err, releaseErr)
 		}

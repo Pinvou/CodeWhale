@@ -105,6 +105,28 @@ function pinvouSharedtauriChatEvents() {
     function notify() {
       cancelPendingStreamNotify(state.activeSessionId);
       immediateNotify();
+      // 直发（无合并帧）路径的派发标记；仅对有探针条目的流式 session 生效，
+      // 其它事件是空操作。
+      // r5 P2-2：抑制态 notify 不盖章——后台路由期间（runSyncOnSession 翻转
+      // activeSessionId + suppressNotify），此处没有任何渲染发布发生，盖章
+      // 会产出假 stall 记录（recv→dispatch≈201ms 实测）或系统性量快（漏报）。
+      // 发布侧（publish 内）**同样有门控**（r13 P2-2 修复；本行为注释为 r14
+      // 勘误）：rAF/定时器腿虽在路由 finally 后才 fire，但 init 启动批处理窗内
+      // 基座 notify 直接丢弃（suppressNotify || startupNotificationBatching），
+      // publish 按**发射时刻**的 isNotifySuppressed() 分流：抑制→markThrottled
+      // （零发布不能量成健康派发），否则 markDispatched。
+      // r9 P1-A：抑制态**取消**掉的 pending 条目也不能就这么滞留——它已无
+      // 发布者（合并帧被杀、抑制态又无直发），下一个无关事件终会把它盖章成
+      // 假 stall（recv→dispatch= 整段工具执行时间）。按节流收口：markThrottled
+      // 诚实地声明「我们主动选择不发布」，finalize 不上报。配 markThrottled 的
+      // t_dispatch 守卫（r9 P2），对已盖章条目安全退化为 no-op。
+      if (window.RenderStageProbe) {
+        if (!isNotifySuppressed()) {
+          try { window.RenderStageProbe.markDispatched(state.activeSessionId); } catch (_) {}
+        } else {
+          try { window.RenderStageProbe.markThrottled(state.activeSessionId); } catch (_) {}
+        }
+      }
     }
 
     function scheduleStreamNotify(sid, firstDelta) {
@@ -123,7 +145,22 @@ function pinvouSharedtauriChatEvents() {
       pendingStreamNotifications[sid] = pending;
       function publish() {
         if (pendingStreamNotifications[sid] !== pending) return;
+        // r8 P1：cancel-all 置换的**其它**会话的武装条目也要补章——它的内容
+        // 已随本次 immediateNotify() 一同发布上屏（一次发布覆盖全部快照），
+        // 滞留不章的话：活跃会话的条目会被 180ms 渲染腿补章成假 stall
+        // （recv_to_dispatch≈180ms，真实派发在 16ms）并烧掉该会话的 10s
+        // 节流配额——同窗口的真实冻结被静默丢弃（受控时钟亲证）。
+        // 只补**活跃**会话（displaced === activeSessionId）的条目（r14 勘误：
+        // 旧注释称「后台会话补 markThrottled」，实现从未盖过后台条目——
+        // 后台 displaced 条目不在此处收口，由 5s 新鲜度上界/刷新节流章/
+        // begin supersede/终态章封死，伪造出口已复核封死）；活跃补章随
+        // r13 分流：抑制窗内 markThrottled、窗外 markDispatched。
+        var displaced = Object.keys(pendingStreamNotifications).filter(
+          function (other) { return other !== sid && pendingStreamNotifications[other]; }
+        );
         Object.keys(pendingStreamNotifications).forEach(cancelPendingStreamNotify);
+        // r13 P2-2：displaced 补章移入 immediateNotify 后的抑制分流块——
+        // 此处（发布前）无法知道这次发布是否被批处理窗丢弃。
         // The synchronous event router has already saved every affected
         // buffer and restored the visible working set before this callback.
         // Publish that coherent host snapshot once, even if one of the
@@ -131,6 +168,31 @@ function pinvouSharedtauriChatEvents() {
         // working set merely to issue a suppressed notification.
         try {
           immediateNotify();
+          // r13 P2-2：批处理窗内合并腿盖章按**发射时刻** isNotifySuppressed
+          // 分流——窗内基座 notify 直接丢弃（bridge suppressNotify ||
+          // startupNotificationBatching），零发布不能量成健康派发（假
+          // 健康章方向）。与 notify() :119-125 的直发臂同构：抑制→
+          // markThrottled（诚实声明「主动不发布」），否则 markDispatched。
+          // displaced 活跃臂同理（r8 P1 的补章语义在抑制窗内同样不成立）。
+          if (window.RenderStageProbe) {
+            var fireSuppressed = isNotifySuppressed();
+            try {
+              if (fireSuppressed) {
+                try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
+              } else {
+                try { window.RenderStageProbe.markDispatched(sid); } catch (_) {}
+              }
+              for (var d = 0; d < displaced.length; d++) {
+                if (displaced[d] === state.activeSessionId) {
+                  if (fireSuppressed) {
+                    try { window.RenderStageProbe.markThrottled(displaced[d]); } catch (_) {}
+                  } else {
+                    try { window.RenderStageProbe.markDispatched(displaced[d]); } catch (_) {}
+                  }
+                }
+              }
+            } catch (_) {}
+          }
         } catch (error) {
           console.error("[chat] coalesced stream notify failed", error);
         }
@@ -139,6 +201,9 @@ function pinvouSharedtauriChatEvents() {
         pending.frame = window.requestAnimationFrame(publish);
       }
       pending.timer = setTimeout(publish, STREAM_NOTIFY_MAX_WAIT_MS);
+      if (window.RenderStageProbe) {
+        try { window.RenderStageProbe.markScheduled(sid); } catch (_) {}
+      }
     }
 
     function refreshEffectiveModelConfigAfterAuthError(error) {
@@ -784,6 +849,12 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
     }
     lastForegroundSessionId = sid;
     cancelPendingStreamNotify(sid);
+    // r9 P1-B：切会话取消掉的合并帧同样无主了——紧随的真实发布本 tick 上屏
+    // 或已不可达，滞留条目会被后续事件盖章成假 stall（recv→dispatch= 纯等待
+    // 时间）。提前打节流章远比迟到数秒的假冻结诚实。
+    if (window.RenderStageProbe) {
+      try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
+    }
   }
 
   function scheduleStreamRender(sid) {
@@ -809,7 +880,15 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
         // Keep the visible preview's existing immediate publication after
         // parsing; only background render completions share a later frame.
         if (sid === state.activeSessionId) notify();
-        else scheduleStreamNotify(sid, false);
+        else {
+          // r7 P2-2：这条 publish 走后台 1s 预览腿——该条目的 recv→dispatch
+          // 间隔是应用自己的合并节流（生成停顿 ≥1s 时 ~1032ms 实测），不是
+          // 主线程冻结。给探针条目打标，finalize 不上报（snapshot 保留）。
+          if (window.RenderStageProbe) {
+            try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
+          }
+          scheduleStreamNotify(sid, false);
+        }
       }
     }, isNotifySuppressed() ? BACKGROUND_STREAM_RENDER_THROTTLE_MS : STREAM_RENDER_THROTTLE_MS);
   }
@@ -1228,6 +1307,12 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
       markRemoteTurn(sid, doneBuffer, true, "chat_done_without_local_owner");
     }
     if (!requiresAuthorityReconcile) markScheduledInitialTurnTerminal(sid);
+    // r12 P2-1：终态的前台/后台判定必须在进 runSyncOnSession **之前**取——
+    // 路由内部会把 activeSessionId 临时翻成 sid（:104 harness 同款语义），
+    // 闭包内再比就是恒等。前台终态的合并帧虽被取消，但路由恢复后的真实
+    // notify 会发布并补章；打节流标会让 throttledOrigin 否决补章后的
+    // finalize，用户看着会话完成时的真实主线程冻结零上报。
+    var terminalForeground = sid === state.activeSessionId;
     runSyncOnSession(sid, function () {
       var error = e.payload && e.payload.error;
       var terminalRecord = recordTurnCompleted(e.payload || {});
@@ -1283,6 +1368,16 @@ function finalizeStreamingReasoning(index) { return pinvouSharedtauriChatEvents(
       // background session's terminal must cancel its own pending frame or a
       // redundant late round fires within 32ms.
       cancelPendingStreamNotify(sid);
+      // r9 P1-C：后台终态取消的合并帧是滞留条目（引擎 delta+done 背靠背时
+      // 终态总在 +16ms rAF 之前到——每次后台会话完成都会滞留）。切回后下一
+      // 个事件会把它盖章成假 stall（recv→dispatch= 纯阅读时间）。按节流收口。
+      // r12 P2-1：**仅后台会话**（terminalForeground 在 runSyncOnSession 之前
+      // 捕获，见上方声明处注释）——前台终态的补偿发布真实存在，节流标会否决
+      // 会话完成时刻的真实冻结上报。后台条目无补偿发布（其内容已随活跃会话
+      // 的发布上屏），维持节流收口不变。
+      if (window.RenderStageProbe && !terminalForeground) {
+        try { window.RenderStageProbe.markThrottled(sid); } catch (_) {}
+      }
       var terminalStatus = String(e.payload && e.payload.status || "").toLowerCase();
       var interrupted = ["interrupted", "cancelled", "canceled"].includes(terminalStatus);
       if (interrupted) preserveInterruptedAssistantPresentation();
