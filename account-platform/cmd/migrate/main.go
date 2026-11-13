@@ -216,6 +216,13 @@ func migrationDomain(ctx context.Context, connection *pgx.Conn, loaded []migrati
 }
 
 func protectedMigrationDomain(version int64, name, checksum string) string {
+	// These F02 names and canonical SQL digests remain reserved across version
+	// changes; the Billing wrapper must validate the complete identity.
+	if name == "refund_dispatch_fencing" || name == "payment_notification_provenance" ||
+		checksum == "b21624f92414a8ec464138ab5bab13ac5d6e2d982881cb2b1e72ca22f7e8c694" ||
+		checksum == "26c694e7b99c7d070654a2bd26d3b2af693d4a15e400c5c677fb93f5f3a88eee" {
+		return "billing"
+	}
 	for _, identity := range []struct {
 		domain         string
 		version        int64
@@ -234,6 +241,8 @@ func protectedMigrationDomain(version int64, name, checksum string) string {
 		{"token", 900004, "account_closure_replay_fence", "1e662dda9e4b27674da7bda3949d8fefef10c18f84c0d626d4093271d46a5a30"},
 		{"billing", 900001, "outbox_publication_generation", "7e36e103ad25620dd7a882792fcd0d942f6208038aeaa966eb44b367cea27f05"},
 		{"billing", 900002, "payment_anomaly_resolution_intents", "68df09f526088b981c992d0c9912cab8f4ac2c6f5567fdb6351cfdc2b905d2a2"},
+		{"billing", 900004, "refund_dispatch_fencing", "b21624f92414a8ec464138ab5bab13ac5d6e2d982881cb2b1e72ca22f7e8c694"},
+		{"billing", 900005, "payment_notification_provenance", "26c694e7b99c7d070654a2bd26d3b2af693d4a15e400c5c677fb93f5f3a88eee"},
 		{"billing", 79, "registration_bonus", "27802b2d3e76e6a42c809d620d3d9833cfaa529d7d5517982318236a56719deb"},
 		{"billing", 900011, "member_lifecycle_event_identity", "af4a63ed0592a0e60d5f4744176e15cc5013c3633c6f0f414f7580b7132b2aa8"},
 		{"billing", 900013, "entitlement_activation_execution_lock", "b2442654c753e1c9ff68708926ec2274e9962d9264050ec4d86ff1cf0168d96f"},
