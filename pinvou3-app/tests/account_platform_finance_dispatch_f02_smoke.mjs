@@ -34,7 +34,7 @@ try {
       await page.waitForFunction(() => !document.querySelector('[role=status]'));
       await page.$$eval('tbody button', buttons => buttons[1].click());
       await page.waitForSelector('[role=alert]');
-      assert.equal(await page.$eval('[role=alert]', node => node.textContent), await page.evaluate(() => window.f02Dispatch.copy().unavailable));
+      assert.equal(await page.$eval('[role=alert]', node => node.textContent), await page.evaluate(() => window.f02Dispatch.copy().approvalReadUnavailable));
       assert.equal(await page.$eval('article h4', node => node.textContent), await page.evaluate(() => window.f02Dispatch.id));
       assert.equal(await page.evaluate(() => document.body.textContent.includes('33333333-3333-4333-8333-333333333333')), false);
       assert.equal(await page.evaluate(() => window.f02Dispatch.calls.filter(call => call.method !== 'GET').length), 0);
@@ -111,7 +111,8 @@ try {
     await page.$eval('form', form => form.requestSubmit());
     await page.waitForFunction(() => window.f02Dispatch.created && document.querySelector('[role=alert]') && ![...document.querySelectorAll('[role=status]')].some(node => node.textContent.includes('loading') || node.textContent.includes('Loading')));
     await page.evaluate(() => { window.f02Dispatch.historyIncomplete = false; });
-    await page.$eval('form', form => form.requestSubmit());
+    const retry = await page.evaluateHandle(() => [...document.querySelectorAll('section>button')].find(button => button.textContent === window.f02Dispatch.copy().retry && !button.disabled));
+    await retry.click(); await retry.dispose();
     await page.waitForFunction(() => window.f02Dispatch.submitted);
     assert.equal(await page.evaluate(() => window.f02Dispatch.calls.filter(call => call.url.endsWith('/adjustments') && call.method === 'POST').length), 1);
     assert.ok(await page.evaluate(() => window.f02Dispatch.calls.some(call => call.url.includes('/adjustments?'))));

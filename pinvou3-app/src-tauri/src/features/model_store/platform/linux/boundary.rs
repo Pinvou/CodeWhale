@@ -6,6 +6,16 @@
 use super::config;
 use super::db;
 
+/// Run the final device deletion guards and filesystem mutation in one
+/// exclusive store-resource boundary. The token never escapes this feature;
+/// all store shared download/stage holders must retire before admission.
+pub(crate) fn with_weight_removal_boundary<T>(
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _resources = super::version_store::try_exclusive_resource_operation_lock()?;
+    operation()
+}
+
 /// 商店边界查询（宽松版，登记端用）：按模型名查商店库，命中返回商店里的规范
 /// 名。查询出错按未命中处理——登记错最多产生一条之后删不掉的记录，不构成破
 /// 坏；**破坏性的移除路径必须走 [`store_model_name_checked`]（fail-closed）**。

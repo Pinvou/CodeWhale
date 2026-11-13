@@ -124,6 +124,12 @@ const policy = JSON.parse(readSource(path.join(root, 'src', 'platform', 'web', '
 const allowed = new Set(policy.allowed_commands);
 const allowedEvents = new Set(policy.allowed_events);
 
+const rustForwardedEvents = remoteControlManager.match(/const RUST_FORWARDED_EVENTS: &\[&str\] = &\[([^\]]*)\];/);
+assert.ok(rustForwardedEvents, 'the Rust direct-forward deduplication contract must remain explicit');
+assert.equal(allowedEvents.has('models:changed'), true, 'store model refreshes must reach Web clients');
+assert.match(rustForwardedEvents[1], /"models:changed"/,
+  'store model refreshes use Rust forwarding and must suppress the desktop proxy duplicate');
+
 function rustCommandBlock(source, command) {
   const signature = source.indexOf(`fn ${command}(`);
   assert.notEqual(signature, -1, `missing Rust command ${command}`);
@@ -165,6 +171,7 @@ for (const command of [
   'transcribe_voice_audio',
   'save_model',
   'delete_model',
+  'delete_model_if_store_link',
   'set_active_model',
   'test_model_connection',
   'set_disabled_connectors',
@@ -760,7 +767,7 @@ assert.doesNotMatch(webSearchRestartBody, /invoke\("restart_app"/,
   'Web settings bridge must not invoke the native-only restart command');
 assert.match(main, /const saved = isWeb[\s\S]{0,180}saveSearchSettings\(search\)[\s\S]{0,180}saveSearchSettingsAndRestart\(search\)/,
   'the shared UI must save without requesting a desktop restart in WebUI');
-assert.match(webBridge, /state\.settings = await invoke\(IS_WEB \? "web_access_update_settings" : "update_settings"/,
+assert.match(webBridge, /const settings = await invoke\(IS_WEB \? "web_access_update_settings" : "update_settings", \{ patch: patch \}\);\s*window\.PinvouBridgeShared\.publishSettings\(state, settings\);/,
   'WebUI must keep the canonical settings returned by the desktop backend');
 assert.match(webBridge, /web_access_update_settings", \{ patch: \{ search: search \} \}/,
   'WebUI search saves must send a narrow patch instead of a full settings snapshot');

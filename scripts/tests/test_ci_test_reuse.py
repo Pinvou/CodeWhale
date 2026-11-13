@@ -192,6 +192,30 @@ class ReuseTests(unittest.TestCase):
         for step in regression['steps']: step['conclusion'] = 'skipped'
         self.assertEqual(self.lookup(), ([], None))
 
+    def test_windows_private_pool_reuse_binds_actual_labels_and_configuration(self):
+        labels = ['self-hosted', 'Windows', 'heavy']
+        self.config['PINVOU_WINDOWS_HEAVY_RUNNER'] = json.dumps(labels)
+        self.proof['fingerprint'] = REUSE.fingerprint(self.queued, self.base, self.config)
+        self.proof['jobs'] = ['windows-rust-test']
+        policy = REUSE.JOBS['windows-rust-test']
+        self.jobs = [self.jobs[0]] + [
+            {'name': f'windows-rust-test ({phase})', 'conclusion': 'success', 'run_id': 12,
+             'labels': labels, 'steps': [{'name': step['name'], 'conclusion': 'success'}
+                                       for step in policy['steps'] if step['name']]}
+            for phase in ('all-targets-check', 'regression')]
+        self.assertEqual(self.lookup(), (['windows-rust-test'], 12))
+        # A hosted fallback caused by absent/inconsistent PR identity cannot
+        # stand in for either configured queue matrix leg.
+        for index in (1, 2):
+            with self.subTest(hosted_leg=index):
+                self.jobs[index]['labels'] = ['windows-latest']
+                self.assertEqual(self.lookup(), ([], None))
+                self.jobs[index]['labels'] = labels
+        changed = {**self.config, 'PINVOU_WINDOWS_HEAVY_RUNNER': '["self-hosted","Windows","other"]'}
+        self.assertEqual(self.lookup(changed), ([], None))
+        self.pr['head']['repo']['full_name'] = 'fork/repository'
+        self.assertEqual(self.lookup(), ([], None))
+
     def test_queue_policy_edits_and_multi_member_shapes_force_execution(self):
         original=REUSE.git
         def changed(*args):

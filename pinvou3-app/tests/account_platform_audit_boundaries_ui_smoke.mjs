@@ -36,7 +36,31 @@ async function fill(page, reason = 'Controlled original audit justification') {
     change(document.querySelector('input[minlength]'), reason);
   }, reason);
 }
-async function button(page, key) { await page.evaluate(key => [...document.querySelectorAll('button')].find(button => button.textContent.trim() === window.f17.copy.audit[key]).click(), key); }
+async function button(page, key) {
+ if (key === 'refreshExport') {
+  await page.evaluate(() => {
+   const status = [...document.querySelectorAll('.adm-inline-message > strong')].find(node => node.textContent.startsWith(window.f17.copy.audit.exportStatus));
+   const refresh = [...status.parentElement.querySelectorAll('button')].find(node => node.textContent.trim() === window.f17.copy.refresh);
+   if (!refresh) throw new Error('Export refresh unavailable');
+   refresh.click();
+  });
+  return;
+ }
+ if (key === 'export' || key === 'reviewOnly') {
+  const before = await page.evaluate(() => window.f17.createCount);
+  await page.evaluate(() => [...document.querySelectorAll('button')].find(node => node.textContent.trim() === window.f17.presentation.reviewButton).click());
+  if (key === 'reviewOnly') return;
+  await page.waitForSelector('.adm-audit-confirm-submit');
+  assert.equal(await page.evaluate(() => window.f17.createCount), before, 'review never creates the export before confirmation');
+  await page.click('.adm-audit-confirm-submit');
+  return;
+ }
+ if (key === 'download' && !(await page.evaluate(() => [...document.querySelectorAll('button')].some(node => node.textContent.trim() === window.f17.copy.audit.download)))) {
+  await button(page, 'refreshExport');
+  await page.waitForFunction(() => [...document.querySelectorAll('button')].some(node => node.textContent.trim() === window.f17.copy.audit.download));
+ }
+ await page.evaluate(key => [...document.querySelectorAll('button')].find(node => node.textContent.trim() === window.f17.copy.audit[key]).click(), key);
+}
 try {
   await run('export-only permission installs usable form without unauthorized log read', async page => {
     await open(page, 'exportOnly=1'); await page.waitForSelector('input[minlength]');
