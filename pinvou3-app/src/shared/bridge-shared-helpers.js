@@ -103,6 +103,41 @@
     projects: ["projectsList", "projectsAssignmentDegradedAt"],
   };
 
+  // Config-only refreshes and selection reads share config ordering, while
+  // a later background refresh must not discard a pending selection ID.
+  const modelReadTokens = new WeakMap();
+  function beginModelRead(state, sessionId, includesSelection = false) {
+    let tokens = modelReadTokens.get(state);
+    if (!tokens) {
+      tokens = {};
+      modelReadTokens.set(state, tokens);
+    }
+    const token = {};
+    const sameSession = () => (state.activeSessionId || null) === sessionId;
+    if (sameSession()) {
+      tokens.config = token;
+      if (includesSelection) tokens.selection = token;
+    }
+    return {
+      configIsCurrent: () => sameSession() && tokens.config === token,
+      selectionIsCurrent: () => sameSession() && tokens.selection === token,
+    };
+  }
+
+  // All clusters sharing this state also share settings read ordering. A
+  // successful write or event publication invalidates older reads without
+  // making user writes wait for a slow background get_settings request.
+  const settingsReadTokens = new WeakMap();
+  function beginSettingsRead(state) {
+    const token = {};
+    settingsReadTokens.set(state, token);
+    return () => settingsReadTokens.get(state) === token;
+  }
+  function publishSettings(state, settings) {
+    settingsReadTokens.set(state, {});
+    state.settings = settings;
+  }
+
   // 共享基础工厂：所有 cluster 的函数体只在这里定义一次。
   // deps 解构 = 各 cluster 依赖名的并集（去掉与函数声明同名的名字）。
   function sharedBridgeBase(deps) {
@@ -2293,8 +2328,11 @@
 
   // web+tauriSettings 共享
   async function loadSettings() {
+    const isCurrent = beginSettingsRead(state);
     try {
-      state.settings = await invoke("get_settings");
+      const settings = await invoke("get_settings");
+      if (!isCurrent()) return;
+      publishSettings(state, settings);
       // The computer_use master switch is persisted via the dedicated command through
       // prefs (not the update_settings patch); at cold start with no session yet, the
       // persisted value lands first (a session-less computer_use_get_status read fills
@@ -2310,9 +2348,10 @@
         state.computerUse = Object.assign({}, state.computerUse, { enabled: persistedEnabled });
       }
     } catch {
+      if (!isCurrent()) return;
       // Backend unreachable = nothing to judge; fall back to following the
       // system for the color scheme (color_scheme: system).
-      state.settings = { theme: "genesis", color_scheme: "system", language: "zh-Hans" };
+      publishSettings(state, { theme: "genesis", color_scheme: "system", language: "zh-Hans" });
     }
     notify();
   }
@@ -4333,7 +4372,7 @@
         swapPct: snap.ram && snap.ram.swap_total_kib > 0 ? Math.round(snap.ram.swap_used_kib / snap.ram.swap_total_kib * 100) : 0,
         vllmModel: vllmDisplayModel,
         vllmHealthStatus: healthStatus,
-        vllmOnline: vllm ? (healthStatus === "verified" && (vllm.status === "ready" || vllm.status === "busy")) : false,
+        vllmOnline: vllm ? ((targetKind === "local" || targetKind === "remote") && healthStatus === "verified" && (vllm.status === "ready" || vllm.status === "busy")) : false,
         // 云端(remote)不做健康探测(无 auth 的 /v1/models 必 401)→ 不显示 OFFLINE。
         // 暴露原始 kind 供前端判定(别比本地化 label)。
         vllmIsRemote: targetKind === "remote",
@@ -4395,13 +4434,17 @@
   async function loadEffectiveModelConfig(sessionId) {
     const seq = ++modelConfigurationReadSequence;
     const requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
+    const read = beginModelRead(state, requestedSessionId);
     try {
       const config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
-      // When switching sessions quickly, an older request may return after the new one; never let the old session's config overwrite the current overlay state.
-      if (seq !== modelConfigurationReadSequence || (state.activeSessionId || null) !== requestedSessionId) return false;
+      // 双守卫并存（合并保全双方）：main #2495 的读取序号拦住同会话内的
+      // 迟到响应；本 PR 的 beginModelRead 纪元进一步覆盖会话切换与选择
+      // 变化。任一失配都不得覆盖当前覆盖层状态。
+      if (seq !== modelConfigurationReadSequence || !read.configIsCurrent()) return false;
       state.effectiveModelConfig = config;
     } catch {
-      if (seq !== modelConfigurationReadSequence || (state.activeSessionId || null) !== requestedSessionId) return false;
+      if (seq !== modelConfigurationReadSequence || !read.configIsCurrent()) return false;
+      // A transport failure does not replace an authoritative config snapshot.
       return false;
     }
     notify();
@@ -5713,6 +5756,8 @@
     },
     // FE14 wave 5：双 lane 共享的桥接状态切片字段注册表（见上方注释）。
     STATE_SLICE_FIELDS,
+    beginModelRead,
+    publishSettings,
     // F-FE13-2：assistant_done 时间线记录构建器（无 deps，静态共享）。
     buildAssistantDoneTimelineRecord,
   });

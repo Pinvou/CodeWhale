@@ -205,6 +205,7 @@ docs/                 架构设计、验证报告与维护文档
 - [macOS 运行环境要求](docs/macos-requirements.md)
 - [CodeWhale fork 策略](docs/fork-policy.md)
 - [当前 fork 修改清单](docs/fork-modifications.md)
+- [远控临时模型租约绑定（开发文档）](docs/remote-control-temporary-model-binding.md)
 - [工具市场概览](docs/工具市场.md)
 - [应用内升级设计](docs/应用内升级-设计.md)
 - [终端用户资料包](资料包/README.md)

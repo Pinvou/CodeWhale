@@ -1,0 +1,28 @@
+.adm-repair-queue .adm-registration-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));align-items:start;gap:10px;margin:14px 0}
+.adm-repair-queue .adm-registration-filters>button{align-self:start;margin-top:19px}
+.adm-repair-queue .adm-registration-filters select,.adm-repair-queue .adm-registration-filters input{min-width:0;width:100%}
+.adm-registration-duration{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:5px 8px;grid-column:span 2}
+.adm-registration-duration small{grid-column:1/-1;color:var(--adm-muted);overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-registration-filter-scope{font-size:13px;color:var(--adm-muted);overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-repair-queue .adm-registration-filters :focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:520px){.adm-repair-queue .adm-registration-filters{grid-template-columns:repeat(2,minmax(0,1fr))}.adm-repair-queue .adm-registration-filters>button{margin-top:0}}
+
+.adm-restored-shell .adm-registration-table{margin-top:12px}
+.adm-registration-table th small{display:block;margin-top:3px;color:var(--adm-muted);font-weight:400;white-space:normal}
+.adm-registration-table tbody td{vertical-align:top}
+.adm-registration-table tbody td:first-child code{display:block;min-width:120px;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-registration-table td:last-child{min-width:144px}
+.adm-registration-row-evidence{margin-top:8px;color:var(--adm-text)}
+.adm-registration-row-evidence summary{min-height:32px;padding:6px 2px;cursor:pointer;color:var(--adm-primary);white-space:normal}
+.adm-registration-row-evidence summary:focus,.adm-restored-shell .adm-registration-table:focus{outline:3px solid var(--adm-primary);outline-offset:-2px}
+.adm-registration-row-evidence dl{display:grid;gap:8px;margin:4px 0 0;padding:10px;background:var(--adm-soft);border:1px solid var(--adm-line);border-radius:8px;white-space:normal}
+.adm-registration-row-evidence dl>div{min-width:0}
+.adm-registration-row-evidence dt{color:var(--adm-muted)}
+.adm-registration-row-evidence dd{margin:2px 0 0;overflow-wrap:break-word;overflow-wrap:anywhere}
+
+.adm-registration-result-scope{display:grid;gap:4px;margin:12px 0}
+.adm-registration-result-scope p{margin:0}
+.adm-registration-previous,.adm-registration-empty{padding:12px 14px;background:var(--adm-soft);color:var(--adm-text);border:1px solid var(--adm-line);border-radius:10px}
+.adm-registration-empty{display:grid;gap:9px;margin-top:12px;justify-items:start}
+.adm-registration-empty p{margin:0}
+.adm-registration-empty button:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
