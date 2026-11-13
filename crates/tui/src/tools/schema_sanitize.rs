@@ -45,17 +45,18 @@ pub fn sanitize(schema: &mut Value) {
 /// different instance, so the context resets there and only genuinely
 /// dangling names are pruned.
 fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
-    // Whether THIS schema declared a properties map before normalization:
-    // `inject_properties_on_bare_objects` below inserts a synthetic empty
-    // map on a bare typed object, and a nullable-union collapse can merge an
-    // arm's map in — only a pre-existing declaration is a real property
-    // scope (review thread on 5897491074: treating the injected map as
-    // declared discarded the inherited context for typed-object
+    // Whether THIS schema declared a properties map before the injection
+    // pass: capture AFTER the nullable-union collapse (a merged arm's map —
+    // even an explicitly empty one — is the schema's own declaration,
+    // review thread on 5897819279) but BEFORE
+    // `inject_properties_on_bare_objects`, whose synthetic map is not a
+    // declaration (review threads on 5896057559 and 5897491074: treating
+    // it as one discarded the inherited context for composition
     // intermediates).
+    collapse_nullable_unions(schema);
     let declared_properties = schema
         .as_object()
         .is_some_and(|obj| obj.contains_key("properties"));
-    collapse_nullable_unions(schema);
     inject_properties_on_bare_objects(schema);
     prune_dangling_required(schema, enclosing_properties);
     collapse_single_element_unions(schema);
@@ -362,6 +363,19 @@ fn inject_properties_on_bare_objects(schema: &mut Value) {
         return;
     }
     if obj.contains_key("properties") || obj.contains_key("additionalProperties") {
+        return;
+    }
+    // A composition-bearing bare object never reaches the strict-mode
+    // validator this injection exists for (strict mode rejects root and
+    // nested compositions outright), so the synthetic map buys nothing
+    // there — while persisting it manufactures provenance the next
+    // sanitize pass mistakes for a declared empty scope and re-prunes the
+    // nested required-only branches (review thread on 5897819279: the
+    // registry sanitize injects, then sanitize_for_responses sanitizes the
+    // same schema again). Skipped here, the branch stays property-less,
+    // the inherited-context rule keeps forwarding ancestor names, and the
+    // pass is idempotent.
+    if obj.contains_key("oneOf") || obj.contains_key("anyOf") || obj.contains_key("allOf") {
         return;
     }
     obj.insert("properties".into(), Value::Object(Map::new()));
@@ -890,6 +904,103 @@ mod tests {
         assert!(
             validator.is_valid(&json!({"a": "x"})),
             "the object form must stay valid after sanitization: {schema}"
+        );
+    }
+
+    #[test]
+    fn sanitize_is_idempotent_for_typed_composition_intermediates() {
+        // The registry sanitizes first, and `sanitize_for_responses`
+        // sanitizes the same schema again: a synthetic compatibility map
+        // injected on pass one must not read as a declaration on pass two,
+        // or the typed-composition intermediate re-prunes its nested
+        // required-only branches on the second pass (review 5897819279).
+        // Composition-bearing bare typed objects now receive no synthetic
+        // map at all — the strict validator the injection exists for
+        // rejects compositions outright — so the pass is idempotent and
+        // the inherited context survives.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {
+                    "type": "object",
+                    "oneOf": [
+                        {"required": ["a"]},
+                        {"required": ["b"]}
+                    ]
+                },
+                {"type": "string"}
+            ]
+        });
+        sanitize(&mut schema);
+        let once = schema.clone();
+        sanitize(&mut schema);
+        assert_eq!(
+            schema, once,
+            "a second sanitize pass must be a no-op here: {schema}"
+        );
+        assert!(
+            !schema["oneOf"][0]
+                .as_object()
+                .expect("object branch")
+                .contains_key("properties"),
+            "the composition-bearing bare typed branch must not gain a synthetic map: {schema}"
+        );
+        assert_eq!(
+            schema["oneOf"][0]["oneOf"],
+            json!([{"required": ["a"]}, {"required": ["b"]}]),
+            "the nested required-only branches must survive both passes: {schema}"
+        );
+    }
+
+    #[test]
+    fn empty_property_map_merged_from_a_nullable_arm_is_a_declared_scope() {
+        // Provenance is captured after the nullable-union collapse: an arm
+        // carrying an explicitly EMPTY properties map merges that map into
+        // the scope, and it reads as a declaration — strictly local, like
+        // any directly declared empty map — not as a synthetic map to
+        // inherit through (review 5897819279). The untyped sibling branch
+        // at the same instance shows the inherited reading still applies
+        // when nothing was declared.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {
+                    "anyOf": [
+                        {"type": "object", "properties": {}},
+                        {"type": "null"}
+                    ],
+                    "oneOf": [
+                        {"required": ["a"]},
+                        {"type": "string"}
+                    ]
+                },
+                {
+                    "oneOf": [
+                        {"required": ["a"]},
+                        {"type": "string"}
+                    ]
+                },
+                {"type": "string"}
+            ]
+        });
+        sanitize(&mut schema);
+        assert_eq!(
+            schema["oneOf"][0]["oneOf"],
+            json!([{}, {"type": "string"}]),
+            "the merged explicit empty map is a declared scope: required prunes locally: {schema}"
+        );
+        assert_eq!(
+            schema["oneOf"][1]["oneOf"],
+            json!([{"required": ["a"]}, {"type": "string"}]),
+            "the undeclared sibling branch inherits the ancestor names: {schema}"
         );
     }
 
