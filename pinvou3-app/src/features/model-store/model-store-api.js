@@ -71,6 +71,11 @@ function fetchLibrary() {
   return invokeTauri('model_store_library');
 }
 
+/** Read authoritative settings after a lifecycle operation; failures must not look empty. */
+export function fetchSavedModels() {
+  return invokeTauri('list_models', { requireReadable: true });
+}
+
 /**
  * 单个模型的详情（运行时信息、端点、脚本正文等）。
  * @param {string} cardId - 卡片 ID。
@@ -78,6 +83,21 @@ function fetchLibrary() {
  */
 function fetchModelDetail(cardId) {
   return invokeTauri('model_store_model_detail', { cardId });
+}
+
+/** Clear only this linked model's fixed context cap, then refresh its consumers. */
+export function followDeploymentContext(cardId, modelId) {
+  return invokeTauri('model_store_follow_deployment_context', { cardId, modelId });
+}
+
+/** Read the latest recipe and compare it with the installed card. */
+function checkCardUpdate(cardId) {
+  return invokeTauri('model_store_check_card_update', { cardId });
+}
+
+/** Apply the exact revision that the user reviewed; progress uses normal tasks. */
+function startCardUpdate(cardId, revision) {
+  return invokeTauri('model_store_start_card_update', { cardId, revision });
 }
 
 /**
@@ -161,7 +181,7 @@ function startUninstall(cardId, purgeWeights) {
 /**
  * 强制从模型库移除：**只删记录，一个字节都不删**。
  *
- * 只在正常卸载反复失败时用。它不可逆（记录和这张卡的 API Key 一起没），而且删完
+ * 只在正常卸载反复失败时用。它不可逆（当前及全部历史记录、这张卡的 API Key 一起没），而且删完
  * 之后磁盘上的几十 GB 就再也没有界面能管到了——所以要显式 confirm。
  * @param {string} cardId - 卡片 ID。
  * @returns {Promise<object>} 移除结果，含仍在磁盘上的残留路径。
@@ -239,7 +259,7 @@ function takeStartupCleanup() {
  * `scan_dirs` 是只读的，含内置位置（当前权重目录、`~/models`、下载/桌面）和当前
  * 挂着的 U 盘；`import_scan_dirs` 才是用户能编辑的那份补充。两者分开是因为用户
  * 真正要问的是「下载前到底找了哪些地方」，只给可编辑的那份答不了这个问题。
- * @returns {Promise<{models_dir:string, import_scan_dirs:string[], scan_dirs:string[], free_bytes:number|null}>} 当前存储设置。
+ * @returns {Promise<{models_dir:string, import_scan_dirs:string[], scan_dirs:string[], free_bytes:number|null, startup_update_check_enabled:boolean}>} 当前存储设置。
  */
 function fetchStorageSettings() {
   return invokeTauri('model_store_storage_settings');
@@ -250,14 +270,16 @@ function fetchStorageSettings() {
  *
  * **不会搬运已下载的权重**：几十上百 GB 的移动可能跨盘、可能中途断电，那得是
  * 一件有独立进度和失败处理的事，不能藏在一次保存设置里悄悄发生。
- * @param {{modelsDir?:string|null, importScanDirs?:string[]|null}} patch - 要改的项。
+ * @param {{modelsDir?:string|null, importScanDirs?:string[]|null, startupUpdateCheckEnabled?:boolean|null}} patch - 要改的项。
  * @returns {Promise<object>} 保存后的设置，形状同 fetchStorageSettings。
  */
-function saveStorageSettings({ modelsDir = null, importScanDirs = null } = {}) {
-  return invokeTauri('model_store_set_storage_settings', { modelsDir, importScanDirs });
+function saveStorageSettings({ modelsDir = null, importScanDirs = null, startupUpdateCheckEnabled = null } = {}) {
+  return invokeTauri('model_store_set_storage_settings', { modelsDir, importScanDirs, startupUpdateCheckEnabled });
 }
 
 export {
+  checkCardUpdate,
+  startCardUpdate,
   storeAvailability,
   takeStartupCleanup,
   fetchStorageSettings,
@@ -281,3 +303,10 @@ export {
   answerRun,
   fetchActiveRuns,
 };
+
+// measure=true 时后端逐行重测目录大小并登记（评审第 7 轮的显式测量入口）。
+export function fetchVersions(cardId, opts) {
+  const measure = !!(opts && opts.measure);
+  return invokeTauri("model_store_versions", measure ? { cardId, measure } : { cardId });
+}
+export function startVersionAction(cardId, action, versionId) { return invokeTauri("model_store_start_version_action", { cardId, action, versionId }); }
