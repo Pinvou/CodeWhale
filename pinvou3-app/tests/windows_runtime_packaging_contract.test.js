@@ -525,6 +525,17 @@ assert.match(
   "initialization must use the hash-verified Release transport",
 );
 assert.doesNotMatch(runtimeInitScript, /"lfs", "pull"/u, "initialization must not download Git LFS objects");
+assert.match(runtimeInitScript, /\[Alias\("ForceLfsPull"\)\]/u,
+  "legacy ForceLfsPull callers must retain their ForceDownload alias");
+const runtimePrJob = prCheckWorkflow.slice(prCheckWorkflow.indexOf("\n  windows-runtime-test:"),
+  prCheckWorkflow.indexOf("\n  macos-codex-runtime-test:"));
+for (const script of ["windows_runtime_cache_behavior.ps1", "windows_runtime_release_behavior.ps1"]) {
+  assert.ok(runtimePrJob.includes(script), `${script} must run in the ordinary PR runtime job`);
+}
+assert.match(runtimePrJob, /@\('powershell', 'pwsh'\)/u,
+  "runtime regressions must exercise both Windows PowerShell and PowerShell 7");
+assert.ok(runtimePrJob.includes("scripts/ci-fixture-process.py --receipt $receipt"),
+  "runtime behavior regressions must preserve process ownership and retirement receipts");
 assert.ok(
   runtimeInitScript.lastIndexOf("Update-RuntimeSubmoduleWithoutLfsSmudge") <
     runtimeInitScript.indexOf("  Sync-RuntimeReleaseAssets"),

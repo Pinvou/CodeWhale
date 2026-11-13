@@ -10,6 +10,7 @@ import hashlib
 import json
 import ntpath
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -229,6 +230,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--receipt', type=Path, required=True)
     parser.add_argument('--cleanup-seconds', type=float, default=5)
+    parser.add_argument('--short-workspace-parent', type=Path)
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if not 0 < args.cleanup_seconds <= 15:
@@ -242,17 +244,51 @@ def main(argv=None):
     # Runner TMPDIR can already exceed that budget before Chrome appends its
     # own directory and socket name. Keep the private scope under the short
     # system temporary path; never alter the Runner's global environment.
-    root = Path(tempfile.mkdtemp(prefix='pinvou-ci-fixture-', dir='/tmp' if sys.platform == 'linux' else None))
-    identity = root.stat()
+    parent = None
+    if args.short_workspace_parent is not None:
+        parent = args.short_workspace_parent
+        if (sys.platform != 'win32' or not parent.is_absolute() or
+                not re.fullmatch(r'[A-Za-z]:', parent.drive) or
+                len(str(parent)) + 10 > 35 or any(c.isspace() for c in str(parent)) or
+                not parent.is_dir() or parent == Path(parent.anchor)):
+            raise ValueError('short workspace parent must be an existing short local Windows directory')
+        for ancestor in (parent, *parent.parents):
+            if ancestor.is_symlink() or getattr(ancestor.lstat(), 'st_file_attributes', 0) & 0x400:
+                raise ValueError('short workspace parent must not traverse a reparse point')
     ledger = args.receipt.parent / (args.receipt.stem + '-resources')
     ledger.mkdir()
     receipt = {'schema': 1, 'kind': 'process', 'id': uuid.uuid4().hex, 'state': 'registered', 'pid': os.getpid(), 'cleanup_failed': True}
     scope = uuid.uuid4().hex
-    receipt['workspace'] = {'path': str(root), 'dev': identity.st_dev, 'ino': identity.st_ino}
-    (root / '.pinvou-fixture-scope').write_text(scope, encoding='ascii')
-    if sys.platform == 'linux':
-        receipt['scope'] = {'id': scope, 'uid': os.getuid(), 'cgroup': hashlib.sha256(Path('/proc/self/cgroup').read_bytes()).hexdigest(), 'controller_start': Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]}
-    atomic_receipt(args.receipt, receipt)
+    root = None; identity = None; created = False
+    try:
+        if parent is not None:
+            # Persist an intent before creating anything outside the default
+            # TEMP. Cancellation here remains visible and fails closed; an
+            # allocating receipt never authorizes deletion without identity.
+            root = parent / ('p' + uuid.uuid4().hex[:8])
+            receipt.update(state='allocating', workspace={'path': str(root), 'dev': None, 'ino': None})
+            atomic_receipt(args.receipt, receipt)
+            root.mkdir()  # exclusive: never adopt a pre-existing directory
+        else:
+            root = Path(tempfile.mkdtemp(prefix='pinvou-ci-fixture-', dir='/tmp' if sys.platform == 'linux' else None))
+        created = True
+        receipt['workspace'] = {'path': str(root), 'dev': None, 'ino': None}
+        identity = root.stat()
+        receipt.update(state='registered', workspace={'path': str(root), 'dev': identity.st_dev, 'ino': identity.st_ino})
+        (root / '.pinvou-fixture-scope').write_text(scope, encoding='ascii')
+        if sys.platform == 'linux':
+            receipt['scope'] = {'id': scope, 'uid': os.getuid(), 'cgroup': hashlib.sha256(Path('/proc/self/cgroup').read_bytes()).hexdigest(), 'controller_start': Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]}
+        atomic_receipt(args.receipt, receipt)
+    except BaseException as error:
+        receipt.update(state='unconfirmed', cleanup_failed=True, error_class=type(error).__name__)
+        if created and identity is not None:
+            remove_owned_workspace(root, (identity.st_dev, identity.st_ino))
+            receipt['state'] = 'released'
+        try:
+            atomic_receipt(args.receipt, receipt)
+        except OSError:
+            pass  # retain the original failure and any already-persisted intent
+        raise
     env = {**os.environ, 'PINVOU_CI_PROCESS_SCOPE': scope, 'PINVOU_CI_FIXTURE_ROOT': str(root), 'PINVOU_CI_RESOURCE_LEDGER': str(ledger), 'TMPDIR': str(root), 'TMP': str(root), 'TEMP': str(root)}
     try:
         if sys.platform == 'linux':

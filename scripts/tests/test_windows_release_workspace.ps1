@@ -3,11 +3,33 @@ param([string]$NodeRuntimeZip)
 $ErrorActionPreference='Stop'
 $helper=Join-Path $PSScriptRoot '../windows-release-workspace.ps1'
 $tempBase=[IO.Path]::GetTempPath().TrimEnd('\')
-$labelLength=48-$tempBase.Length-1
-if($labelLength -lt 12){throw 'Test requires a temporary parent shorter than 36 characters'}
+# Keep every fixture and clone inside a registered process scope, including
+# cancellation paths where this script's finally block cannot execute.
+$ownedShortScope=$env:PINVOU_CI_FIXTURE_ROOT -and $tempBase -ieq $env:PINVOU_CI_FIXTURE_ROOT -and
+ $tempBase.Length -le 35 -and $tempBase -notmatch '\s' -and
+ (Test-Path -LiteralPath (Join-Path $tempBase '.pinvou-fixture-scope'))
+if(-not $ownedShortScope){
+ $candidate=[IO.DirectoryInfo]$PSScriptRoot
+ while($candidate -and ($candidate.FullName.Length+10 -gt 35 -or $candidate.FullName -match '\s')){$candidate=$candidate.Parent}
+ if(-not $candidate -or -not $candidate.Parent){throw 'No short non-root checkout ancestor is available for the workspace fixture'}
+ $receiptParent=if($env:PINVOU_CI_RESOURCE_LEDGER){$env:PINVOU_CI_RESOURCE_LEDGER}else{[IO.Path]::GetTempPath()}
+ $receipt=Join-Path $receiptParent ('workspace-test-'+[Guid]::NewGuid().ToString('N')+'.json')
+ $python=if($env:PINVOU_CI_PYTHON){$env:PINVOU_CI_PYTHON}else{'python'}
+ $child=@('-NoProfile','-NonInteractive','-File',$PSCommandPath)
+ if($NodeRuntimeZip){$child+=@('-NodeRuntimeZip',[IO.Path]::GetFullPath($NodeRuntimeZip))}
+ Write-Output "Workspace input TEMP length $($tempBase.Length); supervisor receipt: $receipt"
+ & $python (Join-Path $PSScriptRoot '../ci-fixture-process.py') --short-workspace-parent $candidate.FullName --receipt $receipt -- (Join-Path $PSHOME 'pwsh.exe') @child
+ if($LASTEXITCODE -ne 0){throw "Supervised workspace regression failed ($LASTEXITCODE); original receipt retained: $receipt"}
+ return
+}
+$fixtureParent=$tempBase
+$labelLength=48-$fixtureParent.Length-1
 # A 48-character parent forces the created checkout to the supported 56-character limit.
 $label=('rwt-'+[Guid]::NewGuid().ToString('N')+[Guid]::NewGuid().ToString('N')).Substring(0,$labelLength)
-$fixture=Join-Path $tempBase $label
+$fixture=Join-Path $fixtureParent $label
+# Creation without -Force refuses a pre-existing fixture rather than adopting it.
+New-Item -ItemType Directory -Path $fixture -ErrorAction Stop|Out-Null
+Write-Output "Workspace fixture: TEMP length $($tempBase.Length), parent length $($fixtureParent.Length), fixture length $($fixture.Length)."
 $source=Join-Path $fixture ('nested/checkout-'+('long-path-'*5));$statePath=Join-Path $fixture 'state.json'
 $outside=Join-Path $fixture 'unrelated';$owner='workspace-test/'+[Guid]::NewGuid().ToString('N')
 $savedEnv=@{};foreach($key in @('GITHUB_ENV','GITHUB_OUTPUT','GITHUB_REPOSITORY')){$savedEnv[$key]=[Environment]::GetEnvironmentVariable($key);[Environment]::SetEnvironmentVariable($key,$null)}
@@ -34,6 +56,16 @@ try {
  if((Git-Test @('-C',$state.root,'rev-parse','HEAD')) -ne $commit){throw 'Pinned source differs'}
  if((Git-Test @('-C',$state.root,'rev-parse','--is-shallow-repository')) -ne 'true'){throw 'Shallow checkout handling differs'}
  if([IO.File]::ReadAllText((Join-Path $state.root 'fixture.txt')) -ne 'original source'){throw 'Working files differ'}
+ # A short source containing whitespace must also be relocated, independently
+ # of the length trigger. Its original source must survive cleanup.
+ $spaceSource=Join-Path $fixture 'a b';$spaceState=Join-Path $fixture 'space-state.json'
+ Git-Test @('clone','--quiet','--shared',$source,$spaceSource)|Out-Null
+ if($spaceSource.Length -gt 56){throw 'Whitespace case must exercise a short source'}
+ & $helper -SourceRoot $spaceSource -ExpectedCommit $commit -TemporaryRoot $fixture -StatePath $spaceState -Owner ($owner+'/space')|Out-Null
+ $space=Get-Content -LiteralPath $spaceState -Raw|ConvertFrom-Json
+ if(-not $space.created -or $space.root -match '\s' -or $space.root.Length -gt 56){throw 'Short whitespace checkout was not relocated'}
+ & $helper -Mode Cleanup -SourceRoot $spaceSource -TemporaryRoot $fixture -StatePath $spaceState -Owner ($owner+'/space')|Out-Null
+ if((Test-Path -LiteralPath $space.root) -or -not(Test-Path -LiteralPath (Join-Path $spaceSource 'fixture.txt'))){throw 'Whitespace cleanup did not preserve the original source'}
  # A target substitution must never remove an unrelated sibling.
  $tampered=Join-Path $fixture 'tampered.json';$bad=$state|Select-Object *;$bad.root=$outside
  [IO.File]::WriteAllText($tampered,($bad|ConvertTo-Json))
@@ -63,10 +95,20 @@ try {
  Write-Output 'Windows release workspace: pinning, short paths and cleanup isolation passed.'
  if($NodeRuntimeZip){Write-Output 'Real Node/npm archive expansion passed under Windows PowerShell 5.1.'}
 } finally {
+ if($spaceState -and (Test-Path -LiteralPath $spaceState)){
+  $pendingSpace=Get-Content -LiteralPath $spaceState -Raw|ConvertFrom-Json
+  if($pendingSpace.created -and ((Test-Path -LiteralPath $pendingSpace.root) -or (Test-Path -LiteralPath ($pendingSpace.root+'.owner.json')))){
+   & $helper -Mode Cleanup -SourceRoot $spaceSource -TemporaryRoot $fixture -StatePath $spaceState -Owner ($owner+'/space')|Out-Null
+  }
+ }
  if((Test-Path -LiteralPath $statePath) -and $state -and $state.created -and (Test-Path -LiteralPath $state.root)){
   & $helper -Mode Cleanup -SourceRoot $source -TemporaryRoot $fixture -StatePath $statePath -Owner $owner|Out-Null
  }
  foreach($key in $savedEnv.Keys){[Environment]::SetEnvironmentVariable($key,$savedEnv[$key])}
- $resolved=[IO.Path]::GetFullPath($fixture);$temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
- if($resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $resolved) -ceq $label){Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction SilentlyContinue}
+ $resolved=[IO.Path]::GetFullPath($fixture)
+ if([IO.Path]::GetDirectoryName($resolved) -ine $fixtureParent -or (Split-Path -Leaf $resolved) -cne $label){throw 'Unexpected workspace fixture cleanup path'}
+ if(Test-Path -LiteralPath $resolved){
+  if((Get-Item -LiteralPath $resolved -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Workspace fixture root became a reparse point'}
+  Remove-Item -LiteralPath $resolved -Recurse -Force
+ }
 }

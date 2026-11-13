@@ -23,7 +23,8 @@ private-runtimes/windows  -> 公开运行时仓库的确定 commit
 
 运行时仓库的 `payload/` 按组件保存资源。Poppler、Tesseract、ASR、7-Zip 分别使用一个
 确定性 ZIP；Python、Node.js、Pandoc、ONNX Runtime 继续使用各自的上游组件包；
-VC Runtime 保持独立文件。二进制由 Git LFS 管理。
+VC Runtime 保持独立文件。运行时仓库历史中的二进制仍由 Git LFS 管理；主仓库初始化
+不下载 LFS 对象，而从公开的固定 Release 附件物化同一 manifest 所锁定的文件。
 
 `windows-runtime.manifest.json` 当前锁定 9 个仓库级资源、四个组件 ZIP 内部
 112 个 7-Zip/Poppler/Tesseract/ASR 文件，以及 2145 个最终 staging 文件的路径、大小和 SHA-256。
@@ -51,7 +52,12 @@ npm run build:nsis
 ```
 
 运行时 submodule 配置为 `update = none`，普通的递归 submodule 初始化只处理公共底座，
-Windows 构建机通过 `runtime:windows:init` 显式覆盖该策略并拉取 Git LFS 对象。
+Windows 构建机通过 `runtime:windows:init` 显式准备固定 gitlink 的源码和 manifest，
+禁用自动 LFS smudge，然后匿名下载该 commit 对应的 `runtime-<完整40位commit>` Release 附件。
+附件名称取 manifest 中资源路径的文件名，下载、缓存复用和物化均校验清单大小及 SHA-256；
+不使用 `latest`，也不回退到 `git lfs pull`。旧 `-ForceLfsPull` 调用作为 `-ForceDownload` 的别名保留。
+更新运行时前，需先在公开运行时仓库发布对应固定 commit 的 Release，上传 manifest 中的全部载荷附件；
+验证附件内容与清单一致后再更新主仓库 gitlink/lock。缺附件或校验不符会阻止初始化，不得通过修改缓存元数据绕过。
 
 ### Jenkins 子模块准备
 
@@ -63,10 +69,11 @@ npm --prefix pinvou3-app run runtime:windows:init
 ```
 
 `CodeWhale` 当前没有嵌套 submodule，因此不需要 `--recursive`。`runtime:windows:init` 会比较主仓库 gitlink 与本地 runtime
-commit；更新 checkout 时显式禁用 LFS smudge，一致且工作树中不存在 LFS pointer 时，跳过 submodule update 和
-`git lfs pull`。脚本输出的
-`PINVOU3_WINDOWS_RUNTIME_CACHE_KEY=pinvou3-windows-runtime-v5-<commit>-<lock-sha-prefix>` 可作为 Jenkins 缓存键，
-缓存外置 Git LFS objects 和 `pinvou3-app/src-tauri/target/windows-runtime` 中已验证的 staging。缓存 schema、gitlink 或
+commit；更新 checkout 时显式禁用 LFS smudge，一致时复用源码 checkout。随后按固定 manifest
+校验 `release-assets/` 的内容寻址缓存，缺失或损坏时重新下载固定附件，再原子物化到 runtime 工作树。
+脚本输出的
+`PINVOU3_WINDOWS_RUNTIME_CACHE_KEY=pinvou3-windows-runtime-v6-<commit>-<lock-sha-prefix>` 可作为 Jenkins 缓存键，
+缓存 `pinvou3-app/src-tauri/target/windows-runtime` 中已验证的 Release 附件和 staging。缓存 schema、gitlink 或
 主仓库 runtime lock 任一变化都会生成新键。
 
 同一工作区上的并发初始化与 staging 调用通过 `target/windows-runtime/.resolver.lock` 串行化；等待方最多阻塞 120 秒，
@@ -83,7 +90,8 @@ npm --prefix pinvou3-app run runtime:windows:cache-key
 ```
 
 取得缓存键后，Jenkins 只恢复 `pinvou3-app/src-tauri/target/windows-runtime`，再执行本节开头的 submodule 准备命令。
-其中 `lfs-storage/` 是脚本通过命令级 `lfs.storage` 使用的外置 Git LFS 对象库，其余目录保存已验证、已展开的安装资源。
+其中 `release-assets/` 按内容哈希保存经过大小与 SHA-256 复验的固定 Release 附件，其余目录保存已验证、已展开的安装资源。
+旧 `lfs-storage/` 不是 v6 初始化的输入，无需恢复；缓存命中仍须按锁定 manifest 复验，不能自行信任缓存元数据。
 不得把 `.git/modules/private-runtimes/windows/lfs/objects` 作为独立缓存路径恢复到全新 workspace；这会提前创建不完整的
 submodule gitdir，导致后续 `git submodule update --init` 无法初始化 runtime。
 
@@ -99,8 +107,7 @@ GitHub Actions 当前也未跨 workflow run 持久化 runtime，只能复用单�
 GitHub Actions 构建 Windows NSIS 时仍进入 `windows-release` Environment，作为正式发布边界；
 job 自身只允许 `main`，Environment 可按发布策略进一步配置 protected branch 和 required reviewers。
 运行时仓库已公开，不需要仓库级、组织级或 Environment Secret。checkout 设置
-`persist-credentials: false`，初始化脚本按锁定 URL、gitlink 和 manifest 匿名拉取运行时及
-Git LFS 对象。
+`persist-credentials: false`，初始化脚本按锁定 URL、gitlink 和 manifest 匿名准备源码并下载固定 Release 附件。
 
 所有 PR（包括同仓 PR）只运行不拉取大型运行时的 Windows 打包契约测试。只有 `main` 的发布链路
 push 或在 `main` 上执行的 `workflow_dispatch` 才能进入 `windows-release` 构建正式 NSIS；
