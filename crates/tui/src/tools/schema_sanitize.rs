@@ -28,18 +28,52 @@ use crate::models::Tool;
 /// - Collapse single-element `oneOf` / `allOf`
 /// - Walk recursively through all subschemas
 pub fn sanitize(schema: &mut Value) {
+    sanitize_in_instance(schema, &[]);
+}
+
+/// Sanitize a schema for one JSON instance scope.
+///
+/// `enclosing_properties` carries the property names declared by the
+/// enclosing object schema for the *same* instance: a `required` array
+/// inside a composition branch refers to that instance, so a required-only
+/// branch such as `oneOf: [{required: ["patch"]}, ...]` (the builtin
+/// `apply_patch` shape) keeps its entries — they resolve against the root
+/// `properties` — instead of being pruned into `{}`, which under `oneOf`
+/// semantics would reject every instance (all-empty branches match
+/// everything, so exactly-one-match is unsatisfiable). Every other keyword
+/// (`properties.*`, `items`, `additionalProperties`, ...) validates a
+/// different instance, so the context resets there and only genuinely
+/// dangling names are pruned.
+fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
     collapse_nullable_unions(schema);
     inject_properties_on_bare_objects(schema);
-    prune_dangling_required(schema);
+    prune_dangling_required(schema, enclosing_properties);
     collapse_single_element_unions(schema);
     // Recurse into all sub-schemas
     if let Some(obj) = schema.as_object_mut() {
-        for (_, v) in obj.iter_mut() {
-            sanitize(v);
+        let local_properties: Vec<String> = obj
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .map(|props| props.keys().cloned().collect())
+            .unwrap_or_default();
+        for (key, v) in obj.iter_mut() {
+            if matches!(
+                key.as_str(),
+                "oneOf" | "anyOf" | "allOf" | "not" | "if" | "then" | "else"
+            ) {
+                sanitize_in_instance(v, &local_properties);
+            } else {
+                sanitize_in_instance(v, &[]);
+            }
         }
     } else if let Some(arr) = schema.as_array_mut() {
+        // Composition branch lists arrive as the array value of a
+        // composition keyword, whose context the parent already chose —
+        // thread it so each branch prunes against the enclosing
+        // properties. Non-composition arrays enter with an empty context
+        // and keep it.
         for v in arr.iter_mut() {
-            sanitize(v);
+            sanitize_in_instance(v, enclosing_properties);
         }
     }
 }
@@ -121,7 +155,7 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
     obj.remove("enum");
     obj.remove("not");
     ensure_properties_object(obj);
-    prune_dangling_required(schema);
+    prune_dangling_required(schema, &[]);
     combine_constraint_notes(constraint_note, dependent_note)
 }
 
@@ -187,7 +221,7 @@ pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
     if stripped_composition.is_some() && !obj.contains_key("type") {
         obj.insert("type".into(), Value::String("object".to_string()));
     }
-    prune_dangling_required(schema);
+    prune_dangling_required(schema, &[]);
     constraint_note.or_else(|| {
         // Merged properties do not compensate for the dropped composition:
         // a union of `additionalProperties:false` branches merges its branch
@@ -304,16 +338,29 @@ fn inject_properties_on_bare_objects(schema: &mut Value) {
 }
 
 /// Remove entries from `required` that aren't keys in `properties`.
-fn prune_dangling_required(schema: &mut Value) {
+///
+/// An object with no local `properties` declaration at all (a required-only
+/// composition branch) resolves names against `enclosing_properties` — the
+/// same-instance property names declared by the enclosing object schema —
+/// before a name is declared dangling. A local `properties` key, even empty,
+/// keeps the strictly local resolution (the DeepSeek strict validator reads
+/// required against the schema object it validates, so an injected empty
+/// properties map must not silently adopt the enclosing names).
+fn prune_dangling_required(schema: &mut Value, enclosing_properties: &[String]) {
     let Some(obj) = schema.as_object_mut() else {
         return;
     };
     // Collect known property names first (immutable borrow), then prune.
-    let known_keys: Vec<String> = obj
+    let local_keys: Vec<String> = obj
         .get("properties")
         .and_then(|v| v.as_object())
         .map(|props| props.keys().cloned().collect())
         .unwrap_or_default();
+    let known_keys: &[String] = if obj.contains_key("properties") {
+        &local_keys
+    } else {
+        enclosing_properties
+    };
     let Some(required) = obj.get_mut("required").and_then(|v| v.as_array_mut()) else {
         return;
     };
@@ -646,6 +693,121 @@ mod tests {
         });
         sanitize(&mut schema);
         assert!(schema.get("required").is_none());
+    }
+
+    #[test]
+    fn required_only_composition_branches_resolve_against_the_enclosing_properties() {
+        // `required` inside a composition branch refers to the SAME instance
+        // the enclosing schema validates, so a required-only branch
+        // (`{required: ["patch"]}` with the field declared in the enclosing
+        // `properties`) is not dangling: pruning it would leave `oneOf:
+        // [{}, {}, {}]`, whose every branch matches every instance — under
+        // exactly-one semantics that contract admits no instance at all
+        // (review 5885719142: the registry handed exactly that shape for
+        // the builtin apply_patch tool, and the verbatim Messages lanes
+        // forwarded it).
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "patch": {"type": "string"},
+                "replace": {"type": "array"}
+            },
+            "oneOf": [
+                {"required": ["patch"]},
+                {"required": ["replace"]}
+            ]
+        });
+        sanitize(&mut schema);
+        assert_eq!(
+            schema["oneOf"],
+            json!([{"required": ["patch"]}, {"required": ["replace"]}]),
+            "required-only branches must keep their enclosing-resolvable names"
+        );
+    }
+
+    #[test]
+    fn genuinely_dangling_branch_required_still_prunes_against_the_enclosing_properties() {
+        // The fallback resolves names only against what the enclosing
+        // schema actually declares: a branch requiring a name that exists
+        // nowhere stays dangling and is pruned, keeping the DeepSeek
+        // strict-validator workaround intact.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"patch": {"type": "string"}},
+            "oneOf": [
+                {"required": ["patch"]},
+                {"required": ["ghost"]}
+            ]
+        });
+        sanitize(&mut schema);
+        assert_eq!(
+            schema["oneOf"],
+            json!([{"required": ["patch"]}, {}]),
+            "an enclosing-unresolvable branch name must still prune"
+        );
+    }
+
+    #[test]
+    fn nested_instance_scopes_do_not_inherit_the_enclosing_required_context() {
+        // `properties.*` and `items` validate DIFFERENT instances: a
+        // required-only branch inside them must not resolve against the
+        // outer object's property names, or a genuinely dangling nested
+        // name would survive on the strength of an unrelated sibling.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "patch": {"type": "string"},
+                "handler": {
+                    "type": "object",
+                    "properties": {"kind": {"type": "string"}},
+                    "oneOf": [
+                        {"required": ["ghost"]},
+                        {"type": "string"}
+                    ]
+                }
+            }
+        });
+        sanitize(&mut schema);
+        assert_eq!(
+            schema["properties"]["handler"]["oneOf"],
+            json!([{}, {"type": "string"}]),
+            "a nested instance scope resets the property context"
+        );
+    }
+
+    #[test]
+    fn branch_with_local_properties_keeps_strictly_local_required_resolution() {
+        // A branch declaring its own `properties` (the self-contained
+        // alternative shape) resolves `required` locally exactly as before:
+        // the DeepSeek strict validator reads required against the branch's
+        // own advertised properties, so an injected or declared empty
+        // properties map must not silently adopt the enclosing names.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "patch": {"type": "string"},
+                "handler": {
+                    "type": "object",
+                    "properties": {"kind": {"type": "string"}},
+                    "required": ["kind", "patch"],
+                    "oneOf": [
+                        {"type": "object", "properties": {"kind": {"type": "string"}}, "required": ["kind", "patch"]},
+                        {"type": "string"}
+                    ]
+                }
+            }
+        });
+        sanitize(&mut schema);
+        assert_eq!(
+            schema["properties"]["handler"]["required"],
+            json!(["kind"]),
+            "a local-properties branch prunes against its own map only"
+        );
+        assert_eq!(
+            schema["properties"]["handler"]["oneOf"][0]["required"],
+            json!(["kind"]),
+            "the local-properties branch alternative prunes the same way"
+        );
     }
 
     #[test]
