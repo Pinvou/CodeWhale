@@ -12,6 +12,8 @@ import { PricingLifecycleWorkspace } from './PricingLifecycleWorkspace.jsx';
 import { AdminOperationsWorkspace } from './AdminOperationsWorkspace.jsx';
 import { AdminAccountClosureWorkspace } from './AdminAccountClosureWorkspace.jsx';
 import { AdminRepairQueue } from './AdminRepairQueue.jsx';
+import { registrationQueueCopy } from '../../shared/admin-registration-queue-i18n.js';
+import { profileRepairQueueCopy } from '../../shared/admin-profile-repair-i18n.js';
 import { personalPortalSections } from './portal-sections.js';
 
 export function AdminProductsPage({ client, me, copy, language, permissions, route }) {
@@ -38,9 +40,13 @@ export function AdminOperationsPage({ client, me, copy, language, permissions, r
     ['profile', 'platform.profile-changes.repair', copy.userManagement.profileRepair],
   ].filter(([, permission]) => permissions.includes(permission));
   const closureDenied = route.operationsTab === 'closures' && !permissions.includes('platform.account-closures.read');
-  const active = closureDenied ? null : tabs.some(([key]) => key === route.operationsTab) ? route.operationsTab : tabs[0]?.[0];
+  const registrationDenied = route.operationsTab === 'registration' && !permissions.includes('platform.registrations.repair');
+  const profileDenied = route.operationsTab === "profile" && !permissions.includes("platform.profile-changes.repair");
+  const active = closureDenied || registrationDenied || profileDenied ? null : tabs.some(([key]) => key === route.operationsTab) ? route.operationsTab : tabs[0]?.[0];
   return <section><nav className="adm-tabs">{tabs.map(([key, , label]) => <button key={key} aria-pressed={active === key} onClick={() => route.navigate('operations', { operations_page: key })}>{label}</button>)}</nav>
     {closureDenied && <p role="alert">{accountClosureCopy[language].listPermissionDenied}</p>}
+    {registrationDenied && <p role="alert">{registrationQueueCopy[language].denied}</p>}
+    {profileDenied && <p role="alert">{profileRepairQueueCopy[language].denied}</p>}
     <RetainedWorkspace active={active} available={tabs.map(([key]) => key)}>{view => <>
       {view === 'policy' && <AdminOperationsWorkspace {...{ client, copy, language, permissions, authorizationRefreshing }} currentUserID={me.user_id} authorizationRefreshGuard={authorizationRefreshRef} />}
       {view === 'closures' && <AdminAccountClosureWorkspace {...{ client, me, language }} />}

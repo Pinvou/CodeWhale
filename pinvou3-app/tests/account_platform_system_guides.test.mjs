@@ -24,7 +24,7 @@ async function loadComponent() {
   if (component) return component;
   const name = 'AdminSystemStatusWorkspace.jsx';
   const raw = await readFile(new URL(name, sourceRoot), 'utf8'); sourceHash = createHash('sha256').update(raw).digest('hex');
-  let source = raw;
+  let source = raw.replace(/^import ['"][^'"]+\.css['"];?\r?$/gm, '');
   for (const match of [...source.matchAll(/from (["'])([^"']+)\1/g)]) {
     const resolved = match[2].startsWith('.') ? new URL(match[2], sourceRoot).href : pathToFileURL(nodeRequire.resolve(match[2])).href;
     source = source.replace(match[0], 'from ' + JSON.stringify(resolved));

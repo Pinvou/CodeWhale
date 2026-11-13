@@ -403,11 +403,13 @@ function completeTokenManagementCopy(translations) {
       en: { title: 'Provisioning overview', boundary: 'Current authoritative route provisioning facts only.', unavailable: 'The provisioning overview is temporarily unavailable.' },
       ja: { title: 'Provisioning 概要', boundary: '現在のルート Provisioning の正式な情報のみを集計します。', unavailable: 'リソース設定の概要を一時的に読み込めません。' },
     }[language];
-    copy.pageOverviews.titles.modelOperations = provisioningCopy.title;
-    copy.pageOverviews.boundaries.modelOperations = provisioningCopy.boundary;
+    copy.provisioningPresentation = {"zh":{"listTitle":"资源配置任务","overviewTitle":"资源配置任务概览","overviewLead":"汇总当前可读取的路由配置任务。","versions":"配置版本","effective":"已生效版本","target":"计划版本","choose":"选择或手动输入","fromPage":"从本页选择"},"en":{"listTitle":"Resource provisioning tasks","overviewTitle":"Resource provisioning overview","overviewLead":"Current route provisioning tasks you can access.","versions":"Configuration versions","effective":"Active version","target":"Planned version","choose":"Choose or enter an ID","fromPage":"Choose from this page"},"ja":{"listTitle":"リソース設定タスク","overviewTitle":"リソース設定タスクの概要","overviewLead":"現在参照できるルート設定タスクを集計します。","versions":"設定バージョン","effective":"適用済みバージョン","target":"予定バージョン","choose":"選択または ID を入力","fromPage":"このページから選択"}}[language];
+    copy.pageOverviews.titles.modelOperations = copy.provisioningPresentation.overviewTitle;
+    copy.pageOverviews.boundaries.modelOperations = copy.provisioningPresentation.overviewLead;
     copy.pageOverviews.unavailable.modelOperations = provisioningCopy.unavailable;
     copy.pageOverviews.provisioningFailure = { language, ...{"zh":{"diagnostics":"查看诊断信息","code":"服务错误码","localList":"任务列表独立加载，请以下方状态为准。"},"en":{"diagnostics":"View diagnostics","code":"Service error code","localList":"The task list loads separately. Check its status below."},"ja":{"diagnostics":"診断情報を表示","code":"サービスエラーコード","localList":"タスク一覧は個別に読み込まれます。下の状態をご確認ください。"}}[language] };
 
+    copy.provisioningTaskIdentity = {"zh":{"object":"配置对象","model":"模型 ID","account":"活跃 Token 账户","noAccount":"未提供活跃账户","unavailable":"未提供","view":"查看任务详情","snapshot":"此处展示当前列表中的任务资料。","taskID":"任务 ID"},"en":{"object":"Provisioned resources","model":"Model ID","account":"Active Token account","noAccount":"Active account not provided","unavailable":"Not provided","view":"View task details","snapshot":"These task details come from the current list.","taskID":"Task ID"},"ja":{"object":"設定対象","model":"モデル ID","account":"有効な Token アカウント","noAccount":"有効なアカウントの情報なし","unavailable":"未提供","view":"タスクの詳細を表示","snapshot":"現在の一覧に含まれるタスク情報です。","taskID":"タスク ID"}}[language];
     const { pricingControls, ...modelAdditions } = additions[language];
     const list = priceListCopy[language];
     const risk = priceRiskCopy[language];
@@ -592,4 +594,173 @@ Object.assign(tokenManagementCopy.ja.modelToken, {
   },
   "tokenResourceScopeUnknown": "共有ポリシーは未確認",
   "tokenResourcePolicy": "共有ポリシー"
+});
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "tokenResourceAccountID": "Token 账户 ID"
+});
+
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "tokenResourceAccountID": "Token account ID"
+});
+
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "tokenResourceAccountID": "トークンアカウント ID"
+});
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "accountRecoverySearchDisclosure": "按命令引用精确查询",
+  "accountRecoverySearchGuide": "输入完整命令引用，在当前可见的待处理队列中查找。",
+  "accountRecoveryActiveQuery": "已应用的命令引用",
+  "accountRecoveryClearQuery": "清除命令引用",
+  "accountRecoveryEmpty": "当前没有待人工处理的账户创建命令。",
+  "accountRecoveryNoMatch": "当前没有与此命令引用匹配的待处理项。",
+  "accountRecoveryEmptyPage": "当前页没有可显示的待处理项。"
+});
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "accountRecoverySearchDisclosure": "Find an exact command reference",
+  "accountRecoverySearchGuide": "Enter the full command reference to search the pending items you can access.",
+  "accountRecoveryActiveQuery": "Applied command reference",
+  "accountRecoveryClearQuery": "Clear command reference",
+  "accountRecoveryEmpty": "No account creation commands currently need manual review.",
+  "accountRecoveryNoMatch": "No pending item matches this command reference.",
+  "accountRecoveryEmptyPage": "No pending items are shown on this page."
+});
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "accountRecoverySearchDisclosure": "コマンド参照を完全一致で検索",
+  "accountRecoverySearchGuide": "完全なコマンド参照を入力し、閲覧可能な保留中の項目を検索します。",
+  "accountRecoveryActiveQuery": "適用中のコマンド参照",
+  "accountRecoveryClearQuery": "コマンド参照を消去",
+  "accountRecoveryEmpty": "現在、手動確認が必要なアカウント作成コマンドはありません。",
+  "accountRecoveryNoMatch": "このコマンド参照に一致する保留中の項目はありません。",
+  "accountRecoveryEmptyPage": "このページに表示できる保留中の項目はありません。"
+});
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "tokenAccountDetail": "Token 账户详情",
+  "backToAccounts": "返回 Token 账户列表",
+  "tokenAccountViews": "Token 账户详情页签",
+  "tokenAccountProvisioning": "开通记录",
+  "tokenAccountProvisioningItem": "开通任务"
+});
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "tokenAccountDetail": "Token account details",
+  "backToAccounts": "Back to Token accounts",
+  "tokenAccountViews": "Token account detail views",
+  "tokenAccountProvisioning": "Provisioning records",
+  "tokenAccountProvisioningItem": "Provisioning task"
+});
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "tokenAccountDetail": "トークンアカウントの詳細",
+  "backToAccounts": "トークンアカウント一覧に戻る",
+  "tokenAccountViews": "トークンアカウントの詳細タブ",
+  "tokenAccountProvisioning": "プロビジョニング履歴",
+  "tokenAccountProvisioningItem": "プロビジョニングタスク"
+});
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "tokenAccountSnapshotTime": "数据快照时间",
+  "tokenAccountSnapshotUnknown": "数据快照时间未提供",
+  "tokenAccountRecordTime": "账户记录更新时间",
+  "tokenAccountTechnical": "账户技术信息"
+});
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "tokenAccountSnapshotTime": "Data snapshot time",
+  "tokenAccountSnapshotUnknown": "Data snapshot time not provided",
+  "tokenAccountRecordTime": "Account record updated",
+  "tokenAccountTechnical": "Account technical details"
+});
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "tokenAccountSnapshotTime": "データのスナップショット時刻",
+  "tokenAccountSnapshotUnknown": "データのスナップショット時刻は未提供",
+  "tokenAccountRecordTime": "アカウントレコードの更新時刻",
+  "tokenAccountTechnical": "アカウントの技術情報"
+});
+
+const catalogDirectoryCopy = {
+  zh: { previewSync: '预览目录同步', syncLead: '比较当前目录与来源快照。预览不会修改目录，确认后才提交同步。', noVersion: '尚未选择来源版本', selectVersion: '输入有效的来源版本以查看回滚影响。', observedVersion: (current, observed) => '当前目录版本：' + current + ' · 来源快照：' + observed },
+  en: { previewSync: 'Preview catalog sync', syncLead: 'Compare the current catalog with the source snapshot. Preview makes no changes; syncing requires confirmation.', noVersion: 'No source version selected', selectVersion: 'Enter a valid source version to preview rollback impact.', observedVersion: (current, observed) => 'Current catalog version: ' + current + ' · Source snapshot: ' + observed },
+  ja: { previewSync: 'カタログ同期をプレビュー', syncLead: '現在のカタログとソースのスナップショットを比較します。プレビューでは変更せず、確認後に同期を送信します。', noVersion: 'ソースバージョン未選択', selectVersion: '有効なソースバージョンを入力してロールバックの影響を確認してください。', observedVersion: (current, observed) => '現在のカタログバージョン：' + current + ' · ソーススナップショット：' + observed },
+};
+for (const language of ['zh', 'en', 'ja']) tokenManagementCopy[language].modelToken.catalogDirectory = catalogDirectoryCopy[language];
+
+const catalogFilterCopy = {
+  zh: { protocolHelp: '可直接输入完整协议代码，也可以从本页已加载的代码中选取。', adapterHelp: '当前目录不提供 Adapter 选项。请输入完整 Adapter 版本代码。', knownProtocols: '本页已加载的协议代码', noKnownProtocols: '已加载的代码中无匹配项，仍可按完整代码搜索。' },
+  en: { protocolHelp: 'Enter an exact protocol code or choose one from this page’s loaded results.', adapterHelp: 'This catalog does not provide Adapter options. Enter the exact Adapter version code.', knownProtocols: 'Protocol codes loaded on this page', noKnownProtocols: 'No loaded code matches. You can still search by exact code.' },
+  ja: { protocolHelp: 'プロトコルコードを完全に入力するか、このページで読み込んだコードから選択してください。', adapterHelp: 'このカタログは Adapter の候補を提供しません。Adapter バージョンの完全なコードを入力してください。', knownProtocols: 'このページで読み込んだプロトコルコード', noKnownProtocols: '読み込んだコードに一致はありません。完全なコードで検索できます。' },
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(tokenManagementCopy[language].modelToken.catalogDirectory, catalogFilterCopy[language]);
+
+const catalogListCopy = {
+  zh: { locale: 'zh-CN', tokenLength: '上下文长度（Token）', unknown: '未提供', listDenied: '当前无权读取模型目录', empty: '当前目录没有模型。', noMatches: '没有模型符合当前筛选条件。', stale: '下方显示上一次成功读取的结果。' },
+  en: { locale: 'en-US', tokenLength: 'Context length (tokens)', unknown: 'Not available', listDenied: 'You do not have access to read the model catalog', empty: 'The current catalog has no models.', noMatches: 'No models match the applied filters.', stale: 'The list below shows the last successful results.' },
+  ja: { locale: 'ja-JP', tokenLength: 'コンテキスト長（トークン）', unknown: '未提供', listDenied: 'モデルカタログの読み取り権限がありません', empty: '現在のカタログにモデルはありません。', noMatches: '適用した条件に一致するモデルはありません。', stale: '下には前回正常に読み取った結果を表示しています。' },
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(tokenManagementCopy[language].modelToken.catalogDirectory, catalogListCopy[language]);
+
+const protocolTaskViews = {
+  zh: { label: '协议与公式任务', advanced: '高级筛选', applied: count => '已应用 ' + count + ' 项', noAccess: '当前无权读取此列表', empty: '此列表暂无记录。' },
+  en: { label: 'Protocol and formula tasks', advanced: 'Advanced filters', applied: count => count + ' applied', noAccess: 'You do not have access to this list', empty: 'This list has no records yet.' },
+  ja: { label: 'プロトコルと計算式の操作', advanced: '詳細フィルター', applied: count => count + ' 件適用中', noAccess: 'この一覧の読み取り権限がありません', empty: 'この一覧にレコードはありません。' },
+};
+for (const language of ['zh', 'en', 'ja']) tokenManagementCopy[language].modelToken.protocolTaskViews = protocolTaskViews[language];
+
+const protocolDefinitionViews = {
+  zh: { title: '协议定义详情', open: '查看协议定义', snapshot: '来自当前列表快照', unavailable: '当前获准列表没有该协议版本。', unknown: '未提供字段声明', unsupported: '无法确认字段结构', empty: '此版本没有声明字段；这不代表接受任意输入。', additionalAllowed: '此结构明确允许额外字段。', additionalDenied: '此结构明确不允许额外字段。', type: '字段类型', requirement: '是否必填', required: '必填', notRequired: '非必填', notDeclared: '未声明' },
+  en: { title: 'Protocol definition details', open: 'View protocol definition', snapshot: 'From the current list snapshot', unavailable: 'This protocol version is not in the current authorized list.', unknown: 'No field declaration was provided', unsupported: 'The field structure could not be verified', empty: 'This version declares no fields. This does not imply arbitrary input is allowed.', additionalAllowed: 'This schema explicitly allows additional fields.', additionalDenied: 'This schema explicitly disallows additional fields.', type: 'Field type', requirement: 'Requirement', required: 'Required', notRequired: 'Not required', notDeclared: 'Not declared' },
+  ja: { title: 'プロトコル定義の詳細', open: 'プロトコル定義を表示', snapshot: '現在の一覧スナップショット', unavailable: '現在許可されている一覧にこのバージョンがありません。', unknown: 'フィールド宣言が提供されていません', unsupported: 'フィールド構造を確認できません', empty: 'このバージョンには宣言済みフィールドがありません。任意入力を許可する意味ではありません。', additionalAllowed: 'このスキーマは追加フィールドを明示的に許可しています。', additionalDenied: 'このスキーマは追加フィールドを明示的に禁止しています。', type: 'フィールド型', requirement: '必須条件', required: '必須', notRequired: '必須ではない', notDeclared: '宣言なし' },
+};
+for (const language of ['zh', 'en', 'ja']) tokenManagementCopy[language].modelToken.protocolDefinitionView = protocolDefinitionViews[language];
+
+const formulaPresentation = {
+  zh: { billingUnits: '计费可用计量单位', noActiveUnits: '当前没有可用于新公式草稿的有效单位。', safeCalculation: '只使用允许的输入参数', previewFacts: '这是已保存公式的配置预览，不会运行公式。', formulaVersion: '公式版本', mappingHelp: '每个计量单位对应一个允许的输入参数。', sampleNotice: '缺少可选参数时，服务端样本用 0 示意；这不是本次用量或费用。', sampleUnknown: '预览未提供可确认的缺省样本。', sampleValue: value => '缺省样本：' + value, units: { INPUT_TOKEN:'输入 Token', CACHED_INPUT_TOKEN:'缓存输入 Token', OUTPUT_TOKEN:'输出 Token', IMAGE:'图片', REQUEST:'请求', DOCUMENT:'文档' } },
+  en: { billingUnits: 'Metering units available for billing', noActiveUnits: 'No active units are available for a new formula draft.', safeCalculation: 'Uses allowed input parameters', previewFacts: 'This preview shows the saved formula configuration. It does not run the formula.', formulaVersion: 'Formula version', mappingHelp: 'Each metering unit maps to one allowed input parameter.', sampleNotice: 'The server sample uses 0 for absent optional parameters. It does not show actual usage or charges.', sampleUnknown: 'The preview did not provide a verifiable default sample.', sampleValue: value => 'Default sample: ' + value, units: { INPUT_TOKEN:'Input tokens', CACHED_INPUT_TOKEN:'Cached input tokens', OUTPUT_TOKEN:'Output tokens', IMAGE:'Images', REQUEST:'Requests', DOCUMENT:'Documents' } },
+  ja: { billingUnits: '請求に使える計量単位', noActiveUnits: '新しい計算式ドラフトに使える有効な単位がありません。', safeCalculation: '許可された入力パラメーターを使用', previewFacts: '保存済みの計算式設定を表示します。計算式は実行しません。', formulaVersion: '計算式バージョン', mappingHelp: '各計量単位を許可された入力パラメーターに対応付けます。', sampleNotice: '任意パラメーターがない場合、サーバーサンプルは 0 を示します。実際の使用量や請求額ではありません。', sampleUnknown: '確認できる既定サンプルは提供されていません。', sampleValue: value => '既定サンプル：' + value, units: { INPUT_TOKEN:'入力トークン', CACHED_INPUT_TOKEN:'キャッシュ入力トークン', OUTPUT_TOKEN:'出力トークン', IMAGE:'画像', REQUEST:'リクエスト', DOCUMENT:'ドキュメント' } },
+};
+for (const language of ['zh', 'en', 'ja']) tokenManagementCopy[language].modelToken.formulaPresentation = formulaPresentation[language];
+
+Object.assign(tokenManagementCopy.zh.modelToken, {
+  "modelModalities": {
+    "text": "文本",
+    "image": "图像",
+    "audio": "音频",
+    "video": "视频"
+  },
+  "modelNoModalities": "未列出支持的模态",
+  "modelFieldUnavailable": "未提供",
+  "modelFieldInvalid": "数值无效",
+  "modelFieldPrecisionUnknown": "数值精度无法确认",
+  "modelTechnicalDetails": "高级技术信息",
+  "modelFactLocale": "zh-CN",
+  "modelFactSeparator": "、"
+});
+Object.assign(tokenManagementCopy.en.modelToken, {
+  "modelModalities": {
+    "text": "Text",
+    "image": "Image",
+    "audio": "Audio",
+    "video": "Video"
+  },
+  "modelNoModalities": "No supported modalities listed",
+  "modelFieldUnavailable": "Not provided",
+  "modelFieldInvalid": "Invalid value",
+  "modelFieldPrecisionUnknown": "Value precision cannot be confirmed",
+  "modelTechnicalDetails": "Advanced technical details",
+  "modelFactLocale": "en",
+  "modelFactSeparator": ", "
+});
+Object.assign(tokenManagementCopy.ja.modelToken, {
+  "modelModalities": {
+    "text": "テキスト",
+    "image": "画像",
+    "audio": "音声",
+    "video": "動画"
+  },
+  "modelNoModalities": "対応モダリティの記載なし",
+  "modelFieldUnavailable": "未提供",
+  "modelFieldInvalid": "無効な値",
+  "modelFieldPrecisionUnknown": "値の精度を確認できません",
+  "modelTechnicalDetails": "詳細な技術情報",
+  "modelFactLocale": "ja-JP",
+  "modelFactSeparator": "、"
 });
