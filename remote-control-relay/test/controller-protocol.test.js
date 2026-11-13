@@ -514,6 +514,7 @@ test("remote actions require their operation capability in both encrypted direct
   const cases = [
     ["permission_list", { task_id: "task-1" }, { permissions: [] }, "permission_v1"],
     ["attachment_abort", { task_id: "task-1", transfer_id: "ctr-up-1" }, { aborted: true }, "attachment_v1"],
+    ["attachment_abort_confirmed", { task_id: "task-1", transfer_id: "ctr-up-1" }, { transfer_id: "ctr-up-1", cleanup_confirmed: true }, "attachment_v1"],
     ["artifact_index", {}, { artifacts: [] }, "artifact_v1"],
   ];
   for (const [operation, requestBody, resultBody, capability] of cases) {
@@ -531,6 +532,18 @@ test("remote actions require their operation capability in both encrypted direct
       });
     }
   }
+});
+
+test('confirmed attachment cleanup has a closed proof distinct from logical abort', () => {
+  const payload = { ...validPayload('remote_action_result'), operation: 'attachment_abort_confirmed', ok: true,
+    body: { transfer_id: 'ctr-up-1', cleanup_confirmed: true } };
+  assert.doesNotThrow(() => validateControllerPayload(payload, 'B'));
+  for (const body of [{ aborted: true }, { transfer_id: 'ctr-up-1' },
+    { transfer_id: 'ctr-up-1', cleanup_confirmed: 'true' },
+    { transfer_id: 'ctr-up-1', cleanup_confirmed: true, already_absent: true }]) {
+    assert.throws(() => validateControllerPayload({ ...payload, body }, 'B'), ControllerProtocolError);
+  }
+  assert.throws(() => validateControllerPayload({ ...payload, operation: 'attachment_abort' }, 'B'), ControllerProtocolError);
 });
 
 test("controller_joined has no DEV-00 production path from untrusted data to a lease context", () => {

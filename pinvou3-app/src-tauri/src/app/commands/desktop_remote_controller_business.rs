@@ -1027,6 +1027,13 @@ impl DesktopControlledBusiness {
                         Ok(json!({"transfer_id": begun.handle_id, "chunk_bytes": begun.chunk_bytes.to_string(),
                             "total_bytes": begun.total_bytes.to_string()}))
                     }
+                    "attachment_abort_confirmed" => {
+                        let runtime = self.app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>();
+                        runtime.uploads().abort_confirmed(
+                            field("transfer_id")?, lease, &session_id, field("task_id")?,
+                        )?;
+                        Ok(json!({"transfer_id":field("transfer_id")?,"cleanup_confirmed":true}))
+                    }
                     "attachment_chunk" | "attachment_abort" => {
                         let runtime = self.app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>();
                         runtime.uploads().require_upload_binding(
