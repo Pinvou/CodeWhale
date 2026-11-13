@@ -103,6 +103,7 @@ ACCOUNT_REQUIRED = {
     "TestTokenAuthorizationWriterToBillingNonTargetPostgres",
     "TestOwnerCombinedActualHTTPPostgres",
     "TestApprovalRecoveryQueryAllRegisteredCommandsPostgres",
+    "TestUnstartedApprovalGrantInventoryPostgres",
     "TestApprovalRecoveryQueryForwardMigrationPostgres",
     "TestApprovalAuthorizationWallClockPostgres",
     "TestApprovalMutationWallClockPostgres",
@@ -121,6 +122,7 @@ ACCOUNT_REQUIRED = {
 # These Account roots are real named leaf tests; all other required roots
 # still need completed child-case evidence. Root run/pass and no-skip stay mandatory.
 ACCOUNT_LEAF_REQUIRED = {
+    "TestUnstartedApprovalGrantInventoryPostgres",
     "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
     "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
     "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
@@ -156,7 +158,7 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {"TestChargebackPrincipalRegisteredIdentity", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres"}
+SCHEMA_REQUIRED = {'TestBillingHistoricalCatalogRollbackPostgres', 'TestBillingOrdinaryReplayOriginalMigrationPostgres', 'TestChargebackPrincipalRegisteredIdentity', 'TestF04PublicTokenUserOwnerAuthorityAndDirectory', 'TestF09EntitlementPackageIndexPublicMigration', 'TestLatePaymentQueryRegisteredIdentity', 'TestLegacyEntitlementUpgradeAdmissionPostgres', 'TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres', 'TestManualRetentionHistoricalHardeningPostgres', 'TestOrphanPaidOrderIndexPublicMigration', 'TestReconciliationFairRetryRegisteredIdentity', 'TestTokenWalletReceiptSchemaPostgres', 'TestUnknownProviderEntryPublicMigrationPostgres', 'TestUsageWaiverHistoricalSchemaPostgres'}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -210,6 +212,7 @@ RETAINED_REQUIRED = {
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestReceivableSettlementGuardedWritesPostgres",
     "TestPostgresManagedPricePagination",
+    "TestPriceFallbackMissingBindingPostgres",
     "TestLedgerRepairProofHistoricalUpgradePostgres",
     "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres",
     "TestLedgerRepairAuthorityCrossDatePostgres",
@@ -285,8 +288,12 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestOrphanPaidOrderIndexPublicMigration": {
+        "fresh-failure-atomicity-and-retry",
+        "populated-upgrade-replay-and-own-ddl-rollback",
+    },
     "TestChargebackFrozenExecutionPostgres": {"actual-payment-origin-two-leg-reconciliation", "empty-digest-zero-effect", "activation-version-receipt-and-order-summary", "proof-claim-same-effective-component-tuple-drift", "wallet-source-lock-before-final-recompute"},
-    "TestChargebackPrincipalIndependentCashPostgres": {"authorized-original-writer-partial-and-replay", "conflicts-retained-paginated-and-fresh-whole-blocked", "legacy-missing-cash-and-completed-receipt-stable", "binding-auth-input-rejections-zero-write-and-recovery", "combined-and-over-gross-cash-requires-review", "immutable-receipts-runtime-and-migration-owner", "active-cash-cache-refreshes-on-legacy-record-and-dismiss", "legacy-financial-completion-keeps-principal-review-marker", "recharge-and-permitted-write-off-retain-principal-review", "shared-supplier-evidence-cannot-bind-another-payment", "F14-partial-cash-fences-fresh-plan-and-retains-old-receipt", "storage-failure-rolls-back-and-next-attempt-recovers", "concurrent-peer-cash-serializes-and-retries-without-money", "retained-038-forward-upgrade-and-down-refusal"},
+    "TestChargebackPrincipalIndependentCashPostgres": {"authorized-original-writer-partial-and-replay", "conflicts-retained-paginated-and-fresh-whole-blocked", "legacy-missing-cash-and-completed-receipt-stable", "binding-auth-input-rejections-zero-write-and-recovery", "combined-and-over-gross-cash-requires-review", "immutable-receipts-runtime-and-migration-owner", "active-cash-cache-refreshes-on-legacy-record-and-dismiss", "legacy-financial-completion-keeps-principal-review-marker", "recharge-and-permitted-write-off-retain-principal-review", "shared-supplier-evidence-cannot-bind-another-payment", "F14-partial-cash-fences-fresh-plan-and-retains-old-receipt", "storage-failure-rolls-back-and-next-attempt-recovers", "concurrent-peer-cash-serializes-and-retries-without-money", "retained-038-forward-upgrade-and-down-refusal", "keyset-evidence-pagination-index-and-boundary"},
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)
@@ -301,6 +308,12 @@ EXACT_REQUIRED_CHILDREN = {
         "valid-proof", "persistence-failure", "operator",
     },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
+    "TestPriceFallbackMissingBindingPostgres": {
+        "missing-binding-and-rollback",
+        "permission-denied-before-mutation",
+        "binding-read-fault-and-later-retry",
+        "valid-binding-fallback-and-receipt-replay",
+    },
     "TestPostgresManagedPricePagination": {
         "bounded-batch-queries",
         *{f"bounded-batch-queries/{kind}-{size}" for kind in ("list", "namespace") for size in (1, 100, 200)},

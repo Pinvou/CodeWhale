@@ -111,6 +111,11 @@ func (r *PostgresRepository) recordChargebackPrincipal(ctx context.Context, tx p
 		_, err = createPaymentAnomalyWithinTransaction(ctx, tx, "PAYMENT_FACT_CONFLICT", "P1", "chargeback-principal:"+item.ID.String()+":"+fact.EvidenceDigest,
 			paymentAnomalyReference{PaymentOrderID: &item.PaymentOrderID, PaymentTransactionID: &item.PaymentTransactionID, PaymentEvidenceID: &item.PaymentEvidenceID},
 			map[string]any{"chargeback_case_id": item.ID, "cash_principal": fact, "reason": "INDEPENDENT_CASH_REQUIRES_REVIEW"}, r.now())
+		if err == nil {
+			// Include the newly created or deduplicated review in the same commit.
+			// A dismissed case no longer contributes a derived principal marker.
+			err = refreshChargebackCashSummary(ctx, tx, item.PaymentOrderID, r.now())
+		}
 	}
 	return err
 }

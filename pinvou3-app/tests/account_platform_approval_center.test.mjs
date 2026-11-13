@@ -1,10 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { approvalQuery, approvalBusinessRoute, readApprovalRoute, approvalCenterVisible } from '../src/features/account-platform/admin-approval-actions.js';
+import { approvalQuery, approvalBusinessRoute, readApprovalRoute, approvalCenterVisible, approvalExpiryDate } from '../src/features/account-platform/admin-approval-actions.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { loadFinancePage } from '../src/features/account-platform/admin-finance-pagination.js';
 import { adminPlatformCopy } from '../src/shared/i18n.js';
 const id='11111111-1111-4111-8111-111111111111';
+test('expiry dates require real ISO calendar days and valid strictly ordered ranges',()=>{
+ assert.equal(approvalExpiryDate('2024-02-29'),'2024-02-29T00:00:00Z');
+ for(const value of ['2026-02-29','2026-04-31','2026-13-01','2026-1-01','2026-11-11T00:00:00Z',' 2026-11-11',''])assert.equal(approvalExpiryDate(value),'');
+ for(const [from,to] of [['2026-11-12','2026-11-11'],['2026-11-11','2026-11-11'],['2026-02-29','2026-03-01']]){
+  const route=readApprovalRoute(`?approval_view=pending&approval_expires_from=${from}&approval_expires_to=${to}`);
+  assert.equal(route.expiresFrom,'');assert.equal(route.expiresTo,'');assert.deepEqual(approvalQuery(route,id),{status:'SUBMITTED'});
+ }
+ assert.deepEqual(approvalQuery(readApprovalRoute('?approval_view=pending&approval_expires_from=2026-11-11&approval_expires_to=2026-11-12'),id),{status:'SUBMITTED',expires_from:'2026-11-11T00:00:00Z',expires_to:'2026-11-12T00:00:00Z'});
+});
 test('mine binds current requester while pending/execution use distinct server filters',()=>{
  assert.deepEqual(approvalQuery({view:'mine',commandType:'WALLET_ADJUSTMENT',target:id,status:'DRAFT'},id),{command_type:'WALLET_ADJUSTMENT',target:id,requester_user_id:id,status:'DRAFT'});
  assert.deepEqual(approvalQuery({view:'pending',status:'EXECUTED'},id),{status:'SUBMITTED'});

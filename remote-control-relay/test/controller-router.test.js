@@ -11,7 +11,7 @@ import { ControllerResumeHooks } from "../controller-resume.js";
 import { RelayStateStore } from "../relay-state-store.js";
 import { PairingStore } from "../pairing-store.js";
 import { PairingRegistrationHandler } from "../pairing-registration-handler.js";
-import { validateControllerMessage } from "../protocol-controller.js";
+import { validateControllerMessage, RegistrationValidationContext, validateControllerRegistrationMessage } from "../protocol-controller.js";
 
 function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "task_v1"], realLeaseHooks = false, pairingRegistrationHandler } = {}) {
   const sent = new Map([["socket-A", []], ["socket-B", []]]);
@@ -403,6 +403,59 @@ test("persistent registration replay preserves outcomes and exposes only the res
   assert.equal(recovered.type, "desktop_pairing_registered");
   assert.equal(recovered.remote_control_generation, next.remote_control_generation);
   assert.equal(recovered.relay_epoch, "relay-restart-0002");
+});
+
+test("real persisted registration quota survives restart and routes bounded authenticated rejections", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "pinvou-registration-quota-"));
+  const options = { statePath: join(directory, "controller", "state.json"), legacyStatePath: join(directory, "legacy.json"),
+    // Actual files/lock/CAS; the existing Windows test seam does not prove ACLs.
+    ...(process.platform === "win32" ? { protectPath: async () => {}, verifyPath: async () => {}, verifyAncestors: async () => {} } : {}) };
+  let state;
+  t.after(async () => { await state?.close(); await rm(directory, { recursive: true, force: true }); });
+  const digestKeyring = { activeKeyId: "quota-test-key", keys: [{ keyId: "quota-test-key", key: crypto.randomBytes(32).toString("hex") }] };
+  const publicKey = () => crypto.generateKeyPairSync("x25519").publicKey.export({ type: "spki", format: "der" }).subarray(-32).toString("base64");
+  const request = (sequence, endpoint = "endpoint-0001") => ({ v: 1, type: "desktop_pairing_register",
+    request_id: `quota-transport-${sequence}`, registration_request_id: `quota-registration-${sequence}`,
+    endpoint_id: endpoint, remote_control_generation: `quota-generation-${sequence}`,
+    code_wrap_public_key_b64: publicKey(), handshake_public_key_b64: publicKey(), key_algorithm: "x25519", capabilities: ["pairing_v1"] });
+  const registrationBudget = { maxPerEndpointRecords: 2, maxGlobalRecords: 4, windowMs: 1000,
+    maxPerEndpointWindow: 1, maxGlobalWindow: 2 };
+  const routed = (pairingStore, relayEpoch) => fixture({ pairingRegistrationHandler: new PairingRegistrationHandler({ pairingStore, relayEpoch,
+    authorizeEndpoint: async ({ endpointId, context }) => {
+      if (context.endpointId !== endpointId) throw new Error("not the authenticated endpoint");
+    } }) });
+  state = await RelayStateStore.open(options);
+  let pairing = await PairingStore.open({ stateStore: state, digestKeyring, clock: () => 1000, registrationBudget });
+  let value = routed(pairing, "epoch-quota-first");
+  const first = request(1);
+  await value.router.handle({ socketIdentity: "socket-B", message: first });
+  const initial = value.sent.get("socket-B").at(-1);
+  assert.equal(initial.type, "desktop_pairing_registered");
+  const before = state.readNamespace("desktop_pairing").namespace_revision;
+  const limited = request(2);
+  await assert.rejects(value.router.handle({ socketIdentity: "socket-B", message: limited }), { code: "controller_busy" });
+  const busy = value.sent.get("socket-B").at(-1);
+  assert.equal(validateControllerMessage(busy, "relay").code, "controller_busy");
+  assert.equal(validateControllerRegistrationMessage(busy, "relay", new RegistrationValidationContext(limited)).code, "controller_busy");
+  assert.deepEqual(Object.keys(busy).sort(), ["code", "message", "registration_request_id", "remote_control_generation", "request_id", "type", "v"]);
+  assert.ok(!JSON.stringify(busy).includes("secret"));
+  await assert.rejects(value.router.handle({ socketIdentity: "socket-B", message: request(3, "endpoint-forged") }), { code: "pairing_endpoint_unauthorized" });
+  assert.equal(state.readNamespace("desktop_pairing").namespace_revision, before);
+  await value.router.handle({ socketIdentity: "socket-B", message: { ...first, request_id: "quota-retry" } });
+  assert.equal(value.sent.get("socket-B").at(-1).sealed_code_b64, initial.sealed_code_b64);
+  assert.equal(state.readNamespace("desktop_pairing").namespace_revision, before);
+  await state.close();
+  state = await RelayStateStore.open(options);
+  pairing = await PairingStore.open({ stateStore: state, digestKeyring, clock: () => 1500, registrationBudget });
+  assert.equal(await pairing.invalidateForRelayRestart(), 1);
+  value = routed(pairing, "epoch-quota-restarted");
+  await assert.rejects(value.router.handle({ socketIdentity: "socket-B", message: request(4) }), { code: "controller_busy" });
+  value.sent.set("socket-C", []);
+  value.router.addSocket({ socketIdentity: "socket-C", source: "198.51.100.3", socket: "socket-C" });
+  value.router.authenticateControlled({ socketIdentity: "socket-C", endpointId: "endpoint-0002", authenticatedContext: { endpointId: "endpoint-0002" } });
+  await value.router.handle({ socketIdentity: "socket-C", message: request(5, "endpoint-0002") });
+  assert.equal(value.sent.get("socket-C").at(-1).type, "desktop_pairing_registered");
+  assert.equal(state.readNamespace("desktop_pairing").value.registrations.length, 2);
 });
 
 test("registration routing continues to collapse unrelated internal errors", async () => {

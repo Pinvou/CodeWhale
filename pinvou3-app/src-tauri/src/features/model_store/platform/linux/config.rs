@@ -125,6 +125,8 @@ pub struct Settings {
     pub hf_endpoint: String,
     pub store_url: String,
     pub update_url: Option<String>,
+    /// Independent of manual checks, telemetry and application updates.
+    pub startup_update_check_enabled: bool,
     pub gateway_enabled: bool,
     pub gateway_port: u16,
     /// 同时下载几个模型。多个下载并行不会更快——它们抢的是同一条带宽，
@@ -204,6 +206,7 @@ impl Default for Settings {
             // 那台服务器改成了只收隧道流量的私有源站，直连 IP 一律 403。
             store_url: "https://account.pinvou.com/model-store".to_string(),
             update_url: Some("https://pinvou.com/model-cube-update".to_string()),
+            startup_update_check_enabled: true,
             gateway_enabled: false,
             gateway_port: 8090,
             max_concurrent_downloads: 1,
@@ -276,7 +279,7 @@ fn quarantine_bad_path(cfg_file: &Path) -> PathBuf {
 /// 留存文件同时也是 [`try_load_settings`] 的隔离标记：原文件改名后，后续读取在
 /// 文件系统里看到的就是"缺失"，破坏性消费方必须凭这份残留继续 fail-closed，
 /// 而不是把保护范围未知的半拍当成全新安装（十六轮评审 P1）。写端同一口径：
-/// [`save_settings`] 以严格读取为闸门，读不过去的态（缺失+留存、在但不可读、
+/// [`update_settings`] 以严格读取为闸门，读不过去的态（缺失+留存、在但不可读、
 /// 解析坏）一律拒绝普通保存，防止宽松读取的默认值被固化成合法配置、把读端的
 /// fail-closed 洗掉（二十六/二十七轮评审 P1）。
 fn quarantine_broken_config(cfg_file: &Path, reason: &str) {
@@ -293,16 +296,31 @@ fn quarantine_broken_config(cfg_file: &Path, reason: &str) {
     }
 }
 
-/// 回填派生默认值（staging_dir / models_dir / 商店地址迁移），读取出与默认回退
-/// 两条路径共用。
-fn apply_settings_defaults(mut settings: Settings) -> Settings {
+/// All configuration mutation, including quarantine, shares one private file lock.
+/// Hold it only for local reads/patches/atomic writes, never for network work.
+fn settings_lock() -> std::io::Result<fs::File> {
+    let lock =
+        crate::platform::filesystem::open_private_lock_file(&config_dir().join("config.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn missing_settings_default() -> Settings {
+    let mut settings = Settings::default();
+    // A quarantined configuration is evidence of an interrupted recovery, not
+    // a fresh install. Unknown prior consent cannot authorize automatic traffic.
+    settings.startup_update_check_enabled = matches!(
+        fs::symlink_metadata(config_file().with_extension("json.bad")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    );
+    settings
+}
+
+fn normalize_settings(mut settings: Settings) -> Settings {
     if settings.staging_dir.trim().is_empty() {
         settings.staging_dir = data_dir().join("staging").to_string_lossy().to_string();
     }
     if settings.models_dir.trim().is_empty() {
-        // 默认跟其余数据放在一起。LMM 那边默认的是 `~/models`——那是它作为独立
-        // 应用时的取值，在品悟里会在用户主目录下凭空多一个没人认识的目录。
-        // 这个值可配：几十上百 GB 的权重，用户很可能想放到别的盘。
         settings.models_dir = data_dir().join("models").to_string_lossy().to_string();
     }
     if LEGACY_DEFAULT_STORE_URLS.contains(&settings.store_url.trim().trim_end_matches('/')) {
@@ -311,51 +329,61 @@ fn apply_settings_defaults(mut settings: Settings) -> Settings {
     settings
 }
 
-/// 读取设置（可失败版）：配置文件存在但读不出/解析坏时 `Err`（隔离改名、日志等
-/// 副作用照旧发生），文件缺失（全新安装的正常态）回 `Ok(默认)`——但隔离残留
-/// `config.json.bad` 还在时例外：原文件正是上一拍被隔离改名掉的，那不是全新
-/// 安装，保护范围未知，继续 `Err` 直到配置恢复或用户显式删掉残留（十六轮评审
-/// P1）。**破坏性消费方必须走本函数 fail-closed**——设备移除的商店权重根静默
-/// 回退默认值，会让自定义 `models_dir` 的保护恰在配置读取失败的一拍失效（五轮
-/// 评审 P3）；宽松消费方继续用 [`load_settings`]。
-pub fn try_load_settings() -> Result<Settings, String> {
-    let mut settings = Settings::default();
-    let cfg_file = config_file();
-    match read_config_text(&cfg_file) {
-        // 整体反序列化。老配置文件里缺掉的字段靠结构体上的 `#[serde(default)]`
-        // （见 `Settings` 定义）取 Default 给的值，而不是各类型的零值——注意这
-        // **不是**逐字段合并：任一字段类型不符，整个文件就废掉，走下面的留存分支。
-        Ok(text) => match serde_json::from_str::<Settings>(&text) {
-            Ok(parsed) => settings = parsed,
-            Err(e) => {
-                quarantine_broken_config(&cfg_file, &format!("解析失败（{e}）"));
-                return Err(format!("配置文件解析失败（{e}）"));
-            }
-        },
-        // 没有配置文件通常是全新安装的正常状态，不出声；但隔离残留还在时，
-        // "缺失"只是上一拍改名的结果——首次严格检查被拒后的重试、或宽松读取先
-        // 隔离了配置的随后严格检查，都从这里二次进入。放行默认根等于把自定义
-        // models_dir 等保护整个撤掉（十六轮评审 P1），必须继续拒绝。
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let bad = quarantine_bad_path(&cfg_file);
-            if bad.exists() {
-                return Err(format!(
-                    "配置文件缺失，但此前读取失败的隔离留存 {} 仍在：自定义设置（如权重目录）的保护范围未知。请恢复配置文件，或确认放弃后删除该留存文件",
-                    bad.display()
-                ));
+/// Strict fresh read while the caller holds settings_lock. Writers must not
+/// turn read/parse failures into a replacement configuration.
+fn read_settings_snapshot_unlocked() -> std::io::Result<(Settings, bool)> {
+    let (settings, missing) = match read_config_text(&config_file()) {
+        Ok(text) => (
+            serde_json::from_str::<Settings>(&text)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+            false,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            (missing_settings_default(), true)
+        }
+        Err(error) => return Err(error),
+    };
+    Ok((normalize_settings(settings), missing))
+}
+
+fn read_settings_unlocked() -> std::io::Result<Settings> {
+    read_settings_snapshot_unlocked().map(|(settings, _)| settings)
+}
+
+pub fn load_settings() -> Settings {
+    let result = (|| {
+        let _lock = settings_lock()?;
+        match read_settings_unlocked() {
+            Ok(settings) => Ok(settings),
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::InvalidData {
+                    // This rename is inside the same lock as all writers. A
+                    // stale reader can never quarantine a newly saved file.
+                    quarantine_broken_config(&config_file(), "解析失败");
+                }
+                Err(error)
             }
         }
-        // 文件在、却读不出来（权限、磁盘错误）：**不**改名——内容未必是坏的，而且
-        // 连读都读不了多半也 rename 不了。但同样必须出声，否则又是一次无声重置。
-        Err(e) => {
-            eprintln!(
-                "[model-store] 配置文件 {} 读取失败（{e}），本次回退默认设置",
-                cfg_file.display()
-            );
-            return Err(format!("配置文件读取失败（{e}）"));
-        }
-    }
-    Ok(apply_settings_defaults(settings))
+    })();
+    result.unwrap_or_else(|error: std::io::Error| {
+        eprintln!("[model-store] 配置读取失败（{error}），本次回退默认设置并关闭自动检查");
+        let mut settings = Settings::default();
+        settings.startup_update_check_enabled = false;
+        normalize_settings(settings)
+    })
+}
+
+/// Automatic access fails closed on errors or quarantined configuration. A
+/// valid old configuration without the field keeps its original enabled default.
+pub fn startup_update_check_enabled() -> Result<bool, String> {
+    read_settings().map(|settings| settings.startup_update_check_enabled)
+}
+
+/// A coherent settings snapshot for controls that must not save fallback data
+/// after a failed read. Missing quarantined files carry a disabled policy.
+pub fn read_settings() -> Result<Settings, String> {
+    let _lock = settings_lock().map_err(|error| format!("读取模型商店设置失败：{error}"))?;
+    read_settings_unlocked().map_err(|error| format!("读取模型商店设置失败：{error}"))
 }
 
 /// 配置文本的唯一读取口。生产上就是 [`fs::read_to_string`]。
@@ -390,18 +418,58 @@ pub fn arm_transient_read_failure(times: usize) {
 static TEST_TRANSIENT_READ_FAILURES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-pub fn load_settings() -> Settings {
-    // 宽松消费方（商店页 / ollama_base_url / 并发上限 / 开关状态等**只读展示**
-    // 消费方）：读取失败回默认设置，历史行为不变；隔离改名与日志副作用已在
-    // [`try_load_settings`] 内发生。
-    //
-    // **会落盘的消费方不在此列**（二十八轮评审 P1）：读-改-整体写回的普通设置
-    // 入口若从本函数拿快照，瞬态读取失败时拿到的是默认值，而 `save_settings`
-    // 闸门的重读可能已恢复——闸门只判 Err/Ok，放行的就是这份默认快照，真实
-    // 配置被一次普通开关整体洗掉。所以这类入口（service.rs 的
-    // `set_test_store_enabled` / `set_storage_settings`）首读必须走
-    // [`try_load_settings`] 并传播错误。
-    try_load_settings().unwrap_or_else(|_| apply_settings_defaults(Settings::default()))
+/// Destructive device-boundary queries and every production settings patch
+/// require known settings roots. Missing config plus a quarantine marker is not
+/// a fresh install, even when the patch explicitly enables automatic checks.
+/// A valid restored config takes precedence over the retained backup. Removing
+/// the backup is an explicit manual abandonment, never a settings-save effect.
+/// The unlocked helper's caller already owns the single configuration lock.
+fn try_load_settings_unlocked() -> Result<Settings, String> {
+    let cfg_file = config_file();
+    match read_settings_snapshot_unlocked() {
+        Ok((settings, missing)) => {
+            if missing {
+                let bad = quarantine_bad_path(&cfg_file);
+                match fs::symlink_metadata(&bad) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                    _ => {
+                        return Err(format!(
+                            "配置文件缺失，但此前读取失败的隔离留存 {} 仍在或无法确认：自定义设置（如权重目录）的保护范围未知。请恢复配置文件，或确认放弃后删除该留存文件",
+                            bad.display()
+                        ));
+                    }
+                }
+            }
+            Ok(settings)
+        }
+        Err(error) => {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                quarantine_broken_config(&cfg_file, "解析失败");
+            }
+            Err(format!("配置文件读取失败：{error}"))
+        }
+    }
+}
+
+pub fn try_load_settings() -> Result<Settings, String> {
+    let _lock = settings_lock().map_err(|error| format!("读取模型商店设置失败：{error}"))?;
+    try_load_settings_unlocked()
+}
+
+/// One domain transaction for all production settings patches. Waiting writers
+/// reread after acquiring the cross-process lock; None fields retain that value.
+/// Failed reads never run the patch or publish defaults. A parse failure may
+/// quarantine the original bytes under this same lock, preserving main's
+/// recovery contract without a second settings read before writing.
+pub fn update_settings(
+    patch: impl FnOnce(&mut Settings) -> Result<(), String>,
+) -> Result<Settings, String> {
+    let _lock = settings_lock().map_err(|error| format!("锁定模型商店设置失败：{error}"))?;
+    let mut settings = try_load_settings_unlocked()
+        .map_err(|error| format!("读取当前配置失败，未做任何修改：{error}"))?;
+    patch(&mut settings)?;
+    write_settings_unlocked(&settings).map_err(|error| format!("保存设置失败：{error}"))?;
+    Ok(settings)
 }
 
 /// 写配置。**先写临时文件再 rename**，并且一开始就以 0600 创建。
@@ -417,45 +485,19 @@ pub fn load_settings() -> Settings {
 /// 2. 先写后 `set_permissions` 之间有一个 0644 的窗口，而这个文件里有商店地址
 ///    这类不该给同机其他用户看的东西。用 `OpenOptions::mode` 直接按 0600 建，
 ///    窗口就不存在了。
-///
-/// 写端闸门与读端 fail-closed 同口径（二十六/二十七轮评审 P1）：动笔前先按
-/// [`try_load_settings`] 严格读一遍，读不过去的状态一律拒绝普通保存。普通
-/// setter（切测试商店开关等）先经宽松 [`load_settings`] 拿到默认值再整体写回，
-/// 三种"保护范围未知"的态若放行，都会把默认值固化成合法 `config.json`，此后
-/// 严格读取走"合法 JSON"分支接受它，未知的自定义 `models_dir` 等保护整个失效
-/// （严格读端的 fail-closed 被写端洗掉）：
-///
-/// * 配置缺失而隔离留存还在——这正是 [`try_load_settings`] 持续 `Err` 的态，
-///   一次与删除无关的开关切换就会让留存里未知的保护范围整个失效；
-/// * 配置在但读不出来（如 mode 000、磁盘错误）——严格读取报错且**不**隔离，
-///   留存不存在；但父目录可写就能建 0600 临时文件再 rename 覆盖原文件
-///   （rename(2) 不要求读被替换的文件），下一拍严格读取接受合法默认 JSON，
-///   原配置里未知的保护范围就此消失（二十七轮评审 P1 补的正是这一分支）；
-/// * 配置在但解析坏——宽松读取那一拍已先隔离改名，到这里表现为缺失+留存。
-///
-/// 拒绝的报错带上严格读取的原始原因，与读端同口径给出出路：恢复有效配置，或
-/// 确认放弃后按提示清理残留。配置可读可解析就放行——包括用户已显式恢复、
-/// 历史留存还在的态，不能让留存永久阻断已恢复的有效配置；全新安装（缺失且
-/// 无留存）同样放行。
-///
-/// 闸门有一处自己罩不住的盲区（二十八轮评审 P1 的剩余分支）：它重读成功时
-/// **只判 Err/Ok，读到的真实 `Settings` 被丢弃**，落盘的仍是调用方传进来的
-/// 对象。若调用方的首读走宽松 [`load_settings`] 赶上瞬态失败拿到默认值、到
-/// 这一拍瞬态已恢复，闸门放行的就是那份默认快照——真实 config.json 被洗成
-/// 默认。所以这个盲区不在写端修（那需要把两次读取缝成一次事务），而是在
-/// 上游入口把首读改成 [`try_load_settings`]：读不到就不改、不保存（service.rs
-/// 的两个普通设置入口，回归见 `transient_first_read_failure_must_not_persist_the_default_snapshot`）。
+#[cfg(test)]
 pub fn save_settings(settings: &Settings) -> std::io::Result<()> {
+    let _lock = settings_lock()?;
+    try_load_settings_unlocked().map_err(|reason| std::io::Error::other(format!(
+        "普通保存被拒绝：当前配置严格读取失败（{reason}）——请先恢复有效配置，或确认放弃后清理隔离留存再重试",
+    )))?;
+    write_settings_unlocked(settings)
+}
+
+fn write_settings_unlocked(settings: &Settings) -> std::io::Result<()> {
     use std::io::Write as _;
 
     let cfg_file = config_file();
-    // 闸门判定与读端是同一段代码（[`try_load_settings`]），两条端的 fail-closed
-    // 不会各自漂移；副作用（解析坏时的隔离改名）也正是严格读取本拍会发生的事。
-    if let Err(reason) = try_load_settings() {
-        return Err(std::io::Error::other(format!(
-            "普通保存被拒绝：当前配置严格读取失败（{reason}）——自定义设置（如权重目录）的保护范围未知，不能用宽松读取的默认值整体覆盖。请先恢复有效配置，或确认放弃后按提示清理残留再重试",
-        )));
-    }
     let json = serde_json::to_string_pretty(settings)?;
 
     let tmp = cfg_file.with_extension("json.tmp");
@@ -969,7 +1011,40 @@ mod tests {
         assert_eq!(s.gateway_port, 8090);
         assert_eq!(s.min_free_space_gb, 2.0);
         assert!(!s.gateway_enabled);
+        assert!(s.startup_update_check_enabled);
         assert_eq!(s.max_concurrent_downloads(), 1, "默认只允许一个下载");
+    }
+
+    #[test]
+    fn startup_update_policy_preserves_old_defaults_and_persisted_opt_out() {
+        let _home = TempHome::new();
+        assert!(startup_update_check_enabled().unwrap());
+        fs::write(config_file(), "{}").unwrap();
+        assert!(startup_update_check_enabled().unwrap());
+        let mut settings = load_settings();
+        settings.startup_update_check_enabled = false;
+        save_settings(&settings).unwrap();
+        assert!(!startup_update_check_enabled().unwrap());
+        assert!(!load_settings().startup_update_check_enabled);
+        let mut settings = load_settings();
+        settings.test_mode_enabled = true;
+        settings.import_scan_dirs = vec!["/extra/models".into()];
+        save_settings(&settings).unwrap();
+        assert!(!startup_update_check_enabled().unwrap());
+        assert!(load_settings().test_mode_enabled);
+    }
+
+    #[test]
+    fn startup_update_policy_does_not_default_on_unreadable_or_malformed_settings() {
+        let _home = TempHome::new();
+        for text in ["{broken", r#"{"startup_update_check_enabled":"false"}"#] {
+            fs::write(config_file(), text).unwrap();
+            assert!(startup_update_check_enabled().is_err());
+            assert_eq!(fs::read_to_string(config_file()).unwrap(), text);
+        }
+        fs::remove_file(config_file()).unwrap();
+        fs::create_dir(config_file()).unwrap();
+        assert!(startup_update_check_enabled().is_err());
     }
 
     #[test]
@@ -1029,3 +1104,6 @@ mod tests {
         clear_token_fallback();
     }
 }
+
+#[cfg(test)]
+mod transaction_tests;

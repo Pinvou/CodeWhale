@@ -14,7 +14,7 @@ func TestChargebackPrincipalRegisteredIdentity(t *testing.T) {
 	if _, err = Ordered(input); err != nil {
 		t.Fatal(err)
 	}
-	at := slices.IndexFunc(input, func(m migrations.Migration) bool { return m.Version == 900039 })
+	at := slices.IndexFunc(input, func(m migrations.Migration) bool { return m.Version == 900044 })
 	if at < 0 {
 		t.Fatal("missing registered forward migration")
 	}

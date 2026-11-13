@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type principalReconciliationProvider struct{ payment.Provider }
@@ -403,6 +403,51 @@ func TestChargebackPrincipalIndependentCashPostgres(t *testing.T) {
 		if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM chargeback_principal_evidence WHERE payment_transaction_id=$1`, transaction).Scan(&claims); err != nil || claims != 1 {
 			t.Fatal("dismissal erased the original cash evidence", err)
 		}
+		var originalReceipt string
+		if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object('anomaly',to_jsonb(a),'manual',to_jsonb(m))::text FROM payment_anomaly_cases a JOIN manual_review_cases m ON m.id=a.id WHERE a.id=$1`, *partial.ManualReviewCaseID).Scan(&originalReceipt); err != nil {
+			t.Fatal(err)
+		}
+		assertLateReview := func(attention string, open int) {
+			t.Helper()
+			var actualAttention, receipt string
+			var actualOpen, observations int
+			if err := r.pool.QueryRow(ctx, `SELECT p.attention_summary,
+ (SELECT count(*) FROM payment_anomaly_cases WHERE payment_order_id=p.id AND status='OPEN'),
+ (SELECT count(*) FROM chargeback_principal_evidence WHERE payment_transaction_id=$2),
+ (SELECT jsonb_build_object('anomaly',to_jsonb(a),'manual',to_jsonb(m))::text FROM payment_anomaly_cases a JOIN manual_review_cases m ON m.id=a.id WHERE a.id=$3)
+ FROM payment_orders p WHERE p.id=$1`, order.ID, transaction, *partial.ManualReviewCaseID).Scan(&actualAttention, &actualOpen, &observations, &receipt); err != nil || actualAttention != attention || actualOpen != open || observations != 2 || receipt != originalReceipt {
+				t.Fatal("late dismissed-case review or original receipt drifted", actualAttention, actualOpen, observations, err)
+			}
+			if before != principalMoneySnapshot(t, r, ctx) {
+				t.Fatal("late dismissed-case review moved money")
+			}
+		}
+		late := record(t, transaction, partial.ProviderChargebackID, "50", ref, "CNY", 200)
+		if late.Status != "DISMISSED" || late.CashPrincipal.Status != "CONFLICT" || late.CashPrincipal.AmountFen != nil || !late.CashPrincipal.ManualReviewRequired {
+			t.Fatal("late conflicting receipt changed the original disposition or hid cash conflict")
+		}
+		assertLateReview("REVIEW_REQUIRED", 1)
+		if replay := record(t, transaction, partial.ProviderChargebackID, "50", ref, "CNY", 200); !reflect.DeepEqual(late, replay) {
+			t.Fatal("identical late receipt changed the case or evidence")
+		}
+		assertLateReview("REVIEW_REQUIRED", 1)
+		var lateAnomaly uuid.UUID
+		if err := r.pool.QueryRow(ctx, `SELECT id FROM payment_anomaly_cases WHERE payment_order_id=$1 AND anomaly_type='PAYMENT_FACT_CONFLICT' AND status='OPEN'`, order.ID).Scan(&lateAnomaly); err != nil {
+			t.Fatal(err)
+		}
+		actor, key := uuid.New(), uuid.NewString()
+		retainedClaimAnomaly(t, r, ctx, lateAnomaly, actor)
+		resolved, err := retainedResolveClaimedAnomaly(t, r, ctx, lateAnomaly, actor, key, "DISMISS", "controlled late evidence review dismissal", "NONE")
+		if err != nil || resolved.Status != "RESOLVED" {
+			t.Fatal("supported late review resolution", err)
+		}
+		assertLateReview("NORMAL", 0)
+		// The original receipt remains resolved, and an identical supplier retry
+		// neither recreates a queue item nor overwrites the immutable conflict.
+		if replay := record(t, transaction, partial.ProviderChargebackID, "50", ref, "CNY", 200); !reflect.DeepEqual(late, replay) {
+			t.Fatal("resolved late receipt replay changed the cash facts")
+		}
+		assertLateReview("NORMAL", 0)
 	})
 	t.Run("legacy-financial-completion-keeps-principal-review-marker", func(t *testing.T) {
 		_, order, transaction, reference := newPaid(t)
@@ -647,9 +692,13 @@ func TestChargebackPrincipalIndependentCashPostgres(t *testing.T) {
 		}
 	})
 	t.Run("retained-038-forward-upgrade-and-down-refusal", chargebackPrincipalUpgrade)
+	t.Run("keyset-evidence-pagination-index-and-boundary", func(t *testing.T) {
+		chargebackPrincipalPageIndexProbe(t, ctx, r)
+	})
 }
 
 func chargebackPrincipalUpgrade(t *testing.T) {
+	product := principalMigrationTool(t)
 	r, ctx := retainedFinanceRepository(t, 900038)
 	// This retained fixture represents historical owner facts, not a new supplier
 	// assertion. No original cash proof can be recovered from its points.
@@ -661,6 +710,27 @@ func chargebackPrincipalUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := principalMoneySnapshot(t, r, ctx)
+	authorityBefore := principalMigrationAuthoritySnapshot(t, ctx, r)
+	principalMigrationCLI(t, ctx, product, r, "billing_service", "up", false)
+	if principalMigrationAuthoritySnapshot(t, ctx, r) != authorityBefore || principalMoneySnapshot(t, r, ctx) != before {
+		t.Fatal("runtime CLI refusal changed history, authority or money")
+	}
+	principalMigrationCLI(t, ctx, product, r, "billing_migrator", "up", true)
+	authorityInstalled := principalMigrationAuthoritySnapshot(t, ctx, r)
+	principalMigrationCLI(t, ctx, product, r, "billing_migrator", "up", true)
+	if principalMigrationAuthoritySnapshot(t, ctx, r) != authorityInstalled {
+		t.Fatal("CLI replay changed migration history or authority")
+	}
+	for _, actor := range []string{"billing_service", "billing_migrator"} {
+		principalMigrationCLI(t, ctx, product, r, actor, "down", false)
+		if principalMigrationAuthoritySnapshot(t, ctx, r) != authorityInstalled || principalMoneySnapshot(t, r, ctx) != before {
+			t.Fatal("CLI Down refusal changed history, authority or money", actor)
+		}
+	}
+	principalMigrationCLI(t, ctx, product, r, "billing_migrator", "up", true)
+	if principalMigrationAuthoritySnapshot(t, ctx, r) != authorityInstalled {
+		t.Fatal("CLI recovery after refusal changed migration history or authority")
+	}
 	config := r.pool.Config().ConnConfig.Copy()
 	config.User = "billing_migrator"
 	config.Password = ""
@@ -679,6 +749,7 @@ func chargebackPrincipalUpgrade(t *testing.T) {
 	if err := billingschema.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
+	chargebackPrincipalPageIndex(t, ctx, r)
 	fact, err := readChargebackCashPrincipal(ctx, r.pool, fixture.ChargebackCaseID)
 	if err != nil || fact.Status != "MISSING" || fact.AmountFen != nil || fact.ObservationCount != 0 {
 		t.Fatal("migration invented historical cash", err)
@@ -691,8 +762,10 @@ func chargebackPrincipalUpgrade(t *testing.T) {
 	if before != principalMoneySnapshot(t, r, ctx) {
 		t.Fatal("migration changed financial facts")
 	}
-	if err := billingschema.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "forward-only") {
-		t.Fatal("cash evidence down was not refused", err)
+	refused := billingschema.DownOne(ctx, connection, loaded)
+	var pgError *pgconn.PgError
+	if !errors.As(refused, &pgError) || pgError.Code != "55000" || pgError.Message != "chargeback cash principal evidence is forward-only" {
+		t.Fatal("cash evidence down did not retain its precise public refusal", refused)
 	}
 	if before != principalMoneySnapshot(t, r, ctx) {
 		t.Fatal("refused down changed financial facts")
@@ -701,7 +774,7 @@ func chargebackPrincipalUpgrade(t *testing.T) {
 		t.Fatal("up replay after rejected down", err)
 	}
 	var receipts int
-	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations WHERE version=900039`).Scan(&receipts); err != nil || receipts != 1 {
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations WHERE version=900044`).Scan(&receipts); err != nil || receipts != 1 {
 		t.Fatal("migration ledger changed after down refusal", strconv.Itoa(receipts), err)
 	}
 }
