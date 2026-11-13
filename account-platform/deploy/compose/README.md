@@ -1,5 +1,7 @@
 # 本地 Compose 环境
 
+Aliyun 四种短信用途、可选模板回退与管理版本迁移见[短信配置说明](../../docs/sms-configuration-conflict-recovery.md#阿里云模板用途与兼容迁移)。
+
 GSA-07 专用审批授权 Relay 的独立凭据、专项就绪与迁移顺序见[发布约束](../runbooks/approval-authorization-relay.md)；普通容器健康不能替代授权专项验收，当前扩展 NOT_DEPLOYED。
 
 本目录的 Compose 基线用于开发、测试和单机部署编排；能够启动这些容器不代表能够从空白主机恢复当前账号平台。完整恢复还需要同一恢复集中的四个 PostgreSQL 数据库、NATS JetStream、独立模型网关、站点 Secret/override、边缘代理/证书/网络配置和不可变制品。生产或灾难恢复必须执行 [`../runbooks/full-redeployment.md`](../runbooks/full-redeployment.md)，不得把新建空卷后的健康检查当作恢复成功。
