@@ -71,8 +71,11 @@ const criticalPaths = [
   "remote-control-relay/docs/schemas/remote-control-release-evidence.v1.schema.json",
   "remote-control-relay/scripts/controller-release-gate.mjs",
   "remote-control-relay/scripts/validate-controller-release-evidence.mjs",
+  "remote-control-relay/scripts/release-evidence-artifacts.mjs",
   "remote-control-relay/scripts/verify-github-workflow-run.cjs",
   "remote-control-relay/test/controller-release-evidence.test.js",
+  "remote-control-relay/test/release-evidence-artifacts.test.js",
+  "remote-control-relay/test/controller-release-source-binding.test.js",
   "remote-control-relay/test/installer-spdx.test.js",
   "scripts/create-installer-spdx.mjs",
   "scripts/run-windows-remote-control-e2e.ps1",
@@ -126,11 +129,17 @@ test("PR and release workflows execute or route every policy-sensitive change", 
     assert.ok(pr.includes(marker), `PR path filter misses ${marker}`);
   }
   for (const executableTest of [
-    "release-path-policy.test.js", "installer-spdx.test.js", "github-workflow-run-identity.test.js",
+    "release-path-policy.test.js", "release-evidence-artifacts.test.js", "controller-release-source-binding.test.js", "installer-spdx.test.js", "github-workflow-run-identity.test.js",
     "windows-e2e-orchestrator-contract.test.js", "windows-e2e-orchestrator-helpers.test.js",
     "windows-e2e-path-guard.test.js", "remote_control_real_ui_smoke_contract.test.mjs",
     "remote_control_feature_gate_contract.test.mjs", "nsis_resource_staging_contract.test.js",
   ]) assert.ok(pr.includes(executableTest), `release-contract-test does not execute ${executableTest}`);
+  const evidenceStep = prWorkflow.jobs["release-contract-test"].steps.find((step) => step?.run?.includes("remote-control-relay/test/release-evidence-artifacts.test.js"));
+  assert.ok(evidenceStep, "artifact IO suite must be selected by release-contract-test");
+  const evidenceCommand = evidenceStep.run.split("\n").find((line) => line.includes("remote-control-relay/test/release-evidence-artifacts.test.js"));
+  assert.match(evidenceCommand, /^python scripts\/ci-fixture-process\.py --receipt "\$\{\{ runner\.temp \}\}\/remote-evidence-contract-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\.json" -- node --test /u);
+  const lines = evidenceStep.run.trim().split("\n");
+  assert.equal(lines[lines.indexOf(evidenceCommand) + 1].trim(), "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", "supervisor failure must fail the actual Windows step");
   for (const filter of [
     "remote-control-relay/scripts/verify-github-workflow-run.cjs",
     "remote-control-relay/test/release-path-policy.test.js",

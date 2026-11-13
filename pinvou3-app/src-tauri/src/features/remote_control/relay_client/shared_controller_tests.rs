@@ -228,10 +228,10 @@ async fn shared_real_reader_prepare_targets_one_next_socket_not_old_business() {
         .outbound_scope(&business(&context))
         .unwrap()
         .unwrap();
-    assert!(authority.frame_is_current(&old_business));
+    assert!(authority.frame_is_current(&old_business, 0));
     peer.wire.send(Wire::Close).await.unwrap();
     peer.connection(false).await;
-    assert!(!authority.frame_is_current(&old_business));
+    assert!(!authority.frame_is_current(&old_business, 0));
     assert!(
         peer.sender
             .try_send(RelayOutbound::Message(business(&context)))
@@ -247,12 +247,12 @@ async fn shared_real_reader_prepare_targets_one_next_socket_not_old_business() {
     )
     .unwrap();
     let scope = authority.outbound_scope(&prepare).unwrap().unwrap();
-    assert!(!authority.frame_is_current(&scope));
+    assert!(!authority.frame_is_current(&scope, 0));
     peer.sender
         .try_send(RelayOutbound::Message(prepare.clone()))
         .unwrap();
     peer.connection(true).await;
-    assert!(authority.frame_is_current(&scope));
+    assert!(authority.frame_is_current(&scope, 0));
     let actual = tokio::time::timeout(Duration::from_secs(3), peer.received.recv())
         .await
         .unwrap()
@@ -260,10 +260,10 @@ async fn shared_real_reader_prepare_targets_one_next_socket_not_old_business() {
     assert_eq!(actual, prepare);
     peer.reconnect().await;
     assert!(
-        !authority.frame_is_current(&scope),
+        !authority.frame_is_current(&scope, 0),
         "prepare may target only one next socket"
     );
-    assert!(!authority.frame_is_current(&old_business));
+    assert!(!authority.frame_is_current(&old_business, 0));
 }
 
 #[tokio::test]
@@ -286,7 +286,7 @@ async fn shared_real_reader_same_generation_replacement_rejects_old_owner() {
     assert!(!authority.install_joined(old_join, &context, capabilities()));
     let new_join = peer.read(&fixture.joined).await.unwrap();
     assert!(authority.install_joined(new_join, &context, capabilities()));
-    assert!(!authority.frame_is_current(&old_scope));
+    assert!(!authority.frame_is_current(&old_scope, 0));
     assert!(
         peer.sender
             .try_send_controller_owned(generation, old_binding, business(&context))
@@ -305,6 +305,104 @@ async fn shared_real_reader_same_generation_replacement_rejects_old_owner() {
     assert!(
         peer.received.try_recv().is_err(),
         "old owner enqueued a frame"
+    );
+}
+
+#[tokio::test]
+async fn regenerated_prepare_has_exact_socket_lease_and_nonrenewable_local_cutoff() {
+    use super::super::controller::{
+        relay_transport::ControllerRole, resume::build_controller_resume_prepare,
+    };
+    let fixture = pairing_fixture("shared-prepare-requeue");
+    let context = context(&fixture.joined);
+    let generation = &context.remote_control_generation;
+    let mut peer = Peer::new(generation).await;
+    let authority = peer.sender.controller_authority.clone();
+    let binding = authority.binding(generation).unwrap();
+    let joined = peer.read(&fixture.joined).await.unwrap();
+    assert!(authority.install_joined(joined, &context, capabilities()));
+    let old_business = authority
+        .outbound_scope(&business(&context))
+        .unwrap()
+        .unwrap();
+    peer.wire.send(Wire::Close).await.unwrap();
+    peer.connection(false).await;
+    let prepare = build_controller_resume_prepare(
+        &context,
+        ControllerRole::ControlledB,
+        "request-requeued-prepare",
+        &[7; 32],
+        "BwcHBwcHBwcHBwcHBwcHBw==",
+        1_700_000_030_000,
+    )
+    .unwrap();
+    let old_prepare = authority.outbound_scope(&prepare).unwrap().unwrap();
+    peer.connection(true).await;
+    peer.reconnect().await;
+    assert!(
+        !authority.frame_is_current(&old_prepare, 0),
+        "retained prepare must stay on its old epoch"
+    );
+    assert!(!authority.frame_is_current(&old_business, 0));
+    let epoch = authority
+        .resume_socket_epoch(generation, binding, &context)
+        .unwrap();
+    let now = super::super::controller::relay_runtime::controlled_monotonic_millis();
+    let cutoff = now + 5_000;
+    let scope = authority
+        .resume_prepare_scope(&prepare, generation, binding, epoch, cutoff, now)
+        .unwrap();
+    assert!(authority.frame_is_current(&scope, cutoff - 1));
+    assert!(
+        !authority.frame_is_current(&scope, cutoff),
+        "queued prepare must expire independently of the reaper"
+    );
+    assert!(
+        authority
+            .resume_prepare_scope(&business(&context), generation, binding, epoch, cutoff, now)
+            .is_err()
+    );
+    assert!(
+        authority
+            .resume_prepare_scope(&prepare, generation, binding, epoch - 1, cutoff, now)
+            .is_err()
+    );
+    assert!(
+        authority
+            .resume_prepare_scope(&prepare, generation, binding, epoch, cutoff, cutoff)
+            .is_err()
+    );
+    let mut foreign = prepare.clone();
+    foreign["lease_epoch"] = json!("999");
+    assert!(
+        authority
+            .resume_prepare_scope(&foreign, generation, binding, epoch, cutoff, now)
+            .is_err()
+    );
+    assert!(
+        peer.sender
+            .try_send_resume_prepare_owned(generation, binding, prepare.clone(), epoch, cutoff)
+            .unwrap()
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), peer.received.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        prepare
+    );
+    authority.retire_owned(generation, binding);
+    assert!(
+        authority
+            .resume_socket_epoch(generation, binding, &context)
+            .is_none()
+    );
+    assert!(!authority.frame_is_current(&scope, now));
+    assert!(
+        !peer
+            .sender
+            .try_send_resume_prepare_owned(generation, binding, prepare, epoch, cutoff)
+            .unwrap()
     );
 }
 
