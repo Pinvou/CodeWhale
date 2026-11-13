@@ -27,6 +27,13 @@ try {
  await run('session switch refresh uses new explicit Code owner',async()=>{await fresh();await open();await page.evaluate(async()=>{window.nativeCode.owner='code-b';window.nativeCode.modelRef={source:'ACCOUNT_PLATFORM',model_id:'public-b'};await window.nativeCode.render();});await page.waitForFunction(()=>document.querySelector('#root button').textContent.includes('Platform B'));await click('Platform A');await page.waitForFunction(()=>window.nativeCode.calls.length>0);assert.deepEqual(await page.evaluate(()=>window.nativeCode.calls),[['account_platform_select_session_model',{input:{sessionId:'code-b',modelId:'public-a'}}]]);});
  await run('failed catalog selection remains directly visible and preserves reference in three locales',async()=>{for(const language of ['zh','en','ja']){await fresh();await page.evaluate(async lang=>{window.nativeCode.language=lang;await window.nativeCode.render();},language);await open();await page.evaluate(()=>window.nativeCode.fail=true);await click('Platform B');await page.waitForFunction(()=>document.querySelector('[role="alert"]')?.textContent===window.nativeCode.copy().uiSettingsDetail.modelSwitchFailed);assert.equal(await page.evaluate(()=>window.nativeCode.modelRef.model_id),'public-a');assert.equal(await page.evaluate(()=>window.nativeCode.calls.length),1);}});
  await run('three shared locales preserve catalog choices',async()=>{for(const language of ['zh','en','ja']){await fresh();await page.evaluate(async lang=>{window.nativeCode.language=lang;await window.nativeCode.render();},language);await open();assert.equal(await page.evaluate(()=>[...document.querySelectorAll('button')].find(el=>el.textContent.includes('Platform blocked')).disabled),true);}});
+ await run('unpublished runtime capability remains visible with a localized reason and cannot dispatch', async () => {
+  for (const language of ['zh', 'en', 'ja']) {
+   await fresh(); await page.evaluate(async lang => { window.nativeCode.language=lang; await window.nativeCode.render(); }, language); await open();
+   assert.equal(await page.evaluate(() => { const row=[...document.querySelectorAll('button')].find(node => node.textContent.includes('Platform unpublished')); return row.disabled && row.title === window.nativeCode.copy().uiSettingsDetail.modelRuntimeProtocolUnavailable; }), true);
+   await click('Platform unpublished'); assert.deepEqual(await page.evaluate(() => window.nativeCode.calls), []);
+  }
+ });
  console.log(`RESULT ${passed} PASS ${failed} FAIL 0 SKIP`); if(failed)process.exitCode=1;
 } catch(error){console.error(`FAIL setup: ${error.name}`);process.exitCode=1;}
 finally { if(browser)await browser.close();if(vite)await vite.close();if(fs.existsSync(profile))fs.rmSync(profile,{recursive:true,force:true}); }

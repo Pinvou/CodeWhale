@@ -89,7 +89,7 @@ func providerHealthFacts(t *testing.T, ctx context.Context, r *PostgresRepositor
 	facts := providerHealthTableFacts(t, ctx, r, "payment_provider_attempts", "payment_provider_health_observations", "payment_stop_loss_evaluations", "payment_stop_loss_evaluation_members", "payment_provider_controls", "outbox_events")
 	var metadata string
 	if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_array(
- (SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m WHERE version<>900040),
+ (SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m WHERE version<>900045),
  (SELECT jsonb_agg(jsonb_build_array(relname,pg_get_userbyid(relowner),relacl::text) ORDER BY relname) FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind IN ('r','p','S','v','m')),
  (SELECT jsonb_agg(pg_get_indexdef(indexrelid) ORDER BY indexrelid::regclass::text) FROM pg_index WHERE indexrelid<>COALESCE(to_regclass('public.payment_provider_health_recent_idx'),0)),
  (SELECT jsonb_agg(pg_get_triggerdef(oid) ORDER BY tgrelid,tgname) FROM pg_trigger WHERE NOT tgisinternal),
