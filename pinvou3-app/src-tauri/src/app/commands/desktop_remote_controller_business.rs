@@ -15,7 +15,7 @@ use crate::features::remote_control::controller::controlled::{
 };
 use crate::features::remote_control::controller::permission::{
     DecisionAuthority, DecisionOutcome, DispatchCommit, DispatchState, PermissionAuthority,
-    PermissionDecision,
+    PermissionDecision, PermissionDecisionOwner,
 };
 use crate::features::remote_control::controller::ports::{
     ControlledExecutionPort, RemotePortError, RemotePortFuture,
@@ -29,7 +29,7 @@ use crate::features::remote_control::controller::relay_runtime::{
     ControlledBusinessPort, controlled_monotonic_millis, log_controlled_port_error,
 };
 use crate::features::remote_control::controller::task::{
-    RemoteTaskLedger, RemoteTaskState, TaskLeaseBinding,
+    RemoteTaskLedger, RemoteTaskService, TaskLeaseBinding,
 };
 use crate::features::remote_control::controller::task::{
     RemoteTaskRequest, TASK_MODE_CHAT, TASK_MODE_CODE, TASK_MODEL_SOURCE_CONTROLLED,
@@ -52,6 +52,9 @@ use base64::Engine as _;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager as _};
+
+#[path = "desktop_remote_controller_business/permission_decision.rs"]
+mod permission_decision;
 
 /// A same-value allow retry observes the original dispatch, never dispatches twice.
 fn commit_effective_permission_allow(
@@ -133,11 +136,17 @@ impl ControlledCleanupSink for DesktopControlledCleanup {
             return;
         };
         let now_b = controlled_monotonic_millis();
-        let _ = runtime.service().interrupt_generation_and_clear_sessions(
+        let report = runtime.service().interrupt_generation_and_clear_sessions(
             generation,
             "remote_control_stopped",
             now_b,
         );
+        if let Some((_, failure)) = report.failed.first() {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_interrupt_persistence_failed",
+                failure.code,
+            );
+        }
     }
 }
 
@@ -889,97 +898,32 @@ impl DesktopControlledBusiness {
         body: &Value,
     ) -> Result<Value, String> {
         let controlled = self.app.state::<ControlledDeviceManager>();
-        let (owner, request_id, decision) = controlled
-            .with_current_business_lease(lease, || {
-                let field = |key: &str| -> Result<&str, String> {
-                    body.get(key)
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| "remote_action_invalid".to_owned())
-                };
-                let task_id = field("task_id")?;
-                let request_id = field("permission_request_id")?;
-                let decision = PermissionDecision::parse(field("decision")?)
-                    .ok_or_else(|| "permission_decision_invalid".to_owned())?;
-                let tasks = self
-                    .app
-                    .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>();
-                let session_id = tasks
-                    .service()
-                    .session_for(session_ref, &lease.remote_control_generation)
-                    .ok_or_else(|| "task_session_binding_mismatch".to_owned())?;
-                let record = self
-                    .app
-                    .state::<Arc<RemoteTaskLedger>>()
-                    .record(task_id)
-                    .map_err(|error| error.code.to_owned())?;
-                if record.session_id != session_id
-                    || record.lease != TaskLeaseBinding::from_context(lease)
-                    || record.is_terminal()
-                {
-                    return Err("task_session_binding_mismatch".to_owned());
-                }
-                let authority = self.app.state::<Arc<PermissionAuthority>>();
-                let outcome = authority
-                    .decide(
-                        DecisionAuthority::ControllerA,
-                        lease,
-                        task_id,
-                        request_id,
-                        decision,
-                        authority.now_ms(),
-                    )
-                    .map_err(|error| error.code.to_owned())?;
-                commit_effective_permission_allow(&authority, request_id, &outcome)?;
-                Ok((
-                    RemotePermissionOwner {
-                        task_sequence: record.sequence,
-                        session_id,
-                        task_id: task_id.to_owned(),
-                        lease: lease.clone(),
-                    },
-                    request_id.to_owned(),
-                    if matches!(outcome, DecisionOutcome::Expired) {
-                        PermissionDecision::Deny
-                    } else {
-                        decision
-                    },
-                ))
-            })
-            .map_err(|error| error.code.to_owned())??;
-
-        super::desktop_remote_permission::respond_remote_permission_via_acp(
-            &self.app.state::<AcpPool>(),
-            &owner,
-            &request_id,
-            decision,
-        )
-        .await?;
-        controlled
-            .with_current_business_lease(lease, || {
-                let record = self
-                    .app
-                    .state::<Arc<RemoteTaskLedger>>()
-                    .record(&owner.task_id)
-                    .map_err(|error| error.code.to_owned())?;
-                if record.sequence != owner.task_sequence
-                    || record.session_id != owner.session_id
-                    || record.lease != TaskLeaseBinding::from_context(lease)
-                    || !matches!(
-                        record.state,
-                        RemoteTaskState::Running | RemoteTaskState::WaitingPermission
-                    )
-                {
-                    return Err("task_session_binding_mismatch".to_owned());
-                }
-                Ok(())
-            })
-            .map_err(|error| error.code.to_owned())??;
-        let view = self
+        let tasks = self
             .app
-            .state::<Arc<PermissionAuthority>>()
-            .view(&request_id)
-            .map_err(|error| error.code.to_owned())?;
-        Ok(json!({"state": view.state}))
+            .state::<Arc<super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
+            .service();
+        let authority = self.app.state::<Arc<PermissionAuthority>>();
+        let pool = self.app.state::<AcpPool>();
+        permission_decision::PermissionDecisionHandler {
+            controlled: &controlled,
+            tasks: tasks.as_ref(),
+            authority: &authority,
+        }
+        .handle(
+            lease,
+            session_ref,
+            body,
+            |owner, request_id, decision| async move {
+                super::desktop_remote_permission::respond_remote_permission_via_acp(
+                    &pool,
+                    &owner,
+                    &request_id,
+                    decision,
+                )
+                .await
+            },
+        )
+        .await
     }
 
     /// Resolve the A reference only through the current authenticated B
@@ -1082,6 +1026,13 @@ impl DesktopControlledBusiness {
                         let begun = runtime.uploads().begin(context, metadata, now)?;
                         Ok(json!({"transfer_id": begun.handle_id, "chunk_bytes": begun.chunk_bytes.to_string(),
                             "total_bytes": begun.total_bytes.to_string()}))
+                    }
+                    "attachment_abort_confirmed" => {
+                        let runtime = self.app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>();
+                        runtime.uploads().abort_confirmed(
+                            field("transfer_id")?, lease, &session_id, field("task_id")?,
+                        )?;
+                        Ok(json!({"transfer_id":field("transfer_id")?,"cleanup_confirmed":true}))
                     }
                     "attachment_chunk" | "attachment_abort" => {
                         let runtime = self.app.state::<Arc<super::desktop_remote_attachment::DesktopRemoteAttachmentRuntime>>();
