@@ -155,6 +155,8 @@ type PasswordVault struct {
 	mu           sync.Mutex
 	records      map[string]*passwordRecord
 	operations   map[uuid.UUID]operationPasswordBinding
+	recordExpiry credentialExpiryQueue[string]
+	proofExpiry  credentialExpiryQueue[uuid.UUID]
 	hmacKey      []byte
 	directory    UserDirectory
 	now          func() time.Time
@@ -231,6 +233,7 @@ func (v *PasswordVault) precheckBefore(password string, deadline time.Time) (Pas
 		return PasswordReference{}, ErrPasswordReferenceCapacity
 	}
 	v.records[handle] = &passwordRecord{password: password, fingerprint: fingerprint, expiresAt: expiresAt}
+	v.recordExpiry.add(handle, expiresAt)
 	return PasswordReference{Handle: handle, PolicyVersion: PasswordPolicyVersion, ExpiresAt: expiresAt}, nil
 }
 
@@ -269,6 +272,7 @@ func (v *PasswordVault) validateReference(operationID uuid.UUID, handle, policyV
 		return nil
 	}
 	v.operations[operationID] = binding
+	v.proofExpiry.add(operationID, binding.expiresAt)
 	return nil
 }
 
@@ -381,22 +385,32 @@ func (v *PasswordVault) removeExpiredLocked() {
 	v.removeExpiredOperationsLocked()
 	v.operationsMu.Unlock()
 	now := v.now()
-	for handle, record := range v.records {
-		if now.After(record.expiresAt) {
-			record.mu.Lock()
-			record.password = ""
-			record.fingerprint = [32]byte{}
-			record.mu.Unlock()
-			delete(v.records, handle)
+	for {
+		expired, ok := v.recordExpiry.takeExpired(now, false)
+		if !ok {
+			return
 		}
+		record := v.records[expired.key]
+		if record == nil || !record.expiresAt.Equal(expired.at) {
+			continue
+		}
+		record.mu.Lock()
+		record.password = ""
+		record.fingerprint = [32]byte{}
+		record.mu.Unlock()
+		delete(v.records, expired.key)
 	}
 }
 
 func (v *PasswordVault) removeExpiredOperationsLocked() {
 	now := v.now()
-	for operationID, binding := range v.operations {
-		if now.After(binding.expiresAt) {
-			delete(v.operations, operationID)
+	for {
+		expired, ok := v.proofExpiry.takeExpired(now, false)
+		if !ok {
+			return
+		}
+		if binding, exists := v.operations[expired.key]; exists && binding.expiresAt.Equal(expired.at) {
+			delete(v.operations, expired.key)
 		}
 	}
 }

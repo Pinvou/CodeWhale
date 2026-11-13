@@ -49,18 +49,36 @@ try {
   for (const language of ['zh', 'en', 'ja']) await run(`actual admin permission navigation, status, int64, readonly runbooks ${language}`, async page => {
     await open(page, `language=${language}`);
     await page.waitForSelector('.adm-system-workspace .adm-metrics');
+    await page.waitForSelector('.adm-page-head .adm-system-observation time');
+    assert.equal(await page.$$eval('.adm-page h1, .adm-page h2', (nodes, title) => nodes.filter(node => node.textContent.trim() === title).length, adminLayoutCopy[language].nav.system), 1, 'embedded system page has one page heading');
+    assert.equal(await page.$('.adm-system-workspace > h1'), null, 'embedded workspace reuses the layout title in every locale');
+    assert.equal(await page.$eval('.adm-page-head .adm-system-observation time', node => node.dateTime), '2026-10-09T01:02:03Z', 'header uses the accepted server check-start timestamp');
+    assert.equal(await page.$('.adm-system-workspace .adm-system-refresh'), null, 'refresh is in the actual layout heading area');
+    assert.equal(await page.$('.adm-system-reconciliation-link'), null, 'system-only permission does not expose a usage-review navigation action');
     assert.equal(await page.$eval('nav button[data-section="system"]', (button, label) => button.getAttribute('aria-current') === 'page' && button.textContent.includes(label), adminLayoutCopy[language].nav.system), true);
     const text = await page.evaluate(() => document.querySelector('.adm-system-workspace').textContent);
     assert.ok(text.includes('9,007,199,254,740,993'));
     assert.ok(text.includes('9,223,372,036,854,775,807'));
     for (const key of ['services', 'relays', 'recentErrors']) assert.ok(text.includes(await page.evaluate(key => window.statusFixture.copy.system[key], key)));
     assert.ok(text.includes('HEALTHY'));
+    const recent = await page.evaluate(() => {
+      const title = window.statusFixture.copy.system.recentErrors;
+      return [...document.querySelectorAll('.adm-system-sections article')].find(node => node.querySelector('h2')?.textContent === title)?.textContent || '';
+    });
+    assert.ok(recent.includes(await page.evaluate(() => window.statusFixture.copy.system.recentErrorsScope)));
+    assert.ok(recent.includes(await page.evaluate(() => window.statusFixture.copy.system.recentErrorsEmpty)));
+    assert.ok(recent.includes(await page.evaluate(() => window.statusFixture.copy.system.reconciliationErrorsScope)));
     await page.click('.adm-runbook-panel summary');
+    const guide = await page.$eval('.adm-runbook-panel details:first-of-type', node => node.textContent);
+    assert.ok(guide.includes('account-platform/deploy/runbooks/full-redeployment.md'));
+    assert.ok(guide.includes(await page.evaluate(() => window.statusFixture.copy.runbooks.preflight)));
+    assert.equal(await page.$$eval('.adm-runbook-panel details:first-of-type ol>li', nodes => nodes.length), 3);
+    assert.equal(await page.$$eval('.adm-runbook-panel a', nodes => nodes.length), 0, 'no invented online manual URL');
     assert.ok(text.includes(await page.evaluate(() => window.statusFixture.copy.runbooks.noExecution)));
     assert.deepEqual(await page.evaluate(() => window.statusFixture.calls.filter(call => call.url === '/api/admin/system/status').map(call => call.method)), ['GET']);
     assert.equal(await page.evaluate(() => document.querySelectorAll('.adm-runbook-panel button').length), 0);
     await page.evaluate(() => { window.statusFixture.mode = 'unhealthy'; });
-    await page.click('.adm-system-workspace > button');
+    await page.click('.adm-page-head .adm-system-refresh');
     await page.waitForFunction(() => document.querySelector('.adm-system-workspace')?.textContent.includes('controlled pending error'));
     const expectedUpdated = await page.evaluate(() => window.statusFixture.copy.system.updated);
     assert.equal(typeof expectedUpdated, 'string');
@@ -71,7 +89,7 @@ try {
     await open(page, 'mode=unhealthy'); await page.waitForSelector('.adm-system-workspace .adm-metrics');
     const text = await page.evaluate(() => document.querySelector('.adm-system-workspace').textContent);
     for (const value of ['UNHEALTHY', 'DEGRADED', 'connection failed', 'controlled-resource', 'controlled pending error']) assert.ok(text.includes(value));
-    assert.equal(await page.evaluate(() => document.querySelector('.adm-metrics article strong').textContent), '0');
+    assert.equal(await page.evaluate(() => document.querySelector('.adm-metrics article strong').textContent), '0 / 1');
   });
   for (const language of ['zh', 'en', 'ja']) await run(`unavailable reconciliation is not zero and diagnostics are translated ${language}`, async page => {
     await open(page, `language=${language}&mode=reconciliation-unavailable`);
@@ -116,6 +134,7 @@ try {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await page.waitForFunction(() => !document.querySelector('.adm-metrics') && !!document.querySelector('.adm-system-workspace [role=alert]'));
     assert.equal(await page.$('.adm-metrics'), null);
+    assert.equal(await page.$('.adm-page-head .adm-system-observation time'), null, 'late old-owner observation cannot populate the current error header');
   });
 } finally { await browser.close(); await server.close(); }
 const result = { pass: results.filter(row => row.pass).length, fail: results.filter(row => !row.pass).length, results, limits: ['Real AdminPlatformView, independent SystemStatusWorkspace and AdminPlatformClient with controlled HTTP. No real aggregator probes, deployment, canonical Portal build, full F18 parent, or E2E.'] };

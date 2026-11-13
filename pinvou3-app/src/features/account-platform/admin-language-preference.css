@@ -1,0 +1,7 @@
+.adm-restored-shell .adm-language-control{display:grid;gap:6px;min-width:0}
+.adm-restored-shell .adm-language-control small{color:var(--adm-muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.adm-restored-shell .adm-language-control small:empty{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+.adm-restored-shell .adm-language-control small[data-language-feedback=unsaved]{color:var(--adm-warning)}
+.adm-restored-shell .adm-language-settings{max-width:460px;margin-top:14px}
+.adm-restored-shell .adm-language-settings label{font-size:13px;font-weight:650}
+.adm-restored-shell .adm-language-settings select{min-height:40px;padding:8px 11px;border:1px solid var(--adm-line);border-radius:9px;color:var(--adm-text);background:var(--adm-surface);font:inherit}

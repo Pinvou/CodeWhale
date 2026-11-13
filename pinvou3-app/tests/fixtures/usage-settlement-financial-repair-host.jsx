@@ -1,5 +1,6 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import { AdminUsageSettlementFinancialRepairForm } from '../../src/features/account-platform/AdminUsageSettlementFinancialRepairForm.jsx';
 import { AdminPlatformView } from '../../src/features/account-platform/AdminPlatformView.jsx';
 import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
 import { encodeFinanceJSON, parseFinanceJSON } from '../../src/features/account-platform/finance-contract.js';
@@ -26,13 +27,13 @@ window.fetch = async (url, options = {}) => {
     platform_permissions: params.has('deny') ? [] : params.has('approve') ? ['platform.billing.repairs.approve'] : ['platform.billing.repairs.request'], platform_authorization_version: 1 });
   if (url === '/api/admin/approvals/capability') return reply({ session_approval_wire_version: 2, control: { version: 1, epoch: 1, authorization_relay_epoch: 1 } });
   if (url === '/api/admin/approvals/directory') return reply({ schema_version: 1, platform_authorization_version: 1, items: [
-    { command_type: 'LEDGER_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'ENTITLEMENT_COMPONENT_ADJUSTMENT', policy_version: 2, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'RECEIVABLE_WRITE_OFF', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'CHARGEBACK_FINANCIAL_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'RECONCILIATION_FINANCIAL_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'USAGE_SETTLEMENT_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'UNKNOWN_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
+    { command_type: 'LEDGER_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'ENTITLEMENT_COMPONENT_ADJUSTMENT', policy_version: 2, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'RECEIVABLE_WRITE_OFF', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'CHARGEBACK_FINANCIAL_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'RECONCILIATION_FINANCIAL_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'USAGE_SETTLEMENT_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'UNKNOWN_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
   ] }, 200, { 'X-Platform-Authorization-Version': '1' });
   if (url === '/api/admin/account/admin/v2/approval-command-prechecks') {
     state.prechecks++;
@@ -46,7 +47,7 @@ window.fetch = async (url, options = {}) => {
     if (params.has('edit-loss-changed')) facts.normalized_command.loss_review_id = id(4);
     if (params.has('loss-mismatch')) facts.normalized_command.loss_review_id = id(4);
     if (params.has('usage-mismatch')) facts.normalized_command.usage_request_id = id(4);
-    if (params.has('late')) return new Promise(resolve => { state.releasePrecheck = () => resolve(reply(facts)); });
+    if (params.has('late')) return new Promise(resolve => { state.releasePrecheck = () => { state.precheckReleased = true; resolve(reply(facts)); }; });
     return reply(facts);
   }
   if (url === '/api/admin/approvals/requests' && options.method === 'POST') {
@@ -57,7 +58,14 @@ window.fetch = async (url, options = {}) => {
     if (state.lose) { state.lose = false; throw new TypeError('controlled committed POST lost ACK'); }
     return reply({ approval_request_id: id(9) }, 201);
   }
-  if (String(url).startsWith('/api/admin/approvals/requests?')) return reply({ items: state.created ? [{ approval_request_id: id(9), command_type: 'USAGE_SETTLEMENT_REPAIR', requester: { user_id: id(8) }, status: state.status, version: state.version, target: { resource_type: 'USAGE_HOLD', resource_id: id(1) } }] : [], has_more: false });
+  if (String(url).startsWith('/api/admin/approvals/requests?')) {
+    const query = new URL(url, location.href).searchParams;
+    const collection = { items: state.created ? [{ approval_request_id: id(9), command_type: 'USAGE_SETTLEMENT_REPAIR', requester: { user_id: id(8) }, status: state.status, version: state.version, target: { resource_type: 'USAGE_HOLD', resource_id: id(1) } }] : [], has_more: false };
+    collection.items = collection.items.filter(item =>
+      (!query.get('requester_user_id') || item.requester.user_id === query.get('requester_user_id')) &&
+      (!query.get('status') || item.status === query.get('status')));
+    return reply(collection);
+  }
   if (url === `/api/admin/approvals/requests/${id(9)}` && options.method === 'PUT') {
     if (params.has('lost-recent') && !state.authenticatedAgain) return reply({ code: 'RECENT_AUTHENTICATION_REQUIRED' }, 401);
     if (state.denyReplay) return reply({ code: 'FORBIDDEN' }, 403);
@@ -74,4 +82,16 @@ window.fetch = async (url, options = {}) => {
     financial_snapshot: projection('a').financial_snapshot, execution: state.status === 'EXECUTED' ? { attempt_status: 'EXECUTED' } : undefined });
   throw new Error(`Uncontrolled production request: ${url}`);
 };
-root.render(<AdminPlatformView client={client} language={language} copy={adminPlatformCopy[language]} onLanguageChange={() => {}} />);
+if (params.has('display')) {
+  // Exercise the real form without remounting it when one display-scope axis changes.
+  let displayClient = client, owner = id(8), revision = 0;
+  const render = () => root.render(<main data-display-revision={revision}><AdminUsageSettlementFinancialRepairForm client={displayClient} owner={owner} copy={ledgerRepairCopy[language]} operationCopy={financeCopy[language]} /></main>);
+  state.changeDisplayScope = axis => {
+    if (axis === 'client') { displayClient = new AdminPlatformClient(); displayClient.csrfToken = 'controlled-next'; }
+    else if (axis === 'owner') owner = id(7);
+    else if (axis === 'epoch') displayClient.financeSessionEpoch++;
+    else throw new Error('Unsupported display-scope axis');
+    revision++; render();
+  };
+  render();
+} else root.render(<AdminPlatformView client={client} language={language} copy={adminPlatformCopy[language]} onLanguageChange={() => {}} />);

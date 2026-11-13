@@ -35,7 +35,7 @@ function makeModelId() {
  *   generic 类型。错得很隐蔽。
  * @param {{modelName: string, displayName: string, baseUrl: string,
  *          apiKey?: string|null, contextWindow?: number|null,
- *          existingId?: string|null}} input 入参。
+ *          existingId?: string|null, cardId?: string|null}} input 入参。
  * @returns {object} 可直接交给 bridge.models.saveModel 的一行配置。
  */
 function buildSavedModel({
@@ -45,6 +45,7 @@ function buildSavedModel({
   apiKey = null,
   contextWindow = null,
   existingId = null,
+  cardId = null,
 }) {
   if (!modelName) throw new Error('missing modelName');
   if (!baseUrl) throw new Error('missing baseUrl');
@@ -60,6 +61,12 @@ function buildSavedModel({
     provider_kind: 'custom',
     model: modelName,
     base_url: baseUrl,
+    model_store_card_id: cardId,
+    model_store_link_detached: false,
+    model_store_link_requested: !!cardId,
+    // Repeated import changes only the validated store route. The backend
+    // preserves the latest user options and credential under its settings lock.
+    model_store_link_only: !!(existingId && cardId),
     context_window_tokens: contextWindow || null,
     max_output_tokens: null,
     reasoning_effort: null,
@@ -246,6 +253,13 @@ function findLinkedRows(savedModels, ...names) {
   return savedModels.filter((row) => wanted.has(row?.model) && isLocalGatewayUrl(row?.base_url));
 }
 
+/** Legacy routes are migrated precisely by the backend; names never authorize mutation. */
+function findCardLinkedRows(savedModels, cardId) {
+  if (!Array.isArray(savedModels) || !cardId) return [];
+  return savedModels.filter((row) => row?.model_store_card_id === cardId
+    && !row.model_store_link_detached && row.provider_kind !== 'coding_plan' && isLocalGatewayUrl(row.base_url));
+}
+
 /**
  * 端点身份的规范化形式：scheme + 小写 host:port + 去尾斜杠的 path + 原样 query。
  *
@@ -277,8 +291,8 @@ function normalizeLoopbackEndpoint(url) {
  * 设备管理的外部模型接入/移除必须用它：同一台机器经常同时跑两个推理服务
  * （如 8000/v1 与 8001/v1 都挂着 qwen3），按“任意回环”匹配，移除 8000 的
  * 记录会把 8001 的品悟配置一起交给 deleteModel，接入处复用首个 existingId
- * 也会顶掉另一端的配置。模型商店卡片继续用宽版 findLinkedRows——卡片的
- * 端口由脚本版本决定，换一版端口就变，宽尺子才清得掉历史行（见上）。
+ * 也会顶掉另一端的配置。模型商店卡片使用 findCardLinkedRows 按稳定
+ * cardId 关联，并由后端再次核对归属；名称和端点都不授权删除商店关联。
  * @param {Array<object>|null} savedModels - 品悟的模型列表（bs.savedModels）。
  * @param {unknown} baseUrl - 这条记录自己的 base_url（linkTargetOf 的产物）。
  * @param {...(string|null|undefined)} names - 与 findLinkedRows 相同的标识集。
@@ -302,8 +316,8 @@ function findLinkedRowsForEndpointWith(savedModels, baseUrl, normalizeName, ...n
  * 设备管理的外部模型接入/移除必须用它：同一台机器经常同时跑两个推理服务
  * （如 8000/v1 与 8001/v1 都挂着 qwen3），按“任意回环”匹配，移除 8000 的
  * 记录会把 8001 的品悟配置一起交给 deleteModel，接入处复用首个 existingId
- * 也会顶掉另一端的配置。模型商店卡片继续用宽版 findLinkedRows——卡片的
- * 端口由脚本版本决定，换一版端口就变，宽尺子才清得掉历史行（见上）。
+ * 也会顶掉另一端的配置。模型商店卡片使用 findCardLinkedRows 按稳定
+ * cardId 关联，并由后端再次核对归属；名称和端点都不授权删除商店关联。
  * @param {Array<object>|null} savedModels - 品悟的模型列表（bs.savedModels）。
  * @param {unknown} baseUrl - 这条记录自己的 base_url（linkTargetOf 的产物）。
  * @param {...(string|null|undefined)} names - 与 findLinkedRows 相同的标识集。
@@ -353,6 +367,7 @@ export {
   canonicalOllamaModelName,
   checkLinkable,
   findLinkedRows,
+  findCardLinkedRows,
   findLinkedRowsForEndpoint,
   findLinkedRowsForOllamaEndpoint,
   isLocalGatewayUrl,

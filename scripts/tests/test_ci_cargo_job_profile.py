@@ -52,7 +52,7 @@ class RegistryGuardProfileTests(unittest.TestCase):
     def test_opt_in_has_same_override_and_keeps_registry_flags(self):
         command = self.invoke({"PINVOU_CI_CODEWHALE_DEV_O0": "1"})
         self.assertEqual(command[:4], ["cargo", "--config", "profile.dev.package.codewhale-tui.opt-level=0", "test"])
-        self.assertEqual(command[4:], ["--manifest-path", str(ROOT / "pinvou3-app/src-tauri/Cargo.toml"), "--lib", "--no-default-features", "--locked", "--", "--list", "--format", "terse"])
+        self.assertEqual(command[4:], ["--manifest-path", str(ROOT / "pinvou3-app/src-tauri/Cargo.toml"), "--lib", "--no-default-features", "--features", "benchmark-hooks", "--locked", "--", "--list", "--format", "terse"])
 
     def test_unset_preserves_original_registry_invocation(self):
         command = self.invoke({})
