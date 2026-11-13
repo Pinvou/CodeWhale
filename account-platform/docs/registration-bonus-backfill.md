@@ -51,14 +51,25 @@ receipts, including the original IDs and inputs used to replay them.
 2. Restore the protected version of `REGISTRATION_BONUS_FINGERPRINT_HMAC_KEY_BASE64`
    and its `REGISTRATION_BONUS_FINGERPRINT_KEY_ID` to the isolated Account
    process. Before startup, verify the rendered Account key ID against the
-   recovery record without printing the secret. Compose accepts a site key ID.
-   The standard Helm template pins `registration-bonus-v1`, so a recovery with
-   another ID requires the approved matching site override. If the rendered ID
+   recovery record without printing the secret. The standard development Compose
+   accepts a site key ID; production `compose.signup.yaml` and the standard Helm
+   template pin `registration-bonus-v1`. A recovery with another ID requires the
+   approved matching site override. Inspect only the Account key ID field, not
+   the complete rendered Compose environment, which contains secret material.
+   If the rendered ID
    differs, stop and correct the site configuration while preserving the
    database binding. Use a separate disposable copy for each incorrect ID or
-   incorrect key test. Enable mobile registration for these startup checks so
-   they exercise key validation. Both negative cases must fail before either
-   worker starts and preserve the baseline facts and checkpoint.
+   incorrect key test. Each copy must contain the original bound checkpoint or
+   permanent facts; a new unbound checkpoint cannot prove rejection of another
+   key. Set `MOBILE_AUTH_ENABLED=true` for these startup checks; when disabled,
+   startup skips fingerprint configuration. Prepare the isolated Account startup
+   prerequisites, including database, workload credentials, OIDC/identity and
+   the mobile stack's SMS and Redis configuration. Both negative cases must fail
+   specifically with `REGISTRATION_BONUS_CONFIGURATION_INVALID`, not an earlier
+   dependency or configuration error. This fixed fatal code does not distinguish
+   an incorrect ID from incorrect key bytes. Confirm that neither the wallet
+   provisioning nor registration recovery worker starts, and preserve the
+   baseline facts and checkpoint.
 3. Start Account with the recovered key and mobile registration enabled only on
    a disposable paired copy in the writable rehearsal phase. Use isolated
    databases, Billing, identity, messaging, and other dependencies. Block
@@ -74,11 +85,14 @@ receipts, including the original IDs and inputs used to replay them.
    with its original input, and exercise concurrent registrations for the same
    test number. Verify one permanent eligibility fact and at most one grant,
    including when the first account has been anonymized.
-4. Record the release, recovery point, protected secret version reference,
-   aggregate outcomes and unresolved jobs. Resume only after the recovery and
-   security owners confirm the recovered material is trusted and the Account
-   and Billing evidence agrees. Keep all disposable rehearsal copies out of
-   promotion. On the separate recovery candidate, reconcile by registration
+4. After the rehearsal passes, create a fresh paired recovery candidate from
+   the untouched recovery copy and the same verified protected secret version,
+   with isolated dependencies. Do not promote or copy the writable rehearsal's
+   database state. Keep the candidate isolated and registration/bonus traffic
+   fenced; starting its writers is another write boundary that must be accounted
+   for just as in step 3. Record the release, recovery point, protected secret
+   version reference, aggregate outcomes and unresolved jobs. On this candidate,
+   reconcile by registration
    operation. If Account is pending and Billing already has the matching
    receipt, replay the original input through the existing authorized recovery
    path, subject to its normal checks. Ordinary wallet provisioning requires no
@@ -88,6 +102,8 @@ receipts, including the original IDs and inputs used to replay them.
    the expected receipt is missing, or if the original mode cannot be verified,
    hold that operation for reconciliation against trusted records from after
    the recovery point before allowing any retry.
+   Resume traffic only after the recovery and security owners confirm the
+   recovered material is trusted and the Account and Billing evidence agrees.
 
 ## Rotate protection and plan HMAC key replacement
 
