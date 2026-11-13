@@ -1,0 +1,114 @@
+..................................................................................................................................................................................................................................................................................check-lock-registry: ok — 2 lockfiles mirror-free (lockfileVersion 3), team-relay-hub @img/* libc mapping intact (16 pkgs)
+Rust CI disk available before preparation: 12.0 GiB
+Removing unused hosted-runner SDK: <TMP_06>/sdk (du -sh: 8.0K)
+Freed 0.00 GiB by removing <TMP_06>/sdk
+Removing unused hosted-runner SDK: <TMP_06>/hostedtoolcache (du -sh: 4.0K)
+Freed 0.00 GiB by removing <TMP_06>/hostedtoolcache
+Removing unused hosted-runner SDK: <TMP_06>/chrome (du -sh: 4.0K)
+Freed 0.00 GiB by removing <TMP_06>/chrome
+Removing unused hosted-runner SDK: <TMP_06>/msedge (du -sh: 4.0K)
+Freed 0.00 GiB by removing <TMP_06>/msedge
+Rust CI disk available after preparation: 12.0 GiB
+.Rust CI disk available before preparation: 12.0 GiB
+Removing unused hosted-runner SDK: <TMP_07>/sdk (du -sh: 8.0K)
+Freed 0.00 GiB by removing <TMP_07>/sdk
+Removing unused hosted-runner SDK: <TMP_07>/.ghcup (du -sh: 4.0K)
+Freed 0.00 GiB by removing <TMP_07>/.ghcup
+Removing unused hosted-runner SDK: <TMP_07>/julia1.12.7 (du -sh: 4.0K)
+Freed 0.00 GiB by removing <TMP_07>/julia1.12.7
+Rust CI disk available after preparation: 12.0 GiB
+.Rust CI disk available without cleanup: 12.0 GiB
+Rust CI disk available without cleanup: 12.0 GiB
+Rust CI disk preparation failed: Rust jobs require at least 24 GiB free; self-hosted SDKs were not removed
+..Rust CI disk available before preparation: 12.0 GiB
+Removing unused hosted-runner SDK: <TMP_08>/sdk (du -sh: 8.0K)
+Rust CI disk preparation failed: denied
+.Rust CI disk available before preparation: 8.0 GiB
+Removing unused hosted-runner SDK: <TMP_09>/sdk (du -sh: 8.0K)
+Freed 0.00 GiB by removing <TMP_09>/sdk
+Rust CI disk available after preparation: 8.0 GiB
+Rust CI disk available before preparation: 8.0 GiB
+Rust CI disk available after preparation: 8.0 GiB
+.Rust CI disk available before preparation: 12.0 GiB
+Removing unused hosted-runner SDK: <TMP_10>/du-sdk (du -sh: unknown size)
+Freed 0.00 GiB by removing <TMP_10>/du-sdk
+Rust CI disk available after preparation: 12.0 GiB
+Rust CI disk available before preparation: 12.0 GiB
+Removing unused hosted-runner SDK: <TMP_10>/du-sdk (du -sh: unknown size)
+Freed 0.00 GiB by removing <TMP_10>/du-sdk
+Rust CI disk available after preparation: 12.0 GiB
+Rust CI disk available before preparation: 12.0 GiB
+Removing unused hosted-runner SDK: <TMP_10>/du-sdk (du -sh: unknown size)
+Freed 0.00 GiB by removing <TMP_10>/du-sdk
+Rust CI disk available after preparation: 12.0 GiB
+Rust CI disk available before preparation: 12.0 GiB
+Removing unused hosted-runner SDK: <TMP_10>/du-sdk (du -sh: 4.0K)
+Freed 0.00 GiB by removing <TMP_10>/du-sdk
+Rust CI disk available after preparation: 12.0 GiB
+...Rust CI disk available before preparation: 5.0 GiB
+Removing unused hosted-runner SDK: <TMP_11>/sdk (du -sh: 8.0K)
+Freed 0.00 GiB by removing <TMP_11>/sdk
+Rust CI disk available after preparation: 5.0 GiB
+Rust CI disk preparation failed: Rust jobs require at least 10 GiB free right after disk preparation; refusing an undersized runner (the build would ENOSPC)
+.Rust CI disk preparation failed: GITHUB_WORKSPACE is required
+.Rust CI disk available before preparation: 12.0 GiB
+Removing unused hosted-runner SDK: <TMP_12>/sdk (du -sh: 8.0K)
+Freed 0.00 GiB by removing <TMP_12>/sdk
+Removing unused hosted-runner SDK: <TMP_12>/extra-sdk (du -sh: 4.0K)
+Freed 0.00 GiB by removing <TMP_12>/extra-sdk
+Rust CI disk available after preparation: 12.0 GiB
+.usage: python3 -m unittest [-h] [--aggressive] [--check-only]
+                           [--min-free-gib MIN_FREE_GIB]
+python3 -m unittest: error: argument --min-free-gib: --min-free-gib must be >= 1 GiB
+usage: python3 -m unittest [-h] [--aggressive] [--check-only]
+                           [--min-free-gib MIN_FREE_GIB]
+python3 -m unittest: error: argument --min-free-gib: --min-free-gib must be >= 1 GiB
+usage: python3 -m unittest [-h] [--aggressive] [--check-only]
+                           [--min-free-gib MIN_FREE_GIB]
+python3 -m unittest: error: argument --min-free-gib: invalid int value: 'abc'
+.Rust CI disk available before preparation: 12.0 GiB
+Removing unused hosted-runner SDK: <TMP_13>/sdk (du -sh: 8.0K)
+Freed 0.00 GiB by removing <TMP_13>/sdk
+Rust CI disk available after preparation: 12.0 GiB
+Rust CI disk available before preparation: 12.0 GiB
+Rust CI disk available after preparation: 12.0 GiB
+.Rust CI disk available before preparation: 12.0 GiB
+Removing unused hosted-runner SDK: <TMP_14>/sdk (du -sh: 8.0K)
+Freed 0.00 GiB by removing <TMP_14>/sdk
+Rust CI disk available after preparation: 12.0 GiB
+.....Rust CI disk available without cleanup: 12.0 GiB
+.Rust CI disk available without cleanup: 12.0 GiB
+.Rust CI disk available before preparation: 12.0 GiB
+Removing unused hosted-runner SDK: <TMP_15>/sdk (du -sh: 8.0K)
+Freed 0.00 GiB by removing <TMP_15>/sdk
+Rust CI disk available after preparation: 12.0 GiB
+............................................................................................................................................................................................................................................................................................ok: /usr/bin/true architecture arm64
+ok: /usr/bin/true GLIBC_2.34 ≤ GLIBC_2.35
+PASS: 1 个 ELF 为 arm64，且满足 GLIBC_ ≤ 2.35 / GLIBCXX_ ≤ 3.4.30 / CXXABI_ ≤ 1.3.13
+.........................................................................................................usage: python3 -m unittest [-h] [--only-session ONLY_SESSION]
+python3 -m unittest: error: argument --only-session: expected one argument
+..................................................................................................................................................................
+----------------------------------------------------------------------
+Ran 846 tests in 84.558s
+
+OK
+trusted_backflow=false: policy emitted unknown mode 'stealth'; failed closed
+backflow_mode=full
+trusted_backflow=true: trusted Community backflow #186; mechanical sync-version change 0.9.0 -> 0.9.1
+backflow_mode=release
+trusted_backflow=false: trust resolution failed closed: workflow event is not an object
+backflow_mode=full
+test-registry-guard: ok — 2 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present
+test-registry-guard: ok — 1 unique test paths, 1 required pins present

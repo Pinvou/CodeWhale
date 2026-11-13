@@ -93,6 +93,12 @@ func TestPortalApprovalPaginationSourceHop(t *testing.T) {
 		mu.Lock()
 		sources = append(sources, r.Header.Get(httpserver.RateLimitSourceHeader))
 		mu.Unlock()
+		if r.Header.Get(httpserver.RateLimitSourceHeader) == "198.51.100.12" {
+			w.Header().Set("Retry-After", "37")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"code":"RATE_LIMITED","message":"too many reads"}`)
+			return
+		}
 		_, _ = io.WriteString(w, `{"items":[],"limit":17,"has_more":false}`)
 	}))
 	defer backend.Close()
@@ -107,7 +113,11 @@ func TestPortalApprovalPaginationSourceHop(t *testing.T) {
 		r.AddCookie(&http.Cookie{Name: s.sessionCookieName(), Value: session.ID})
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
-		if w.Code != 200 {
+		wantStatus, wantBody, wantRetry := http.StatusOK, `{"items":[],"limit":17,"has_more":false}`, ""
+		if source == "198.51.100.12" {
+			wantStatus, wantBody, wantRetry = http.StatusTooManyRequests, `{"code":"RATE_LIMITED","message":"too many reads"}`, "37"
+		}
+		if w.Code != wantStatus || w.Body.String() != wantBody || w.Header().Get("Retry-After") != wantRetry {
 			t.Fatalf("approval BFF status=%d body=%s", w.Code, w.Body.String())
 		}
 	}

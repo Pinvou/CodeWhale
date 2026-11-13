@@ -12,31 +12,42 @@ import {
   platformModelSelectableForNewSession,
   platformModelSelectableAsDefault,
   sameModelSelectionRef,
+  platformModelRuntimeSupported,
 } from '../src/features/account-platform/model-catalog-selection.js';
+
+test('unpublished or unknown runtime protocols cannot become a default or a new session', () => {
+  for (const runtime_protocol of [undefined, '', 'UNKNOWN', 'openai_chat_v1', 'OPENAI_CHAT_V1', 'DEEPSEEK_V4_CHAT_V1']) {
+    const item = { runtime_protocol, context_eligible: true, lifecycle_status: 'PUBLISHED' };
+    const expected = ['OPENAI_CHAT_V1', 'DEEPSEEK_V4_CHAT_V1'].includes(runtime_protocol);
+    assert.equal(platformModelRuntimeSupported(item), expected);
+    assert.equal(platformModelSelectableAsDefault(item), expected);
+    assert.equal(platformModelSelectableForNewSession(item), expected);
+  }
+});
 
 test('platform model selection follows context and new-session lifecycle cutoffs', () => {
   const now = Date.parse('2026-08-25T08:00:00Z');
-  assert.equal(platformModelSelectableForNewSession({ context_eligible: true, lifecycle_status: 'PUBLISHED' }, now), true);
+  assert.equal(platformModelSelectableForNewSession({ runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'PUBLISHED' }, now), true);
   assert.equal(platformModelSelectableForNewSession({ context_eligible: false, lifecycle_status: 'PUBLISHED' }, now), false);
-  assert.equal(platformModelSelectableForNewSession({ context_eligible: true, lifecycle_status: 'REMOVED' }, now), false);
+  assert.equal(platformModelSelectableForNewSession({ runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'REMOVED' }, now), false);
   assert.equal(platformModelSelectableForNewSession({
-    context_eligible: true,
+    runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true,
     lifecycle_status: 'DEPRECATED',
     new_session_cutoff_at: '2026-08-25T08:00:01Z',
   }, now), true);
   assert.equal(platformModelSelectableForNewSession({
-    context_eligible: true,
+    runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true,
     lifecycle_status: 'DEPRECATED',
     new_session_cutoff_at: '2026-08-25T08:00:00Z',
   }, now), false);
-  assert.equal(platformModelSelectableForNewSession({ context_eligible: true, lifecycle_status: 'DEPRECATED' }, now), false);
+  assert.equal(platformModelSelectableForNewSession({ runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED' }, now), false);
 });
 
 test('composer lists context-visible models while selection references remain source-aware', () => {
   const visible = composerPlatformModels([
-    { model_id: 'published', context_eligible: true, lifecycle_status: 'PUBLISHED' },
-    { model_id: 'deprecated', context_eligible: true, lifecycle_status: 'DEPRECATED' },
-    { model_id: 'removed', context_eligible: true, lifecycle_status: 'REMOVED' },
+    { model_id: 'published', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'PUBLISHED' },
+    { model_id: 'deprecated', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED' },
+    { model_id: 'removed', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'REMOVED' },
     { model_id: 'denied', context_eligible: false, lifecycle_status: 'PUBLISHED' },
   ]);
   assert.deepEqual(visible.map(item => item.model_id), ['published', 'deprecated']);
@@ -94,13 +105,13 @@ test('ChatView replacement catalog uses the existing new-session lifecycle cutof
   const future = new Date(Date.now() + 3600000).toISOString();
   const past = new Date(Date.now() - 3600000).toISOString();
   const items = [
-    { model_id: 'published', context_eligible: true, lifecycle_status: 'PUBLISHED' },
-    { model_id: 'deprecated-before-cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: future },
-    { model_id: 'deprecated-after-cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: past },
-    { model_id: 'deprecated-no-cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED' },
-    { model_id: 'deprecated-invalid-cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: 'invalid' },
+    { model_id: 'published', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'PUBLISHED' },
+    { model_id: 'deprecated-before-cutoff', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: future },
+    { model_id: 'deprecated-after-cutoff', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: past },
+    { model_id: 'deprecated-no-cutoff', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED' },
+    { model_id: 'deprecated-invalid-cutoff', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: 'invalid' },
     { model_id: 'context-denied', context_eligible: false, lifecycle_status: 'PUBLISHED' },
-    { model_id: 'removed', context_eligible: true, lifecycle_status: 'REMOVED' },
+    { model_id: 'removed', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'REMOVED' },
   ];
   let models, selection;
   effect({ available: true, accountPlatform: { modelCatalog: async () => ({ items }) } }, 'source-a', true,
@@ -123,12 +134,12 @@ test('Personal known execution/settlement labels match current management meanin
 test('global defaults exclude every deprecated model while explicit new-session grace remains', () => {
   const now = Date.parse('2026-08-25T08:00:00Z');
   for (const cutoff of [undefined, 'invalid', '2026-08-25T07:59:59Z', '2026-08-25T08:00:00Z', '2026-08-25T08:00:01Z']) {
-    const item = { model_id: 'catalog-id-a', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: cutoff };
+    const item = { model_id: 'catalog-id-a', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: cutoff };
     assert.equal(platformModelSelectableAsDefault(item), false);
   }
-  assert.equal(platformModelSelectableForNewSession({context_eligible:true,lifecycle_status:'DEPRECATED',new_session_cutoff_at:'2026-08-25T08:00:01Z'},now),true);
-  for (const item of [null,{}, {context_eligible:false,lifecycle_status:'PUBLISHED'}, {context_eligible:true,lifecycle_status:'REMOVED'}, {context_eligible:true,lifecycle_status:'DRAFT'}, {context_eligible:true,lifecycle_status:'UNKNOWN'}]) assert.equal(platformModelSelectableAsDefault(item),false);
-  assert.equal(platformModelSelectableAsDefault({context_eligible:true,lifecycle_status:'PUBLISHED'}),true);
+  assert.equal(platformModelSelectableForNewSession({runtime_protocol:'OPENAI_CHAT_V1',context_eligible:true,lifecycle_status:'DEPRECATED',new_session_cutoff_at:'2026-08-25T08:00:01Z'},now),true);
+  for (const item of [null,{}, {context_eligible:false,lifecycle_status:'PUBLISHED'}, {runtime_protocol:'OPENAI_CHAT_V1',context_eligible:true,lifecycle_status:'REMOVED'}, {runtime_protocol:'OPENAI_CHAT_V1',context_eligible:true,lifecycle_status:'DRAFT'}, {runtime_protocol:'OPENAI_CHAT_V1',context_eligible:true,lifecycle_status:'UNKNOWN'}]) assert.equal(platformModelSelectableAsDefault(item),false);
+  assert.equal(platformModelSelectableAsDefault({runtime_protocol:'OPENAI_CHAT_V1',context_eligible:true,lifecycle_status:'PUBLISHED'}),true);
 });
 
 // Tool/system presentation rows have no relationship to authoritative turn ids.

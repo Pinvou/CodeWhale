@@ -33,6 +33,8 @@ spec:
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
           resources: {{ toYaml $root.Values.resources | nindent 12 }}
           env:
+            - name: MIGRATION_TIMEOUT
+              value: {{ $root.Values.migrations.timeout | quote }}
             - name: PINVOU_DEPLOYMENT_ENVIRONMENT
               value: {{ $root.Values.global.environment | quote }}
             - name: DATABASE_URL
