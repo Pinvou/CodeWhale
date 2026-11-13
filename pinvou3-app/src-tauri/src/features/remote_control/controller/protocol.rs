@@ -105,7 +105,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63";
+    "98e97089e09533376d4e0df65a93d6434ab4ead2dc4dc6f403edfce3214748c1";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -598,6 +598,8 @@ const NESTED_SCHEMAS: &[(&str, Schema)] = &[
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "task_id",
             ],
             optional: &[],
@@ -3105,7 +3107,13 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
         binding_schema.optional,
         "temporary_model_package.binding",
     )?;
-    for field in ["connection_id", "controller_lease_id", "task_id"] {
+    for field in [
+        "connection_id",
+        "controller_lease_id",
+        "relay_epoch",
+        "remote_control_generation",
+        "task_id",
+    ] {
         validate_identifier(
             required_value(binding, field, "temporary_model_package.binding")?,
             &format!("temporary_model_package.binding.{field}"),
@@ -3120,6 +3128,8 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
         "connection_id",
         "controller_lease_id",
         "lease_epoch",
+        "relay_epoch",
+        "remote_control_generation",
         "task_id",
     ] {
         if binding.get(field) != task.get(field) {

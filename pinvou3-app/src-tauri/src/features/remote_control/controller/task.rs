@@ -1940,7 +1940,7 @@ fn extract_skill_ids_from_input(input: &Value) -> std::result::Result<Vec<String
 
 /// Extension surface frozen for DEV-15 (temporary model packages).
 pub(crate) trait RemoteTaskModelScope: Send + Sync {
-    fn release_task_credentials(&self, task_id: &str);
+    fn release_task_credentials(&self, task_id: &str, lease: &TaskLeaseBinding);
 }
 
 /// Extension surface frozen for DEV-16 (A-only approval authority).
@@ -3533,7 +3533,9 @@ impl RemoteTaskService {
             });
         }
         if let Some(scope) = self.hooks.model.lock().clone() {
-            retry_resource_cleanup(|| scope.release_task_credentials(&record.task_id));
+            retry_resource_cleanup(|| {
+                scope.release_task_credentials(&record.task_id, &record.lease)
+            });
         }
         if let Some(scope) = self.hooks.permission.lock().clone() {
             retry_resource_cleanup(|| {
@@ -3888,7 +3890,11 @@ mod tests {
     }
 
     impl RemoteTaskModelScope for CountingHooks {
-        fn release_task_credentials(&self, _task_id: &str) {
+        fn release_task_credentials(
+            &self,
+            _task_id: &str,
+            _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+        ) {
             self.model.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -4194,7 +4200,11 @@ mod tests {
     async fn dispatch_worker_recovers_cleanup_panic_after_durable_terminal() {
         struct PanicOnce(AtomicUsize);
         impl RemoteTaskModelScope for PanicOnce {
-            fn release_task_credentials(&self, _: &str) {
+            fn release_task_credentials(
+                &self,
+                _: &str,
+                _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+            ) {
                 if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                     panic!("test terminal cleanup panic once");
                 }
@@ -4591,7 +4601,11 @@ mod tests {
     fn cleanup_panic_does_not_skip_other_ports_or_change_committed_terminal() {
         struct PanicModel(AtomicUsize);
         impl RemoteTaskModelScope for PanicModel {
-            fn release_task_credentials(&self, _task_id: &str) {
+            fn release_task_credentials(
+                &self,
+                _task_id: &str,
+                _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+            ) {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 panic!("test cleanup panic");
             }
@@ -7729,7 +7743,11 @@ mod tests {
         }
 
         impl RemoteTaskModelScope for InstallationOrderScope {
-            fn release_task_credentials(&self, _task_id: &str) {
+            fn release_task_credentials(
+                &self,
+                _task_id: &str,
+                _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+            ) {
                 self.cleanup_saw_installed
                     .store(self.installed.load(Ordering::SeqCst), Ordering::SeqCst);
             }
