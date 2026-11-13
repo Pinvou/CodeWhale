@@ -13,7 +13,8 @@ Portal 从自己入口的已验证来源创建新的 Account 请求，并附带�
 该提示仅用于防滥用计费，不证明身份或授予权限。缺失、重复或非法提示，
 以及未信任的对端，继续归入连接地址；`X-Forwarded-For` 不获得新权威。
 
-生产 personal Compose 已通过必填的已核实 edge/Portal 对端配置接线。
+生产 personal Compose 模板将 edge/Portal 对端地址作为必填变量传入
+Account 的入口限流配置；这只证明仓库模板接线，不代表站点地址已经核实或已部署。
 普通 Compose 使用 `ACCOUNT_SERVICE_HTTP_TRUSTED_PROXY_IPS`，Portal 使用
 `TOKEN_PORTAL_HTTP_TRUSTED_PROXY_IPS`；Helm 使用
 `security.httpTrustedProxyIPs.account-service` 和 `token-portal`。
