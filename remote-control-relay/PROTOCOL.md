@@ -376,6 +376,16 @@ must match it. This independent registration context is not a lease context.
 Reusing a stable registration ID with a different generation, endpoint,
 identity, public key, algorithm or capability list is `invalid_message`.
 
+New registrations additionally pass the state owner's endpoint/global retained
+record, rolling-window, serialized-byte and bounded fair-queue budgets before code
+allocation. Exact committed retries remain readable without spending a new
+quota; matching in-flight retries coalesce while echoing each transport request
+ID. A quota rejection is the existing bounded `controller_busy` admission error,
+not a terminal registration outcome, and allocates no code or retained receipt.
+The production default-deny and all claim-side protections remain unchanged.
+See [registration limits](docs/pairing-registration-limits.md) for the default
+budgets, persistence/restart boundaries and validation limits.
+
 The claim/reservation authority is connected by the later Relay composition
 when the controller feature flag is enabled. A claim
 normalizes ASCII case and removes whitespace/hyphen separators before applying
