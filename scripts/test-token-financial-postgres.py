@@ -104,6 +104,7 @@ ACCOUNT_REQUIRED = {
     "TestTokenAuthorizationWriterToBillingNonTargetPostgres",
     "TestOwnerCombinedActualHTTPPostgres",
     "TestApprovalRecoveryQueryAllRegisteredCommandsPostgres",
+    "TestUnstartedApprovalGrantInventoryPostgres",
     "TestApprovalRecoveryQueryForwardMigrationPostgres",
     "TestApprovalAuthorizationWallClockPostgres",
     "TestApprovalMutationWallClockPostgres",
@@ -122,6 +123,7 @@ ACCOUNT_REQUIRED = {
 # These Account roots are real named leaf tests; all other required roots
 # still need completed child-case evidence. Root run/pass and no-skip stay mandatory.
 ACCOUNT_LEAF_REQUIRED = {
+    "TestUnstartedApprovalGrantInventoryPostgres",
     "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
     "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
     "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
@@ -157,7 +159,7 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres"}
+SCHEMA_REQUIRED = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres"}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -209,6 +211,7 @@ RETAINED_REQUIRED = {
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestReceivableSettlementGuardedWritesPostgres",
     "TestPostgresManagedPricePagination",
+    "TestPriceFallbackMissingBindingPostgres",
     "TestLedgerRepairProofHistoricalUpgradePostgres",
     "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres",
     "TestLedgerRepairAuthorityCrossDatePostgres",
@@ -285,6 +288,10 @@ BILLING_LEAF_REQUIRED = {
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
     "TestProviderQuotaConcurrentBoundary": {"migration-round-trip", "send", "verify", "login-registration", "login-profile"},
+    "TestOrphanPaidOrderIndexPublicMigration": {
+        "fresh-failure-atomicity-and-retry",
+        "populated-upgrade-replay-and-own-ddl-rollback",
+    },
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)
@@ -299,6 +306,12 @@ EXACT_REQUIRED_CHILDREN = {
         "valid-proof", "persistence-failure", "operator",
     },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
+    "TestPriceFallbackMissingBindingPostgres": {
+        "missing-binding-and-rollback",
+        "permission-denied-before-mutation",
+        "binding-read-fault-and-later-retry",
+        "valid-binding-fallback-and-receipt-replay",
+    },
     "TestPostgresManagedPricePagination": {
         "bounded-batch-queries",
         *{f"bounded-batch-queries/{kind}-{size}" for kind in ("list", "namespace") for size in (1, 100, 200)},

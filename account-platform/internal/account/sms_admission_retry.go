@@ -15,8 +15,14 @@ func retrySMSAdmission[T any](ctx context.Context, run func() (T, error)) (T, er
 	for attempt := 1; ; attempt++ {
 		result, err := run()
 		var postgresError *pgconn.PgError
-		if attempt == maximumAttempts || ctx.Err() != nil || !errors.As(err, &postgresError) || postgresError.Code != "40001" {
+		if ctx.Err() != nil || !errors.As(err, &postgresError) || postgresError.Code != "40001" {
 			return result, err
+		}
+		if attempt == maximumAttempts {
+			// Contention exhausted the bounded admission budget, before dispatch.
+			// Keep the database cause for diagnostics and use the existing safe
+			// service-unavailable response at both public SMS entry points.
+			return result, errors.Join(ErrSMSUnavailable, err)
 		}
 	}
 }

@@ -73,7 +73,35 @@ test('dedicated user and operations views expose closure progress, blockers and 
   assert.match(operationsView, /^import \{ AdminAccountClosureWorkspace \} from '\.\/AdminAccountClosureWorkspace\.jsx';$/m);
   assert.match(operationsView, /^\s*\['closures', 'platform\.account-closures\.read',/m);
   assert.match(operationsView, /^\s*\{view === 'closures' && <AdminAccountClosureWorkspace \{\.\.\.\{ client, me, language \}\} \/>\}/m);
-  assert.match(operationsView, /const active = tabs\.some\(\(\[key\]\) => key === route\.operationsTab\) \? route\.operationsTab/);
+  assert.match(operationsView, /const closureDenied = route\.operationsTab === 'closures' && !permissions\.includes\('platform\.account-closures\.read'\)/);
+  const operationsStart = operationsView.indexOf('export function AdminOperationsPage(');
+  const tabsStart = operationsView.indexOf('  const tabs =', operationsStart);
+  const activeStart = operationsView.indexOf('  const active =', tabsStart);
+  const activeEnd = operationsView.indexOf(';', activeStart);
+  assert.ok(operationsStart >= 0 && tabsStart > operationsStart && activeStart > tabsStart && activeEnd > activeStart);
+  const selectOperation = new Function('route', 'permissions', 'copy', 'accountClosureCopy', 'language',
+    `${operationsView.slice(tabsStart, activeEnd + 1)}\nreturn { active, closureDenied };`);
+  const labels = { operations: { nav: 'policy' }, userManagement: { registrationRepair: 'registration', profileRepair: 'profile' } };
+  const select = (tab, permissions) => selectOperation({ operationsTab: tab }, permissions, labels, { zh: { listTitle: 'closures' } }, 'zh');
+  assert.deepEqual(select('closures', ['platform.account-closures.read']), { active: 'closures', closureDenied: false });
+  for (const permissions of [[], ['platform.registration-bonus.read'], ['platform.registrations.repair'], ['platform.profile-changes.repair']]) {
+    assert.deepEqual(select('closures', permissions), { active: null, closureDenied: true },
+      'denied closure navigation must not fall back to another permitted operation');
+  }
+  const selectRepair = new Function('route', 'permissions', 'copy', 'accountClosureCopy', 'language',
+    `${operationsView.slice(tabsStart, activeEnd + 1)}\nreturn { active, registrationDenied, profileDenied };`);
+  for (const [tab, permission, denied] of [
+    ['registration', 'platform.registrations.repair', 'registrationDenied'],
+    ['profile', 'platform.profile-changes.repair', 'profileDenied'],
+  ]) {
+    const select = permissions => selectRepair({ operationsTab: tab }, permissions, labels, { zh: { listTitle: 'closures' } }, 'zh');
+    assert.deepEqual(select([permission]), { active: tab, registrationDenied: false, profileDenied: false });
+    for (const permissions of [[], ['platform.registration-bonus.read'], ['platform.account-closures.read'], [tab === 'registration' ? 'platform.profile-changes.repair' : 'platform.registrations.repair']]) {
+      assert.deepEqual(select(permissions), { active: null, registrationDenied: denied === 'registrationDenied', profileDenied: denied === 'profileDenied' },
+        'denied repair navigation must not fall back to a different permitted operation');
+    }
+  }
+  assert.match(operationsView, /\{closureDenied && <p role="alert">\{accountClosureCopy\[language\]\.listPermissionDenied\}<\/p>\}/);
   assert.match(adminNavigation, /const route = resolveAdminRoute\(search, flags, available\)/);
   assert.match(adminNavigation, /adminRouteLocation\(search, section, route\.tab \? \{ finance_tab: route\.tab \} : \{\}/);
   const { resolveAdminRoute, visibleAdminSections } = await import('../../../pinvou3-app/src/features/account-platform/admin-sections.js');

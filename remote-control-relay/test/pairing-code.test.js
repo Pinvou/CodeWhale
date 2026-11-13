@@ -4,10 +4,10 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { sealPairingCode } from "../pairing-code-sealer.js";
-import { PairingStore } from "../pairing-store.js";
+import { PairingStore, DEFAULT_PAIRING_REGISTRATION_LIMITS } from "../pairing-store.js";
 import { PairingRegistrationHandler } from "../pairing-registration-handler.js";
 import { ControllerReservationManager, EndpointInteractionSlots } from "../controller-reservation.js";
-import { buildSealedCodeAad, parseSealedCodeV1 } from "../protocol-controller.js";
+import { buildSealedCodeAad, parseSealedCodeV1, validateControllerMessage } from "../protocol-controller.js";
 
 const X25519_SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
 const X25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b656e04220420", "hex");
@@ -573,4 +573,306 @@ test("the plaintext pairing code never reaches logs, telemetry or wire projectio
   assert.match(controlled, /fn validate_pairing_code/u);
   assert.doesNotMatch(controlled, /fn \w*pairing_code\w*generate|fn \w*generate\w*pairing_code/u);
   assert.doesNotMatch(controlled, /rand::|thread_rng|OsRng/u);
+});
+
+function smallRegistrationBudget(overrides = {}) {
+  return { maxPerEndpointRecords: 2, maxGlobalRecords: 4, windowMs: 1000,
+    maxPerEndpointWindow: 2, maxGlobalWindow: 4, ...overrides };
+}
+
+function registeredRequest(endpoint, sequence, overrides = {}) {
+  const request = registration({ endpoint_id: endpoint, registration_request_id: `quota-${endpoint}-${sequence}`,
+    request_id: `transport-${endpoint}-${sequence}`, remote_control_generation: `generation-${endpoint}-${sequence}`, ...overrides });
+  assert.doesNotThrow(() => validateControllerMessage(request, "B"), "registration fixtures must pass the real wire writer contract");
+  return request;
+}
+
+function barrier() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("registration flood is endpoint-fair and known retries never spend another slot", async () => {
+  const stateStore = new MemoryStateStore();
+  let entropyCalls = 0;
+  let sealCalls = 0;
+  const store = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => 1000,
+    randomBytes: (size) => { entropyCalls += 1; return crypto.randomBytes(size); } });
+  const seal = (value) => { sealCalls += 1; return sealPairingCode(value); };
+  const first = registeredRequest("endpoint-flood", 0);
+  const allocated = await store.register({ request: first, relayEpoch: "epoch-quota", sealCode: seal });
+  for (let index = 1; index < DEFAULT_PAIRING_REGISTRATION_LIMITS.maxPerEndpointWindow; index += 1) {
+    await store.register({ request: registeredRequest("endpoint-flood", index), relayEpoch: "epoch-quota", sealCode: seal });
+  }
+  const before = [stateStore.revision, entropyCalls, sealCalls];
+  await assert.rejects(store.register({ request: registeredRequest("endpoint-flood", 99),
+    relayEpoch: "epoch-quota", sealCode: seal }), { code: "controller_busy" });
+  assert.deepEqual([stateStore.revision, entropyCalls, sealCalls], before, "reject before generation/sealing/persistence");
+  const replay = await store.register({ request: { ...first, request_id: "new-transport-retry" },
+    relayEpoch: "epoch-quota", sealCode: seal });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.result.sealed_code_b64, allocated.result.sealed_code_b64);
+  assert.equal(replay.result.request_id, "new-transport-retry");
+  assert.deepEqual([stateStore.revision, entropyCalls, sealCalls], before);
+  assert.equal((await store.register({ request: registeredRequest("endpoint-other", 1),
+    relayEpoch: "epoch-quota", sealCode: seal })).result.type, "desktop_pairing_registered");
+});
+
+test("registration quotas survive JSON reopen, TTL expiry, quarantine and clock rollback", async () => {
+  let now = 0;
+  const stateStore = new MemoryStateStore();
+  const options = { stateStore, digestKeyring: keyring(), clock: () => now,
+    registrationBudget: smallRegistrationBudget({ maxPerEndpointWindow: 1, maxGlobalWindow: 2 }) };
+  let store = await PairingStore.open(options);
+  const first = registeredRequest("endpoint-restart", 1);
+  const initial = await store.register({ request: first, relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  stateStore.value = JSON.parse(JSON.stringify(stateStore.value));
+  store = await PairingStore.open(options);
+  const next = registeredRequest("endpoint-restart", 2);
+  await assert.rejects(store.register({ request: next, relayEpoch: "epoch-quota", sealCode: sealPairingCode }), { code: "controller_busy" });
+  now = 1000; // The exact window boundary releases the rate, not the receipt.
+  await store.register({ request: next, relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  now = 500;
+  await assert.rejects(store.register({ request: registeredRequest("endpoint-restart", 3),
+    relayEpoch: "epoch-quota", sealCode: sealPairingCode }), { code: "controller_busy" });
+  now = 300_001;
+  assert.equal(store.activePairing(initial.result.pairing_id), null);
+  assert.equal((await store.register({ request: first, relayEpoch: "epoch-quota", sealCode: sealPairingCode })).replayed, true);
+  await assert.rejects(store.register({ request: registeredRequest("endpoint-restart", 3),
+    relayEpoch: "epoch-quota", sealCode: sealPairingCode }), { code: "controller_busy" }, "expired code remains in quarantine accounting");
+  now = 600_001;
+  await store.register({ request: registeredRequest("endpoint-restart", 3), relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  assert.equal(stateStore.value.registrations.length, 2);
+  assert.equal(stateStore.value.tombstones.some((row) => row.pairing_id === initial.result.pairing_id), false);
+});
+
+test("sealing rejection has a bounded persisted receipt and cannot bypass admission rate", async () => {
+  const stateStore = new MemoryStateStore();
+  const options = { stateStore, digestKeyring: keyring(), clock: () => 1000,
+    registrationBudget: smallRegistrationBudget({ maxPerEndpointWindow: 1, maxGlobalWindow: 2 }) };
+  let store = await PairingStore.open(options);
+  // A shape-valid noncontributory X25519 wrapping key reaches the real sealer.
+  const invalid = registeredRequest("endpoint-invalid-wrap", 1, { code_wrap_public_key_b64: Buffer.alloc(32).toString("base64") });
+  const failure = await store.register({ request: invalid, relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  assert.equal(failure.result.type, "error");
+  assert.equal(failure.result.code, "pairing_code_generation_failed");
+  assert.equal(stateStore.value.registrations[0].pairing_id, null);
+  assert.equal(stateStore.value.tombstones.length, 0);
+  store = await PairingStore.open(options);
+  const replay = await store.register({ request: { ...invalid, request_id: "retry-invalid-wrap" },
+    relayEpoch: "epoch-quota", sealCode: () => assert.fail("known rejection must not seal again") });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.result.code, "pairing_code_generation_failed");
+  await assert.rejects(store.register({ request: registeredRequest("endpoint-invalid-wrap", 2),
+    relayEpoch: "epoch-quota", sealCode: sealPairingCode }), { code: "controller_busy" });
+  await store.register({ request: registeredRequest("endpoint-valid-wrap", 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  assert.doesNotMatch(JSON.stringify(stateStore.value), /error:|openssl|private_key|ERR_OSSL/u);
+});
+
+test("global retained capacity rejects new registrations while exact replay remains readable", async () => {
+  const stateStore = new MemoryStateStore();
+  const store = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => 1000,
+    registrationBudget: smallRegistrationBudget({ maxPerEndpointRecords: 1, maxGlobalRecords: 2,
+      maxPerEndpointWindow: 1, maxGlobalWindow: 2 }) });
+  const first = registeredRequest("endpoint-global-a", 1);
+  await store.register({ request: first, relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  await store.register({ request: registeredRequest("endpoint-global-b", 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  await assert.rejects(store.register({ request: registeredRequest("endpoint-global-c", 1),
+    relayEpoch: "epoch-quota", sealCode: sealPairingCode }), { code: "controller_busy" });
+  assert.equal((await store.register({ request: first, relayEpoch: "epoch-quota", sealCode: sealPairingCode })).replayed, true);
+  assert.equal(stateStore.value.registrations.length, 2);
+});
+
+test("pairing serialized budget rejects before allocation and preserves shared-file headroom", async () => {
+  const stateStore = new MemoryStateStore();
+  let entropy = 0;
+  const store = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => 1000,
+    randomBytes: (size) => { entropy += 1; return crypto.randomBytes(size); },
+    registrationBudget: { maxNamespaceBytes: 32 * 1024 } });
+  let accepted = 0;
+  for (let index = 0; index < 100; index += 1) {
+    const before = [stateStore.revision, entropy];
+    try {
+      await store.register({ request: registeredRequest(`endpoint-bytes-${index}`, 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+      accepted += 1;
+    } catch (error) {
+      assert.equal(error.code, "controller_busy");
+      assert.deepEqual([stateStore.revision, entropy], before);
+      break;
+    }
+  }
+  assert.ok(accepted > 0 && accepted < 100);
+  assert.equal(stateStore.value.registrations.length, accepted);
+  assert.ok(Buffer.byteLength(JSON.stringify(stateStore.value), "utf8") <= 32 * 1024);
+});
+
+test("bounded endpoint queue coalesces exact flights, snapshots inputs and lets another endpoint proceed", async () => {
+  const stateStore = new MemoryStateStore();
+  const store = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => 1000 });
+  const entered = barrier();
+  const release = barrier();
+  const originalCas = stateStore.compareAndSwap.bind(stateStore);
+  let blocked = true;
+  stateStore.compareAndSwap = async (...args) => {
+    if (blocked) { blocked = false; entered.resolve(); await release.promise; }
+    return originalCas(...args);
+  };
+  const first = registeredRequest("endpoint-queue-a", 1);
+  const active = store.register({ request: first, relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  const pending = [active];
+  await entered.promise;
+  try {
+    const duplicate = store.register({ request: { ...first, request_id: "transport-coalesced" }, relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+    pending.push(duplicate);
+    await assert.rejects(store.register({ request: { ...first, remote_control_generation: "generation-conflict" },
+      relayEpoch: "epoch-quota", sealCode: sealPairingCode }), { code: "pairing_registration_conflict" });
+    const queued = registeredRequest("endpoint-queue-a", 2);
+    const second = store.register({ request: queued, relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+    pending.push(second);
+    queued.endpoint_id = "endpoint-mutated-after-admission";
+    const denied = store.register({ request: registeredRequest("endpoint-queue-a", 3),
+      relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+    pending.push(denied);
+    let admission = "pending";
+    denied.then(() => { admission = "accepted"; }, (error) => { admission = error.code; });
+    // The first CAS is explicitly held, so a queued acceptance cannot settle.
+    // Flush the current turn rather than waiting on a potentially wrong gate.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(admission, "controller_busy");
+    const other = store.register({ request: registeredRequest("endpoint-queue-b", 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+    pending.push(other);
+    release.resolve();
+    const [a, same, b, c] = await Promise.all([active, duplicate, second, other]);
+    assert.equal(a.replayed, false);
+    assert.equal(same.replayed, true);
+    assert.equal(same.result.request_id, "transport-coalesced");
+    assert.equal(same.result.sealed_code_b64, a.result.sealed_code_b64);
+    assert.equal(b.result.type, "desktop_pairing_registered");
+    assert.equal(c.result.type, "desktop_pairing_registered");
+    assert.equal(stateStore.value.registrations.length, 3);
+    assert.equal(stateStore.value.registrations.find((row) => row.registration_request_id === queued.registration_request_id).endpoint_id, "endpoint-queue-a");
+  } finally {
+    release.resolve();
+    await Promise.allSettled(pending);
+  }
+});
+
+test("independent store owners cannot overshoot the durable global quota through CAS races", async () => {
+  const stateStore = new MemoryStateStore();
+  const options = { stateStore, digestKeyring: keyring(), clock: () => 1000,
+    registrationBudget: smallRegistrationBudget({ maxPerEndpointRecords: 1, maxGlobalRecords: 2,
+      maxPerEndpointWindow: 1, maxGlobalWindow: 2 }) };
+  const left = await PairingStore.open(options);
+  await left.register({ request: registeredRequest("endpoint-cas-seed", 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  const right = await PairingStore.open(options);
+  const results = await Promise.allSettled([
+    left.register({ request: registeredRequest("endpoint-cas-left", 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode }),
+    right.register({ request: registeredRequest("endpoint-cas-right", 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode }),
+  ]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(results.find((result) => result.status === "rejected").reason.code, "controller_busy");
+  assert.equal(stateStore.value.registrations.length, 2);
+});
+
+test("global admission queue is bounded and cannot block an already committed replay", async () => {
+  const stateStore = new MemoryStateStore();
+  const store = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => 1000 });
+  const seed = registeredRequest("endpoint-queue-seed", 1);
+  const seeded = await store.register({ request: seed, relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  const entered = barrier();
+  const release = barrier();
+  const originalCas = stateStore.compareAndSwap.bind(stateStore);
+  let blocked = true;
+  stateStore.compareAndSwap = async (...args) => {
+    if (blocked) { blocked = false; entered.resolve(); await release.promise; }
+    return originalCas(...args);
+  };
+  const pending = [store.register({ request: registeredRequest("endpoint-pending-0", 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode })];
+  await entered.promise;
+  try {
+    for (let index = 1; index < 64; index += 1) pending.push(store.register({
+      request: registeredRequest(`endpoint-pending-${index}`, 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode,
+    }));
+    const overflow = store.register({ request: registeredRequest("endpoint-overflow", 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+    pending.push(overflow);
+    let overflowState = "pending";
+    overflow.then(() => { overflowState = "accepted"; }, (error) => { overflowState = error.code; });
+    const replay = store.register({ request: { ...seed, request_id: "queue-full-replay" }, relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+    pending.push(replay);
+    let replayState = "pending";
+    replay.then((result) => { replayState = result; }, (error) => { replayState = error.code; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(overflowState, "controller_busy");
+    assert.equal(replayState.replayed, true);
+    assert.equal(replayState.result.sealed_code_b64, seeded.result.sealed_code_b64);
+    release.resolve();
+    assert.equal((await Promise.all(pending.slice(0, 64))).length, 64);
+    assert.equal(stateStore.value.registrations.length, 65);
+  } finally {
+    release.resolve();
+    await Promise.allSettled(pending);
+  }
+});
+
+test("an unknown persistence acknowledgement does not poison the queue or double-charge its replay", async () => {
+  // This memory owner deliberately remains readable after the lost response.
+  // A production state owner's own fail-stop/read gates are not bypassed.
+  const stateStore = new MemoryStateStore();
+  let entropy = 0;
+  const store = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => 1000,
+    registrationBudget: smallRegistrationBudget({ maxPerEndpointWindow: 1, maxGlobalWindow: 2 }),
+    randomBytes: (size) => { entropy += 1; return crypto.randomBytes(size); } });
+  const originalCas = stateStore.compareAndSwap.bind(stateStore);
+  let failReply = true;
+  stateStore.compareAndSwap = async (...args) => {
+    const result = await originalCas(...args);
+    if (failReply) { failReply = false; throw Object.assign(new Error("lost storage acknowledgement"), { code: "storage_reply_lost" }); }
+    return result;
+  };
+  const request = registeredRequest("endpoint-unknown-write", 1);
+  await assert.rejects(store.register({ request, relayEpoch: "epoch-quota", sealCode: sealPairingCode }), { code: "pairing_persist_failed" });
+  const before = [stateStore.revision, entropy];
+  const replay = await store.register({ request: { ...request, request_id: "unknown-write-retry" }, relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  assert.equal(replay.replayed, true);
+  assert.deepEqual([stateStore.revision, entropy], before);
+  assert.equal(stateStore.value.registrations.length, 1);
+  assert.equal((await store.register({ request: registeredRequest("endpoint-after-failure", 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode })).result.type,
+    "desktop_pairing_registered");
+});
+
+test("unpublished persistence failures spend a bounded work rate without starving another endpoint", async () => {
+  const stateStore = new MemoryStateStore();
+  let now = 1000;
+  let entropy = 0;
+  const store = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => now,
+    registrationBudget: smallRegistrationBudget(),
+    randomBytes: (size) => { entropy += 1; return crypto.randomBytes(size); } });
+  stateStore.failWrites = true;
+  const request = registeredRequest("endpoint-write-failure", 1);
+  for (let index = 0; index < 2; index += 1) {
+    await assert.rejects(store.register({ request, relayEpoch: "epoch-quota", sealCode: sealPairingCode }), { code: "pairing_persist_failed" });
+  }
+  const before = entropy;
+  await assert.rejects(store.register({ request, relayEpoch: "epoch-quota", sealCode: sealPairingCode }), { code: "controller_busy" });
+  assert.equal(entropy, before, "refuse before further crypto even though no receipt was published");
+  assert.equal(stateStore.value.registrations.length, 0);
+  stateStore.failWrites = false;
+  await store.register({ request: registeredRequest("endpoint-other", 1), relayEpoch: "epoch-quota", sealCode: sealPairingCode });
+  now = 2000;
+  assert.equal((await store.register({ request, relayEpoch: "epoch-quota", sealCode: sealPairingCode })).result.type, "desktop_pairing_registered");
+});
+
+test("invalid or unfair registration budgets fail before any state publication", async () => {
+  for (const registrationBudget of [
+    { maxPerEndpointRecords: 3, maxGlobalRecords: 4 },
+    { maxPerEndpointWindow: 3, maxGlobalWindow: 4 },
+    { maxNamespaceBytes: 31 * 1024 }, { maxNamespaceBytes: 16 * 1024 * 1024 },
+    { windowMs: 600_001 }, { maxGlobalRecords: Infinity }, { unsupportedPolicy: 1 },
+  ]) {
+    const stateStore = new MemoryStateStore();
+    await assert.rejects(PairingStore.open({ stateStore, digestKeyring: keyring(), registrationBudget }), { code: "pairing_registration_limits_invalid" });
+    assert.equal(stateStore.revision, "0");
+    assert.equal(stateStore.value, null);
+  }
 });
