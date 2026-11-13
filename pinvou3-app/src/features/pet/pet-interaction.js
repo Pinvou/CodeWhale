@@ -98,10 +98,12 @@ function connectedMonitorArea(monitors, seed) {
       const next = areas[candidate];
       const horizontalGap = Math.max(current.l - next.r, next.l - current.r, 0);
       const verticalGap = Math.max(current.t - next.b, next.t - current.b, 0);
-      if (horizontalGap <= 1 && verticalGap <= 1) {
-        selected.add(candidate);
-        queue.push(candidate);
+      if (!(horizontalGap <= 1 && verticalGap <= 1)) {
+        continue;
       }
+
+      selected.add(candidate);
+      queue.push(candidate);
     }
   }
   const group = [...selected].map((index) => areas[index]);
@@ -467,7 +469,8 @@ export function dragAnimationFromMotion(current, deltaX, deltaY) {
 }
 
 export function stepPetDrag(state) {
-  let { x, y, tx, ty } = state;
+  let { x, y } = state;
+  const { tx, ty } = state;
   const followPointer = state.holding || state.releasePending;
   if (followPointer) {
     // 人物位置就是鼠标目标，不保留速度、弹簧或惯性状态。
@@ -535,6 +538,9 @@ export function clampPetDragToBounds(state, bounds = state.bounds) {
   };
 }
 
+// Closed-side wiring: proportional resize-handle math for the pet window
+// (drag the grip to scale 0.5x-1.2x, anchored at the window's top-left in
+// physical pixels). Pure functions, self-contained; open tree has no caller.
 const MIN_SCALE = 0.5;
 const MAX_SCALE = 1.2;
 const BASE_WIDTH = 240;

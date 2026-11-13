@@ -23,6 +23,7 @@ export const SearchOverlay = ({ theme, history, t, onSelect, onClose }) => {
   }, [onClose]);
 
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: backdrop click-to-close layer, not an interactive container; the keyboard path is Escape-to-close
     <div
       role="presentation"
       className="fixed inset-0 z-[180] flex items-start justify-center px-5 pt-[76px] bg-[rgba(255,255,255,.28)] dark:bg-[rgba(0,0,0,.34)]"
@@ -33,6 +34,7 @@ export const SearchOverlay = ({ theme, history, t, onSelect, onClose }) => {
       }}
       onClick={onClose}
     >
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: inner layer stops click propagation; keyboard events need no equivalent bubbling handling */}
       <div
         role="dialog"
         aria-modal="true"
