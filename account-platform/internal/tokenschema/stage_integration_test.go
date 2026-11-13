@@ -140,7 +140,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		previous := []migrations.Migration{}
 		for _, m := range loaded {
 			if previousStage == 40 {
-				if m.Version < 900007 {
+				if m.Version < 900011 {
 					previous = append(previous, m)
 				}
 				continue
@@ -292,7 +292,7 @@ VALUES('11111111-1111-4111-8111-111111111116','11111111-1111-4111-8111-111111111
 			t.Fatal("publication upgrade changed original outbox facts", generation, err)
 		}
 		for _, migration := range loaded {
-			if migration.Version != 900007 {
+			if migration.Version != 900011 {
 				continue
 			}
 			tx, err := connection.Begin(ctx)

@@ -14,13 +14,49 @@ REQUIRED = {TEST} | {TEST + "/" + name for name in (
 
 
 def validate(output, exit_code):
-    events = [json.loads(line) for line in output.splitlines() if line.strip()]
-    terminal = [e for e in events if e.get("Action") in ("pass", "fail", "skip")]
-    passed = {e.get("Test") for e in terminal if e.get("Test") and e.get("Action") == "pass"}
-    if (exit_code or not REQUIRED <= passed
-            or any(e.get("Package") != PACKAGE or e.get("Action") != "pass" for e in terminal)
-            or not any(e.get("Action") == "pass" and not e.get("Test") for e in terminal)):
+    def reject():
         raise ValueError("TOKEN_OUTBOX_ACCEPTANCE_FAILED_OR_SKIPPED")
+    if exit_code:
+        reject()
+    started, passed = set(), set()
+    package_started = package_passed = False
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if not isinstance(event, dict) or event.get("Package") != PACKAGE:
+            reject()
+        action, name = event.get("Action"), event.get("Test")
+        if "Test" in event and (not isinstance(name, str) or not name):
+            reject()
+        if package_passed or action in ("fail", "skip"):
+            reject()
+        if name:
+            if name not in REQUIRED or not package_started:
+                reject()
+            if action == "run":
+                if name in started or (name != TEST and (TEST not in started or TEST in passed)):
+                    reject()
+                started.add(name)
+            elif action == "pass":
+                if (name not in started or name in passed
+                        or (name == TEST and passed != REQUIRED - {TEST})):
+                    reject()
+                passed.add(name)
+            elif action not in ("output", "pause", "cont") or name not in started:
+                reject()
+        elif action == "start":
+            if package_started:
+                reject()
+            package_started = True
+        elif action == "pass":
+            if not package_started or started != REQUIRED or passed != REQUIRED:
+                reject()
+            package_passed = True
+        elif action != "output" or not package_started:
+            reject()
+    if not package_passed:
+        reject()
 
 
 def main():

@@ -7,14 +7,14 @@ import { checkHelmNATSCredentials } from '../../../scripts/account-platform-nats
 
 const chart = path.resolve(import.meta.dirname, '../../deploy/helm/account-platform');
 const enabled = { skip: process.env.PINVOU_TEST_KMS_HELM !== '1' };
-function render(governed, native = false, tokenEvents = false) {
+function render(governed, native = false, tokenEvents = false, natsCidrs = []) {
   const args = governed ? ['-f', path.join(chart, 'values-model-token-test.yaml'),
     ...(native ? ['-f', path.join(chart, 'values-kms-native-test.yaml')] : [])] :
     ['-f', path.join(chart, 'values-staging.yaml'), '--set-string', 'dependencies.natsUrl=tls://nats.fixture.invalid:4222',
       '--set-string', 'newApi.tlsSecretName=fixture-only-newapi', '--set-string', 'newApi.caConfigMap=fixture-only-ca',
       '--set-string', 'images.newApiTLS.repository=registry.example.invalid/config-only',
       '--set-string', `images.newApiTLS.digest=sha256:${'0'.repeat(64)}`];
-  const result = spawnSync(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', ['template', 'fixture', chart, ...args, '--set', 'availability.enabled=true', '--set', `tokenEventRelay.enabled=${tokenEvents}`, '--set-json', 'workloadIdentity.kubernetesApiServerPorts=[443]', '--set-json', 'external.workloadJwksCidrs=["192.0.2.40/32"]'],
+  const result = spawnSync(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', ['template', 'fixture', chart, ...args, '--set', 'availability.enabled=true', '--set', `tokenEventRelay.enabled=${tokenEvents}`, '--set-json', `external.natsCidrs=${JSON.stringify(natsCidrs)}`, '--set-json', 'workloadIdentity.kubernetesApiServerPorts=[443]', '--set-json', 'external.workloadJwksCidrs=["192.0.2.40/32"]'],
     { encoding: 'utf8', timeout: 30000, maxBuffer: 4 * 1024 * 1024,
       env: Object.fromEntries(Object.entries(process.env).filter(([key]) =>
         ['PATH', 'HOME', 'USERPROFILE', 'SYSTEMROOT', 'TEMP', 'TMP'].includes(key.toUpperCase()))) });
@@ -57,6 +57,42 @@ test('optional Token Helm publisher keeps independent seed, database and trusted
     const changed = structuredClone(items);
     mutate(get(changed, 'token-event-relay'));
     assert.throws(() => checkHelmNATSCredentials(changed), /model_token_deployment_nats_/);
+  }
+});
+
+function assertEventClientPolicy(items, tokenEvents, natsCidrs) {
+  const policies = items.filter(item => item.kind === 'NetworkPolicy' && item.metadata.name.endsWith('-event-clients'));
+  assert.equal(policies.length, 1);
+  const policy = policies[0].spec;
+  assert.deepEqual(policy.policyTypes, ['Egress']);
+  assert.deepEqual(policy.podSelector.matchExpressions, [
+    {key: 'app.kubernetes.io/component', operator: 'In', values: ['account-service', 'billing-service', 'token-gateway', 'account-event-relay', 'billing-event-relay', ...(tokenEvents ? ['token-event-relay'] : [])]},
+    {key: 'pinvou.io/restricted-token-control', operator: 'DoesNotExist'},
+    {key: 'pinvou.io/newapi-data-plane', operator: 'DoesNotExist'},
+  ]);
+  assert.deepEqual(policy.egress ?? [], natsCidrs.map(cidr => ({to: [{ipBlock: {cidr}}], ports: [{protocol: 'TCP', port: 4222}]})));
+  return policy;
+}
+
+test('optional Token Helm publisher joins only the exact existing NATS egress policy', enabled, () => {
+  for (const native of [false, true]) {
+    const cidrs = ['192.0.2.60/32']; // Explicit public documentation-only destination, no network connection.
+    const disabled = render(true, native, false, cidrs), items = render(true, native, true, cidrs);
+    const existing = assertEventClientPolicy(disabled, false, cidrs), active = assertEventClientPolicy(items, true, cidrs);
+    assert.deepEqual(active.egress, existing.egress, 'enabling Token publication must preserve destination CIDRs and ports');
+    assert.deepEqual(active.podSelector.matchLabels, existing.podSelector.matchLabels);
+    for (const mutate of [
+      policy => { policy.podSelector.matchExpressions[0].values.pop(); },
+      policy => { policy.podSelector.matchExpressions[0].values.push('unrelated-client'); },
+      policy => { policy.egress[0].ports[0].port = 443; },
+      policy => { delete policy.egress[0].ports; },
+      policy => { policy.egress[0].to[0].ipBlock.cidr = '0.0.0.0/0'; },
+    ]) {
+      const changed = structuredClone(items);
+      mutate(changed.find(item => item.kind === 'NetworkPolicy' && item.metadata.name.endsWith('-event-clients')).spec);
+      assert.throws(() => assertEventClientPolicy(changed, true, cidrs));
+    }
+    for (const tokenEvents of [false, true]) assertEventClientPolicy(render(true, native, tokenEvents), tokenEvents, []);
   }
 });
 

@@ -7,6 +7,7 @@ import {
   canonicalOllamaModelName,
   checkLinkable,
   findLinkedRows,
+  findCardLinkedRows,
   findLinkedRowsForEndpoint,
   findLinkedRowsForOllamaEndpoint,
   isLocalGatewayUrl,
@@ -28,6 +29,7 @@ test('credential_action 必须是 replace，api_key 不能留空', () => {
   // 错得极其隐蔽，所以钉死。本地推理服务不校验 Key，占位值即可。
   assert.equal(buildSavedModel(OK).credential_action, 'replace');
   assert.equal(buildSavedModel(OK).api_key, 'local');
+  assert.equal(buildSavedModel(OK).model_store_link_detached, false);
   assert.equal(buildSavedModel({ ...OK, apiKey: 'sk-x' }).api_key, 'sk-x');
 });
 
@@ -53,6 +55,17 @@ test('model 填推理服务自己认的 id', () => {
   // 直连时必须填 endpoint_model。经网关才是填 model_name（网关按它查表再替换），
   // 两者混用就是 404 —— 而调用方那边只会看到一句"模型不存在"。
   assert.equal(buildSavedModel(OK).model, 'deepseek-v4-flash-vision-exp');
+});
+
+test('接入时记录稳定卡片关联，升级后仍沿用保存模型 id', () => {
+  const row = buildSavedModel({ ...OK, cardId: 'stable-card', existingId: 'saved-id' });
+  assert.equal(row.model_store_card_id, 'stable-card');
+  assert.equal(row.model_store_link_requested, true);
+  assert.equal(row.model_store_link_only, true);
+  assert.equal(row.id, 'saved-id');
+  assert.equal(buildSavedModel(OK).model_store_card_id, null);
+  assert.equal(buildSavedModel(OK).model_store_link_requested, false);
+  assert.equal(buildSavedModel(OK).model_store_link_only, false);
 });
 
 test('缺任何一个必要取值都要当场报错，不能拼出半截配置', () => {
@@ -171,6 +184,27 @@ test('findLinkedRows：入参脏了就返回空，不许抛', () => {
   assert.deepEqual(findLinkedRows([], 'x'), []);
   assert.deepEqual(findLinkedRows([{ model: 'x' }], ''), [], '没有 model_name 时一行都不能删');
   assert.deepEqual(findLinkedRows([null, undefined, { model: 'x' }], 'x'), [], '缺 base_url 的不算');
+});
+
+test('卡片关联优先且不复用或删除另一张卡的同名接口', () => {
+  const rows = [
+    { id: 'legacy', model: 'shared-model', base_url: 'http://127.0.0.1:8000/v1' },
+    { id: 'other-card', model_store_card_id: 'sglang', model: 'shared-model', base_url: 'http://127.0.0.1:8000/v1' },
+    { id: 'same-card', model_store_card_id: 'tachyon', model: 'old-model', base_url: 'http://127.0.0.1:8001/v1' },
+    { id: 'remote', model_store_card_id: 'tachyon', model: 'shared-model', base_url: 'https://example.com/v1' },
+  ];
+  assert.deepEqual(findCardLinkedRows(rows, 'tachyon').map(row => row.id), ['same-card']);
+  assert.deepEqual(findCardLinkedRows(rows, 'sglang').map(row => row.id), ['other-card']);
+  assert.deepEqual(findCardLinkedRows(rows, null), []);
+});
+
+test('解除关联后的同名本机接口不会被再次接入覆盖或在卸载时清理', () => {
+  const detached = { id: 'user-edited', model: 'same-wire', base_url: 'http://127.0.0.1:9999/v1', model_store_card_id: null };
+  const managed = { ...detached, id: 'managed', provider_kind: 'coding_plan', model_store_card_id: 'original-card' };
+  const optedOut = { ...detached, model_store_card_id: 'original-card', model_store_link_detached: true };
+  assert.deepEqual(findCardLinkedRows([detached, managed, optedOut], 'original-card'), []);
+  const bound = { ...detached, id: 'bound', model_store_card_id: 'original-card' };
+  assert.deepEqual(findCardLinkedRows([detached, bound], 'original-card'), [bound]);
 });
 
 test('isLocalGatewayUrl：认回环地址，不认局域网地址', () => {
