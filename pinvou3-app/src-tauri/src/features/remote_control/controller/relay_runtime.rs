@@ -505,6 +505,8 @@ fn log_stage(value: &str) -> &'static str {
         "journal_snapshot_rejected",
         "task_status_sent",
         "task_status_not_sent",
+        "task_interrupt_persistence_failed",
+        "task_restart_persistence_failed",
         "journal_event_not_sent",
         "journal_event_sent",
         "journal_snapshot_sent",
@@ -613,6 +615,8 @@ fn log_detail(value: &str) -> &'static str {
         "permission_expired",
         "permission_denied",
         "task_conflict",
+        "task_ledger_persist_failed",
+        "task_ledger_capacity",
         "missing",
         "remote_binding_mismatch",
         "controller_not_connected",
@@ -3257,6 +3261,15 @@ mod tests {
             log_stage("task_session_discard_failed"),
             "task_session_discard_failed"
         );
+        for stage in [
+            "task_interrupt_persistence_failed",
+            "task_restart_persistence_failed",
+        ] {
+            assert_eq!(log_stage(stage), stage);
+        }
+        for detail in ["task_ledger_persist_failed", "task_ledger_capacity"] {
+            assert_eq!(log_detail(detail), detail);
+        }
         assert_eq!(log_detail("delete_failed"), "delete_failed");
         assert_eq!(
             log_stage("pending_revocation_queue_full"),
