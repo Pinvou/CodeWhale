@@ -40,13 +40,61 @@ pub async fn model_store_cards(test_mode: Option<bool>) -> Result<Value, String>
 }
 
 #[tauri::command]
-pub async fn model_store_library() -> Result<Value, String> {
-    model_store::library().await
+pub async fn model_store_library(
+    service: State<'_, Arc<ModelStoreService>>,
+) -> Result<Value, String> {
+    model_store::library(Arc::clone(&service)).await
 }
 
 #[tauri::command]
 pub async fn model_store_model_detail(card_id: String) -> Result<Value, String> {
     model_store::model_detail(card_id).await
+}
+
+#[tauri::command]
+pub async fn model_store_follow_deployment_context(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+    model_id: String,
+) -> Result<Value, String> {
+    model_store::follow_deployment_context(Arc::clone(&service), card_id, model_id).await
+}
+
+#[tauri::command]
+pub async fn model_store_check_card_update(card_id: String) -> Result<Value, String> {
+    model_store::check_card_update(card_id).await
+}
+
+#[tauri::command]
+pub async fn model_store_startup_update_check(
+    service: State<'_, Arc<ModelStoreService>>,
+) -> Result<Value, String> {
+    model_store::startup_update_check(Arc::clone(service.inner())).await
+}
+
+/// `measure=true` 时逐行重测目录大小并登记（评审第 7 轮：展示与配额读登记
+/// 值，不每次全树遍历；显式测量是失效策略的用户入口）。
+#[tauri::command]
+pub async fn model_store_versions(card_id: String, measure: Option<bool>) -> Result<Value, String> {
+    model_store::versions(card_id, measure).await
+}
+#[tauri::command]
+pub fn model_store_start_version_action(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+    action: String,
+    version_id: String,
+) -> Result<Value, String> {
+    model_store::start_version_action(&service, card_id, action, version_id)
+}
+
+#[tauri::command]
+pub fn model_store_start_card_update(
+    service: State<'_, Arc<ModelStoreService>>,
+    card_id: String,
+    revision: String,
+) -> Result<Value, String> {
+    model_store::start_card_update(&service, card_id, revision)
 }
 
 // ---------------------------------------------------------------- 长操作
@@ -203,6 +251,7 @@ pub fn model_store_storage_settings() -> Result<Value, String> {
 pub fn model_store_set_storage_settings(
     models_dir: Option<String>,
     import_scan_dirs: Option<Vec<String>>,
+    startup_update_check_enabled: Option<bool>,
 ) -> Result<Value, String> {
-    model_store::set_storage_settings(models_dir, import_scan_dirs)
+    model_store::set_storage_settings(models_dir, import_scan_dirs, startup_update_check_enabled)
 }
