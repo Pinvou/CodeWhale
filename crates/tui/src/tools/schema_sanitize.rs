@@ -1807,10 +1807,15 @@ pub fn validate_mfjs_parameters(parameters: &Value) -> Result<(), KimiParameterS
         return Err(KimiParameterSchemaError::NonTerminatingReference);
     }
 
-    validate_mfjs_expanded_depth(parameters, parameters, 0, &mut HashSet::new(), 0)?;
+    // One shared walk state across the root and every named definition: the
+    // memo is keyed by (node identity, depths), so definitions that share
+    // reference subgraphs are not re-walked, and the work budget covers the
+    // whole document instead of restarting per definition.
+    let mut state = MfjsExpandedWalkState::default();
+    validate_mfjs_expanded_depth(parameters, parameters, 0, 0, &mut state)?;
     if let Some(definitions) = root.get("$defs").and_then(Value::as_object) {
         for definition in definitions.values() {
-            validate_mfjs_expanded_depth(definition, parameters, 0, &mut HashSet::new(), 0)?;
+            validate_mfjs_expanded_depth(definition, parameters, 0, 0, &mut state)?;
         }
     }
     Ok(())
@@ -1841,6 +1846,13 @@ const MFJS_ENUM_LENGTH_CHECK_THRESHOLD: usize = 250;
 const MFJS_MAX_ENUM_STRING_LENGTH: usize = 75_000;
 const MFJS_MAX_SCHEMA_BYTES: usize = 120_000;
 const MFJS_MAX_STRUCTURAL_DEPTH: usize = 64;
+// Expanded-reference walk budget (review 5886233560): the memoized walk
+// below evaluates each (node, property depth, structural depth) state once,
+// so a shared acyclic reference DAG costs linear work instead of one walk
+// per path. The cap bounds the residual worst case — a byte-budget document
+// whose nodes sit at many distinct depth combinations — and fails closed
+// into the same per-tool drop any other resource-limit error takes.
+const MFJS_MAX_EXPANDED_STATES: usize = 100_000;
 // 2^53-1: the IEEE-754 double precision bound JSON numbers interoperate
 // through — an interop ceiling, not a document clause.
 const MFJS_MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -2259,12 +2271,31 @@ fn mfjs_schema_can_terminate(
     }
 }
 
+/// Shared state for one [`validate_mfjs_expanded_depth`] traversal.
+///
+/// `completed` memoizes fully-walked (node identity, property depth,
+/// structural depth) states: the walk's verdict for a state depends only on
+/// the state, and an error propagates before anything is memoized, so a
+/// shared acyclic reference subgraph reached again at the same depths is
+/// skipped instead of re-walked — a compact DAG of shared `$ref`s would
+/// otherwise recompute every path and turn request preparation into
+/// exponential synchronous work on a bounded-size document (review
+/// 5886233560). `visiting_refs` stays the per-path cycle guard; its early
+/// return is path-contextual, so it is never memoized. `work` counts
+/// computed states against [`MFJS_MAX_EXPANDED_STATES`].
+#[derive(Default)]
+struct MfjsExpandedWalkState {
+    visiting_refs: HashSet<String>,
+    completed: HashSet<(usize, usize, usize)>,
+    work: usize,
+}
+
 fn validate_mfjs_expanded_depth(
     schema: &Value,
     document: &Value,
     property_depth: usize,
-    visiting_refs: &mut HashSet<String>,
     structural_depth: usize,
+    state: &mut MfjsExpandedWalkState,
 ) -> Result<(), KimiParameterSchemaError> {
     if property_depth > MFJS_MAX_OBJECT_DEPTH || structural_depth > MFJS_MAX_STRUCTURAL_DEPTH {
         return Err(KimiParameterSchemaError::ResourceLimitExceeded);
@@ -2274,7 +2305,7 @@ fn validate_mfjs_expanded_depth(
         .ok_or(KimiParameterSchemaError::InvalidSchemaNode)?;
 
     if let Some(reference) = obj.get("$ref").and_then(Value::as_str) {
-        if !visiting_refs.insert(reference.to_string()) {
+        if !state.visiting_refs.insert(reference.to_string()) {
             return Ok(());
         }
         let target = resolve_mfjs_reference(document, reference)
@@ -2283,11 +2314,26 @@ fn validate_mfjs_expanded_depth(
             target,
             document,
             property_depth,
-            visiting_refs,
             structural_depth + 1,
+            state,
         );
-        visiting_refs.remove(reference);
+        state.visiting_refs.remove(reference);
         return result;
+    }
+
+    // The document is never mutated during validation, so the node address
+    // is a stable identity for the memo.
+    let state_key = (
+        schema as *const Value as usize,
+        property_depth,
+        structural_depth,
+    );
+    if !state.completed.insert(state_key) {
+        return Ok(());
+    }
+    state.work += 1;
+    if state.work > MFJS_MAX_EXPANDED_STATES {
+        return Err(KimiParameterSchemaError::ResourceLimitExceeded);
     }
 
     if let Some(properties) = obj.get("properties").and_then(Value::as_object) {
@@ -2296,8 +2342,8 @@ fn validate_mfjs_expanded_depth(
                 property,
                 document,
                 property_depth + 1,
-                visiting_refs,
                 structural_depth + 1,
+                state,
             )?;
         }
     }
@@ -2306,8 +2352,8 @@ fn validate_mfjs_expanded_depth(
             items,
             document,
             property_depth,
-            visiting_refs,
             structural_depth + 1,
+            state,
         )?;
     }
     if let Some(additional) = obj
@@ -2318,8 +2364,8 @@ fn validate_mfjs_expanded_depth(
             additional,
             document,
             property_depth,
-            visiting_refs,
             structural_depth + 1,
+            state,
         )?;
     }
     if let Some(branches) = obj.get("anyOf").and_then(Value::as_array) {
@@ -2328,8 +2374,8 @@ fn validate_mfjs_expanded_depth(
                 branch,
                 document,
                 property_depth,
-                visiting_refs,
                 structural_depth + 1,
+                state,
             )?;
         }
     }
@@ -2387,6 +2433,85 @@ mod kimi_tests {
         let any_of = schema["anyOf"].as_array().unwrap();
         assert_eq!(any_of[0]["type"], "object");
         assert_eq!(any_of[1]["type"], "object");
+    }
+
+    #[test]
+    fn mfjs_expanded_walk_memoizes_shared_reference_subgraphs() {
+        // A compact acyclic DAG of shared `$ref`s (review 5886233560): every
+        // Di branches to D(i+1) twice, so the expanded-depth walk crosses
+        // this document along 2^22 paths. The memo evaluates each (node,
+        // depth) state once — linear work on a ~2 KB document — instead of
+        // recomputing every shared subgraph per path inside synchronous
+        // request preparation. Removing the memo makes this test order of
+        // magnitude slower while still passing; the state-count budget
+        // bounds the residual worst case.
+        let mut definitions = serde_json::Map::new();
+        definitions.insert(
+            "D22".to_string(),
+            json!({"type": "object", "properties": {"end": {"type": "string"}}}),
+        );
+        for level in (0..22).rev() {
+            definitions.insert(
+                format!("D{level}"),
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "p": {"$ref": format!("#/$defs/D{}", level + 1)},
+                        "q": {"$ref": format!("#/$defs/D{}", level + 1)}
+                    }
+                }),
+            );
+        }
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {"$ref": "#/$defs/D0"}},
+            "$defs": Value::Object(definitions)
+        });
+
+        validate_mfjs_parameters(&schema).expect("a shared-reference DAG must validate");
+    }
+
+    #[test]
+    fn mfjs_expanded_walk_keeps_the_property_depth_budget_through_shared_refs() {
+        // The memo is keyed by depth too (review 5886233560): the same
+        // shared definition must be walked at every distinct property depth
+        // it is reached at, so the depth budget still fires through a ref.
+        // The deep wrapper chain reaches the shared five-level definition at
+        // property depth 28; its innermost leaf lands past
+        // MFJS_MAX_OBJECT_DEPTH and must be rejected — a node-only memo
+        // would inherit the shallow walk's verdict and wave it through.
+        let deep_definition = json!({
+            "type": "object",
+            "properties": {
+                "l1": {"type": "object", "properties": {
+                    "l2": {"type": "object", "properties": {
+                        "l3": {"type": "object", "properties": {
+                            "l4": {"type": "string"}
+                        }}
+                    }}
+                }}
+            }
+        });
+        let mut deep_property = json!({"$ref": "#/$defs/leaf5"});
+        for _ in 0..27 {
+            deep_property = json!({"type": "object", "properties": {"w": deep_property}});
+        }
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "shallow": {"$ref": "#/$defs/leaf5"},
+                "deep": deep_property
+            },
+            "$defs": {"leaf5": deep_definition}
+        });
+
+        assert!(
+            matches!(
+                validate_mfjs_parameters(&schema),
+                Err(KimiParameterSchemaError::ResourceLimitExceeded)
+            ),
+            "the depth budget must fire through a shared ref: {schema}"
+        );
     }
 
     #[test]
