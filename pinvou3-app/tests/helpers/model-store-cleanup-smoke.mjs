@@ -15,7 +15,10 @@ export async function exerciseLatestLinkedCleanup(page) {
       const createRoot = client.createRoot || client.default?.createRoot;
       const root = createRoot(document.getElementById('root'));
       const record = { card_id: 'cleanup-card', card_name: 'Cleanup', model_name: 'cleanup-wire',
-        status: 'deployed', running: false, size_bytes: 128, deploy_topology: 'single' };
+        status: 'deployed', running: false, size_bytes: 128, deploy_topology: 'single',
+        // 权重就绪时戳：合并后的六态模型里，deployed 缺它会被判成 incomplete，
+        // 详情弹窗的卸载入口（和 keep 确认框）就都不在了。
+        weights_ready_at: '2026-10-01T00:00:00Z' };
       const legacy = { id: 'legacy-link', name: 'Legacy', model: 'cleanup-wire', base_url: 'http://127.0.0.1:8911/v1' };
       const linked = { ...legacy, model_store_card_id: record.card_id };
       const fallback = { id: 'user-default', name: 'User default', model: 'other', base_url: 'https://example.test/v1' };
@@ -26,7 +29,10 @@ export async function exerciseLatestLinkedCleanup(page) {
         if (command === 'model_store_availability') return { available: true };
         if (command === 'model_store_cards' || command === 'model_store_active_runs') return [];
         if (command === 'model_store_library') return { models: fixture.finished ? [] : [record], corrected: [] };
-        if (command === 'model_store_test_store_state') return { enabled: false };
+        // 详情弹窗按钮由 model_store_model_detail 的载荷驱动（合并后详情自带
+        // 拉取），不 mock 它弹窗就只有一行「加载失败」。
+        if (command === 'model_store_model_detail') return { record };
+        if (command === 'model_store_api_keys') return [];
         if (command === 'model_store_take_startup_cleanup') return null;
         if (command === 'model_store_start_lifecycle' && payload.action === 'uninstall') return { run_id: 'cleanup-uninstall' };
         if (command === 'model_store_run_log' && forceRemove) return { done: true, ok: false, lines: [], next: 0, error: 'uninstall failed' };
@@ -78,8 +84,12 @@ export async function exerciseLatestLinkedCleanup(page) {
         ? dictZh.uiModelStore.linkRowStale(record.card_name, dictZh.uiModelStore.linkSnapshotReadFailed)
         : dictZh.uiModelStore.uninstallLinksLeft(record.card_name);
     }, scenario);
-    await page.waitForSelector('[data-testid="model-store-uninstall"]');
-    await page.click('[data-testid="model-store-uninstall"]');
+    // 合并后行卡不再有卸载按钮：入口在详情弹窗（PR 重设计），弹窗内主/次
+    // 卸载按钮按状态二选一，两者都汇到同一条确认流。
+    await page.waitForSelector('[data-testid="model-store-open-detail"]');
+    await page.click('[data-testid="model-store-open-detail"]');
+    await page.waitForSelector('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
+    await page.click('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
     await page.waitForSelector('[data-testid="model-store-uninstall-keep"]');
     await page.click('[data-testid="model-store-uninstall-keep"]');
     if (scenario.startsWith('force-')) {
