@@ -2914,7 +2914,7 @@ mod tests {
         controlled.stop();
         assert!(!controlled.is_running());
         assert!(controlling.is_running());
-        controlling.stop();
+        controlling.stop(&Default::default());
         assert!(!controlling.is_running());
     }
 
