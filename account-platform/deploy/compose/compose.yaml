@@ -534,6 +534,7 @@ services:
     environment:
       DATABASE_URL: postgresql://account_migrator:${ACCOUNT_MIGRATION_DB_PASSWORD}@postgres:5432/account_platform_account?sslmode=disable
       MIGRATION_ROLE: account_service
+      MIGRATION_TIMEOUT: ${MIGRATION_TIMEOUT:-2m}
     depends_on:
       deployment-credentials-check:
         condition: service_completed_successfully
@@ -552,6 +553,7 @@ services:
     environment:
       DATABASE_URL: postgresql://billing_migrator:${BILLING_MIGRATION_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
       MIGRATION_ROLE: billing_service
+      MIGRATION_TIMEOUT: ${MIGRATION_TIMEOUT:-2m}
     depends_on:
       deployment-credentials-check:
         condition: service_completed_successfully
@@ -570,6 +572,7 @@ services:
     environment:
       DATABASE_URL: postgresql://token_migrator:${TOKEN_MIGRATION_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable
       MIGRATION_ROLE: token_gateway
+      MIGRATION_TIMEOUT: ${MIGRATION_TIMEOUT:-2m}
     depends_on:
       billing-migrate:
         condition: service_completed_successfully
@@ -586,6 +589,7 @@ services:
         SERVICE: migrate
     command: ["--dir", "/migrations/payment-simulator"]
     environment:
+      MIGRATION_TIMEOUT: ${MIGRATION_TIMEOUT:-2m}
       DATABASE_URL: postgresql://payment_simulator:${PAYMENT_SIM_DB_PASSWORD}@postgres:5432/account_platform_payment_sim?sslmode=disable
     depends_on:
       deployment-credentials-check:
