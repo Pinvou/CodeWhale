@@ -212,9 +212,27 @@ const expectedProtocolHashes = {
   // now opts into deferBackgroundNotify so background output chunks ride the
   // existing terminal 50ms publication timer; invoke and event wire shapes
   // stay unchanged (publication timing is the deliberate change).
-  // Combined Account lifecycle receipts and main #2135 stream publication.
-  // Retains both call surfaces; digest recomputed from the fixed combined tree.
-  chat: '6d9277e52fc51d55680e832370673095ae41a8b890fc4ad9c23d0f986246a982',
+  // T0-d (#701 桥接面对齐, FFE4-1) 重算：remote_control:tools_changed 监听体
+  // 的内联 CustomEvent 派发改经 window.PinvouToolStoreEvents
+  // .notifyComposerToolsChanged()（shared/tool-store-events.js），命令面无增删。
+  // Recomputed for the #2135 review fix wave: the chat:done listener body in
+  // chat-events.js gains cancelPendingStreamNotify(sid) (with its trailing
+  // comment) so a background session's terminal cancels its own pending
+  // stream notify frame — the wave's only digest-input change. The desktop
+  // admission-reject flush pairing and its context parameter (chat.js) and
+  // the chat-events cluster export entry all sit outside every invoke/listen
+  // call span, so they ride along hash-neutral — no invoke or listen call-set
+  // change.
+  // r10 重钉（评审 r10 P1）：r9 的取消点修复改写了 chat:done 监听体/notify 抑制臂/
+  // refresh 钩子的载荷文本——签名清单不变（52 条），但 join 文本哈希随之漂移；
+  // 原钉 ec6881aa 是父提交 1d2aa96d8 的值。此钉=当前 head 实算值。
+  // r12 重钉（评审 r12 P2 收口批）：终态节流臂加 terminalForeground 前台门
+  // （runSyncOnSession 之前捕获）、isNotifySuppressed 谓词并入
+  // startupNotificationBatching——invoke/listen 调用面零增删（52 条不变），
+  // 抑制臂载荷文本漂移。此钉=当前 head 实算值。
+  // 合并 main fb01c48b6 重钉：main 侧 Account lifecycle receipts + 流式发布
+  // 载荷改动与本分支 r12 收口批叠加，chat 面哈希=合并树实算值。
+  chat: '1e18e33421ccd708e6cf931c8ad7dadfac332ff2fb0d6c130e251bab5618e105',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.

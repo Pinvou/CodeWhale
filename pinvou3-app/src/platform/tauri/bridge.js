@@ -1421,7 +1421,26 @@ function pinvouSceneForMessagePos(pos) { return pinvouSharedtauriMain().pinvouSc
 
   // 事件监听器统一入口:按 payload.session_id 路由同步逻辑;后台变更后补一次 notify 刷新列表。
 function markRemoteTurn(sid, buf, preserveCommittedRevision, cause) { return pinvouSharedtauriMain().markRemoteTurn(sid, buf, preserveCommittedRevision, cause); }
-function onSessionEvent(e, fn, options) { return pinvouSharedtauriMain().onSessionEvent(e, fn, options); }
+function onSessionEvent(e, fn, options) {
+  // 流式热路径打分段探针（接收→调度→派发→下一帧），只在段间隔超阈值时
+  // 上报一条无内容记录；失败路径见 shared/render-stage-probe.js。实现在共享
+  // 模块（评审 rebase 指示），这里在委托外面包一层，不侵入其内部结构。
+  var eventNameForProbe = String((e && e.event) || "");
+  // r9 P1 旁支1：空文本 reasoning_delta 的监听器会提前 return（chat-events
+  // 的 if (!text) return），此后无人调度发布——begin 了就成滞留条目，下一个
+  // 无关事件把它盖章成活跃会话上的假 stall（受控时钟 200ms 实测）。空文本
+  // 根本不是渲染事件，跳过 begin。
+  var emptyReasoningDelta =
+    eventNameForProbe === "chat:reasoning_delta" && !(e && e.payload && e.payload.text);
+  if (
+    /^chat:(delta|reasoning_delta)$/.test(eventNameForProbe) &&
+    !emptyReasoningDelta &&
+    window.RenderStageProbe
+  ) {
+    try { window.RenderStageProbe.begin(e && e.payload && e.payload.session_id); } catch (_) {}
+  }
+  return pinvouSharedtauriMain().onSessionEvent(e, fn, options);
+}
 
 function isScheduledRunSession(sid) { return pinvouSharedtauriMain().isScheduledRunSession(sid); }
 
@@ -2069,7 +2088,13 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     // Live suppression probe for scheduleStreamNotify: inside a background
     // working set the immediate first-delta notify is suppressed, so the
     // stream scheduler must fall through to its bounded frame instead.
-    isNotifySuppressed: function () { return suppressNotify; },
+    // r12 P2-2：谓词必须与 notify() 的真实短路条件一致（suppressNotify ||
+    // startupNotificationBatching）——启动批处理窗内 notify 不发布。
+    // r13 P2-2 更正：合并帧 publish() 腿的盖章也按发射时刻本谓词分流
+    // （抑制→markThrottled / 否则→markDispatched），不是「批处理结束后
+    // 随首次真实发布落章」——窗内每个周期的 publish 腿在 immediateNotify
+    // 丢弃后自行分流，与直发臂同构。
+    isNotifySuppressed: function () { return suppressNotify || startupNotificationBatching; },
     recordAuthoritySyncDiagnostic: recordAuthoritySyncDiagnostic,
     authoritySyncBufferSnapshot: authoritySyncBufferSnapshot,
     // 与历史重载路径共用同一信封判定（userMessageDisplayText 的 isInternalRuntimeEnvelopeText），
