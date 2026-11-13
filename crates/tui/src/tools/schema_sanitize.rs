@@ -447,6 +447,65 @@ fn entry_is_value_permissive(entry: &Value) -> bool {
     true
 }
 
+/// A concrete default the witness can carry for a declared type — the same
+/// bounded grammar [`type_has_default_value`] admits, so callers only see
+/// these spellings (`number` and `integer` share the integral default).
+fn type_default_value(expected: &str) -> Value {
+    match expected {
+        "boolean" => Value::Bool(true),
+        "object" => Value::Object(Map::new()),
+        "array" => Value::Array(Vec::new()),
+        "null" => Value::Null,
+        "number" | "integer" => Value::Number(serde_json::Number::from(1)),
+        _ => Value::String(String::new()),
+    }
+}
+
+/// Whether two co-present entries for the SAME field admit one concrete
+/// common value.
+///
+/// The omission witness carries the field once, so its value must satisfy
+/// both entries; two entries that are value-permissive in isolation can
+/// still have disjoint value sets — an enclosing `{"type":"string"}`
+/// beside a branch `{"type":"number"}` — and proving each side
+/// independently would then witness an instance no root-valid object can
+/// realize, leaving the preserved root union unsatisfiable (review
+/// 5886022727). Within the bounded grammar: pin sets (`const` / `enum`,
+/// already jointly constrained by their own declared type) must
+/// intersect; a pin set against a bare type entry needs one pinned value
+/// of that type; two type entries need one shared default (`number` and
+/// `integer` share `1`; disjoint spellings like `string` and `number`
+/// share none). Entries outside that grammar fail closed first — a shared
+/// verbatim `minLength` could still reject every default the grammar
+/// could construct.
+fn entries_admit_common_value(left: &Value, right: &Value) -> bool {
+    // Anything outside the bounded grammar keeps the pair unproven, even
+    // when both sides agree verbatim: a shared `minLength` could still
+    // reject the grammar's type default.
+    if !entry_is_value_permissive(left) || !entry_is_value_permissive(right) {
+        return false;
+    }
+    let left_set = pinned_value_set(left);
+    let right_set = pinned_value_set(right);
+    let left_type = left.get("type").and_then(Value::as_str);
+    let right_type = right.get("type").and_then(Value::as_str);
+    match (left_set, right_set) {
+        (Some(left), Some(right)) => left.iter().any(|candidate| right.contains(candidate)),
+        (Some(values), None) => values.iter().any(|candidate| {
+            right_type.is_none_or(|expected| json_value_is_type(candidate, expected))
+        }),
+        (None, Some(values)) => values.iter().any(|candidate| {
+            left_type.is_none_or(|expected| json_value_is_type(candidate, expected))
+        }),
+        (None, None) => match (left_type, right_type) {
+            (None, _) | (_, None) => true,
+            (Some(expected), Some(other)) => {
+                json_value_is_type(&type_default_value(expected), other)
+            }
+        },
+    }
+}
+
 /// Whether a schema node's own keys are structural only (see
 /// [`SchemaView`]) — the left side of an admission arm must be, or its
 /// witness could be rejected by a keyword the arms never read.
@@ -671,11 +730,21 @@ impl<'a> PairAdmission<'a> {
             .copied()
             .chain(enclosing.required.iter().copied())
             .all(|field| {
-                let entries = [
-                    left_props.and_then(|props| props.get(field)),
-                    enclosing.props.and_then(|props| props.get(field)),
-                ];
-                entries.into_iter().flatten().all(entry_is_value_permissive)
+                let left_entry = left_props.and_then(|props| props.get(field));
+                let enclosing_entry = enclosing.props.and_then(|props| props.get(field));
+                match (left_entry, enclosing_entry) {
+                    (None, None) => true,
+                    (Some(entry), None) | (None, Some(entry)) => entry_is_value_permissive(entry),
+                    // The witness carries the field once, so one value
+                    // must satisfy BOTH entries; two entries that are
+                    // permissive in isolation can still admit no common
+                    // value, and each side proved independently would
+                    // then witness an instance no root-valid object can
+                    // realize.
+                    (Some(left_entry), Some(enclosing_entry)) => {
+                        entries_admit_common_value(left_entry, enclosing_entry)
+                    }
+                }
             })
     }
 
@@ -864,7 +933,7 @@ fn oneof_node_defect(
     }
     // R2 (shared surviving group, review 5811598796): object branches whose
     // surviving `required` groups are EQUAL are non-discriminating when
-    // they also constrain the shared fields identically. Partially pruned
+    // they also constrain every field identically. Partially pruned
     // groups keep exactly this shape: the cross-branch discriminators
     // (`b` / `a`) are dropped because the branch's own `properties` does
     // not declare them, while the locally declared common requirement
@@ -877,9 +946,15 @@ fn oneof_node_defect(
     // entries that the containing root already implies (vacuous `{}`, or
     // identical to the root's own schema for that field) normalize to
     // absent, so root-implied variants of the same surviving group
-    // compare equal (review 5812238335). Branches whose constraints on
-    // the shared fields still DIVERGE after that normalization stay
-    // untouched: a const/enum pin
+    // compare equal (review 5812238335). The signature reads every local
+    // property, not just the shared group's fields: branches whose
+    // OPTIONAL pins diverge (`kind` const `email` vs `sms`) stay
+    // untouched, because each tagged instance matches exactly one branch
+    // and the pairwise pin proof below is what judges them (review
+    // 5886022727 — collapsing such branches to one signature flattened a
+    // usable union and kept only one pin). Branches whose constraints on
+    // the shared fields still DIVERGE after that normalization likewise
+    // stay untouched: a const/enum pin
     // (`xai_sanitize_passes_const_differentiated_union_through_without_touching_consts`)
     // or a nested subconstraint
     // (`xai_sanitize_flattens_oneof_distinct_only_before_recursive_normalization`)
@@ -909,33 +984,44 @@ fn oneof_node_defect(
         if names.is_empty() {
             continue;
         }
-        // Constraint signature for the shared fields only: the branch's
-        // own property entries for those names, with two normalizations
-        // for constraints the containing root already implies for every
-        // root-valid instance (review 5812238335): a vacuous `{}` entry
-        // constrains nothing, and an entry identical to the root's own
-        // schema for that field adds nothing the root has not already
-        // required. Both normalize to absent so root-implied variants
-        // compare equal; any other divergence keeps its verbatim shape
-        // and the branch stays untouched (conservative pass-through on
-        // that bounded fail-open remainder, disclosed in review
-        // 5811598796's reply — deeper subset relations are a solver).
+        // Constraint signature over the branch's whole property map: the
+        // SHARED required fields carry two normalizations for constraints
+        // the containing root already implies for every root-valid
+        // instance (review 5812238335): a vacuous `{}` entry constrains
+        // nothing, and an entry identical to the root's own schema for
+        // that field adds nothing the root has not already required. Both
+        // normalize to absent so root-implied variants compare equal; any
+        // other divergence keeps its verbatim shape and the branch stays
+        // untouched (conservative pass-through on that bounded fail-open
+        // remainder, disclosed in review 5811598796's reply — deeper
+        // subset relations are a solver). Every OTHER local property
+        // ships verbatim (review 5886022727): an optional pin
+        // (`kind: {"const":"email"}` vs `{"const":"sms"}`) discriminates
+        // the branches — each tagged instance matches exactly one — so
+        // branches differing there must not compare equal, or this arm
+        // declares them equivalent before the pairwise pin proof can run,
+        // the flattening fallback keeps only one pin, and the other valid
+        // variant is rejected with no note. Annotation-only divergence is
+        // already stripped upstream, so verbatim here is
+        // validation-relevant; grouped signatures stay deterministic
+        // through the BTreeMap ordering.
         let signature = match branch.get("properties").and_then(Value::as_object) {
             Some(props) => {
-                let mut shared: serde_json::Map<String, Value> = serde_json::Map::new();
+                let mut shared = std::collections::BTreeMap::new();
                 for (key, value) in props {
-                    if !names.contains(&key.as_str()) {
-                        continue;
-                    }
-                    let vacuous = value.as_object().is_some_and(|entry| entry.is_empty());
-                    let root_identical = root_props
-                        .and_then(|rp| rp.get(key.as_str()))
-                        .is_some_and(|root_entry| root_entry == value);
-                    if !vacuous && !root_identical {
+                    if names.contains(&key.as_str()) {
+                        let vacuous = value.as_object().is_some_and(|entry| entry.is_empty());
+                        let root_identical = root_props
+                            .and_then(|rp| rp.get(key.as_str()))
+                            .is_some_and(|root_entry| root_entry == value);
+                        if !vacuous && !root_identical {
+                            shared.insert(key.clone(), value.clone());
+                        }
+                    } else {
                         shared.insert(key.clone(), value.clone());
                     }
                 }
-                Value::Object(shared)
+                Value::Object(shared.into_iter().collect())
             }
             None => Value::Object(serde_json::Map::new()),
         };
@@ -996,8 +1082,11 @@ fn empty_matching_object_branch(branch: &Value) -> bool {
 /// Any root whose composition is not a single documented-good union stays on
 /// the protective flattening pass: sibling root `allOf`/`enum`/`not`, both
 /// union keywords at once (the doc names one union, not an intersection), a
-/// present-but-malformed (non-array) union value, an empty union, and
-/// branches without an explicit object `type` — xAI's own 400 message for
+/// present-but-malformed (non-array) union value, an empty union,
+/// a declared root `type` other than `"object"` (a non-object root cannot
+/// satisfy an object branch, so the union would ship with no valid
+/// instance — review 5886022727), and branches without an explicit object
+/// `type` — xAI's own 400 message for
 /// `apply_patch`'s bare required-groups called that union "an anyOf/oneOf
 /// union with a non-object branch". Other root-level keywords (annotations,
 /// `$defs`, `$ref`, `if`/`then`/`else`, …) are not root composition
@@ -1008,6 +1097,19 @@ fn root_union_is_all_object_branches(schema: &Value) -> bool {
         return false;
     };
     if obj.contains_key("allOf") || obj.contains_key("enum") || obj.contains_key("not") {
+        return false;
+    }
+    // The root's own declared `type` participates too (review 5886022727):
+    // a declared non-object root cannot satisfy an object branch, so
+    // pass-through would ship a root whose every instance fails. Absent
+    // types stay eligible — the preserved branches force the effective
+    // object shape — while an explicitly incompatible or malformed root
+    // takes the compatibility fallback, which forces `type: "object"` and
+    // merges the branch properties into a usable object.
+    if obj
+        .get("type")
+        .is_some_and(|declared| declared.as_str() != Some("object"))
+    {
         return false;
     }
     let mut unions = 0;
@@ -3175,8 +3277,37 @@ mod tests {
         // branches whose surviving `required` groups are EQUAL lose
         // exactly-one for every instance — partially pruned groups keep
         // this shape (cross-branch discriminators dropped, the locally
-        // shared requirement survives on both).
+        // shared requirement survives on both). The branches differ only
+        // in a keyword the signature never reads (floors — review
+        // 5811366579), so their property maps normalize equal and this
+        // rule is what judges them. A branch that still declares a
+        // differing OPTIONAL PROPERTY is validation surface and routes to
+        // the pairwise admission arm instead (review 5886022727 — the
+        // shared-group signature reads the whole property map); the
+        // companion assertion below pins that such a shape is still a
+        // defect, just a pairwise-named one.
         let r2_shared = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"c": {"type": "string"}},
+                    "required": ["c"],
+                    "minProperties": 1
+                },
+                {
+                    "type": "object",
+                    "properties": {"c": {"type": "string"}},
+                    "required": ["c"],
+                    "minProperties": 2
+                }
+            ]
+        });
+        let reason = oneof_semantic_defect(&r2_shared).expect("R2 shared group must fire");
+        assert!(
+            reason.starts_with("R2 2 branches share the required group"),
+            "unexpected shared-group reason: {reason}"
+        );
+        let r2_shared_with_optional = json!({
             "oneOf": [
                 {
                     "type": "object",
@@ -3190,10 +3321,9 @@ mod tests {
                 }
             ]
         });
-        let reason = oneof_semantic_defect(&r2_shared).expect("R2 shared group must fire");
         assert!(
-            reason.starts_with("R2 2 branches share the required group"),
-            "unexpected shared-group reason: {reason}"
+            oneof_semantic_defect(&r2_shared_with_optional).is_some(),
+            "a shared group with differing optional fields must still take a defect"
         );
         // Different groups stay untouched: an instance carrying one group
         // but not the other still matches exactly one.
@@ -3990,6 +4120,142 @@ mod tests {
 
         assert_eq!(schema["type"], "object");
         assert_eq!(note, None);
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_union_whose_shared_witness_field_admits_no_common_value() {
+        // The omission witness carries the left branch's group AND the
+        // enclosing required once, so one value must satisfy BOTH entries
+        // for the shared field. Two independently value-permissive entries
+        // with disjoint types — the root's `c: string` beside each
+        // branch's `c: number` — admit no such value, so every proof must
+        // fail and the union takes the flattening fallback (review
+        // 5886022727) instead of passing an unsatisfiable root union
+        // through.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"},
+                "c": {"type": "string"}
+            },
+            "required": ["c"],
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}, "c": {"type": "number"}},
+                    "required": ["a", "c"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}, "c": {"type": "number"}},
+                    "required": ["b", "c"]
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "a joint-constraint union with disjoint shared types must take \
+             the flattening fallback: {schema}"
+        );
+        assert_eq!(
+            schema["properties"]["c"],
+            json!({"type": "string"}),
+            "the fallback keeps the root's usable c:string entry: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x", "c": "s"})),
+            "the flattened fallback keeps a usable c:string object: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_object_union_under_a_declared_non_object_root_type() {
+        // The eligibility guard reads the root's own declared type too: a
+        // `string` root cannot satisfy an object branch, so pass-through
+        // would ship a root with no valid instance (review 5886022727).
+        // The compatibility fallback forces the object type and merges
+        // the branch properties, keeping both fields usable.
+        let mut schema = json!({
+            "type": "string",
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["a"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}},
+                    "required": ["b"]
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(
+            schema["type"], "object",
+            "a declared non-object root takes the compatibility fallback: {schema}"
+        );
+        assert!(
+            schema.get("anyOf").is_none(),
+            "the ineligible union is flattened: {schema}"
+        );
+        assert!(
+            schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
+            "both branch fields stay usable after the fallback: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_keeps_optional_pin_discriminated_shared_group_union_through() {
+        // Two branches sharing the required group `c` but pinning their
+        // optional `kind` fields to different values ARE discriminated:
+        // each tagged instance matches exactly one branch. The
+        // shared-group signature must therefore read the branches'
+        // optional entries too — declaring them equivalent takes the
+        // fallback, the fallback keeps only one pin, and the other valid
+        // variant is rejected with no note (review 5886022727).
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"c": {"type": "string"}},
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"c": {"type": "string"}, "kind": {"const": "email"}},
+                    "required": ["c"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"c": {"type": "string"}, "kind": {"const": "sms"}},
+                    "required": ["c"]
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        let branches = schema
+            .get("oneOf")
+            .expect("a pin-discriminated shared-group union must ship: {schema}");
+        assert_eq!(
+            branches[0]["properties"]["kind"],
+            json!({"const": "email"}),
+            "the email variant must survive production preprocessing: {schema}"
+        );
+        assert_eq!(
+            branches[1]["properties"]["kind"],
+            json!({"const": "sms"}),
+            "the sms variant must survive production preprocessing: {schema}"
+        );
     }
 
     #[test]
