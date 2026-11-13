@@ -1098,7 +1098,13 @@ pub(crate) async fn resume_round_trip<T>(
         "observe retained evidence, not a None projection"
     );
     send(&mut socket, &stale).await;
-    processed(&mut processed_rx, &stale).await;
+    // The manager now discards an explicit retired generation before the
+    // worker queue. A following harmless frame on this same ordered reader
+    // proves the old frame has drained without requiring it to reach worker.
+    let ingress_barrier = json!({"v":1,"type":"error","request_id":"request-stale-ingress-barrier",
+        "code":"invalid_message","message":"rejected"});
+    send(&mut socket, &ingress_barrier).await;
+    processed(&mut processed_rx, &ingress_barrier).await;
     assert_eq!(
         manager.resume_phase_for_test(),
         Some(super::super::resume::ResumePhase::Prepared)
@@ -1552,4 +1558,83 @@ pub(crate) async fn controller_lane_outage_round_trip<T>(
             .is_err(),
         "endpoint-scoped legacy error must not enter the controller lane"
     );
+
+    let retired = channel.sender();
+    let controller_frame = json!({"v":1,"type":"error","request_id":"request-inbound-overload",
+        "code":"invalid_message","message":"test frame"});
+    for _ in 0..129 {
+        send(&mut socket, &controller_frame).await;
+    }
+    let mut marker = scoped;
+    marker["message"] = json!("legacy route after controller overload");
+    send(&mut socket, &marker).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while relay.status().last_error.as_deref() != Some("legacy route after controller overload")
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("same endpoint must continue to process legacy frames after the controller overflow");
+    assert_eq!(
+        retired.try_send(json!({})).unwrap_err(),
+        "desktop_controller_generation_stale"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), channel.recv())
+            .await
+            .unwrap()
+            .is_none(),
+        "a retired lane must discard buffered frames"
+    );
+    let mut replacement = relay
+        .start_controller_relay(channel.generation())
+        .await
+        .expect("the same endpoint can bind a new lane");
+    assert!(!retired.same_binding(&replacement.sender()));
+    drop(channel);
+    assert_lifecycle_route(&mut socket, &mut replacement).await;
+
+    // Leave a new lane unconsumed while the persistent socket delivers a
+    // protocol-valid old-generation burst. These must not fill its queue.
+    let old_generation = replacement.generation().to_owned();
+    drop(replacement);
+    let mut successor = relay
+        .start_controller_relay("generation-lane-outage-successor")
+        .await
+        .unwrap();
+    let expiry = fixture_wall_clock_millis() + 60_000;
+    let binding = CodeWrapBinding::new(
+        "registration-retired-overload",
+        "pairing-retired-overload",
+        &old_generation,
+        "relay-retired-overload",
+        expiry,
+    )
+    .unwrap();
+    let receiver = CodeWrapKeyPair::generate().unwrap();
+    let sealed = CodeWrapKeyPair::generate()
+        .unwrap()
+        .seal_pairing_code(receiver.public_key(), &binding, "2345678")
+        .unwrap();
+    let stale = json!({"v":1,"type":"desktop_pairing_registered",
+        "request_id":"request-retired-overload", "registration_request_id":"registration-retired-overload",
+        "pairing_id":"pairing-retired-overload", "remote_control_generation":old_generation,
+        "relay_epoch":"relay-retired-overload", "expires_at_ms":expiry.to_string(),
+        "sealed_code_b64":base64::engine::general_purpose::STANDARD.encode(sealed)});
+    for _ in 0..129 {
+        send(&mut socket, &stale).await;
+    }
+    marker["message"] = json!("legacy route after stale generation burst");
+    send(&mut socket, &marker).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while relay.status().last_error.as_deref()
+            != Some("legacy route after stale generation burst")
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("persistent reader must drain old frames and retain Legacy routing");
+    assert_lifecycle_route(&mut socket, &mut successor).await;
 }
