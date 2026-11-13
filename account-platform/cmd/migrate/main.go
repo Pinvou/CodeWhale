@@ -54,7 +54,16 @@ func productionBackupEvidence(now time.Time) (string, string, string, error) {
 func main() {
 	directory := flag.String("dir", os.Getenv("MIGRATIONS_DIR"), "directory containing SQL migrations")
 	direction := flag.String("direction", "up", "migration direction: up or down")
+	timeoutDefault := os.Getenv("MIGRATION_TIMEOUT")
+	if timeoutDefault == "" {
+		timeoutDefault = defaultMigrationTimeout
+	}
+	timeout := flag.String("timeout", timeoutDefault, "database operation budget, greater than zero and at most 24h (MIGRATION_TIMEOUT; default 2m)")
 	flag.Parse()
+	budget, err := migrationTimeout(*timeout)
+	if err != nil {
+		log.Fatal("MIGRATION_TIMEOUT_INVALID")
+	}
 	if *directory == "" {
 		log.Fatal("migration directory is required through --dir or MIGRATIONS_DIR")
 	}
@@ -71,26 +80,28 @@ func main() {
 	if err != nil {
 		log.Fatal("MIGRATION_SOURCE_INVALID")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	connection, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
-		log.Fatal("MIGRATION_DATABASE_CONNECTION_FAILED")
+		log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_DATABASE_CONNECTION_FAILED"))
 	}
-	defer connection.Close(context.Background())
-	defer migrations.Unlock(context.Background(), connection)
+	// Success-path cleanup shares the database budget too. pgx Close always
+	// closes the underlying socket even when this context has expired.
+	defer connection.Close(ctx)
+	defer migrations.Unlock(ctx, connection)
 	if migrationRole := strings.TrimSpace(os.Getenv("MIGRATION_ROLE")); migrationRole != "" {
 		if !regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`).MatchString(migrationRole) {
 			log.Fatal("MIGRATION_ROLE is invalid")
 		}
 		if _, err = connection.Exec(ctx, "SET ROLE "+pgx.Identifier{migrationRole}.Sanitize()); err != nil {
-			log.Fatal("MIGRATION_ROLE_SELECTION_FAILED")
+			log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_ROLE_SELECTION_FAILED"))
 		}
 	}
 
 	domain, err := migrationDomain(ctx, connection, loaded, *directory)
 	if err != nil {
-		log.Fatal("MIGRATION_DOMAIN_IDENTITY_INVALID")
+		log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_DOMAIN_IDENTITY_INVALID"))
 	}
 
 	switch *direction {
@@ -149,7 +160,7 @@ func main() {
 		err = fmt.Errorf("unsupported migration direction %q", *direction)
 	}
 	if err != nil {
-		log.Fatal("MIGRATION_EXECUTION_FAILED")
+		log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_EXECUTION_FAILED"))
 	}
 }
 
@@ -216,6 +227,13 @@ func migrationDomain(ctx context.Context, connection *pgx.Conn, loaded []migrati
 }
 
 func protectedMigrationDomain(version int64, name, checksum string) string {
+	// These F02 names and canonical SQL digests remain reserved across version
+	// changes; the Billing wrapper must validate the complete identity.
+	if name == "refund_dispatch_fencing" || name == "payment_notification_provenance" ||
+		checksum == "b21624f92414a8ec464138ab5bab13ac5d6e2d982881cb2b1e72ca22f7e8c694" ||
+		checksum == "26c694e7b99c7d070654a2bd26d3b2af693d4a15e400c5c677fb93f5f3a88eee" {
+		return "billing"
+	}
 	for _, identity := range []struct {
 		domain         string
 		version        int64
@@ -234,13 +252,15 @@ func protectedMigrationDomain(version int64, name, checksum string) string {
 		{"token", 900004, "account_closure_replay_fence", "1e662dda9e4b27674da7bda3949d8fefef10c18f84c0d626d4093271d46a5a30"},
 		{"billing", 900001, "outbox_publication_generation", "7e36e103ad25620dd7a882792fcd0d942f6208038aeaa966eb44b367cea27f05"},
 		{"billing", 900002, "payment_anomaly_resolution_intents", "68df09f526088b981c992d0c9912cab8f4ac2c6f5567fdb6351cfdc2b905d2a2"},
+		{"billing", 900004, "refund_dispatch_fencing", "b21624f92414a8ec464138ab5bab13ac5d6e2d982881cb2b1e72ca22f7e8c694"},
+		{"billing", 900005, "payment_notification_provenance", "26c694e7b99c7d070654a2bd26d3b2af693d4a15e400c5c677fb93f5f3a88eee"},
 		{"billing", 79, "registration_bonus", "27802b2d3e76e6a42c809d620d3d9833cfaa529d7d5517982318236a56719deb"},
 		{"billing", 900011, "member_lifecycle_event_identity", "af4a63ed0592a0e60d5f4744176e15cc5013c3633c6f0f414f7580b7132b2aa8"},
 		{"billing", 900013, "entitlement_activation_execution_lock", "b2442654c753e1c9ff68708926ec2274e9962d9264050ec4d86ff1cf0168d96f"},
 		{"billing", 900014, "ledger_activation_execution_lock", "122f47cfb1a1d40edad6a656eb7bca757d892c4af9699361d68d2ceed2112452"},
 		{"billing", 900015, "receivable_activation_execution_lock", "e8ce834446a7fb35132b6df60c0cbaaa86d5af93163eecbe449a150af1937c38"},
 		{"billing", 900016, "payment_activation_execution_lock", "e91164261390798fd3b98be27d91ff4442b30ed3aebb72002b180104d465a6a1"},
-		{"billing", 900040, "provider_health_recent", "0d1b5cc17cce2342540c4c75d15c783f53f37177412247ca5eefcd24d942d961"},
+		{"billing", 900045, "provider_health_recent", "0d1b5cc17cce2342540c4c75d15c783f53f37177412247ca5eefcd24d942d961"},
 		{"billing", 900017, "payment_repair_order_lookup", "18d285451a58950e40ef90cf77ebe7455e86f2331db2187ba437f8c67f84a865"},
 		{"billing", 900018, "refund_activation_execution_lock", "96b284f182a33fce5c7636291be06e50c050e69ee26cf923033c2332b8a8d673"},
 		{"billing", 900019, "chargeback_activation_execution_lock", "98a4640847b80cc79bb865a5cc462f42b5b75012fc66d988e120497381e051d1"},

@@ -4,7 +4,7 @@ VENDOR_DIR="$HOME/.local/share/local-model-manager/vendor/qwen38-nvfp4-mtp"
 [ -d "$VENDOR_DIR" ] || { echo "ERROR: 未找到部署包，请先完成下载" >&2; exit 1; }
 cd "$VENDOR_DIR"
 
-PROFILE="${LMM_DEPLOY_PROFILE:-benchmark}"
+PROFILE="${LMM_DEPLOY_PROFILE:-production-sampling}"
 PROFILE_DIR="$VENDOR_DIR/profiles/$PROFILE"
 [ -d "$PROFILE_DIR" ] || { echo "ERROR: 未知的部署方案: $PROFILE" >&2; exit 1; }
 

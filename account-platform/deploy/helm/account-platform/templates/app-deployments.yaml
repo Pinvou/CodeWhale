@@ -202,6 +202,11 @@ spec:
             - name: {{ $item.env }}
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }}, optional: {{ not $aliyunRequired }} } }
             {{- end }}
+            {{- /* These two purpose overrides remain optional for existing login-template fallback. */}}
+            {{- range $item := list (dict "env" "ALIYUN_SMS_PROFILE_MOBILE_TEMPLATE" "key" "aliyun-sms-profile-mobile-template") (dict "env" "ALIYUN_SMS_PASSWORD_RESET_TEMPLATE" "key" "aliyun-sms-password-reset-template") }}
+            - name: {{ $item.env }}
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }}, optional: true } }
+            {{- end }}
             - name: SMS_VERIFICATION_HMAC_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: sms-verification-hmac-key-base64, optional: {{ not $httpRequired }} } }
             - name: SMS_HTTP_BEARER_TOKEN
