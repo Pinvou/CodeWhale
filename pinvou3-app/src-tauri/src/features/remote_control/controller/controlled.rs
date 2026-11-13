@@ -1460,6 +1460,52 @@ impl ControlledDeviceManager {
         self.begin_resume_inner(owner.operation.clone(), Some(owner), now_b)
     }
 
+    /// Authorize only a fresh enqueue for the original Prepared attempt. This
+    /// is read-only: no prepare transition, token rotation or deadline renewal.
+    /// The synchronous action may acquire endpoint/transport locks, never
+    /// reenter this manager or await. Token copies are zeroed on return.
+    pub(crate) fn with_owned_prepared_resume<T>(
+        &self,
+        owner: &ControlledTransportOwner,
+        clock: impl FnOnce() -> u64,
+        action: impl FnOnce(&LeaseContext, &[u8; 32], u64, u64) -> T,
+    ) -> Result<Option<T>> {
+        let inner = self.inner.lock();
+        ensure_transport_owner(&inner, owner)?;
+        if inner.phase != ControlledStatusKind::Reconnecting
+            || inner.reconnect_reason != Some(ReconnectReason::Transport)
+        {
+            return Ok(None);
+        }
+        let Some(gate) = inner
+            .resume_gate
+            .as_ref()
+            .filter(|gate| gate.phase() == ResumePhase::Prepared)
+        else {
+            return Ok(None);
+        };
+        let Some(deadline_b) = gate
+            .frozen_deadline_b()
+            .zip(
+                inner
+                    .watchdog
+                    .as_ref()
+                    .and_then(|watchdog| watchdog.deadline_b()),
+            )
+            .map(|(frozen, current)| frozen.min(current))
+            .filter(|deadline| clock() < *deadline)
+        else {
+            return Ok(None);
+        };
+        let token = Zeroizing::new(gate.current_token());
+        Ok(Some(action(
+            owner.lease(),
+            &token,
+            gate.relay_deadline_identity_ms(),
+            deadline_b,
+        )))
+    }
+
     fn begin_resume_inner(
         &self,
         operation: ControlledOperation,
