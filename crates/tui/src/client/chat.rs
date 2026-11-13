@@ -1344,7 +1344,10 @@ pub(crate) fn build_chat_wire_body(
         body["top_p"] = json!(top_p);
     }
     let mut omitted_tool_names = Vec::new();
-    let mut advertised_moonshot_wire_names: std::collections::HashSet<String> =
+    // Registry spellings that survived schema sanitization (pre-prefix):
+    // identity for the forced-choice check, distinct from the minted
+    // aliases below (review thread on 5897491074).
+    let mut moonshot_offered_registry_names: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     let mut moonshot_minted_names: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -1366,10 +1369,7 @@ pub(crate) fn build_chat_wire_body(
             // `3d_render` as a phantom collision and neither tool would be
             // advertised (review thread on 5896144003).
             omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools);
-            let (collision_dropped, minted_names) =
-                prefix_digit_led_tool_names_for_moonshot(&mut chat_tools);
-            omitted_tool_names.extend(collision_dropped);
-            advertised_moonshot_wire_names = chat_tools
+            moonshot_offered_registry_names = chat_tools
                 .iter()
                 .filter_map(|tool| {
                     tool.get("function")
@@ -1378,6 +1378,9 @@ pub(crate) fn build_chat_wire_body(
                         .map(str::to_owned)
                 })
                 .collect();
+            let (collision_dropped, minted_names) =
+                prefix_digit_led_tool_names_for_moonshot(&mut chat_tools);
+            omitted_tool_names.extend(collision_dropped);
             moonshot_minted_names = minted_names;
         }
         // xAI rejects a parameters root that is not a plain object schema
@@ -1444,21 +1447,23 @@ pub(crate) fn build_chat_wire_body(
             {
                 function.insert("name".into(), json!(wire_name.clone()));
             }
-            // A forced call must name a tool THIS request actually offers
-            // under the forced spelling. A digit-led forced name is live
-            // only when THAT registry tool survived to mint that exact wire
-            // name (a collision or length drop shadows it even though a
-            // namesake twin advertises the same spelling); a non-digit-led
-            // forced name must itself be advertised. Membership in the
-            // omitted list alone cannot express this: after the sanitizer
-            // runs first, a dropped registry spelling can equal the wire
-            // spelling a surviving sibling advertises.
+            // A forced call must name the REGISTRY tool THIS request
+            // offers under the forced spelling. A digit-led forced name is
+            // live only when THAT registry tool survived to mint that
+            // exact wire name (a collision or length drop shadows it even
+            // though a namesake twin advertises the same spelling); a
+            // non-digit-led forced name is live only when the registry
+            // entry with THAT name itself survived — a minted alias of a
+            // different digit-led survivor must not answer for it, or a
+            // forced call for a schema-dropped underscore tool would
+            // dispatch onto the dropped registry handler through
+            // exact-match precedence (review thread on 5897491074).
             let forced_is_offered = if digit_led {
                 moonshot_minted_names
                     .get(&forced)
                     .is_some_and(|minted| minted == &wire_name)
             } else {
-                advertised_moonshot_wire_names.contains(&forced)
+                moonshot_offered_registry_names.contains(&forced)
             };
             if !forced_is_offered {
                 bail!(
@@ -6972,6 +6977,32 @@ mod alias_thinking_detection_tests {
             body.omitted_tool_names,
             vec!["_3d_render".to_string()],
             "the schema drop is reported under its registry spelling"
+        );
+
+        // Forcing the dropped REGISTRY spelling fails: the offered check
+        // reads registry identity, not minted aliases, so a forced call
+        // naming the schema-dropped `_3d_render` cannot dispatch onto the
+        // dropped registry handler through exact-match precedence (review
+        // 5897491074).
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
+        invalid_underscore.input_schema = json!({"type": "string"});
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            invalid_underscore,
+        ]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "_3d_render"}));
+        let error = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .err()
+        .expect("forcing the dropped underscore registry spelling must bail");
+        assert!(
+            error.to_string().contains("not offered"),
+            "the bail must name the offered predicate: {error}"
         );
 
         // Forcing the survivor proceeds under both spellings.
