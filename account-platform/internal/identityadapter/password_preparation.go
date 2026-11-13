@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/passwordpreparation"
@@ -23,6 +24,8 @@ import (
 
 var ErrPasswordPreparation = errors.New("password preparation requires an admitted challenge")
 var ErrPasswordPreparationUnavailable = errors.New("password preparation authority result is unavailable")
+
+const passwordPreparationWaitTimeout = 10 * time.Second
 
 type PasswordPreparationVerifier interface {
 	Claim(context.Context, passwordpreparation.Claim) (passwordpreparation.Facts, error)
@@ -93,31 +96,49 @@ type passwordPreparationState struct {
 // in-memory bookkeeping, never authority calls, request bodies or responses.
 // References include waiters, so removing an idle lock cannot split ownership.
 type passwordPreparationLock struct {
-	mu    sync.Mutex
+	gate  chan struct{}
 	users int
 }
 
-func (s *passwordPreparationState) lockGrant(id uuid.UUID) func() {
+func (s *passwordPreparationState) lockGrant(ctx context.Context, id uuid.UUID) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	if s.locks == nil {
 		s.locks = make(map[uuid.UUID]*passwordPreparationLock)
 	}
 	lock := s.locks[id]
 	if lock == nil {
-		lock = &passwordPreparationLock{}
+		lock = &passwordPreparationLock{gate: make(chan struct{}, 1)}
 		s.locks[id] = lock
 	}
 	lock.users++
 	s.mu.Unlock()
-	lock.mu.Lock()
-	return func() {
-		lock.mu.Unlock()
+	dropUser := func() {
 		s.mu.Lock()
 		lock.users--
 		if lock.users == 0 {
 			delete(s.locks, id)
 		}
 		s.mu.Unlock()
+	}
+	select {
+	case lock.gate <- struct{}{}:
+		// Cancellation can race a release. Do not start authority/body work
+		// just because the available gate won that select.
+		if err := ctx.Err(); err != nil {
+			<-lock.gate
+			dropUser()
+			return nil, err
+		}
+		return func() {
+			<-lock.gate
+			dropUser()
+		}, nil
+	case <-ctx.Done():
+		dropUser()
+		return nil, ctx.Err()
 	}
 }
 
@@ -193,7 +214,13 @@ func (s *Service) preparePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	// Serialize only this grant; unrelated admitted requests must not wait on
 	// authority I/O or a slow body. Account still serializes replicas.
-	unlock := state.lockGrant(id)
+	waitCtx, cancelWait := context.WithTimeout(r.Context(), passwordPreparationWaitTimeout)
+	unlock, err := state.lockGrant(waitCtx, id)
+	cancelWait()
+	if err != nil {
+		s.writeError(w, r, ErrPasswordPreparationUnavailable)
+		return
+	}
 	defer unlock()
 	state.mu.Lock()
 	for key, saved := range state.records {

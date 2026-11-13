@@ -47,3 +47,9 @@ PR Check 对账号平台路径改动在 Draft、Ready 和 Merge Queue 均执行 
 Billing 的本地与部署初始化、升级角色前置见 [数据库运行说明](deploy/postgres/README.md)。迁移必须由独立 migrator 执行，服务启动不创建 owner 或扩大权限。
 
 迁移包的身份校验、已知旧快照的实际拒绝条件和核验限制见[迁移准入与快照识别](docs/migration-snapshot-admission.md)。该说明不替代历史库升级实证，也不撤销已有兼容承诺。
+
+## 密码预检的同一 grant 等待
+
+公开 `/v1/registration/password-prechecks` 对同一已准入 grant 保持单个本地分配所有者，注册及密码重置用途继续由原授权事实绑定。排队期间请求取消或等待预算耗尽，会以既有 `503 PASSWORD_PREPARATION_UNAVAILABLE` 结束当前等待；该等待者不再 claim 授权、读取密码或分配 handle，原所有者保留其所有权，已有引用按原有效期使用。
+
+同一 grant 的等待预算为 10 秒，较早的调用方取消/截止时间优先。取得所有权后，授权 claim 和密码引用分配继续使用原请求上下文及各自既有 I/O 限制。失败后须在原授权仍有效时重试同一操作，原所有者的结果按既有回执核实。不同 grant 继续独立处理，已有 handle 容量、有效期和操作回执语义不变，也不增加公开 bootstrap 的内部服务认证要求。
