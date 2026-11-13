@@ -153,7 +153,7 @@ test('an uncommitted completed batch is reused only with the same file objects a
   };
   assert.deepEqual(await uploadRemoteFiles(api, binding, 'task-cached', files, () => {}, owner), ['owned-1']);
   assert.deepEqual(await uploadRemoteFiles(api, binding, 'task-cached', files, () => {}, owner), ['owned-1']);
-  await assert.rejects(uploadRemoteFiles(api, binding, 'task-cached', [file('a.txt', 'a')], () => {}, owner), { code: 'result_unknown' });
+  await assert.rejects(uploadRemoteFiles(api, binding, 'task-cached', [file('a.txt', 'a')], () => {}, owner), { code: 'remote_attachment_completed' });
   assert.equal(starts, 1);
   retireCompletedRemoteUpload(owner.ownerIdentity, binding, 'task-cached');
 });
@@ -331,7 +331,7 @@ test('remote attachment upload hashes bytes and commits only B-confirmed transfe
     },
     attachmentChunk: async (_local, _remote, _task, transferId, index, chunkB64, chunkBytes) => {
       chunks.push({ transferId, index, chunkB64, chunkBytes });
-      return { state: index === 2 ? 'completed' : 'receiving', receivedBytes: Math.min((index + 1) * 2, 5) };
+      return { state: index === 2 ? 'completed' : 'accepted', receivedBytes: Math.min((index + 1) * 2, 5) };
     },
     attachmentAbort: async () => assert.fail('completed upload must not abort'),
   };

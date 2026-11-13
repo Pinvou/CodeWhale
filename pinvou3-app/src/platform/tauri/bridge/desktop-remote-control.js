@@ -1446,6 +1446,13 @@
       }, undefined, false);
     }
 
+    function attachmentAbortConfirmed(localSessionId, remoteRef, taskId, transferId) {
+      if (!requiredOpaqueId(taskId) || !requiredOpaqueId(transferId)) return Promise.reject(invalidTaskIntent());
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "attachment_abort_confirmed", taskId: taskId, transferId: transferId,
+      }, undefined, false);
+    }
+
     function artifactIndex(localSessionId, remoteRef) {
       return invokeRemoteAction(localSessionId, remoteRef, { operation: "artifact_index" })
         .then(function (body) { return (body.artifacts || []).map(function (item) { return {
@@ -1562,6 +1569,7 @@
       attachmentBegin: attachmentBegin,
       attachmentChunk: attachmentChunk,
       attachmentAbort: attachmentAbort,
+      attachmentAbortConfirmed: attachmentAbortConfirmed,
       artifactIndex: artifactIndex,
       artifactPreview: artifactPreview,
       artifactDownloadBegin: artifactDownloadBegin,
