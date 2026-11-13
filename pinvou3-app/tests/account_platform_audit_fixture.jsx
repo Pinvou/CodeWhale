@@ -2,10 +2,10 @@ import React from 'react';
 import {createRoot} from 'react-dom/client';
 import {AdminPlatformView} from '../src/features/account-platform/AdminPlatformView.jsx';
 import {AdminPlatformClient} from '../src/features/account-platform/admin-client.js';
-import {adminPlatformCopy,auditWorkspaceCopy} from '../src/shared/i18n.js';
+import {adminPlatformCopy,auditWorkspaceCopy,auditExportPresentation,auditActionLabels} from '../src/shared/i18n.js';
 const params=new URLSearchParams(location.search),language=params.get('language')||'zh';
 const id='00000000-0000-4000-8000-000000000017';
-const state=window.f17={language,id,copy:auditWorkspaceCopy[language],calls:[],lostCreate:params.has('lost'),createUnknownForbidden:params.has('unknownForbidden'),definiteForbidden:params.has('initialForbidden'),createCount:0,lostTicket:params.has('ticketLost'),downloaded:false};
+const state=window.f17={language,id,copy:auditWorkspaceCopy[language],presentation:auditExportPresentation[language],auditLabels:auditActionLabels[language],status:'PENDING',statusReads:0,calls:[],lostCreate:params.has('lost'),createUnknownForbidden:params.has('unknownForbidden'),definiteForbidden:params.has('initialForbidden'),createCount:0,lostTicket:params.has('ticketLost'),downloaded:false};
 state.reauthenticated=params.has('reauthenticated');
 state.actor=state.reauthenticated&&params.has('otherActor')?'00000000-0000-4000-8000-000000000018':id;
 const original=window.fetch.bind(window);
@@ -16,7 +16,7 @@ const longAuditItems=params.has('longAction')?[
  {audit_id:'00000000-0000-4000-8000-000000000018',action:'UNKNOWN_'+ 'X'.repeat(160)},
  {audit_id:'00000000-0000-4000-8000-000000000019',action:'user.active_context.set'},
 ].map(item=>({...item,result:'SUCCEEDED',request_id:'controlled-request',resource_type:'ADMIN_APPROVAL_CONTROL',resource_id:id})):null;
-const job=()=>({export_id:id,status:'READY',filename:'controlled-audit.pae',include_pii:Boolean(state.includePII),redacted:!state.includePII,...(state.ticketIssued?{download_ticket_issued_at:'2026-10-09T00:00:00Z'}:{})});
+const job=()=>({export_id:id,status:state.status,filename:'controlled-audit.pae',include_pii:Boolean(state.includePII),redacted:!state.includePII,...(state.ticketIssued?{download_ticket_issued_at:'2026-10-09T00:00:00Z'}:{})});
 window.fetch=async(url,options={})=>{
  if(!String(url).startsWith('/api/'))return original(url,options);
  state.calls.push({url:String(url),method:options.method||'GET',body:options.body,headers:options.headers,credentials:options.credentials,cache:options.cache});
@@ -40,7 +40,7 @@ window.fetch=async(url,options={})=>{
  }
  if(String(url).endsWith('/download-tickets')){if(!state.reauthenticated&&params.has('ticketRecent'))return response({code:'RECENT_AUTHENTICATION_REQUIRED'},401);state.ticketIssued=true;if(state.revokeAfterTicket)state.piiAllowed=false;if(state.lostTicket){state.lostTicket=false;throw new TypeError('controlled lost ticket ACK');}return response({export_id:id,download_token:'a'.repeat(43),expires_at:'2099-10-09T00:15:00Z'},201);}
  if(String(url).endsWith('/download')){if(state.forbidDownload)return response({code:'PERMISSION_DENIED'},403);state.downloaded=true;return new Response('controlled-encrypted-envelope',{headers:{'Content-Type':'application/vnd.pinvou.audit-envelope+json'}});}
- if(String(url).endsWith('/audit-exports/'+id))return response(job());
+ if(String(url).endsWith('/audit-exports/'+id)){state.statusReads++;state.status=params.has('progress')&&state.statusReads===1?'GENERATING':'READY';return response(job());}
  return response({code:'CONTROLLED_NOT_FOUND'},404);
 };
 const client=new AdminPlatformClient();

@@ -35,7 +35,8 @@ const userStatusRisk = new URLSearchParams(location.search).get('userStatusRisk'
 const userDetailHeader = new URLSearchParams(location.search).get('userDetailHeader') === '1';
 if (userDetailHeader) {
   c.permissions = ['platform.users.read', 'platform.roles.read', 'platform.organizations.read'];
-  c.headerUser = { user_id: otherID, user_code: 'USR-1111-1111-1111-1111-DP', display_name: '用于验证用户详情标题和返回入口布局的测试用户名称', status: 'ACTIVE', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z' };
+  // Keep the layout-stress name wide on runners whose CJK fallback glyphs are narrow.
+  c.headerUser = { user_id: otherID, user_code: 'USR-1111-1111-1111-1111-DP', display_name: '用于验证用户详情标题和返回入口布局的测试用户名称 WWWWWWWWWWWWWWWWWWWW', status: 'ACTIVE', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z' };
   c.headerReadStatus = 200;
 }
 const userSearchTools = new URLSearchParams(location.search).get('userSearchTools') === '1';
