@@ -23,7 +23,7 @@ LEDGER_REPAIR_APPROVAL_ROOT = "TestLedgerRepairCrossDomainActivationPostgresInte
 LEDGER_REPAIR_PAYMENT_E2E_ROOT = "TestLedgerRepairPaymentAuthorityE2EPostgresIntegration"
 LEDGER_REPAIR_APPROVAL_ROOTS = {LEDGER_REPAIR_APPROVAL_ROOT, LEDGER_REPAIR_PAYMENT_E2E_ROOT}
 BILLING_ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
-MIGRATION_CLI_ROOTS = {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown", "TestAccountClosureSagaIdentityDispatchPostgres"}
+MIGRATION_CLI_ROOTS = {"TestMigrationCLIBudgetRecovery", "TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown", "TestAccountClosureSagaIdentityDispatchPostgres"}
 MIGRATION_IDENTITY_ROOT = "TestAccountClosureSagaIdentityDispatchPostgres"
 MIGRATION_IDENTITY_CASES = {
     "source-only-name-and-checksum", "ledger-only-renamed-directory",
@@ -119,6 +119,7 @@ def emit_child_logs(child_log, children):
 
 def verify_results(raw, required):
     passed = set()
+    passed_cases = set()
     count = 0
     running = set()
     started_packages, passed_packages, test_packages = set(), set(), set()
@@ -147,6 +148,7 @@ def verify_results(raw, required):
         if action == "fail" or (name and action == "skip"):
             raise RuntimeError("closure contract failed or skipped")
         if name and action == "pass":
+            passed_cases.add(name)
             count += 1
             if "/" not in name:
                 if name in passed:
@@ -159,6 +161,13 @@ def verify_results(raw, required):
         raise RuntimeError("required closure contracts did not execute exactly: missing="
                            + ", ".join(sorted(required - passed)) + "; unexpected="
                            + ", ".join(sorted(passed - required)))
+    if "TestMigrationCLIBudgetRecovery" in required:
+        budget_cases = {"TestMigrationCLIBudgetRecovery/" + suffix for suffix in (
+            "invalid_budget_before_database", "domain_lock_wait", "partial_up_timeout",
+            "explicit_flag_overrides_invalid_env_and_retry", "transactional_down_timeout", "down_retry",
+            "successful_unlock_preserves_connection", "expired_unlock_retires_owned_connection")}
+        if not budget_cases <= passed_cases:
+            raise RuntimeError("migration budget recovery cases did not execute")
     return count
 
 
