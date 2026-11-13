@@ -51,11 +51,22 @@ fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
     collapse_single_element_unions(schema);
     // Recurse into all sub-schemas
     if let Some(obj) = schema.as_object_mut() {
-        let local_properties: Vec<String> = obj
-            .get("properties")
-            .and_then(|v| v.as_object())
-            .map(|props| props.keys().cloned().collect())
-            .unwrap_or_default();
+        // The context this scope hands its same-instance applicators: a
+        // local `properties` map replaces the inherited names, while an
+        // object with NO local declaration introduces no property scope of
+        // its own and passes the inherited names through — a nested
+        // composition inside a bare `{oneOf: [...]}` branch still resolves
+        // against the ancestor that declared the properties (review
+        // thread on 5896057559: dropping the inheritance there pruned the
+        // inner required-only branches into `{}` and left no valid
+        // argument).
+        let local_properties: Vec<String> = match obj.get("properties") {
+            Some(props) => props
+                .as_object()
+                .map(|props| props.keys().cloned().collect())
+                .unwrap_or_default(),
+            None => enclosing_properties.to_vec(),
+        };
         for (key, v) in obj.iter_mut() {
             if matches!(
                 key.as_str(),
@@ -772,6 +783,49 @@ mod tests {
             schema["properties"]["handler"]["oneOf"],
             json!([{}, {"type": "string"}]),
             "a nested instance scope resets the property context"
+        );
+    }
+
+    #[test]
+    fn inherited_property_names_flow_through_nested_same_instance_composition() {
+        // A composition branch with no local `properties` introduces no
+        // property scope of its own: the ancestor's declared names must
+        // reach compositions nested inside it, or a bare
+        // `{oneOf: [...]}` intermediate branch prunes its inner
+        // required-only branches into `{}` — the inner union becomes
+        // unsatisfiable and the sibling non-object branch is incompatible
+        // with the object root, so no argument stays valid (review
+        // 5896057559). `{"a":"x"}` is valid before sanitization and the
+        // schema must keep admitting it.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {
+                    "oneOf": [
+                        {"required": ["a"]},
+                        {"required": ["b"]}
+                    ]
+                },
+                {"type": "string"}
+            ]
+        });
+        sanitize(&mut schema);
+        assert_eq!(
+            schema["oneOf"][0]["oneOf"],
+            json!([{"required": ["a"]}, {"required": ["b"]}]),
+            "the nested required-only branches must resolve against the root properties: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the sanitized schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x"})),
+            "the object form must stay valid after sanitization: {schema}"
         );
     }
 
