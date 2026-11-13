@@ -60,6 +60,22 @@ function ModelCallStatus({ model, copy, onViewOperations }) {
   </section>;
 }
 
+function modelTokenCapacity(value, copy, allowZero) {
+  if (value == null) return copy.modelFieldUnavailable;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < (allowZero ? 0 : 1)) return copy.modelFieldInvalid;
+  if (!Number.isSafeInteger(value)) return copy.modelFieldPrecisionUnknown;
+  return value.toLocaleString(copy.modelFactLocale) + ' Token';
+}
+
+function modelModalitySummary(values, copy) {
+  if (!Array.isArray(values)) return copy.modelFieldUnavailable;
+  if (!values.length) return copy.modelNoModalities;
+  return values.map((code) => {
+    if (typeof code !== 'string' || !code.trim()) return copy.modelFieldUnavailable;
+    return Object.prototype.hasOwnProperty.call(copy.modelModalities, code) ? copy.modelModalities[code] : code;
+  }).join(copy.modelFactSeparator);
+}
+
 function OverviewTab({ detail, copy }) {
   const model = detail.model;
   return <section className="adm-card adm-model-detail-panel" aria-labelledby="model-overview-heading">
@@ -71,14 +87,17 @@ function OverviewTab({ detail, copy }) {
       <Fact label={copy.catalogVersion}>{model.catalog_version}</Fact>
       <Fact label={copy.capabilityVersion}>{model.capability_version}</Fact>
       <Fact label={copy.protocol}>{model.protocol_code} · v{model.protocol_version}</Fact>
-      <Fact label={copy.contextLength}>{Number(model.context_length || 0).toLocaleString()}</Fact>
-      <Fact label={copy.maximumOutputTokens}>{Number(model.maximum_output_tokens || 0).toLocaleString()}</Fact>
-      <Fact label={copy.modalities}>{(model.supported_modalities || []).join(', ') || '—'}</Fact>
-      <Fact label={copy.tokenizerVersion}>{model.tokenizer_version || '—'}</Fact>
+      <Fact label={copy.contextLength}>{modelTokenCapacity(model.context_length, copy, false)}</Fact>
+      <Fact label={copy.maximumOutputTokens}>{modelTokenCapacity(model.maximum_output_tokens, copy, true)}</Fact>
+      <Fact label={copy.modalities}>{modelModalitySummary(model.supported_modalities, copy)}</Fact>
       <Fact label={copy.runtimeProtocol}>{runtimeProtocolPresentation(model, copy).label}</Fact>
       <Fact label={copy.source}>{model.source_available === true ? copy.modelCallSourceAvailable : model.source_available === false ? copy.enumLabels.UNAVAILABLE : copy.modelCallSourceUnknown}</Fact>
     </Facts>
     {model.description && <p className="adm-model-detail-description">{model.description}</p>}
+    <details className="adm-model-technical-details">
+      <summary>{copy.modelTechnicalDetails}</summary>
+      <Facts><Fact label={copy.tokenizerVersion}>{typeof model.tokenizer_version === 'string' && model.tokenizer_version.trim() ? model.tokenizer_version : copy.modelFieldUnavailable}</Fact></Facts>
+    </details>
   </section>;
 }
 
