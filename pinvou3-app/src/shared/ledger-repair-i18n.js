@@ -550,3 +550,522 @@ ledgerRepairCopy.ja.receivableAmounts = {
 ledgerRepairCopy.zh.receivableTask = { action: '当前任务', name: '应收核销', lead: '填写目标与金额，读取服务端快照并核对后，提交核销审批。', submit: '提交核销审批', submitting: '正在提交审批…', submitHelp: '系统会按当前状态创建草稿或更新已有的可编辑草稿，并在审批状态允许时提交。审批通过且执行完成后，才会核销应收。', recoveryHelp: '使用原请求确认提交结果。结果明确前，当前单据和已填内容会保留。', submissionConfirmed: '已确认提交核销审批。请在审批中心查看最新状态。' };
 ledgerRepairCopy.en.receivableTask = { action: 'Current task', name: 'Receivable write-off', lead: 'Enter the target and amount, read and review the server snapshot, then submit the write-off for approval.', submit: 'Submit for write-off approval', submitting: 'Submitting for approval…', submitHelp: 'The system creates a draft or updates an existing editable draft and submits it when the approval status allows. The receivable is written off only after approval and execution.', recoveryHelp: 'Use the original request to confirm the submission result. The current receivable and your entries stay in place until the result is confirmed.', submissionConfirmed: 'Write-off approval submission confirmed. Check the Approval Center for the latest status.' };
 ledgerRepairCopy.ja.receivableTask = { action: '現在のタスク', name: '未収金の償却', lead: '対象と金額を入力し、サーバーのスナップショットを取得して確認してから、償却の承認を申請します。', submit: '償却の承認を申請', submitting: '承認を申請中…', submitHelp: '現在の状態に応じて下書きを作成するか、編集可能な既存の下書きを更新し、承認状態が許可する場合に申請します。承認後、処理が実行されてから未収金が償却されます。', recoveryHelp: '元のリクエストで申請結果を確認します。結果が確認されるまで、対象の未収金と入力内容は保持されます。', submissionConfirmed: '償却の承認申請を確認しました。最新の状態は承認センターで確認してください。' };
+
+ledgerRepairCopy.zh.paymentRelation = {
+  "intro": "输入要核对的支付订单和这笔支付已经保存的凭证。读取后会核对它们是否属于同一笔支付。",
+  "title": "订单与凭证核对",
+  "fields": [
+    "支付订单 ID",
+    "已保存的支付凭证 ID",
+    "渠道交易流水",
+    "订单金额（分）"
+  ],
+  "limit": "此快照未提供币种、渠道名称或实时收款状态。",
+  "reading": "正在核对当前输入…",
+  "matched": "已核对本次读取的关联。",
+  "pending": "仍在确认上一次审批请求的结果。",
+  "waiting": "请读取快照以核对当前输入。"
+};
+ledgerRepairCopy.en.paymentRelation = {
+  "intro": "Enter the payment order and the evidence already recorded for that payment. The snapshot checks that they refer to the same payment.",
+  "title": "Order and evidence",
+  "fields": [
+    "Payment order ID",
+    "Recorded payment evidence ID",
+    "Provider transaction reference",
+    "Order amount (minor units)"
+  ],
+  "limit": "This snapshot does not include the currency, provider name, or live payment status.",
+  "reading": "Checking the current references…",
+  "matched": "These references match in the loaded snapshot.",
+  "pending": "The previous approval request is still being confirmed.",
+  "waiting": "Load the snapshot to check the current references."
+};
+ledgerRepairCopy.ja.paymentRelation = {
+  "intro": "対象の支払い注文と、その支払いについて記録済みの証拠を入力してください。スナップショットで同じ支払いかを確認します。",
+  "title": "注文と証拠の確認",
+  "fields": [
+    "支払い注文 ID",
+    "記録済みの支払い証拠 ID",
+    "決済事業者の取引参照",
+    "注文額（最小通貨単位）"
+  ],
+  "limit": "このスナップショットには通貨、決済事業者名、現在の支払い状態が含まれません。",
+  "reading": "現在の参照を照合中…",
+  "matched": "取得したスナップショットでこれらの参照が一致しました。",
+  "pending": "前回の承認リクエストの結果を確認中です。",
+  "waiting": "スナップショットを取得して現在の参照を照合してください。"
+};
+
+ledgerRepairCopy.zh.paymentImpact = {
+  "title": "拟议账务影响",
+  "gate": "当前只核对快照。提交的是审批请求，处理进度以审批详情为准。",
+  "missing": "此快照未提供",
+  "unit": "积分",
+  "amount": "最小货币单位",
+  "ref": "审批请求",
+  "state": "审批状态",
+  "unknown": "请查看审批详情",
+  "states": {
+    "SUBMITTED": "已提交，待审批",
+    "APPROVED": "已批准，待执行",
+    "EXECUTING": "正在执行",
+    "EXECUTED": "执行完成",
+    "EXECUTION_FAILED": "执行失败"
+  },
+  "scenario": "适用于支付渠道已确认收款、本地账务尚未入账的订单。",
+  "fields": [
+    "拟补记积分",
+    "拟抵扣应收积分",
+    "目标钱包",
+    "当前钱包余额"
+  ]
+};
+ledgerRepairCopy.en.paymentImpact = {
+  "title": "Proposed ledger impact",
+  "gate": "This is a snapshot. Submission starts an approval request; check its details for processing status.",
+  "missing": "Not provided in this snapshot",
+  "unit": "points",
+  "amount": "minor currency units",
+  "ref": "Approval request",
+  "state": "Approval status",
+  "unknown": "See approval details",
+  "states": {
+    "SUBMITTED": "Submitted, awaiting approval",
+    "APPROVED": "Approved, awaiting execution",
+    "EXECUTING": "Executing",
+    "EXECUTED": "Execution complete",
+    "EXECUTION_FAILED": "Execution failed"
+  },
+  "scenario": "Use this for an order the payment provider confirmed as paid but the local ledger has yet to credit.",
+  "fields": [
+    "Points to credit",
+    "Points to apply to receivables",
+    "Destination wallet",
+    "Current wallet balance"
+  ]
+};
+ledgerRepairCopy.ja.paymentImpact = {
+  "title": "予定される台帳への影響",
+  "gate": "これはスナップショットです。送信すると承認申請が開始されます。進捗は申請の詳細で確認してください。",
+  "missing": "このスナップショットにはありません",
+  "unit": "ポイント",
+  "amount": "通貨の最小単位",
+  "ref": "承認申請",
+  "state": "承認状況",
+  "unknown": "承認申請の詳細を確認",
+  "states": {
+    "SUBMITTED": "送信済み・承認待ち",
+    "APPROVED": "承認済み・実行待ち",
+    "EXECUTING": "実行中",
+    "EXECUTED": "実行完了",
+    "EXECUTION_FAILED": "実行失敗"
+  },
+  "scenario": "決済事業者が入金を確認済みで、ローカル台帳に未計上の注文に使用します。",
+  "fields": [
+    "計上予定のポイント",
+    "未収分に充当するポイント",
+    "対象ウォレット",
+    "現在のウォレット残高"
+  ]
+};
+
+ledgerRepairCopy.zh.paymentTask = {
+  "identity": "核对对象和证据",
+  "approval": "提交审批请求",
+  "command": "命令代码",
+  "reading": "正在加载核对快照…",
+  "read": "加载核对快照",
+  "submitting": "正在提交审批请求…",
+  "badID": "请输入完整、无首尾空格的 UUID。",
+  "evidence": "填写已持久化的支付证据 UUID。",
+  "anomaly": "填写这笔退款对应的异常案件 UUID。",
+  "approvalHelp": "核对上方快照后填写审批理由及请求标识。",
+  "title": "支付入账补记",
+  "target": "填写平台支付订单 UUID；商户订单号不能用于此字段。",
+  "factsFailed": "无法加载支付补记的核对快照。请检查订单和支付证据后重试。"
+};
+ledgerRepairCopy.en.paymentTask = {
+  "identity": "Check the target and evidence",
+  "approval": "Submit for approval",
+  "command": "Command code",
+  "reading": "Loading verification snapshot…",
+  "read": "Load verification snapshot",
+  "submitting": "Submitting approval request…",
+  "badID": "Enter the full UUID without leading or trailing spaces.",
+  "evidence": "Enter the UUID of the stored payment evidence.",
+  "anomaly": "Enter the UUID of the anomaly case for this refund.",
+  "approvalHelp": "Review the snapshot above, then provide the reason and request reference.",
+  "title": "Credit a confirmed payment",
+  "target": "Enter the platform payment order UUID. The merchant order number is not accepted here.",
+  "factsFailed": "Could not load the payment verification snapshot. Check the order and evidence, then retry."
+};
+ledgerRepairCopy.ja.paymentTask = {
+  "identity": "対象と証拠を確認",
+  "approval": "承認を申請",
+  "command": "コマンドコード",
+  "reading": "確認用スナップショットを読み込み中…",
+  "read": "確認用スナップショットを読み込む",
+  "submitting": "承認申請を送信中…",
+  "badID": "前後に空白を付けず、完全な UUID を入力してください。",
+  "evidence": "保存済みの決済証拠の UUID を入力してください。",
+  "anomaly": "この返金に対応する異常案件の UUID を入力してください。",
+  "approvalHelp": "上のスナップショットを確認し、申請理由と申請識別子を入力してください。",
+  "title": "確認済みの決済を追加入金",
+  "target": "プラットフォームの決済注文 UUID を入力します。加盟店の注文番号は使えません。",
+  "factsFailed": "決済の確認用スナップショットを読み込めませんでした。注文と決済証拠を確認して再試行してください。"
+};
+
+ledgerRepairCopy.zh.refundRelation = {
+  "intro": "请提供这次退款、已保存的支付凭证及对应异常案件。系统会在同一次读取中核对三个对象。",
+  "title": "退款、凭证与案件核对",
+  "fields": [
+    "退款 ID",
+    "已保存的支付凭证 ID",
+    "异常案件 ID",
+    "渠道退款流水"
+  ],
+  "limit": "此快照未提供原支付订单详情或可选凭证列表。",
+  "reading": "正在核对当前输入…",
+  "matched": "已核对本次读取的关联。",
+  "pending": "仍在确认上一次审批请求的结果。",
+  "waiting": "请读取快照以核对当前输入。"
+};
+ledgerRepairCopy.en.refundRelation = {
+  "intro": "Provide the refund, its recorded payment evidence, and the related exception case. The snapshot checks the three references together.",
+  "title": "Refund, evidence and exception case",
+  "fields": [
+    "Refund ID",
+    "Recorded payment evidence ID",
+    "Exception case ID",
+    "Provider refund reference"
+  ],
+  "limit": "This snapshot does not include the original payment order details or a list of eligible evidence.",
+  "reading": "Checking the current references…",
+  "matched": "These references match in the loaded snapshot.",
+  "pending": "The previous approval request is still being confirmed.",
+  "waiting": "Load the snapshot to check the current references."
+};
+ledgerRepairCopy.ja.refundRelation = {
+  "intro": "対象の返金、記録済みの支払い証拠、対応する例外案件を入力してください。スナップショットで三つの参照をまとめて照合します。",
+  "title": "返金・証拠・例外案件の確認",
+  "fields": [
+    "返金 ID",
+    "記録済みの支払い証拠 ID",
+    "例外案件 ID",
+    "決済事業者の返金参照"
+  ],
+  "limit": "元の支払い注文の詳細や選択可能な証拠の一覧は、このスナップショットに含まれません。",
+  "reading": "現在の参照を照合中…",
+  "matched": "取得したスナップショットでこれらの参照が一致しました。",
+  "pending": "前回の承認リクエストの結果を確認中です。",
+  "waiting": "スナップショットを取得して現在の参照を照合してください。"
+};
+
+ledgerRepairCopy.zh.refundImpact = {
+  "title": "拟议账务影响",
+  "gate": "当前只核对快照。提交的是审批请求，处理进度以审批详情为准。",
+  "missing": "此快照未提供",
+  "unit": "积分",
+  "amount": "最小货币单位",
+  "ref": "审批请求",
+  "state": "审批状态",
+  "unknown": "请查看审批详情",
+  "states": {
+    "SUBMITTED": "已提交，待审批",
+    "APPROVED": "已批准，待执行",
+    "EXECUTING": "正在执行",
+    "EXECUTED": "执行完成",
+    "EXECUTION_FAILED": "执行失败"
+  },
+  "scenario": "适用于渠道退款已完成、本地账务待冲回的异常。此操作用于补记本地冲回，不会再次发起渠道退款。",
+  "fields": [
+    "渠道退款金额",
+    "应冲回积分",
+    "可收回积分",
+    "缺口积分",
+    "目标钱包",
+    "权益包",
+    "订单已付金额",
+    "累计已退金额",
+    "币种",
+    "渠道实时状态"
+  ]
+};
+ledgerRepairCopy.en.refundImpact = {
+  "title": "Proposed ledger impact",
+  "gate": "This is a snapshot. Submission starts an approval request; check its details for processing status.",
+  "missing": "Not provided in this snapshot",
+  "unit": "points",
+  "amount": "minor currency units",
+  "ref": "Approval request",
+  "state": "Approval status",
+  "unknown": "See approval details",
+  "states": {
+    "SUBMITTED": "Submitted, awaiting approval",
+    "APPROVED": "Approved, awaiting execution",
+    "EXECUTING": "Executing",
+    "EXECUTED": "Execution complete",
+    "EXECUTION_FAILED": "Execution failed"
+  },
+  "scenario": "Use this when the provider has refunded the payment and the local ledger still needs a reversal. This records a local reversal without requesting another provider refund.",
+  "fields": [
+    "Provider refund amount",
+    "Points to reverse",
+    "Recoverable points",
+    "Points shortfall",
+    "Destination wallet",
+    "Entitlement package",
+    "Order amount paid",
+    "Total refunded",
+    "Currency",
+    "Live provider status"
+  ]
+};
+ledgerRepairCopy.ja.refundImpact = {
+  "title": "予定される台帳への影響",
+  "gate": "これはスナップショットです。送信すると承認申請が開始されます。進捗は申請の詳細で確認してください。",
+  "missing": "このスナップショットにはありません",
+  "unit": "ポイント",
+  "amount": "通貨の最小単位",
+  "ref": "承認申請",
+  "state": "承認状況",
+  "unknown": "承認申請の詳細を確認",
+  "states": {
+    "SUBMITTED": "送信済み・承認待ち",
+    "APPROVED": "承認済み・実行待ち",
+    "EXECUTING": "実行中",
+    "EXECUTED": "実行完了",
+    "EXECUTION_FAILED": "実行失敗"
+  },
+  "scenario": "決済事業者による返金が完了し、ローカル台帳で取消処理が残っている場合に使用します。決済事業者に再度返金を依頼することはありません。",
+  "fields": [
+    "事業者の返金額",
+    "取消対象ポイント",
+    "回収可能なポイント",
+    "不足ポイント",
+    "対象ウォレット",
+    "権益パッケージ",
+    "注文の支払済額",
+    "返金累計",
+    "通貨",
+    "事業者の現在の状態"
+  ]
+};
+
+ledgerRepairCopy.zh.refundTask = {
+  "identity": "核对对象和证据",
+  "approval": "提交审批请求",
+  "command": "命令代码",
+  "reading": "正在加载核对快照…",
+  "read": "加载核对快照",
+  "submitting": "正在提交审批请求…",
+  "badID": "请输入完整、无首尾空格的 UUID。",
+  "evidence": "填写已持久化的支付证据 UUID。",
+  "anomaly": "填写这笔退款对应的异常案件 UUID。",
+  "approvalHelp": "核对上方快照后填写审批理由及请求标识。",
+  "title": "退款账务冲回",
+  "target": "填写已完成渠道退款的退款记录 UUID。",
+  "factsFailed": "无法加载退款冲回的核对快照。请核对退款、支付证据及异常案件后重试。"
+};
+ledgerRepairCopy.en.refundTask = {
+  "identity": "Check the target and evidence",
+  "approval": "Submit for approval",
+  "command": "Command code",
+  "reading": "Loading verification snapshot…",
+  "read": "Load verification snapshot",
+  "submitting": "Submitting approval request…",
+  "badID": "Enter the full UUID without leading or trailing spaces.",
+  "evidence": "Enter the UUID of the stored payment evidence.",
+  "anomaly": "Enter the UUID of the anomaly case for this refund.",
+  "approvalHelp": "Review the snapshot above, then provide the reason and request reference.",
+  "title": "Record a refund reversal",
+  "target": "Enter the UUID of the refund record completed by the provider.",
+  "factsFailed": "Could not load the refund verification snapshot. Check the refund, payment evidence and anomaly case, then retry."
+};
+ledgerRepairCopy.ja.refundTask = {
+  "identity": "対象と証拠を確認",
+  "approval": "承認を申請",
+  "command": "コマンドコード",
+  "reading": "確認用スナップショットを読み込み中…",
+  "read": "確認用スナップショットを読み込む",
+  "submitting": "承認申請を送信中…",
+  "badID": "前後に空白を付けず、完全な UUID を入力してください。",
+  "evidence": "保存済みの決済証拠の UUID を入力してください。",
+  "anomaly": "この返金に対応する異常案件の UUID を入力してください。",
+  "approvalHelp": "上のスナップショットを確認し、申請理由と申請識別子を入力してください。",
+  "title": "返金の台帳取消を記録",
+  "target": "決済事業者が返金を完了した返金記録の UUID を入力します。",
+  "factsFailed": "返金の確認用スナップショットを読み込めませんでした。返金、決済証拠、異常案件を確認して再試行してください。"
+};
+
+ledgerRepairCopy.zh.chargebackRelation = {
+  "intro": "请输入已经登记的拒付案件及该笔支付已保存的凭证。读取后可核对案件和凭证是否匹配。",
+  "title": "拒付案件与凭证核对",
+  "fields": [
+    "拒付案件 ID",
+    "已保存的支付凭证 ID",
+    "渠道拒付流水"
+  ],
+  "limit": "此快照未提供商户单号、渠道名称、货币拒付金额或可选凭证列表。",
+  "reading": "正在核对当前输入…",
+  "matched": "已核对本次读取的关联。",
+  "pending": "仍在确认上一次审批请求的结果。",
+  "waiting": "请读取快照以核对当前输入。"
+};
+ledgerRepairCopy.en.chargebackRelation = {
+  "intro": "Enter an existing chargeback case and the evidence recorded for its payment. The snapshot checks that the evidence belongs to this case.",
+  "title": "Chargeback case and evidence",
+  "fields": [
+    "Chargeback case ID",
+    "Recorded payment evidence ID",
+    "Provider chargeback reference"
+  ],
+  "limit": "This snapshot does not include the merchant order number, provider name, chargeback amount in currency, or an eligible evidence list.",
+  "reading": "Checking the current references…",
+  "matched": "These references match in the loaded snapshot.",
+  "pending": "The previous approval request is still being confirmed.",
+  "waiting": "Load the snapshot to check the current references."
+};
+ledgerRepairCopy.ja.chargebackRelation = {
+  "intro": "登録済みのチャージバック案件と、その支払いについて記録済みの証拠を入力してください。スナップショットで証拠が案件に対応するかを確認します。",
+  "title": "チャージバック案件と証拠の確認",
+  "fields": [
+    "チャージバック案件 ID",
+    "記録済みの支払い証拠 ID",
+    "決済事業者のチャージバック参照"
+  ],
+  "limit": "このスナップショットには加盟店の注文番号、決済事業者名、通貨建てのチャージバック額、選択可能な証拠の一覧が含まれません。",
+  "reading": "現在の参照を照合中…",
+  "matched": "取得したスナップショットでこれらの参照が一致しました。",
+  "pending": "前回の承認リクエストの結果を確認中です。",
+  "waiting": "スナップショットを取得して現在の参照を照合してください。"
+};
+
+ledgerRepairCopy.zh.chargebackImpact = {
+  "title": "拟议账务影响",
+  "gate": "当前只核对快照。提交的是审批请求，处理进度以审批详情为准。",
+  "missing": "此快照未提供",
+  "unit": "积分",
+  "amount": "最小货币单位",
+  "ref": "审批请求",
+  "state": "审批状态",
+  "unknown": "请查看审批详情",
+  "states": {
+    "SUBMITTED": "已提交，待审批",
+    "APPROVED": "已批准，待执行",
+    "EXECUTING": "正在执行",
+    "EXECUTED": "执行完成",
+    "EXECUTION_FAILED": "执行失败"
+  },
+  "scenario": "适用于已经确认的拒付，用于处理本地账务的基础积分缺口。此操作不会登记新拒付或代渠道申诉。",
+  "fields": [
+    "基础积分缺口",
+    "目标钱包",
+    "权益包",
+    "渠道拒付金额"
+  ]
+};
+ledgerRepairCopy.en.chargebackImpact = {
+  "title": "Proposed ledger impact",
+  "gate": "This is a snapshot. Submission starts an approval request; check its details for processing status.",
+  "missing": "Not provided in this snapshot",
+  "unit": "points",
+  "amount": "minor currency units",
+  "ref": "Approval request",
+  "state": "Approval status",
+  "unknown": "See approval details",
+  "states": {
+    "SUBMITTED": "Submitted, awaiting approval",
+    "APPROVED": "Approved, awaiting execution",
+    "EXECUTING": "Executing",
+    "EXECUTED": "Execution complete",
+    "EXECUTION_FAILED": "Execution failed"
+  },
+  "scenario": "Use this for an already confirmed chargeback to address the base points shortfall in the local ledger. It does not open a new chargeback or dispute it with the provider.",
+  "fields": [
+    "Base points shortfall",
+    "Destination wallet",
+    "Entitlement package",
+    "Provider chargeback amount"
+  ]
+};
+ledgerRepairCopy.ja.chargebackImpact = {
+  "title": "予定される台帳への影響",
+  "gate": "これはスナップショットです。送信すると承認申請が開始されます。進捗は申請の詳細で確認してください。",
+  "missing": "このスナップショットにはありません",
+  "unit": "ポイント",
+  "amount": "通貨の最小単位",
+  "ref": "承認申請",
+  "state": "承認状況",
+  "unknown": "承認申請の詳細を確認",
+  "states": {
+    "SUBMITTED": "送信済み・承認待ち",
+    "APPROVED": "承認済み・実行待ち",
+    "EXECUTING": "実行中",
+    "EXECUTED": "実行完了",
+    "EXECUTION_FAILED": "実行失敗"
+  },
+  "scenario": "確認済みのチャージバックによるローカル台帳の基本ポイント不足を処理します。新規の登録や決済事業者への異議申立ては行いません。",
+  "fields": [
+    "基本ポイントの不足",
+    "対象ウォレット",
+    "権益パッケージ",
+    "事業者のチャージバック額"
+  ]
+};
+
+ledgerRepairCopy.zh.chargebackTask = {
+  "identity": "核对对象和证据",
+  "approval": "提交审批请求",
+  "command": "命令代码",
+  "reading": "正在加载核对快照…",
+  "read": "加载核对快照",
+  "submitting": "正在提交审批请求…",
+  "badID": "请输入完整、无首尾空格的 UUID。",
+  "evidence": "填写已持久化的支付证据 UUID。",
+  "anomaly": "填写这笔退款对应的异常案件 UUID。",
+  "approvalHelp": "核对上方快照后填写审批理由及请求标识。",
+  "title": "拒付积分缺口处理",
+  "target": "填写已确认拒付的案件 UUID。",
+  "factsFailed": "无法加载拒付补偿的核对快照。请检查拒付案件和支付证据后重试。"
+};
+ledgerRepairCopy.en.chargebackTask = {
+  "identity": "Check the target and evidence",
+  "approval": "Submit for approval",
+  "command": "Command code",
+  "reading": "Loading verification snapshot…",
+  "read": "Load verification snapshot",
+  "submitting": "Submitting approval request…",
+  "badID": "Enter the full UUID without leading or trailing spaces.",
+  "evidence": "Enter the UUID of the stored payment evidence.",
+  "anomaly": "Enter the UUID of the anomaly case for this refund.",
+  "approvalHelp": "Review the snapshot above, then provide the reason and request reference.",
+  "title": "Address a chargeback points shortfall",
+  "target": "Enter the UUID of the confirmed chargeback case.",
+  "factsFailed": "Could not load the chargeback verification snapshot. Check the chargeback case and payment evidence, then retry."
+};
+ledgerRepairCopy.ja.chargebackTask = {
+  "identity": "対象と証拠を確認",
+  "approval": "承認を申請",
+  "command": "コマンドコード",
+  "reading": "確認用スナップショットを読み込み中…",
+  "read": "確認用スナップショットを読み込む",
+  "submitting": "承認申請を送信中…",
+  "badID": "前後に空白を付けず、完全な UUID を入力してください。",
+  "evidence": "保存済みの決済証拠の UUID を入力してください。",
+  "anomaly": "この返金に対応する異常案件の UUID を入力してください。",
+  "approvalHelp": "上のスナップショットを確認し、申請理由と申請識別子を入力してください。",
+  "title": "チャージバックのポイント不足を処理",
+  "target": "確認済みのチャージバック案件の UUID を入力します。",
+  "factsFailed": "チャージバックの確認用スナップショットを読み込めませんでした。案件と決済証拠を確認して再試行してください。"
+};
+Object.assign(ledgerRepairCopy.zh, { usageSettlementTask: {"lead":"填写对应的用量引用，加载结算快照并核对，再提交修复审批。","load":"加载用量结算快照","technical":"技术信息","submit":"提交结算修复审批","submitting":"正在提交审批…","submitted":"已确认送审。审批编号："} });
+Object.assign(ledgerRepairCopy.en, { usageSettlementTask: {"lead":"Enter the usage references, load and review the settlement snapshot, then submit the repair for approval.","load":"Load usage settlement snapshot","technical":"Technical information","submit":"Submit settlement repair for approval","submitting":"Submitting for approval…","submitted":"Approval submission confirmed. Approval ID:"} });
+Object.assign(ledgerRepairCopy.ja, { usageSettlementTask: {"lead":"利用量の参照情報を入力し、精算スナップショットを取得して確認してから修復の承認を申請します。","load":"利用量の精算スナップショットを読み込む","technical":"技術情報","submit":"精算修復を承認申請","submitting":"承認申請を送信中…","submitted":"承認申請の送信を確認しました。承認 ID："} });
+Object.assign(ledgerRepairCopy.zh, { usageSettlementIdentity: {"title":"核对用量结算引用","scope":"冻结记录、用量请求、损失复核和钱包来自同一次已核验快照。","wallet":"关联钱包","hints":{"target_resource_id":"填写待修复的用量冻结记录 ID。","usage_request_id":"填写这条冻结记录对应的用量请求 ID。","loss_review_id":"填写同一用量请求的损失复核 ID。"}} });
+Object.assign(ledgerRepairCopy.en, { usageSettlementIdentity: {"title":"Review usage settlement references","scope":"The hold, usage request, loss review, and wallet come from the same verified snapshot.","wallet":"Associated wallet","hints":{"target_resource_id":"Enter the usage hold ID for this repair.","usage_request_id":"Enter the usage request ID for that hold.","loss_review_id":"Enter the loss review ID for the same usage request."}} });
+Object.assign(ledgerRepairCopy.ja, { usageSettlementIdentity: {"title":"利用量精算の参照情報を確認","scope":"保留、利用量リクエスト、損失審査、ウォレットは同じ検証済みスナップショットの情報です。","wallet":"関連ウォレット","hints":{"target_resource_id":"修復対象の利用量保留 ID を入力してください。","usage_request_id":"この保留に対応する利用量リクエスト ID を入力してください。","loss_review_id":"同じ利用量リクエストの損失審査 ID を入力してください。"}} });
+Object.assign(ledgerRepairCopy.zh, { usageSettlementPlan: {"title":"拟议结算","expected":"按原计价复算的用量积分","settle":"拟补记结算积分","overage":"拟新增应收积分","points":"积分","scope":"这些是快照中的拟议金额。当前预占、已经扣减和调整后余额未包含在此快照中。","language":"zh"} });
+Object.assign(ledgerRepairCopy.en, { usageSettlementPlan: {"title":"Proposed settlement","expected":"Usage credits recalculated from original pricing","settle":"Credits proposed for settlement","overage":"Proposed new receivable credits","points":"credits","scope":"These are proposed amounts from the snapshot. It does not include the current hold, credits already deducted, or the balance after the adjustment.","language":"en"} });
+Object.assign(ledgerRepairCopy.ja, { usageSettlementPlan: {"title":"精算予定","expected":"元の料金に基づく利用量ポイントの再計算","settle":"精算予定ポイント","overage":"追加予定の未収ポイント","points":"ポイント","scope":"これらはスナップショットの予定額です。現在の保留額、控除済みポイント、調整後の残高は含まれていません。","language":"ja"} });
