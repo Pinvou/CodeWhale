@@ -1274,7 +1274,7 @@ mod tests {
                 }
             }
             let restored = RemoteTaskLedger::open_recovered(path.clone(), reopened_at).unwrap();
-            let recovered = restored.recover_after_restart(reopened_at);
+            let recovered = restored.recover_after_restart(reopened_at).committed;
             assert_eq!(recovered.len(), usize::from(!completed));
             let persisted = restored.record("task-1").unwrap();
             let mut event = task_event("task-1", persisted.wire_status());

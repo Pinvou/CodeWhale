@@ -1202,6 +1202,15 @@ non-Unicode configuration rejects admission with
 the wire protocol. Progress, busy observations and retries do not refresh it.
 Expiry reports `task_turn_timeout`, not successful completion.
 
+The controlled desktop commits the terminal state and bounded reason to its
+task ledger before projecting the result or running terminal cleanup. Repeated
+completion returns the existing record and reason. On a stop or recovery
+write failure, the unsuccessful task stays non-terminal and retains its turn
+lock. The controlled desktop records a bounded persistence failure. A repeat
+of the interruption can retry the uncommitted tasks, and a restart after
+storage is writable reconciles any remaining in-flight records before
+exposing the task runtime.
+
 Chat cleanup targets the captured reservation generation and, where observed,
 the exact foundation turn identity. It never uses the session-wide subagent
 cancel operation or latches a stop disposition on an unobserved/replaced slot;
