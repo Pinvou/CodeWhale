@@ -25,6 +25,8 @@ try {
       const handle = await page.evaluateHandle(({ selector, label }) => [...document.querySelectorAll(selector)].find(node => node.textContent.trim() === label && node.getClientRects().length && !node.disabled), { selector, label });
       assert.ok(handle.asElement(), label); await handle.asElement().click(); await handle.dispose();
     };
+    await click('[data-workspace=products] .adm-pricing-panes button', await page.evaluate(() => window.probe.labels.meteringUnits));
+    await page.waitForFunction(() => new URLSearchParams(location.search).get('pricing_pane') === 'units' && document.querySelector('[data-workspace=products] .adm-pricing-panes button[aria-pressed=true]')?.textContent.trim() === window.probe.labels.meteringUnits);
     await click('[data-workspace=products] button', await page.evaluate(() => window.probe.labels.createUnitVersion));
     await page.type('[data-workspace=products] .adm-pricing-unit-form input', 'CONTROLLED_UNIT');
     await page.$eval('[data-workspace=products] .adm-pricing-unit-form', form => form.requestSubmit());
