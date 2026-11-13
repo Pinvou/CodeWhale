@@ -289,3 +289,7 @@ networkPolicy:
 resources:
   requests: { cpu: 100m, memory: 128Mi }
   limits: { cpu: "1", memory: 512Mi }
+
+# Finite database budget per migration invocation; CLI validates 0 < timeout <= 24h.
+migrations:
+  timeout: 2m

@@ -1,11 +1,28 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import {
   financialRepairCommandTypes, financialRepairInputs, financialRepairPrecheckBody,
   financialRepairProjectionRows, financialRepairDraftFromProjection,
 } from './admin-financial-repair-form.js';
 import { integerMoney } from './finance-contract.js';
+import { ledgerMicrocreditsToPoints } from './ledger-amount-input.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
+
+function ReceivableWriteOffAmounts({ projection, words }) {
+  const snapshot = projection.financial_snapshot;
+  const requested = integerMoney(snapshot.write_off_microcredits);
+  const outstanding = integerMoney(snapshot.outstanding_microcredits);
+  const rows = [
+    [words.outstanding, ledgerMicrocreditsToPoints(outstanding)],
+    [words.requested, ledgerMicrocreditsToPoints(requested)],
+  ];
+  return <section className="adm-writeoff-amounts" aria-label={words.title}>
+    <h5>{words.title}</h5>
+    <dl>{rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{words.points(value)}</dd></div>)}</dl>
+    <p className="adm-writeoff-plan-kind">{requested === outstanding ? words.full : words.partial}</p>
+    <p className="adm-writeoff-plan-limit">{words.limit}</p>
+  </section>;
+}
 
 // The repair page never asks the operator for amounts the owner already knows:
 // the precheck returns the frozen projection and the draft copies it verbatim.
@@ -28,9 +45,15 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
   currentClient.current = client;
   const operation = useFinanceOperation(owner, operationCopy, client, `financial-repair:${commandTypes.join(':')}`);
   const writeOff = commandType === 'RECEIVABLE_WRITE_OFF';
+  const fixedWriteOff = writeOff && commandTypes.length === 1 && commandTypes[0] === commandType;
+  const targetWords = copy.receivableTarget;
+  const amountWords = copy.receivableAmounts;
+  const targetFieldsID = useId();
   const locked = busy !== '' || operation.busy || operation.unknown;
   const pending = operation.pendingFacts;
   const displayedFacts = pending ? financialRepairProjectionRows(pending.projection) : facts;
+  const displayedProjection = pending?.projection || projection;
+  const refreshingTarget = writeOff && busy === 'facts' && Boolean(displayedFacts);
 
   useEffect(() => {
     mounted.current = true;
@@ -45,7 +68,8 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
   }, [client]);
 
   const fields = financialRepairInputs[commandType];
-  const label = (field) => (field.key === 'target_resource_id' ? copy.targets[commandType] : copy.fields[field.key]);
+  const targetField = (key) => writeOff ? (key === 'write_off_microcredits' ? amountWords.field : targetWords.fields[key]) : null;
+  const label = (field) => targetField(field.key)?.label || (field.key === 'target_resource_id' ? copy.targets[commandType] : copy.fields[field.key]);
   const setValue = (key, value) => {
     factsRevision.current += 1;
     setBusy((current) => current === 'facts' ? '' : current);
@@ -73,7 +97,7 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
     if (prepared.error) {
       setProjection(null);
       setFacts(null);
-      setFailure(copy.invalidInput);
+      setFailure(writeOff && prepared.field === 'write_off_microcredits' ? { field: prepared.field } : copy.invalidInput);
       return;
     }
     const revision = ++factsRevision.current;
@@ -98,7 +122,8 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
       setProjection(null);
       setFacts(null);
       if (error?.code === 'RECENT_AUTHENTICATION_REQUIRED') setNeedsAuthentication(true);
-      setFailure(error?.code === 'APPROVAL_PRECHECK_UNAVAILABLE' ? copy.factsUnavailable : copy.factsFailed);
+      const feedback = error?.code === 'APPROVAL_PRECHECK_UNAVAILABLE' ? 'factsUnavailable' : 'factsFailed';
+      setFailure(writeOff ? { feedback } : copy[feedback]);
     } finally {
       if (live()) setBusy('');
     }
@@ -155,35 +180,56 @@ export function AdminReceivableWriteOffForm({ client, copy, onCreated, owner = '
 
   return <section className="adm-financial-repair" aria-label={copy.title}>
     <h3>{copy.title}</h3>
-    <p>{copy.lead}</p>
+    <p>{fixedWriteOff ? copy.receivableTask.lead : copy.lead}</p>
     {writeOff && operation.error && <p role="alert">{operation.error}</p>}
     {needsAuthentication && <div className="adm-writeoff-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
     <form className="adm-financial-repair-target" onSubmit={readFacts}>
-      <label>{copy.command}
+      {writeOff && <p className="adm-writeoff-target-intro">{targetWords.intro}</p>}
+      {fixedWriteOff ? <dl className="adm-writeoff-fixed-command"><div><dt>{copy.receivableTask.action}</dt><dd>{copy.receivableTask.name}</dd></div></dl>
+      : <label>{copy.command}
         <select disabled={writeOff && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
           {commandTypes.map((command) => <option key={command} value={command}>{command}</option>)}
         </select>
-      </label>
-      {fields.map((field) => <label key={field.key}>{label(field)}
-        <input disabled={writeOff && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : field.key === 'expected_version' ? pending.draft.normalized_command.expected_receivable_version : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
-          onChange={(event) => setValue(field.key, event.target.value)} />
-      </label>)}
+      </label>}
+      {fields.map((field) => {
+        const guidance = targetField(field.key);
+        const fieldID = guidance ? targetFieldsID + '-input-' + field.key : undefined;
+        const helpID = guidance ? targetFieldsID + '-' + field.key : undefined;
+        const amountInvalid = writeOff && field.key === 'write_off_microcredits' && failure?.field === field.key;
+        const errorID = amountInvalid ? helpID + '-error' : undefined;
+        const control = <input id={fieldID} disabled={writeOff && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : field.key === 'expected_version' ? pending.draft.normalized_command.expected_receivable_version : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
+          aria-invalid={amountInvalid || undefined} aria-describedby={amountInvalid ? helpID + ' ' + errorID : helpID} onChange={(event) => setValue(field.key, event.target.value)} />;
+        if (!guidance) return <label key={field.key}>{label(field)}{control}</label>;
+        return <div key={field.key} className={field.key === 'expected_version' ? 'adm-writeoff-target-field adm-writeoff-version-field' : 'adm-writeoff-target-field'}>
+          <label htmlFor={fieldID}>{label(field)}</label>{control}<small id={helpID}>{guidance.help}</small>
+          {amountInvalid && <small id={errorID} className="adm-writeoff-amount-error" role="alert">{amountWords.field.invalid}</small>}
+        </div>;
+      })}
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
     </form>
-    {failure && <p role="alert">{failure}</p>}
-    {created && <p role="status">{copy.createdHint} <code>{created}</code></p>}
-    {displayedFacts && <div className="adm-financial-repair-facts">
+    {failure && !failure.field && <p role="alert">{failure.feedback ? copy[failure.feedback] : failure}{failure.feedback && !operation.unknown && <> {targetWords.recheck}</>}</p>}
+    {created && <p role="status">{fixedWriteOff ? copy.receivableTask.submissionConfirmed : copy.createdHint} <code>{created}</code></p>}
+    {refreshingTarget && <p role="status">{copy.reading}</p>}
+    {displayedFacts && !refreshingTarget && <div className="adm-financial-repair-facts">
       <h4>{copy.frozenFacts}</h4>
+      {writeOff && displayedProjection && <dl className="adm-writeoff-confirmed-target">
+        <div><dt>{targetWords.confirmed}</dt><dd><code>{displayedProjection.target_resource_id}</code></dd></div>
+        <div><dt>{targetWords.version}</dt><dd>{String(displayedProjection.critical_resource_versions.receivable_version)}</dd></div>
+      </dl>}
+      {writeOff && displayedProjection?.command_type === 'RECEIVABLE_WRITE_OFF' && <ReceivableWriteOffAmounts projection={displayedProjection} words={amountWords} />}
       <dl>{displayedFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>
       <details><summary>{copy.criticalFacts}</summary><pre>{displayedFacts.critical}</pre></details>
       <details><summary>{copy.financialFacts}</summary><pre>{displayedFacts.financial}</pre></details>
     </div>}
-    {(projection || writeOff && operation.unknown) && <form className="adm-financial-repair-draft" onSubmit={createDraft}>
+    {(projection || writeOff && operation.unknown) && !refreshingTarget && <form className="adm-financial-repair-draft" onSubmit={createDraft}>
       <label>{copy.reason}<textarea disabled={writeOff && locked} required minLength="10" maxLength="2000" value={pending?.draft.reason ?? reason} onChange={(event) => setReason(event.target.value)} /></label>
       <small>{copy.reasonHint}</small>
       <label>{copy.requestKey}<input disabled={writeOff && locked} required value={pending?.draft.idempotency_key?.slice('approval:'.length) ?? requestKey} onChange={(event) => setRequestKey(event.target.value)} /></label>
       <small>{copy.requestKeyHint}</small>
-      <button type="submit" disabled={busy !== '' || operation.busy}>{writeOff && operation.unknown ? operationCopy.retry : busy === 'draft' || operation.busy ? copy.creating : copy.createDraft}</button>
+      {fixedWriteOff && <small>{operation.unknown ? copy.receivableTask.recoveryHelp : copy.receivableTask.submitHelp}</small>}
+      <button type="submit" disabled={busy !== '' || operation.busy}>{writeOff && operation.unknown ? operationCopy.retry
+        : busy === 'draft' || operation.busy ? (fixedWriteOff ? copy.receivableTask.submitting : copy.creating)
+        : fixedWriteOff ? copy.receivableTask.submit : copy.createDraft}</button>
     </form>}
   </section>;
 }

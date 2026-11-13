@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -65,9 +65,10 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   assert.match(source, /while IFS= read -r relay_module; do/);
   assert.match(source, /relay_modules\+=\("\$relay_module"\)/);
   assert.match(source, /"\$\{relay_modules\[@\]\}"/);
-  assert.match(source, /mkdir -p "\$backup\/code-js"/);
+  assert.match(source, /relay_code_capture "\$remote_dir" "\$backup\/code-js"/);
   assert.match(source, /for module in "\$code_stage"\/\*\.js/);
-  assert.equal((source.match(/for module in "\$backup\/code-js"\/\*\.js/g) || []).length, 2);
+  assert.equal((source.match(/relay_code_stage "\$backup\/code-js" "\$remote_dir"/g) || []).length, 2);
+  assert.equal((source.match(/relay_code_replace "\$staged" "\$remote_dir"/g) || []).length, 2);
   assert.match(source, /docs\/schemas\/behavior-telemetry-v1\.schema\.json/);
   assert.match(source, /docs\/schemas\/behavior-telemetry-registries\.json/);
   assert.match(source, /await import\('\.\/telemetry-service\.js'\)/);
@@ -94,7 +95,7 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   assert.equal((source.match(/for _ in \$\(seq 1 30\); do/g) || []).length, 2);
   assert.match(source, /if curl -fsS --connect-timeout 3 --max-time 5 http:\/\/127\.0\.0\.1:8787\/pinvou3\/remote\/healthz >\/dev\/null 2>&1/);
   assert.match(source, /controller-v1 路由烟测失败/);
-  assert.equal((source.match(/cp -a "\$module" "\$remote_dir\/"/g) || []).length, 3);
+  assert.equal((source.match(/cp -a "\$module" "\$remote_dir\/"/g) || []).length, 1);
   assert.doesNotMatch(source, /PINVOU_ALLOW_LEGACY_REMOTE_DEPLOY/);
   assert.doesNotMatch(source, /nginx -t|systemctl reload nginx/);
 });
@@ -128,6 +129,212 @@ test("production relay code artifact supports a cold ESM load", async (t) => {
     "await import('./telemetry-service.js')",
   ], { cwd: stage, encoding: "utf8", timeout: 10_000 });
   assert.equal(loaded.status, 0, loaded.stderr);
+});
+
+test("rollback verifies and stages the complete code backup before touching live modules", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-code-backup-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const helper = join(repoRoot, "remote-control-relay", "scripts", "relay-code-backup.sh");
+  const bash = bashExecutable();
+  const run = (directory, script) => spawnSync(bash, ["-c", [
+    "set -euo pipefail", 'source "$1"', 'cd -- "$2"', script,
+  ].join("\n"), "fixture", helper.replaceAll("\\", "/"), directory.replaceAll("\\", "/")], {
+    encoding: "utf8", timeout: 25_000,
+  });
+  for (const variant of ["valid", "empty", "missing", "truncated", "extra", "manifest",
+    "paired-suffix", "missing-lf", "embedded-nul", "replace-failure"]) {
+    const dir = join(root, variant);
+    await mkdir(join(dir, "old"), { recursive: true });
+    await mkdir(join(dir, "live"));
+    await writeFile(join(dir, "live", "server.js"), "new server");
+    await writeFile(join(dir, "live", "new-only.js"), "new only");
+    if (variant !== "empty") {
+      await writeFile(join(dir, "old", "server.js"), "old server");
+      await writeFile(join(dir, "old", "z-module.js"), "old module");
+    }
+    const capture = run(dir, 'relay_code_capture "$PWD/old" "$PWD/backup"');
+    assert.equal(capture.status, 0, capture.stderr);
+    const backup = (name) => join(dir, "backup", name);
+    if (variant === "missing") await rm(backup("z-module.js"));
+    if (variant === "truncated") await writeFile(backup("z-module.js"), "short");
+    if (variant === "extra") await writeFile(backup("extra.js"), "extra");
+    if (variant === "manifest") await writeFile(backup(".manifest.sha256"), "");
+    if (["paired-suffix", "missing-lf", "embedded-nul"].includes(variant)) {
+      const manifest = await readFile(backup(".manifest.sha256"));
+      if (variant === "paired-suffix") {
+        await rm(backup("z-module.js"));
+        await writeFile(backup(".manifest.sha256"), manifest.subarray(0, manifest.lastIndexOf(10, manifest.length - 2) + 1));
+      } else if (variant === "missing-lf") {
+        await writeFile(backup(".manifest.sha256"), manifest.subarray(0, -1));
+      } else {
+        await writeFile(backup(".manifest.sha256"), Buffer.concat([manifest.subarray(0, 8), Buffer.of(0), manifest.subarray(8)]));
+      }
+    }
+    const inject = variant === "replace-failure"
+      ? 'mv() { case "$2" in */incoming/z-module.js) return 31 ;; esac; command mv "$@"; }'
+      : "";
+    const result = run(dir, [
+      'staged="$(relay_code_stage "$PWD/backup" "$PWD/live")"', inject,
+      'relay_code_replace "$staged" "$PWD/live"',
+    ].join("\n"));
+    const live = join(dir, "live");
+    if (variant === "valid" || variant === "empty") {
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual((await readdir(live)).sort(), variant === "empty" ? [] : ["server.js", "z-module.js"]);
+      if (variant === "valid") assert.equal(await readFile(join(live, "server.js"), "utf8"), "old server");
+    } else {
+      assert.equal(result.status, 1, `${variant}: ${result.stderr}`);
+      assert.match(result.stderr, variant === "replace-failure" ? /previous code restored/u : /backup_invalid/u);
+      assert.deepEqual((await readdir(live)).sort(), ["new-only.js", "server.js"]);
+      assert.equal(await readFile(join(live, "server.js"), "utf8"), "new server");
+      assert.equal(await readFile(join(live, "new-only.js"), "utf8"), "new only");
+    }
+  }
+});
+
+test("both production rollback entries reject a corrupt backup before stopping the service", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-rollback-entry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = (await readFile(deployScript, "utf8")).replaceAll("\r\n", "\n");
+  const jsBoundary = 'rm -rf "$remote_dir/web/dist"';
+  const autoStart = source.indexOf("\nrollback() {\n");
+  const manualStart = source.indexOf('\nstamp="${backup##*/}"\n');
+  const autoEnd = source.indexOf(jsBoundary, autoStart);
+  const manualEnd = source.indexOf(jsBoundary, manualStart);
+  assert.ok(autoStart >= 0 && autoEnd > autoStart && manualStart >= 0 && manualEnd > manualStart);
+  const helper = join(repoRoot, "remote-control-relay", "scripts", "relay-code-backup.sh");
+  for (const [name, body] of [
+    ["automatic", `${source.slice(autoStart, autoEnd)}\nprintf continued > restored\n}\nrollback`],
+    ["public-check", `${source.slice(manualStart, manualEnd)}\nprintf continued > restored`],
+  ]) {
+    const dir = join(root, name);
+    await mkdir(join(dir, "old"), { recursive: true });
+    const backup = join(dir, "live", "backups", "20261109-010000");
+    await mkdir(backup, { recursive: true });
+    await copyFile(helper, join(backup, "relay-code-backup.sh"));
+    await writeFile(join(backup, "controller-lock-rollout.sh"),
+      'controller_lock_before_rollback() { printf called > stopped; test -f "$3/server.js"; }\n');
+    await writeFile(join(dir, "old", "server.js"), "old server");
+    await writeFile(join(dir, "live", "server.js"), "new server");
+    const run = (script) => spawnSync(bashExecutable(), ["-c", [
+      "set -euo pipefail", 'cd -- "$1"', 'remote_dir="$PWD/live"',
+      'backup="$remote_dir/backups/20261109-010000"', 'service=fixture', 'controller_state_dir=fixture',
+      'source "$backup/relay-code-backup.sh"', 'source "$backup/controller-lock-rollout.sh"',
+      script, body,
+    ].join("\n"), "fixture", dir.replaceAll("\\", "/")], { encoding: "utf8", timeout: 10_000 });
+    const corrupt = run('relay_code_capture "$PWD/old" "$backup/code-js"; printf corrupt > "$backup/code-js/server.js"');
+    assert.equal(corrupt.status, 1, corrupt.stderr);
+    assert.match(corrupt.stderr, /backup_invalid/u);
+    await assert.rejects(access(join(dir, "stopped")), { code: "ENOENT" });
+    assert.equal(await readFile(join(dir, "live", "server.js"), "utf8"), "new server");
+    if (name === "public-check" && process.platform !== "win32") {
+      const alternate = join(dir, "live", "backups", "20261109-010001");
+      await symlink(backup, alternate, "dir");
+      const alias = run('cp -- "$PWD/old/server.js" "$backup/code-js/server.js"; backup="$remote_dir/backups/20261109-010001"');
+      assert.equal(alias.status, 1, alias.stderr);
+      assert.match(alias.stderr, /拒绝未知备份目录/u);
+      await assert.rejects(access(join(dir, "stopped")), { code: "ENOENT" });
+    }
+    const valid = run([
+      'cp -- "$PWD/old/server.js" "$backup/code-js/server.js"',
+      'rm() { [[ "$*" != *"/.relay-code-rollback."* ]] || return 79; command rm "$@"; }',
+    ].join("\n"));
+    assert.equal(valid.status, 0, valid.stderr);
+    assert.match(valid.stderr, /relay_code_cleanup_pending/u);
+    assert.equal(await readFile(join(dir, "stopped"), "utf8"), "called");
+    assert.equal(await readFile(join(dir, "restored"), "utf8"), "continued");
+    assert.equal(await readFile(join(dir, "live", "server.js"), "utf8"), "old server");
+  }
+});
+
+test("manual rollback CLI verifies real backup bytes before stopping and replacing code", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "relay-manual-rollback-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bash = bashExecutable();
+  const stamp = "20261109-010000";
+  const dir = root.replaceAll("\\", "/");
+  const live = join(root, "live");
+  const backup = join(live, "backups", stamp);
+  await mkdir(backup, { recursive: true });
+  await mkdir(join(root, "old"));
+  for (const helper of ["controller-lock-rollout.sh", "relay-code-backup.sh"]) {
+    await copyFile(join(repoRoot, "remote-control-relay", "scripts", helper), join(backup, helper));
+  }
+  const runner = [
+    'set -euo pipefail',
+    'fixture="$1"; shift',
+    'export PINVOU_REMOTE_DEPLOY_DIR="$fixture/live"',
+    'systemctl() { case "$1" in show) printf loaded ;; stop) printf stopped > "$PINVOU_REMOTE_DEPLOY_DIR/../stopped" ;; *) return 98 ;; esac; }',
+    'export -f systemctl',
+    'ssh() {',
+    '  printf ssh >> "$fixture/calls"',
+    '  while (( $# > 0 )) && [[ "$1" != -- ]]; do shift; done; shift',
+    // Execute the real SSH payload through the complete JS transaction. The
+    // separate asset/systemd restoration is outside this isolated code fixture.
+    '  local line',
+    '  while IFS= read -r line; do',
+    '    [[ "$line" != \'rm -rf "$remote_dir/web/dist"\' ]] || break',
+    '    printf "%s\\n" "$line"',
+    '  done > "$fixture/remote-code.sh"',
+    '  cat >/dev/null',
+    '  bash "$fixture/remote-code.sh" "$@"',
+    '}',
+    'curl() { case "${!#}" in http://direct.invalid/*) return 22 ;; */healthz) printf \'{"ok":true,"room_count":0}\' ;; */r/deploy-check) printf old-page ;; *) return 99 ;; esac; }',
+    'npm() { echo unexpected-build >&2; return 99; }',
+    'scp() { echo unexpected-upload >&2; return 99; }',
+    'source "$0" "$@"',
+  ].join("\n");
+  const env = {
+    ...process.env,
+    PINVOU_CONFIRM_PRODUCTION_DEPLOY: "1", PINVOU_CONFIRM_CONTROLLER_LOCK_UPGRADE: "0",
+    PINVOU_REMOTE_DEPLOY_SERVER: "fixture@relay.invalid",
+    PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER: "fixture@relay.invalid", SSH_KEY: "fixture-key",
+    PINVOU_REMOTE_PUBLIC_URL: "https://public.invalid/pinvou3/remote",
+    PINVOU_REMOTE_DIRECT_URL: "http://direct.invalid/pinvou3/remote",
+    PINVOU_REMOTE_PUBLIC_BASE_PATH: "/pinvou3/remote", PINVOU_REMOTE_HARDENING_FILE: "",
+  };
+  const run = (args, overrides = {}) => spawnSync(bash,
+    ["-c", runner, deployScript.replaceAll("\\", "/"), dir, ...args],
+    { env: { ...env, ...overrides }, encoding: "utf8", timeout: 15_000 });
+  for (const [args, overrides] of [
+    [["--rollback"], {}], [["--rollback", "../other"], {}],
+    [["--rollback", stamp, "extra"], {}], [["--unknown", stamp], {}],
+    [["--rollback", stamp], { PINVOU_CONFIRM_PRODUCTION_DEPLOY: "0" }],
+    [["--rollback", stamp], { PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER: "other@relay.invalid" }],
+  ]) {
+    const result = run(args, overrides);
+    assert.equal(result.status, 64, result.stdout + result.stderr);
+    assert.equal(await pathExists(join(root, "calls")), false);
+  }
+  for (const mode of ["corrupt", "valid", "empty"]) {
+    await rm(join(backup, "code-js"), { recursive: true, force: true });
+    await rm(join(root, "stopped"), { force: true });
+    await writeFile(join(live, "server.js"), "new server");
+    await writeFile(join(live, "new-only.js"), "new module");
+    await rm(join(root, "old", "server.js"), { force: true });
+    if (mode !== "empty") await writeFile(join(root, "old", "server.js"), "old server");
+    const captured = spawnSync(bash, ["-c", [
+      'set -euo pipefail', 'source "$1/live/backups/20261109-010000/relay-code-backup.sh"',
+      'relay_code_capture "$1/old" "$1/live/backups/20261109-010000/code-js"',
+    ].join("\n"), "capture", dir], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(captured.status, 0, captured.stderr);
+    if (mode === "corrupt") await writeFile(join(backup, "code-js", "server.js"), "truncated");
+    const result = run(["--rollback", stamp]);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, mode === "corrupt" ? 1 : 0, result.stdout + result.stderr);
+    if (mode === "corrupt") {
+      assert.match(result.stderr, /relay_code_backup_invalid/u);
+      assert.equal(await pathExists(join(root, "stopped")), false);
+      assert.equal(await readFile(join(live, "server.js"), "utf8"), "new server");
+      assert.equal(await readFile(join(live, "new-only.js"), "utf8"), "new module");
+    } else {
+      assert.match(result.stdout, /人工回滚完成并通过公网复检/u);
+      assert.equal(await readFile(join(root, "stopped"), "utf8"), "stopped");
+      assert.equal(await pathExists(join(live, "new-only.js")), false);
+      assert.equal(await pathExists(join(live, "server.js")), mode === "valid");
+      if (mode === "valid") assert.equal(await readFile(join(live, "server.js"), "utf8"), "old server");
+    }
+  }
 });
 
 test("staged controller smoke resolves its protocol after the real module install loop", async (t) => {
