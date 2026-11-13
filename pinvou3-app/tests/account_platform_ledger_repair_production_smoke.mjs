@@ -82,7 +82,7 @@ async function openedDraft(page) {
 }
 async function prepare(page) {
   const inputs = await page.$$('.adm-financial-repair-target input');
-  for (const [index, value] of [id(1), id(2), id(3), id(4), '9223372036854775807'].entries()) await inputs[index].type(value);
+  for (const [index, value] of [id(1), id(2), id(3), id(4), '922337203685477.5807'].entries()) await inputs[index].type(value);
   await page.click('.adm-financial-repair-target button'); await page.waitForSelector('.adm-financial-repair-draft');
   await page.type('.adm-financial-repair-draft textarea', 'Controlled original Ledger correction reason');
   await page.type('.adm-financial-repair-draft input', 'k'.repeat(111));

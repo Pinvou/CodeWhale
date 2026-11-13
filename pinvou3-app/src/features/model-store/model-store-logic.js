@@ -19,6 +19,22 @@ const LOG_WAIT_SECONDS = 25;
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
 
+/** Preserve a valid saved choice; otherwise use the backend's deployment default. */
+function selectedDeployProfile(record) {
+  const profiles = record?.profiles || [];
+  return [record?.active_profile_id, record?.default_profile_id]
+    .find((id) => profiles.some((profile) => profile.id === id)) || profiles[0]?.id || null;
+}
+
+/** Legacy catalogue names still label the benchmark as default. */
+function deployProfileLabel(record, profile, copy) {
+  if (record?.card_id === 'qwen38-27b-nvfp4-mtp') {
+    if (profile.id === 'benchmark') return copy.profileMtpBenchmark;
+    if (profile.id === 'production-sampling') return copy.profileMtpProduction;
+  }
+  return profile.name;
+}
+
 /**
  * 人类可读的字节数。单位是国际通用符号,不需要进 i18n 词典。
  * @param {number} bytes - 字节数。
@@ -64,6 +80,29 @@ function parseProgressLine(line) {
   const total = Number(matched[2]);
   const done = Number(matched[1]);
   return { done: total > 0 ? Math.min(done, total) : done, total };
+}
+
+/**
+ * 强制移除结果的结构化警告码 → 界面文案。后端只发码（`force_remove_records_only`
+ * / `force_remove_residual_paths`），正文按当前语言渲染；路径明细不进文案，始终由
+ * `residual_paths` 列表单独渲染。未知字符串（旧版结果、测试桩的纯文本）原样显示，
+ * 保证向后兼容。
+ * @param {object} copy - i18n 文案对象（uiModelStore 段）。
+ * @param {string|null|undefined} warning - 后端警告码或旧版纯文本警告。
+ * @returns {string} 可直接渲染的文案；无警告时为空串。
+ */
+function operationWarningText(copy, warning) {
+  if (!warning) return '';
+  if (warning === 'force_remove_records_only') return copy.forceRemoveRecordsOnlyWarning;
+  if (warning === 'force_remove_residual_paths') return copy.forceRemoveResidualWarning;
+  return String(warning);
+}
+
+/** Translate owned operation codes at display time; keep other diagnostics intact. */
+function operationErrorText(copy, failure) {
+  const message = String(failure?.message || failure);
+  const messages = copy.operationErrors;
+  return messages && Object.prototype.hasOwnProperty.call(messages, message) ? messages[message] : message;
 }
 
 const PROMPT_KINDS = ['text', 'password', 'confirm'];
@@ -543,15 +582,28 @@ function uninstallDoneText(copy, name, outcome) {
   return copy.uninstallDoneKept(name);
 }
 
+/** Preserve all uninstall recovery warnings after linked-model cleanup finishes. */
+function uninstallCleanupWarning(copy, name, linksCleaned, syncError) {
+  return [
+    !linksCleaned ? copy.uninstallLinksLeft(name) : null,
+    syncError ? copy.linkSyncFailed(syncError) : null,
+  ].filter(Boolean).join(' ');
+}
+
 export {
+  selectedDeployProfile,
+  deployProfileLabel,
   MAX_LOG_LINES,
   SPEED_WINDOW_MS,
   LOG_WAIT_SECONDS,
   formatBytes,
   uninstallDoneText,
+  uninstallCleanupWarning,
   uninstallOptionsFor,
   splitDuration,
   parseProgressLine,
+  operationWarningText,
+  operationErrorText,
   parsePromptLine,
   computeSpeed,
   trimSamples,

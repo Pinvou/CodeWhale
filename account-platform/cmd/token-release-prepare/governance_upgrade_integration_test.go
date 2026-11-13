@@ -167,6 +167,14 @@ func testGovernanceExpansionPostgres(t *testing.T, ctx context.Context, admin *p
 		}()
 		deadline := time.Now().Add(5 * time.Second)
 		for {
+			select {
+			case err := <-result:
+				if err != nil {
+					t.Fatalf("governance returned before the database lock barrier: %v", err)
+				}
+				t.Fatal("governance completed before the database lock barrier")
+			default:
+			}
 			var waiting bool
 			if admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=$1 AND usename='token_migrator' AND wait_event_type='Lock')`, tokenConfig.Database).Scan(&waiting) != nil {
 				t.Fatal("actual lock wait unavailable")
