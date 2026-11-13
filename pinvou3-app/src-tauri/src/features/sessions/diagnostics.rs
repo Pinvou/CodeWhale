@@ -40,6 +40,7 @@ const FRONTEND_EVENTS: &[&str] = &[
     "reconcile_succeeded",
     "remote_sync_blocked_action",
     "remote_turn_marked",
+    "render_stage_stall",
     "session_download_capability_wait_failed",
     "session_download_cleanup",
     "transcript_committed_event_received",
@@ -221,7 +222,10 @@ fn normalize_frontend_details(value: Option<&Value>) -> Value {
             | "cleanup_requested_count"
             | "cleanup_failed_count"
             | "cleanup_succeeded_count"
-            | "restored_queue_count" => normalize_nonnegative_number(value),
+            | "restored_queue_count"
+            | "stage_seq"
+            | "recv_to_dispatch_ms"
+            | "dispatch_to_frame_ms" => normalize_nonnegative_number(value),
             "buffer_present"
             | "local_turn_owned"
             | "remote_turn_active"
