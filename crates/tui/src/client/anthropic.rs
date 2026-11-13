@@ -1377,6 +1377,64 @@ mod tests {
     }
 
     #[test]
+    fn registry_produced_patch_tool_ships_a_valid_union_on_the_verbatim_lane() {
+        // The damage this PR's regression guards against starts upstream of
+        // the adapter: the real registry pipeline (sanitize +
+        // canonicalize_schema) pruned the builtin apply_patch schema's
+        // required-only oneOf branches into `[{}, {}, {}]`, and the
+        // verbatim Messages lanes forwarded it — a contract no argument can
+        // satisfy, since every object matches all three empty branches
+        // (review 5885719142). The end-to-end pin runs the ACTUAL
+        // registry-produced tool through a non-native Messages lane: the
+        // union reaches the wire with every branch group intact, so a
+        // replacement-only call conforms to the advertised builtin
+        // contract.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        let registry = crate::tools::ToolRegistryBuilder::new()
+            .with_patch_tools()
+            .build(context);
+        let patch_tool = registry
+            .to_api_tools()
+            .into_iter()
+            .find(|tool| tool.name == "apply_patch")
+            .expect("apply_patch registered");
+
+        let client = deepseek_test_client(crate::config::DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL);
+        let mut request = request_with("deepseek-chat", None, None, None);
+        request.tools = Some(vec![patch_tool.clone()]);
+
+        let body = client.build_anthropic_body(&request, true);
+
+        let schema = &body["tools"][0]["input_schema"];
+        assert_eq!(
+            schema["oneOf"],
+            json!([
+                {"required": ["patch"]},
+                {"required": ["replace"]},
+                {"required": ["changes"]}
+            ]),
+            "the registry-produced union must reach the wire intact: {schema}"
+        );
+
+        // The shipped contract is satisfiable for every supported call
+        // shape: a compiled validator accepts a replacement-only argument
+        // — the exact case the pruned `oneOf: [{}, {}, {}]` shape rejected.
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(schema)
+            .expect("the shipped builtin contract must compile");
+        assert!(
+            validator.is_valid(&json!({"replace": [{"path": "a.txt", "content": "hi"}]})),
+            "a replacement-only call must conform to the shipped union: {schema}"
+        );
+        assert!(
+            validator.is_valid(&json!({"patch": "--- a/x\n+++ b/x\n"})),
+            "a patch-only call must conform to the shipped union: {schema}"
+        );
+    }
+
+    #[test]
     fn anthropic_identity_narrows_even_on_a_proxy_base_url() {
         // Provider identity stays in the gate because ANTHROPIC_BASE_URL-style
         // overrides commonly front the genuine validator through a proxy: a
