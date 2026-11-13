@@ -3,14 +3,16 @@ import { createRoot } from 'react-dom/client';
 import { dictZh } from '../../src/shared/i18n/zh.js';
 import { dictEn } from '../../src/shared/i18n/en.js';
 import { dictJa } from '../../src/shared/i18n/ja.js';
-import { remoteDispatchCases } from '../../src/features/remote-control/remote-dispatch-ui.mjs';
+import { markRemoteDispatchPayloadLost, recordRemoteDispatch, remoteDispatchCases } from '../../src/features/remote-control/remote-dispatch-ui.mjs';
+import { remoteProxyComposerIdentity, remoteProxyLeaseIdentity } from '../../src/features/remote-control/remote-session-adapter.mjs';
+import { uploadRemoteFiles } from '../../src/features/remote-control/remote-file-transfer.mjs';
 
 // Mount the real ChatView once. Only the host bridge is controlled; React
 // state, effect cleanup, retry handlers, transfer guard and case ledger are real.
 const parameters = new URLSearchParams(location.search);
 const copy = { zh: dictZh, en: dictEn, ja: dictJa }[parameters.get('lang') || 'zh'];
 const fixture = window.dispatchFixture = {
-  calls: [], commits: [], uploads: [], previews: [], controlledSnapshots: [], renewals: [], restores: [], current: null,
+  calls: [], commits: [], uploads: [], cleanups: [], previews: [], controlledSnapshots: [], renewals: [], restores: [], current: null,
   scenario: parameters.get('scenario') || 'commit', copy,
 };
 const platformCapabilities = { loaded: true, os: 'windows', desktopRemoteControl: true };
@@ -101,7 +103,16 @@ window.TauriBridge = {
       return { receivedBytes: length, state: 'completed' };
     },
     attachmentAbort: async (id, ref, taskId, transferId) => { fixture.calls.push({ kind: 'abort', id, ref, taskId, transferId }); return { aborted: true }; },
-    abandonRemoteTask: async (id, request, taskId) => { fixture.calls.push({ kind: 'abandon', id, request, taskId }); },
+    attachmentAbortConfirmed: (id, ref, taskId, transferId) => {
+      fixture.calls.push({ kind: 'confirmedCleanup', id, ref, taskId, transferId });
+      return new Promise((resolve, reject) => fixture.cleanups.push({ resolve, reject, transferId }));
+    },
+    abandonRemoteTask: async (id, request, taskId) => {
+      fixture.calls.push({ kind: 'abandon', id, request, taskId });
+      if (fixture.scenario === 'cleanup-local-failure'
+        && fixture.calls.filter(call => call.kind === 'abandon').length === 1) throw new Error('store_failed');
+      if (fixture.scenario.startsWith('cleanup')) session(id).history.unattemptedPending = [];
+    },
     controlledCapabilitiesSnapshot: () => new Promise((resolve, reject) =>
       fixture.controlledSnapshots.push({ resolve, reject })),
     controlledTaskSend: async (...args) => { fixture.calls.push({ kind: 'controlledSend', args }); },
@@ -111,6 +122,33 @@ window.TauriBridge = {
     },
   },
 };
+if (fixture.scenario.startsWith('cleanup')) {
+  const original = session('remote-a');
+  original.history.unattemptedPending = [{ ...original.handle, dispatchState: 'prepared_never_attempted' }];
+  recordRemoteDispatch(original.id, original.connection.sessionRef,
+    remoteProxyLeaseIdentity(original.id, original.connection), '',
+    { state: 'prepared_not_sent', retryHandle: original.handle }, original.history);
+  if (fixture.scenario === 'cleanup-history') markRemoteDispatchPayloadLost(original.id, original.handle.taskId);
+  const binding = { localSessionId: original.id, remoteRef: original.connection.sessionRef };
+  const options = { ownerIdentity: remoteProxyComposerIdentity(original.id, original.connection),
+    leaseIdentity: JSON.stringify([original.connection.connectionId, original.connection.controllerLeaseId,
+      original.connection.leaseEpoch, original.connection.relayEpoch, original.connection.generation]) };
+  const selected = { name: 'a.txt', type: 'text/plain', size: 1, arrayBuffer: async () => new Uint8Array([97]).buffer };
+  let current = true;
+  try {
+    await uploadRemoteFiles({ attachmentBegin: async () => {
+      current = false;
+      return { transferId: 'cleanup-original-handle', chunkBytes: 1 };
+    } }, binding, original.handle.taskId, [selected], () => {}, { ...options, isCurrent: () => current });
+    throw new Error('fixture expected navigation cancellation');
+  } catch (error) {
+    if (error.code !== 'result_unknown') throw error;
+  }
+  fixture.manualUpload = () => uploadRemoteFiles({
+    attachmentBegin: async () => { fixture.calls.push({ kind: 'manualBegin' }); return { transferId: 'manual-new-handle', chunkBytes: 1 }; },
+    attachmentChunk: async () => ({ state: 'completed', receivedBytes: 1 }),
+  }, binding, 'manual-new-task', [selected], () => {}, options);
+}
 const { ChatView } = await import('../../src/features/chat/ChatView.jsx');
 function App() {
   const [selected, setSelected] = useState(() => {

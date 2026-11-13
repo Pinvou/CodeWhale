@@ -115,10 +115,20 @@ export class OrganizationClient {
  async grants(org, signal) { return collection(await this.request('token', `${orgPath(org)}/quota-grants`, 'GET', undefined, '', [200], signal), item => requireQuotaGrant(item, org)); }
  async createOrder(org, body, key) { const value = requirePaymentOrder(await this.request('token', `${orgPath(org)}/recharge/orders`, 'POST', body, key, [201])); if (value.beneficiary_organization_id !== org || value.product_id !== body.product_id || value.channel !== body.channel) invalid(); return value; }
  async order(org, id, signal) { const value = requirePaymentOrder(await this.request('token', `${orgPath(org)}/recharge/orders/${organizationID(id)}`, 'GET', undefined, '', [200], signal), id); if (value.beneficiary_organization_id !== org) invalid(); return value; }
+ async orders(org, cursor = '', signal) {
+  if (typeof cursor !== 'string' || cursor.length > 256 || cursor && !/^[A-Za-z0-9_-]+$/.test(cursor)) invalid();
+  const page = await this.request('token', `${orgPath(org)}/recharge/orders${cursor ? '?cursor=' + encodeURIComponent(cursor) : ''}`, 'GET', undefined, '', [200], signal);
+  owned(page, org);
+  const items = requireFinanceCollection(page).map(item => requirePaymentOrder(item));
+  if (items.length > 50 || new Set(items.map(item => item.order_id)).size !== items.length || !Object.prototype.hasOwnProperty.call(page, 'next_cursor') || page.next_cursor !== null && (typeof page.next_cursor !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(page.next_cursor) || page.next_cursor === cursor || !items.length)) invalid();
+  return { items, next_cursor: page.next_cursor };
+ }
+ // Same-key replay returns the current grant projection. Object/amount facts
+ // remain exact; normal member lifecycle updates may advance its version.
  async allocate(org, body, key) {
   const items = collection(await this.request('token', `${orgPath(org)}/quota-grants:batch`, 'POST', body, key, [207]), item => item);
   if (items.length !== body.items.length) invalid();
-  items.forEach((item, index) => { if (item.index !== index || !['SUCCEEDED', 'FAILED', 'UNKNOWN'].includes(item.status)) invalid(); if (item.status === 'SUCCEEDED') { const grant = requireQuotaGrant(item.grant, org, body.items[index]); if (integerMoney(grant.original_microcredits) !== integerMoney(body.items[index].amount_microcredits) || grant.membership_version !== body.items[index].membership_version) invalid(); } else if (typeof item.code !== 'string' || !item.code) invalid(); });
+  items.forEach((item, index) => { if (item.index !== index || !['SUCCEEDED', 'FAILED', 'UNKNOWN'].includes(item.status)) invalid(); if (item.status === 'SUCCEEDED') { const grant = requireQuotaGrant(item.grant, org, body.items[index]); if (integerMoney(grant.original_microcredits) !== integerMoney(body.items[index].amount_microcredits) || grant.membership_version < organizationVersion(body.items[index].membership_version)) invalid(); } else if (typeof item.code !== 'string' || !item.code) invalid(); });
   if (items.some(item => item.status === 'UNKNOWN')) throw Object.assign(new Error('COMMAND_RESULT_UNKNOWN'), { code: 'COMMAND_RESULT_UNKNOWN', financeRequestState: 'WRITE_OBSERVED' });
   return { items };
  }
@@ -155,12 +165,42 @@ export class OrganizationClient {
  }
 }
 
+// Fresh reads retire only this client's identical resource. Already-cancelled
+// callers retain the original request abort behavior without cancelling peers.
+function prepareOrganizationRead(client, resource, signal, fresh) {
+ if (!fresh || signal?.aborted) return;
+ if (typeof client.invalidateRead !== 'function') throw new Error('ORGANIZATION_FRESH_READ_UNSUPPORTED');
+ client.invalidateRead('account', resource);
+}
+
+export const adminOrganizationPageLimit = 25;
+
 export class OrganizationAdminClient {
  constructor(client) { this.client = client; }
- async summary(org, signal) { return requireOrganization(await this.client.request('account', `/admin/v1/organizations/${organizationID(org)}`, signal), org); }
- async list(filters = {}, signal) { const query = new URLSearchParams({ limit: '25' }); for (const name of ['q', 'status', 'cursor']) if (filters[name]) query.set(name, filters[name]); const value = await this.client.request('account', `/admin/v1/organizations?${query}`, signal); collection(value, adminOrganization); return value; }
- async read(org, resource, signal) { const value = await this.client.request('account', `/admin/v1/organizations/${organizationID(org)}/${resource}`, signal); if (resource === 'units') { organizationVersion(value.structure_version); collection(value, item => owned(item, org, 'unit_id')); } else if (resource === 'members') collection(value, requireMembership); else if (value?.organization_id !== org) invalid(); return value; }
- async members(org, cursor = '', signal, filters = {}) { const query = new URLSearchParams({ limit: '25' }); if (cursor) query.set('cursor', cursor); for (const key of ['q', 'role']) if (filters[key]) query.set(key, String(filters[key]).trim()); const value = await this.client.request('account', `/admin/v1/organizations/${organizationID(org)}/members?${query}`, signal); collection(value, requireMembership); return value; }
+ async summary(org, signal, { fresh = false } = {}) {
+  const resource = `/admin/v1/organizations/${organizationID(org)}`;
+  prepareOrganizationRead(this.client, resource, signal, fresh);
+  return requireOrganization(await this.client.request('account', resource, signal), org);
+ }
+ async list(filters = {}, signal, { fresh = false } = {}) {
+  const query = new URLSearchParams({ limit: String(adminOrganizationPageLimit) });
+  for (const name of ['q', 'status', 'cursor']) if (filters[name]) query.set(name, filters[name]);
+  const resource = `/admin/v1/organizations?${query}`;
+  prepareOrganizationRead(this.client, resource, signal, fresh);
+  const value = await this.client.request('account', resource, signal);
+  collection(value, adminOrganization); return value;
+ }
+ async read(org, resource, signal, { fresh = false } = {}) { const path = `/admin/v1/organizations/${organizationID(org)}/${resource}`; prepareOrganizationRead(this.client, path, signal, fresh); const value = await this.client.request('account', path, signal); if (resource === 'units') { organizationVersion(value.structure_version); collection(value, item => owned(item, org, 'unit_id')); } else if (resource === 'members') collection(value, requireMembership); else if (value?.organization_id !== org) invalid(); return value; }
+ async members(org, cursor = '', signal, filters = {}, { fresh = false } = {}) {
+  const query = new URLSearchParams({ limit: '25' });
+  if (cursor) query.set('cursor', cursor);
+  for (const key of ['q', 'role']) if (filters[key]) query.set(key, String(filters[key]).trim());
+  const resource = `/admin/v1/organizations/${organizationID(org)}/members?${query}`;
+  prepareOrganizationRead(this.client, resource, signal, fresh);
+  const value = await this.client.request('account', resource, signal);
+  collection(value, requireMembership);
+  return value;
+ }
  async write(org, action, body, key, target = '') {
   const root = `/admin/v1/organizations${org ? `/${organizationID(org)}` : ''}`;
   const id = target ? organizationID(target) : '';

@@ -580,7 +580,7 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	if _, err := w.repository.PurgeExpiredAccountClosureRetention(ctx, 100); err != nil {
+	if _, err := w.repository.MarkExpiredAccountClosureRetention(ctx, 100); err != nil {
 		log.Print("ACCOUNT_CLOSURE_RETENTION_UPDATE_FAILED")
 	}
 	for processed := 0; processed < 20; processed++ {
