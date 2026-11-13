@@ -134,8 +134,10 @@ export { dict, LANG_TO_TAG, TAG_TO_LANG, languageFromLocaleTags, initialSystemLa
 
 export { accountPlatformCopy } from './account-platform-i18n.js';
 export { accountLayoutCopy, adminLayoutCopy } from './account-layout-i18n.js';
+export { accountAuthCopy } from './account-auth-i18n.js';
 export { adminPlatformCopy } from './admin-platform-i18n.js';
 export { financeCopy } from './finance-i18n.js';
+export { accountDesktopCopy } from './account-desktop-i18n.js';
 export { ledgerRepairCopy } from './ledger-repair-i18n.js';
 export { reconciliationCopy } from './reconciliation-i18n.js';
 export { organizationCopy } from './organization-i18n.js';
@@ -153,3 +155,10 @@ export { adminRolePresentationCopy } from './admin-role-presentation-i18n.js';
 
 export { registrationRepairCopy } from './registration-repair-i18n.js';
 export { productAdmissionCopy } from './product-admission-i18n.js';
+
+export { auditActionCopy, auditActionLabels, auditPrivacyCopy, auditExportPresentation, auditListCopy } from './admin-audit-presentation-i18n.js';
+
+export { smsStatusCopy, smsTemplateCopy } from './admin-sms-presentation-i18n.js';
+
+export { adminLanguagePreferenceCopy } from './admin-language-preference-i18n.js';
+export { approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy, approvalDirectoryCopy, approvalDirectoryToolbarCopy } from './admin-approval-read-i18n.js';

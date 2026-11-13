@@ -1,4 +1,6 @@
 // Restored role presentation copy from f6441da6c, with current permission vocabulary.
+import { accountLayoutCopy } from './account-layout-i18n.js';
+
 export const adminRolePresentationCopy = {
   "zh": {
     "catalog": "角色目录",
@@ -155,13 +157,13 @@ export const adminRolePresentationCopy = {
     "previous": "上一步",
     "next": "下一步",
     "nextPage": "下一页",
-    "newGrant": "新增授权",
+    "newGrant": "给用户授权",
     "guidedGrant": "引导式授权",
     "stepUser": "选择用户",
     "stepRole": "角色与期限",
     "stepConfirm": "预览确认",
     "chooseUser": "选择要授权的用户",
-    "chooseUserLead": "使用用户名、显示名称或完整用户编码搜索，也可输入用户 ID。",
+    "chooseUserLead": "按用户名、显示名称或完整用户编码搜索。只有用户 ID 时，请使用高级查找。",
     "userSearchPlaceholder": "用户名、显示名称或完整用户编码",
     "user": "用户",
     "noEmailSearch": "当前系统没有可靠邮箱事实源，因此不提供邮箱搜索。",
@@ -346,14 +348,14 @@ export const adminRolePresentationCopy = {
     "previous": "Previous",
     "next": "Next",
     "nextPage": "Next page",
-    "newGrant": "New grant",
+    "newGrant": "Grant a role to a user",
     "guidedGrant": "Guided grant",
     "stepUser": "Choose user",
     "stepRole": "Role and validity",
     "stepConfirm": "Review",
     "chooseUser": "Choose the user to authorize",
-    "chooseUserLead": "Search by username, display name or complete user code, or enter a user ID.",
-    "userSearchPlaceholder": "Username, display name or complete user code",
+    "chooseUserLead": "Search by username, display name, or complete user code. If you only have the user ID, use the advanced lookup.",
+    "userSearchPlaceholder": "Username, display name, or complete user code",
     "user": "User",
     "noEmailSearch": "Email search is unavailable because the current account system has no reliable email source.",
     "chooseRoleAndValidity": "Choose role and validity",
@@ -537,13 +539,13 @@ export const adminRolePresentationCopy = {
     "previous": "戻る",
     "next": "次へ",
     "nextPage": "次のページ",
-    "newGrant": "新しい付与",
+    "newGrant": "ユーザーにロールを付与",
     "guidedGrant": "ガイド付き付与",
     "stepUser": "ユーザー",
     "stepRole": "ロールと期限",
     "stepConfirm": "確認",
     "chooseUser": "付与するユーザーを選択",
-    "chooseUserLead": "ユーザー名、表示名、完全なユーザーコードで検索するか、ユーザー ID を入力してください。",
+    "chooseUserLead": "ユーザー名、表示名、または完全なユーザーコードで検索します。ユーザー ID のみの場合は詳細検索を使用してください。",
     "userSearchPlaceholder": "ユーザー名、表示名、完全なユーザーコード",
     "user": "ユーザー",
     "noEmailSearch": "信頼できるメール情報源がないため、メール検索は提供しません。",
@@ -574,3 +576,42 @@ export const adminRolePresentationCopy = {
     "expiredNotice": "この付与は期限切れです。"
   }
 };
+
+
+// Read-only validity labels are separate from grant-form blank-value guidance.
+const bindingValidityCopy = {
+  zh: { validFrom: '生效时间', validUntil: '到期时间', noExpiry: '无到期时间' },
+  en: { validFrom: 'Starts at', validUntil: 'Expires at', noExpiry: 'No expiry' },
+  ja: { validFrom: '開始日時', validUntil: '終了日時', noExpiry: '無期限' },
+};
+for (const language of ['zh', 'en', 'ja']) Object.assign(adminRolePresentationCopy[language], bindingValidityCopy[language]);
+
+Object.assign(adminRolePresentationCopy.zh, {"userNextSearchHelp":"请选择查询结果中的用户，或填写完整用户 ID。下一步仅校验 ID 格式。","userNextManualHelp":"请填写完整用户 ID。下一步仅校验 ID 格式，不查询用户资料。","targetIDFormatHelp":"用户 ID 格式无效，请核对完整的用户 UUID。"});
+Object.assign(adminRolePresentationCopy.en, {"userNextSearchHelp":"Select a search result or enter the full user ID. Next checks only the ID format.","userNextManualHelp":"Enter the full user ID. Next checks only the ID format and does not look up the profile.","targetIDFormatHelp":"The user ID format is invalid. Check the full user UUID."});
+Object.assign(adminRolePresentationCopy.ja, {"userNextSearchHelp":"検索結果からユーザーを選ぶか、完全なユーザー ID を入力してください。次へでは ID の形式のみを確認します。","userNextManualHelp":"完全なユーザー ID を入力してください。次へでは ID の形式のみを確認し、ユーザー情報は検索しません。","targetIDFormatHelp":"ユーザー ID の形式が無効です。完全なユーザー UUID を確認してください。"});
+
+Object.assign(adminRolePresentationCopy.zh, { permissionCodeLabel: "权限代码" });
+
+Object.assign(adminRolePresentationCopy.en, { permissionCodeLabel: "Permission code" });
+
+Object.assign(adminRolePresentationCopy.ja, { permissionCodeLabel: "権限コード" });
+
+Object.assign(adminRolePresentationCopy.zh, {"bindingUserID":"用户 ID","bindingUserCode":"用户编码","bindingUserFallback":"以用户 ID 识别","bindingUserNoPermission":"当前身份无权读取用户资料，保留完整用户 ID。","bindingUserUnavailable":"暂时无法读取用户资料；可继续按完整用户 ID 核对。","bindingUserLoading":"正在读取用户资料…","bindingUserRetired":"当前会话或页面已变化，请等待重新加载后核对资料。","reloadBindingUsers":"重试读取资料","confirmRevokeTitle":"确认撤销此项授权","confirmRevokeLead":"请核对以下用户、角色与授权范围。确认后仅撤销这一条授权记录。","revokeBindingImpact":"此项授权将停止提供对应角色的权限。该用户仍可能通过其他有效授权拥有相同权限；撤销不会删除用户账号。"});
+
+Object.assign(adminRolePresentationCopy.en, {"bindingUserID":"User ID","bindingUserCode":"User code","bindingUserFallback":"Identify by user ID","bindingUserNoPermission":"Your current identity cannot read user profiles. The full user ID remains available.","bindingUserUnavailable":"The user profile is temporarily unavailable. You can still verify the full user ID.","bindingUserLoading":"Loading user profile…","bindingUserRetired":"The session or page has changed. Wait for the profile to reload before checking it.","reloadBindingUsers":"Retry profile lookup","confirmRevokeTitle":"Confirm revoking this grant","confirmRevokeLead":"Check the user, role and scope below. Confirmation revokes only this grant record.","revokeBindingImpact":"This grant will stop providing the role’s permissions. Other active grants may still provide the same permissions. Revocation does not delete the user account."});
+
+Object.assign(adminRolePresentationCopy.ja, {"bindingUserID":"ユーザー ID","bindingUserCode":"ユーザーコード","bindingUserFallback":"ユーザー ID で識別","bindingUserNoPermission":"現在の権限ではユーザー情報を読み取れません。完全なユーザー ID で確認できます。","bindingUserUnavailable":"ユーザー情報を一時的に読み取れません。完全なユーザー ID で引き続き確認できます。","bindingUserLoading":"ユーザー情報を読み込み中…","bindingUserRetired":"セッションまたはページが変わりました。再読み込み後にユーザー情報を確認してください。","reloadBindingUsers":"ユーザー情報を再取得","confirmRevokeTitle":"この付与の取り消しを確認","confirmRevokeLead":"次のユーザー、ロール、範囲を確認してください。確定すると、この付与記録のみが取り消されます。","revokeBindingImpact":"この付与によるロール権限の提供を停止します。他の有効な付与で同じ権限を引き続き持つ場合があります。ユーザーアカウントは削除されません。"});
+
+adminRolePresentationCopy.zh.returnToRoleList = '返回当前角色在列表中的位置';
+adminRolePresentationCopy.en.returnToRoleList = 'Back to this role in the list';
+adminRolePresentationCopy.ja.returnToRoleList = '一覧の現在のロールに戻る';
+
+adminRolePresentationCopy.zh.bindingFilters = { ...{"serverTitle":"按用户查询授权","serverHelp":"输入完整用户 ID 后点击查询；留空查询平台授权。页面顶部“刷新”重读已应用的用户条件，不应用未提交的草稿。更改或清除已应用的用户条件会重置本地筛选和页码；仅清空未提交的输入会保留它们。","userID":"用户 ID（可选）","query":"查询","clearUser":"清除用户查询","applied":"服务端查询条件：","allUsers":"未限定用户","notApplied":"未执行授权查询","invalidURL":"链接中的用户 ID 无效。请输入完整用户 ID，或清除用户查询。","localTitle":"筛选已加载的授权","localHelp":"关键字和状态立即筛选已加载记录，不会发起新的授权列表请求。关键字匹配用户 ID、角色名称或角色代码，不搜索用户姓名。","keyword":"用户 ID 或角色关键字","resetLocal":"重置本地筛选"}, loaded: (matching, loaded) => `已加载 ${loaded} 条，当前匹配 ${matching} 条；不是平台总量。`, localPages: (page, pages) => `已加载结果内第 ${page} / ${pages} 页` };
+
+adminRolePresentationCopy.en.bindingFilters = { ...{"serverTitle":"Query grants by user","serverHelp":"Enter a complete user ID and choose Query, or leave it blank for platform grants. Refresh at the top reloads the applied user condition, not an unsubmitted draft. Changing or clearing the applied user condition resets local filters and the page. Clearing only a draft keeps them.","userID":"User ID (optional)","query":"Query","clearUser":"Clear user query","applied":"Server query condition: ","allUsers":"No user restriction","notApplied":"Grant query not run","invalidURL":"The link contains an invalid user ID. Enter a complete user ID or clear the user query.","localTitle":"Filter loaded grants","localHelp":"Keywords and status immediately filter loaded records without a new grant-list request. Keywords match user ID, role name or role code, not user names.","keyword":"User ID or role keyword","resetLocal":"Reset local filters"}, loaded: (matching, loaded) => `${matching} matching of ${loaded} loaded grants; not the platform total.`, localPages: (page, pages) => `Loaded results: page ${page} of ${pages}` };
+
+adminRolePresentationCopy.ja.bindingFilters = { ...{"serverTitle":"ユーザーで付与を照会","serverHelp":"完全なユーザー ID を入力して照会してください。空欄ではプラットフォームの付与を照会します。ページ上部の更新は適用済みの条件を再取得し、未送信の入力は適用しません。適用済みのユーザー条件を変更または解除すると、ローカル条件とページがリセットされます。未送信の入力だけを消した場合は保持されます。","userID":"ユーザー ID（任意）","query":"照会","clearUser":"ユーザー条件を解除","applied":"サーバーへの照会条件：","allUsers":"ユーザー指定なし","notApplied":"付与の照会は未実行","invalidURL":"リンクのユーザー ID が無効です。完全なユーザー ID を入力するか、ユーザー条件を解除してください。","localTitle":"取得済みの付与を絞り込み","localHelp":"キーワードと状態は取得済みの記録に即時適用され、付与一覧を再取得しません。ユーザー ID、ロール名、ロールコードが対象で、ユーザー名は検索しません。","keyword":"ユーザー ID またはロールのキーワード","resetLocal":"ローカル条件をリセット"}, loaded: (matching, loaded) => `取得済み ${loaded} 件のうち ${matching} 件が一致。プラットフォーム全体の総数ではありません。`, localPages: (page, pages) => `取得済み結果：${page} / ${pages} ページ` };
+
+adminRolePresentationCopy.zh.targetReadback = { statusLabel:'账号状态', statuses:{ ...accountLayoutCopy.zh.statuses, PROVISIONING:"开通中", REPAIR_REQUIRED:"需要修复", BOOTSTRAP_PENDING:"等待初始化" }, manualOnly:"手动填写的用户 ID", manualLead:"请输入目标用户的完整 ID。此处无法查询用户资料。", lookupID:"查找此 ID", submittedQuery:"已提交的查询：", exactIDQuery:"已按 ID 查找：", unfilteredQuery:"未设搜索条件", statusUnknown:"未知状态", statusUnavailable:"状态未提供", selected:'所选用户', manualUnverified:'当前 ID 未与搜索结果匹配', manualAction:'高级：手动填写用户 ID' };
+adminRolePresentationCopy.en.targetReadback = { statusLabel:'Account status', statuses:{ ...accountLayoutCopy.en.statuses, PROVISIONING:"Provisioning", REPAIR_REQUIRED:"Repair required", BOOTSTRAP_PENDING:"Awaiting setup" }, manualOnly:"Manually entered user ID", manualLead:"Enter the complete user ID. User records cannot be looked up here.", lookupID:"Look up this ID", submittedQuery:"Submitted search:", exactIDQuery:"Lookup by ID:", unfilteredQuery:"No search filter", statusUnknown:"Unrecognized status", statusUnavailable:"Status unavailable", selected:'Selected user', manualUnverified:'Current ID not matched to a search result', manualAction:'Advanced: enter user ID' };
+adminRolePresentationCopy.ja.targetReadback = { statusLabel:'アカウント状態', statuses:{ ...accountLayoutCopy.ja.statuses, PROVISIONING:"準備中", REPAIR_REQUIRED:"修復が必要", BOOTSTRAP_PENDING:"初期設定待ち" }, manualOnly:"手入力したユーザー ID", manualLead:"対象のユーザー ID をすべて入力してください。ここではユーザー情報を検索できません。", lookupID:"この ID を検索", submittedQuery:"実行した検索：", exactIDQuery:"ID で検索：", unfilteredQuery:"検索条件なし", statusUnknown:"不明な状態", statusUnavailable:"状態情報なし", selected:'選択したユーザー', manualUnverified:'現在の ID は検索結果と一致していません', manualAction:'詳細設定：ユーザー ID を入力' };

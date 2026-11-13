@@ -51,7 +51,7 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/api/admin/approvals/capability') return json(response, { session_approval_wire_version: 2, control: { version: 1, epoch: 1, authorization_relay_epoch: 1 } });
   if (url.pathname === '/api/admin/approvals/directory') {
     response.setHeader('X-Platform-Authorization-Version', '1');
-    return json(response, { schema_version: 1, platform_authorization_version: 1, items: [{ command_type: proof.command_type, policy_version: 2, risk_class: 'FINANCIAL_CORRECTION', requestable: true }, { command_type: 'UNINSTALLED_TEST_APPROVAL', policy_version: 2, risk_class: 'UNKNOWN', requestable: true }] });
+    return json(response, { schema_version: 1, platform_authorization_version: 1, items: [{ command_type: proof.command_type, policy_version: 2, risk_class: 'FINANCIAL_CORRECTION', visible: true, requestable: true }, { command_type: 'UNINSTALLED_TEST_APPROVAL', policy_version: 2, risk_class: 'UNKNOWN', visible: true, requestable: true }] });
   }
   if (url.pathname === '/api/admin/approvals/requests' && request.method === 'GET') {
     center?.reads.push(url.searchParams.toString());
@@ -136,8 +136,19 @@ const prepare = async (page, language = 'en') => {
   await page.waitForSelector('section input'); const inputs = await page.$$('section input'); assert.equal(inputs.length, 3);
   await inputs[0].type(packageID); await inputs[1].type(orderID); await inputs[2].type('CORRECTION');
   await click(page, entitlementCorrectionCopy[language].precheck);
-  await page.waitForSelector('section dl'); assert.equal(effects, 0);
-  assert.ok(await page.evaluate(() => document.querySelector('section dl').textContent.includes('9007199254740993')));
+  await page.waitForSelector('.adm-financial-repair-facts table tbody tr'); assert.equal(effects, 0);
+  const facts = await page.$$eval('.adm-financial-repair-facts', (nodes, titles) => {
+    const reference=nodes.find(node=>node.getAttribute('aria-label')===titles.reference);
+    const composition=nodes.find(node=>node.getAttribute('aria-label')===titles.composition);
+    return { ids:[...reference.querySelectorAll('dd code')].map(node=>node.textContent), amounts:[...composition.querySelectorAll('dd')].map(node=>node.textContent), rows:[...composition.querySelectorAll('tbody tr')].map(row=>[...row.querySelectorAll('th,td')].map(node=>node.textContent)) };
+  }, { reference:entitlementCorrectionCopy[language].reference.title, composition:entitlementCorrectionCopy[language].composition.title });
+  const points=entitlementCorrectionCopy[language].composition.points;
+  assert.deepEqual(facts.ids,[packageID,orderID,id(3),id(4)],'the visible proof identifies its original package, order, wallet and payment');
+  assert.deepEqual(facts.amounts,['900,719,925,474.0993 '+points,'922,337,203,685,477.5807 '+points]);
+  assert.deepEqual(facts.rows,[
+    [entitlementCorrectionCopy[language].types.BASE,'922,337,203,685,477.5807 '+points,'921,436,483,760,003.4814 '+points],
+    [entitlementCorrectionCopy[language].types.BONUS,'0 '+points,'900,719,925,474.0993 '+points],
+  ],'exact point values show the source reduction and target addition without changing the package total');
   await page.type('section textarea', 'Verified original payment product split');
 };
 try {
@@ -236,8 +247,10 @@ try {
     reset(); const page = await open(language); expectedReason = '中'.repeat(26) + 'ab';
     await fill(page, [packageID, orderID, expectedReason]); await click(page, entitlementCorrectionCopy[language].precheck);
     await page.waitForSelector('section dl'); assert.equal(prechecks.length, 1); assert.equal(new TextEncoder().encode(prechecks[0].reason_code).length, 80);
-    await fill(page, [packageID, orderID, '中'.repeat(27)]); await click(page, entitlementCorrectionCopy[language].precheck);
-    await page.waitForFunction(text => document.querySelector('[role="alert"]')?.textContent === text, { timeout: 5000 }, financeCopy[language].inputInvalid);
+    await fill(page, [packageID, orderID, '中'.repeat(27)]);
+    await page.waitForFunction(text => document.querySelector('section form [role="alert"]')?.textContent === text, { timeout: 5000 }, entitlementCorrectionCopy[language].reasonCodeOver);
+    assert.equal(await page.$eval('section form button', button => button.disabled), true, 'overlong reasons cannot request a precheck');
+    assert.equal(await page.$eval('section form input[aria-required]', input => input.getAttribute('aria-invalid')), 'true');
     assert.equal(prechecks.length, 1); assert.equal(await page.$('section dl'), null); assert.equal(writes.length, 0);
     assert.ok(await page.evaluate(text => document.body.textContent.includes(text), entitlementCorrectionCopy[language].reasonCodeHelp));
     expectedReason = 'CORRECTION'; await fill(page, [packageID, orderID, ' CORRECTION ']); await click(page, entitlementCorrectionCopy[language].precheck);
@@ -262,7 +275,8 @@ try {
     const openCenterDetail = async (page, language) => {
       await page.waitForSelector('nav button[data-section="approvals"]');
       await page.click('nav button[data-section="approvals"]');
-      await page.waitForFunction(command => document.querySelector('tbody')?.textContent.includes(command), {}, proof.command_type);
+      try { await page.waitForFunction(command => document.querySelector('[data-workspace="approvals"] tbody')?.textContent.includes(command), {timeout:5000}, proof.command_type); }
+      catch (error) { console.error(JSON.stringify({diagnostic:'controlled-approval-center-entry',mode,status,reads:center?.reads,view:await page.evaluate(()=>({url:location.pathname+location.search,text:document.body.innerText}))}));throw error; }
       await click(page, financeCopy[language].details); await page.waitForSelector('article textarea');
       assert.ok(await page.$eval('article', (node, id) => node.textContent.includes(id), requestID));
     };
