@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -26,6 +27,11 @@ func TestAuditExportRetryClassificationRequiresTemporaryDatabaseFailure(t *testi
 		{"constraint", wrapAuditExportDatabaseError(&pgconn.PgError{Code: "23514"}), false},
 		{"local-eof", io.EOF, false},
 		{"database-eof", wrapAuditExportDatabaseError(io.EOF), true},
+		{"local-unexpected-eof", io.ErrUnexpectedEOF, false},
+		{"database-unexpected-eof", wrapAuditExportDatabaseError(io.ErrUnexpectedEOF), true},
+		{"wrapped-local-unexpected-eof", fmt.Errorf("local input: %w", io.ErrUnexpectedEOF), false},
+		{"wrapped-database-unexpected-eof", fmt.Errorf("source cursor: %w", wrapAuditExportDatabaseError(io.ErrUnexpectedEOF)), true},
+		{"database-wrapped-unexpected-eof", wrapAuditExportDatabaseError(fmt.Errorf("driver read: %w", io.ErrUnexpectedEOF)), true},
 		{"local-transport", &net.OpError{Op: "read", Err: io.EOF}, false},
 		{"database-transport", wrapAuditExportDatabaseError(&net.OpError{Op: "read", Err: io.EOF}), true},
 		{"quota", ErrAuditExportQuota, false},

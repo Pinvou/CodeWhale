@@ -23,15 +23,16 @@ const os = require('os');
 const path = require('path');
 const assert = require('assert');
 const { startUiTestServer } = require('./ui_test_server');
+const { wrapNative } = require('./helpers/browser-fixture.cjs');
 
 function loadPuppeteer() {
-  try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
+  try { return wrapNative(require('puppeteer-core')); } catch (_) { /* fall through */ }
   const npx = path.join(os.homedir(), '.npm', '_npx');
   if (fs.existsSync(npx)) {
     for (const directory of fs.readdirSync(npx)) {
       const candidate = path.join(npx, directory, 'node_modules', 'puppeteer-core');
       if (fs.existsSync(candidate)) {
-        try { return require(candidate); } catch (_) { /* try next */ }
+        try { return wrapNative(require(candidate)); } catch (_) { /* try next */ }
       }
     }
   }
@@ -58,7 +59,6 @@ if (!CHROME) {
   console.error('SKIP: 未找到 chromium/chrome，可用 env CHROME=/path/to/chrome 指定');
   process.exit(2);
 }
-const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-device-mgr-'));
 
 // 设备快照 fixture：与 tests/device_bridge_format.test.mjs 的 fixtureSnapshot 同一
 // 形状（bridge/device.js 的 _fmt 契约已在那边锁定，这里只负责驱动真实渲染）。
@@ -184,7 +184,7 @@ function injectSource() {
     var settings = {
       theme: 'liquid-light',
       color_scheme: 'light',
-      language: 'zh-Hans',
+      language: sessionStorage.getItem('__deviceSmokeLanguage') || 'zh-Hans',
       memory_enabled: true,
       notifications: { enabled: true, task_completed: true },
       pet: { enabled: false },
@@ -225,6 +225,9 @@ function injectSource() {
     window.__testSetMegacubeDevice = function (value) {
       sessionStorage.setItem('__testMegacubeDevice', value ? '1' : '0');
     };
+    window.__testSetDeviceLanguage = function (value) {
+      sessionStorage.setItem('__deviceSmokeLanguage', value);
+    };
     function record(cmd, args) { calls.push({ cmd: cmd, args: args || null }); }
     function emit(name, payload) {
       return Promise.all((handlers[name] || []).slice().map(function (handler) {
@@ -236,6 +239,9 @@ function injectSource() {
       switch (cmd) {
         case 'get_platform_capabilities': return Promise.resolve(Object.assign({}, platformCaps));
         case 'get_settings': return Promise.resolve(settings);
+        case 'update_settings':
+          settings = Object.assign({}, settings, (args && args.patch) || {});
+          return Promise.resolve(settings);
         case 'get_effective_model_config': return Promise.resolve({ model: 'deepseek-v4-flash', base_url: 'https://api.deepseek.com', preset: 'deepseek', api_key_set: true });
         case 'list_models': return Promise.resolve({ models: models.slice(), active_model_id: activeModelId });
         case 'save_model':
@@ -350,6 +356,16 @@ function injectSource() {
           // detail 原句；2026-11-10 复审 P2——回退映射本套件曾照绿）。
           return Promise.resolve([{ key: 'ollama', running: false, reason: 'timeout', detail: 'probe timeout' }, { key: 'docker', running: true, detail: null }]);
         case 'get_external_models':
+          // Owned-boundary UI scenario only: a rejected command cannot mutate
+          // this registry/files fixture. Native file preservation is Rust's test.
+          if (window.__DEVICE_MGR_TEST__.trackGuardRemoval) return Promise.resolve({
+            models: window.__DEVICE_MGR_TEST__.guardRemovalState.registered ? [{
+              id: 'm-guard-owned', name: 'guarded-local', kind: 'llamacpp',
+              model: 'guard-model', base_url: 'http://127.0.0.1:8888/v1',
+              weights_path: '/home/u/models/guarded-local', registered: true,
+              source: 'registry', status: 'available', note: '',
+            }] : [], warnings: [],
+          });
           if (window.__DEVICE_MGR_TEST__.failExternalModels) return Promise.reject(new Error('external models down (smoke)'));
           if (window.__DEVICE_MGR_TEST__.emptyExternalModels) return Promise.resolve({ models: [], warnings: [] });
           // ⑥-g 同端点跨行身份（round-31 review P2）：换上碰撞列表，测完还原。
@@ -388,6 +404,14 @@ function injectSource() {
         case 'device_register_external_model':
           return Promise.resolve({ id: 'm-registered-new', name: (args && args.name) || '', kind: (args && args.kind) || 'ollama' });
         case 'device_remove_external_model':
+          if (window.__DEVICE_MGR_TEST__.trackGuardRemoval && args && args.id === 'm-guard-owned') {
+            var guard = window.__DEVICE_MGR_TEST__;
+            if (guard.guardRemovalError) return Promise.reject(new Error(guard.guardRemovalError));
+            guard.guardRemovalState.registered = false;
+            if (args.deleteWeights) guard.guardRemovalState.weightsPresent = false;
+            guard.guardRemovalState.successfulDeletes += 1;
+            return Promise.resolve({ removed_registry: true, removed_weights: !!args.deleteWeights, warnings: [] });
+          }
           // ⑥-h 守卫拒绝面（round-37 review P2）：后端守卫链返回 Err(String)
           // 是移除的核心安全叙事，唯一用户出口就是这个拒绝臂——桩此前恒成功，
           // 删掉 catch→toast 全套测试照绿。
@@ -412,6 +436,9 @@ function injectSource() {
       // ⑥-h 移除守卫拒绝面（round-37 review P2）：拒绝 toast 是守卫链的唯一
       // 用户出口，桩注入 Err 用。
       failRemove: false,
+      trackGuardRemoval: false,
+      guardRemovalError: null,
+      guardRemovalState: { registered: true, weightsPresent: true, successfulDeletes: 0 },
       // ⑥-g 同端点跨行身份（round-31 review P2）：换成碰撞列表用。
       collisionExternalModels: false,
       // ⑩-e/⑩-f 外部模型读取面（round-30 review P3）：旧行在场的常驻陈旧行 +
@@ -491,13 +518,22 @@ async function clickTestId(page, testId) {
 }
 
 (async () => {
+  const { fixtureScope } = await import('./helpers/fixture-scope.mjs');
+  let primaryFailure;
+  let hasPrimaryFailure = false;
+  let retirementFailure;
+  try {
   const { url } = await startUiTestServer();
   const browser = await puppeteer.launch({
     executablePath: CHROME,
     headless: 'new',
     args: ['--no-sandbox', '--disable-gpu', '--no-first-run', '--no-default-browser-check'],
-    userDataDir: PROFILE,
   });
+  // Failure-path negative control creates the same owned browser/server as
+  // normal execution, then leaves through the same finally retirement boundary.
+  if (process.env.PINVOU_DEVICE_SMOKE_FAIL_AFTER_LAUNCH === '1') {
+    throw new Error('device smoke intentional failure after browser launch');
+  }
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -1071,6 +1107,93 @@ async function clickTestId(page, testId) {
     () => !document.querySelector('[data-testid="device-manager-remove-confirm"]'),
     { timeout: 4000 },
   );
+
+  // ⑥-i Owned store-boundary failures: actual React failure/retry flow in
+  // zh/en/ja. The fixture ledger models command refusal and later acceptance;
+  // real native lock and filesystem preservation remain the Rust regression's job.
+  const removalCatalogs = [
+    ['zh-Hans', (await import('../src/shared/i18n/zh.js')).dictZh],
+    ['en', (await import('../src/shared/i18n/en.js')).dictEn],
+    ['ja', (await import('../src/shared/i18n/ja.js')).dictJa],
+  ];
+  const diagnostic = 'Permission denied (os error 13): guarded-weights';
+  for (const [language, dictionary] of removalCatalogs) {
+    const copy = dictionary.uiDeviceMgr;
+    // Full App language is React-owned after boot; writing settings alone is
+    // not a UI language switch. Restore each real saved locale at fresh boot.
+    await page.evaluate(language => window.__testSetDeviceLanguage(language), language);
+    await page.reload({ waitUntil: 'networkidle0' });
+    await page.waitForFunction(label => !!document.querySelector('[title="' + label + '"]')
+      || [...document.querySelectorAll('span')].some(node => (node.textContent || '').trim() === label),
+    { timeout: 20000 }, dictionary.deviceMgr);
+    await clickNavByLabel(page, dictionary.deviceMgr);
+    await page.waitForFunction(expected => !!document.querySelector('[data-testid="device-manager-view"]')
+      && (document.body.innerText || '').includes(expected), { timeout: 8000 }, copy.modelsTitle);
+    await page.evaluate(async () => {
+      const fixture = window.__DEVICE_MGR_TEST__;
+      fixture.trackGuardRemoval = true;
+      fixture.guardRemovalState = { registered: true, weightsPresent: true, successfulDeletes: 0 };
+      await window.TauriBridge.device.fetchExternalModels();
+    });
+    await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="device-manager-external-row"]')]
+      .some(row => (row.innerText || '').includes('guarded-local')), { timeout: 8000 });
+    await clickTestId(page, 'device-manager-remove');
+    await page.waitForFunction(() => {
+      const confirm = document.querySelector('[data-testid="device-manager-remove-confirm"]');
+      const toggle = document.querySelector('[data-testid="device-manager-delete-weights"]');
+      return !!confirm && !confirm.disabled && !!toggle && !toggle.disabled;
+    }, { timeout: 8000 });
+    await clickTestId(page, 'device-manager-delete-weights');
+    const failures = [
+      ['model_store_weight_removal_busy', copy.weightRemovalBusy],
+      ['model_store_weight_removal_lock_failed: ' + diagnostic, copy.weightRemovalLockFailed(diagnostic)],
+      ['model_store_weight_path_invalid', copy.weightRemovalPathInvalid],
+      ['model_store_weight_path_unavailable: ' + diagnostic, copy.weightRemovalPathUnavailable(diagnostic)],
+    ];
+    for (const [message, expected] of failures) {
+      await page.evaluate(message => { window.__DEVICE_MGR_TEST__.guardRemovalError = message; }, message);
+      await clickTestId(page, 'device-manager-remove-confirm');
+      await page.waitForFunction(expected => {
+        const toast = document.querySelector('[data-testid="model-store-toast"]');
+        const confirm = document.querySelector('[data-testid="device-manager-remove-confirm"]');
+        return (toast?.innerText || '').includes(expected) && !!confirm && !confirm.disabled;
+      }, { timeout: 8000 }, expected);
+      const refused = await page.evaluate(registeredBadge => {
+        const state = window.__DEVICE_MGR_TEST__.guardRemovalState;
+        const row = document.querySelector('[data-testid="device-manager-external-row"]');
+        return { ...state, rowKept: (row?.innerText || '').includes('guarded-local'),
+          registeredBadgeShown: (row?.innerText || '').includes(registeredBadge),
+          weightsStillSelected: !!document.querySelector('[data-testid="device-manager-delete-weights"]')?.checked,
+          toast: document.querySelector('[data-testid="model-store-toast"]')?.innerText || '' };
+      }, copy.registeredBadge);
+      rec('⑥-i ' + language + ' ' + message.split(':')[0] + ' localized refusal keeps registration/files and retry',
+        refused.registered && refused.weightsPresent && refused.successfulDeletes === 0
+        && refused.rowKept && refused.registeredBadgeShown && refused.weightsStillSelected && !refused.toast.includes('model_store_weight_'),
+        JSON.stringify(refused));
+    }
+    await page.evaluate(() => { window.__DEVICE_MGR_TEST__.guardRemovalError = null; });
+    await clickTestId(page, 'device-manager-remove-confirm');
+    await page.waitForFunction(expected => window.__DEVICE_MGR_TEST__.guardRemovalState.successfulDeletes === 1
+      && !document.querySelector('[data-testid="device-manager-external-row"]')
+      && (document.querySelector('[data-testid="model-store-toast"]')?.innerText || '').includes(expected),
+    { timeout: 8000 }, copy.removeDone('guarded-local'));
+    const retried = await page.evaluate(() => ({
+      ...window.__DEVICE_MGR_TEST__.guardRemovalState,
+      args: window.__DEVICE_MGR_TEST__.callsOf('device_remove_external_model').at(-1)?.args,
+      toast: document.querySelector('[data-testid="model-store-toast"]')?.innerText || '',
+    }));
+    rec('⑥-i ' + language + ' retry succeeds once after guard recovery',
+      !retried.registered && !retried.weightsPresent && retried.successfulDeletes === 1
+      && retried.args.deleteWeights === true && retried.toast.includes(copy.removeDone('guarded-local')),
+      JSON.stringify(retried));
+  }
+  await page.evaluate(() => window.__testSetDeviceLanguage('zh-Hans'));
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => !!document.querySelector('[title="设备管理"]')
+    || [...document.querySelectorAll('span')].some(node => (node.textContent || '').trim() === '设备管理'), { timeout: 20000 });
+  await clickNavByLabel(page, '设备管理');
+  await page.waitForFunction(text => !!document.querySelector('[data-testid="device-manager-remove"]')
+    && (document.body.innerText || '').includes(text), { timeout: 8000 }, removalCatalogs[0][1].uiDeviceMgr.modelsTitle);
 
   // ⑥-e armed 确认 × doctor 互斥（round-22 review P2）：doctor 一轮在飞（这里
   // 用挂住的 create_session 制造可观察窗口）必须把 armed 确认按钮/勾选框按住
@@ -1716,16 +1839,27 @@ async function clickTestId(page, testId) {
     monitorRendered && monitorOnly.deviceViewAbsent,
     JSON.stringify({ monitorRendered, ...monitorOnly }));
 
-  await browser.close();
-
   const failed = results.filter(result => !result.pass).length;
   console.log(failed ? `\n❌ ${failed}/${results.length} FAILED` : `\n✅ ALL ${results.length} PASS`);
-  // 自然退出（exitCode 而非 process.exit）：fixture-scope 的 beforeExit 钩子
-  // 负责 ui_test_server 的 owned-server 登记 release——硬退会把 http 凭据留在
-  // registered 态，frontend-test 的资源账本审计（retirement not clean）因此
-  // 整链红（2026-11-06 CI 实证，rebase 后首次以完整链跑 bridge-smoke 暴露）。
   process.exitCode = failed ? 1 : 0;
+  } catch (error) {
+    hasPrimaryFailure = true;
+    primaryFailure = error;
+  } finally {
+    // Confirm browser child shutdown and server close before removing the
+    // factory-owned profile/cache. A live browser cannot reach beforeExit.
+    try { await fixtureScope.close(); }
+    catch (cleanupError) { retirementFailure = cleanupError; }
+  }
+  if (retirementFailure) {
+    if (hasPrimaryFailure) throw new AggregateError([primaryFailure, retirementFailure],
+      'Device smoke failed and fixture retirement was not confirmed', { cause: retirementFailure });
+    throw retirementFailure;
+  }
+  if (hasPrimaryFailure) throw primaryFailure;
 })().catch(error => {
-  console.error('FATAL', error.stack || error.message);
+  // Logging the Error object retains AggregateError.errors when execution and
+  // retirement both fail, including the original assertion/timeout stack.
+  console.error('FATAL', error);
   process.exitCode = 1;
 });
