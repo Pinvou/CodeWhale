@@ -6,6 +6,7 @@
 - `run_turn` 内的选中错误与 `TurnErrorSource` 成对保留、清空和覆盖；只在终态失败选定时写入本轮 `TurnContext`，随同一 `TurnComplete` 交付。实际 client 请求/流错误为 Model，本地请求准备、REPL、预算等为 Runtime；其他终态及未知来源为 None。panic、取消、重试、错误文本和既有结果状态保持原契约，无跨轮错误缓存。
 - 仅内部 Engine 事件增加可选来源，不扩展 wire/遥测字段；现有 protocol projection 明确忽略它。宿主保留模型原错误后才合并本地持久化错误，ACP 只在当前 prompt 失败边界赋予来源，普通终态保守降级；诊断写入按任务→诊断锁顺序验证当前已接纳 attempt、turn、租约及同源上下文；历史消息观察不能为待接纳提交选择 turn，匹配 attempt 的接纳事件才建立或校正归属。新增私有 attempt 缓存字段缺省兼容旧缓存，不扩展遥测字段。本地受控模型 transport 经真实 Engine，验证初始请求错误、流读取错误、provider error frame、真实 Python REPL CSV EOF 及下一用户回合恢复；默认 bash 工具增加实际 shell 语法错误与非零退出事实，退出码由宿主 shell 决定（Windows 默认 PowerShell 不是 Bash）。测试边界不是 live provider/Linux 原事故或发布构建。
 - 父仓 gitlink 对齐公开维护提交 `6f7a3a748f408568468ace45aa5cdbb34f882d73`，保留 #142 的终态来源契约以及之后的维护修复。原本地候选仅为历史审核来源；未移动任何 CodeWhale 维护分支或标签，`verify-public-submodule.sh` 的公开可达性门禁保持不变。
+- 完整 fork guard 显式选择带 `behavior-telemetry-test` 的独立 `behavior_telemetry` 测试目标，并以完整测试路径和恰好一次执行校验生产者来源回归；普通 `--lib forkguard_` 不包含该目标，`--fast` 仅检查指纹。严格终态校验仍编入真实 lib 测试目标；来源与采集点断言同时覆盖模型、ACP prompt 及两类本地运行时。
 
 ## 本轮同步接线：冷启动所有权与有界拆除（2026-10-13）
 

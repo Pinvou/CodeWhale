@@ -501,6 +501,22 @@ bold "── 第 2 层：CodeWhale forkguard 回归 ──"
 echo
 bold "── 第 3 层：pinvou3-app forkguard 回归 ──"
 ( cd "$APP" && cargo test --lib --locked forkguard_ -- --test-threads=1 ) || fail=1
+# This registered producer regression lives in the feature-gated standalone
+# telemetry harness, not the lib harness above. Pin the full test path and
+# require execution: libtest otherwise succeeds even when it selects zero tests.
+run_model_provenance_test() {
+  local output
+  output=$( cd "$APP" && cargo test --test behavior_telemetry --locked \
+    --features behavior-telemetry-test \
+    behavior_telemetry::tests::model_producer::forkguard_model_terminal_provenance_excludes_repl_eof_and_recovers \
+    -- --exact --test-threads=1 2>&1 ) || { printf '%s\n' "$output"; return 1; }
+  printf '%s\n' "$output"
+  if ! grep -q 'test result: ok\. 1 passed; 0 failed; 0 ignored;' <<<"$output"; then
+    red "❌ pinned model provenance regression did not execute exactly once"
+    return 1
+  fi
+}
+run_model_provenance_test || fail=1
 ( cd "$APP" && cargo check --all-targets --features benchmark-hooks --locked ) || fail=1
 ( cd "$APP" && cargo test --lib --locked --features benchmark-hooks eval_send_message_op_isolated_from_gui_authority_and_installs_exact_policy -- --test-threads=1 ) || fail=1
 ( cd "$APP" && cargo test --lib --locked --features benchmark-hooks features::assistant::product_runtime::headless_bridge::tests -- --test-threads=1 ) || fail=1

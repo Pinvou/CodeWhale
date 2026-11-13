@@ -1292,12 +1292,14 @@ fn diagnostic_late_terminal_cannot_write_a_successor_context() {
             events::task_fields(BehaviorEvent::new("task_admitted"), session, attempt).turn(turn);
         diagnostics::enrich(t, &mut event, lease);
     }
-    fn model_failure(
+    fn terminal_failure(
         t: &BehaviorTelemetry,
         lease: &CollectionLease,
         session: &str,
         attempt: &TaskAttempt,
         turn: &str,
+        expected_code: &str,
+        expected_site: &str,
     ) {
         let mut event = events::task_fields(BehaviorEvent::new("task_finished"), session, attempt)
             .turn(turn)
@@ -1305,19 +1307,45 @@ fn diagnostic_late_terminal_cannot_write_a_successor_context() {
             .integer("duration_ms", 1)
             .string("error_category", "model_error");
         diagnostics::enrich(t, &mut event, lease);
-        assert_eq!(event.fields["diagnostic_code"], "stream_unexpected_eof");
+        assert_eq!(event.fields["diagnostic_code"], expected_code);
+        assert_eq!(event.fields["diagnostic_site"], expected_site);
     }
     let _home = TestHome::new();
     let runtime = test_runtime("http://localhost:1");
     let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
     let lease = telemetry.current_lease().unwrap();
-    for source in [FailureSource::Model, FailureSource::AcpPrompt] {
+    for (source, expected_code, expected_site) in [
+        (
+            FailureSource::Model,
+            "stream_unexpected_eof",
+            "assistant_error",
+        ),
+        (
+            FailureSource::AcpPrompt,
+            "stream_unexpected_eof",
+            "acp_error",
+        ),
+        (
+            FailureSource::AssistantRuntime,
+            "unknown",
+            "assistant_error",
+        ),
+        (FailureSource::AcpRuntime, "unknown", "acp_error"),
+    ] {
         for accepted in [false, true] {
             let session = format!("successor_{}_{}", source as u8, accepted);
             let mut old = submit(&telemetry, &lease, &session);
             admit(&telemetry, &lease, &session, &mut old, "old_turn");
             telemetry.capture_failure_context(&session, "old_turn", "unexpected EOF", source);
-            model_failure(&telemetry, &lease, &session, &old, "old_turn");
+            terminal_failure(
+                &telemetry,
+                &lease,
+                &session,
+                &old,
+                "old_turn",
+                expected_code,
+                expected_site,
+            );
 
             // Real task-state/field shapes, in the reachable race order:
             // new submission -> history copy -> old terminal resumes.
@@ -1359,7 +1387,15 @@ fn diagnostic_late_terminal_cannot_write_a_successor_context() {
                 admit(&telemetry, &lease, &session, &mut next, "new_turn");
             }
             telemetry.capture_failure_context(&session, "new_turn", "unexpected EOF", source);
-            model_failure(&telemetry, &lease, &session, &next, "new_turn");
+            terminal_failure(
+                &telemetry,
+                &lease,
+                &session,
+                &next,
+                "new_turn",
+                expected_code,
+                expected_site,
+            );
             // Real legacy-cache deserialization remains supported, but a
             // missing submission marker cannot authorize a model source.
             let mut saved = serde_json::to_value(&*telemetry.diagnostics.lock().unwrap()).unwrap();
@@ -1377,7 +1413,15 @@ fn diagnostic_late_terminal_cannot_write_a_successor_context() {
             assert!(legacy["contexts"][&session]["code"].is_null());
             *telemetry.diagnostics.lock().unwrap() = serde_json::from_value(saved).unwrap();
             telemetry.capture_failure_context(&session, "new_turn", "unexpected EOF", source);
-            model_failure(&telemetry, &lease, &session, &next, "new_turn");
+            terminal_failure(
+                &telemetry,
+                &lease,
+                &session,
+                &next,
+                "new_turn",
+                expected_code,
+                expected_site,
+            );
         }
     }
 }
