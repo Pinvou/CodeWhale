@@ -8,13 +8,13 @@ import { requirePersonalAccount, organizationRechargeTargetAllowed } from './per
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { capturePersonalRechargeReauthentication, authorizePersonalRechargeReauthentication } from './personal-recharge-reauthentication.js';
 import { createDesktopReauthenticationCoordinator } from './desktop-reauthentication.js';
-import { supportedLocales, localeNames } from '../../shared/supported-locales.js';
 import { hasPermission } from './authorization-ui.js';
 import { formatBalance } from './balance-view.js';
 import { accountDisplayLabel, maskedAccountMobile } from './account-display-label.js';
 import { localizedAccountPlatformError } from './error-localization.js';
 import { ProfileSettings } from './ProfileSettings.jsx';
 import { AccountLogin } from './AccountLogin.jsx';
+import { DesktopAccountCenter } from './DesktopAccountCenter.jsx';
 import { AccountPortalLayout, AccountPortalPanel } from './AccountPortalLayout.jsx';
 import { PortalSectionAction } from './PortalSectionAction.jsx';
 import { usePortalSections } from './usePortalSections.js';
@@ -170,21 +170,22 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     else { await logout(); }
   };
   if (reauthentication && reauthentication.ticket.client === client) return <div className="ap-shell ap-login">
-    <AccountLogin key={reauthentication.ticket.id} client={reauthenticationClient} copy={copy} reauthentication
+    <AccountLogin key={reauthentication.ticket.id} client={reauthenticationClient} copy={copy} language={language} reauthentication
       onAuthenticated={() => reauthentication.coordinator.complete(reauthentication.ticket)}
       onAuthenticationFailure={reason => reauthentication.coordinator.fail(reauthentication.ticket, reason)} />
     <button type="button" onClick={() => reauthentication.coordinator.cancel(reauthentication.ticket)}>{copy.desktopReauthenticationCancel}</button>
     {onClose && <button type="button" onClick={() => { reauthentication.coordinator.cancel(reauthentication.ticket); onClose(); }}>{copy.close}</button>}
   </div>;
   if (auth === 'loading' || profileOwner !== client) return <div className="ap-shell ap-centered" role="status">{copy.loading}</div>;
-  if (rechargeRequest && auth !== 'ready') return <main className="ap-shell ap-app"><p role="alert">{organizationCopy[language].permissions}</p>{onClose && <button onClick={onClose}>{copy.close}</button>}</main>;
+  const personalRecharge = rechargeRequest?.contextType === 'PERSONAL' && rechargeRequest.view === 'recharge';
+  if (rechargeRequest && !personalRecharge && auth !== 'ready') return <main className="ap-shell ap-app"><p role="alert">{organizationCopy[language].permissions}</p>{onClose && <button onClick={onClose}>{copy.close}</button>}</main>;
   if (auth !== 'ready') return <div className="ap-shell ap-login">
     {error && <div className="ap-alert error" role="alert">{error}</div>}
     {auth === 'error' && <button disabled={busy} onClick={() => void refresh()}>{copy.retry}</button>}
-    {portal ? <a href={portalLoginLocation(globalThis.location?.pathname, globalThis.location?.search)}>{copy.login}</a> : <AccountLogin key={auth} client={client} copy={copy} onAuthenticated={async () => { const profile = await refresh(); if (profile) onAuthenticated?.(profile); }} />}
+    {portal ? <a href={portalLoginLocation(globalThis.location?.pathname, globalThis.location?.search)}>{copy.login}</a> : <AccountLogin key={auth} client={client} copy={copy} language={language} onAuthenticated={async () => { const profile = await refresh(); if (profile) onAuthenticated?.(profile); }} />}
     {onClose && <button onClick={onClose}>{copy.close}</button>}
   </div>;
-  const rechargeAllowed = !rechargeRequest || rechargeRequest.client === client
+  const rechargeAllowed = !rechargeRequest || personalRecharge || rechargeRequest.client === client
     && rechargeRequest.sessionEpoch === (client.financeSessionEpoch || 0)
     && rechargeRequest.actor === me.user_id && rechargeRequest.contextVersion === me.active_context.context_version
     && organizationRechargeTargetAllowed(me, rechargeRequest);
@@ -223,21 +224,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     {me.active_context?.context_type !== 'ORGANIZATION' && <PersonalFinanceWorkspace key={`portal-finance:${me.user_id}`} client={client} me={me} language={language} presentationTargets={{ section: navigation.section, credits: creditTarget, orders: ordersTarget, feedback: financeFeedbackTarget }} onPaid={() => { if (renderedEpoch === epoch.current) return refresh(false); }} />}
     {me.active_context?.context_type === 'ORGANIZATION' && <OrganizationFinanceWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} purchaseFocusRequest={portalPurchase} presentationTargets={{ section: navigation.section, organizationSection, organizationName, credits: creditTarget, management: organizationFinanceTarget, feedback: financeFeedbackTarget, onPurchase: () => { navigation.navigate('myOrganization'); setOrganizationPage({ owner: contextOwner, section: 'billing' }); setPortalPurchase({ client, actor: me.user_id, organizationId: me.active_context.organization_id, contextVersion: me.active_context.context_version, sessionEpoch: client.financeSessionEpoch || 0 }); } }} />}
   </AccountPortalLayout>;
-  return <main className={`ap-shell ap-app ${portal ? 'ap-portal' : 'ap-desktop'}`}>
-    <header><h1>{copy.title}</h1><select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}>{supportedLocales.map(locale => <option key={locale} value={locale}>{localeNames[locale]}</option>)}</select><button disabled={busy} onClick={() => void refresh()}>{copy.refresh}</button><button disabled={busy} onClick={logout}>{copy.logout}</button></header>
-    {error && <div className="ap-alert error" role="alert">{error}</div>}
-    {notice && <div className="ap-alert" role="status">{notice}</div>}
-    <section><h2>{accountDisplayLabel(me, copy.user)}</h2><dl><dt>{copy.username}</dt><dd>{me.username || '—'}</dd><dt>{copy.mobile}</dt><dd>{me.mobile || '—'}</dd><dt>{copy.accountStatus}</dt><dd>{me.status}</dd></dl></section>
-    <OrganizationDirectory key={`${me.user_id}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} onChanged={() => refresh(false)} />
-    {me.active_context?.context_type === 'ORGANIZATION' ? <OrganizationWorkspace key={`${me.user_id}:${me.active_context.organization_id}:${me.active_context.context_version}`} client={client} me={me} language={language} purchaseFocusRequest={rechargeRequest} onChanged={() => refresh(false)} /> : <>
-    {hasPermission(me, 'personal.billing.read') && <section className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatBalance(balance?.available_microcredits, language)}</strong><small>{copy.reservedCredits}: {formatBalance(balance?.reserved_microcredits, language)}</small></section>}
-    <PersonalFinanceWorkspace key={`personal-finance:${me.user_id}`} client={client} me={me} language={language} onPaid={() => { if (renderedEpoch === epoch.current) return refresh(false); }} />
-    <PersonalUsageWorkspace key={`personal-usage:${me.user_id}`} client={client} me={me} language={language} />
-    <AccountClosureWorkspace key={`${me.user_id}:${me.personal_authorization_version || me.active_context?.personal_authorization_version || 0}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} />
-    </>}
-    {hasPermission(me, 'personal.profile.update') && (portal ? <ProfileSettings key={me.user_id} copy={copy} me={me} client={client} onError={reason => { if (renderedEpoch === epoch.current) setError(localizedAccountPlatformError(copy, reason)); }} onChanged={result => changed(result, renderedEpoch)} onRecovering={() => { if (renderedEpoch === epoch.current) setNotice(copy.profileChangeRecovering); }} /> : <button onClick={() => client.openPortal(language).catch(reason => { if (renderedEpoch === epoch.current) setError(localizedAccountPlatformError(copy, reason)); })}>{copy.profileSettings}</button>)}
-    {portal && hasPermission(me, 'personal.security.manage') && <a href="/auth/login?reauthenticate=1&return_to=%2F">{copy.reauthenticate}</a>}
-    {portal && me.platform_permissions?.some(permission => permission.startsWith('platform.')) && <a href="/admin.html">{copy.adminCenter}</a>}
-    {onClose && <button onClick={onClose}>{copy.close}</button>}
-  </main>;
+  const desktopRechargeRequest = personalRecharge && me.active_context.context_type !== 'PERSONAL' ? null : rechargeRequest;
+  return <DesktopAccountCenter key={`${me.user_id}:${me.active_context.context_version}:${client.financeSessionEpoch || 0}`} client={client} me={me} balance={balance} copy={copy} language={language} onLanguageChange={onLanguageChange} busy={busy} error={error} notice={notice} rechargeRequest={desktopRechargeRequest}
+    onRefresh={() => refresh()} onLogout={logout} onPaid={() => { if (renderedEpoch === epoch.current) return refresh(false); }} />;
 }
