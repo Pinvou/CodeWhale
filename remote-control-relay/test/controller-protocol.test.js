@@ -336,6 +336,16 @@ test("task submission carries bounded input, exact statuses and the full tempora
   const wrongBinding = structuredClone(fixture.task_submit_vectors.temporary);
   wrongBinding.temporary_model_package.binding.task_id = "task-other";
   assertProtocolError("stale_context", () => validateControllerPayload(wrongBinding, "A", LEASE));
+  for (const field of ["connection_id", "controller_lease_id", "lease_epoch", "relay_epoch", "remote_control_generation", "task_id"]) {
+    const stale = structuredClone(fixture.task_submit_vectors.temporary);
+    stale.temporary_model_package.binding[field] = field === "lease_epoch" ? "2" : "old-context";
+    assertProtocolError("stale_context", () => validateControllerPayload(stale, "A", LEASE));
+  }
+  for (const field of ["relay_epoch", "remote_control_generation"]) {
+    const missing = structuredClone(fixture.task_submit_vectors.temporary);
+    delete missing.temporary_model_package.binding[field];
+    assertProtocolError("missing_field", () => validateControllerPayload(missing, "A", LEASE));
+  }
   const oauth = structuredClone(fixture.task_submit_vectors.temporary);
   oauth.temporary_model_package.primary_credential.kind = "oauth";
   assertProtocolError("invalid_enum", () => validateControllerPayload(oauth, "A", LEASE));

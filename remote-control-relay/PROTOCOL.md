@@ -669,7 +669,7 @@ For `model_source=controller_temporary`, `task_submit` requires one strict,
 64-KiB `temporary_model_package/v1`; it is forbidden for `controlled_device`.
 The package requires `schema, package_id, binding, primary,
 primary_credential`, with optional one-level `vision_fallback`. Binding is
-exactly `connection_id + controller_lease_id + lease_epoch + task_id` and must
+exactly `connection_id + controller_lease_id + lease_epoch + relay_epoch + remote_control_generation + task_id` and must
 equal the containing task. A route requires `display_name, preset, wire_api,
 base_url, model, image_capability_override` and only optionally accepts
 `provider_kind, vendor, endpoint_mode, context_window_tokens,
@@ -733,7 +733,7 @@ outcomes and already-admitted requests are not refusal receipts. Both clients
 must support these fields; older strict decoders may reject such receipts.
 
 The contract digest is
-`5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63`.
+`98e97089e09533376d4e0df65a93d6434ab4ead2dc4dc6f403edfce3214748c1`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role

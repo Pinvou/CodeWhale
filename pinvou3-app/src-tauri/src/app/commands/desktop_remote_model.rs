@@ -84,6 +84,8 @@ pub(crate) fn build_task_package(
             connection_id: live.connection_id.clone(),
             controller_lease_id: live.controller_lease_id.clone(),
             lease_epoch: epoch,
+            relay_epoch: live.relay_epoch.clone(),
+            remote_control_generation: live.remote_control_generation.clone(),
             task_id: task_id.to_owned(),
         },
         primary: project_saved_model(primary)?,
