@@ -1,0 +1,13 @@
+.adm-restored-shell .adm-reconciliation-bill{display:grid;min-width:0;gap:14px;margin-block:18px}
+.adm-restored-shell .adm-reconciliation-bill header h3,.adm-restored-shell .adm-reconciliation-bill p{margin:0}
+.adm-restored-shell .adm-reconciliation-bill header{display:grid;gap:6px}
+.adm-restored-shell .adm-reconciliation-bill-source{display:grid;grid-template-columns:repeat(2,max-content);align-items:center;gap:12px}
+.adm-restored-shell .adm-reconciliation-bill-source a{color:var(--adm-primary);text-decoration:underline;text-underline-offset:2px}
+.adm-restored-shell .adm-reconciliation-bill-input,.adm-restored-shell .adm-reconciliation-bill-preview{display:grid;min-width:0;gap:10px}
+.adm-restored-shell .adm-reconciliation-bill-input label,.adm-restored-shell .adm-reconciliation-bill-input input,.adm-restored-shell .adm-reconciliation-bill-input textarea{min-width:0;width:100%}
+.adm-restored-shell .adm-reconciliation-bill-input button,.adm-restored-shell .adm-reconciliation-bill footer button{justify-self:start;width:auto}
+.adm-restored-shell .adm-reconciliation-bill-preview{padding:12px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-soft)}
+.adm-restored-shell .adm-reconciliation-bill-preview dl{display:grid;grid-template-columns:minmax(0,max-content) minmax(0,1fr);gap:5px 12px;margin:0}
+.adm-restored-shell .adm-reconciliation-bill-preview dd{margin:0;font-variant-numeric:tabular-nums}
+.adm-restored-shell .adm-reconciliation-bill-input small,.adm-restored-shell .adm-reconciliation-bill-preview{overflow-wrap:anywhere}
+@media(max-width:520px){.adm-restored-shell .adm-reconciliation-bill-source{grid-template-columns:minmax(0,1fr)}.adm-restored-shell .adm-reconciliation-bill-source>*{justify-self:start}}

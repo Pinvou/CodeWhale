@@ -33,6 +33,6 @@ test('actual host rejects late actor/context reads and cancelled requests',async
   const h=host();let release,entered;const started=new Promise(r=>{entered=r;});h.client.bootstrap=()=>new Promise(r=>{release=r;entered();});const task=h.invoke(notice);await started;change(h);release(profile());await task;assert.equal(h.calls.some(c=>c[0]==='open'),false);
  }
 });
-test('personal target preserves original immediate host behavior',async()=>{const h=host();h.client.bootstrap=()=>{throw Error('must not read for personal');};await h.invoke({kind:'wallet_insufficient',contextType:'PERSONAL',action:'OPEN_RECHARGE'});assert.deepEqual(h.calls,[['request',null],['open',true]]);});
+test('personal target immediately opens the account center with the recharge destination',async()=>{const h=host();h.client.bootstrap=()=>{throw Error('must not read for personal');};await h.invoke({kind:'wallet_insufficient',contextType:'PERSONAL',action:'OPEN_RECHARGE'});assert.deepEqual(h.calls,[['request',{contextType:'PERSONAL',view:'recharge'}],['open',true]]);});
 
 test('first authenticated session observation may initialize the existing observation epoch',async()=>{const h=host();h.client.session=async()=>{h.client.versionObservationEpoch++;return {authenticated:true};};await h.invoke(notice);assert.equal(h.calls.some(c=>c[0]==='open'),true);});

@@ -33,6 +33,9 @@ async function fixture(t) {
   }) });
   await registry.enroll({ endpointId: ENDPOINT, credential: ACCESS, desktopCredential: DESKTOP });
   const pairing = await PairingStore.open({ stateStore: store, clock: () => 1000,
+    // Exercise the shared byte budget before the per-endpoint admission limits.
+    // The test loop stays bounded at 64; production defaults remain unchanged.
+    registrationBudget: { maxPerEndpointRecords: 64, maxPerEndpointWindow: 64 },
     digestKeyring: { activeKeyId: "shared-pairing-key", keys: [{ keyId: "shared-pairing-key",
       key: "shared-capacity-pairing-digest-key-0000000" }] } });
   const handler = new PairingRegistrationHandler({ pairingStore: pairing, relayEpoch: "shared-capacity-epoch",

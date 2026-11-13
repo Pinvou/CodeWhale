@@ -13,7 +13,6 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/humandelegation"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
-	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/tokengovernance"
 )
 
@@ -21,39 +20,40 @@ import (
 // retains the original Billing-only authorities. Missing independent
 // writer availability closes APPROVE, while historical reads/rejection and
 // ordinary account operations remain available through the mature pool.
-func configureApprovals(ctx context.Context, repository *account.PostgresRepository, service *account.Service, credential, environment string) error {
+func configureApprovals(ctx context.Context, repository *account.PostgresRepository, service *account.Service, credential, environment string) ([]accountBackgroundTask, error) {
 	profile, err := config.ParseAccountPlatformProfile(os.Getenv("ACCOUNT_PLATFORM_PROFILE"))
 	if err != nil {
-		return errors.New("ACCOUNT_DEPLOYMENT_PROFILE_INVALID")
+		return nil, errors.New("ACCOUNT_DEPLOYMENT_PROFILE_INVALID")
 	}
 	if err := configureApprovalPagination(ctx, repository); err != nil {
-		return errors.New("ACCOUNT_APPROVAL_PAGINATION_CONFIGURATION_INVALID")
+		return nil, errors.New("ACCOUNT_APPROVAL_PAGINATION_CONFIGURATION_INVALID")
 	}
 	_ = repository.ConfigureApprovalWriter(ctx, os.Getenv("APPROVAL_WRITER_DATABASE_URL"))
 	clients, err := newApprovalRuntimeClients(profile, os.Getenv("BILLING_HTTP_URL"), os.Getenv("TOKEN_HTTP_URL"), credential,
 		os.Getenv("TOKEN_GOVERNANCE_POLICY_SET_DIGEST"), os.Getenv("TOKEN_GOVERNANCE_HANDLER_SET_DIGEST"))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	installApprovalRuntimeClients(profile, repository, service, clients)
 	key, err := humandelegation.DecodeSigningKey(os.Getenv("HUMAN_DELEGATION_SIGNING_KEY_BASE64URL"))
 	if err != nil {
-		return errors.New("ACCOUNT_DELEGATION_KEY_INVALID")
+		return nil, errors.New("ACCOUNT_DELEGATION_KEY_INVALID")
 	}
 	signer, err := humandelegation.NewSigner(os.Getenv("HUMAN_DELEGATION_SIGNING_KEY_ID"), key)
 	clear(key)
 	if err != nil {
-		return errors.New("ACCOUNT_DELEGATION_CONFIGURATION_INVALID")
+		return nil, errors.New("ACCOUNT_DELEGATION_CONFIGURATION_INVALID")
 	}
 	service.WithHumanDelegations(signer).WithApprovalRecoveryResults(clients.results).WithApprovalRecoveryEffects(clients.effects)
 	schedule, err := manualreview.ParseOnCallSchedule(os.Getenv("MANUAL_REVIEW_ON_CALL_USER_IDS"), strings.HasPrefix(strings.ToLower(environment), "production"))
 	if err != nil {
-		return errors.New("ACCOUNT_MANUAL_REVIEW_SCHEDULE_INVALID")
+		return nil, errors.New("ACCOUNT_MANUAL_REVIEW_SCHEDULE_INVALID")
 	}
-	go observability.RunBackground(ctx, "approval-expiry", account.NewApprovalExpiryWorker(repository, time.Minute).Run)
-	go observability.RunBackground(ctx, "approval-pagination-cleanup", account.NewApprovalPaginationCleanupWorker(repository, time.Minute).Run)
-	go observability.RunBackground(ctx, "manual-review-sla", account.NewManualReviewSLAWorker(repository, schedule, time.Minute).Run)
-	return nil
+	return []accountBackgroundTask{
+		{"approval-expiry", account.NewApprovalExpiryWorker(repository, time.Minute).Run},
+		{"approval-pagination-cleanup", account.NewApprovalPaginationCleanupWorker(repository, time.Minute).Run},
+		{"manual-review-sla", account.NewManualReviewSLAWorker(repository, schedule, time.Minute).Run},
+	}, nil
 }
 
 type approvalRuntimeClients struct {
