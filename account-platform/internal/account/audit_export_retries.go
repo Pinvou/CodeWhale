@@ -41,7 +41,7 @@ func transientAuditExportDatabaseError(err error) bool {
 		return false
 	}
 	var transport net.Error
-	return errors.Is(operation.cause, io.EOF) || pgconn.Timeout(operation.cause) || errors.As(operation.cause, &transport)
+	return errors.Is(operation.cause, io.EOF) || errors.Is(operation.cause, io.ErrUnexpectedEOF) || pgconn.Timeout(operation.cause) || errors.As(operation.cause, &transport)
 }
 
 func (s *AuditExportService) retryGeneration(ctx context.Context, job claimedAuditExport) error {

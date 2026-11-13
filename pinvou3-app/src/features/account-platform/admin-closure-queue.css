@@ -1,0 +1,17 @@
+.adm-closure-directory .adm-closure-range{margin:8px 0;color:var(--adm-muted);font-size:13px}
+.adm-closure-directory .adm-closure-filters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr)) auto auto;align-items:end;gap:10px;margin:14px 0;padding:12px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-surface)}
+.adm-closure-directory .adm-closure-filters select{min-width:0;width:100%}
+.adm-closure-directory .adm-closure-filters button{margin:0}
+.adm-closure-directory .adm-closure-table-wrap{width:100%;min-width:0;margin:12px 0;overflow-x:auto;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-surface)}
+.adm-closure-directory .adm-closure-table{min-width:40rem;margin:0;table-layout:fixed}
+.adm-closure-directory .adm-closure-table th,.adm-closure-directory .adm-closure-table td{vertical-align:top;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-closure-directory .adm-closure-table thead th:first-child{width:23%}
+.adm-closure-directory .adm-closure-table thead th:last-child{width:27%}
+.adm-closure-directory .adm-closure-table code{white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-closure-directory .adm-closure-local-heading{background:var(--adm-soft);text-align:left}
+.adm-closure-directory .adm-closure-action-cell textarea{width:100%;min-width:0;resize:vertical}
+.adm-closure-directory .adm-closure-action-cell p{margin:0 0 6px}
+.adm-closure-directory .adm-closure-action-cell button{margin-top:6px}
+.adm-closure-directory .adm-closure-table-wrap:focus,.adm-closure-directory button:focus,.adm-closure-directory select:focus,.adm-closure-directory textarea:focus{outline:3px solid var(--adm-primary);outline-offset:2px}
+@media(max-width:720px){.adm-closure-directory .adm-closure-filters{grid-template-columns:repeat(2,minmax(0,1fr))}.adm-closure-directory .adm-closure-filters button{width:100%}}
+@media(max-width:390px){.adm-closure-directory .adm-closure-filters{grid-template-columns:minmax(0,1fr)}}

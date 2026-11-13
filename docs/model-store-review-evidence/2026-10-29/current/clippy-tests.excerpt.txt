@@ -1,0 +1,51 @@
+[Excerpt: first 12 and last 36 original lines; full-file hash below in manifest.]
+   Compiling pinvou3-tauri v0.10.16 (<WORKTREE>/pinvou3-app/src-tauri)
+warning: used `unwrap()` on a `Result` value
+  --> tests/memory_e2e.rs:67:14
+   |
+67 |       let ns = std::time::SystemTime::now()
+   |  ______________^
+68 | |         .duration_since(std::time::UNIX_EPOCH)
+69 | |         .unwrap()
+   | |_________________^
+   |
+   = note: if this value is an `Err`, it will panic
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#unwrap_used
+
+[... 196866 original lines omitted ...]
+4021 | |                     "sess-purged",
+4022 | |                     CodexWorkspaceKind::Project,
+...    |
+4026 | |                 .expect("bind purged");
+     | |______________________________________^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#expect_used
+
+warning: used `expect()` on a `Result` value
+    --> src/lib.rs:4027:13
+     |
+4027 | /             store
+4028 | |                 .bind_code_native_session(
+4029 | |                     "sess-survivor",
+4030 | |                     CodexWorkspaceKind::Project,
+...    |
+4034 | |                 .expect("bind survivor");
+     | |________________________________________^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#expect_used
+
+warning: used `expect()` on a `Result` value
+    --> src/lib.rs:4046:27
+     |
+4046 |               let on_disk = std::fs::read_to_string(home.join("session-agents.json"))
+     |  ___________________________^
+4047 | |                 .expect("the index must persist after the purge leg");
+     | |_____________________________________________________________________^
+     |
+     = note: if this value is an `Err`, it will panic
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#expect_used
+
+warning: `pinvou3-tauri` (lib test) generated 19018 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.23s

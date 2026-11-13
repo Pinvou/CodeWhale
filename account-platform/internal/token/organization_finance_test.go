@@ -34,6 +34,20 @@ func TestOrganizationFinanceAuthorityAndWalletScope(t *testing.T) {
 		{"denied-products", "denied", "GET", "/recharge/products", "", 403},
 		{"denied-capabilities", "denied", "GET", "/payment-capabilities", "", 403},
 		{"order", "valid", "GET", "/recharge/orders/" + order.String(), "", 200},
+		{"history-first-page", "valid", "GET", "/recharge/orders", "", 200},
+		{"history", "valid", "GET", "/recharge/orders?cursor=cGFnZQ", "", 200},
+		{"history-billing-bad-cursor", "history-billing-400", "GET", "/recharge/orders?cursor=cGFnZQ", "", 400},
+		{"history-billing-unavailable", "history-billing-503", "GET", "/recharge/orders?cursor=cGFnZQ", "", 503},
+		{"denied-history", "denied", "GET", "/recharge/orders", "", 403},
+		{"foreign-history-wallet", "foreign-history-wallet", "GET", "/recharge/orders", "", 502},
+		{"foreign-history-requester", "foreign-history-requester", "GET", "/recharge/orders", "", 502},
+		{"duplicate-history-orders", "duplicate-history-orders", "GET", "/recharge/orders", "", 502},
+		{"forged-history-wallet", "valid", "GET", "/recharge/orders?wallet_id=" + other.String(), "", 400},
+		{"duplicate-history-cursor", "valid", "GET", "/recharge/orders?cursor=a&cursor=b", "", 400},
+		{"invalid-history-cursor", "valid", "GET", "/recharge/orders?cursor=invalid%20cursor", "", 400},
+		{"malformed-history-escape", "invalid-history-query", "GET", "/recharge/orders?cursor=%GG", "", 400},
+		{"malformed-history-tail", "invalid-history-query", "GET", "/recharge/orders?cursor=cGFnZQ&ignored=x;y", "", 400},
+		{"empty-history-cursor", "invalid-history-query", "GET", "/recharge/orders?cursor=", "", 400},
 		{"foreign-order-org", "foreign-order-org", "GET", "/recharge/orders/" + order.String(), "", 404},
 		{"foreign-order-wallet", "foreign-order-wallet", "GET", "/recharge/orders/" + order.String(), "", 404},
 		{"create", "valid", "POST", "/recharge/orders", `{"product_id":"owned-product","channel":"alipay"}`, 201},
@@ -41,7 +55,7 @@ func TestOrganizationFinanceAuthorityAndWalletScope(t *testing.T) {
 		{"client-beneficiary", "valid", "POST", "/recharge/orders", `{"product_id":"owned-product","channel":"alipay","beneficiary_organization_id":"` + other.String() + `"}`, 400},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var ensure, create atomic.Int32
+			var ensure, create, history atomic.Int32
 			account := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/internal/v1/authorization/check":
@@ -116,6 +130,39 @@ func TestOrganizationFinanceAuthorityAndWalletScope(t *testing.T) {
 					}
 					_, _ = fmt.Fprint(w, `{"channels":["ALIPAY"]}`)
 				case "/internal/v1/recharge/orders":
+					if r.Method == http.MethodGet {
+						history.Add(1)
+						if r.URL.Query().Get("requester_id") != user.String() || r.URL.Query().Get("wallet_id") != wallet.String() || r.URL.Query().Get("limit") != "50" {
+							t.Error("order history lost its resolved payer/wallet boundary")
+						}
+						if tc.name == "history" && r.URL.Query().Get("cursor") != "cGFnZQ" {
+							t.Error("history cursor was not forwarded")
+						}
+						if tc.name == "history-first-page" && r.URL.Query().Has("cursor") {
+							t.Error("first-page request acquired a cursor")
+						}
+						if tc.kind == "history-billing-400" || tc.kind == "history-billing-503" {
+							if r.URL.Query().Get("cursor") != "cGFnZQ" {
+								t.Error("upstream error fixture lost the original cursor")
+							}
+							w.WriteHeader(tc.want)
+							_, _ = fmt.Fprint(w, `{"code":"CONTROLLED_HISTORY_FAILURE"}`)
+							return
+						}
+						requester, scopeWallet := user, wallet
+						if tc.kind == "foreign-history-requester" {
+							requester = other
+						}
+						if tc.kind == "foreign-history-wallet" {
+							scopeWallet = other
+						}
+						items := []map[string]any{{"order_id": order, "amount_fen": int64(9007199254740993)}}
+						if tc.kind == "duplicate-history-orders" {
+							items = append(items, items[0])
+						}
+						_ = json.NewEncoder(w).Encode(map[string]any{"requester_id": requester, "wallet_id": scopeWallet, "items": items, "next_cursor": nil})
+						return
+					}
 					create.Add(1)
 					var in struct {
 						Requester, Wallet, Org   uuid.UUID
@@ -174,11 +221,29 @@ func TestOrganizationFinanceAuthorityAndWalletScope(t *testing.T) {
 			if tc.want == 403 && ensure.Load() != 0 {
 				t.Error("denied authority reached Billing")
 			}
+			if tc.kind == "invalid-history-query" && (ensure.Load() != 0 || !strings.Contains(out.Body.String(), "INVALID_REQUEST")) {
+				t.Error("invalid history query reached Billing or lost its public error code")
+			}
+			if tc.kind == "history-billing-400" || tc.kind == "history-billing-503" {
+				var response struct {
+					Code string `json:"code"`
+				}
+				expectedCode := "INVALID_REQUEST"
+				if tc.kind == "history-billing-503" {
+					expectedCode = "BILLING_UNAVAILABLE"
+				}
+				if json.Unmarshal(out.Body.Bytes(), &response) != nil || response.Code != expectedCode || ensure.Load() != 1 || history.Load() != 1 || create.Load() != 0 {
+					t.Error("upstream history failure lost its public error mapping or owned read boundary")
+				}
+			}
 			if tc.method == "POST" && tc.want == 400 && create.Load() != 0 {
 				t.Error("invalid client facts reached payment creation")
 			}
 			if tc.name == "balance" && !strings.Contains(out.Body.String(), "9007199254740993") {
 				t.Error("organization amount lost exact int64 bytes")
+			}
+			if tc.name == "history" && (!strings.Contains(out.Body.String(), "9007199254740993") || out.Header().Get("Cache-Control") != "no-store" || !strings.Contains(out.Body.String(), org.String())) {
+				t.Error("organization history lost exact monetary bytes, owner binding or no-store policy")
 			}
 		})
 	}

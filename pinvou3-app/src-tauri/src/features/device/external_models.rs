@@ -860,6 +860,70 @@ pub(crate) mod guard4_test_hooks {
     }
 }
 
+// A test-only barrier after every final deletion guard. Dropping the release
+// sender aborts the barrier promptly; it cannot strand a fixture on a panic.
+#[cfg(test)]
+struct WeightRemovalPause {
+    target: PathBuf,
+    arrived: std::sync::mpsc::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+static WEIGHT_REMOVAL_TEST_PAUSE: std::sync::Mutex<Option<WeightRemovalPause>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn weight_removal_test_pause(target: &Path) -> Result<(), String> {
+    let hook = {
+        let mut state = WEIGHT_REMOVAL_TEST_PAUSE
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if state.as_ref().is_some_and(|hook| hook.target == target) {
+            state.take()
+        } else {
+            None
+        }
+    };
+    if let Some(hook) = hook {
+        hook.arrived.send(()).map_err(|error| error.to_string())?;
+        hook.release
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| format!("weight-removal test barrier: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod weight_removal_test_hooks {
+    pub(crate) fn arm(
+        target: &std::path::Path,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut state = super::WEIGHT_REMOVAL_TEST_PAUSE
+            .lock()
+            .expect("weight-removal barrier");
+        assert!(state.is_none(), "another weight-removal barrier is active");
+        *state = Some(super::WeightRemovalPause {
+            target: target.to_path_buf(),
+            arrived: arrived_tx,
+            release: release_rx,
+        });
+        (arrived_rx, release_tx)
+    }
+}
+
+/// Only errors introduced by the store's authoritative-path boundary use
+/// these owned codes. Preserve them for the device UI's locale mapping; other
+/// store/database/configuration errors retain their existing context wrappers.
+fn is_owned_store_weight_path_error(error: &str) -> bool {
+    error == "model_store_weight_path_invalid"
+        || error
+            .strip_prefix("model_store_weight_path_unavailable: ")
+            .is_some_and(|diagnostic| !diagnostic.is_empty())
+}
+
 fn normalize_optional(raw: &Option<String>) -> Option<String> {
     raw.as_deref()
         .map(str::trim)
@@ -1061,7 +1125,10 @@ pub async fn remove_external_model(
             // 存量——升级前已移除的扫描目录（历史为空）与被 16 条上限淘汰的
             // 历史根——由"在册卡片实际引用的权重路径"兜底。fail-closed 与
             // 名单/权重根查询同口径。
-            let installed_refs = crate::features::model_store::installed_weight_paths_checked()?;
+            let installed_refs =
+                crate::features::model_store::installed_weight_paths_for_removal_checked(
+                    delete_weights && weights_path.is_some(),
+                )?;
             let installed_weight_hit = match weights_path.as_deref() {
                 Some(weights) => paths_intersect_any(Path::new(weights), &installed_refs),
                 None => false,
@@ -1137,6 +1204,9 @@ pub async fn remove_external_model(
     .await
     .map_err(|error| format!("商店边界查询失败：{error}"))?
     .map_err(|error: String| {
+        if is_owned_store_weight_path_error(&error) {
+            return error;
+        }
         // 商店库查询失败（含永久损坏）在"请稍后重试"之外同样给手工删除出路
         // （round-22 review P3，与命中商店名单的拒绝同一句尾）：永久损坏时
         // "稍后重试"是死路，记录会从 UI 永远删不掉。
@@ -1235,139 +1305,151 @@ pub async fn remove_external_model(
                             )? {
                                 return Ok(None);
                             }
-                            // 守卫（含 canonicalize）与整目录删除同一池执行：
-                            // canonicalize 在陈旧 NFS/FUSE 挂载上可能阻塞数秒，
-                            // 不能占住 async worker（第四轮评审 P3）。
-                            // daemon 模型候选根 = env 迁移根 + 默认根并集：env
-                            // 写错/指向未建目录时默认根仍要受保护（第二十轮评审 P2）。
-                            let ollama_roots = ollama_model_roots(
-                                std::env::var("OLLAMA_MODELS").ok().as_deref(),
-                                &home,
-                            );
-                            let target = weights_deletion_guard(
-                                &home,
-                                Some(&protected),
-                                &ollama_roots,
-                                Path::new(&weights_for_task),
-                            )?;
-                            // canonicalize（守卫）与 remove_dir_all（删除）之间存在窗口：
-                            // 本地进程可把路径的中间分量换成符号链接让删除落到别处。
-                            // 删除前重新解析并比对，收窄最后一跳。剩余的亚毫秒级精确
-                            // 竞速不在承诺内——能写 HOME 的本地进程本就可以直接 rm -rf，
-                            // 守卫防的是"守卫时刻判断正确、删除时刻路径已被换走"的
-                            // 构造场景（五轮评审对抗实测）。
-                            let recheck = target.canonicalize().map_err(|error| {
-                                format!(
-                                    "拒绝删除：目标目录在删除前变得不可解析（{}）：{error}",
-                                    truncate_path_echo(&target.to_string_lossy())
+                            // Store download/stage operations hold this exact
+                            // cross-process resource lock shared. Acquire it
+                            // exclusively before the final guards, and retain
+                            // it through remove_dir_all; two unlocked queries
+                            // cannot exclude a new reference between them.
+                            crate::features::model_store::with_weight_removal_boundary(|| {
+                                // 守卫（含 canonicalize）与整目录删除同一池执行：
+                                // canonicalize 在陈旧 NFS/FUSE 挂载上可能阻塞数秒，
+                                // 不能占住 async worker（第四轮评审 P3）。
+                                // daemon 模型候选根 = env 迁移根 + 默认根并集：env
+                                // 写错/指向未建目录时默认根仍要受保护（第二十轮评审 P2）。
+                                let ollama_roots = ollama_model_roots(
+                                    std::env::var("OLLAMA_MODELS").ok().as_deref(),
+                                    &home,
+                                );
+                                let target = weights_deletion_guard(
+                                    &home,
+                                    Some(&protected),
+                                    &ollama_roots,
+                                    Path::new(&weights_for_task),
+                                )?;
+                                // canonicalize（守卫）与 remove_dir_all（删除）之间存在窗口：
+                                // 本地进程可把路径的中间分量换成符号链接让删除落到别处。
+                                // 删除前重新解析并比对，收窄最后一跳。剩余的亚毫秒级精确
+                                // 竞速不在承诺内——能写 HOME 的本地进程本就可以直接 rm -rf，
+                                // 守卫防的是"守卫时刻判断正确、删除时刻路径已被换走"的
+                                // 构造场景（五轮评审对抗实测）。
+                                let recheck = target.canonicalize().map_err(|error| {
+                                    format!(
+                                        "拒绝删除：目标目录在删除前变得不可解析（{}）：{error}",
+                                        truncate_path_echo(&target.to_string_lossy())
+                                    )
+                                })?;
+                                ensure_recheck_unchanged(&target, &recheck)?;
+                                // 商店权重根删除时刻复查（第九轮评审 P3）：边界臂的
+                                // 根集合只在守卫链早段查过一次，与上方 ollama 根同一
+                                // 模式在闭包内重推导；查询失败按拒绝（与边界臂
+                                // fail-closed 同口径）。canonicalize（守卫）→ 删除
+                                // 之间剩余的同用户竞速窗口沿用上方免责：能写
+                                // settings/HOME 的本地进程本就可以直接 rm -rf，这里
+                                // 收窄的是"守卫时刻判断正确、删除时刻目录已被换进
+                                // 商店根"的构造场景。
+                                let store_roots =
+                                    crate::features::model_store::store_weights_roots_checked()
+                                        .map_err(|error| {
+                                            format!(
+                                                "拒绝删除：商店权重根读取失败（{error}），为防误删已拒绝"
+                                            )
+                                        })?;
+                                ensure_recheck_outside_store_roots(&recheck, &store_roots)?;
+                                // 存量引用删除时刻复查（2026-11-04 评审 P2）：与商店
+                                // 根复查同一模式重推导，查询失败按拒绝（fail-closed
+                                // 同口径）。
+                                let installed_refs =
+                                    crate::features::model_store::installed_weight_paths_checked()
+                                        .map_err(|error| {
+                                            if is_owned_store_weight_path_error(&error) {
+                                                return error;
+                                            }
+                                            format!(
+                                                "拒绝删除：已安装引用读取失败（{error}），为防误删已拒绝"
+                                            )
+                                        })?;
+                                ensure_recheck_outside_installed_refs(&recheck, &installed_refs)?;
+                                // 零痕迹旧根名字删除时刻复查（2026-11-04 评审 P2
+                                // zhuowp 场景）：与边界闭包的名字判定镜像同一口径，
+                                // 查询失败按拒绝（fail-closed 同口径）。
+                                let candidate_names =
+                                    crate::features::model_store::installed_weight_candidate_names_checked()
+                                        .map_err(|error| {
+                                            format!(
+                                                "拒绝删除：在册卡片约定名读取失败（{error}），为防误删已拒绝"
+                                            )
+                                        })?;
+                                ensure_recheck_not_candidate_named(&recheck, &candidate_names)?;
+                                // 自取名原目录标记删除时刻复查（2026-11-05 评审 P2
+                                // zhuowp 场景 II）：与边界闭包的标记判定镜像同一
+                                // 口径，查询失败按拒绝（fail-closed 同口径）。
+                                let import_markers =
+                                    crate::features::model_store::installed_import_markers_checked()
+                                        .map_err(|error| {
+                                            format!(
+                                                "拒绝删除：在册卡片导入标记读取失败（{error}），为防误删已拒绝"
+                                            )
+                                        })?;
+                                ensure_recheck_free_of_import_markers(&recheck, &import_markers)?;
+                                // 登记权重文件名删除时刻复查（2026-11-06 评审 P2
+                                // zhuowp 场景 III）：与标记复查镜像同一口径，查询
+                                // 失败按拒绝（fail-closed 同口径）。
+                                let weight_filenames =
+                                    crate::features::model_store::installed_weight_filenames_checked()
+                                        .map_err(|error| {
+                                            format!(
+                                                "拒绝删除：在册卡片权重文件名读取失败（{error}），为防误删已拒绝"
+                                            )
+                                        })?;
+                                ensure_recheck_free_of_registered_weight_files(
+                                    &recheck,
+                                    &weight_filenames,
+                                )?;
+                                // 同仓注册表交叉引用删除时刻复查（2026-11-07 评审 P2
+                                // zhuowp，review 5801985394）：与商店根复查同一模式
+                                // 重推导（守卫后到删除前注册表可能被并发改写），读取
+                                // 失败按拒绝（fail-closed 同口径；排除口径与边界臂
+                                // 同一把尺：除 id 外逐字段相等的真等价副本，见
+                                // other_registry_weights_checked）。
+                                let registry_weights = other_registry_weights_checked(
+                                    &registry_dir(),
+                                    &exclude_record_for_task,
                                 )
-                            })?;
-                            ensure_recheck_unchanged(&target, &recheck)?;
-                            // 商店权重根删除时刻复查（第九轮评审 P3）：边界臂的
-                            // 根集合只在守卫链早段查过一次，与上方 ollama 根同一
-                            // 模式在闭包内重推导；查询失败按拒绝（与边界臂
-                            // fail-closed 同口径）。canonicalize（守卫）→ 删除
-                            // 之间剩余的同用户竞速窗口沿用上方免责：能写
-                            // settings/HOME 的本地进程本就可以直接 rm -rf，这里
-                            // 收窄的是"守卫时刻判断正确、删除时刻目录已被换进
-                            // 商店根"的构造场景。
-                            let store_roots =
-                                crate::features::model_store::store_weights_roots_checked()
-                                    .map_err(|error| {
-                                        format!(
-                                            "拒绝删除：商店权重根读取失败（{error}），为防误删已拒绝"
-                                        )
-                                    })?;
-                            ensure_recheck_outside_store_roots(&recheck, &store_roots)?;
-                            // 存量引用删除时刻复查（2026-11-04 评审 P2）：与商店
-                            // 根复查同一模式重推导，查询失败按拒绝（fail-closed
-                            // 同口径）。
-                            let installed_refs =
-                                crate::features::model_store::installed_weight_paths_checked()
-                                    .map_err(|error| {
-                                        format!(
-                                            "拒绝删除：已安装引用读取失败（{error}），为防误删已拒绝"
-                                        )
-                                    })?;
-                            ensure_recheck_outside_installed_refs(&recheck, &installed_refs)?;
-                            // 零痕迹旧根名字删除时刻复查（2026-11-04 评审 P2
-                            // zhuowp 场景）：与边界闭包的名字判定镜像同一口径，
-                            // 查询失败按拒绝（fail-closed 同口径）。
-                            let candidate_names =
-                                crate::features::model_store::installed_weight_candidate_names_checked()
-                                    .map_err(|error| {
-                                        format!(
-                                            "拒绝删除：在册卡片约定名读取失败（{error}），为防误删已拒绝"
-                                        )
-                                    })?;
-                            ensure_recheck_not_candidate_named(&recheck, &candidate_names)?;
-                            // 自取名原目录标记删除时刻复查（2026-11-05 评审 P2
-                            // zhuowp 场景 II）：与边界闭包的标记判定镜像同一
-                            // 口径，查询失败按拒绝（fail-closed 同口径）。
-                            let import_markers =
-                                crate::features::model_store::installed_import_markers_checked()
-                                    .map_err(|error| {
-                                        format!(
-                                            "拒绝删除：在册卡片导入标记读取失败（{error}），为防误删已拒绝"
-                                        )
-                                    })?;
-                            ensure_recheck_free_of_import_markers(&recheck, &import_markers)?;
-                            // 登记权重文件名删除时刻复查（2026-11-06 评审 P2
-                            // zhuowp 场景 III）：与标记复查镜像同一口径，查询
-                            // 失败按拒绝（fail-closed 同口径）。
-                            let weight_filenames =
-                                crate::features::model_store::installed_weight_filenames_checked()
-                                    .map_err(|error| {
-                                        format!(
-                                            "拒绝删除：在册卡片权重文件名读取失败（{error}），为防误删已拒绝"
-                                        )
-                                    })?;
-                            ensure_recheck_free_of_registered_weight_files(
-                                &recheck,
-                                &weight_filenames,
-                            )?;
-                            // 同仓注册表交叉引用删除时刻复查（2026-11-07 评审 P2
-                            // zhuowp，review 5801985394）：与商店根复查同一模式
-                            // 重推导（守卫后到删除前注册表可能被并发改写），读取
-                            // 失败按拒绝（fail-closed 同口径；排除口径与边界臂
-                            // 同一把尺：除 id 外逐字段相等的真等价副本，见
-                            // other_registry_weights_checked）。
-                            let registry_weights = other_registry_weights_checked(
-                                &registry_dir(),
-                                &exclude_record_for_task,
-                            )
-                            .map_err(|error| {
-                                format!(
-                                    "拒绝删除：注册表交叉引用读取失败（{error}），为防误删已拒绝"
-                                )
-                            })?;
-                            ensure_recheck_outside_registry_weights(&recheck, &registry_weights)?;
-                            // 无痕在册卡片归属删除时刻复查（2026-11-08 评审 P2-3）：
-                            // 与边界臂同一探测镜像重推导（守卫后到删除前商店库
-                            // 可能变化），查询失败按拒绝（fail-closed 同口径）。
-                            let ownership_unconfirmable =
-                                crate::features::model_store::installed_ownership_unconfirmable_checked()
-                                    .map_err(|error| {
-                                        format!(
-                                            "拒绝删除：在册卡片归属探测失败（{error}），为防误删已拒绝"
-                                        )
-                                    })?;
-                            ensure_recheck_ownership_confirmable(ownership_unconfirmable)?;
-                            // 并发移除兜底：另一窗口/通道已把目录删掉时
-                            // remove_dir_all 报 NotFound——与存在性预检的
-                            // Ok(None) 同口径按"已删除"收敛，不报误导性的
-                            // "删除失败"（第二十轮评审 P3；与 ollama 404 幂等
-                            // 同一语义）。
-                            match std::fs::remove_dir_all(&recheck) {
-                                Ok(()) => Ok(Some(recheck)),
-                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                    Ok(None)
+                                .map_err(|error| {
+                                    format!(
+                                        "拒绝删除：注册表交叉引用读取失败（{error}），为防误删已拒绝"
+                                    )
+                                })?;
+                                ensure_recheck_outside_registry_weights(&recheck, &registry_weights)?;
+                                // 无痕在册卡片归属删除时刻复查（2026-11-08 评审 P2-3）：
+                                // 与边界臂同一探测镜像重推导（守卫后到删除前商店库
+                                // 可能变化），查询失败按拒绝（fail-closed 同口径）。
+                                let ownership_unconfirmable =
+                                    crate::features::model_store::installed_ownership_unconfirmable_checked()
+                                        .map_err(|error| {
+                                            format!(
+                                                "拒绝删除：在册卡片归属探测失败（{error}），为防误删已拒绝"
+                                            )
+                                        })?;
+                                ensure_recheck_ownership_confirmable(ownership_unconfirmable)?;
+                                // 并发移除兜底：另一窗口/通道已把目录删掉时
+                                // remove_dir_all 报 NotFound——与存在性预检的
+                                // Ok(None) 同口径按"已删除"收敛，不报误导性的
+                                // "删除失败"（第二十轮评审 P3；与 ollama 404 幂等
+                                // 同一语义）。
+                                #[cfg(test)]
+                                weight_removal_test_pause(&recheck)?;
+                                match std::fs::remove_dir_all(&recheck) {
+                                    Ok(()) => Ok(Some(recheck)),
+                                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                        Ok(None)
+                                    }
+                                    Err(error) => Err(format!(
+                                        "权重目录删除失败（{}）：{error}",
+                                        truncate_path_echo(&recheck.to_string_lossy())
+                                    )),
                                 }
-                                Err(error) => Err(format!(
-                                    "权重目录删除失败（{}）：{error}",
-                                    truncate_path_echo(&recheck.to_string_lossy())
-                                )),
-                            }
+                            })
                         })
                         .await
                         .map_err(|error| format!("权重目录删除失败（{}）：{error}", truncate_path_echo(&weights)))??;
@@ -2635,6 +2717,27 @@ fn endpoint_models_url(base_url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn owned_weight_path_errors_are_exact_codes_not_substring_guesses() {
+        assert!(super::is_owned_store_weight_path_error(
+            "model_store_weight_path_invalid"
+        ));
+        assert!(super::is_owned_store_weight_path_error(
+            "model_store_weight_path_unavailable: Permission denied (os error 13)"
+        ));
+        for unknown in [
+            "model_store_weight_path_unavailable: ",
+            "unexpected prefix: model_store_weight_path_invalid",
+            "model_store_weight_path_invalid suffix",
+            "other database/configuration failure",
+        ] {
+            assert!(
+                !super::is_owned_store_weight_path_error(unknown),
+                "{unknown}"
+            );
+        }
+    }
+
     use super::*;
 
     /// 测试专用的临时目录（进程内唯一），Drop 由调用方显式清理。
