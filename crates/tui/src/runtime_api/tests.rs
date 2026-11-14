@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "host_http_policy_tests.rs"]
+mod host_http_policy_tests;
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
 use crate::core::ops::Op;
 use crate::models::Role;
@@ -912,6 +915,7 @@ struct TestServerOverrides {
     web: Option<web::RuntimeWebState>,
     compat_stream_test_hook: Option<mpsc::UnboundedSender<CompatStreamTestPoint>>,
     plugin_discovery: Option<Arc<crate::plugins::PluginDiscoveryContext>>,
+    state_probe: Option<tokio::sync::oneshot::Sender<RuntimeApiState>>,
 }
 
 async fn spawn_test_server_with_root_token_mobile_workspace_and_subagents(
@@ -1020,8 +1024,10 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
     } else {
         None
     };
+    let host_model_http_policies = HostModelHttpPolicies::from_config(&config);
     let state = RuntimeApiState {
         config: Arc::new(parking_lot::RwLock::new(config)),
+        host_model_http_policies,
         workspace,
         plugin_discovery: overrides
             .plugin_discovery
@@ -1050,6 +1056,9 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
             .unwrap_or_else(configured_codewhale_binary),
         compat_stream_test_hook: overrides.compat_stream_test_hook,
     };
+    if let Some(probe) = overrides.state_probe {
+        let _ = probe.send(state.clone());
+    }
     let app = build_router(state);
     let handle = tokio::spawn(async move {
         let _ = axum::serve(

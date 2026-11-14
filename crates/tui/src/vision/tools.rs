@@ -17,8 +17,23 @@ use crate::tools::spec::{
 
 pub struct ImageAnalyzeTool {
     config: VisionModelConfig,
-    client: Result<reqwest::Client, ()>,
+    client: Result<reqwest::Client, VisionClientSetupFailure>,
     route_client: Option<DeepSeekClient>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisionClientSetupFailure {
+    HostPolicy,
+    ClientBuilder,
+}
+
+impl VisionClientSetupFailure {
+    fn diagnostic(self) -> &'static str {
+        match self {
+            Self::HostPolicy => "host_policy",
+            Self::ClientBuilder => "client_builder",
+        }
+    }
 }
 
 /// Total envelope for one image_analyze call, retry attempts and response
@@ -56,7 +71,11 @@ impl ImageAnalyzeTool {
         config: VisionModelConfig,
         route_client: Option<DeepSeekClient>,
     ) -> Self {
-        let client = (|| -> anyhow::Result<reqwest::Client> {
+        let client = (|| {
+            let base_url = config
+                .base_url
+                .as_deref()
+                .unwrap_or("https://api.openai.com/v1");
             let builder = crate::tls::reqwest_client_builder()
                 // Bound only the connect handshake. A client- or request-level
                 // `read_timeout` would start counting at `send()` and never
@@ -64,19 +83,33 @@ impl ImageAnalyzeTool {
                 // total deadline on the upload + long non-streaming generation;
                 // the total bound lives in VISION_REQUEST_ENVELOPE instead.
                 .connect_timeout(Duration::from_secs(10));
-            let builder = match config.model_http_policy.as_ref() {
-                Some(policy) => policy.configure(
-                    builder,
-                    config
-                        .base_url
-                        .as_deref()
-                        .unwrap_or("https://api.openai.com/v1"),
-                )?,
+            let builder = match route_client.as_ref().filter(|route| {
+                route.idempotency_matches_route(
+                    base_url,
+                    config.api_key.as_deref().unwrap_or_default(),
+                )
+            }) {
+                Some(route) => route.with_vision_route_headers(builder),
                 None => builder,
             };
-            Ok(builder.build()?)
-        })()
-        .map_err(|_| ());
+            let builder = match config.model_http_policy.as_ref() {
+                Some(policy) => policy
+                    .configure(builder, base_url)
+                    .map_err(|_| VisionClientSetupFailure::HostPolicy)?,
+                None => builder,
+            };
+            builder
+                .build()
+                .map_err(|_| VisionClientSetupFailure::ClientBuilder)
+        })();
+        if let Err(reason) = &client {
+            // A host policy error can contain private routes or credentials.
+            // Only this closed stage classification belongs in library logs.
+            tracing::warn!(
+                stage = reason.diagnostic(),
+                "Vision HTTP client setup failed"
+            );
+        }
         Self {
             config,
             client,
@@ -352,9 +385,9 @@ impl ToolSpec for ImageAnalyzeTool {
             let response = with_retry(
                 &retry_config,
                 || {
-                    let client = idempotency_route
-                        .map(|route| route.http_client.clone())
-                        .unwrap_or_else(|| client.clone());
+                    // Matching route metadata does not make the two host
+                    // transport policies interchangeable.
+                    let client = client.clone();
                     let url = url.clone();
                     let api_key = api_key.clone();
                     let payload = payload.clone();
@@ -466,6 +499,70 @@ mod tests {
             base_url: Some("https://example.invalid/v1".to_string()),
             model_http_policy: None,
         }
+    }
+
+    #[tokio::test]
+    async fn forkguard_host_http_policy_vision_diagnostics_expose_only_setup_stage() {
+        #[derive(Debug)]
+        struct RejectedPolicy(bool);
+
+        impl crate::config::ModelHttpPolicy for RejectedPolicy {
+            fn configure(
+                &self,
+                builder: reqwest::ClientBuilder,
+                _base_url: &str,
+            ) -> anyhow::Result<reqwest::ClientBuilder> {
+                if self.0 {
+                    anyhow::bail!(
+                        "private-host-error-canary: https://private-route.invalid/secret"
+                    );
+                }
+                Ok(builder.user_agent("invalid\nheader"))
+            }
+        }
+
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let writer = log.reopen().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish();
+        let tools = tracing::subscriber::with_default(subscriber, || {
+            [
+                (true, VisionClientSetupFailure::HostPolicy),
+                (false, VisionClientSetupFailure::ClientBuilder),
+            ]
+            .map(|(reject_policy, expected)| {
+                let mut config = fake_config();
+                config.model_http_policy = Some(std::sync::Arc::new(RejectedPolicy(reject_policy)));
+                let tool = ImageAnalyzeTool::new(config);
+                assert_eq!(tool.client.as_ref().err(), Some(&expected));
+                tool
+            })
+        });
+        let workspace = tempdir().unwrap();
+        for tool in tools {
+            let error = tool
+                .execute(
+                    json!({"image_path":"never-read.png"}),
+                    &ToolContext::new(workspace.path().to_path_buf()),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Vision HTTP transport unavailable")
+            );
+            assert!(!error.to_string().contains("private-host-error-canary"));
+        }
+        let logs = std::fs::read_to_string(log.path()).unwrap();
+        assert!(logs.contains("host_policy"));
+        assert!(logs.contains("client_builder"));
+        assert!(!logs.contains("private-host-error-canary"));
+        assert!(!logs.contains("private-route.invalid"));
+        assert!(!logs.contains("invalid\\nheader"));
     }
 
     fn standalone_vision_cap(model: &str) -> u64 {
@@ -1155,6 +1252,26 @@ mod tests {
     async fn forkguard_model_operation_vision_http_retry_keeps_id() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Debug)]
+        struct TransportPolicy(&'static str);
+        impl crate::config::ModelHttpPolicy for TransportPolicy {
+            fn configure(
+                &self,
+                builder: reqwest::ClientBuilder,
+                _base_url: &str,
+            ) -> anyhow::Result<reqwest::ClientBuilder> {
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(
+                    "x-transport-policy",
+                    reqwest::header::HeaderValue::from_static(self.0),
+                );
+                headers.insert(
+                    "x-pinvou-context-id",
+                    reqwest::header::HeaderValue::from_str(&format!("host-{}-context", self.0))?,
+                );
+                Ok(builder.no_proxy().default_headers(headers))
+            }
+        }
         let server = MockServer::start().await;
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
@@ -1175,25 +1292,26 @@ mod tests {
         )
         .unwrap();
         let context = ToolContext::new(workspace.path());
-        let route = DeepSeekClient::new(&crate::config::Config {
+        let route_config = crate::config::Config {
             provider: Some("deepseek".into()),
             api_key: Some("owned-test-key".into()),
             base_url: Some(format!("{}/v1", server.uri())),
             default_text_model: Some("deepseek-v4-pro".into()),
             request_idempotency_header: Some("idempotency-key".into()),
+            model_http_policy: Some(Arc::new(TransportPolicy("primary"))),
             http_headers: Some(std::collections::HashMap::from([
                 ("X-Pinvou-Context-Type".into(), "ORG".into()),
                 ("X-Pinvou-Context-Id".into(), "owned-test-context".into()),
             ])),
             ..Default::default()
-        })
-        .unwrap();
+        };
+        let route = DeepSeekClient::new(&route_config).unwrap();
         let tool = ImageAnalyzeTool::new_with_route_client(
             VisionModelConfig {
                 model: "test-vision-model".into(),
                 api_key: Some("owned-test-key".into()),
                 base_url: Some(format!("{}/v1", server.uri())),
-                model_http_policy: None,
+                model_http_policy: Some(Arc::new(TransportPolicy("vision"))),
             },
             Some(route.clone()),
         );
@@ -1225,14 +1343,23 @@ mod tests {
         assert_ne!(ids[1], ids[2]);
         assert!(receipts.windows(2).all(|pair| pair[0].body == pair[1].body));
         assert!(receipts.iter().all(|receipt| {
+            receipt.headers.get("x-transport-policy").unwrap() == "vision"
+                && receipt.headers.get("authorization").unwrap() == "Bearer owned-test-key"
+        }));
+        assert!(receipts.iter().all(|receipt| {
             receipt
                 .headers
                 .get("x-pinvou-context-id")
                 .unwrap()
                 .to_str()
                 .unwrap()
-                == "owned-test-context"
+                == "host-vision-context"
         }));
+        assert!(
+            receipts
+                .iter()
+                .all(|receipt| { receipt.headers.get("x-pinvou-context-type").unwrap() == "ORG" })
+        );
         // Parent main-route state must not leak into a separately configured
         // vision provider, even when the loopback endpoint is the same.
         let ordinary = ImageAnalyzeTool::new_with_route_client(
@@ -1255,5 +1382,42 @@ mod tests {
         assert_eq!(receipts.len(), 4);
         assert!(!receipts[3].headers.contains_key("idempotency-key"));
         assert!(!receipts[3].headers.contains_key("x-pinvou-context-id"));
+        assert!(!receipts[3].headers.contains_key("x-transport-policy"));
+
+        // The same global capability also overrides raw configuration when
+        // inherited by vision: matching metadata must precede the host hook.
+        let shared_policy: Arc<dyn crate::config::ModelHttpPolicy> =
+            Arc::new(TransportPolicy("shared"));
+        let mut shared_config = route_config;
+        shared_config.model_http_policy = Some(shared_policy.clone());
+        shared_config.vision_model = Some(VisionModelConfig {
+            model: "test-vision-model".into(),
+            api_key: None,
+            base_url: shared_config.base_url.clone(),
+            model_http_policy: None,
+        });
+        let shared_vision = shared_config.vision_model_config().unwrap();
+        assert!(Arc::ptr_eq(
+            shared_vision.model_http_policy.as_ref().unwrap(),
+            &shared_policy
+        ));
+        let shared_route = DeepSeekClient::new(&shared_config).unwrap();
+        let shared_tool =
+            ImageAnalyzeTool::new_with_route_client(shared_vision, Some(shared_route));
+        shared_tool
+            .execute(json!({"image_path":"tiny.png"}), &context)
+            .await
+            .unwrap();
+        let receipts = server.received_requests().await.unwrap();
+        assert_eq!(receipts.len(), 5);
+        assert_eq!(
+            receipts[4].headers.get("x-pinvou-context-id").unwrap(),
+            "host-shared-context"
+        );
+        assert_eq!(
+            receipts[4].headers.get("x-transport-policy").unwrap(),
+            "shared"
+        );
+        assert!(receipts[4].headers.contains_key("idempotency-key"));
     }
 }

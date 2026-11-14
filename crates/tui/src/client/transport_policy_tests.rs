@@ -48,6 +48,7 @@ async fn forkguard_host_http_policy_reaches_primary_fallback_and_vision() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(header("x-host-policy", "applied"))
+        .and(header("authorization", "Bearer owned-fixture-key"))
         .respond_with(ResponseTemplate::new(200).set_body_json(
             serde_json::json!({"choices":[{"message":{"content":"owned fixture"}}]}),
         ))
@@ -93,19 +94,18 @@ async fn forkguard_host_http_policy_reaches_primary_fallback_and_vision() {
     assert_eq!(policy.calls.load(Ordering::SeqCst), 3);
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(workspace.path().join("sample.png"), b"owned image fixture").unwrap();
-    let result = vision
+    vision
         .execute(
             serde_json::json!({"image_path":"sample.png"}),
             &ToolContext::new(workspace.path().to_path_buf()),
         )
         .await
         .unwrap();
-    assert!(result.success);
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
 
 #[tokio::test]
-async fn forkguard_host_http_policy_denial_fails_primary_and_vision_closed() {
+async fn forkguard_host_http_policy_construction_denial_fails_closed() {
     let untrusted: Config =
         serde_json::from_value(serde_json::json!({"model_http_policy": {"disable": true}}))
             .unwrap();

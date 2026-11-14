@@ -2961,8 +2961,15 @@ impl TranscriptConfig {
     }
 }
 
-/// Host-owned constraints applied to every inference HTTP client, including
-/// the HTTP/1 fallback and standalone vision route. Never loaded from TOML.
+/// Host-owned constraints for the primary model, HTTP/1 fallback and standalone
+/// vision client builders wired through this configuration. Never loaded from
+/// TOML. Voice, prompt suggestions, credential probes and separate Fleet worker
+/// processes do not inherit this hook.
+///
+/// Primary builders install their default authentication and headers before
+/// this hook, so trusted policies can overwrite matching default header keys.
+/// Matching vision route metadata is installed before its hook; vision retains
+/// its request-level authentication after client construction.
 pub trait ModelHttpPolicy: std::fmt::Debug + Send + Sync {
     fn configure(
         &self,
@@ -2996,6 +3003,10 @@ pub struct Config {
     /// a static Idempotency-Key conflicts with this opt-in and is rejected.
     #[serde(skip)]
     pub request_idempotency_header: Option<String>,
+    /// Trusted host capability, shared by clone and with explicit override
+    /// precedence in configuration merges. Not serializable configuration.
+    /// Runtime API disk reloads/provider switches retain the server's installed
+    /// capability; starting a new runtime uses the new host-supplied value.
     #[serde(skip)]
     pub model_http_policy: Option<std::sync::Arc<dyn ModelHttpPolicy>>,
     /// Optional user-facing tab/window title shown as `[title] …` in front of
@@ -3661,7 +3672,9 @@ pub struct VisionModelConfig {
     /// Base URL for the vision model API. Defaults to OpenAI.
     #[serde(default)]
     pub base_url: Option<String>,
-    /// In-memory host policy, retained when a vision route is cloned.
+    /// In-memory vision override; otherwise the global policy is inherited.
+    /// Clones share the same capability. Runtime API disk reloads preserve the
+    /// host override, including across disabling/re-enabling the vision route.
     #[serde(skip)]
     pub model_http_policy: Option<std::sync::Arc<dyn ModelHttpPolicy>>,
 }

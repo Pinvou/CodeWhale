@@ -254,6 +254,9 @@ pub struct DeepSeekClient {
     /// stream-header fallback when H2 stalls. Same auth and headers.
     pub(super) http1_client: reqwest::Client,
     request_idempotency_header: Option<HeaderName>,
+    // Configured route metadata for matching vision calls. Transport policies
+    // remain on each client's own builder and are never borrowed from here.
+    matching_vision_headers: HeaderMap,
     operation_id: Option<uuid::Uuid>,
     // In-memory only: includes frozen auth/context headers without exposing
     // their values in receipts, logs, prompts, or persisted session state.
@@ -590,6 +593,7 @@ impl Clone for DeepSeekClient {
             http_client: self.http_client.clone(),
             http1_client: self.http1_client.clone(),
             request_idempotency_header: self.request_idempotency_header.clone(),
+            matching_vision_headers: self.matching_vision_headers.clone(),
             operation_id: self.operation_id,
             operation_route_identity: self.operation_route_identity.clone(),
             api_key: self.api_key.clone(),
@@ -1096,7 +1100,7 @@ fn build_speech_synthesis_body(
 
 /// Returns true when CODEWHALE_FORCE_HTTP1 (legacy alias: DEEPSEEK_FORCE_HTTP1)
 /// is set to a truthy value (`1`, `true`, `yes`, `on`, case-insensitive). Used
-/// by `build_http_client` to opt out of HTTP/2 entirely when a provider's edge
+/// by `DeepSeekClient` construction to opt out of HTTP/2 when a provider's edge
 /// mishandles long-lived H2 streams (#103). Anything else (unset, `0`,
 /// `false`, ...) leaves HTTP/2 on.
 pub(crate) fn force_http1_from_env() -> bool {
@@ -1375,10 +1379,24 @@ impl DeepSeekClient {
         // HTTP/1.1 and the fallback is a no-op retry path.
         let http1_client = build_client(true)?;
 
+        let mut matching_vision_headers = build_default_headers(
+            &api_key,
+            &http_headers,
+            api_provider,
+            &base_url,
+            wire_format,
+            auth_disabled,
+        )?;
+        // The vision adapter already supplies its own request authentication
+        // and framing. Only exact route matches may inherit the other metadata.
+        matching_vision_headers.remove(AUTHORIZATION);
+        matching_vision_headers.remove(CONTENT_TYPE);
+
         Ok(Self {
             http_client,
             http1_client,
             request_idempotency_header,
+            matching_vision_headers,
             operation_id: None,
             operation_route_identity,
             api_key,
@@ -3377,6 +3395,16 @@ impl DeepSeekClient {
             None => builder,
         }
     }
+
+    /// Seed matching route metadata before the vision host policy runs.
+    /// The caller must first verify `idempotency_matches_route`.
+    pub(crate) fn with_vision_route_headers(
+        &self,
+        builder: reqwest::ClientBuilder,
+    ) -> reqwest::ClientBuilder {
+        builder.default_headers(self.matching_vision_headers.clone())
+    }
+
     pub(crate) fn idempotency_matches_route(&self, base_url: &str, api_key: &str) -> bool {
         self.request_idempotency_header.is_some()
             && self.wire_format == WireFormat::ChatCompletions
