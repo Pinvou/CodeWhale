@@ -243,8 +243,14 @@ pub(crate) fn authority_envelope_for_worker(
         && spec.runtime_profile.shell.allows_shell()
     {
         // Scout, Reviewer, and Planner get one classifier-bounded
-        // foreground shell. Verifiers keep the dedicated Run surface,
-        // consultants remain shell-less, and writers retain the historical
+        // foreground shell. On this executor path the Verifier keeps only
+        // the dedicated Run surface below. (The classifier-bounded `bash`
+        // evidence lane named by
+        // `SubAgentToolRegistry::allows_bounded_readonly_bash` is an
+        // in-session delegation surface: a fleet member spawned here has no
+        // in-process subagent registry at all, so it never holds that lane —
+        // see the fleet mutual-exclusivity note in docs/SUBAGENTS.md.)
+        // Consultants remain shell-less, and writers retain the historical
         // subprocess contract.
         ToolShellAuthority::ReadOnly
     } else {

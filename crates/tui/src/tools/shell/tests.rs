@@ -5778,7 +5778,7 @@ async fn readonly_github_calls_refuse_at_the_policy_inside_the_tool_entry() {
 fn guidance_states_the_foreground_stdin_contract() {
     let description = super::guidance::description();
     assert!(
-        description.contains("Foreground commands without `interactive` or `combined_output` run without a terminal stdin"),
+        description.contains("Foreground commands without `interactive`, `tty`, or `combined_output` run without a terminal stdin"),
         "guidance must state the bounded foreground stdin: {description}"
     );
     assert!(
@@ -8501,6 +8501,8 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         completion_reported: false,
         bounded_output: None,
         stdin: None,
+        stdin_closed_at_eof: false,
+        stdin_write_stalled: false,
         child: None,
         stop_unconfirmed: false,
         windows_job: None,
@@ -9870,7 +9872,319 @@ async fn inline_stdin_payload_over_the_cap_refuses() {
         output.content
     );
 }
+/// Runs a stdin scenario on a worker thread behind a 60 s outer guard. The
+/// scenario's own deadline machinery is what should finish it; a mechanism
+/// regression that never returns trips this guard instead (the join can
+/// extend past the guard while the scenario's child still holds the blocked
+/// write open — the child's own watchdog releases it, so the guard
+/// terminates, loudly late). A worker panic surfaces as a failed verdict,
+/// never as a hung test.
+#[cfg(unix)]
+fn run_stdin_scenario_with_hang_guard(
+    name: &'static str,
+    body: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    let (sender, receiver) = std::sync::mpsc::channel::<Result<(), String>>();
+    let handle = std::thread::spawn(move || {
+        let verdict = body();
+        let _ = sender.send(verdict.clone());
+        verdict
+    });
+    match receiver.recv_timeout(Duration::from_secs(60)) {
+        Ok(verdict) => {
+            // Reaps the worker; the verdict from the channel is the
+            // scenario outcome, so the join's own copy adds nothing.
+            let _ = handle.join().expect("the scenario worker panicked");
+            verdict
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let _ = handle.join();
+            Err(format!("{name} hung past its 60 s guard"))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            // The worker died before its verdict reached the channel.
+            let _ = handle.join().expect_err("the scenario worker panicked");
+            Err(format!("{name} panicked before reporting a verdict"))
+        }
+    }
+}
 
+#[cfg(unix)]
+const SIGPIPE_GUARD_HELPER_ENV: &str = "CODEWHALE_SIGPIPE_GUARD_HELPER";
+
+/// Lets the driver verify the helper actually RAN: libtest exits 0 on an
+/// unmatched `--exact` filter, so a future rename of the helper test would
+/// otherwise leave the pin silently green while guarding nothing.
+#[cfg(unix)]
+const SIGPIPE_GUARD_HELPER_CANARY_ENV: &str = "CODEWHALE_SIGPIPE_GUARD_HELPER_CANARY";
+
+/// Helper half of `sigpipe_guard_survives_a_broken_pipe_restore`: runs in a
+/// process that re-armed SIGPIPE at SIG_DFL (what `run_with_args` does in
+/// production), takes the guard, writes into a readerless pipe, checks that
+/// the drop restored the prior mask, and only then writes the ran-canary —
+/// so the driver fails on a helper that died at signal 13 (consume removed),
+/// panicked on a left-blocked mask (restore removed), or never ran (rename
+/// drift).
+#[cfg(unix)]
+#[test]
+fn sigpipe_guard_helper_process() {
+    if std::env::var(SIGPIPE_GUARD_HELPER_ENV).ok().as_deref() != Some("1") {
+        return;
+    }
+    // The suite binary runs with std's SIG_IGN, under which a broken-pipe
+    // SIGPIPE is discarded at generation and never becomes pending — the
+    // bug cannot reproduce there, so the helper re-arms the production
+    // disposition first.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        let mut fds = [0 as libc::c_int; 2];
+        assert_eq!(libc::pipe(fds.as_mut_ptr()), 0, "pipe");
+        libc::close(fds[0]);
+        {
+            let guard = super::BlockedSigpipeGuard::new();
+            let buf = [b'x'; 4096];
+            let written = libc::write(fds[1], buf.as_ptr().cast(), buf.len());
+            assert_eq!(written, -1, "the readerless write must fail");
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EPIPE),
+                "the readerless write must fail with EPIPE"
+            );
+            // Dropping the guard restores the mask. A block-and-restore
+            // guard delivers the pending SIGPIPE here and this process
+            // dies at signal 13 before reaching the end of the test; the
+            // consume-before-restore fix reaches it and exits 0.
+            drop(guard);
+        }
+        // The restore half is pinned too: after the drop, SIGPIPE must no
+        // longer be blocked on this thread. A no-op restore would leave
+        // every later SIGPIPE pending on this thread forever — invisible
+        // to the exit-status assertion above, so query the mask directly.
+        let mut now_blocked: libc::sigset_t = std::mem::zeroed();
+        assert_eq!(
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut now_blocked),
+            0,
+            "query the signal mask"
+        );
+        assert_eq!(
+            libc::sigismember(&now_blocked, libc::SIGPIPE),
+            0,
+            "the guard drop must restore the prior mask (SIGPIPE must not stay blocked)"
+        );
+        libc::close(fds[1]);
+    }
+    // Ran-canary for the driver: written only after every assertion above
+    // passed, so an unmatched filter (helper never ran) is distinguishable
+    // from a green run.
+    if let Some(canary) = std::env::var_os(SIGPIPE_GUARD_HELPER_CANARY_ENV) {
+        std::fs::write(&canary, b"ran").expect("write the ran-canary");
+    }
+}
+
+/// The SIGPIPE guard must consume the signal it blocked before restoring
+/// the mask: a bounded write that ends in EPIPE leaves SIGPIPE pending on
+/// the worker thread, and a plain block-and-restore delivers it at the
+/// process disposition (SIG_DFL in production, see `run_with_args`) —
+/// killing the whole host one instruction after the "handled" EPIPE. The
+/// suite cannot see this (test binaries run SIG_IGN, so no SIGPIPE ever
+/// becomes pending), so the driver re-execs this binary as a helper that
+/// re-arms SIG_DFL first: with the consume the helper exits 0; without it
+/// the helper dies at signal 13 and the non-success status fails here.
+#[cfg(unix)]
+#[test]
+fn sigpipe_guard_survives_a_broken_pipe_restore() {
+    let test_binary = std::env::current_exe().expect("current test binary");
+    let canary = std::env::temp_dir().join(format!(
+        "codewhale-sigpipe-guard-canary-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&canary);
+    let mut helper = Command::new(&test_binary)
+        .arg("--exact")
+        .arg("tools::shell::tests::sigpipe_guard_helper_process")
+        .env(SIGPIPE_GUARD_HELPER_ENV, "1")
+        .env(SIGPIPE_GUARD_HELPER_CANARY_ENV, &canary)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sigpipe guard helper");
+    let status = helper.wait().expect("wait sigpipe guard helper");
+    assert!(
+        status.success(),
+        "the guard's mask restore must not deliver the pending SIGPIPE (a broken guard kills the helper at signal 13): {status}"
+    );
+    assert!(
+        canary.exists(),
+        "the helper must actually run — libtest exits 0 on an unmatched --exact filter, so a green status without the canary means this pin guarded nothing (helper renamed?)"
+    );
+    let _ = std::fs::remove_file(&canary);
+}
+
+/// The PTY interact writer dup must carry close-on-exec: it stays open in
+/// this process for a terminal task's whole lifetime, so a bare `dup`
+/// (which CLEARS `FD_CLOEXEC`) would leak a live master-side terminal fd
+/// into every command spawned while the task runs — a child could inject
+/// input into or capture output from another task's terminal, and hold the
+/// master open past the task's teardown. portable-pty's own descriptors are
+/// cloexec'd; this pin holds the dup to the same invariant, and to the
+/// same-description write semantics the writer relies on.
+#[cfg(all(unix, not(target_env = "ohos")))]
+#[test]
+fn pty_writer_dup_carries_close_on_exec() {
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let mut fds = [0 as libc::c_int; 2];
+    assert_eq!(
+        unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) },
+        0,
+        "pipe2() failed"
+    );
+    let mut reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let mut writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+    let dup_fd = dup_cloexec(writer.as_raw_fd()).expect("dup_cloexec");
+    let flags = unsafe { libc::fcntl(dup_fd, libc::F_GETFD) };
+    assert!(flags >= 0, "F_GETFD on the dup failed: {flags}");
+    assert!(
+        flags & libc::FD_CLOEXEC != 0,
+        "the PTY writer dup must set FD_CLOEXEC (a bare libc::dup clears it): flags={flags}"
+    );
+
+    // Same open description as the source: bytes written through the dup
+    // surface on the reader end, and the task keeps writing after the
+    // original handle is gone (both write ends must close before EOF).
+    let mut dup_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+    dup_file
+        .write_all(b"cloexec-")
+        .and_then(|_| writer.write_all(b"dup"))
+        .expect("write through the dup and the original");
+    drop(writer);
+    drop(dup_file);
+    let mut rest = Vec::new();
+    reader.read_to_end(&mut rest).expect("read through the dup");
+    assert_eq!(rest, b"cloexec-dup", "bytes written via the dup must land");
+}
+
+/// Behavioral half of `pty_writer_dup_carries_close_on_exec`: a command
+/// spawned after the dup must not see the duplicated descriptor in its fd
+/// table (Linux `/proc` pin; the cloexec assert above holds the same
+/// invariant on every unix target).
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[test]
+fn spawned_child_does_not_inherit_the_pty_writer_dup() {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let mut fds = [0 as libc::c_int; 2];
+    assert_eq!(
+        unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) },
+        0,
+        "pipe2() failed"
+    );
+    let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+    let dup_fd = dup_cloexec(writer.as_raw_fd()).expect("dup_cloexec");
+    let dup_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+
+    // Identify OUR pipe by kernel inode, not by fd number: a parallel test
+    // may legally hold (and leak) unrelated fds with colliding numbers.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { libc::fstat(writer.as_raw_fd(), &mut stat) },
+        0,
+        "fstat on the pipe write end failed"
+    );
+    let pipe_target = format!("pipe:[{}]", stat.st_ino);
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("for f in /proc/self/fd/*; do readlink \"$f\"; done")
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn fd-listing child");
+    let listing = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !listing.lines().any(|line| line.trim() == pipe_target),
+        "spawned child must not inherit the dup'd descriptor ({pipe_target}); its fd targets:\n{listing}"
+    );
+    drop(dup_file);
+    drop(writer);
+    drop(reader);
+}
+
+/// The lowercase tool's own description carries the same foreground stdin
+/// contract: its legacy translation accepts only command/timeout/sandbox
+/// fields, so that sentence is the whole stdin story on that surface.
+#[test]
+fn lowercase_bash_description_states_the_foreground_stdin_contract() {
+    let description = LowercaseBashTool.description();
+    assert!(
+        description.contains("This foreground surface runs without a terminal stdin"),
+        "the lowercase description must state the bounded foreground stdin: {description}"
+    );
+    assert!(
+        description.contains("a bare `$SHELL` receive end-of-file"),
+        "the bare-shell probe must be named as exiting on EOF: {description}"
+    );
+}
+/// When the inline payload cannot be delivered at spawn, the run must abort
+/// with the run-never-started context: no task id exists yet, so the child
+/// is killed and the error must say the mentioned task id was never
+/// registered — the caller must not try to cancel or kill it. The
+/// manager-level lane has no inline cap, so an over-pipe-buffer payload
+/// against a non-reading child reaches the bounded writer's deadline here;
+/// the tool surface cannot produce this stall on Linux (its 64 KiB cap
+/// equals the default pipe buffer), which is why this pin drives the
+/// manager API directly.
+#[test]
+#[cfg(unix)]
+fn spawn_aborts_with_run_never_started_context_when_the_payload_stalls() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    // 2 MiB: far past any default pipe buffer, so the bounded writer's
+    // deadline is what ends the write.
+    let payload = "x".repeat(2 * 1024 * 1024);
+
+    let started = Instant::now();
+    let err = manager
+        .execute_with_options_env(
+            &sleep_command(60),
+            None,
+            60_000,
+            true,
+            Some(payload.as_str()),
+            false,
+            None,
+            HashMap::new(),
+        )
+        .expect_err("the spawn must abort when the inline payload stalls");
+    let elapsed = started.elapsed();
+
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("the run was killed at spawn"),
+        "error must carry the killed-at-spawn context (the process WAS created, \
+         so the copy must not claim the run never started); got: {text}"
+    );
+    assert!(
+        text.contains("the command was killed before it could do any work"),
+        "error must state the process was created and then killed; got: {text}"
+    );
+    assert!(
+        text.contains("never registered"),
+        "error must tell the caller the task id was never registered; got: {text}"
+    );
+    assert!(
+        !text.contains("Kill the task"),
+        "the task-targeted recovery copy must not appear on the spawn-abort \
+         path; got: {text}"
+    );
+    assert!(
+        elapsed >= STDIN_WRITE_DEADLINE,
+        "the abort must come from the bounded writer's deadline, not an \
+         instant failure; took {elapsed:?}: {text}"
+    );
+}
 #[cfg(unix)]
 #[test]
 fn readonly_operand_gate_refuses_cd_operands_the_shell_reinterprets() {
@@ -10700,9 +11014,9 @@ async fn foreground_terminal_command_keeps_its_interact_surface() {
 #[test]
 #[cfg(all(unix, not(target_env = "ohos")))]
 fn interact_write_to_a_stalled_tty_command_is_bounded() {
-    let (sender, receiver) = std::sync::mpsc::channel::<Result<(), String>>();
-    let handle = std::thread::spawn(move || {
-        let run = || -> Result<(), String> {
+    let verdict = run_stdin_scenario_with_hang_guard(
+        "the bounded tty-write pin",
+        || -> Result<(), String> {
             let tmp = tempdir().map_err(|error| error.to_string())?;
             let mut manager = ShellManager::new(tmp.path().to_path_buf());
             let result = manager
@@ -10782,17 +11096,8 @@ fn interact_write_to_a_stalled_tty_command_is_bounded() {
             }
             manager.kill(&task_id).map_err(|error| error.to_string())?;
             Ok(())
-        };
-        let verdict = run();
-        let _ = sender.send(verdict.clone());
-        verdict
-    });
-    let verdict = receiver
-        .recv_timeout(Duration::from_secs(60))
-        .unwrap_or_else(|_| {
-            let _ = handle.join();
-            Err("the bounded tty-write test hung past its 60 s guard".to_string())
-        });
+        },
+    );
     assert!(verdict.is_ok(), "{verdict:?}");
 }
 
@@ -11488,6 +11793,103 @@ fn readonly_compound_refusal_names_the_cmd_comment_wall() {
     }
 }
 
+/// An explicit `close_stdin` on a terminal task whose last write already
+/// STALLED must stay bounded, must not claim an end-of-file the abandoned
+/// worker never delivered, and must not read as success either: the stall
+/// skip refuses the close outright ("was not applied") and keeps the
+/// interact surface attached, and the tail refusal still names the stall.
+/// A mutation that reports the stalled close as Ok reddens on the
+/// expect_err; a close that wedges on the full input queue trips the outer
+/// guard instead.
+#[cfg(all(unix, not(target_env = "ohos")))]
+#[test]
+fn close_stdin_on_a_stalled_terminal_task_is_bounded_and_claims_no_eof() {
+    let verdict = run_stdin_scenario_with_hang_guard(
+        "the stalled-terminal-close pin",
+        || -> Result<(), String> {
+            let tmp = tempdir().map_err(|error| error.to_string())?;
+            let mut manager = ShellManager::new(tmp.path().to_path_buf());
+            let result = manager
+                // Same shape as the stalled-write pin above: a raw-mode
+                // tty whose command never reads backpressures the master
+                // write, and the marker only prints after `stty` succeeds.
+                .execute_with_options_env(
+                    "stty raw -echo 2>/dev/null && printf RAW-READY; sleep 60",
+                    None,
+                    60_000,
+                    true,
+                    None,
+                    true,
+                    None,
+                    HashMap::new(),
+                )
+                .map_err(|error| error.to_string())?;
+            let task_id = result
+                .task_id
+                .ok_or_else(|| "background execution should return task_id".to_string())?;
+            let mut raw_ready = false;
+            for _ in 0..40 {
+                std::thread::sleep(Duration::from_millis(150));
+                let snapshot = manager.inspect_job(&task_id).expect("inspect job").snapshot;
+                if snapshot.stdout_tail.contains("RAW-READY") {
+                    raw_ready = true;
+                    break;
+                }
+            }
+            assert!(
+                raw_ready,
+                "raw mode must be established before the stalled write: {:?}",
+                manager.inspect_job(&task_id).expect("inspect job").snapshot
+            );
+            let payload = "x".repeat(200 * 1024);
+            let error = manager
+                .write_stdin(&task_id, &payload, false)
+                .err()
+                .ok_or_else(|| "the stalled tty write must error at the deadline".to_string())?
+                .to_string();
+            if !error.contains("did not complete within") {
+                return Err(error);
+            }
+            // The close itself must return promptly (no delivery attempt
+            // on a stalled queue) and must NOT report success: with the
+            // end-of-file undelivered, an Ok close would tell the model
+            // stdin is closed when it is not.
+            let started = std::time::Instant::now();
+            let close_error = manager
+                .write_stdin(&task_id, "", true)
+                .expect_err("a close on a stalled terminal task must not claim success")
+                .to_string();
+            if started.elapsed() >= STDIN_WRITE_DEADLINE {
+                return Err(format!(
+                    "the close on a stalled terminal task must not wait on the queue: {:?}",
+                    started.elapsed()
+                ));
+            }
+            if !close_error.contains("was not applied") {
+                return Err(format!(
+                    "the stalled-close refusal must say the close was not applied: {close_error}"
+                ));
+            }
+            // And any further stdin traffic must still be refused without
+            // claiming an EOF: no delivery happened, so "end-of-file" would
+            // be a lie (the refusal here comes from the write-stall gate —
+            // the refused close left the handle attached).
+            let after_close = manager
+                .write_stdin(&task_id, "y", false)
+                .err()
+                .ok_or_else(|| "the post-close write must be refused".to_string())?
+                .to_string();
+            if after_close.contains("end-of-file") {
+                return Err(format!(
+                    "a terminal close after a stall must not claim an EOF that never landed: {after_close}"
+                ));
+            }
+            manager.kill(&task_id).map_err(|error| error.to_string())?;
+            Ok(())
+        },
+    );
+    assert!(verdict.is_ok(), "{verdict:?}");
+}
 /// The owned-writer bounded stdin write (the Windows/ohos fallback path):
 /// a consuming child gets the payload and the writer handed back; a child
 /// that never reads fills its pipe buffer and past the deadline the helper
@@ -11507,7 +11909,8 @@ fn bounded_stdin_write_owned_returns_the_writer_and_times_out_clean() {
         .expect("cat spawns");
     let stdin = child.stdin.take().expect("stdin piped");
     let (returned, result) =
-        super::bounded_stdin_write_owned(super::StdinWriter::Pipe(stdin), b"hello\n".to_vec());
+        super::bounded_stdin_write_owned(super::StdinWriter::Pipe(stdin), b"hello\n".to_vec())
+            .expect("the bounded-write worker thread must spawn");
     let Ok(result) = result else {
         panic!("a consuming child must complete the write, not lose the worker: {result:?}");
     };
@@ -11526,7 +11929,8 @@ fn bounded_stdin_write_owned_returns_the_writer_and_times_out_clean() {
     let payload = vec![b'x'; 256 * 1024]; // well past the 64 KiB pipe buffer
     let started = std::time::Instant::now();
     let (returned, result) =
-        super::bounded_stdin_write_owned(super::StdinWriter::Pipe(stdin), payload);
+        super::bounded_stdin_write_owned(super::StdinWriter::Pipe(stdin), payload)
+            .expect("the bounded-write worker thread must spawn");
     let elapsed = started.elapsed();
     assert!(
         matches!(result, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
@@ -11542,6 +11946,247 @@ fn bounded_stdin_write_owned_returns_the_writer_and_times_out_clean() {
     );
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// `bounded_stdin_eof_delivery` — the worker the explicit terminal close
+/// rides — must classify its outcome honestly: a write that lands reports
+/// `Delivered`, a write into a FULL pipe (nothing consuming) reports
+/// `Stalled` only at the deadline, and a write to a readerless pipe reports
+/// `Failed`. A Stalled that came back as Delivered would let `write_stdin`
+/// claim an end-of-file that never landed. The call is deadline-bounded by
+/// construction, so a broken deadline hangs this test into the nextest
+/// slow-timeout instead of passing.
+// Unix PTY-lane cfg, matching the function it pins.
+#[cfg(all(unix, not(target_env = "ohos")))]
+#[test]
+fn bounded_stdin_eof_delivery_reports_stalled_failed_and_delivered() {
+    use std::os::fd::FromRawFd;
+
+    // Delivered: /dev/null accepts the two bytes unconditionally.
+    let null = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/null")
+        .expect("open /dev/null");
+    assert!(
+        matches!(
+            super::bounded_stdin_eof_delivery(&null),
+            super::BoundedEofDelivery::Delivered
+        ),
+        "a write that lands must report Delivered"
+    );
+
+    // Failed: a readerless pipe errors the write without delivering (the
+    // suite runs with SIG_IGN, so the EPIPE surfaces as an error, not a
+    // signal — the process-death discipline is pinned by the sigpipe guard
+    // helper test).
+    let mut fds = [0 as libc::c_int; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+    unsafe { libc::close(fds[0]) };
+    let orphan = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+    assert!(
+        matches!(
+            super::bounded_stdin_eof_delivery(&orphan),
+            super::BoundedEofDelivery::Failed
+        ),
+        "a readerless pipe must report Failed"
+    );
+    drop(orphan);
+
+    // Stalled: fill a pipe to capacity without a consumer (O_NONBLOCK so
+    // the test thread never blocks), restore blocking mode for the worker,
+    // and the two-byte delivery cannot land until the deadline.
+    let mut fds = [0 as libc::c_int; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+    let read_fd = fds[0];
+    let full = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+    unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) };
+    let chunk = [b'x'; 4096];
+    loop {
+        let written = unsafe { libc::write(fds[1], chunk.as_ptr().cast(), chunk.len()) };
+        if written <= 0 {
+            break; // EAGAIN: the pipe is full
+        }
+    }
+    unsafe { libc::fcntl(fds[1], libc::F_SETFL, 0) };
+    let started = std::time::Instant::now();
+    let outcome = super::bounded_stdin_eof_delivery(&full);
+    drop(full);
+    assert!(
+        matches!(outcome, super::BoundedEofDelivery::Stalled),
+        "a full pipe must stall the delivery: {outcome:?}"
+    );
+    assert!(
+        started.elapsed() >= super::STDIN_WRITE_DEADLINE,
+        "the stall must honor the deadline: {:?}",
+        started.elapsed()
+    );
+    // Unblock the abandoned worker: a reader consumes the queued bytes, the
+    // worker's write lands, its send fails on the dropped receiver, and the
+    // thread exits instead of parking for the process lifetime. The drain
+    // is bounded so the reader cannot hang once the pipe ends are closed.
+    let drainer = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let mut total = 0usize;
+        while total < 512 * 1024 {
+            let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            total += n as usize;
+        }
+        unsafe { libc::close(read_fd) };
+    });
+    drainer.join().expect("drain the stalled pipe");
+}
+
+/// The FRESH-stall close arm — a terminal close whose own ^D delivery
+/// stalls with the stall flag still down (no prior write set it) — must
+/// wait the bounded deadline, return the close refusal that cites it,
+/// restore the handle under the stall flag, and refuse the follow-up write
+/// without another deadline wait. A mutant reporting this arm as Ok would
+/// read as the schema's delivered end-of-file while the bytes never
+/// landed; the not-applied pin next door only reaches the SKIP arm (its
+/// scenario stalls a write first), so this record-level pin is the only
+/// guard on the arm itself. Drives `write_stdin` on a record whose stdin
+/// is a `PtyFile` over a full pipe — exactly what a real PTY task hands
+/// the arm.
+#[cfg(all(unix, not(target_env = "ohos")))]
+#[test]
+fn close_stdin_that_stalls_on_fresh_delivery_refuses_and_stays_attached() {
+    use std::os::fd::FromRawFd;
+
+    // Fill a pipe to capacity without a consumer (O_NONBLOCK so the test
+    // thread never blocks), restore blocking mode for the worker: the
+    // two-byte ^D delivery cannot land until the deadline.
+    let mut fds = [0 as libc::c_int; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+    let read_fd = fds[0];
+    let full = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+    unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) };
+    let chunk = [b'x'; 4096];
+    loop {
+        let written = unsafe { libc::write(fds[1], chunk.as_ptr().cast(), chunk.len()) };
+        if written <= 0 {
+            break; // EAGAIN: the pipe is full
+        }
+    }
+    unsafe { libc::fcntl(fds[1], libc::F_SETFL, 0) };
+
+    let now = std::time::Instant::now();
+    let mut shell = BackgroundShell {
+        id: "fresh-stall-close".to_string(),
+        owner_session_id: "stdin-test-session".to_string(),
+        command: "cat".to_string(),
+        working_dir: std::path::PathBuf::from("."),
+        status: ShellStatus::Running,
+        exit_code: None,
+        started_at: now,
+        finished_at: None,
+        last_output_at: now,
+        last_observed_output_len: 0,
+        sandbox_type: SandboxType::None,
+        ownership: ShellOwnership::Managed,
+        linked_task_id: None,
+        owner_agent: None,
+        origin_tool_call_id: None,
+        origin_turn_id: None,
+        stdout_buffer: super::new_shared_raw_output(),
+        stderr_buffer: None,
+        bounded_output: None,
+        heavy_permit: None,
+        stdout_cursor: 0,
+        stderr_cursor: 0,
+        completion_reported: false,
+        stdin: Some(StdinWriter::PtyFile(full)),
+        stdin_closed_at_eof: false,
+        stdin_write_stalled: false,
+        child: None,
+        stop_unconfirmed: false,
+        stdout_thread: None,
+        stderr_thread: None,
+        work_lifecycle: None,
+        lifecycle_seq: 0,
+        last_lifecycle_status: None,
+        last_lifecycle_bytes: 0,
+    };
+
+    let started = std::time::Instant::now();
+    let close_err = shell
+        .write_stdin("", true)
+        .expect_err("a close whose own delivery stalls must be refused, not reported Ok");
+    assert!(
+        started.elapsed() >= super::STDIN_WRITE_DEADLINE,
+        "the fresh-stall close must attempt the bounded delivery first: {:?}",
+        started.elapsed()
+    );
+    let message = format!("{close_err:#}");
+    assert!(
+        message.starts_with("the stdin close for task fresh-stall-close"),
+        "the refusal must be the close refusal: {message}"
+    );
+    assert!(
+        message.contains("did not complete within"),
+        "the fresh-stall refusal must cite the deadline: {message}"
+    );
+    assert!(
+        !message.contains("no close can deliver it now"),
+        "a fresh stall must not take the not-applied skip arm: {message}"
+    );
+    assert!(
+        !message.contains("stdin writes to task"),
+        "the close refusal must not be the write-stall gate: {message}"
+    );
+    assert!(
+        shell.stdin.is_some(),
+        "the refused close must keep the interact surface attached"
+    );
+    assert!(
+        shell.stdin_write_stalled,
+        "the fresh-stall close must mark the stall for later refusals"
+    );
+    assert!(
+        !shell.stdin_closed_at_eof,
+        "a stalled delivery must not claim an end-of-file"
+    );
+
+    // The follow-up write is refused by the stall gate without another
+    // bounded wait.
+    let started = std::time::Instant::now();
+    let write_err = shell
+        .write_stdin("x", false)
+        .expect_err("a write after a stalled close must be refused");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "the stall flag must refuse the follow-up write without another deadline wait: {:?}",
+        started.elapsed()
+    );
+    let message = format!("{write_err:#}");
+    assert!(
+        message.contains("stdin writes to task fresh-stall-close are refused"),
+        "the follow-up refusal must be the stall gate: {message}"
+    );
+
+    // Unblock the abandoned worker exactly like the classification pin: a
+    // bounded reader consumes the queued bytes, the worker's write lands,
+    // its send fails on the dropped receiver, and the thread exits. The
+    // record must drop first — it still holds the ORIGINAL pipe write end,
+    // and until every write end closes the drainer's read never sees EOF,
+    // so joining before the drop would hang the harness (the classification
+    // pin avoids this by dropping `full` before its call).
+    drop(shell);
+    let drainer = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        let mut total = 0usize;
+        while total < 512 * 1024 {
+            let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            total += n as usize;
+        }
+        unsafe { libc::close(read_fd) };
+    });
+    drainer.join().expect("drain the stalled pipe");
 }
 
 /// An unconfirmed stop keeps its write scope across every coordination
@@ -11829,6 +12474,11 @@ fn bash_schema_stdin_max_length_matches_the_enforced_inline_cap() {
     }
 }
 
+// The ^D close delivery is compiled only for the unix PTY lane (the same
+// predicate as the `PtyFile` variant): Windows has no console EOF to
+// deliver and ohos has no tty lane at all, so both the exit and the
+// end-of-file refusal assertions below are meaningless there.
+#[cfg(all(unix, not(target_env = "ohos")))]
 #[tokio::test]
 async fn interact_close_stdin_delivers_eof_to_a_terminal_command() {
     // Base delivered end-of-file to a terminal task through the ownership

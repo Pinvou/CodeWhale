@@ -36,8 +36,8 @@ use crate::core::engine::tool_catalog::{
     TOOL_SEARCH_NAME, active_tools_for_request, apply_native_tool_deferral,
     bounded_toolbox_eviction_note, ensure_advanced_tooling, execute_tool_search_with_cache,
     initial_active_tools, is_tool_search_tool, park_toolbox_eviction, remove_toolbox_drops,
-    render_toolbox_eviction_notes, tool_matches_any_rule, toolbox_oversize_reason,
-    touch_cached_tool_after_execution,
+    render_toolbox_eviction_notes, rule_matches_tool, tool_matches_any_rule,
+    toolbox_oversize_reason, touch_cached_tool_after_execution,
 };
 use crate::core::events::{AgentProgressEventMeta, Event};
 use crate::core::session::{PendingToolboxEviction, ToolActivationCache, ToolboxEvictionTrigger};
@@ -404,7 +404,7 @@ fn subagent_perf_enabled() -> bool {
 
 const VALID_SUBAGENT_TYPES: &str = "general, explore, planner, reviewer, implement, test, advisor, custom \
      (legacy aliases remain accepted: worker, scout, builder, verifier, consultant, general-purpose, general_purpose, default, exploration/explorer, plan/planning/awaiter, review/code-review/code_review, implementer/implementation, verify/verification/validator/tester, oracle)";
-const SUBAGENT_TYPE_DESCRIPTION: &str = "Fleet role for this delegated worker. general: full tool access for multi-step tasks; write-capable, so it claims the parent workspace unless write_roots narrows it — parallel generals without disjoint write_roots contend, so prefer a read-only role for research fan-outs. explore: fast read-only exploration. planner: grounded strategy with read-only probes. reviewer: reads and grades code. implement: lands focused code changes; write-capable under the same workspace-claim rules as general, so parallel implements need disjoint write_roots or worktree=true. test: runs tests/validation gates and reports evidence. advisor: read-only high-reasoning counsel for judgement calls and design critique. custom: the tools listed in allowed_tools on the parent's posture; without an explicit write authority it starts read-only and never contends. Legacy aliases remain accepted at deserialization boundaries.";
+const SUBAGENT_TYPE_DESCRIPTION: &str = "Fleet role for this delegated worker. general: full tool access for multi-step tasks; write-capable, so it claims the parent workspace unless write_roots narrows it — parallel generals without disjoint write_roots contend, so prefer a read-only role for research fan-outs. explore: fast read-only exploration. planner: grounded strategy with read-only probes. reviewer: reads and grades code. implement: lands focused code changes; write-capable under the same workspace-claim rules as general, so parallel implements need disjoint write_roots or worktree=true. test: runs the built-in verification gates and reports evidence, with a bounded read-only shell — for in-session delegations — for gathering it; a read-only-shell parent clamps the gates (probes remain), and custom commands are refused. advisor: read-only high-reasoning counsel for judgement calls and design critique. custom: the tools listed in allowed_tools on the parent's posture; without an explicit write authority it starts read-only and never contends. Legacy aliases remain accepted at deserialization boundaries.";
 
 // === Types ===
 
@@ -9513,7 +9513,7 @@ impl ToolSpec for AgentTool {
         concat!(
             "Start with action=start and prompt; returns a turn-owned agent_id immediately. A prompt-only start (no type/profile) launches read-only; pass a write-capable type (e.g. implement) or declare write_roots before write work. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
             "Use multiple starts for independent parallel tasks. ",
-            "type selects the Fleet role: general (full tool access), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (runs tests and reports evidence), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture); legacy aliases are still accepted. ",
+            "type selects the Fleet role: general (full tool access), explore (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), implement (lands focused code changes), test (built-in verification gates; custom commands refused), advisor (read-only design counsel), or custom (allowed_tools on the parent's posture); legacy aliases are still accepted. ",
             "profile runs the child as a named Fleet role or an exact prompt-only profile explicitly presented by the embedding host — pass it only when the task needs that identity. The child follows the operator's per-role model configuration, else the parent's model; model or thinking overrides are not advertised (parse-accepted for compatibility). ",
             "Use action=roster to inspect Fleet roles and host-presented prompt-only profiles before choosing a type or profile. The host-profile listing is capped and unpaged — search a large pool with profile_query. ",
             "Child run budgets come from Fleet role defaults and operator [subagents] config; budget fields are not advertised (parse-accepted for compatibility). ",
@@ -10622,6 +10622,11 @@ async fn spawn_subagent_from_input(
             .worker_profile
             .denied_tools
             .retain(|rule| is_posture_denial(rule));
+        // The dropped preferences were the inherited operator rules; their
+        // explicit-bookkeeping twins go with them, so the child's explicit
+        // set holds exactly the caller's list below. An automatic clamp rule
+        // keeps its enforcement regardless.
+        child_runtime.worker_profile.explicit_denied_tools.clear();
     }
     if let Some(ref caller_deny) = spawn_request.disallowed_tools {
         for tool in caller_deny {
@@ -10632,6 +10637,21 @@ async fn spawn_subagent_from_input(
                 .any(|existing| existing == tool)
             {
                 child_runtime.worker_profile.denied_tools.push(tool.clone());
+            }
+            // Bookkeep the caller's provenance even when the rule string was
+            // already present (e.g. the role clamp installed the same
+            // `Bash` rule): the carve-outs override the clamp's automatic
+            // denial, never the caller's.
+            if !child_runtime
+                .worker_profile
+                .explicit_denied_tools
+                .iter()
+                .any(|existing| existing == tool)
+            {
+                child_runtime
+                    .worker_profile
+                    .explicit_denied_tools
+                    .push(tool.clone());
             }
         }
     }
@@ -15560,12 +15580,14 @@ impl SubAgentToolSurface {
 /// Role-only approval posture; the registry allow/deny and runtime envelope
 /// remain the authoritative per-tool checks.
 ///
-/// `Auto` is safe for every role. `Suggest` requires a write-capable role;
-/// `Required` requires the full-shell posture. A Custom worker may describe
-/// either posture, but its explicit allowlist and the runtime envelope still
-/// narrow what it can execute. Read-only bash operations are classified Auto,
-/// so Scouts and Reviewers do not gain general shell authority through this
-/// branch.
+/// Only the `Auto` and `Suggest` answers remain live: the posture gate's
+/// `Required` branch keys on the held shell policy plus the verifier's
+/// recorded parent-shell grant (`holds_shell_authority`), no longer on this
+/// role-only table. `Suggest` still requires a write-capable role. A Custom
+/// worker may describe either posture, but its explicit allowlist and the
+/// runtime envelope still narrow what it can execute. Read-only bash
+/// operations are classified Auto, so the read-only roles do not gain
+/// general shell authority through this branch.
 fn role_posture_permits(agent_type: &FleetRole, approval: ApprovalRequirement) -> bool {
     if matches!(agent_type, FleetRole::Custom) {
         return true;
@@ -15630,12 +15652,26 @@ struct SubAgentToolRegistry {
     // parent/child scope. Deny rules always win, including canonical prefixes.
     allowed_tools: Option<Vec<String>>,
     disallowed_tools: Vec<String>,
+    // The operator/caller subset of `disallowed_tools` (session
+    // `--disallowed-tools` preferences plus the spawn request's explicit
+    // `disallowed_tools`). The strings overlap the role clamp's automatic
+    // rules, so provenance is carried: the bounded read-only bash lane
+    // overrides the clamp's automatic denial, never one of these.
+    operator_denied_tools: Vec<String>,
     // Approval posture is separate from authority. Auto approval can remove a
     // prompt, but cannot restore a tool removed by role, scope, or envelope.
     auto_approve: bool,
     accept_edits: bool,
     agent_type: FleetRole,
     runtime_profile: WorkerRuntimeProfile,
+    /// Whether the child's requested shell was a full shell *after the parent
+    /// clamp but before the role's own narrowing* — i.e. the read-only shell
+    /// it now runs under came from its role's own narrowing, not from a
+    /// parent that itself held no shell authority. Keys the Verifier's
+    /// verification-surface carve-out in [`Self::holds_shell_authority`] so a
+    /// read-only role parent cannot obtain gate execution it never had by
+    /// delegating to `test`.
+    parent_shell_authority: bool,
     // Depth is the only special authority governing nested `agent` calls.
     can_spawn_child: bool,
     // Every mutation is attributed to the child and checked against its live
@@ -15706,11 +15742,17 @@ impl SubAgentToolRegistry {
         let coordination_manager = Arc::clone(&runtime.manager);
         let mut surface_options = runtime.agent_tool_surface_options.clone();
         // Shell authority is an intersection: a parent cannot delegate more
-        // than it owns, and read-only inspection roles (Scout, Reviewer) are
-        // narrowed to the hardened read-only classifier even when the parent
-        // has a full shell.
+        // than it owns, and read-only roles (Scout, Reviewer, Planner,
+        // Verifier) are narrowed to the hardened read-only classifier even
+        // when the parent has a full shell.
         let parent_shell = ShellPolicy::from_legacy_allow_shell(runtime.allow_shell);
         let mut child_shell = runtime.worker_profile.shell.min_with(parent_shell);
+        // Capture the grant before the role narrowing below: a Full shell
+        // here means the parent itself could run processes, so the role's
+        // read-only downgrade is the child's own posture. A clamped
+        // (read-only-parent) child must not regain authority through a
+        // role carve-out it merely shares the name of.
+        let parent_shell_authority = matches!(child_shell, ShellPolicy::Full);
         if crate::fleet::role::role_requires_read_only_shell(&agent_type)
             && child_shell.allows_shell()
         {
@@ -15752,10 +15794,12 @@ impl SubAgentToolRegistry {
         Self {
             allowed_tools,
             disallowed_tools: effective_profile.denied_tools.clone(),
+            operator_denied_tools: effective_profile.explicit_denied_tools.clone(),
             auto_approve: runtime.context.auto_approve,
             accept_edits: runtime.accept_edits,
             agent_type,
             runtime_profile: effective_profile,
+            parent_shell_authority,
             can_spawn_child,
             owner_agent_id,
             owner_agent_name,
@@ -15774,10 +15818,11 @@ impl SubAgentToolRegistry {
     /// clears the role-based delegation rules on its own.
     fn delegation_refusal(&self, name: &str, input: &Value) -> Option<String> {
         // #5595/#5438: session approval is transport, not a second shell
-        // classifier. Scout/Reviewer/Planner calls already proven by the exact
-        // predicate used at posture, envelope, and execute boundaries are
-        // delegated reads even though lowercase `bash` deliberately keeps the
-        // stricter parent-parallel classifier as its generic approval baseline.
+        // classifier. Scout/Reviewer/Planner/Verifier calls already proven by
+        // the exact predicate used at posture, envelope, and execute
+        // boundaries are delegated reads even though lowercase `bash`
+        // deliberately keeps the stricter parent-parallel classifier as its
+        // generic approval baseline.
         if self.bounded_readonly_bash_evidence(name, input) {
             return None;
         }
@@ -16373,8 +16418,18 @@ impl SubAgentToolRegistry {
                     {
                         return true;
                     }
-                    matches!(self.runtime_profile.shell, ShellPolicy::Full)
-                        && role_posture_permits(&self.agent_type, ApprovalRequirement::Required)
+                    // Canonical `bash` on a lane role is deliberately NOT
+                    // covered by the authority check below: the classifier
+                    // carve-out above is its only door, so a command the
+                    // grammar refuses keeps the `[shell.readonly.command]`
+                    // refusal instead of being waved through to the
+                    // envelope. The check is case-aware because legacy
+                    // `Bash` is the raw-shell alias — the carve-out is
+                    // exact-name `bash` only, and the alias must not
+                    // re-enter through this branch.
+                    let bash_must_use_classifier_lane = name.eq_ignore_ascii_case("bash")
+                        && self.allows_bounded_readonly_bash("bash");
+                    !bash_must_use_classifier_lane && self.holds_shell_authority()
                 }
             },
             None => true,
@@ -16391,9 +16446,11 @@ impl SubAgentToolRegistry {
     /// Whether this child may surface and dispatch the canonical lowercase
     /// `bash` tool under the read-only inspection posture.
     ///
-    /// Scout, Reviewer, and Planner keep exactly one shell entry point —
-    /// canonical `bash` — whose concrete calls the strict read-only
-    /// classifier bounds.
+    /// Scout, Reviewer, Planner, and Verifier keep exactly one shell entry
+    /// point — canonical `bash` — whose concrete calls the strict read-only
+    /// classifier bounds. For the Verifier this is the evidence lane: running
+    /// the built-in gates is only half the role, and "pass/fail with
+    /// evidence" needs probes like `wc -c` the raw surface can never allow.
     /// Catalog visibility and dispatch authorization consult this same
     /// predicate, so a tool that appears on the wire can always be called and
     /// one that is denied never appears.
@@ -16411,13 +16468,20 @@ impl SubAgentToolRegistry {
     /// case-insensitive compare would hand these roles back the raw shell this
     /// carve-out exists to withhold. Only the canonical lowercase tool the
     /// first-turn catalog actually offers is bounded by the classifier.
+    ///
+    /// The lane overrides exactly ONE denial source: the role clamp's
+    /// automatic raw-shell rules. An operator or caller who denied `bash` (or
+    /// any rule matching it — `exec_shell*`, a wildcard) by name keeps that
+    /// restriction authoritative at catalog admission and dispatch alike, so
+    /// any operator/caller rule matching `bash` disables the lane outright.
     fn allows_bounded_readonly_bash(&self, name: &str) -> bool {
         name == "bash"
-            && matches!(
-                &self.agent_type,
-                FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
-            )
+            && crate::fleet::role::role_requires_read_only_shell(&self.agent_type)
             && self.runtime_profile.shell != crate::worker_profile::ShellPolicy::None
+            && !self
+                .operator_denied_tools
+                .iter()
+                .any(|rule| rule_matches_tool(rule, name))
     }
 
     fn legacy_action_alias(family: &str, action: &str) -> Option<&'static str> {
@@ -16474,8 +16538,10 @@ impl SubAgentToolRegistry {
 
     fn role_blocks_unhardened_process_tool(&self, name: &str) -> bool {
         // Catalog filtering is defense in depth. Scout/Reviewer see only the
-        // hardened evidence profile; Verifier may receive bounded Run but not
-        // any raw or session-oriented shell path. Dispatch repeats this check.
+        // hardened evidence profile; Verifier may receive bounded Run and the
+        // same classifier-bounded canonical `bash` lane as the inspection
+        // roles, but not any raw or session-oriented shell path. Dispatch
+        // repeats this check.
         let lower = name.to_ascii_lowercase();
         let evidence_tool = crate::tools::registry::readonly_evidence_tool_name(name)
             || self
@@ -16485,14 +16551,19 @@ impl SubAgentToolRegistry {
         let bounded_inspection = matches!(&self.agent_type, FleetRole::Scout | FleetRole::Reviewer)
             && lower != "agent"
             && !evidence_tool;
-        let raw_shell = lower == "bash"
-            || lower.starts_with("exec_shell")
+        let raw_shell = lower.starts_with("exec_shell")
             || matches!(
                 lower.as_str(),
                 "exec_wait" | "exec_interact" | "task_shell_start" | "task_shell_wait"
             )
             || lower.starts_with("terminal/");
-        bounded_inspection || matches!(&self.agent_type, FleetRole::Verifier) && raw_shell
+        // For a verifier, canonical `bash` is hardened exactly when the
+        // bounded read-only lane admits it (`allows_bounded_readonly_bash`);
+        // every other raw-shell spelling — and legacy `Bash`, which fails the
+        // lane's exact-name check — stays unhardened and blocked.
+        let verifier_shell = matches!(&self.agent_type, FleetRole::Verifier)
+            && (raw_shell || (lower == "bash" && !self.allows_bounded_readonly_bash(name)));
+        bounded_inspection || verifier_shell
     }
 
     fn network_is_denied(&self) -> bool {
@@ -16505,12 +16576,33 @@ impl SubAgentToolRegistry {
         !self.runtime_profile.permissions.write
     }
 
+    /// Shell *authority* — the right to start the processes the built-in
+    /// verification surface runs. A full runtime shell holds it. The one
+    /// narrowed exception is the Verifier whose *parent granted a full
+    /// shell* (`parent_shell_authority`): `role_requires_read_only_shell`
+    /// downgrades the Verifier's raw-command policy to the classifier-bounded
+    /// probe lane, and running the workspace's own gates is the role's entire
+    /// purpose, so that role-own downgrade must not take the gates away
+    /// (`reject_unbounded_verification` and the envelope still bound every
+    /// concrete call). The grant cannot travel through delegation: a Verifier
+    /// child of a read-only role parent was clamped by that parent, holds no
+    /// authority of its own, and stays refused — delegation moves work, never
+    /// authority. No other role regains authority through a narrowed shell: a
+    /// Builder or Custom child of a read-only parent inherits
+    /// `ShellPolicy::ReadOnly` and must not start the test runner its parent
+    /// cannot — keying this on the role's *default* posture would hand
+    /// exactly that to every role whose default shell is full.
+    fn holds_shell_authority(&self) -> bool {
+        matches!(self.runtime_profile.shell, ShellPolicy::Full)
+            || (self.parent_shell_authority
+                && matches!(self.agent_type, FleetRole::Verifier)
+                && !matches!(self.runtime_profile.shell, ShellPolicy::None))
+    }
+
     fn shell_is_denied(&self) -> bool {
-        // Likewise, shell requires both a Full profile and no explicit shell
-        // sentinel. Read-only evidence commands are Auto-classified exceptions,
-        // not a Full-shell grant.
-        !matches!(self.runtime_profile.shell, ShellPolicy::Full)
-            || self.is_tool_denied(SHELL_AUTHORITY_SENTINEL)
+        // Read-only evidence commands are Auto-classified exceptions, not a
+        // shell-authority grant; the explicit shell sentinel always wins.
+        !self.holds_shell_authority() || self.is_tool_denied(SHELL_AUTHORITY_SENTINEL)
     }
 
     fn execution_envelope(&self) -> crate::tools::execution_envelope::ExecutionEnvelope {
@@ -16609,10 +16701,9 @@ impl SubAgentToolRegistry {
         // Visibility and dispatch consult the same capability guard. These
         // representative calls let a read-only bash schema survive catalog
         // shaping without treating an empty input as arbitrary shell authority.
-        if !matches!(
-            &self.agent_type,
-            FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
-        ) {
+        // The role set is the one `allows_bounded_readonly_bash` admits: the
+        // read-only-shell roles, including the verifier's evidence lane.
+        if !crate::fleet::role::role_requires_read_only_shell(&self.agent_type) {
             return None;
         }
         match name {
@@ -17830,7 +17921,8 @@ const CONSULTANT_AGENT_INTRO: &str = concat!(
 );
 
 const VERIFIER_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet test agent (role: `test`). Your job is to run the requested gates with your bounded validation tools — the allowed test/check selections — and report results. You never write: patching the workspace is denied. Unbounded shell forms are refused; use the verification surface.\n",
+    "You are a trusted Fleet test agent (role: `test`). Your job is to run the requested gates with your bounded validation tools — the allowed test/check selections — and report results; the gates are yours on envelopes whose parent grants shell authority, while a child clamped by a read-only-shell parent keeps the read-only probes but has its gates refused. You never write: patching the workspace is denied. Unbounded shell forms are refused; use the verification surface.\n",
+    "When the session grants it — for in-session delegations, on envelopes that carry the probe lane — you also hold a bounded read-only shell, under the same classifier-gated grammar as the read-only roles, for gathering evidence with probes such as `wc`, `ls`, `cat`, and `grep` pipelines; envelopes without it omit the shell entirely and shell attempts refuse, and custom commands are refused.\n",
     "Report PASS/FAIL/FLAKY at the top of SUMMARY with exact command evidence.\n",
     "Capture failing assertion and file:line; put obvious fixes under RISKS.\n",
     "You may use more tool calls than quick exploration, but stop after decisive pass/fail evidence.\n",

@@ -4884,7 +4884,16 @@ esac
                         !permissions.write,
                         "verifier receipt {key} must stay read-only"
                     );
-                    assert_eq!(permissions.shell, "full");
+                    // The verifier joined the read-only-shell roles, so the
+                    // receipt records the narrowed effective posture (the old
+                    // `full` label overclaimed a raw shell the clamp always
+                    // denied). On the fleet envelope the verifier holds the
+                    // gates with no bash surface at all — the classifier
+                    // probe lane is in-session only; in-session, its bash is
+                    // the classifier-bounded lane. The built-in verification
+                    // surface stays keyed on the shell ceiling, not on this
+                    // label.
+                    assert_eq!(permissions.shell, "read_only");
                 }
                 role => panic!("unexpected receipt role for {key}: {role:?}"),
             }
