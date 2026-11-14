@@ -487,11 +487,15 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
 fn is_exact_https_route(base_url: &str, expected_authority: &str, expected_path: &str) -> bool {
     // URL schemes and host names are ASCII case-insensitive; paths are not.
     // Do not lowercase the whole URL here: a differently-cased path is a
-    // neighboring route, not the official endpoint. Keep this intentionally
-    // dependency-free because provider metadata is used by low-level config
-    // callers that should not need URL parsing machinery just for this guard.
+    // neighboring route, not the official endpoint. Trailing slashes are
+    // insignificant before the path comparison because the transport trims
+    // them all (`trim_end_matches('/')`) before dialing, so a route spelled
+    // with repeated trailing slashes still reaches this exact endpoint.
+    // Keep this intentionally dependency-free because provider metadata is
+    // used by low-level config callers that should not need URL parsing
+    // machinery just for this guard.
     let trimmed = base_url.trim();
-    let normalized = trimmed.strip_suffix('/').unwrap_or(trimmed);
+    let normalized = trimmed.trim_end_matches('/');
     let Some((scheme, authority_and_path)) = normalized.split_once("://") else {
         return false;
     };
@@ -504,9 +508,27 @@ fn is_exact_https_route(base_url: &str, expected_authority: &str, expected_path:
         && path == expected_path
 }
 
+/// Whether a configured route is a bare official HTTPS host with no path
+/// (`https://<authority>`, trailing slashes insignificant).
+///
+/// Complements [`is_exact_https_route`] for the one shape the transport
+/// normalizes onto the exact route: a version-less base URL gets `/v1`
+/// appended by the client before the request is dialed, and the transport
+/// trims every trailing slash first, so a bare official host — however many
+/// trailing slashes it carries — is the same first-party endpoint as its
+/// documented `/v1` spelling.
+fn is_bare_https_authority(base_url: &str, expected_authority: &str) -> bool {
+    let trimmed = base_url.trim();
+    let normalized = trimmed.trim_end_matches('/');
+    let Some((scheme, authority)) = normalized.split_once("://") else {
+        return false;
+    };
+    scheme.eq_ignore_ascii_case("https") && authority.eq_ignore_ascii_case(expected_authority)
+}
+
 /// Whether a configured route is exactly the official Kimi Code endpoint.
 ///
-/// A trailing slash is insignificant, but neighboring Kimi-hosted paths must
+/// Trailing slashes are insignificant, but neighboring Kimi-hosted paths must
 /// not inherit membership-plan credentials merely because they share a host.
 #[must_use]
 pub fn is_exact_kimi_code_route(kind: ProviderKind, base_url: &str) -> bool {
@@ -586,11 +608,21 @@ pub fn is_exact_zai_chat_route(kind: ProviderKind, base_url: &str) -> bool {
 ///
 /// This deliberately excludes the `/anthropic` routes: those use the native
 /// Messages adapter and do not share Chat Completions token-limit fields.
+/// The bare official hosts (`https://api.minimax.io`, `https://api.minimaxi.com`,
+/// no path) count as first-party too: the client normalizes a version-less
+/// base URL by appending `/v1`, so a bare-host configuration dials the same
+/// documented endpoint as its `/v1` spelling and must not be classified as
+/// a gateway. Repeated trailing slashes count too: the transport trims them
+/// all before appending `/v1`, so their classification must match what is
+/// actually dialed. Neighboring spellings — explicit ports, other paths,
+/// HTTP downgrades — stay fail-closed like the rest of the exact-route family.
 #[must_use]
 pub fn is_exact_minimax_chat_route(kind: ProviderKind, base_url: &str) -> bool {
     kind == ProviderKind::Minimax
         && (is_exact_https_route(base_url, "api.minimax.io", "v1")
-            || is_exact_https_route(base_url, "api.minimaxi.com", "v1"))
+            || is_exact_https_route(base_url, "api.minimaxi.com", "v1")
+            || is_bare_https_authority(base_url, "api.minimax.io")
+            || is_bare_https_authority(base_url, "api.minimaxi.com"))
 }
 
 /// Whether a configured route is one of MiniMax's exact first-party
@@ -2213,10 +2245,16 @@ mod tests {
         ));
 
         // Scheme and hostname casing are insignificant, but the endpoint
-        // path is a route identifier and must remain exact.
+        // path is a route identifier and must remain exact. Repeated
+        // trailing slashes stay insignificant: the transport trims them all
+        // before dialing, so this spelling reaches the same endpoint.
         assert!(is_exact_kimi_code_route(
             ProviderKind::Moonshot,
             "HTTPS://API.KIMI.COM/coding/v1/"
+        ));
+        assert!(is_exact_kimi_code_route(
+            ProviderKind::Moonshot,
+            "https://api.kimi.com/coding/v1//"
         ));
         for neighboring_route in [
             "https://api.kimi.com/CODING/v1",
@@ -2225,7 +2263,6 @@ mod tests {
             "https://api.kimi.com:443/coding/v1",
             "https://api.kimi.com/coding/v1?preview=1",
             "https://api.kimi.com/coding/v1#fragment",
-            "https://api.kimi.com/coding/v1//",
         ] {
             assert!(
                 !is_exact_kimi_code_route(ProviderKind::Moonshot, neighboring_route),
@@ -2283,7 +2320,13 @@ mod tests {
 
     #[test]
     fn direct_moonshot_route_matching_is_exact() {
-        for route in ["HTTPS://API.MOONSHOT.AI/v1/", "HTTPS://API.MOONSHOT.CN/v1/"] {
+        for route in [
+            "HTTPS://API.MOONSHOT.AI/v1/",
+            "HTTPS://API.MOONSHOT.CN/v1/",
+            // Repeated trailing slashes: the transport trims them all before
+            // dialing, so this spelling reaches the same endpoint.
+            "https://api.moonshot.ai/v1//",
+        ] {
             assert!(is_exact_moonshot_platform_route(
                 ProviderKind::Moonshot,
                 route
@@ -2295,7 +2338,6 @@ mod tests {
             "https://api.moonshot.ai:443/v1",
             "https://api.moonshot.ai/v1?preview=1",
             "https://api.moonshot.ai/v1#fragment",
-            "https://api.moonshot.ai/v1//",
             "https://api.moonshot.ai/v1/chat/completions",
             "https://api.moonshot.cn/v1/chat/completions",
             "https://api.kimi.com/coding/v1",
@@ -2315,6 +2357,10 @@ mod tests {
     fn direct_xai_route_matching_is_exact() {
         assert!(is_exact_xai_platform_route(
             ProviderKind::Xai,
+            "https://api.x.ai/v1//"
+        ));
+        assert!(is_exact_xai_platform_route(
+            ProviderKind::Xai,
             "HTTPS://API.X.AI/v1/"
         ));
         for neighboring_route in [
@@ -2323,7 +2369,6 @@ mod tests {
             "https://api.x.ai:443/v1",
             "https://api.x.ai/v1?preview=1",
             "https://api.x.ai/v1#fragment",
-            "https://api.x.ai/v1//",
             "https://api.x.ai/v1/chat/completions",
             "https://gateway.example/v1",
         ] {
@@ -2349,6 +2394,9 @@ mod tests {
             "https://open.bigmodel.cn/api/paas/v4",
             "https://open.bigmodel.cn/api/paas/v4/",
             "HTTPS://OPEN.BIGMODEL.CN/api/paas/v4",
+            // Repeated trailing slashes: the transport trims them all before
+            // dialing, so this spelling reaches the same endpoint.
+            "https://api.z.ai/api/paas/v4//",
         ] {
             assert!(is_exact_zai_chat_route(ProviderKind::Zai, route), "{route}");
         }
@@ -2358,7 +2406,6 @@ mod tests {
             "https://api.z.ai/API/paas/v4",
             "https://api.z.ai/api/paas/v4?preview=1",
             "https://api.z.ai/api/paas/v4#fragment",
-            "https://api.z.ai/api/paas/v4//",
             "https://api.z.ai/api/paas/v4/chat/completions",
             // BigModel neighbors: the undocumented coding path and the
             // preview product stay fail-closed, like the official-endpoint
@@ -2390,6 +2437,17 @@ mod tests {
             "https://api.minimax.io/v1",
             "https://api.minimaxi.com/v1/",
             "HTTPS://API.MINIMAX.IO/v1",
+            // Bare official hosts: the client appends `/v1` to a version-less
+            // base URL, so these dial the same first-party endpoint. Repeated
+            // trailing slashes count too — the transport trims them all before
+            // appending `/v1`, so their classification must match what is
+            // actually dialed (review 4539989149 / 4541485725).
+            "https://api.minimax.io",
+            "https://api.minimaxi.com/",
+            "HTTPS://API.MINIMAXI.COM",
+            "https://api.minimax.io//",
+            "https://api.minimaxi.com///",
+            "https://api.minimax.io/v1//",
         ] {
             assert!(
                 is_exact_minimax_chat_route(ProviderKind::Minimax, route),
@@ -2402,11 +2460,17 @@ mod tests {
             "https://api.minimax.io/V1",
             "https://api.minimax.io/v1?preview=1",
             "https://api.minimax.io/v1#fragment",
-            "https://api.minimax.io/v1//",
             "https://api.minimax.io/v1/chat/completions",
             "https://api.minimax.io/anthropic",
             "https://api.minimaxi.com/anthropic",
             "https://gateway.example/v1",
+            // Bare-host neighbors: a differently-cased scheme is a downgrade,
+            // an explicit port and lookalike or neighboring hosts stay
+            // fail-closed even without a path.
+            "http://api.minimax.io",
+            "https://api.minimax.io:443",
+            "https://api.minimax.io.evil.example",
+            "https://gateway.example",
         ] {
             assert!(
                 !is_exact_minimax_chat_route(ProviderKind::Minimax, neighboring_route),
@@ -2425,6 +2489,11 @@ mod tests {
             "https://api.minimax.io/anthropic",
             "https://api.minimaxi.com/anthropic/",
             "HTTPS://API.MINIMAX.IO/anthropic",
+            // Repeated trailing slashes: the Messages transport trims them
+            // all (`anthropic_messages_url`) before appending the versioned
+            // path, so the classification must match what is dialed.
+            "https://api.minimaxi.com/anthropic/",
+            "https://api.minimax.io/anthropic//",
         ] {
             assert!(
                 is_exact_minimax_anthropic_route(ProviderKind::MinimaxAnthropic, route),
@@ -2437,7 +2506,6 @@ mod tests {
             "https://api.minimax.io/Anthropic",
             "https://api.minimax.io/anthropic?preview=1",
             "https://api.minimax.io/anthropic#fragment",
-            "https://api.minimax.io/anthropic//",
             "https://api.minimax.io/anthropic/v1/messages",
             "https://api.minimax.io/v1",
             "https://gateway.example/anthropic",
