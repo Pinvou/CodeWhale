@@ -20,7 +20,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 import { spawnNdjsonChild, stopNdjsonChild } from './helpers/ndjson-child-driver.mjs';
 import { cleanupBrowserFixture, confirmedChildStopper, confirmedProcessExited, readPendingHostRequest } from './helpers/browser-wrapper-fixture-cleanup.mjs';
-import { heldRequestResultDiagnostic } from './helpers/browser-wrapper-held-result.mjs';
+import { heldRequestResultDiagnostic, heldRequestAuthorizationDiagnostic } from './helpers/browser-wrapper-held-result.mjs';
 
 const WRAPPER = fileURLToPath(new URL(
   '../src-tauri/resources/common/bundle/mcp-servers/browser-wrapper.mjs',
@@ -1382,7 +1382,8 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
         ),
         request.then((response) => assert.fail(
           'tool completed before its release barrier: ' +
-          JSON.stringify(heldRequestResultDiagnostic(response)),
+          JSON.stringify({ ...heldRequestResultDiagnostic(response),
+            authorization: heldRequestAuthorizationDiagnostic(response) }),
         )),
       ]);
       assert.equal(
