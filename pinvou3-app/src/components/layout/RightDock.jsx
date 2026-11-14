@@ -199,7 +199,7 @@ export function useRightDockOcclusion(occlusionId, active) {
     };
   }, [active, occlusionId, publishOcclusion, releaseOcclusion]);
 
-  return active ? (dock && occlusionId ? publicationReady : true) : false;
+  return active ? (!dock || !occlusionId ? true : publicationReady) : false;
 }
 
 export function RightDockHost({

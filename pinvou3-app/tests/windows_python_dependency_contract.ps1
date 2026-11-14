@@ -210,29 +210,36 @@ Assert-True -Condition $freshRejected -Message "fresh staging must reject a fail
 $savedStageId = $stageId
 $savedStagingParent = $stagingParent
 $savedStagingRoot = $stagingRoot
+$savedStageManifestPath = $stageManifestPath
 $savedGeneratedConfigPath = $generatedConfigPath
 $savedRuntimeDescriptorPath = $runtimeDescriptorPath
 try {
   $stageId = "python-contract-stage"
   $stagingParent = Join-Path $fixtureRoot "windows-runtime"
   $stagingRoot = Join-Path $stagingParent $stageId
+  $stageManifestPath = Join-Path $stagingRoot ".stage-manifest.json"
   $generatedConfigPath = Join-Path $stagingParent "tauri.generated.conf.json"
   $runtimeDescriptorPath = Join-Path $stagingParent "runtime-descriptor.json"
   New-Item -ItemType Directory -Path (Join-Path $stagingRoot "expanded\python") -Force | Out-Null
-  New-Item -ItemType Directory -Path (Join-Path $stagingRoot "expanded\vc_redist") -Force | Out-Null
+  New-Item -ItemType Directory -Path (Join-Path $stagingRoot "payload\vc_redist") -Force | Out-Null
   [System.IO.File]::WriteAllText((Join-Path $stagingRoot "expanded\python\python.exe"), "fixture")
-  [System.IO.File]::WriteAllText((Join-Path $stagingRoot "expanded\vc_redist\VC_redist.x64.exe"), "fixture")
-  Write-Utf8WithoutBom -Path (Join-Path $stagingRoot ".verified-stage.json") -Content (Get-StageInventoryContent -StageRoot $stagingRoot)
-  Write-Utf8WithoutBom -Path (Join-Path $stagingRoot ".verified-lock") -Content (Get-VerificationMarkerContent)
+  [System.IO.File]::WriteAllText((Join-Path $stagingRoot "payload\vc_redist\VC_redist.x64.exe"), "fixture")
+  $fixtureManifest = [pscustomobject]@{
+    stagedFiles = @(Get-StagedRelativeFiles -Root $stagingRoot)
+  }
+  Write-Utf8WithoutBom -Path $stageManifestPath -Content (Get-StageManifestContent -Root $stagingRoot)
+  $stageManifestSha256 = Get-Sha256 -Path $stageManifestPath
+  Write-Utf8WithoutBom -Path (Join-Path $stagingRoot ".verified-lock") -Content (Get-VerificationMarkerContent -StageManifestSha256 $stageManifestSha256)
   Write-TauriOverlay -StageId $stageId
-  Write-RuntimeDescriptor -Manifest ([pscustomobject]@{}) -StageId $stageId
+  Write-RuntimeDescriptor -Manifest $fixtureManifest -StageId $stageId
 
-  Assert-True -Condition (Test-VerifiedStageReusable -Manifest ([pscustomobject]@{}) -PythonDependencyProbe { param($PythonRoot) $true }) -Message "verified-stage fixture must be reusable before dependency probe failure injection"
-  Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest ([pscustomobject]@{}) -PythonDependencyProbe { param($PythonRoot) $false })) -Message "verified-stage reuse must reject a failed Python dependency probe"
+  Assert-True -Condition (Test-VerifiedStageReusable -Manifest $fixtureManifest -PythonDependencyProbe { param($PythonRoot) $true }) -Message "verified-stage fixture must be reusable before dependency probe failure injection"
+  Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $fixtureManifest -PythonDependencyProbe { param($PythonRoot) $false })) -Message "verified-stage reuse must reject a failed Python dependency probe"
 } finally {
   $stageId = $savedStageId
   $stagingParent = $savedStagingParent
   $stagingRoot = $savedStagingRoot
+  $stageManifestPath = $savedStageManifestPath
   $generatedConfigPath = $savedGeneratedConfigPath
   $runtimeDescriptorPath = $savedRuntimeDescriptorPath
 }
