@@ -20,6 +20,15 @@ The corpus contains known/tuned regression families, not fresh holdouts. The
 [frozen evaluator copies](frozen-evaluator-v2.4.5/README.md) preserve their measured
 bytes and documented defects; current graders live under `scripts/`.
 
+> 本仓差异（pinvou3）: the "current graders under `scripts/`" statements throughout
+> these records describe the community repository
+> [Pinvou/pinvou-agent](https://github.com/Pinvou/pinvou-agent), where this
+> evaluation was produced. This repository carries only the frozen evaluator
+> copies and the two render scripts committed alongside this README; the
+> aggregation/grading scripts themselves are not vendored here. Reproducing the
+> original runs therefore requires the community repository, while this
+> directory alone still reproduces the aggregate replay, figures, and PDF.
+
 ## Evidence index
 
 The full 27-family summary layers are [raw](summary-v2.4.5-raw.json),

@@ -1,5 +1,8 @@
 # Commit Message Convention
 
+> 本文件为本仓（pinvou3）改编版，改编自社区仓 Pinvou/pinvou-agent 的同名文档：社区仓强制英文描述，本仓强制中文描述，两者不可互换。
+> 本仓权威规范为 [`docs/Git Commit 信息规范文档.md`](Git%20Commit%20信息规范文档.md) 与 [`CONTRIBUTING.md`](../CONTRIBUTING.md)，由 `scripts/validate-commit-msg.py`（经 `.githooks/commit-msg` 在每次提交时执行）自动校验。本文是该规范的英文摘要，与自动校验同口径；冲突时以中文权威文档为准。
+
 ## Purpose and scope
 
 This convention keeps the Git history readable, consistent, traceable, and suitable for automated release tooling. It applies to every new human-authored commit on every branch.
@@ -11,17 +14,17 @@ The project uses a focused form of [Conventional Commits](https://www.convention
 Use this subject format:
 
 ```text
-<type>: <English description>
-<type>(<scope>)!: <English description>
+<type>: <中文描述>
+<type>(<scope>)!: <中文描述>
 ```
 
-For changes that need more context, add an English body and optional trailers:
+For changes that need more context, add an optional body and trailers:
 
 ```text
-<type>: <English description>
-<type>(<scope>)!: <English description>
+<type>: <中文描述>
+<type>(<scope>)!: <中文描述>
 
-Explain why the change is needed, how it works, and any relevant impact.
+说明改动原因、实现方式与影响范围。
 
 Optional-Trailer: value
 Signed-off-by: Name <email@example.com>
@@ -32,11 +35,11 @@ The fields have these meanings:
 - `type` is required and must be one of the allowed values below.
 - `scope` is optional and identifies the affected module, page, or capability, such as `session`, `search`, or `installer`.
 - `!` is optional and marks a breaking change.
-- `description` is required. Use concise English, no more than 50 characters, without ending punctuation. Automated checks validate the format, not the language.
+- `description` is required. Use concise **Chinese**, no more than 50 characters, as a declarative sentence without ending punctuation. The automated check validates both the format **and** the language: a description without any Chinese character is rejected.
 - The GitHub-generated terminal suffix ` (#<PR number>)` on a squash commit is platform metadata and does not count toward the 50-character description limit.
-- The optional body and trailers must be written in English, apart from standard identifiers, paths, URLs, code, and proper names.
+- The optional body has no hard language gate; this repository's practice is to write it in Chinese, apart from standard identifiers, paths, URLs, code, and proper names.
 
-Every human-authored commit must also include the DCO `Signed-off-by` trailer described in [`DCO.md`](../DCO.md). Create it with `git commit -s` or add `--signoff` when amending or rebasing.
+Every human-authored commit must also include the DCO `Signed-off-by` trailer described in [`DCO.md`](../DCO.md), and it must match the commit author identity. Create it with `git commit -s` or add `--signoff` when amending or rebasing. Trusted Dependabot/GitHub Actions bot commits and merge commits (more than one parent) are exempt; the fixed historical squash-commit registry is documented in [the Chinese convention](Git%20Commit%20信息规范文档.md), is scoped to explicitly registered commit objects, and never exempts new commits.
 
 ## Allowed types
 
@@ -59,8 +62,8 @@ Every human-authored commit must also include the DCO `Signed-off-by` trailer de
 Add `!` after the type or scope when a change breaks compatibility, removes a public interface, or requires migration:
 
 ```text
-feat(api)!: remove the legacy login parameters
-fix(storage)!: change the persisted session schema
+feat(api)!: 重构用户登录接口，废弃旧版登录参数
+fix(storage)!: 调整会话持久化结构，历史数据适配变更
 ```
 
 Explain the migration and compatibility impact in the commit body and pull request.
@@ -70,45 +73,46 @@ Explain the migration and compatibility impact in the commit body and pull reque
 Features and fixes:
 
 ```text
-feat(search): add offline result filtering
-feat(settings): allow custom model identifiers
-fix(session): prevent duplicate sync attempts
-fix(installer): preserve runtime resources on upgrade
+feat(user): 新增手机号验证码登录功能
+feat(search): 新增离线结果过滤能力
+fix(installer): 修复升级时运行时资源丢失问题
+fix(session): 解决会话同步重复触发问题
 ```
 
 Maintenance changes:
 
 ```text
-refactor(chat): isolate message retry state
-perf(list): avoid redundant result rendering
-docs: explain the release verification flow
-test(connector): cover missing credential errors
-chore(deps): update the browser test runtime
+refactor(chat): 抽离消息重试公共逻辑
+perf(list): 优化列表渲染卡顿、减少重复请求
+docs: 更新发布验证流程说明
+test(connector): 补充凭证缺失错误覆盖
+chore(deps): 升级浏览器测试运行时
 ```
 
 Reverts:
 
 ```text
-revert: restore the previous session timeout
+revert: 回滚上一版会话超时调整
 ```
 
 ## Invalid examples
 
-Do not use vague descriptions:
+Do not use vague descriptions (`update`, `fix bug`, `修改代码`, `测试` are rejected outright):
 
 ```text
 chore: update
 fix: fix bug
-chore: modify code
-test: test
+chore: 修改代码
+test: 测试
 ```
 
-Do not use an unsupported type, omit the required separator, end the description with punctuation, exceed the length limit, or write the description in a language other than English:
+Do not use an unsupported type, omit the required separator, end the description with punctuation, exceed the 50-character limit, or write the description without Chinese:
 
 ```text
 feature: add search filters
 fix(session) prevent duplicate sync attempts
 fix: prevent duplicate sync attempts.
+fix: 修复重复同步尝试问题。
 ```
 
 ## Best practices

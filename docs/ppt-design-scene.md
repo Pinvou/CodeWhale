@@ -10,4 +10,4 @@
 
 验证入口：`test:pinvou-mode-state`、`test:scene-capabilities`、`test:pinvou-scene-sidecar`、`test:ui-language` 与构建后的 `test:scene-cards-smoke`。
 
-实现位置：场景路由 `pinjou3-app/src/features/chat/work-scene-routes.js`；场景能力 `pinjou3-app/src/features/chat/scene-capabilities.js`。
+实现位置：场景路由 `pinvou3-app/src/features/chat/work-scene-routes.js`；场景能力 `pinvou3-app/src/features/chat/scene-capabilities.js`。

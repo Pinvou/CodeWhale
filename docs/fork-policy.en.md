@@ -1,16 +1,16 @@
 # Pinvou CodeWhale Fork Policy
 
-> Updated: 2026-11-05. Public maintenance 11cba403d contains #114/#125 plus #123/#124/#129/#131/#133/#134/#135; parent gitlink follows the public maintenance head.
+> Updated: 2026-11-10. Public maintenance 6f7a3a748 sits on 11cba403d and contains #136/#142/#148/#150/#152; the parent aligns through the strict public-maintenance-head gate.
 > Canonical Chinese policy: [`docs/fork-policy.md`](fork-policy.md). This English page is a condensed summary; the Chinese version is the complete, authoritative process.
 
 Integrated upstream backport and historical provenance: [modification register](fork-modifications.en.md#web-jsonpath-upstream-backport-integrated-historical-candidate-evidence-756). The public maintenance gate and section 6 authorization requirement continue to apply.
 
 ## 0. Current maintenance baseline and validation boundary
 
-- Public maintenance and parent gitlink: `11cba403dc6bd6ca5c4dca55042785b03449ac8e` (2026-11-05). #123 merged as `e5a8af221`, #124 as `449edbf0b`, #129 as `4e560354c`, #131 as `e2a0e14fd`, #133 as `4e75c6a07`, #134 as `8a4719fd4`, #135 as `11cba403d`. This follow-up changes parent references only; it does not advance maintenance.
-- Measured history: 93 commits above upstream v0.9.12 `dcd4c200f`, 78 above r1 `1fafee7e2`; 91 carry DCO sign-offs. The unsigned squash commits are #107 `f27672935` and #116 `e9a7f48da1`. The previous single-exception claim no longer applies. Published maintenance history is preserved.
+- Public maintenance and parent gitlink: `6f7a3a748f408568468ace45aa5cdbb34f882d73` (2026-11-10). On top of the former `11cba403d` this consumes the merged #136 `37be2844f`, #142 `78804c83e`, #148 `5f15cce57`, #150 `e972a9a05`, and #152 `6f7a3a748`. The parent consumes published commits only; it does not advance the maintenance branch or move tags.
+- Measured history: 98 commits above upstream v0.9.12 `dcd4c200f`, 83 above r1 `1fafee7e2`; 96 carry DCO sign-offs. The unsigned squash commits are #107 `f27672935` and #116 `e9a7f48da1`. The previous single-exception claim no longer applies. Published maintenance history is preserved.
 - Immutable `pinvou-v0.9.12-r3` remains at `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`; r1 remains at `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`. The public verifier still requires maintenance-head equality and the frozen r3 tag; no predicate is relaxed.
-- Measured drift: 540 files, +119210/-49666, net +69544; 301 distinct `forkguard_*` names (floor remains 64). Earlier native Windows receipts retain their recorded commit boundaries; they do not prove execution on this integrated tree. Current parent CI and final integrated-tree review remain separate requirements.
+- Measured drift: 548 files, +121115/-49797, net +71318; 301 distinct `forkguard_*` names (floor remains 64). Earlier native Windows receipts retain their recorded commit boundaries; they do not prove execution on this integrated tree. Current parent CI and final integrated-tree review remain separate requirements.
 
 - The public pre-upgrade rollback point is immutable tag `pinvou-v0.9.5-r13` at `f853f8f1566c57e6be40d5439a222a932aa79ef5`; local `backup/pre-v0.9.12-sync` at the same SHA is only a convenience ref.
 - r1 is the protected consumable baseline. At each rN closure the parent gitlink, maintenance branch, and immutable tag resolve to the same commit.
@@ -25,16 +25,27 @@ Integrated upstream backport and historical provenance: [modification register](
   6. Swarm rate-limit governance (T6, appended)
   7. Compaction checkpoint role compatibility (T7, merged into the maintenance branch)
   8. Roster presentation of host profiles (T8, appended)
-  9. Custom-wire runtime route (T9, merged into the maintenance branch)
+  9. Custom wire runtime route (T9, merged into the maintenance branch)
   10. Tachyon reasoning-effort dialect (T10, merged into the maintenance branch)
 
 The exact commits and fingerprints are recorded in [`docs/fork-modifications.md`](fork-modifications.md).
+
+## Historical account-host wiring retained
+
+The records below preserve the commit and verification boundaries of their time; the current maintenance baseline is section 0.
+
+> F05 invocation-idempotency registration: the original `8b5a86390` patch and its follow-up fixes were merged into `pinvou3-clean` by an external maintainer through CodeWhale #92; the public maintenance head synced at the time, `ea9fdc90f`, must retain that capability. The parent keeps the original F05 commit history through an ordinary merge, and the foundation still uses the published maintenance commit — a pre-merge candidate SHA is never treated as the maintenance head. The account Gateway's host opt-in and per-invocation identity are registered under T1 in `docs/fork-modifications.md`. Current gates and actual host verification remain separate requirements; source-code inclusion cannot substitute for either.
+
+> Strict-alignment follow-up after 2026-10-14: the public maintenance branch merged #107 with external approval; `f27672935` keeps the same wire model/protocol host-freeze restriction, and cross-model requests still re-resolve. Two new result-oriented regressions are consumed with the published commit; the parent modifies no foundation code, moves no tags, and does not relax the public-maintenance-head check; host applicability CI for the new head is verified separately.
+
+> #54 alignment follow-up after 2026-10-14: `803e672bb` directly inherits the #107 maintenance commit above and consumes the externally approved workspace-roots foundation capability (T1/T2). The parent keeps a single execution-root input and does not turn the session ledger into additional execution roots; new persisted root fields are redacted item-by-item along the existing Web metadata path while Native keeps raw values. The foundation also changes single-root operand cwd handling and symlink/missing-path `..` resolution, so this cannot be registered as a behavior-neutral gitlink update; actual host verification is recorded separately.
 
 
 ## Rules
 
 - Prefer the app bridge, bundle instructions/Skills, MCP/connectors/plugins, then an upstream contribution. Keep a fork patch only when the behavior must be atomic inside CodeWhale's Engine, SubAgent, Task, or Automation lifecycle.
 - Product tool policy, UI, workspace selection, and business routing stay in `pinvou3-app`.
+- The current maintenance head and drift are governed by section 0 of `docs/fork-modifications.md`; this round consumes the merged #136/#142/#148/#150/#152 from the public maintenance branch without modifying the branch or moving fixed tags. The historical #107 maintenance head `f27672935` measures `397 files, +53709/-21547` above upstream v0.9.12, net +32162; its `client.rs` +124/-5 relative to `480bebf61` retains same-model host route limits and two result-oriented regressions, filed under the existing T1 with no new topic.
 - The soft drift limits remain 1,500 net added lines and 200 fork-distinct lines per file. The v0.9.12 r1 baseline is 94 files and `+5022/-944` (net 4,078), down from v0.9.5 r13 at 110 files and `+10895/-1195`. Newly touched files include equivalent Rust/rustdoc release-lint adjustments, review-requested result-level lifecycle and evaluation regressions, the API-search fallback reachability/error-guidance fix, removal of an obsolete upstream-comparison test helper, an exact runtime-contract budget ratchet for the official v0.9.12 plus Pinvou r1 model-visible schemas, a bounded macOS cold-build timeout, and overdue one-shot delivery; they add no fork behavior topic. The remaining excess is justified by Engine/Task-atomic steer, final-dispatch security, host prompt/profile/Skills ownership, Automation lifecycle behavior, and their safety tests. Upstreaming priority is generic steer and per-turn security first, Automation lifecycle second, parent migration to narrow re-export APIs followed by retirement of the 18-module compatibility facade, then replacement of prompt/profile/Skills ownership with stable host APIs.
 - Fixups are squashed into their owning topic; no long-lived catch-up commit chains are maintained, and generic host configuration, routing, tools, Automation, and OAuth must remain within their owning boundary.
 - A fork-distinct change must update the modification register and guard fingerprints, include a result-oriented `forkguard_*` test where applicable, and pass `./scripts/fork-guard.sh --fast`.
