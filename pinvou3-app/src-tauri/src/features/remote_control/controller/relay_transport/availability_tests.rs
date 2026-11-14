@@ -547,6 +547,10 @@ async fn lifecycle_guard_retires_aborted_unpolled_task_but_not_replacement() {
 }
 
 #[tokio::test]
+// accept_hdr_async 的握手回调签名由 tungstenite/tauri 类型强制：Err 变体
+// （tauri::http::Response，≥136 字节）不是本测试的选择，无法装箱缩小。
+// result_large_err 属 perf deny 组，此处为 API 形状导致的定点豁免。
+#[allow(clippy::result_large_err)]
 async fn real_spawn_panic_retires_sender_and_projects_one_owned_disconnect() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let slot = Arc::new(OnceLock::<ControllerTransportSender>::new());
@@ -638,6 +642,8 @@ fn explicit_stop_suppresses_terminal_projection_and_sink_panic_cannot_skip_retir
 }
 
 #[tokio::test]
+// 同上：accept_hdr_async 回调的 Err 变体形状由 API 强制（见上一个测试的说明）。
+#[allow(clippy::result_large_err)]
 async fn real_socket_invalid_traffic_and_unmatched_pongs_cannot_renew_silence() {
     for noise in [
         Message::Text("invalid JSON".into()),
