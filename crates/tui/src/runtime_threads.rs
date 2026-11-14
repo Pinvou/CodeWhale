@@ -1471,13 +1471,18 @@ impl RuntimeThreadStore {
 
     pub fn save_turn(&self, turn: &TurnRecord) -> Result<()> {
         validated_record_id(&turn.thread_id, "thread id")?;
-        // Every mutation path serializes on `turn_mutation` and loads through
-        // `load_turn`, which returns the staged routed-usage form — so the
-        // record being saved already carries any staged appends and
-        // persisting it supersedes the stage. Clearing here keeps the staged
-        // set from resurrecting stale records after an out-of-band write.
+        // Callers serialize on `turn_mutation`, and `load_turn` returns the
+        // staged routed-usage form, so the record being saved already carries
+        // any staged appends and persisting it supersedes the stage. The
+        // stage clears only after the write succeeds: on a failed write the
+        // staged batch stays resident and the next flush or settlement save
+        // retries it, so a transient disk error cannot silently drop the
+        // already-acknowledged records the journal never saw. (Writes that
+        // succeed are superseded, and out-of-band writers still invalidate
+        // the stage through this same success path.)
+        write_json_atomic(&self.turn_path(&turn.id)?, turn)?;
         self.routed_usage_staged.lock().remove(&turn.id);
-        write_json_atomic(&self.turn_path(&turn.id)?, turn)
+        Ok(())
     }
 
     /// Deliver one routed-usage record for `turn_id`. Appends stage in memory
