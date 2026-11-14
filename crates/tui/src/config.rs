@@ -9940,7 +9940,9 @@ fn provider_preserves_custom_base_url_model(provider: ApiProvider, base_url: &st
 }
 
 fn moonshot_base_url_uses_kimi_code(base_url: &str) -> bool {
-    let normalized = normalize_base_url(base_url).to_ascii_lowercase();
+    // The exact gate trims insignificant surrounding whitespace; this loose
+    // copy must stay a superset of it, so trim here too.
+    let normalized = normalize_base_url(base_url.trim()).to_ascii_lowercase();
     normalized == DEFAULT_KIMI_CODE_BASE_URL
         || normalized == "https://api.kimi.com/coding"
         || normalized.starts_with("https://api.kimi.com/coding/")
@@ -10247,6 +10249,25 @@ pub(crate) fn validate_kimi_code_api_model_id(
 #[cfg(test)]
 mod kimi_code_pairing_tests {
     use super::*;
+
+    #[test]
+    fn loose_kimi_code_recognition_trims_padding_like_the_exact_gate() {
+        // The exact gate trims insignificant surrounding whitespace; the
+        // loose copy (default-model fallback) must stay a superset of it.
+        for base_url in [
+            "  https://api.kimi.com/coding/v1/  ",
+            "\thttps://api.kimi.ai/coding/v1",
+        ] {
+            assert!(
+                moonshot_base_url_uses_kimi_code(base_url),
+                "{base_url} must stay inside the loose membership recognition"
+            );
+            assert!(
+                moonshot_base_url_is_exact_kimi_code(base_url),
+                "{base_url} must stay an exact membership route (subset invariant)"
+            );
+        }
+    }
 
     #[test]
     fn direct_platform_ids_fail_on_kimi_code_endpoint() {
