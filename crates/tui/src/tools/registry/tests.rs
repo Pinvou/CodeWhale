@@ -1714,3 +1714,40 @@ fn classic_truncation_footer_teaches_a_followable_retry() {
         "the classic truncation footer must keep naming the followable retrieval route"
     );
 }
+
+#[test]
+fn registered_apply_patch_schema_keeps_its_required_only_branch_groups() {
+    // The builtin apply_patch schema declares root properties beside
+    // `oneOf: [{required: [patch]}, {required: [replace]}, {required:
+    // [changes]}]` — required-only branches resolving against the
+    // ENCLOSING properties. Pruning those groups (the pre-context walk
+    // did) left `oneOf: [{}, {}, {}]`, whose every branch matches every
+    // instance: under exactly-one semantics the advertised builtin
+    // contract admits no instance at all, and the verbatim Messages lanes
+    // forwarded the damage verbatim (review 5885719142). The registry
+    // catalog must carry the intact branch groups instead.
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let registry = ToolRegistryBuilder::new().with_patch_tools().build(ctx);
+    let tools = registry.to_api_tools();
+    let patch = tools
+        .iter()
+        .find(|tool| tool.name == "apply_patch")
+        .expect("apply_patch registered");
+    assert_eq!(
+        patch.input_schema["oneOf"],
+        json!([
+            {"required": ["patch"]},
+            {"required": ["replace"]},
+            {"required": ["changes"]}
+        ]),
+        "the registered apply_patch union must keep every required-only branch: {}",
+        patch.input_schema
+    );
+    for field in ["patch", "replace", "changes"] {
+        assert!(
+            patch.input_schema["properties"].get(field).is_some(),
+            "every branch name stays declared at the root: {field}"
+        );
+    }
+}
