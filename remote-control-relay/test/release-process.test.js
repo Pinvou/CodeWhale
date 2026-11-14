@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { parse } from "yaml";
 import { runReleaseProcess } from "../scripts/release-process.mjs";
 import { buildReleaseSubprocessEnvironment } from "../scripts/controller-release-gate.mjs";
 
@@ -19,6 +20,87 @@ const quote = (text) => `'${text.replaceAll("'", "''")}'`;
 test("a command cannot consume its supervisor's private control input", async () => {
   await runReleaseProcess(process.execPath, ["-e", "if(require('node:fs').readFileSync(0).length!==0)process.exitCode=41"],
     { env, timeoutMs: 5000 });
+});
+
+test("CI preserves an interpreter usable by the filtered release environment", () => {
+  const workflow = parse(readFileSync(new URL("../../.github/workflows/pr-check.yml", import.meta.url), "utf8"));
+  for (const step of workflow.jobs["relay-test"].steps) {
+    if (step.uses?.startsWith("actions/setup-python@")) {
+      assert.equal(step.with?.["update-environment"], false,
+        "Linux release contracts must retain the runner interpreter instead of a runtime needing filtered loader variables");
+    }
+  }
+  const windows = workflow.jobs["release-contract-test"].steps.filter((step) => step.uses?.startsWith("actions/setup-python@"));
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0].if, "${{ runner.os == 'Windows' && runner.environment == 'github-hosted' }}");
+  const release = parse(readFileSync(new URL("../../.github/workflows/release-packages.yml", import.meta.url), "utf8"));
+  const releaseSetup = release.jobs["remote-control-release-gate"].steps.filter((step) => step.uses?.startsWith("actions/setup-python@"));
+  assert.equal(releaseSetup.length, 1);
+  assert.equal(releaseSetup[0].if, "${{ runner.environment == 'github-hosted' }}");
+});
+
+test("supervisor receipt failures retain known aborts and expose only closed diagnostics", async () => {
+  const key = Symbol.for("pinvou.release.runner.receipt.probe");
+  for (const abort of [null, "cancelled", "timeout"]) {
+   for (const scenario of ["missing", "invalid", "unconfirmed", "reported-timeout", "primary", "start-error"]) {
+    const child = Object.assign(new EventEmitter(), { pid: scenario === "start-error" ? undefined : 1234, stdin: new PassThrough(),
+      stdout: new PassThrough(), stderr: new PassThrough(), unref: () => {}, kill: () => true });
+    let next = 0;
+    const timers = new Map();
+    globalThis[key] = { spawn: () => child,
+      setTimeout: (fn, delay) => { const id = ++next; timers.set(id, { fn, delay }); return id; },
+      clearTimeout: (id) => timers.delete(id) };
+    try {
+      let source = readFileSync(new URL("../scripts/release-process.mjs", import.meta.url), "utf8");
+      assert.ok(source.includes('import { spawn } from "node:child_process";'));
+      source = source.replace('import { spawn } from "node:child_process";',
+        'const {spawn,setTimeout,clearTimeout}=globalThis[Symbol.for("pinvou.release.runner.receipt.probe")];');
+      assert.match(source, /^const supervisor = .+;$/mu);
+      source = source.replace(/^const supervisor = .+;$/mu, 'const supervisor="controlled-supervisor";');
+      const module = await import(`data:text/javascript;base64,${Buffer.from(source + `\n//${crypto.randomUUID()}`).toString("base64")}`);
+      const controller = new AbortController();
+      const running = module.runReleaseProcess(process.execPath, [], { env, timeoutMs: 1000, signal: controller.signal })
+        .then(() => null, (error) => error);
+      const request = JSON.parse(child.stdin.read().toString());
+      if (abort === "cancelled") controller.abort();
+      if (abort === "timeout") {
+        const businessTimers = [...timers.values()].filter((timer) => timer.delay === 1000);
+        assert.equal(businessTimers.length, 1);
+        businessTimers[0].fn();
+      }
+      if (scenario === "start-error") child.emit("error", new Error("PRIVATE_DIAGNOSTIC_SENTINEL"));
+      else {
+        const receipt = scenario === "invalid" ? {
+          nonce: request.nonce, execution_error: "PRIVATE_DIAGNOSTIC_SENTINEL", primary_exit_code: 23, reason: "cancelled",
+        } : { nonce: request.nonce, execution_error: null, exit_code: 86, forced: true,
+          root_exit_code: scenario === "primary" ? 23 : 143,
+          primary_exit_code: scenario === "primary" ? 23 : null, cleanup_confirmed: false,
+          reason: scenario === "reported-timeout" ? "timeout" : abort };
+        child.stderr.write(scenario === "missing" ? "PRIVATE_DIAGNOSTIC_SENTINEL" :
+          "PINVOU_RELEASE_PROCESS " + JSON.stringify(receipt) + "\n");
+        child.emit("close", scenario === "missing" ? 127 : 0);
+      }
+      const error = await running;
+      const expectedAbort = { cancelled: "release_subgate_cancelled", timeout: "release_subgate_timeout" }[abort];
+      const expected = scenario === "primary" ? "release_subgate_failed" : expectedAbort
+        || (scenario === "reported-timeout" ? "release_subgate_timeout"
+          : scenario === "start-error" ? "release_subgate_start_failed" : "release_subgate_cleanup_unconfirmed");
+      assert.equal(error.code, expected, `${abort}/${scenario}`);
+      assert.equal(error.cleanupConfirmed, scenario === "start-error");
+      if (scenario !== "start-error") assert.equal(error.cleanupError, "release_subgate_cleanup_unconfirmed");
+      if (scenario === "missing" || scenario === "invalid") {
+        assert.equal(error.receiptStatus, scenario);
+        assert.equal(error.supervisorExitCode, scenario === "missing" ? 127 : 0);
+      }
+      if (scenario === "primary") assert.equal(error.exitCode, 23, "a valid earlier primary must win over a later abort");
+      assert.doesNotMatch(JSON.stringify(error), /PRIVATE_DIAGNOSTIC_SENTINEL/u);
+      assert.equal(error.cause, undefined);
+    } finally {
+      child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
+      delete globalThis[key];
+    }
+   }
+  }
 });
 
 test("missing acknowledgement settles at the first bounded cleanup deadline without close", async () => {

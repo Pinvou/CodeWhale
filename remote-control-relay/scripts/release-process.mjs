@@ -10,6 +10,11 @@ function failure(code, details = {}) {
   return Object.assign(new Error(code), { code, ...details });
 }
 
+function interruptionFailureCode(reason) {
+  return reason === "timeout" ? "release_subgate_timeout"
+    : reason === "cancelled" ? "release_subgate_cancelled" : null;
+}
+
 // All callers supply their existing purpose-filtered command environment.
 // The supervisor inherits the same filtered environment; no secret env spread.
 export function runReleaseProcess(command, args, {
@@ -45,8 +50,7 @@ export function runReleaseProcess(command, args, {
     const abandonUnconfirmed = () => {
       child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy();
       child.unref();
-      const primaryCode = requested === "timeout" ? "release_subgate_timeout"
-        : requested === "cancelled" ? "release_subgate_cancelled" : "release_subgate_cleanup_unconfirmed";
+      const primaryCode = interruptionFailureCode(requested) || "release_subgate_cleanup_unconfirmed";
       settle(failure(primaryCode, { cleanupConfirmed: false, cleanupError: "release_subgate_cleanup_unconfirmed" }));
     };
     const forceUnconfirmed = () => {
@@ -96,7 +100,7 @@ export function runReleaseProcess(command, args, {
       if (error) reject(error); else resolve();
     };
     child.once("error", () => {
-      if (child.pid == null) settle(failure("release_subgate_start_failed", { cleanupConfirmed: true }));
+      if (child.pid == null) settle(failure(interruptionFailureCode(requested) || "release_subgate_start_failed", { cleanupConfirmed: true }));
       else if (!hardKilled) forceUnconfirmed();
       else abandonUnconfirmed();
     });
@@ -118,17 +122,22 @@ export function runReleaseProcess(command, args, {
         || (receipt.root_exit_code !== null && !Number.isInteger(receipt.root_exit_code))
         || (receipt.primary_exit_code !== null && (!Number.isInteger(receipt.primary_exit_code)
           || receipt.primary_exit_code === 0 || receipt.primary_exit_code !== receipt.root_exit_code))) {
-        settle(failure("release_subgate_cleanup_unconfirmed")); return;
+        settle(failure(interruptionFailureCode(requested) || "release_subgate_cleanup_unconfirmed", {
+          cleanupConfirmed: false, cleanupError: "release_subgate_cleanup_unconfirmed",
+          supervisorExitCode: Number.isInteger(code) && code >= 0 && code <= 0xffffffff ? code : null,
+          receiptStatus: receipt === null ? "missing" : "invalid",
+        })); return;
       }
+      const reason = requested || receipt.reason;
       if (receipt.cleanup_confirmed !== true) {
         const primaryCode = receipt.primary_exit_code !== null ? "release_subgate_failed"
-          : receipt.execution_error ? `release_subgate_${receipt.execution_error}` : "release_subgate_cleanup_unconfirmed";
+          : interruptionFailureCode(reason)
+            || (receipt.execution_error ? `release_subgate_${receipt.execution_error}` : "release_subgate_cleanup_unconfirmed");
         settle(failure(primaryCode,
           { exitCode: receipt.root_exit_code ?? receipt.exit_code, cleanupConfirmed: false,
             cleanupError: "release_subgate_cleanup_unconfirmed" }));
         return;
       }
-      const reason = requested || receipt.reason;
       const rootExit = receipt.root_exit_code ?? receipt.exit_code;
       if (receipt.primary_exit_code !== null) {
         settle(failure("release_subgate_failed", { exitCode: receipt.primary_exit_code,

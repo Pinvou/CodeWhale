@@ -335,7 +335,9 @@ class WebpkiCiContractTests(unittest.TestCase):
                     ('account-platform-test', 'Account test resource lifecycle receipts'),
                     ('account-closure-test', 'Account closure resource lifecycle receipts'),
                     ('windows-codex-runtime-test', 'Preserve browser fixture exit receipts'),
-                    ('windows-codex-runtime-test', 'Preserve ACP fixture exit receipt')]
+                    ('windows-codex-runtime-test', 'Preserve ACP fixture exit receipt'),
+                    ('relay-test', '保留 Relay 进程作用域原始回执'),
+                    ('release-contract-test', '保留 Windows 发布进程原始回执')]
         self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed))
         for job, name in reviewed:
             steps = job_block(workflow, job).split('\n      - ')
@@ -360,7 +362,8 @@ class WebpkiCiContractTests(unittest.TestCase):
         for name in ['Confirm test resource retirement', 'Confirm Account test resource retirement',
                      'Test and vet all Account Platform Go modules',
                      'Windows browser wrapper lifecycle regression', 'Windows browser wrapper lazy regression',
-                     'Windows ACP bridge runtime smoke']:
+                     'Windows ACP bridge runtime smoke', 'Relay 与部署脚本回归',
+                     'Windows 远控发布与安全契约', 'Windows 共享进程监督器兼容回归']:
             with self.subTest(step=name), self.assertRaises(AssertionError):
                 self.verify_diagnostic_uploads(workflow.replace(
                     f'      - name: {name}\n', f'      - name: {name}\n        continue-on-error: true\n'))

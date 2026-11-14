@@ -644,6 +644,7 @@ jobs:
           run-id: ${{ inputs.remote_control_evidence_run_id || vars.PINVOU_REMOTE_CONTROL_EVIDENCE_RUN_ID }}
 
       - uses: actions/setup-python@v7
+        if: ${{ runner.environment == 'github-hosted' }}
         with:
           python-version: "3.13"
 

@@ -1404,10 +1404,6 @@ jobs:
           # still write a 107MB PR-scoped cache copy per run (invisible to
           # other PRs — pure quota weight). Same policy as release-contract-test.
 
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
-
       - name: 安装 relay 依赖
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
 
@@ -2243,7 +2239,7 @@ jobs:
           npm --prefix pinvou3-app run test:linux-asr-runtime
 
       - uses: actions/setup-python@v7
-        if: ${{ runner.os == 'Windows' }}
+        if: ${{ runner.os == 'Windows' && runner.environment == 'github-hosted' }}
         with:
           python-version: "3.13"
 

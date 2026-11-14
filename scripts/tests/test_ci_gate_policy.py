@@ -3645,6 +3645,8 @@ python3() { fixture_mock python3 "$@"; }
             "Account closure resource lifecycle receipts",
             "Preserve browser fixture exit receipts",
             "Preserve ACP fixture exit receipt",
+            "保留 Relay 进程作用域原始回执",
+            "保留 Windows 发布进程原始回执",
         )
         self.assertEqual(
             len(step_level),

@@ -96,6 +96,9 @@ Tests requiring a live model, network service, credential, or large model asset 
 
 ### Test resource lifetime
 
+Release command ownership, failure diagnostics and supported interpreter setup are
+documented in [the release process lifetime guide](docs/remote-release-process-lifetime.md).
+
 One-shot CI fixtures must create resources through the shared lifetime boundary:
 
 - Go PostgreSQL fixtures use `internal/cifixture.CreateDatabase` and retain the
