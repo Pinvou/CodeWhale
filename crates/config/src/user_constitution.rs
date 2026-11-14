@@ -1331,8 +1331,13 @@ fn truncate_clause_text(s: &str, max: usize) -> String {
     if let Some(idx) = s.rfind(TRUNCATION_MARKER_PREFIX) {
         let tail = &s[idx..];
         if tail.ends_with(TRUNCATION_MARKER_SUFFIX) {
-            let digits =
-                &tail[TRUNCATION_MARKER_PREFIX.len()..tail.len() - TRUNCATION_MARKER_SUFFIX.len()];
+            // `get` (not slice indexing) so a degenerate tail — e.g. exactly
+            // `[…truncated chars]`, where the prefix's own trailing space
+            // completes the suffix — yields an empty digit run instead of a
+            // start-after-end panic, and falls through to plain text.
+            let digits = tail
+                .get(TRUNCATION_MARKER_PREFIX.len()..tail.len() - TRUNCATION_MARKER_SUFFIX.len())
+                .unwrap_or_default();
             if !digits.is_empty()
                 && digits.chars().count() <= MAX_MARKER_DIGITS
                 && digits.bytes().all(|b| b.is_ascii_digit())
@@ -2268,6 +2273,63 @@ mod tests {
             truncate_clause_text(&small_fake, MAX_CLAUSE_TEXT_LEN),
             small_fake
         );
+    }
+
+    /// A clause whose terminal marker-shaped tail carries **no** digits —
+    /// exactly `[…truncated chars]`, where the prefix's own trailing space
+    /// completes the suffix — must not panic the recognizer's byte slicing
+    /// (the digit range degenerates to start-after-end). It falls through to
+    /// plain text: a fitting clause passes verbatim, an over-cap one is
+    /// re-bounded with one accurate marker, and both forms are fixed points.
+    #[test]
+    fn truncate_clause_text_survives_a_zero_digit_terminal_marker() {
+        let body = "review probe ".repeat(40);
+        let fitting = format!("{body}[…truncated chars]");
+        assert_eq!(
+            truncate_clause_text(&fitting, MAX_CLAUSE_TEXT_LEN),
+            fitting,
+            "a fitting zero-digit marker tail passes verbatim without panicking"
+        );
+        assert_eq!(
+            truncate_clause_text(&fitting, MAX_CLAUSE_TEXT_LEN),
+            fitting,
+            "the pass-through is idempotent"
+        );
+
+        let over_cap = format!("{}[…truncated chars]", "z".repeat(MAX_CLAUSE_TEXT_LEN + 50));
+        let bounded = truncate_clause_text(&over_cap, MAX_CLAUSE_TEXT_LEN);
+        assert!(
+            bounded.ends_with("[…truncated 68 chars]"),
+            "over-cap re-bound carries one accurate marker: {bounded_tail}",
+            bounded_tail = &bounded[bounded.len().saturating_sub(40)..]
+        );
+        assert_eq!(
+            truncate_clause_text(&bounded, MAX_CLAUSE_TEXT_LEN),
+            bounded,
+            "the re-bounded form is a fixed point"
+        );
+
+        // An interior zero-digit marker that is not terminal must not be
+        // recognized either (the suffix check fails), and the clause still
+        // bounds normally.
+        let interior = format!(
+            "{}[…truncated chars] tail",
+            "z".repeat(MAX_CLAUSE_TEXT_LEN + 50)
+        );
+        let bounded2 = truncate_clause_text(&interior, MAX_CLAUSE_TEXT_LEN);
+        assert!(bounded2.ends_with(" chars]"), "{bounded2}");
+        assert_eq!(
+            truncate_clause_text(&bounded2, MAX_CLAUSE_TEXT_LEN),
+            bounded2
+        );
+    }
+
+    /// Headline pins for the limits audit: a silent revert of either constant
+    /// must fail CI the way the other headline caps' pins do.
+    #[test]
+    fn constitution_headline_caps_are_pinned() {
+        assert_eq!(MAX_CLAUSE_TEXT_LEN, 2000);
+        assert_eq!(MAX_MARKER_DIGITS, 12);
     }
 
     #[test]
