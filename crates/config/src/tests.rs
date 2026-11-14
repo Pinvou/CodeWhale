@@ -2529,12 +2529,15 @@ fn moonshot_kimi_code_smoke_config_set_then_resolve() -> Result<()> {
 #[test]
 fn kimi_code_loose_route_recognition_covers_both_membership_hosts() {
     // The exact membership endpoint on both hosts, recognized by the loose
-    // gate, official-host scoping, and the exact gate alike.
+    // gate, official-host scoping, and the exact gate alike. The padded
+    // variant pins the subset invariant across insignificant surrounding
+    // whitespace, which both gates trim.
     for base_url in [
         DEFAULT_KIMI_CODE_BASE_URL,
         "https://api.kimi.com/coding/v1/",
         "https://api.kimi.ai/coding/v1",
         "https://api.kimi.ai/coding/v1/",
+        "  https://api.kimi.com/coding/v1/  ",
     ] {
         assert!(
             crate::moonshot_base_url_uses_kimi_code(base_url),
