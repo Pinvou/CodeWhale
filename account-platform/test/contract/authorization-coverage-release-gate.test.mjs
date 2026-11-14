@@ -169,7 +169,7 @@ test('authorization release gate classifies every HTTP task event callback and C
   ]);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  // main's complete graph plus this PR's reconciliation repair-context GET.
+  // The existing complete graph includes the reconciliation repair-context GET.
   assert.deepEqual(await runAuthorizationCoverage(), { routes: 412, tasks: 32, events: 18, cli: 28 });
 });
 
