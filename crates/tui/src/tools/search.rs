@@ -28,8 +28,9 @@ const MAX_RESULTS: usize = 250;
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
 /// Hard cap on a single grep_files run. The directory walk plus per-file regex
-/// is synchronous blocking work; without this it can run for minutes on a large
-/// tree. Mirrors the file_search tool so both blocking searches behave the same.
+/// is synchronous blocking work; without this it can run for minutes on a
+/// large tree. (The file_search tool keeps its own separate, shorter budget —
+/// these are intentionally no longer mirrored.)
 const GREP_FILES_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Result of a grep match
