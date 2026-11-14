@@ -1377,13 +1377,18 @@ where
                             .as_ref()
                             .is_some_and(|probe| payload.as_ref() == probe)
                         {
-                            let probe = pending_ping.take().unwrap();
-                            last_inbound = tokio::time::Instant::now();
-                            let millis = rtt_sample(config.clock.as_ref(), &probe[..8]).unwrap();
-                            sink.emit(ControllerTransportEvent::RttSample {
-                                remote_control_generation: config.generation(),
-                                millis,
-                            });
+                            if let Some(probe) = pending_ping.take() {
+                                last_inbound = tokio::time::Instant::now();
+                                // probe 恰为 8 字节，rtt_sample 的 None 分支不可达；
+                                // 按工作区 unwrap 禁令以守卫处理而非 panic。
+                                if let Some(millis) = rtt_sample(config.clock.as_ref(), &probe[..8])
+                                {
+                                    sink.emit(ControllerTransportEvent::RttSample {
+                                        remote_control_generation: config.generation(),
+                                        millis,
+                                    });
+                                }
+                            }
                         }
                     }
                     Ok(Message::Close(_)) => break "Relay connection closed".to_string(),
