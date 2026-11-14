@@ -111,6 +111,7 @@ ACCOUNT_REQUIRED = {
     "TestApprovalProofWallClockPostgres",
     "TestOrganizationUnitAuthorityWallClockPostgres",
     "TestApprovalListPoolRuntimePostgres",
+    "TestApprovalPaginationSourcePostgres",
     "TestPasswordPreparationAuthorizationPostgres",
     "TestApprovalWithdrawalOriginalReceiptPostgres",
     "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
@@ -287,6 +288,11 @@ BILLING_LEAF_REQUIRED = {
 }
 BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
+    "TestApprovalPaginationSourcePostgres": {
+        "registered-replicas-use-distinct-admitted-client-keys",
+        "exhausted-client-is-shared-across-replicas-with-rollback",
+        "subject-budget-survives-source-change",
+    },
     "TestOrphanPaidOrderIndexPublicMigration": {
         "fresh-failure-atomicity-and-retry",
         "populated-upgrade-replay-and-own-ddl-rollback",
