@@ -1654,11 +1654,14 @@ mod tests {
         assert!(body.chars().count() <= MAX_BODY_CHARS);
         // Literal pins for the audited forge bounds (96/6000 → 200/60000):
         // GitHub's real caps are 256/65,536, so a bound raised past those or
-        // lowered back toward the old ones fails here.
+        // lowered back toward the old ones fails here. The upper bounds are
+        // const-asserted (a runtime `assert!` on a constant would trip
+        // clippy's `assertions_on_constants` under newer toolchains); the
+        // exact values stay runtime pins.
+        const _: () = assert!(MAX_TITLE_CHARS <= 256);
+        const _: () = assert!(MAX_BODY_CHARS <= 65_536);
         assert_eq!(MAX_TITLE_CHARS, 200);
         assert_eq!(MAX_BODY_CHARS, 60_000);
-        assert!(MAX_TITLE_CHARS <= 256);
-        assert!(MAX_BODY_CHARS <= 65_536);
     }
 
     #[test]
