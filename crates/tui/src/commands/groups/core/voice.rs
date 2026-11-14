@@ -204,7 +204,17 @@ const ASR_REQUEST_TIMEOUT: Duration = Duration::from_secs(MAX_RECORD_SECS * 3 / 
 /// concluding it is silent or wedged. A healthy recorder emits a chunk every
 /// ~10 ms, so this only fires on a dead or stalled pipe; killing the child
 /// unblocks the read and lets the max-duration deadline stay meaningful.
+/// Applies only after the first chunk — see
+/// [`RECORDER_STARTUP_TIMEOUT`].
 const RECORDER_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Budget for the recorder's *first* chunk, covering process spawn plus the
+/// recorder's own startup. A loaded machine or cold start can legitimately
+/// take longer than [`RECORDER_IDLE_TIMEOUT`] to deliver the first PCM
+/// block, and that latency is not a stall: without a startup grace the
+/// capture would abort as "recorder stopped responding" on exactly the
+/// machines that are slowest to record. Once any chunk has arrived, the
+/// idle budget takes over.
+const RECORDER_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Interim-transcript polling cadence while a capture is running.
 const INTERIM_POLL_MS: u64 = 700;
 /// Extra polls past the recording cap before the interim loop gives up;
@@ -289,10 +299,19 @@ fn record_audio() -> RecordOutcome {
     let speech_threshold: i16 = 500; // RMS-based speech detection threshold
     let silence_duration_samples = 16000u32; // 1 second of silence to stop
     let mut recorder_stalled = false;
+    // The idle budget judges a recorder that has already produced data;
+    // the first chunk waits on the startup budget instead.
+    let mut received_any_chunk = false;
 
     loop {
-        match rx.recv_timeout(RECORDER_IDLE_TIMEOUT) {
+        let read_budget = if received_any_chunk {
+            RECORDER_IDLE_TIMEOUT
+        } else {
+            RECORDER_STARTUP_TIMEOUT
+        };
+        match rx.recv_timeout(read_budget) {
             Ok(Ok(buf)) => {
+                received_any_chunk = true;
                 let chunk: Vec<i16> = buf
                     .as_chunks::<2>()
                     .0
@@ -333,10 +352,11 @@ fn record_audio() -> RecordOutcome {
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
-                // No data within the idle budget: the recorder is silent or
-                // wedged. Kill it (which also unblocks the reader thread) and
-                // drop the partial capture — a half-buffered recording must
-                // not be transcribed as if it were complete.
+                // No data within the budget (idle after the first chunk,
+                // startup before it): the recorder is silent or wedged. Kill
+                // it (which also unblocks the reader thread) and drop the
+                // partial capture — a half-buffered recording must not be
+                // transcribed as if it were complete.
                 let _ = child.lock().unwrap().kill();
                 recorder_stalled = true;
                 break;
@@ -840,6 +860,29 @@ pub fn voice_control(app: &mut App) -> CommandResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The startup grace must never be tighter than the idle budget: it
+    /// covers process spawn plus the recorder's own startup, which is
+    /// strictly more work than delivering a chunk on a healthy pipe. A
+    /// startup budget at or below the idle budget reintroduces the false
+    /// "recorder stopped responding" abort on slow machines this grace
+    /// exists to prevent.
+    #[test]
+    fn recorder_startup_budget_is_not_tighter_than_the_idle_budget() {
+        assert!(
+            RECORDER_STARTUP_TIMEOUT >= RECORDER_IDLE_TIMEOUT,
+            "startup ({RECORDER_STARTUP_TIMEOUT:?}) must grant at least the \
+             idle budget ({RECORDER_IDLE_TIMEOUT:?})"
+        );
+        assert!(
+            RECORDER_IDLE_TIMEOUT >= Duration::from_secs(1),
+            "the idle budget must stay meaningfully positive"
+        );
+        assert!(
+            RECORDER_STARTUP_TIMEOUT < Duration::from_secs(MAX_RECORD_SECS),
+            "startup grace must stay well inside the recording cap"
+        );
+    }
 
     #[test]
     fn wav_encoding_produces_valid_header() {
