@@ -155,3 +155,10 @@ export { adminRolePresentationCopy } from './admin-role-presentation-i18n.js';
 
 export { registrationRepairCopy } from './registration-repair-i18n.js';
 export { productAdmissionCopy } from './product-admission-i18n.js';
+
+export { auditActionCopy, auditActionLabels, auditPrivacyCopy, auditExportPresentation, auditListCopy } from './admin-audit-presentation-i18n.js';
+
+export { smsStatusCopy, smsTemplateCopy } from './admin-sms-presentation-i18n.js';
+
+export { adminLanguagePreferenceCopy } from './admin-language-preference-i18n.js';
+export { approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy, approvalDirectoryCopy, approvalDirectoryToolbarCopy } from './admin-approval-read-i18n.js';

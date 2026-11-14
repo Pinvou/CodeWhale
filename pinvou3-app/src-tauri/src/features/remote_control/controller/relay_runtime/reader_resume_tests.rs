@@ -18,6 +18,9 @@ pub(crate) mod journal_owner_tests;
 #[path = "reader_resume_tests/reservation_replay_tests.rs"]
 pub(crate) mod reservation_replay_tests;
 
+#[path = "reader_resume_tests/prepare_requeue_tests.rs"]
+mod prepare_requeue_tests;
+
 fn fixture_wall_clock_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1110,6 +1113,9 @@ pub(crate) async fn resume_round_trip<T>(
         return;
     }
     let frozen = manager.watchdog_deadline_for_test().unwrap();
+    if owner_case.as_deref() == Some("prepare_write") {
+        assert!(relay.arm_prepare_write_failure_for_test());
+    }
     // A real socket close goes through RelayClient's connection event and the
     // manager reader, rather than directly invoking a resume helper.
     socket.close(None).await.unwrap();
@@ -1119,9 +1125,31 @@ pub(crate) async fn resume_round_trip<T>(
     wait_prepared(&manager).await;
     assert!(!owned.worker.as_ref().unwrap().is_finished());
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
-    let mut socket = accept(&listener).await;
-    registered(&mut socket).await;
-    let prepare = receive(&mut socket, "controller_resume_prepare").await;
+    let mut socket =
+        if let Some(case @ ("prepare_write" | "prepare_legacy")) = owner_case.as_deref() {
+            prepare_requeue_tests::successor_socket(
+                &listener,
+                &relay,
+                &manager,
+                &mut processed_rx,
+                case,
+            )
+            .await
+        } else {
+            let mut socket = accept(&listener).await;
+            registered(&mut socket).await;
+            socket
+        };
+    let prepare = prepare_requeue_tests::receive_prepare(&mut socket).await;
+    if owner_case.as_deref() == Some("prepare_write") {
+        use sha2::Digest as _;
+        let digest: [u8; 32] = sha2::Sha256::digest(prepare.to_string().as_bytes()).into();
+        assert_eq!(
+            relay.failed_prepare_digest_for_test(),
+            Some(digest),
+            "successor must regenerate the same prepare, not rotate its proof or request"
+        );
+    }
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
     assert!(handle.state::<ControlledLaneState>().is_suspended());
     let activation = "activation-reader-0001";
@@ -1141,7 +1169,13 @@ pub(crate) async fn resume_round_trip<T>(
         "observe retained evidence, not a None projection"
     );
     send(&mut socket, &stale).await;
-    processed(&mut processed_rx, &stale).await;
+    // The manager now discards an explicit retired generation before the
+    // worker queue. A following harmless frame on this same ordered reader
+    // proves the old frame has drained without requiring it to reach worker.
+    let ingress_barrier = json!({"v":1,"type":"error","request_id":"request-stale-ingress-barrier",
+        "code":"invalid_message","message":"rejected"});
+    send(&mut socket, &ingress_barrier).await;
+    processed(&mut processed_rx, &ingress_barrier).await;
     assert_eq!(
         manager.resume_phase_for_test(),
         Some(super::super::resume::ResumePhase::Prepared)
@@ -1182,22 +1216,29 @@ pub(crate) async fn resume_round_trip<T>(
         .seal_resume_confirm("request-peer-current", activation)
         .unwrap();
     send(&mut socket, &confirm).await;
-    receive(&mut socket, "controller_resume_activation_ack").await;
+    let activation_ack = receive(&mut socket, "controller_resume_activation_ack").await;
+    assert_ne!(activation_ack["request_id"], prepare["request_id"]);
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
     let mut pending = provisional.clone();
     pending["type"] = json!("controller_resume_activation_pending");
+    // The actual Relay writer uses the validated B ACK request, not prepare.
+    pending["request_id"] = activation_ack["request_id"].clone();
     send(&mut socket, &pending).await;
     let liveness = receive(&mut socket, "controller_post_activation_liveness").await;
+    assert_ne!(liveness["request_id"], activation_ack["request_id"]);
     let mut confirmed = pending.clone();
     confirmed
         .as_object_mut()
         .unwrap()
         .remove("original_deadline_ms");
     confirmed["type"] = json!("controller_post_activation_liveness_confirmed");
+    // The Relay confirms the current liveness request, not the activation ACK.
+    confirmed["request_id"] = liveness["request_id"].clone();
     confirmed["liveness_epoch_b"] = liveness["liveness_epoch_b"].clone();
     confirmed["heartbeat_sequence_b"] = json!("1");
     send(&mut socket, &confirmed).await;
-    receive(&mut socket, "controller_resume_ready_ack").await;
+    let ready_ack = receive(&mut socket, "controller_resume_ready_ack").await;
+    assert_ne!(ready_ack["request_id"], liveness["request_id"]);
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
     let mut resumed = confirmed.clone();
     resumed
@@ -1205,6 +1246,8 @@ pub(crate) async fn resume_round_trip<T>(
         .unwrap()
         .remove("heartbeat_sequence_b");
     resumed["type"] = json!("controller_resumed");
+    // Relay's B delivery is correlated to B's actual ready ACK request.
+    resumed["request_id"] = ready_ack["request_id"].clone();
     resumed["liveness_epoch_a"] = json!("live-a-reader-2");
     resumed["resume_deadline_ms"] = json!("1700000030000");
     resumed["new_resume_token_b64"] =
@@ -1595,4 +1638,83 @@ pub(crate) async fn controller_lane_outage_round_trip<T>(
             .is_err(),
         "endpoint-scoped legacy error must not enter the controller lane"
     );
+
+    let retired = channel.sender();
+    let controller_frame = json!({"v":1,"type":"error","request_id":"request-inbound-overload",
+        "code":"invalid_message","message":"test frame"});
+    for _ in 0..129 {
+        send(&mut socket, &controller_frame).await;
+    }
+    let mut marker = scoped;
+    marker["message"] = json!("legacy route after controller overload");
+    send(&mut socket, &marker).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while relay.status().last_error.as_deref() != Some("legacy route after controller overload")
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("same endpoint must continue to process legacy frames after the controller overflow");
+    assert_eq!(
+        retired.try_send(json!({})).unwrap_err(),
+        "desktop_controller_generation_stale"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), channel.recv())
+            .await
+            .unwrap()
+            .is_none(),
+        "a retired lane must discard buffered frames"
+    );
+    let mut replacement = relay
+        .start_controller_relay(channel.generation())
+        .await
+        .expect("the same endpoint can bind a new lane");
+    assert!(!retired.same_binding(&replacement.sender()));
+    drop(channel);
+    assert_lifecycle_route(&mut socket, &mut replacement).await;
+
+    // Leave a new lane unconsumed while the persistent socket delivers a
+    // protocol-valid old-generation burst. These must not fill its queue.
+    let old_generation = replacement.generation().to_owned();
+    drop(replacement);
+    let mut successor = relay
+        .start_controller_relay("generation-lane-outage-successor")
+        .await
+        .unwrap();
+    let expiry = fixture_wall_clock_millis() + 60_000;
+    let binding = CodeWrapBinding::new(
+        "registration-retired-overload",
+        "pairing-retired-overload",
+        &old_generation,
+        "relay-retired-overload",
+        expiry,
+    )
+    .unwrap();
+    let receiver = CodeWrapKeyPair::generate().unwrap();
+    let sealed = CodeWrapKeyPair::generate()
+        .unwrap()
+        .seal_pairing_code(receiver.public_key(), &binding, "2345678")
+        .unwrap();
+    let stale = json!({"v":1,"type":"desktop_pairing_registered",
+        "request_id":"request-retired-overload", "registration_request_id":"registration-retired-overload",
+        "pairing_id":"pairing-retired-overload", "remote_control_generation":old_generation,
+        "relay_epoch":"relay-retired-overload", "expires_at_ms":expiry.to_string(),
+        "sealed_code_b64":base64::engine::general_purpose::STANDARD.encode(sealed)});
+    for _ in 0..129 {
+        send(&mut socket, &stale).await;
+    }
+    marker["message"] = json!("legacy route after stale generation burst");
+    send(&mut socket, &marker).await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while relay.status().last_error.as_deref()
+            != Some("legacy route after stale generation burst")
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("persistent reader must drain old frames and retain Legacy routing");
+    assert_lifecycle_route(&mut socket, &mut successor).await;
 }

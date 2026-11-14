@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager as _};
 use tokio::sync::oneshot;
+use zeroize::Zeroize;
 
 use crate::features::behavior_telemetry::{
     RemoteControlEvent, RemoteOutcome, RemoteReason, RemoteStage, track_remote_control,
@@ -505,6 +506,8 @@ fn log_stage(value: &str) -> &'static str {
         "journal_snapshot_rejected",
         "task_status_sent",
         "task_status_not_sent",
+        "task_interrupt_persistence_failed",
+        "task_restart_persistence_failed",
         "journal_event_not_sent",
         "journal_event_sent",
         "journal_snapshot_sent",
@@ -537,6 +540,7 @@ fn log_stage(value: &str) -> &'static str {
         "attachment_uploads_expired",
         "artifact_downloads_expired",
         "task_terminal_persist_failed",
+        "controller_inbound_retired",
         "task_rejected_persist_failed",
         "task_dispatch_rejected",
         "task_session_discard_failed",
@@ -602,6 +606,8 @@ fn log_detail(value: &str) -> &'static str {
         "session_mapping_missing",
         "status_unavailable",
         "outbound_unavailable",
+        "desktop_controller_inbound_full",
+        "desktop_controller_inbound_closed",
         "seal_failed",
         "queue_failed",
         "inbound_item_capacity",
@@ -613,6 +619,8 @@ fn log_detail(value: &str) -> &'static str {
         "permission_expired",
         "permission_denied",
         "task_conflict",
+        "task_ledger_persist_failed",
+        "task_ledger_capacity",
         "missing",
         "remote_binding_mismatch",
         "controller_not_connected",
@@ -855,6 +863,17 @@ impl Drop for ProcessedControllerFrame {
 #[async_trait::async_trait]
 pub(crate) trait ControlledRelayPort: Send {
     fn try_send(&self, message: Value) -> Result<(), String>;
+    fn resume_socket_epoch(&self, _lease: &LeaseContext) -> Option<u64> {
+        None
+    }
+    fn try_send_resume_prepare(
+        &self,
+        _message: Value,
+        _epoch: u64,
+        _deadline_b: u64,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
     async fn recv(&mut self) -> Option<Value>;
 }
 
@@ -862,6 +881,23 @@ pub(crate) trait ControlledRelayPort: Send {
 impl ControlledRelayPort for crate::features::remote_control::manager::ControllerRelayChannel {
     fn try_send(&self, message: Value) -> Result<(), String> {
         crate::features::remote_control::manager::ControllerRelayChannel::try_send(self, message)
+    }
+
+    fn resume_socket_epoch(&self, lease: &LeaseContext) -> Option<u64> {
+        crate::features::remote_control::manager::ControllerRelayChannel::resume_socket_epoch(
+            self, lease,
+        )
+    }
+
+    fn try_send_resume_prepare(
+        &self,
+        message: Value,
+        epoch: u64,
+        deadline_b: u64,
+    ) -> Result<bool, String> {
+        crate::features::remote_control::manager::ControllerRelayChannel::try_send_resume_prepare(
+            self, message, epoch, deadline_b,
+        )
     }
 
     async fn recv(&mut self) -> Option<Value> {
@@ -1089,13 +1125,43 @@ async fn finish_controlled_registration<W, S, F>(
     serve(worker).await;
 }
 
+/// Keep the task until its registration result has been observed. If it exits
+/// abnormally, joining it before reporting channel closure guarantees that its
+/// generation-bound worker/channel have been dropped. Successful registration
+/// still leaves the existing serving task running independently.
+pub(crate) struct ControlledRegistrationTask {
+    done: oneshot::Receiver<Result<ControlledStatus, String>>,
+    task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    #[cfg(test)]
+    abort: tokio::task::AbortHandle,
+}
+
+impl ControlledRegistrationTask {
+    pub(crate) async fn wait(
+        self,
+    ) -> Result<Result<ControlledStatus, String>, oneshot::error::RecvError> {
+        let result = self.done.await;
+        if result.is_err() {
+            // The JoinError can contain a panic payload. It is deliberately
+            // neither formatted nor exposed through diagnostics or IPC.
+            self.task.await;
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn abort_handle_for_test(&self) -> tokio::task::AbortHandle {
+        self.abort.clone()
+    }
+}
+
 impl ControlledRelayWorker {
     pub(crate) async fn start(
         app: AppHandle,
         relay: RemoteControlManager,
         operation: ControlledOperation,
         business: std::sync::Arc<dyn ControlledBusinessPort>,
-    ) -> Result<oneshot::Receiver<Result<ControlledStatus, String>>, String> {
+    ) -> Result<ControlledRegistrationTask, String> {
         let code_wrap = CodeWrapKeyPair::generate().map_err(|_| "pairing_key_invalid")?;
         let handshake = HandshakeKeyPair::generate().map_err(|_| "handshake_key_invalid")?;
         let channel = relay.start_controller_relay(operation.generation()).await?;
@@ -1121,7 +1187,7 @@ impl ControlledRelayWorker {
             #[cfg(test)]
             evidence_hooks: None,
         };
-        tauri::async_runtime::spawn(async move {
+        let task = tauri::async_runtime::spawn(async move {
             let result = worker.register_pairing().await;
             finish_controlled_registration(
                 worker,
@@ -1132,7 +1198,18 @@ impl ControlledRelayWorker {
             )
             .await;
         });
-        Ok(done_rx)
+        #[cfg(test)]
+        let abort = task.inner().abort_handle();
+        Ok(ControlledRegistrationTask {
+            done: done_rx,
+            // The lifecycle owns a completion future rather than exporting a
+            // host runtime handle through its interface. Join errors stay private.
+            task: Box::pin(async move {
+                let _ = task.await;
+            }),
+            #[cfg(test)]
+            abort,
+        })
     }
 
     async fn register_pairing(&mut self) -> Result<ControlledStatus, String> {
@@ -2554,7 +2631,8 @@ pub(crate) struct ControlledResumeAttempt {
     owner: Option<ControlledTransportOwner>,
     #[cfg(test)]
     activation_probe: Option<Box<dyn FnOnce() + Send + Sync>>,
-    // Five actual send points in the frozen resume exchange, never peer IDs.
+    // At most five local request identities, never peer IDs. Prepare reserves
+    // one slot before socket readiness; retries never allocate another slot.
     request_ids: Vec<String>,
     lease: Option<LeaseContext>,
     activation_id: Option<String>,
@@ -2566,6 +2644,7 @@ pub(crate) struct ControlledResumeAttempt {
     ack_sent: bool,
     liveness_sent: bool,
     ready_sent: bool,
+    prepare_epoch: Option<u64>,
 }
 
 impl ControlledResumeAttempt {
@@ -2611,32 +2690,23 @@ fn begin_owned_controlled_resume<P: ControlledRelayPort + ?Sized>(
     let Ok(material) = manager.begin_owned_resume(owner, now_b) else {
         return false;
     };
-    prepare_controlled_resume(port, resume, owner, material)
+    prepare_controlled_resume(port, manager, resume, owner, material)
 }
 
 fn prepare_controlled_resume<P: ControlledRelayPort + ?Sized>(
     port: &P,
+    manager: &ControlledDeviceManager,
     resume: &mut ControlledResumeAttempt,
     owner: &ControlledTransportOwner,
-    material: ControlledResumeMaterial,
+    mut material: ControlledResumeMaterial,
 ) -> bool {
+    material.resume_token.zeroize();
     let Ok(challenge) = new_resume_challenge() else {
         return false;
     };
     let request_id = format!("request-resume-{}", uuid::Uuid::new_v4().simple());
-    let Ok(frame) = build_controller_resume_prepare(
-        &material.lease,
-        super::relay_transport::ControllerRole::ControlledB,
-        &request_id,
-        &material.resume_token,
-        &challenge,
-        material.relay_deadline_identity_ms,
-    ) else {
-        return false;
-    };
-    if port.try_send(frame).is_err() {
-        return false;
-    }
+    // Keep only public attempt identity locally. The lifecycle owner lends
+    // its current token under its lock when a real controller socket is ready.
     resume.operation = Some(owner.operation().clone());
     resume.owner = Some(owner.clone());
     resume.request_ids = vec![request_id];
@@ -2651,7 +2721,64 @@ fn prepare_controlled_resume<P: ControlledRelayPort + ?Sized>(
     resume.ack_sent = false;
     resume.liveness_sent = false;
     resume.ready_sent = false;
-    true
+    resume.prepare_epoch = None;
+    retry_controlled_resume_prepare(port, manager, resume, controlled_monotonic_millis)
+        != ControlledResumeOutcome::Failed
+}
+
+/// Reconstruct rather than retarget. The original request/challenge are reused
+/// for Relay's exact-prepare idempotency; only a new socket epoch can enqueue
+/// again, and neither this read nor the send renews the original frozen cutoff.
+fn retry_controlled_resume_prepare<P: ControlledRelayPort + ?Sized>(
+    port: &P,
+    manager: &ControlledDeviceManager,
+    resume: &mut ControlledResumeAttempt,
+    clock: impl FnOnce() -> u64,
+) -> ControlledResumeOutcome {
+    let Some(owner) = resume.owner.clone() else {
+        return ControlledResumeOutcome::Ignored;
+    };
+    let Some(request_id) = resume.request_ids.first() else {
+        return ControlledResumeOutcome::Failed;
+    };
+    let result = manager.with_owned_prepared_resume(
+        &owner,
+        clock,
+        |lease, token, wire_deadline, deadline_b| {
+            if resume.lease.as_ref() != Some(lease)
+                || resume.relay_deadline_identity_ms != wire_deadline
+            {
+                return Err("desktop_remote_resume_invalid".to_owned());
+            }
+            let Some(epoch) = port.resume_socket_epoch(lease) else {
+                return Ok(None);
+            };
+            if resume.prepare_epoch == Some(epoch) {
+                return Ok(None);
+            }
+            let frame = build_controller_resume_prepare(
+                lease,
+                super::relay_transport::ControllerRole::ControlledB,
+                request_id,
+                token,
+                &resume.challenge_b64,
+                wire_deadline,
+            )
+            .map_err(|error| error.to_string())?;
+            port.try_send_resume_prepare(frame, epoch, deadline_b)
+                .map(|sent| sent.then_some(epoch))
+        },
+    );
+    match result {
+        Ok(Some(Ok(Some(epoch)))) => {
+            resume.prepare_epoch = Some(epoch);
+            ControlledResumeOutcome::Ignored
+        }
+        Ok(Some(Err(_))) => ControlledResumeOutcome::Failed,
+        // Retired owners, later phases, expired budgets and not-ready/racing
+        // sockets cannot send. Existing expiry/retirement still owns cleanup.
+        _ => ControlledResumeOutcome::Ignored,
+    }
 }
 
 /// E2E-06：按 Relay/A 的恢复帧推进 B 端相位。任何相位不符、对端确认验签失败或
@@ -2679,6 +2806,11 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
         return ControlledResumeOutcome::Ignored;
     }
     let advance = |step, now| manager.advance_owned_resume(&owner, step, now);
+    if kind == "desktop_relay_connection"
+        && message.get("connected").and_then(Value::as_bool) == Some(true)
+    {
+        return retry_controlled_resume_prepare(port, manager, resume, controlled_monotonic_millis);
+    }
     // Relay errors deliberately have no lease tuple. Authority comes from
     // strict protocol validation and this operation's locally sent request.
     if kind == "error" {
@@ -3043,6 +3175,9 @@ pub(crate) mod reader_resume_tests;
 mod owner_interleaving_tests;
 
 #[cfg(test)]
+mod resume_prepare_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3255,6 +3390,16 @@ mod tests {
             assert_eq!(log_remote_action_operation(sentinel), "other");
         }
         assert_eq!(log_stage("controlled_status"), "controlled_status");
+        assert_eq!(
+            log_stage("controller_inbound_retired"),
+            "controller_inbound_retired"
+        );
+        for detail in [
+            "desktop_controller_inbound_full",
+            "desktop_controller_inbound_closed",
+        ] {
+            assert_eq!(log_detail(detail), detail);
+        }
         assert_eq!(log_stage("preconnect_expired"), "preconnect_expired");
         for detail in [
             "desktop_remote_pairing_expired",
@@ -3267,6 +3412,15 @@ mod tests {
             log_stage("task_session_discard_failed"),
             "task_session_discard_failed"
         );
+        for stage in [
+            "task_interrupt_persistence_failed",
+            "task_restart_persistence_failed",
+        ] {
+            assert_eq!(log_stage(stage), stage);
+        }
+        for detail in ["task_ledger_persist_failed", "task_ledger_capacity"] {
+            assert_eq!(log_detail(detail), detail);
+        }
         assert_eq!(log_detail("delete_failed"), "delete_failed");
         assert_eq!(
             log_stage("pending_revocation_queue_full"),
@@ -3523,6 +3677,19 @@ mod tests {
         fn try_send(&self, message: Value) -> Result<(), String> {
             self.sent.lock().unwrap().push(message);
             Ok(())
+        }
+
+        fn resume_socket_epoch(&self, _lease: &LeaseContext) -> Option<u64> {
+            Some(0)
+        }
+
+        fn try_send_resume_prepare(
+            &self,
+            message: Value,
+            _epoch: u64,
+            _deadline_b: u64,
+        ) -> Result<bool, String> {
+            self.try_send(message).map(|()| true)
         }
 
         async fn recv(&mut self) -> Option<Value> {

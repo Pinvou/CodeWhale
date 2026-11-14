@@ -4,6 +4,10 @@ This chart deploys Account Service, Billing Service, Token Gateway, Token Portal
 Keycloak, and Redis. NATS, PostgreSQL and payment/model providers stay external so
 their backup, certificate, and merchant controls remain environment-owned.
 
+Aliyun SMS purpose templates, optional login-template fallback, runtime Secret
+keys and versioned configuration migration are documented in the
+[SMS configuration guide](../../../docs/sms-configuration-conflict-recovery.md#阿里云模板用途与兼容迁移).
+
 The bundled Keycloak uses the existing chart-wide `resources` requests and
 limits. Its management HTTP startup/readiness probes remain distinct from
 `/health/live`, which restarts a failed process only after startup succeeds.

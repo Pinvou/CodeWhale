@@ -18,6 +18,8 @@
 | 最终发布门禁 | `npm --prefix remote-control-relay run release:gate` | 证据属于待发布 commit，任何失败不放行 |
 | 泄露扫描 | 下述三个真实 Rust 用例、`node --test remote-control-relay/test/controller-sensitive-scan.test.js remote-control-relay/test/controller-telemetry.test.js` | 真实错误投影、Debug 脱敏、受控枚举与哨兵扫描；零匹配视为失败 |
 
+远控发布路径以 `scripts/remote-control-release-path-policy.mjs` 为准。主控派发和结果投影、被控任务提交、Chat/ACP 回合授权、持久化会话归属与模式、模型协议判定、受控附件的私有发布与转换、App 装配均登记了具体实现文件。受控附件范围包括实际的私有输出、归档成员准入和嵌入执行的转换脚本。单文件变更会进入 PR 的发布契约检查及发布工作流的路径筛选。新增这些入口时同步更新两处工作流，并运行 `node --test remote-control-relay/test/release-path-policy.test.js` 验证路由。
+
 ### 1.1 泄露扫描的非空执行证据
 
 哨兵扫描必须完整收集四个固定表面，缺面或非法值不得得到 clean 回执；编码检测范围与限制见[敏感证据扫描合同](remote-control-sensitive-evidence-scan.md)。
@@ -101,6 +103,12 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 
 ## 5. 回滚
 
+生产部署保存 Relay 顶层 JavaScript 文件、总数量及逐文件 SHA-256 清单。部署阶段和公网检查触发的回滚都先在同卷暂存，并按字节核对完整清单。清单与文件同时丢失尾项、增加或改写文件都会在停服前中止回滚。带有效清单的空集合也可恢复。公网复检只接受本次部署的实际时间戳目录及普通回滚脚本。替换中途失败会尝试恢复替换前的代码，恢复失败时保留暂存文件。替换成功后，暂存清理失败会记录待清理目录，资产恢复和服务重启继续执行。
+
+人工恢复使用 `bash scripts/deploy-remote-relay.sh --rollback YYYYMMDD-HHMMSS`，时间戳须取自受控运维清单中已核对的备份。执行前仍须明确设置 `PINVOU_CONFIRM_PRODUCTION_DEPLOY=1`、相同的 `PINVOU_REMOTE_DEPLOY_SERVER` / `PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER`、`SSH_KEY`、`PINVOU_REMOTE_DIRECT_URL`，并确认 `PINVOU_REMOTE_DEPLOY_DIR`、`PINVOU_REMOTE_DEPLOY_SERVICE` 和 `PINVOU_REMOTE_PUBLIC_URL` 对应待恢复实例。所有独立写入者和自动重启源须先停止，旧版本须满足下述 gateway 与状态格式门禁。
+
+人工入口只选择该实例 `backups/<时间戳>`，复用公网失败后的同一恢复实现；不会构建、下载或上传新版本，也不要求故障版本先通过部署前健康检查。备份缺失、清单不完整或损坏时，在停服和改写 JS 前拒绝。备份必须含当前格式的 `code-js/.manifest.sha256` 与两份回滚 helper；历史不兼容备份不可手工补造清单后绕过验证。恢复后执行服务检查与公网复检，失败会非零退出，须检查保留现场，不得据此继续发布。
+
 - 首选回滚是把 Relay、A、B 的统一开关关闭；入口隐藏/拒绝，但 registry、tombstone、digest keyring 和 state schema 原样保留。
 - 最低回滚版本必须 registry-aware。真实旧 v2 二进制只能监听 literal loopback，并置于唯一 enrollment gateway 后；nginx 所有公开 websocket 路径必须指向 gateway，不能直达旧 Relay。
 - 已写入 `self_registration` 来源时，读取注册表的 Relay/gateway/维护工具都须理解该来源；旧 parser 不能直接读取。使用兼容构建关闭自动登记，不删除撤销记录或恢复陈旧整库来绕过格式检查。兼容及自行撤销后的额度恢复步骤见 [ENROLLMENT.md](../remote-control-relay/ENROLLMENT.md#recovering-quota-after-a-device-self-revokes)。
@@ -116,7 +124,7 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 
 构建与运行开关是两层独立约束：构建时 `PINVOU_DESKTOP_CONTROLLER_ENABLED=0`（以及未明确开启的 release/custom profile）将关闭状态固化到产物，运行时设为 `1` 或不设变量都不能重新开启。启用产物必须以构建值 `1` 生成并取得本节之外的全部发布验收证据；受保护的 installer 证据 workflow 固定构建值 `1`。debug 默认开启只用于本地开发，不提供发布资格。
 
-仅构建值为 `1` 的 Windows A/B 产物允许运行时未设变量或精确 `1` 开启；运行时 `0` 或其他值关闭。非 Windows 平台始终 unsupported。Relay 不使用桌面构建值，仍要求运行时精确 `1`、`self_hosted` 与 TOFU=false；当前 `official` 认证模式未接线，不能作为已支持的生产验收组合。普通 Windows 发布继续构建关闭远控的产物，不以“免验收”隐式开放功能。
+仅构建值为 `1` 的 Windows A/B 产物允许运行时未设变量或精确 `1` 开启；运行时 `0` 或其他值关闭。本节的受保护安装包证据覆盖 Windows。Linux 64 位可启用的桌面源码路径也纳入相关路径筛选，正式 Linux 发布资格另行验收。Relay 不使用桌面构建值，仍要求运行时精确 `1`、`self_hosted` 与 TOFU=false；当前 `official` 认证模式未接线，不能作为已支持的生产验收组合。普通 Windows 发布继续构建关闭远控的产物，不以“免验收”隐式开放功能。
 
 遥测快照由受信生产聚合服务提供，并非独立的实际会话取证；门禁预期 commit、URL、token-file 和回滚输入来自受保护配置，部署环境文件不得覆盖这些预期值。真实双机与 Provider 验收仍单独必需。
 
