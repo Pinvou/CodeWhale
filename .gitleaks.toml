@@ -39,6 +39,21 @@ condition = "AND"
 paths = ['''^crates/tui/src/tui/widgets/workflow_panel\.rs$''']
 regexes = ['''^sk-receipt-secret-1234567890$''']
 
+[[rules.allowlists]]
+description = "Synthetic memory-refusal test fixtures"
+condition = "AND"
+paths = ['''^crates/tui/src/native_memory/tests\.rs$''']
+regexes = ['''^sk-live-abc123$''', '''^ghp_0123456789abcdef$''']
+
+[[rules]]
+id = "aws-access-token"
+
+[[rules.allowlists]]
+description = "Synthetic ASIA memory-refusal test fixture"
+condition = "AND"
+paths = ['''^crates/tui/src/native_memory/tests\.rs$''']
+regexes = ['''^ASIAIOSFODNN7EXAMPLE$''']
+
 [[rules]]
 id = "jwt"
 
