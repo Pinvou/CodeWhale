@@ -95,21 +95,98 @@ async fn ack_answer(rx_ack: &mut oneshot::Receiver<bool>, budget: Duration) -> A
 }
 
 impl EngineHandle {
+    /// Retire only at the actor's own idle boundary, preserving active turns,
+    /// queued inputs, child/shell results and goal continuations by refusing.
+    /// `false` also covers states whose safe retirement cannot be certified,
+    /// including an outstanding advisor watcher or an event still sitting in
+    /// the host's queue: the host must keep consuming events until the
+    /// handshake completes. It does not
+    /// promise that waiting alone will eventually make retirement available.
+    ///
+    /// The call blocks until the actor reaches its next input boundary, so
+    /// retry loops must back off instead of spinning. The embedding host must
+    /// exclude new external work until retirement is complete — including
+    /// work still held by an in-flight `reserve()` permit, which the actor
+    /// cannot observe. `host_is_idle` checks its own consumers synchronously
+    /// while the actor is sealed: dequeuing an event does not prove host
+    /// persistence or terminal delivery finished.
+    /// The synchronous predicate must return promptly: an already-latched
+    /// cancel token deliberately cannot interrupt this sealed wait. Residual
+    /// work observed after commit is diagnosed, not a reopened handshake.
+    ///
+    /// Refusing resumes the actor without shutdown; so does a cancel token
+    /// firing for the first time during an uncommitted wait (a token already
+    /// latched by an earlier cancelled turn does not refuse). `Err` means no
+    /// proposal is answerable — the request channel or a oneshot counterpart
+    /// was dropped — not that the engine is unhealthy; the cancel-beats-commit
+    /// race also surfaces as `Err("idle-retirement proposal expired")`, so
+    /// an `Err` is not proof that another proposer did not commit. Observe
+    /// `wait_run_completion` to distinguish a stopped incarnation, and retry
+    /// only while it is still running. `true` means the actor
+    /// consumed the commit — the send receipt alone is not proof, since a
+    /// send racing a simultaneous cancel can succeed on a proposal the actor
+    /// abandons; a lost commit ack therefore reports `false`. `true` means
+    /// committed, not completed; wait_run_completion is still required before
+    /// touching resources. Cancelling an uncommitted wait cannot cause a late
+    /// shutdown.
+    pub async fn shutdown_when_idle(&self, host_is_idle: impl FnOnce() -> bool) -> Result<bool> {
+        let (ready, receipt) = oneshot::channel();
+        let (commit, committed) = oneshot::channel();
+        let (commit_ack, ack) = oneshot::channel();
+        self.idle_retirement
+            .as_ref()
+            .ok_or_else(|| anyhow!("engine idle-retirement is unavailable"))?
+            .send(super::idle_shutdown::IdleRetirement {
+                ready,
+                commit: committed,
+                commit_ack,
+            })
+            .await?;
+        if !receipt
+            .await
+            .map_err(|_| anyhow!("engine idle-retirement request dropped"))?
+        {
+            return Ok(false);
+        }
+        // Keep both owners at the same boundary. There is no await between this
+        // host check and commit. A refused host or cancelled proposal drops the
+        // commit sender, so the actor resumes instead of leaving a closed handle.
+        if !host_is_idle() {
+            return Ok(false);
+        }
+        commit
+            .send(())
+            .map_err(|_| anyhow!("engine idle-retirement proposal expired"))?;
+        // Only the actor's ack proves it consumed the commit; the send above
+        // can also succeed against a proposal the cancel arm just abandoned.
+        if ack.await.is_err() {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     /// Wait for this exact background run to return or terminate abnormally.
     /// Cancelling a wait does not stop the engine or consume another waiter's result.
     /// Directly constructed handles return `NotObserved`; completion does not prove
     /// persistence succeeded or detached children and blocking writers stopped.
-    pub async fn wait_run_completion(&self) -> EngineRunCompletion {
-        let Some(mut completion) = self.run_completion.clone() else {
-            return EngineRunCompletion::NotObserved;
-        };
-        loop {
-            let outcome = *completion.borrow_and_update();
-            if let Some(outcome) = outcome {
-                return outcome;
-            }
-            if completion.changed().await.is_err() {
-                return EngineRunCompletion::AbnormalTermination;
+    /// The wait owns only its receipt and may outlive the handle without keeping
+    /// the engine's operation sender or event queue alive.
+    pub fn wait_run_completion(
+        &self,
+    ) -> impl std::future::Future<Output = EngineRunCompletion> + Send + 'static + use<> {
+        let completion = self.run_completion.clone();
+        async move {
+            let Some(mut completion) = completion else {
+                return EngineRunCompletion::NotObserved;
+            };
+            loop {
+                let outcome = *completion.borrow_and_update();
+                if let Some(outcome) = outcome {
+                    return outcome;
+                }
+                if completion.changed().await.is_err() {
+                    return EngineRunCompletion::AbnormalTermination;
+                }
             }
         }
     }

@@ -13873,6 +13873,496 @@ async fn interrupted_child_stops_gating_later_writers() {
     );
 }
 
+/// Mail accepted while a child was parked must follow the resume: the
+/// queue-only receipt promised the owner session the mail survives a resume,
+/// but the resume re-dispatches under a NEW id and `followup` on the old id
+/// can only park further mail on the retained record — it can never deliver.
+/// The resume delivers parked mail in its initial input, before the latest
+/// instruction; no additional followup is required to wake the mailbox.
+#[tokio::test]
+async fn resumed_child_inherits_the_parked_mail_of_its_interrupted_predecessor() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+
+    let mut guard = manager.write().await;
+    let first = guard
+        .spawn_background_with_assignment_options(
+            Arc::clone(&manager),
+            runtime.clone(),
+            FleetRole::Builder,
+            "edit the workspace".into(),
+            make_assignment(),
+            Some(vec![]),
+            SubAgentSpawnOptions {
+                name: Some("writer-mail".into()),
+                ..Default::default()
+            },
+        )
+        .expect("writer admitted");
+    // Give the child a continuable checkpoint with content, as a real
+    // interrupted loop leaves behind, so the resume has something to seed.
+    guard
+        .agents
+        .get_mut(&first.agent_id)
+        .expect("agent")
+        .checkpoint = Some(build_subagent_checkpoint(
+        &first.agent_id,
+        "parent_interrupt",
+        &[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "prior work".to_string(),
+                cache_control: None,
+            }],
+        }],
+        1,
+        true,
+    ));
+    guard
+        .interrupt_child(&first.agent_id, None, "interrupted by parent".into())
+        .expect("interrupt");
+    guard
+        .followup_child(&first.agent_id, "accepted while parked".to_string())
+        .expect("queue-only follow-up receipt");
+    guard
+        .followup_child(&first.agent_id, "second parked mail".into())
+        .unwrap();
+    assert_eq!(
+        guard.queued_mail_depth(&first.agent_id),
+        Some(2),
+        "the parked mail sits on the interrupted predecessor"
+    );
+
+    let resumed = guard
+        .resume_from_checkpoint_for_session(
+            "workspace",
+            Arc::clone(&manager),
+            runtime,
+            &first.agent_id,
+            "continue",
+        )
+        .expect("resume re-dispatches the checkpoint");
+    assert_ne!(
+        resumed.agent_id, first.agent_id,
+        "resume runs under a new id"
+    );
+    assert_eq!(
+        guard.queued_mail_depth(&resumed.agent_id),
+        None,
+        "the accepted FIFO is already included in the successor's initial input"
+    );
+    assert_eq!(
+        guard.queued_mail_depth(&first.agent_id),
+        None,
+        "the predecessor's mailbox is emptied by the migration"
+    );
+    let prompt = &guard.agents[&resumed.agent_id].prompt;
+    assert!(
+        prompt.find("accepted while parked").unwrap() < prompt.find("second parked mail").unwrap()
+    );
+    assert!(
+        prompt.find("second parked mail").unwrap()
+            < prompt.rfind("Parent follow-up: continue").unwrap()
+    );
+    assert_eq!(resumed.queue_depth, 0);
+    assert!(resumed.woke && resumed.continued_from_checkpoint);
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_interrupt_preserves_uncheckpointed_fifo() {
+    for stage in ["unread", "taken", "appended", "checkpointed"] {
+        let tmp = tempdir().unwrap();
+        let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+        let mut runtime = stub_runtime();
+        runtime.manager = manager.clone();
+        runtime.context = ToolContext::new(tmp.path());
+        let mut guard = manager.write().await;
+        let (child, mut rx) = guard.insert_test_running_agent_with_input(stage, tmp.path());
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "earlier state".into(),
+                cache_control: None,
+            }],
+        }];
+        assert!(guard.update_checkpoint(
+            &child,
+            build_subagent_checkpoint(&child, "before_api_request", &messages, 1, true)
+        ));
+        for text in ["FIFO-M1", "FIFO-M2"] {
+            let receipt = guard.followup_child(&child, text.into()).unwrap();
+            assert!(receipt.woke);
+            assert_eq!(receipt.queue_depth, 0);
+        }
+        assert_eq!(guard.queued_follow_up_counts()[&child], 2);
+        let mut taken = VecDeque::new();
+        if stage != "unread" {
+            let input = rx.try_recv().unwrap();
+            input.mark_taken();
+            taken.push_back(input);
+            assert_eq!(guard.queued_follow_up_counts()[&child], 1);
+        }
+        if matches!(stage, "appended" | "checkpointed") {
+            append_subagent_inputs_as_user_messages(&mut messages, &mut taken);
+        }
+        if stage == "checkpointed" {
+            assert!(guard.update_checkpoint(
+                &child,
+                build_subagent_checkpoint(&child, "before_api_request", &messages, 2, true)
+            ));
+        }
+        guard
+            .queue_running_parent_message(&child, "FIFO-M3".into())
+            .unwrap();
+        guard
+            .interrupt_child(&child, None, "controlled interrupt".into())
+            .unwrap();
+        drop(rx);
+        drop(taken);
+        let expected = if stage == "checkpointed" {
+            vec!["FIFO-M2", "FIFO-M3"]
+        } else {
+            vec!["FIFO-M1", "FIFO-M2", "FIFO-M3"]
+        };
+        assert_eq!(
+            guard.queued_mail[&child]
+                .iter()
+                .map(|mail| mail.text.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "{stage}"
+        );
+        assert!(guard.queued_follow_up_counts().is_empty());
+        let checkpoint = guard.agents[&child].checkpoint.clone().unwrap();
+        assert!(!guard.update_checkpoint(
+            &child,
+            build_subagent_checkpoint(&child, "late worker", &[], 99, true)
+        ));
+        assert_eq!(
+            guard.agents[&child]
+                .checkpoint
+                .as_ref()
+                .unwrap()
+                .checkpoint_id,
+            checkpoint.checkpoint_id
+        );
+        let resumed = guard
+            .resume_from_checkpoint_for_session(
+                "workspace",
+                manager.clone(),
+                runtime,
+                &child,
+                "FIFO-LATEST",
+            )
+            .unwrap();
+        let prompt = &guard.agents[&resumed.agent_id].prompt;
+        assert_eq!(
+            prompt.matches("FIFO-M1").count(),
+            1,
+            "no loss or replay: {stage}"
+        );
+        assert!(prompt.find("FIFO-M1").unwrap() < prompt.find("FIFO-M2").unwrap());
+        assert!(prompt.find("FIFO-M2").unwrap() < prompt.find("FIFO-M3").unwrap());
+        assert!(prompt.find("FIFO-M3").unwrap() < prompt.find("FIFO-LATEST").unwrap());
+        assert_eq!(resumed.queue_depth, 0);
+        assert_eq!(guard.queued_mail_depth(&child), None);
+        assert_eq!(guard.queued_mail_depth(&resumed.agent_id), None);
+    }
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_resume_reaches_real_request_without_another_followup() {
+    let tmp = tempdir().unwrap();
+    let (sent, mut received) = mpsc::unbounded_channel();
+    let app = Router::new().route("/{*path}", post(move |Json(body): Json<Value>| {
+        let sent = sent.clone();
+        async move {
+            sent.send(body).unwrap();
+            Json(json!({"id":"chatcmpl-mail","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let shutdown = CancellationToken::new();
+    let stop_guard = shutdown.clone().drop_guard();
+    let stopping = shutdown.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopping.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let config = crate::config::Config {
+        api_key: Some("test-key".into()),
+        base_url: Some(format!("http://{addr}/v1")),
+        ..Default::default()
+    };
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut runtime = stub_runtime();
+    runtime.client = DeepSeekClient::new(&config).unwrap();
+    runtime.api_config = Some(Arc::new(config));
+    runtime.manager = manager.clone();
+    runtime.context = ToolContext::new(tmp.path());
+    let task = {
+        let mut guard = manager.write().await;
+        let (child, _) = guard.insert_test_interrupted_continuable_agent(
+            "real-request",
+            tmp.path(),
+            vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "earlier checkpoint".into(),
+                    cache_control: None,
+                }],
+            }],
+        );
+        for text in ["REAL-MAIL-ONE", "REAL-MAIL-TWO"] {
+            guard.followup_child(&child, text.into()).unwrap();
+        }
+        let resumed = guard
+            .resume_from_checkpoint_for_session(
+                "workspace",
+                manager.clone(),
+                runtime,
+                &child,
+                "REAL-LATEST",
+            )
+            .unwrap();
+        assert_eq!(resumed.queue_depth, 0);
+        guard
+            .agents
+            .get_mut(&resumed.agent_id)
+            .unwrap()
+            .task_handle
+            .take()
+            .unwrap()
+    };
+    let body = tokio::time::timeout(Duration::from_secs(10), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let messages = body["messages"].to_string();
+    assert_eq!(messages.matches("REAL-MAIL-ONE").count(), 1);
+    assert_eq!(messages.matches("REAL-MAIL-TWO").count(), 1);
+    assert!(messages.find("REAL-MAIL-ONE").unwrap() < messages.find("REAL-MAIL-TWO").unwrap());
+    assert!(messages.find("REAL-MAIL-TWO").unwrap() < messages.find("REAL-LATEST").unwrap());
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(stop_guard);
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_checkpoint_keeps_fresh_batch_before_history_trimming() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = manager.clone();
+    runtime.context = ToolContext::new(tmp.path());
+    let mut messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "earlier work".into(),
+            cache_control: None,
+        }],
+    }];
+    let child = {
+        let mut guard = manager.write().await;
+        let (child, mut rx) = guard.insert_test_running_agent_with_input("large-mail", tmp.path());
+        guard.update_checkpoint(
+            &child,
+            build_subagent_checkpoint(&child, "prior", &messages, 1, true),
+        );
+        for text in [
+            "BATCH-FIRST".to_owned(),
+            format!(
+                "BATCH-SECOND{}",
+                "x".repeat(SUBAGENT_CHECKPOINT_MESSAGE_BUDGET_BYTES + 1)
+            ),
+        ] {
+            guard.followup_child(&child, text).unwrap();
+        }
+        let mut inputs = VecDeque::new();
+        while let Ok(input) = rx.try_recv() {
+            input.mark_taken();
+            inputs.push_back(input);
+        }
+        append_subagent_inputs_as_user_messages(&mut messages, &mut inputs);
+        child
+    };
+    let cp =
+        checkpoint_subagent_progress(&runtime, &child, "before_api_request", &messages, 2, true)
+            .await;
+    assert_eq!(cp.omitted_messages, 1);
+    assert_eq!(
+        cp.messages.len(),
+        2,
+        "the first input must not disappear behind the oversized last input"
+    );
+    assert_eq!(message_text(&cp.messages[0]), "BATCH-FIRST");
+    assert!(message_text(&cp.messages[1]).starts_with("BATCH-SECOND"));
+    {
+        let mut guard = manager.write().await;
+        assert!(
+            guard.pending_follow_ups[&child].lock().unwrap().is_empty(),
+            "both inputs are actually recoverable in this checkpoint"
+        );
+        guard
+            .interrupt_child(&child, None, "before API".into())
+            .unwrap();
+        let resumed = guard
+            .resume_from_checkpoint_for_session(
+                "workspace",
+                manager.clone(),
+                runtime.clone(),
+                &child,
+                "BATCH-LATEST",
+            )
+            .unwrap();
+        let prompt = &guard.agents[&resumed.agent_id].prompt;
+        assert_eq!(prompt.matches("BATCH-FIRST").count(), 1);
+        assert_eq!(prompt.matches("BATCH-SECOND").count(), 1);
+    }
+    // No pending batch: preserve #3882's ordinary bounded history behavior.
+    messages.push(Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Text {
+            text: "processed".into(),
+            cache_control: None,
+        }],
+    });
+    let other = manager
+        .write()
+        .await
+        .insert_test_running_agent("ordinary-history", tmp.path());
+    let ordinary =
+        checkpoint_subagent_progress(&runtime, &other, "after_model_response", &messages, 3, true)
+            .await;
+    assert_eq!(ordinary.messages.len(), 1);
+    assert_eq!(message_text(&ordinary.messages[0]), "processed");
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_resume_can_be_interrupted_before_its_first_poll() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = manager.clone();
+    runtime.context = ToolContext::new(tmp.path());
+    let mut guard = manager.write().await;
+    let (child, _) = guard.insert_test_interrupted_continuable_agent(
+        "first-poll",
+        tmp.path(),
+        vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "original context".into(),
+                cache_control: None,
+            }],
+        }],
+    );
+    for text in ["EARLY-ONE", "EARLY-TWO"] {
+        guard.followup_child(&child, text.into()).unwrap();
+    }
+    let first = guard
+        .resume_from_checkpoint_for_session(
+            "workspace",
+            manager.clone(),
+            runtime.clone(),
+            &child,
+            "EARLY-LATEST-1",
+        )
+        .unwrap();
+    // The manager write lock keeps the worker from constructing its first
+    // checkpoint. Interrupt through the real production entry in this gap.
+    assert_eq!(
+        guard.agents[&first.agent_id]
+            .checkpoint
+            .as_ref()
+            .unwrap()
+            .reason,
+        "resume_admitted"
+    );
+    guard
+        .interrupt_child(&first.agent_id, None, "before first poll".into())
+        .unwrap();
+    let second = guard
+        .resume_from_checkpoint_for_session(
+            "workspace",
+            manager.clone(),
+            runtime,
+            &first.agent_id,
+            "EARLY-LATEST-2",
+        )
+        .unwrap();
+    let prompt = &guard.agents[&second.agent_id].prompt;
+    assert_eq!(prompt.matches("EARLY-ONE").count(), 1);
+    assert_eq!(prompt.matches("EARLY-TWO").count(), 1);
+    assert!(prompt.find("EARLY-ONE").unwrap() < prompt.find("EARLY-TWO").unwrap());
+    assert!(prompt.find("EARLY-LATEST-1").unwrap() < prompt.find("EARLY-LATEST-2").unwrap());
+    assert_eq!(second.queue_depth, 0);
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_failed_resume_keeps_fifo_for_the_next_attempt() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = manager.clone();
+    runtime.context = ToolContext::new(tmp.path());
+    let mut guard = manager.write().await;
+    let (child, _) = guard.insert_test_interrupted_continuable_agent(
+        "retry-mail",
+        tmp.path(),
+        vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "original context".into(),
+                cache_control: None,
+            }],
+        }],
+    );
+    for text in ["RETRY-ONE", "RETRY-TWO"] {
+        guard.followup_child(&child, text.into()).unwrap();
+    }
+    runtime.max_spawn_depth = 0;
+    assert!(
+        guard
+            .resume_from_checkpoint_for_session(
+                "workspace",
+                manager.clone(),
+                runtime.clone(),
+                &child,
+                "failed instruction"
+            )
+            .is_err()
+    );
+    assert_eq!(guard.queued_mail_depth(&child), Some(2));
+    assert!(!guard.resume_targets.contains_key(&child));
+    runtime.max_spawn_depth = DEFAULT_MAX_SPAWN_DEPTH;
+    let receipt = guard
+        .resume_from_checkpoint_for_session(
+            "workspace",
+            manager.clone(),
+            runtime,
+            &child,
+            "RETRY-LATEST",
+        )
+        .unwrap();
+    let prompt = &guard.agents[&receipt.agent_id].prompt;
+    assert!(prompt.find("RETRY-ONE").unwrap() < prompt.find("RETRY-TWO").unwrap());
+    assert!(prompt.find("RETRY-TWO").unwrap() < prompt.find("RETRY-LATEST").unwrap());
+    assert_eq!(guard.queued_mail_depth(&child), None);
+}
+
 /// The resume path is the same scenario from the other side: `followup` on
 /// an interrupted child re-dispatches its checkpoint under a NEW id and
 /// restores the old claim for that id. With the predecessor counted live,
