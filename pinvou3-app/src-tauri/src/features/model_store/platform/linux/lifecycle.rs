@@ -3043,10 +3043,6 @@ impl ModelManager {
                 // 测试夹具以「服务端收到的请求数」为断言，多探一次就是多一个。
                 if endpoint_path_is_openai_style(endpoint)
                     && openai_compatible_endpoint_alive(endpoint)
-                    // r36 P1-2（显式重启意图放行）：待执行的历史上下文修复要求
-                    // 端点存活时再启用完成一次性修复，是预检的受限例外通道；
-                    // 普通启用仍按双实例防护拒绝（r19 安全不变量不变）。
-                    && !super::linked_models::repair_due(card_id)
                 {
                     return Err(ModelManagerError::new(
                         "该模型的服务端口仍有响应（可能是旧版脚本或手工操作启动的遗留\

@@ -60,6 +60,31 @@ pub(super) fn pending_route<'a>(
     routes: &'a [Route],
     card_id: Option<&str>,
 ) -> Option<&'a Route> {
+    pending_route_inner(prefs, row, routes, card_id, true)
+}
+
+/// r36 P1-2 enable 预检放行通道专用：同 pending_route 但不要求 route.ready
+/// （见 pending_route_inner 注释）。修复执行侧（probe/apply）继续走
+/// pending_route——动偏好前必须 ready，两问不同。
+pub(super) fn pending_route_gate<'a>(
+    prefs: &UserPrefs,
+    row: &SavedModel,
+    routes: &'a [Route],
+    card_id: Option<&str>,
+) -> Option<&'a Route> {
+    pending_route_inner(prefs, row, routes, card_id, false)
+}
+
+/// r36 P1-2 放行通道判据的底座：`require_ready=false` 时不看 route.ready——
+/// enable 预检要回答的是「这张卡有没有等着的修复」（enable 本身会把路由带向
+/// ready），而修复执行侧（probe/apply）仍要求 ready 才动偏好，两问不同。
+fn pending_route_inner<'a>(
+    prefs: &UserPrefs,
+    row: &SavedModel,
+    routes: &'a [Route],
+    card_id: Option<&str>,
+    require_ready: bool,
+) -> Option<&'a Route> {
     if row.model_store_link_detached
         || row.is_builtin_account_platform()
         || !row.is_operator_owned_endpoint()
@@ -71,7 +96,7 @@ pub(super) fn pending_route<'a>(
     let mut matches = routes.iter().filter(|route| route.card_id == card);
     let route = matches.next()?;
     if matches.next().is_some()
-        || !route.ready
+        || (require_ready && !route.ready)
         || route.context_repair_stamp.is_none()
         || card_id.is_some_and(|filter| filter != card)
         || row.model != route.model
