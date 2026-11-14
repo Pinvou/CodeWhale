@@ -213,7 +213,10 @@ fn same_route_enable_crosses_real_ipc_and_fanout_before_next_turn_rebuild() {
         serde_json::to_value(&second).unwrap(),
         serde_json::to_value(&first).unwrap()
     );
-    assert_eq!(server.requests.load(Ordering::Relaxed), 1);
+    // 合并语义（r36 P1-2 同 :188 注）：总预算 = 准入 reconcile 探活 1 + 修复
+    // 验证探活 1；二次启用本身零新增请求（修复已回执不再探、reconcile 走
+    // 60s TTL 缓存）。main 原预算 1 不含准入探活。
+    assert_eq!(server.requests.load(Ordering::Relaxed), 2);
     let after_cached = probe.snapshot(second.model_by_id(MODEL_ID).unwrap().clone());
     assert!(after_cached.requires_rebuild_from(&first_cached));
     assert!(
