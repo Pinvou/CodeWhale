@@ -555,6 +555,16 @@ jobs:
               - 'remote-control-relay/test/github-workflow-run-identity.test.js'
               - 'remote-control-relay/test/installer-spdx.test.js'
               - 'remote-control-relay/test/release-path-policy.test.js'
+              - 'pinvou3-app/scripts/codex-bridge-runtime/package.json'
+              - 'pinvou3-app/scripts/codex-bridge-runtime/package-lock.json'
+              - 'pinvou3-app/src-tauri/src/features/assistant/runtime_model.rs'
+              - 'pinvou3-app/src-tauri/src/core/panic_scope.rs'
+              - 'pinvou3-app/src-tauri/src/core/panic_hooks.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/image_capability.rs'
+              - 'pinvou3-app/src-tauri/src/platform/prefs/model.rs'
+              - 'pinvou3-app/src-tauri/src/platform/credential_store.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/turn_shell_tasks.rs'
+              - 'pinvou3-app/src-tauri/Cargo.lock'
               - 'remote-control-relay/test/windows-e2e-*.test.js'
               - 'remote-control-relay/docs/schemas/**'
               - 'pinvou3-app/tests/nsis_resource_staging_contract.test.js'
@@ -577,6 +587,88 @@ jobs:
               - 'pinvou3-app/src-tauri/src/app/commands/desktop_remote_*.rs'
               - 'pinvou3-app/src-tauri/src/app/commands/**'
               - 'pinvou3-app/src-tauri/src/app/desktop_remote_composition.rs'
+              - 'pinvou3-app/src-tauri/src/lib.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/application/dispatch_remote.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/application/project_remote.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/application/ports.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/application/submit_controlled.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/remote_turn.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/runtime.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/operation_gate.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/remote_ownership.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/remote_turn.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/events.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/lifecycle.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/install.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/engine.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/skill_materialization.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/forwarder.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/stall.rs'
+              - 'pinvou3-app/src-tauri/src/platform/prefs/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/validators.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/store.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/mode_state.rs'
+              - 'pinvou3-app/src-tauri/src/core/mode_state.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/retention.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_core.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/attachment_upload.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/attachments.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/attachments.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/published_attachment.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/limits.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/platform/model_reference.rs'
+              - 'pinvou3-app/src-tauri/src/platform/filesystem.rs'
+              - 'pinvou3-app/src-tauri/src/platform/filesystem/linux_publication.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_deps.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/platform/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/platform/office_stream.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/platform/office_stream.py'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_diagnostics.rs'
+              - 'pinvou3-app/src-tauri/src/core/model_wire.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_office.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_email.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_archive.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/platform/archive_entry.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/visual_preview.rs'
+              - 'pinvou3-app/src/index.html'
+              - 'pinvou3-app/vite.config.mjs'
+              - 'pinvou3-app/src/platform/tauri/bridge/sessions.js'
+              - 'pinvou3-app/src/platform/tauri/bridge/chat-events.js'
+              - 'pinvou3-app/src/shared/bridge-shared-helpers.js'
+              - 'pinvou3-app/src/platform/tauri/bridge/chat.js'
+              - 'pinvou3-app/src/platform/tauri/bridge/interaction.js'
+              - 'pinvou3-app/src-tauri/src/platform/paths.rs'
+              - 'pinvou3-app/src-tauri/src/platform/process.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/text_decode.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/windows/windows_path.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/windows/windows_system.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/posix.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/linux/linux_system.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/spreadsheet_structure.rs'
+              - 'pinvou3-app/scripts/vite-runtime-assets.mjs'
+              - 'pinvou3-app/src-tauri/src/main.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_pdf.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/file_ingest.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/linux/linux_path.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/interface/system.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/interface/path.rs'
+              - 'pinvou3-app/src/shared/chunked-file-upload.js'
+              - 'pinvou3-app/src-tauri/src/platform/os/mod.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/interface/mod.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/linux/mod.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/windows/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/platform/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/application/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/mod.rs'
+              - 'pinvou3-app/src-tauri/src/app/mod.rs'
+              - 'pinvou3-app/src-tauri/src/platform/mod.rs'
+              - 'pinvou3-app/src-tauri/src/core/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/mod.rs'
               - 'pinvou3-app/src-tauri/src/app/remote_projection_adapter.rs'
               - 'pinvou3-app/src-tauri/src/app/commands/remote_control.rs'
               - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
@@ -912,7 +1004,10 @@ jobs:
       # Windows/macOS 腿由独立的平台开关控制(matrix 上下文
       # 不可用于 job 级 if,故在矩阵生成处过滤)。
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"},{"os":"macos-15"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"macos-15"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
-    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || matrix.os }}
+    # Windows pool overrides are limited to same-repository PR metadata (name + ID).
+    # Fork/missing metadata or undeclared events use hosted Windows.
+    # PR-editable YAML is not a runner ACL; other declared events keep their pools.
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') || matrix.os }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1310,7 +1405,21 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends iproute2
           fi
-          ss -H -ltn >/dev/null
+          node --input-type=module <<'NODE'
+          import { inspectLegacyListeners } from "./remote-control-relay/enrollment-gateway.js";
+          try {
+            await inspectLegacyListeners(new URL("ws://127.0.0.1:1"));
+            console.log("Relay listener inspection ready");
+          } catch (error) {
+            const allowed = ["ENOENT", "EACCES", "EPERM", "ETIMEDOUT", "ENOBUFS",
+              "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"];
+            const code = allowed.includes(error.code) ? error.code : "command_failed";
+            const status = Number.isInteger(error.code) ? error.code : null;
+            console.error(JSON.stringify({ stage: "relay_listener_preflight", code, status,
+              killed: error.killed === true }));
+            process.exitCode = 1;
+          }
+          NODE
 
       - name: Relay 与部署脚本回归
         run: |
@@ -1750,6 +1859,14 @@ jobs:
               assert all(event["Action"] == "pass" for event in terminal), "finite PostgreSQL tests failed or skipped"
               roots = {event["Test"] for event in terminal if "/" not in event["Test"]}
               assert roots == required, "required finite PostgreSQL test selection did not execute"
+              audit = "TestAuditExportPersistedBoundaries"
+              if audit in required:
+                  prefix = audit + "/generation_renews_and_recovers/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"renew_live_attempt", "cancel_expired_attempt_and_recover", "ordinary_error_stops_inflight_renewal"}, "audit generation lease cases did not execute"
+                  prefix = audit + "/bounded_retry_policy/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"transient_database_errors_stop_at_three", "expired_third_attempt_is_terminal", "permanent_generation_error_is_not_retried", "pending_without_worker_retains_quota"}, "audit bounded retry cases did not execute"
               inventory = "TestAccount039RollbackInventoryPostgres"
               if inventory in required:
                   prefix = inventory + "/"
@@ -1924,7 +2041,7 @@ jobs:
     name: windows-relay-dacl
     needs: changes
     if: ${{ (!cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-relay-dacl')) }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -1943,7 +2060,7 @@ jobs:
     name: windows-relay-tools-test
     needs: changes
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-relay-tools-test')) }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -2060,7 +2177,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
-    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON(vars.PINVOU_WINDOWS_MEDIUM_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_MEDIUM_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') || matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -2114,7 +2231,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           npm --prefix remote-control-relay run release:gate
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
+          python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/release-evidence-artifacts.test.js remote-control-relay/test/controller-release-source-binding.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -2144,13 +2261,11 @@ jobs:
         )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'knowledge-rust'))
       }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    # 冷跑时长未实测(~/.cargo 存档命中的运行 3–6min;cache-targets: false,
-    # 编译每轮全冷)。工具链滚动触发冷跑且逼近 30m 时 job 被超时判败,
-    # cache-on-failure 的 post 步会保存 ~/.cargo(registry/git 等,不含
-    # target 编译产物),失败与手动取消都会触发(post-if =
-    # success() || cache-on-failure;取消时 runner 仍执行 post 步),
-    # namespace 不会全冷。冷跑实测逼近上限时再上调。
-    timeout-minutes: 30
+    # cache-targets: false 不缓存 target 编译产物。2026-10-30 的 run 41065378772
+    # 中首轮 Clippy 用时 18m53s，测试已成功，但最后的 cargo-deny 尚未完成
+    # 就触及 30m 总上限。为冷编译及完整安全审计保留有界的 60m 预算；
+    # 所有检查继续执行，cache-on-failure 与仅 main 保存 ~/.cargo 的策略保持。
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -3089,7 +3204,7 @@ jobs:
     name: windows-static-updater-contract
     needs: changes
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_static_updater == 'true' && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-static-updater-contract')) }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -3368,7 +3483,7 @@ jobs:
       max-parallel: 2
       matrix:
         phase: [all-targets-check, regression]
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     # 状态机回归使用 Bash 循环；job 级固定 shell 也覆盖 merge ref 从 base
     # 带入该步骤的场景。本 job 其余 run 命令均兼容 Bash。
     defaults:
@@ -3872,6 +3987,9 @@ jobs:
             'features::remote_control::controller::controlling_service::inbound_tests::' \
             'features::remote_control::controller::transfer::staging::tests::' \
             'features::remote_control::controller::relay_transport::tests::' \
+            'features::remote_control::controller::relay_transport::availability_tests::' \
+            'features::remote_control::controller::protocol::parsed_message_tests::' \
+            'features::remote_control::controller::controlling_service::tests::actual_adapter_' \
             'features::remote_control::controller::controlling_service::tests::connect_attempt_' \
             'features::computer_use::platform::windows::tests::' \
             'failed_probe_never_deletes_an_existing_store_windows' \
@@ -3956,7 +4074,7 @@ jobs:
     name: windows-rustup-repair-test
     needs: changes
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-rustup-repair-test')) }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     # smoke 保留引擎生产环境的 1500s 修复预算;"所有下载源都僵死"的病态情形
     # 必须在引擎自身的诊断输出之后再截断,而不是提前,因此上限要盖过
     # checkout + setup + 工具链拷贝、该预算及其文档化的超冲:最后一次预算
@@ -4551,7 +4669,7 @@ jobs:
     name: windows-codex-runtime-test
     needs: changes
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-codex-runtime-test')) }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -4632,7 +4750,7 @@ jobs:
     name: windows-runtime-test
     needs: changes
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-runtime-test')) }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout

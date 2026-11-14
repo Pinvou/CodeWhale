@@ -2,7 +2,7 @@ import { decideWithOriginalReceipt } from './approval-decision-recovery.js';
 import { platformRoleBindingUserID, requirePlatformRoles, requirePlatformRoleBinding } from './platform-role-management.js';
 import { parseSystemStatusJSON } from './admin-system-status.js';
 import { parseUsageJSON, encodeUsageJSON } from './admin-usage-governance.js';
-import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder, integerMoney } from './finance-contract.js';
+import { parseFinanceJSON, encodeFinanceJSON, requireFinanceID, requirePaymentOrder, integerMoney, preserveJSONIntegerFields } from './finance-contract.js';
 import { ENTITLEMENT_CORRECTION_COMMAND, parseEntitlementCorrectionJSON, encodeEntitlementCorrectionJSON, parseApprovalEntitlementJSON } from './admin-entitlement-correction.js';
 import { requireSession } from './personal-contract.js';
 import { mergeObservedVersions } from './authorization-ui.js';
@@ -18,6 +18,7 @@ import { parseRegistrationBonusJSON, encodeRegistrationBonusJSON } from './regis
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
   error.code = payload?.code || 'REQUEST_FAILED';
+  Object.defineProperty(error, 'responseCode', { value: typeof payload?.code === 'string' ? payload.code : '' });
   error.status = response.status;
   error.details = payload?.details || null;
   error.requestID = payload?.request_id || '';
@@ -232,9 +233,12 @@ export class AdminPlatformClient {
     entry.controller.abort();
   }
 
-  accountClosures(signal, cursor = '') {
-    const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
-    return this.request('account', `/admin/v1/account-closure-requests${query}`, signal);
+  accountClosures(signal, cursor = '', filters) {
+    // Preserve the exact existing opaque cursor encoding for old callers.
+    const parts = cursor ? [`cursor=${encodeURIComponent(cursor)}`] : [];
+    for (const key of ['status', 'stage']) if (filters?.[key]) parts.push(`${key}=${encodeURIComponent(filters[key])}`);
+    const query = parts.length ? `?${parts.join('&')}` : '';
+    return this.request('account', `/admin/v1/account-closure-requests${query}`, signal, null, { isolateRead: Boolean(filters) });
   }
   retryAccountClosure(id, reason, key, signal) {
     requireFinanceID(id);
@@ -587,7 +591,7 @@ export class AdminPlatformClient {
     }
     return this.approvalControl;
   }
-  async governedApprovalRead(path, { detail = false, signal } = {}) {
+  async governedApprovalRead(path, { detail = false, signal, requireCollection = false } = {}) {
     const capability = await this.governedApprovalCapability(signal);
     const key = approvalControlKey(capability);
     const lineage = this.approvalLineage();
@@ -610,6 +614,7 @@ export class AdminPlatformClient {
       }
       if (!this.approvalLineageMatches(lineage) || approvalControlKey(this.approvalControl) !== key) throw approvalControlChanged();
       if (!detail) {
+        if (requireCollection && !Array.isArray(payload?.items)) throw new Error("INVALID_APPROVAL_COLLECTION");
         return { ...payload, items: (payload.items || []).map(item => ({ ...item, allowed_actions: [] })) };
       }
       if (capability.session_approval_wire_version === 2 &&
@@ -627,10 +632,10 @@ export class AdminPlatformClient {
       signal?.removeEventListener('abort', abort);
     }
   }
-  governedApprovalRequests(filters = {}, signal) {
+  governedApprovalRequests(filters = {}, signal, { requireCollection = false } = {}) {
     const query = new URLSearchParams({ limit: String(filters.limit || 50) });
     for (const [key, value] of Object.entries(filters)) if (key !== 'limit' && value) query.set(key, value);
-    return this.governedApprovalRead(`?${query}`, { signal });
+    return this.governedApprovalRead(`?${query}`, { signal, requireCollection });
   }
   governedApprovalRequest(requestID, signal) {
     return this.governedApprovalRead(`/${encodeURIComponent(requestID)}`, { detail: true, signal });
@@ -1238,6 +1243,10 @@ tokenAccountRecoveryActionByIdempotencyKey(commandReference, idempotencyKey, sig
 tokenModelCatalogOverview(signal) { return this.request('token', '/admin/v1/overviews/model-catalog', signal); }
   tokenResourcesPageOverview(signal) { return this.request('token', '/admin/v1/overviews/token-resources', signal); }
   tokenProvisioningPageOverview(signal, window = '') { return this.request('token', `/admin/v1/overviews/model-operations${window === '24h' ? '?window=24h' : ''}`, signal); }
+  provisioningsForPresentation(filters = {}, signal) {
+    const query = tokenAdminCollectionQuery('provisionings', filters);
+    return this.request('token', `/admin/v1/provisionings?${query}`, signal, text => JSON.parse(preserveJSONIntegerFields(text, key => key === 'actual_generation' || key === 'desired_generation')), { isolateRead: true });
+  }
   provisionings(filtersOrSignal = {}, signal) {
     if (isAbortSignal(filtersOrSignal)) {
       return this.request('token', '/admin/v1/provisionings?limit=100', filtersOrSignal);

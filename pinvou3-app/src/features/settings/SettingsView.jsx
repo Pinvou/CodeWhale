@@ -61,6 +61,7 @@ import {
 import { VoiceShortcutIntroModal } from '../voice-composer/VoiceShortcutIntroModal.jsx';
 import { ReasoningTierPicker, useModelReasoningTierState } from './local-server-tiers.jsx';
 import { StatusChip } from './StatusChip.jsx';
+import { isModelRouteUnchanged, modelRouteSnapshot } from './model-route-intent.js';
 
 function isReadonlyModel(model) {
   return !!(model && (model.readonly || model.system));
@@ -386,10 +387,23 @@ const formatMemoryTime = (item, copy) => {
       const [providerKey, setProviderKey] = useState(initialProvider ? initialProvider.key : '');
       const [providerKind, setProviderKind] = useState(initial.provider_kind || (initialProvider && initialProvider.providerKind) || (modelScope === 'cloud' ? PROVIDER_KIND_OFFICIAL_API : ''));
       const [vendor, setVendor] = useState(initial.vendor || (initialProvider && initialProvider.vendor) || '');
-      const [endpointMode, setEndpointMode] = useState((initialProvider && initialProvider.endpointMode) || '');
+      const [endpointMode, setEndpointMode] = useState(initial.endpoint_mode || (initialProvider && initialProvider.endpointMode) || '');
       const [model, setModel] = useState(initial.model || '');
       const [baseUrl, setBaseUrl] = useState(initial.base_url || '');
+      const [storeRouteAtOpen] = useState(() => ({
+        existing: !!initial.id && !initial.__new,
+        route: modelRouteSnapshot({
+          preset, provider_kind: providerKind, vendor, endpoint_mode: endpointMode,
+          model, base_url: baseUrl,
+        }),
+      }));
       const [contextWindow, setContextWindow] = useState(initial.context_window_tokens ? String(initial.context_window_tokens) : '');
+      // 上下文字段的编辑意图:表单挂载时的快照可能是旧值(后台商店同步可能已
+      // 把旧 32K 修复为 256K 并落盘一次性迁移标记)。未编辑时保存带
+      // preserve_context_window_tokens,后端保留库内最新值;用户编辑过(含目录
+      // 切换等显式重置)才提交表单值,显式改回 32K/清空仍然有效。
+      // 独立的编辑意图也保护首次探测期间刚确认的选择，即使仍为原来的 32K。
+      const [contextWindowTouched, setContextWindowTouched] = useState(false);
       const [maxOutput, setMaxOutput] = useState(initial.max_output_tokens ? String(initial.max_output_tokens) : '');
       // Thinking effort: initialize from the stored value (normalize first —
       // legacy records may carry pre-normalization values such as deepseek's
@@ -516,6 +530,7 @@ const formatMemoryTime = (item, copy) => {
         if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(nextModel));
         if (!nameTouched) setName(p === 'local_vllm' ? settingsCopy.localModelName(nextModel) : (item.custom ? group.title : (item.title || presetProviderLabel(p, t))));
         setContextWindow(p === 'local_vllm' ? '262144' : '');
+        setContextWindowTouched(true);
         // The output cap is no longer prefilled with 24K: left empty like
         // cloud/custom, declared uniformly by the runtime window tiers.
         setMaxOutput('');
@@ -711,10 +726,17 @@ const formatMemoryTime = (item, copy) => {
             id: id, name: saveName, preset: preset,
             alias: showAliasField ? (alias.trim() || null) : null,
             context_window_tokens: Number.isFinite(contextTokens) && contextTokens > 0 ? contextTokens : null,
+            preserve_context_window_tokens: !contextWindowTouched,
+            context_window_edit_requested: contextWindowTouched,
             max_output_tokens: Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : null,
             // 仅当前表单模型支持档位时保存；手输 model 变为无档位模型时置 null(#209)。
             reasoning_effort: reasoningEffortTiers.length > 0 ? (reasoningEffort || null) : null,
             model: model.trim(), base_url: baseUrl.trim(),
+            preserve_model_store_route: storeRouteAtOpen.existing
+              && isModelRouteUnchanged(storeRouteAtOpen.route, {
+                preset, provider_kind: providerKind, vendor, endpoint_mode: endpointMode,
+                model, base_url: baseUrl,
+              }),
             api_key: nextApiKey, credential_action: nextKeyAction,
             provider_kind: providerKind || null,
             vendor: vendor || null,
@@ -850,6 +872,7 @@ const formatMemoryTime = (item, copy) => {
         setBaseUrl(defs.baseUrl);
         setName(settingsCopy.localModelName(''));
         setContextWindow('');
+        setContextWindowTouched(true);
         setMaxOutput('');
         setApiKey('');
         setKeyAction('keep_existing');
@@ -902,6 +925,7 @@ const formatMemoryTime = (item, copy) => {
           setReasoningEffort(reasoningEffortForModelSwitch({ preset, model: nextModel, vendor, base_url: baseUrl }));
           // Explicit model switches also reset the manual context window so it never leaks across models (same reset discipline as applyCatalogItem).
           setContextWindow('');
+          setContextWindowTouched(true);
           // 与 applyCatalogItem 一致:未手动改过档位时按新条目的视觉能力标注预填。
           if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(nextModel));
           setProviderModelPickerOpen(false);
@@ -1423,7 +1447,7 @@ const formatMemoryTime = (item, copy) => {
                     {!isLocalPreset && renderInlineField({
                       label: t.modelContextWindow,
                       value: contextWindow,
-                      onChange: e => setContextWindow(e.target.value.replaceAll(/[^0-9]/g, '').slice(0, 9)), // eslint-disable-line sonarjs/concise-regex -- keep [^0-9] literal instead of \D; readability first
+                      onChange: e => { setContextWindow(e.target.value.replaceAll(/[^0-9]/g, '').slice(0, 9)); setContextWindowTouched(true); }, // eslint-disable-line sonarjs/concise-regex -- keep [^0-9] literal instead of \D; readability first
                       placeholder: settingsCopy.modelContextWindowPlaceholder,
                       testId: 'model-form-context-window',
                       inputMode: 'numeric',

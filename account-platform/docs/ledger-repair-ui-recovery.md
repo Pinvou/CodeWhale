@@ -77,6 +77,13 @@ or mismatching owner controls fails; only absent database opt-in skips the case.
 The companion `TestF02StopLossOwnerConfiguration` checks configuration acceptance
 and rejection without connecting; it does not establish PostgreSQL execution.
 
+Fresh retries while paused, including after the review case closes, must match
+both `account.ErrConflict` and `account.ErrApprovalExecutionPaused`. These checks
+retain the original request/execution counts, immutable pause, authoritative
+success recovery and executed replay assertions. Removing only the pause error
+identity while preserving conflict must fail this regression; no production
+execution or recovery behavior is changed by the assertion refinement (#1632).
+
 
 `TestAccountClosedGrantBillingHandler` uses controlled repository responses and
 already verified delegation context to cover the existing Billing handler's
