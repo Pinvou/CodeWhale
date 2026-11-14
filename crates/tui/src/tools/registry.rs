@@ -1452,6 +1452,18 @@ struct McpToolAdapter {
     pool: std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpPool>>,
 }
 
+/// Whether an MCP tool name is a known read-only helper that a read-only
+/// posture may run without approval. Besides the built-in discovery
+/// helpers, this recognizes the Pinvou-hosted session-reader server's
+/// read-only half (Pinvou fork registration): `read_session` and
+/// `list_sessions` only page through local session records and never
+/// mutate anything, and the parent's Plan-pinned auxiliary lane advertises
+/// `mcp_session-reader_read_session` as its sole tool — classifying it
+/// ReadOnly is what keeps that advertised parent-history fetch reachable
+/// under the pin. The same server's `send_message_to_session` and
+/// `create_session` mutate messaging state and deliberately stay absent:
+/// they keep the conservative `[Network, RequiresApproval]` default and
+/// the required-approval gate.
 fn is_mcp_read_helper(name: &str) -> bool {
     matches!(
         name,
@@ -1460,6 +1472,10 @@ fn is_mcp_read_helper(name: &str) -> bool {
             | "mcp_read_resource"
             | "read_mcp_resource"
             | "mcp_get_prompt"
+            // Pinvou fork: session-reader's read-only half; the mutating
+            // half of that server is intentionally not listed here.
+            | "mcp_session-reader_read_session"
+            | "mcp_session-reader_list_sessions"
     )
 }
 

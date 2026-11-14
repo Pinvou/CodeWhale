@@ -1714,3 +1714,53 @@ fn classic_truncation_footer_teaches_a_followable_retry() {
         "the classic truncation footer must keep naming the followable retrieval route"
     );
 }
+
+// Pinvou fork registration (parent PR #809): the host-owned session-reader
+// server's read-only half is classified as a read helper so the parent's
+// Plan-pinned auxiliary lane — whose advertised sole tool is
+// `mcp_session-reader_read_session` — can actually fetch parent history
+// under the pin. These pins hold the fork-distinct allowlist extension to
+// its declared boundary: the read-only members in, the mutating members
+// (and everything unknown) out.
+#[test]
+fn forkguard_session_reader_read_tools_classify_read_only() {
+    for name in [
+        "mcp_session-reader_read_session",
+        "mcp_session-reader_list_sessions",
+    ] {
+        let adapter = mcp_tool_adapter_for_test(name);
+        assert_eq!(
+            adapter.capabilities(),
+            vec![ToolCapability::ReadOnly],
+            "{name} is the session-reader read-only half; it must classify ReadOnly so read-only postures keep it reachable"
+        );
+        assert_eq!(
+            adapter.approval_requirement(),
+            ApprovalRequirement::Auto,
+            "{name} reads local session records only; it must not raise an approval card"
+        );
+        assert!(
+            !adapter.defer_loading(),
+            "{name} must stay eagerly loaded like the other read helpers"
+        );
+    }
+}
+
+#[test]
+fn forkguard_session_reader_write_tools_stay_conservatively_gated() {
+    for name in [
+        "mcp_session-reader_send_message_to_session",
+        "mcp_session-reader_create_session",
+    ] {
+        let adapter = mcp_tool_adapter_for_test(name);
+        assert!(
+            !adapter.capabilities().contains(&ToolCapability::ReadOnly),
+            "{name} mutates messaging state; it must never inherit the read-helper ReadOnly classification"
+        );
+        assert_eq!(
+            adapter.approval_requirement(),
+            ApprovalRequirement::Required,
+            "{name} must keep the required-approval gate"
+        );
+    }
+}
