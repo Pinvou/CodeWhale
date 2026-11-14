@@ -259,6 +259,8 @@ after 5 seconds, so the drain cannot outlive ws's own 30-second close timeout.
 | `revoke_persistence_failed` | Persisting the revoke tombstone failed; the requester is closed and the endpoint remains usable. |
 | `revoked_endpoint_capacity_reached` | The tombstone capacity is exhausted (nothing was written); the requester is closed and the endpoint remains usable. |
 | `revoke_failed` | An unexpected error occurred while processing a revoke. |
+| `connection_initialization_failed` | Attaching a newly opened controller-protocol socket to the message router failed; the socket is closed and nothing was registered on it. |
+| `desktop_registration_failed` | An unexpected error escaped desktop endpoint registration; the requester is closed and nothing was registered. |
 
 Besides reject code 1008, clients observe these WebSocket close codes: `1000`
 when the revoke requester is acknowledged with a normal close ("endpoint

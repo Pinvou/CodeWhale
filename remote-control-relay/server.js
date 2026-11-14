@@ -263,9 +263,14 @@ try {
 } catch (error) {
   // Report only the fixed message and the errno name. Letting the rejection
   // reach Node's default handler would print the error cause, whose message
-  // and `path` property embed the state file location.
+  // and `path` property embed the state file location. The cause code is
+  // shape-checked to an errno-style name so a future cause can never carry
+  // arbitrary text into stderr either.
   const code = error?.cause?.code;
-  console.error(`[relay-error] ${error.message}${code ? ` code=${code}` : ""}`);
+  const codeSuffix = typeof code === "string" && /^[A-Z][A-Z0-9_]*$/u.test(code)
+    ? ` code=${code}`
+    : "";
+  console.error(`[relay-error] ${error.message}${codeSuffix}`);
   process.exit(1);
 }
 
@@ -297,14 +302,18 @@ if (DESKTOP_CONTROLLER_ENABLED) {
     // store and validation rejections all carry a fixed snake_case code,
     // with any raw detail (errno names, fs text) tucked into `cause`.
     // Library-level failures without such a code (e.g. a DER decode
-    // error) collapse to a generic code, so no filesystem path, offending
-    // value or library text ever reaches stderr.
+    // error) collapse to a generic code, and the appended cause code is
+    // shape-checked to an errno-style name, so no filesystem path,
+    // offending value or library text ever reaches stderr.
     const code = typeof error?.code === "string" && /^[a-z][a-z0-9_]*$/u.test(error.code)
       ? error.code
       : (typeof error?.message === "string" && /^[a-z][a-z0-9_]*$/u.test(error.message)
         ? error.message
         : "controller_startup_failed");
-    const causeCode = error?.cause?.code;
+    const rawCauseCode = error?.cause?.code;
+    const causeCode = typeof rawCauseCode === "string" && /^[A-Z][A-Z0-9_]*$/u.test(rawCauseCode)
+      ? rawCauseCode
+      : null;
     console.error(`[relay-error] ${code}${causeCode ? ` code=${causeCode}` : ""}`);
     process.exit(1);
   }
@@ -408,7 +417,6 @@ async function createControllerRuntime() {
     throw error;
   }
 }
-
 
 /// 终结单个目的地 socket 的四步清理,send() 的全部终止路径共用:
 /// stringify 失败 / 高水位 / send 回调错误 / send 同步抛错。
@@ -1375,7 +1383,6 @@ async function finishDesktopRegistration(ws, { endpointId, accessToken, desktopS
     notifyDesktopOfWeb(endpoint, endpoint.web_rejoined === true);
   }
 }
-
 
 function joinWebClient(ws, msg) {
   const endpointId = msg.endpoint_id;

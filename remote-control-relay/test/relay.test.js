@@ -2131,9 +2131,9 @@ test("a non-numeric heartbeat falls back instead of a 1 ms NaN tick", async (t) 
   ws.on("ping", () => { pings += 1; });
   await new Promise((resolve) => setTimeout(resolve, 1500));
   assert.equal(pings, 0, `garbage heartbeat produced ${pings} pings (1 ms NaN tick)`);
-  // And the relay stays silent on stderr — a clean fallback prints no
-  // [relay-error] line (operational notices aside).
-  assert.doesNotMatch(isolated.errors(), /\[relay-error\]/u, "heartbeat fallback produced an error line");
+  // And the relay stays silent on stderr: no [relay-error] line at all, and
+  // no stray output beyond operational telemetry notices.
+  assertFixedStderr(isolated, []);
   const health = await (await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`)).json();
   assert.equal(health.endpoint_count, 0);
 
@@ -2565,7 +2565,7 @@ test("expired Web endpoint releases its exact interaction slot before deletion",
 test("official controller fails startup until trusted live claim wiring exists", async () => {
   const isolatedPort = await getFreePort();
   const child = spawn(process.execPath, [join(relayDir, "server.js")], {
-    cwd: relayDir, env: { ...process.env, PORT: String(isolatedPort), ...controllerEnvironment("official-disabled", {
+    cwd: relayDir, env: { ...relayEnvironment(), PORT: String(isolatedPort), ...controllerEnvironment("official-disabled", {
       NODE_ENV: "production", PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "official", PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "0",
     }) }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
@@ -2592,7 +2592,7 @@ test("actual controller startup rejects both public pairing HMAC examples before
     const child = spawn(process.execPath, [join(relayDir, "server.js")], {
       cwd: relayDir,
       env: {
-        ...process.env, PORT: String(await getFreePort()),
+        ...relayEnvironment(), PORT: String(await getFreePort()),
         ...controllerEnvironment(`pairing-example-${index}`, {
           NODE_ENV: "production",
           PINVOU_REMOTE_HOST: "127.0.0.1",
@@ -3874,9 +3874,9 @@ test("a failed bind reports a fixed error without the bind address", async () =>
       await waitForExit(second.child, 10000);
       assert.notEqual(second.child.exitCode, 0);
       // The relay may print operational notices (telemetry configuration);
-      // only [relay-error] lines are pinned, and there must be exactly one.
-      const errorLines = second.errors().split("\n").filter((line) => line.startsWith("[relay-error]"));
-      assert.deepEqual(errorLines, ["[relay-error] listen_failed code=EADDRINUSE"]);
+      // the [relay-error] lines are pinned exactly and any other stray
+      // output is rejected.
+      assertFixedStderr(second, ["[relay-error] listen_failed code=EADDRINUSE"]);
       assert.ok(!second.errors().includes(String(first.port)), "bind address echoed into stderr");
     } finally {
       await stopRelay(second.child);
