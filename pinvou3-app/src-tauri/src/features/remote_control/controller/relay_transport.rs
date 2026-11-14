@@ -1630,7 +1630,12 @@ pub(super) fn dispatch_test_transport_frame_to_sink(
 ) -> bool {
     let config =
         ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
-    dispatch_inbound(&config, sender, sink, &frame.to_string())
+    // 返回值 = 帧是否被准入投递（accepted），不是 positive_lease 退避重置信用：
+    // c03bf63470 重构后 cfg(test) 包装 `dispatch_inbound` 的返回语义变为
+    // `positive_lease.is_some()`（供退避调度自测），与 `controlling_inbound_tests`
+    // 的「饱和帧仍算准入」等断言错位。适配器固定取 evidence.accepted 以保留
+    // 两个测试域各自需要的语义。
+    dispatch_inbound_evidence(&config, sender, sink, &frame.to_string()).accepted
 }
 
 /// Capture actual reader delivery, including schema/context rejection and
