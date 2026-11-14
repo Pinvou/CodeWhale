@@ -136,7 +136,12 @@ func (s *Service) adminApprovalRequestsV2(w http.ResponseWriter, r *http.Request
 		}
 	}
 	filter.Limit = 0
-	sourceIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	// Reuse the ingress limiter's validated immediate-peer/source decision.
+	// Raw forwarding headers never acquire authority in this domain handler.
+	sourceIP, admitted := httpserver.AdmittedRateLimitSource(r.Context())
+	if !admitted {
+		sourceIP, _, err = net.SplitHostPort(r.RemoteAddr)
+	}
 	if err != nil || net.ParseIP(sourceIP) == nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "PAGINATION_SNAPSHOT_UNAVAILABLE", "approval pagination is unavailable", httpserver.RequestID(r.Context()))
 		return
