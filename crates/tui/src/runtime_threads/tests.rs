@@ -3731,6 +3731,106 @@ fn routed_usage_staging_batches_disk_writes_and_stays_read_coherent() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A failed batch flush must not silently drop the staged batch: the
+/// already-acknowledged records whose sinks returned true are journaled only
+/// when the append itself fails, so losing them here would be an
+/// unrecoverable billing gap. A failed write keeps the stage resident and the
+/// next flush retries it.
+#[test]
+fn staged_batch_survives_a_failed_flush_and_retries() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn = sample_turn(
+        "thr_flushfail",
+        "turn_flushfail",
+        RuntimeTurnStatus::InProgress,
+    );
+    store.save_turn(&turn).expect("persist base turn");
+    let turn_path = store.turns_dir.join(format!("{}.json", turn.id));
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    let record = |index: usize| crate::cost_status::EffectiveRouteUsage {
+        route: route.clone(),
+        usage: Usage {
+            input_tokens: index as u32,
+            ..Usage::default()
+        },
+    };
+
+    // Stage up to one short of the batch, then sabotage the target path
+    // (a directory where the JSON file must be) so the batch flush's
+    // atomic write cannot succeed.
+    for index in 0..(ROUTED_USAGE_FLUSH_BATCH - 1) {
+        assert!(
+            store
+                .append_routed_usage_staged(
+                    &turn.id,
+                    &format!("sink:response:{index}"),
+                    record(index)
+                )
+                .expect("stage append"),
+            "record {index} should be newly staged"
+        );
+    }
+    std::fs::remove_file(&turn_path).expect("drop the turn file");
+    std::fs::create_dir(&turn_path).expect("sabotage the turn path with a directory");
+
+    assert!(
+        store
+            .append_routed_usage_staged(
+                &turn.id,
+                &format!("sink:response:{}", ROUTED_USAGE_FLUSH_BATCH - 1),
+                record(ROUTED_USAGE_FLUSH_BATCH - 1)
+            )
+            .is_err(),
+        "the batch flush fails while the turn path is unwritable"
+    );
+    // The whole staged batch is still resident and readable.
+    assert_eq!(
+        store
+            .load_turn(&turn.id)
+            .expect("staged form survives the failed flush")
+            .routed_usage
+            .len(),
+        ROUTED_USAGE_FLUSH_BATCH,
+        "no acknowledged record is lost to a failed flush"
+    );
+
+    // Repair the path: the next append triggers a retry flush that
+    // persists the whole batch plus the new record.
+    std::fs::remove_dir(&turn_path).expect("clear the sabotaging directory");
+    assert!(
+        store
+            .append_routed_usage_staged(&turn.id, "sink:response:retry", record(9_999))
+            .expect("retry flush succeeds"),
+        "the retried record is newly persisted"
+    );
+    let raw = std::fs::read_to_string(&turn_path).expect("read repaired turn from disk");
+    let persisted: TurnRecord = serde_json::from_str(&raw).expect("parse persisted turn");
+    assert_eq!(
+        persisted.routed_usage.len(),
+        ROUTED_USAGE_FLUSH_BATCH + 1,
+        "the retry flush carries the whole recovered batch"
+    );
+    assert_eq!(
+        store
+            .load_turn(&turn.id)
+            .expect("post-retry read")
+            .routed_usage
+            .len(),
+        ROUTED_USAGE_FLUSH_BATCH + 1
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[tokio::test]
 async fn aggregate_usage_fails_closed_for_legacy_reconstructed_route() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
