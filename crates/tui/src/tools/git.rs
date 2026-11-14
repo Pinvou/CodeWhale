@@ -290,7 +290,9 @@ fn pathspec_from(working_dir: &Path, resolved: &Path) -> PathBuf {
 /// reap on expiry, concurrent pipe drains) instead of a blocking
 /// `Command::output()` on the executor thread, so a hung git helper fails the
 /// call at [`GIT_COMMAND_BUDGET`] rather than stalling the turn forever.
-async fn run_git_command(
+/// Shared with the github tool, whose `ensure_github_repo` and
+/// `git_status_porcelain` helpers had the same unbounded blocking shape.
+pub(super) async fn run_git_command(
     working_dir: &Path,
     args: &[String],
 ) -> Result<std::process::Output, ToolError> {
