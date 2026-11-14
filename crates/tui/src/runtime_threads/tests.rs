@@ -3607,8 +3607,9 @@ fn routed_usage_staging_batches_disk_writes_and_stays_read_coherent() {
     // Raising the routed-usage cap to 2048 with per-record turn-file rewrites
     // would cost ~950 MB of O(N²) disk churn on a maximal fleet turn. The
     // staging layer batches those writes; this pins the three contracts that
-    // make it safe: staged appends stay visible to `load_turn` readers, disk
-    // trails by at most one batch, and a plain save supersedes the stage.
+    // make it safe: staged appends stay visible to readers (`load_turn` and
+    // the directory-scan listings alike), disk trails by at most one batch,
+    // and a plain save supersedes the stage.
     let dir = test_runtime_dir();
     let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
     let turn = sample_turn("thr_staged", "turn_staged", RuntimeTurnStatus::InProgress);
@@ -3660,6 +3661,18 @@ fn routed_usage_staging_batches_disk_writes_and_stays_read_coherent() {
             .len(),
         ROUTED_USAGE_FLUSH_BATCH - 1,
         "load_turn returns the staged form"
+    );
+    assert_eq!(
+        store
+            .list_turns_for_thread(&turn.thread_id)
+            .expect("coherent listing")
+            .iter()
+            .map(|listed| listed.routed_usage.len())
+            .max()
+            .unwrap_or(0),
+        ROUTED_USAGE_FLUSH_BATCH - 1,
+        "the directory-scan listing sees the staged form too — usage \
+         aggregation must not under-report between batch flushes"
     );
     assert_eq!(
         disk_routed_len(),

@@ -88,11 +88,15 @@ pub(crate) const MAX_ROUTED_USAGE_RECORDS_PER_TURN: usize = 2_048;
 /// Routed-usage appends stage in memory for up to this many records before
 /// the staged turn is persisted, so delivering a burst of sub-call usage does
 /// not rewrite + fsync the whole turn file per record — at the 2048-record
-/// cap that would be ~950 MB of O(N²) disk churn per turn. `load_turn`
-/// returns the staged form, so in-process readers stay coherent; the turn
-/// settlement save persists any residue. The disclosed trade: a process
-/// crash can lose at most `ROUTED_USAGE_FLUSH_BATCH - 1` records of billing
-/// detail (~5 KB) that per-record saves would have written.
+/// cap that would be ~950 MB of O(N²) disk churn per turn. `load_turn` and
+/// the whole-directory turn listings return the staged form, so in-process
+/// readers stay coherent; the turn settlement save persists any residue. The
+/// disclosed trade: a process crash can lose at most one batch
+/// (`ROUTED_USAGE_FLUSH_BATCH`, ~5 KB) of billing detail that per-record
+/// saves would have written — between flushes at most `BATCH - 1` records
+/// are staged, but the batch flush itself persists the staged form only
+/// after the append that filled it, so a crash mid-flush loses the whole
+/// batch.
 const ROUTED_USAGE_FLUSH_BATCH: usize = 16;
 
 #[cfg(test)]
@@ -1642,7 +1646,7 @@ impl RuntimeThreadStore {
             #[cfg(test)]
             self.turn_dir_files_read
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let turn: TurnRecord = serde_json::from_str(&raw)
+            let mut turn: TurnRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
             if turn.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
                 bail!(
@@ -1650,6 +1654,16 @@ impl RuntimeThreadStore {
                     turn.schema_version,
                     CURRENT_RUNTIME_SCHEMA_VERSION
                 );
+            }
+            // Stage-coherent listing, mirroring `load_turn`: a turn with
+            // staged routed-usage appends has a stale on-disk form (disk
+            // trails by up to one batch), and the listing consumers — usage
+            // aggregation, the `/v1/usage` and per-thread cost surfaces, fork
+            // copying — must not under-report the newest spend between batch
+            // flushes. The staged form is the disk record plus appends, so
+            // substituting it is always a strictly fresher view.
+            if let Some(staged) = self.routed_usage_staged.lock().get(&turn.id) {
+                turn = staged.turn.clone();
             }
             out.push(turn);
         }
