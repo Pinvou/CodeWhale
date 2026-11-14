@@ -95,6 +95,7 @@ ACCOUNT_REQUIRED = {
     "TestRegistrationUnknownInspectionPostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
     "TestRegistrationCompensationDatabaseErrorIdentityPostgres",
+    "TestRegistrationOutboxAggregateLookupPostgres",
     "TestPlatformRoleManagementRuntimePostgres",
     "TestUserCodeLookupRuntimePostgres",
     "TestAuditSearchOriginalMigrationRuntimePostgres",
@@ -297,6 +298,7 @@ EXACT_REQUIRED_CHILDREN = {
         "fresh-failure-atomicity-and-retry",
         "populated-upgrade-replay-and-own-ddl-rollback",
     },
+    "TestRegistrationOutboxAggregateLookupPostgres": {"fresh-install", "retained-upgrade"},
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)
