@@ -345,7 +345,7 @@ impl FleetFile {
                     .take(MAX_MEMBER_DISPLAY_NAME_CHARS)
                     .collect();
                 if clipped != display_name {
-                    crate::logging::warn(&format!(
+                    crate::logging::warn(format!(
                         "member `{}` display_name exceeded {MAX_MEMBER_DISPLAY_NAME_CHARS} characters; clamped",
                         member.id,
                     ));

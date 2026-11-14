@@ -633,7 +633,35 @@ fn read_bounded_to_string(
             ),
         });
     }
-    std::fs::read_to_string(&abs_path).map_err(|err| EvidenceReadError {
+    // The metadata check above is advisory: a file that grows between the
+    // stat and this read must not turn into an unbounded allocation. Read at
+    // most one byte past the cap and let the authoritative check below fail
+    // the read — the same `take(limit + 1)` + post-check shape the secrets
+    // and skills readers use.
+    use std::io::Read;
+    let file = std::fs::File::open(&abs_path).map_err(|err| EvidenceReadError {
+        failure_kind: FleetTaskFailureKind::Verifier,
+        evidence: format!("cannot read {}: {err}", path.display()),
+    })?;
+    let mut limited = file.take(MAX_SCORER_READ_BYTES + 1);
+    let mut buf = Vec::new();
+    limited
+        .read_to_end(&mut buf)
+        .map_err(|err| EvidenceReadError {
+            failure_kind: FleetTaskFailureKind::Verifier,
+            evidence: format!("cannot read {}: {err}", path.display()),
+        })?;
+    if buf.len() as u64 > MAX_SCORER_READ_BYTES {
+        return Err(EvidenceReadError {
+            failure_kind: FleetTaskFailureKind::Verifier,
+            evidence: format!(
+                "refusing to read oversized evidence {}: file grew past the {} byte cap",
+                path.display(),
+                MAX_SCORER_READ_BYTES
+            ),
+        });
+    }
+    String::from_utf8(buf).map_err(|err| EvidenceReadError {
         failure_kind: FleetTaskFailureKind::Verifier,
         evidence: format!("cannot decode {} as UTF-8: {err}", path.display()),
     })
