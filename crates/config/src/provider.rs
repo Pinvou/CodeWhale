@@ -515,7 +515,7 @@ pub fn is_exact_kimi_code_route(kind: ProviderKind, base_url: &str) -> bool {
     }
 
     // The membership plan serves both the default host and the official
-    // overseas alias the app's model catalog registers (pinvoy-agent#825
+    // overseas alias the app's model catalog registers (pinvou-agent#825
     // review P2: saved settings keep api.kimi.ai/coding/v1 verbatim, so the
     // route gate must learn it or the K3.1 replay contract silently misses
     // there).
