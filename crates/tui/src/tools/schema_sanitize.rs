@@ -243,8 +243,7 @@ pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
             let Some(items) = obj.get(key).and_then(Value::as_array) else {
                 continue;
             };
-            let mut groups: Vec<String> =
-                items.iter().filter_map(required_group_label).collect();
+            let mut groups: Vec<String> = items.iter().filter_map(required_group_label).collect();
             groups.sort();
             groups.dedup();
             if groups.len() >= 2 {
@@ -2031,7 +2030,9 @@ mod tests {
 
         assert_eq!(
             note.as_deref(),
-            Some("Exactly one of these parameter groups must be provided: `a` | `b`. At least one of these parameter groups must be provided: `c` | `d`."),
+            Some(
+                "Exactly one of these parameter groups must be provided: `a` | `b`. At least one of these parameter groups must be provided: `c` | `d`."
+            ),
             "both dropped constraints must be surfaced: {note:?}"
         );
         assert!(
@@ -2057,7 +2058,9 @@ mod tests {
 
         assert_eq!(
             note.as_deref(),
-            Some("Exactly one of these parameter groups must be provided: `a` | `b`. At least one of the original argument alternatives must be provided (top-level `anyOf` is not supported by this API and was removed)."),
+            Some(
+                "Exactly one of these parameter groups must be provided: `a` | `b`. At least one of the original argument alternatives must be provided (top-level `anyOf` is not supported by this API and was removed)."
+            ),
             "the generic sentence fills in for the group-less keyword: {note:?}"
         );
     }
@@ -2121,8 +2124,7 @@ mod tests {
             // pass names it whenever no required-group note exists.
             match (previous_note, current_note) {
                 (previous_note, Some(current_note))
-                    if previous_note.is_none()
-                        || previous_note == Some(current_note.clone()) => {}
+                    if previous_note.is_none() || previous_note == Some(current_note.clone()) => {}
                 (previous_note, current_note) => panic!(
                     "{name}: notes diverged beyond the reviewed generic-note gap: \
                      previous={previous_note:?} current={current_note:?}"
