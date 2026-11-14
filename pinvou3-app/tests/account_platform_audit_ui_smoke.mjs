@@ -13,7 +13,7 @@ const executablePath=process.env.F17_BROWSER_EXECUTABLE||process.env.CHROME||[
 assert.ok(executablePath,'Browser unavailable; audit UI validation not performed');
 const browser=await puppeteer.launch({executablePath,headless:true,args:['--no-sandbox','--disable-gpu']});
 const results=[];
-const run=async(name,fn)=>{const page=await browser.newPage();page.setDefaultTimeout(8000);const errors=[];page.on('pageerror',e=>errors.push(e.message));try{await fn(page);assert.deepEqual(errors,[]);results.push({name,pass:true});}catch(e){results.push({name,pass:false,error:e.message,requests:await page.evaluate(()=>window.f17?.calls.map(({url,method})=>({url,method})) || [])});}finally{await page.close();}};
+const run=async(name,fn)=>{if(process.env.F17_CASE&&!name.includes(process.env.F17_CASE))return;const page=await browser.newPage();page.setDefaultTimeout(8000);const errors=[];page.on('pageerror',e=>errors.push(e.message));try{await fn(page);assert.deepEqual(errors,[]);results.push({name,pass:true});}catch(e){results.push({name,pass:false,error:e.message,requests:await page.evaluate(()=>window.f17?.calls.map(({url,method})=>({url,method})) || [])});}finally{await page.close();}};
 const open=async(page,query='')=>{await page.goto(server.resolvedUrls.local[0]+'tests/account_platform_audit_fixture.html?section=audit&'+query);await page.waitForFunction(()=>window.f17&&document.querySelector('.adm-panel'));};
 const fill=async(page,reason='Controlled audit investigation')=>{
  await page.evaluate(reason=>{
@@ -22,8 +22,76 @@ const fill=async(page,reason='Controlled audit investigation')=>{
   change(document.querySelector('input[minlength]'),reason);
  },reason);
 };
-const button=async(page,key)=>page.evaluate(key=>[...document.querySelectorAll('button')].find(b=>b.textContent.trim()===window.f17.copy.audit[key]).click(),key);
+async function button(page, key) {
+ if (key === 'refreshExport') {
+  await page.evaluate(() => {
+   const status = [...document.querySelectorAll('.adm-inline-message > strong')].find(node => node.textContent.startsWith(window.f17.copy.audit.exportStatus));
+   const refresh = [...status.parentElement.querySelectorAll('button')].find(node => node.textContent.trim() === window.f17.copy.refresh);
+   if (!refresh) throw new Error('Export refresh unavailable');
+   refresh.click();
+  });
+  return;
+ }
+ if (key === 'export' || key === 'reviewOnly') {
+  const before = await page.evaluate(() => window.f17.createCount);
+  await page.evaluate(() => [...document.querySelectorAll('button')].find(node => node.textContent.trim() === window.f17.presentation.reviewButton).click());
+  if (key === 'reviewOnly') return;
+  await page.waitForSelector('.adm-audit-confirm-submit');
+  assert.equal(await page.evaluate(() => window.f17.createCount), before, 'review never creates the export before confirmation');
+  await page.click('.adm-audit-confirm-submit');
+  return;
+ }
+ if (key === 'download' && !(await page.evaluate(() => [...document.querySelectorAll('button')].some(node => node.textContent.trim() === window.f17.copy.audit.download)))) {
+  await button(page, 'refreshExport');
+  await page.waitForFunction(() => [...document.querySelectorAll('button')].some(node => node.textContent.trim() === window.f17.copy.audit.download));
+ }
+ await page.evaluate(key => [...document.querySelectorAll('button')].find(node => node.textContent.trim() === window.f17.copy.audit[key]).click(), key);
+}
 try{
+ await run('audit deep link applies the displayed filters on the first HTTP read', async page => {
+  const resource='00000000-0000-4000-8000-000000000017';
+  await open(page, 'audit_action=CONTROLLED_AUDIT_ACTION&audit_resource='+resource);
+  const reads=await page.evaluate(()=>window.f17.calls.filter(call=>call.method==='GET'&&/\/audit-logs(?:\?|$)/.test(call.url)).map(call=>call.url));
+  assert.ok(reads.length>0);
+  const first=new URL(reads[0],'https://controlled.invalid');
+  assert.equal(first.searchParams.get('action'),'CONTROLLED_AUDIT_ACTION');
+  assert.equal(first.searchParams.get('resource'),resource);
+  assert.ok(await page.$eval('.adm-panel',node=>node.textContent.includes('CONTROLLED_AUDIT_ACTION')));
+  assert.equal(await page.evaluate(()=>window.f17.createCount),0);
+ });
+ await run('audit drawer first reverse Tab loops inside and Escape restores the row', async page => {
+  await open(page);
+  await page.click('.adm-audit-row-detail');
+  await page.waitForFunction(()=>document.activeElement===document.querySelector('.adm-detail-drawer'));
+  const focus=()=>page.evaluate(()=>{
+   const drawer=document.querySelector('.adm-detail-drawer');
+   const nodes=[...drawer.querySelectorAll('button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex]:not([tabindex="-1"])')].filter(node=>node.getClientRects().length);
+   return {inside:drawer.contains(document.activeElement),first:document.activeElement===nodes[0],last:document.activeElement===nodes.at(-1),count:nodes.length};
+  });
+  await page.keyboard.down('Shift');await page.keyboard.press('Tab');await page.keyboard.up('Shift');
+  assert.equal((await focus()).last,true,'initial reverse Tab reaches the last drawer control');
+  await page.keyboard.press('Tab');assert.equal((await focus()).first,true);
+  const count=(await focus()).count;assert.ok(count>0);
+  for(let index=0;index<count;index++){await page.keyboard.press('Tab');assert.equal((await focus()).inside,true);}
+  assert.equal((await focus()).first,true,'one complete forward cycle returns to the first control');
+  for(const reverse of [false,true]) {
+   await page.$eval('.adm-topbar button',button=>button.focus());
+   assert.equal((await focus()).inside,false,'the outside target must actually own focus before the native key event');
+   if(reverse)await page.keyboard.down('Shift');await page.keyboard.press('Tab');if(reverse)await page.keyboard.up('Shift');
+   assert.equal((await focus())[reverse?'last':'first'],true,'Tab from outside returns to the appropriate end of the current drawer');
+  }
+  await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('.adm-detail-drawer'));
+  assert.equal(await page.$eval('.adm-audit-row-detail',node=>node===document.activeElement),true);
+  assert.equal(await page.evaluate(()=>window.f17.createCount),0);
+ });
+ await run('review cancellation keeps export creation explicit', async page => {
+  await open(page); await fill(page); await button(page, 'reviewOnly');
+  await page.waitForSelector('.adm-audit-confirm-submit');
+  assert.equal(await page.evaluate(() => window.f17.createCount), 0);
+  await page.click('.adm-audit-export-confirm footer button:not(.adm-audit-confirm-submit)');
+  await page.waitForFunction(() => !document.querySelector('.adm-audit-confirm-submit'));
+  assert.equal(await page.evaluate(() => window.f17.createCount), 0);
+ });
  await run('PII revoked after create denies ticket but preserves job and permits explicit retry',async page=>{
   await open(page,'pii=1');await fill(page);await page.click('input[type=checkbox]');await button(page,'export');await page.waitForFunction(()=>document.body.textContent.includes('controlled-page-only-key'));
   await page.evaluate(()=>{window.f17.piiAllowed=false;});await button(page,'download');await page.waitForSelector('[role=alert]');
@@ -52,11 +120,18 @@ try{
   assert.equal(await page.evaluate(()=>window.f17.calls.filter(c=>c.url.endsWith('/download-tickets')).length),1);
  });
  for(const language of ['zh','en','ja'])await run('real AdminPlatformView audit / create / encrypted download '+language,async page=>{
-  await open(page,'language='+language+(language==='en'?'&lost=1':''));
+  await open(page,'language='+language+'&progress=1'+(language==='en'?'&lost=1':''));
   assert.equal(await page.evaluate(()=>document.querySelector('input[type=checkbox]').disabled),true);
   await fill(page);await button(page,'export');
   if(language==='en'){await page.waitForSelector('[role=alert]');await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f17.copy.audit.retryExport&&!b.disabled));await button(page,'retryExport');}
   await page.waitForFunction(()=>document.body.textContent.includes('controlled-page-only-key'));
+  assert.equal(await page.evaluate(() => document.body.textContent.includes(window.f17.presentation.status.PENDING)), true);
+  assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some(node => node.textContent.trim() === window.f17.copy.audit.download)), false);
+  await button(page, 'refreshExport');
+  await page.waitForFunction(() => document.body.textContent.includes(window.f17.presentation.status.GENERATING));
+  assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some(node => node.textContent.trim() === window.f17.copy.audit.download)), false);
+  await button(page, 'refreshExport');
+  await page.waitForFunction(() => document.body.textContent.includes(window.f17.presentation.status.READY));
   assert.ok(await page.evaluate(()=>{const calls=window.f17.calls.filter(c=>c.url.endsWith('/audit-exports')&&c.method==='POST');return calls.every(c=>c.body===calls[0].body&&c.headers['Idempotency-Key']===calls[0].headers['Idempotency-Key']&&c.headers['X-CSRF-Token']==='controlled-csrf'&&c.cache==='no-store'&&JSON.parse(c.body).include_pii===false)&&!window.localStorage.length&&!Reflect.get(window, 'sessionStorage').length;}));
   await button(page,'download');await page.waitForFunction(()=>window.f17.downloaded);
   assert.ok(await page.evaluate(()=>{const c=window.f17.calls.find(c=>c.url.endsWith('/download'));return c.method==='GET'&&c.headers['X-Pinvou-Download-Token']==='a'.repeat(43)&&c.headers.Accept==='application/vnd.pinvou.audit-envelope+json'&&c.cache==='no-store'&&c.credentials==='same-origin';}));
@@ -70,10 +145,10 @@ try{
  await run('read-only audit permission gives logs without export',async page=>{await open(page,'readOnly=1');assert.equal(await page.$('input[minlength]'),null);assert.equal(await page.evaluate(()=>window.f17.calls.some(c=>c.method==='POST'&&c.url.includes('/audit-'))),false);});
  await run('no permission hides audit and makes no audit calls',async page=>{await page.goto(server.resolvedUrls.local[0]+'tests/account_platform_audit_fixture.html?section=audit&deny=1');await page.waitForFunction(()=>window.f17&&document.querySelector('[role=alert]'));assert.equal(await page.evaluate(()=>window.f17.calls.some(c=>c.url.includes('/audit-'))),false);});
  await run('500 Unicode codepoints can be entered and submitted through actual form',async page=>{await open(page);await fill(page,'');await page.type('input[minlength]','😀'.repeat(500));assert.equal(await page.$eval('input[minlength]',input=>Array.from(input.value).length),500);await button(page,'export');await page.waitForFunction(()=>window.f17.calls.some(c=>c.url.endsWith('/audit-exports')));assert.equal(await page.evaluate(()=>Array.from(JSON.parse(window.f17.calls.find(c=>c.url.endsWith('/audit-exports')).body).reason).length),500);});
- await run('501 Unicode codepoints rejected before create',async page=>{await open(page);await fill(page,'😀'.repeat(501));await button(page,'export');await page.waitForSelector('[role=alert]');assert.equal(await page.evaluate(()=>window.f17.calls.some(c=>c.url.endsWith('/audit-exports'))),false);});
+ await run('501 Unicode codepoints rejected before create',async page=>{await open(page);await fill(page,'😀'.repeat(501));await button(page,'reviewOnly');await page.waitForSelector('[role=alert]');assert.equal(await page.evaluate(()=>window.f17.calls.some(c=>c.url.endsWith('/audit-exports'))),false);});
  await run('committed unknown then forbidden replay retains original immutable attempt',async page=>{
   await open(page,'unknownForbidden=1');await fill(page);await button(page,'export');await page.waitForSelector('[role=alert]');
-  await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f17.copy.audit.retryExport&&!b.disabled));await button(page,'retryExport');await page.waitForFunction(()=>window.f17.createCount===2);await page.waitForFunction(()=>!document.querySelector('input[minlength]')||document.querySelector('input[minlength]').disabled||[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f17.copy.audit.export&&!b.disabled));
+  await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f17.copy.audit.retryExport&&!b.disabled));await button(page,'retryExport');await page.waitForFunction(()=>window.f17.createCount===2);await page.waitForFunction(()=>!document.querySelector('input[minlength]')||document.querySelector('input[minlength]').disabled||[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f17.presentation.reviewButton&&!b.disabled));
   assert.equal(await page.$eval('input[minlength]',input=>input.disabled),true);
   assert.equal(await page.$eval('input[type=checkbox]',input=>input.disabled),true);
   await page.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent.trim()===window.f17.copy.audit.retryExport&&!b.disabled));await button(page,'retryExport');await page.waitForFunction(()=>document.body.textContent.includes('controlled-page-only-key'));
@@ -125,7 +200,7 @@ try{
   assert.equal(JSON.parse(saved.raw).exportID,'00000000-0000-4000-8000-000000000017');
   assert.equal(saved.raw.includes('controlled-page-only-key'),false);assert.equal(saved.raw.includes('download_token'),false);
   await page.goto(server.resolvedUrls.local[0]+'tests/account_platform_audit_fixture.html?'+new URL(saved.url,'https://controlled.invalid').searchParams.toString()+'&ticketRecent=1&reauthenticated=1');
-  await page.waitForFunction(()=>window.f17&&document.body.textContent.includes('READY'));
+  await page.waitForFunction(()=>window.f17&&document.body.textContent.includes(window.f17.presentation.status.READY));
   assert.equal(await page.evaluate(()=>window.f17.calls.some(c=>c.method!=='GET'&&c.url.startsWith('/api/admin/account/admin/v1/audit-exports'))),false);
   assert.ok(await page.evaluate(()=>{const writes=window.f17.calls.filter(c=>c.method!=='GET');return writes.length>0&&writes.every(c=>c.method==='POST'&&c.url==='/api/account/v1/account/bootstrap');}));
   assert.equal(await page.evaluate(()=>document.body.textContent.includes('controlled-page-only-key')),false);
@@ -158,4 +233,4 @@ try{
   assert.equal(await page.evaluate(()=>window.f17.createCount),2);
  });
 }finally{await browser.close();await server.close();}
-const result={pass:results.filter(r=>r.pass).length,fail:results.filter(r=>!r.pass).length,results,limits:['Real React AdminPlatformView / AdminPlatformClient with controlled BFF; no real issuer/owner PostgreSQL or external spreadsheet/deployment/E2E.']};fs.writeFileSync(process.env.F17_REACT_RESULT||'audit-smoke-result.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result));process.exitCode=result.fail?1:0;
+const result={pass:results.filter(r=>r.pass).length,fail:results.filter(r=>!r.pass).length,results,limits:['Real React AdminPlatformView / AdminPlatformClient with controlled BFF; no real issuer/owner PostgreSQL or external spreadsheet/deployment/E2E.']};fs.writeFileSync(process.env.F17_REACT_RESULT||'audit-smoke-result.json',JSON.stringify(result,null,2));console.log(JSON.stringify(result));process.exitCode=result.fail||!results.length?1:0;
