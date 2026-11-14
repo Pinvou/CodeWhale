@@ -361,10 +361,29 @@ function maskedClientFrame(opcode, payload = Buffer.alloc(0)) {
   return Buffer.concat([header, mask, masked]);
 }
 
+// The pinned [relay-error] lines must appear exactly as given, and every
+// other stderr line must be an operational telemetry notice (the closed
+// wiring prints one when telemetry is left unconfigured). No path,
+// offending value, stack text or other stray output may appear.
+function assertFixedStderr(isolated, expectedLines) {
+  const lines = isolated.errors().split("\n");
+  assert.deepEqual(
+    lines.filter((line) => line.startsWith("[relay-error]")),
+    expectedLines,
+  );
+  assert.deepEqual(
+    lines.filter((line) => line && !line.startsWith("[relay-error]")
+      && !line.startsWith("[telemetry] ")),
+    [],
+    "unexpected non-telemetry stderr output",
+  );
+}
+
 // Spawns a relay expected to die during startup and asserts that it exits
-// nonzero leaving exactly one fixed [relay-error] line behind. The optional
-// callback sees the child before it is stopped, for assertions beyond the
-// shared three.
+// nonzero leaving exactly one fixed [relay-error] line behind (operational
+// telemetry notices aside — see assertFixedStderr). The optional callback
+// sees the child before it is stopped, for assertions beyond the shared
+// three.
 async function expectStartupFailure(env, expectedStderr, also = null) {
   const isolated = await spawnRelay(env, { awaitListening: false });
   try {
@@ -374,7 +393,7 @@ async function expectStartupFailure(env, expectedStderr, also = null) {
     // that stopRelay had to kill, or a crash path that signal-kills) must
     // fail this helper, not pass on the strength of the stderr line.
     assert.equal(isolated.child.signalCode, null, "startup failure died by signal");
-    assert.equal(isolated.errors().trim(), expectedStderr);
+    assertFixedStderr(isolated, [expectedStderr]);
     if (also) also(isolated);
   } finally {
     await stopRelay(isolated.child);
@@ -1697,8 +1716,9 @@ test("revoke fails closed without ACK when the tombstone cannot be persisted", a
 
     // Persistence failures log the fixed event code and the errno name only:
     // never the endpoint id (a persistent device identifier) nor raw fs error
-    // text (which embeds paths). This is the relay's only stderr output.
-    assert.equal(isolated.errors().trim(), "[relay-error] revocation_persist_failed code=EEXIST");
+    // text (which embeds paths). Operational telemetry notices aside, this
+    // is the relay's only stderr output.
+    assertFixedStderr(isolated, ["[relay-error] revocation_persist_failed code=EEXIST"]);
 
     await rm(blockedParent, { force: true });
     const reconnect = await registerDesktop(
@@ -3467,10 +3487,7 @@ test("a fifo at the state path fails startup instead of blocking the read", asyn
   try {
     await waitForExit(isolated.child, 10000);
     assert.notEqual(isolated.child.exitCode, 0);
-    assert.equal(
-      isolated.errors().trim(),
-      "[relay-error] relay state path is not a regular file",
-    );
+    assertFixedStderr(isolated, ["[relay-error] relay state path is not a regular file"]);
   } finally {
     await stopRelay(isolated.child);
   }

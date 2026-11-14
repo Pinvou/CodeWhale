@@ -288,7 +288,27 @@ try {
   }
 } catch {}
 
-const controllerRuntime = DESKTOP_CONTROLLER_ENABLED ? await createControllerRuntime() : null;
+let controllerRuntime = null;
+if (DESKTOP_CONTROLLER_ENABLED) {
+  try {
+    controllerRuntime = await createControllerRuntime();
+  } catch (error) {
+    // Same fixed-line discipline as the state load above: enrollment,
+    // store and validation rejections all carry a fixed snake_case code,
+    // with any raw detail (errno names, fs text) tucked into `cause`.
+    // Library-level failures without such a code (e.g. a DER decode
+    // error) collapse to a generic code, so no filesystem path, offending
+    // value or library text ever reaches stderr.
+    const code = typeof error?.code === "string" && /^[a-z][a-z0-9_]*$/u.test(error.code)
+      ? error.code
+      : (typeof error?.message === "string" && /^[a-z][a-z0-9_]*$/u.test(error.message)
+        ? error.message
+        : "controller_startup_failed");
+    const causeCode = error?.cause?.code;
+    console.error(`[relay-error] ${code}${causeCode ? ` code=${causeCode}` : ""}`);
+    process.exit(1);
+  }
+}
 
 async function createControllerRuntime() {
   const config = loadEnrollmentRegistryConfig(process.env);

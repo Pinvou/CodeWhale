@@ -327,7 +327,12 @@ observes the implicit `1006` abnormal-closure code on its side.
   configuration problems (`proxy_ip_configuration_invalid` naming the
   variable, an invalid `PORT`, invalid browser origin entries), state-file
   problems (`relay_state_load_failed ...`, the over-size line, or the
-  non-regular-file line), and bind failures (`listen_failed code=<errno>`).
+  non-regular-file line), bind failures (`listen_failed code=<errno>`),
+  and — when the desktop controller is enabled — controller startup
+  rejections (`official_controller_claim_dispatcher_unavailable`,
+  `pairing_digest_key_invalid`, `relay_signing_key_id_invalid` /
+  `relay_signing_key_invalid`, store and enrollment configuration codes,
+  and the generic `controller_startup_failed` for unstructured failures).
   No startup report echoes a filesystem path, the offending value, or the
   bind address. Three runtime events share the same fixed-line discipline and
   leave the process up: `websocket_protocol_violation code=<ws error code>`
