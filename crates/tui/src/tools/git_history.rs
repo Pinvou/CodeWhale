@@ -5,8 +5,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Output, Stdio};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -15,7 +13,6 @@ use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_bool, optional_str, optional_u64, required_str,
 };
-use crate::dependencies::ExternalTool;
 
 /// Inline cap on git stdout, in characters. The shell-tool spillover helpers
 /// are not a drop-in here: `shell_output::truncate_with_meta` is hard-wired to
@@ -33,11 +30,6 @@ const MAX_UNIFIED: u64 = 50;
 const DEFAULT_BLAME_START_LINE: u64 = 1;
 const DEFAULT_BLAME_MAX_LINES: u64 = 200;
 const MAX_BLAME_MAX_LINES: u64 = 2_000;
-
-/// Total wall-clock budget for one git subprocess. Pathological repositories
-/// (textconv/blame drivers, huge worktrees) previously could hang the turn
-/// forever even though the child already ran off the executor thread.
-const GIT_COMMAND_BUDGET: Duration = Duration::from_secs(120);
 
 /// Tool for reading recent commit history.
 pub struct GitLogTool;
@@ -130,7 +122,7 @@ impl ToolSpec for GitLogTool {
         }
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_command_async(git_ctx.working_dir.clone(), args).await?;
+        let output = super::git::run_git_command(&git_ctx.working_dir, &args).await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(
@@ -252,7 +244,7 @@ impl ToolSpec for GitShowTool {
         }
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_command_async(git_ctx.working_dir.clone(), args).await?;
+        let output = super::git::run_git_command(&git_ctx.working_dir, &args).await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(
@@ -386,7 +378,7 @@ impl ToolSpec for GitBlameTool {
         args.push(pathspec.display().to_string());
 
         let command_str = format_command(working_dir, &args);
-        let output = run_git_command_async(working_dir.to_path_buf(), args).await?;
+        let output = super::git::run_git_command(working_dir, &args).await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(
@@ -501,34 +493,6 @@ fn pathspec_from(working_dir: &Path, resolved: &Path) -> PathBuf {
     }
 }
 
-/// Run one read-only git subprocess under a wall-clock budget.
-///
-/// The child runs through the crate's bounded runner (process-group kill +
-/// reap on expiry, concurrent pipe drains) instead of the previous bare
-/// `spawn_blocking` around `Command::output()`, so a hung git helper — a
-/// repository-configured textconv/blame driver, say — fails the call at
-/// [`GIT_COMMAND_BUDGET`] instead of holding a blocking thread forever.
-async fn run_git_command_async(
-    working_dir: PathBuf,
-    args: Vec<String>,
-) -> Result<Output, ToolError> {
-    let Some(mut cmd) = crate::dependencies::Git::tokio_command() else {
-        return Err(ToolError::not_available(
-            "git is not installed or not in PATH",
-        ));
-    };
-    // Mirror `Git::command`'s `GIT_OPTIONAL_LOCKS=0`; the tokio builder default
-    // does not set it, and git log/show/blame opportunistically refresh the
-    // index, which would take `.git/index.lock` out from under the user's own
-    // git work (#5617). Genuine writes are unaffected either way.
-    cmd.env("GIT_OPTIONAL_LOCKS", "0");
-    // `Command::output()` runs the child with a null stdin; keep that
-    // semantics so git never reads (or waits on) our own stdin.
-    cmd.stdin(Stdio::null());
-    cmd.args(&args).current_dir(&working_dir);
-    super::process::run_bounded_child(&mut cmd, None, GIT_COMMAND_BUDGET, "git").await
-}
-
 fn format_command(working_dir: &Path, args: &[String]) -> String {
     format!(
         "git -C {} {}",
@@ -571,6 +535,7 @@ fn char_boundary_index(text: &str, max_chars: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dependencies::ExternalTool as _;
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
