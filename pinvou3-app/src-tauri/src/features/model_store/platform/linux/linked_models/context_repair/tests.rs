@@ -473,7 +473,6 @@ fn probe_cannot_be_applied_to_a_different_deployment_at_commit() {
 }
 
 #[test]
-#[ignore = "合并裁决待作者：PR 的 enable 双实例预检（running/端点存活即拒）拒绝端点存活的再启用；主线 context-repair 的「再启用以修复上下文」流在端点存活时必然被拒。两条已评审语义并存需裁决：修复链先停用，或预检放行显式重启意图。"]
 fn successful_enable_repairs_same_route_and_notifies_only_after_persistence() {
     let _home = config::TempHome::new();
     let server = Server::new();

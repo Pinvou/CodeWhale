@@ -164,6 +164,29 @@ pub(super) fn sync(card_id: Option<&str>) -> Result<Vec<String>, String> {
     sync_inner(card_id, true)
 }
 
+/// r36 P1-2 裁决落地（显式重启意图放行）：这张卡是否有待执行的历史上下文修复。
+/// enable 预检对「端点仍存活」一律拒绝（防双实例，r19 确立的安全不变量），
+/// 但修复语义恰恰要求端点存活时再启用以完成一次性修复——本谓词是那条
+/// 受限放行通道的唯一判据；读不到偏好/路由时按无修复待办处理（fail-closed
+/// 仍是默认，放行必须被证实）。
+/// 启动期后台对账入口（r36 P2-1）：run_startup_refresh 删除时连带丢掉的
+/// sync_linked_models(None) 在这里恢复——fire-and-forget，失败由调用方记日志。
+pub(crate) fn linked_models_startup_sync() -> Result<(), String> {
+    sync(None).map(|_| ())
+}
+
+pub(super) fn repair_due(card_id: &str) -> bool {
+    let Ok(prefs) = UserPrefs::load_read_only_model_snapshot() else {
+        return false;
+    };
+    let Ok(routes) = routes() else {
+        return false;
+    };
+    prefs.advanced.saved_models.iter().any(|row| {
+        context_repair::pending_route(&prefs, row, &routes, Some(card_id)).is_some()
+    })
+}
+
 /// Bind legacy routes before enable, but do not repair limits until enable succeeds.
 pub(super) fn sync_routes(card_id: Option<&str>) -> Result<Vec<String>, String> {
     sync_inner(card_id, false)

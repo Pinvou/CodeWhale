@@ -54,7 +54,7 @@ fn marker(route: &Route) -> String {
     format!("verified-256k-v1/{}", route.card_id)
 }
 
-fn pending_route<'a>(
+pub(super) fn pending_route<'a>(
     prefs: &UserPrefs,
     row: &SavedModel,
     routes: &'a [Route],

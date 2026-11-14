@@ -124,7 +124,6 @@ fn enable(window: &tauri::WebviewWindow<tauri::test::MockRuntime>) {
 }
 
 #[test]
-#[ignore = "合并裁决待作者：PR 的 enable 双实例预检拒绝端点存活的再启用（本测试的 IPC fixture 在 enable 时端口已在服务）；修复链先停用或预检放行显式重启意图需作者裁决。"]
 fn same_route_enable_crosses_real_ipc_and_fanout_before_next_turn_rebuild() {
     let server = ModelsServer::new();
     let _fixture = Fixture::new(&server.base_url);
