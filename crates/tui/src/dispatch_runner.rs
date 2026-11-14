@@ -41,10 +41,13 @@ use crate::cloud_dispatch::{
 };
 use crate::dependencies::ExternalTool;
 
-/// Ceiling for PR titles (forges truncate longer titles).
-const MAX_TITLE_CHARS: usize = 96;
-/// Ceiling for the PR body, kept well under forge limits.
-const MAX_BODY_CHARS: usize = 6_000;
+/// Ceiling for PR titles. Real forge bounds are much higher (GitHub accepts
+/// roughly 256 characters), so this stays generous while keeping titles
+/// readable.
+const MAX_TITLE_CHARS: usize = 200;
+/// Ceiling for the PR body, kept well under forge limits (GitHub accepts
+/// roughly 65,536 characters).
+const MAX_BODY_CHARS: usize = 60_000;
 /// Harness timeout for one cloud-agent turn.
 const HARNESS_TIMEOUT_SECS: u32 = 3_600;
 
@@ -1629,7 +1632,7 @@ mod tests {
             id: "cloud_00000000000000bb".to_string(),
             kind: "cloud".to_string(),
             status: CloudJobStatus::OpeningPr,
-            prompt: "p".repeat(9_000),
+            prompt: "p".repeat(MAX_BODY_CHARS + 5_000),
             forge: Forge::Github,
             remote_name: "github".to_string(),
             remote_url: "https://github.com/org/repo.git".to_string(),
@@ -1649,6 +1652,16 @@ mod tests {
         let patch = fixture_patch();
         let body = compose_pr_body_for_head(&job, &patch, &patch.head_sha);
         assert!(body.chars().count() <= MAX_BODY_CHARS);
+        // Literal pins for the audited forge bounds (96/6000 → 200/60000):
+        // GitHub's real caps are 256/65,536, so a bound raised past those or
+        // lowered back toward the old ones fails here. The upper bounds are
+        // const-asserted (a runtime `assert!` on a constant would trip
+        // clippy's `assertions_on_constants` under newer toolchains); the
+        // exact values stay runtime pins.
+        const _: () = assert!(MAX_TITLE_CHARS <= 256);
+        const _: () = assert!(MAX_BODY_CHARS <= 65_536);
+        assert_eq!(MAX_TITLE_CHARS, 200);
+        assert_eq!(MAX_BODY_CHARS, 60_000);
     }
 
     #[test]

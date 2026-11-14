@@ -22,7 +22,7 @@ impl GithubTool {
         input: &Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        ensure_github_repo(context)?;
+        ensure_github_repo(context).await?;
         let number = required_u64(input, "number")?;
         let include_comments = optional_bool(input, "include_comments", true)?;
         let fields = if include_comments {
@@ -31,7 +31,7 @@ impl GithubTool {
             "number,title,state,author,labels,assignees,milestone,body,url,createdAt,updatedAt"
         };
         let number_s = number.to_string();
-        let raw = run_gh_json(context, &["issue", "view", &number_s, "--json", fields])?;
+        let raw = run_gh_json(context, &["issue", "view", &number_s, "--json", fields]).await?;
         let shaped = shape_large_text(context, raw, "issue_body", BODY_ARTIFACT_THRESHOLD)?;
         let mut result = ToolResult::json(&json!({
             "summary": format!("Issue #{number}: {}", shaped["title"].as_str().unwrap_or("")),
@@ -50,7 +50,7 @@ impl GithubTool {
         input: &Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        ensure_github_repo(context)?;
+        ensure_github_repo(context).await?;
         let number = required_u64(input, "number")?;
         let number_s = number.to_string();
         let raw = run_gh_json(
@@ -62,10 +62,11 @@ impl GithubTool {
                 "--json",
                 "number,title,state,author,body,comments,reviews,reviewDecision,statusCheckRollup,baseRefName,headRefName,headRefOid,baseRefOid,files,url,createdAt,updatedAt",
             ],
-        )?;
+        )
+        .await?;
         let mut shaped = shape_large_text(context, raw, "pr_body", BODY_ARTIFACT_THRESHOLD)?;
         if optional_bool(input, "include_diff", false)? {
-            let diff = run_gh_text(context, &["pr", "diff", &number_s, "--patch"])?;
+            let diff = run_gh_text(context, &["pr", "diff", &number_s, "--patch"]).await?;
             let diff_ref =
                 write_artifact_if_needed(context, "pr_diff", &diff, DIFF_ARTIFACT_THRESHOLD)?;
             shaped["diff_summary"] = json!(summarize(&diff, 900));
@@ -103,7 +104,7 @@ impl GithubTool {
         }
         let subcmd = if target == "pr" { "pr" } else { "issue" };
         let number_s = number.to_string();
-        run_gh_text(context, &[subcmd, "comment", &number_s, "--body", body])?;
+        run_gh_text(context, &[subcmd, "comment", &number_s, "--body", body]).await?;
         let metadata = github_event_metadata(
             "comment",
             target,
@@ -155,14 +156,14 @@ impl GithubCloseTarget {
     }
 }
 
-pub(super) fn close_github_thread(
+pub(super) async fn close_github_thread(
     input: Value,
     context: &ToolContext,
     target: GithubCloseTarget,
 ) -> Result<ToolResult, ToolError> {
     validate_evidence(&input, true)?;
     if !optional_bool(&input, "allow_dirty", false)? {
-        let status = git_status_porcelain(context)?;
+        let status = git_status_porcelain(context).await?;
         if !status.trim().is_empty() {
             return Ok(ToolResult::error(format!(
                 "Refusing to close {}: worktree is dirty and allow_dirty was false.",
@@ -181,13 +182,13 @@ pub(super) fn close_github_thread(
     let subcmd = target.cli_subcommand();
     let number_s = number.to_string();
     if let Some(comment) = optional_str(&input, "comment")? {
-        run_gh_text(context, &[subcmd, "comment", &number_s, "--body", comment])?;
+        run_gh_text(context, &[subcmd, "comment", &number_s, "--body", comment]).await?;
     }
     let close_args: Vec<&str> = match target {
         GithubCloseTarget::Issue => vec!["issue", "close", &number_s, "--reason", "completed"],
         GithubCloseTarget::Pr => vec!["pr", "close", &number_s],
     };
-    run_gh_text(context, &close_args)?;
+    run_gh_text(context, &close_args).await?;
     let metadata = github_event_metadata(
         "close",
         target.metadata_target(),

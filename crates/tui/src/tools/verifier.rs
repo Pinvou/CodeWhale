@@ -17,11 +17,11 @@ use shlex::try_join;
 
 use crate::dependencies::ExternalTool;
 
+use super::shell_output::truncate_with_meta;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
 };
 
-const MAX_GATE_OUTPUT_CHARS: usize = 16_000;
 const DEFAULT_MAX_PYTHON_FILES: usize = 200;
 const MAX_CUSTOM_GATES: usize = 12;
 const BACKGROUND_GATE_TIMEOUT_MS: u64 = 600_000;
@@ -1198,14 +1198,13 @@ fn run_gate(gate: VerifierGate) -> GateResult {
         }
     };
 
-    let (stdout, stdout_truncated) = truncate_with_note(
-        &String::from_utf8_lossy(&output.stdout),
-        MAX_GATE_OUTPUT_CHARS,
-    );
-    let (stderr, stderr_truncated) = truncate_with_note(
-        &String::from_utf8_lossy(&output.stderr),
-        MAX_GATE_OUTPUT_CHARS,
-    );
+    // Reuse the shell tool's tail-keep truncation (#242): verifier gates
+    // (compilers, test runners) print their failure summaries at the end,
+    // so head-only truncation dropped exactly the actionable part.
+    let (stdout, stdout_meta) = truncate_with_meta(&String::from_utf8_lossy(&output.stdout));
+    let (stderr, stderr_meta) = truncate_with_meta(&String::from_utf8_lossy(&output.stderr));
+    let stdout_truncated = stdout_meta.truncated;
+    let stderr_truncated = stderr_meta.truncated;
     GateResult {
         name: gate.name,
         ecosystem: gate.ecosystem,
@@ -1231,36 +1230,6 @@ fn render_command(program: Option<&str>, args: &[String]) -> String {
     parts.push(program.unwrap_or("<unavailable>").to_string());
     parts.extend(args.iter().cloned());
     parts.join(" ")
-}
-
-fn truncate_with_note(text: &str, max_chars: usize) -> (String, bool) {
-    if text.chars().count() <= max_chars {
-        return (text.to_string(), false);
-    }
-    let end = char_boundary_index(text, max_chars);
-    let truncated = &text[..end];
-    let omitted_chars = text
-        .chars()
-        .count()
-        .saturating_sub(truncated.chars().count());
-    (
-        format!(
-            "{truncated}\n\n[output truncated to {max_chars} characters; {omitted_chars} characters omitted]"
-        ),
-        true,
-    )
-}
-
-fn char_boundary_index(text: &str, max_chars: usize) -> usize {
-    if max_chars == 0 {
-        return 0;
-    }
-    for (count, (idx, _)) in text.char_indices().enumerate() {
-        if count == max_chars {
-            return idx;
-        }
-    }
-    text.len()
 }
 
 #[cfg(test)]
@@ -1416,6 +1385,55 @@ mod tests {
             parsed.gates[0].stdout.contains("rustc"),
             "stdout should include rustc version: {:?}",
             parsed.gates[0].stdout
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn run_verifiers_gate_truncation_keeps_the_tail_where_failures_print() {
+        // #242: compilers and test runners print their failure summaries at
+        // the END of long output, so gate truncation must keep the tail, not
+        // the head. ~40 KB of noise, then the summary, then a failing exit.
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path());
+        let tool = RunVerifiersTool;
+        let script = "printf 'x%.0s' $(seq 1 40000); printf '\\ntest result: FAILED. 0 passed; 1 failed\\n'; exit 1";
+        let result = tool
+            .execute(
+                json!({
+                    "profile": "auto",
+                    "commands": [
+                        { "name": "noisy-failure", "program": "sh", "args": ["-c", script] }
+                    ]
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+
+        let parsed: RunVerifiersOutput =
+            serde_json::from_str(&result.content).expect("verifier output json");
+        assert_eq!(parsed.failed, 1, "result: {}", result.content);
+        let gate = &parsed.gates[0];
+        assert!(
+            gate.stdout_truncated,
+            "40 KB of gate output must be marked truncated"
+        );
+        assert!(
+            gate.stdout.len() < 40_000,
+            "the kept form must be the truncated shape, got {} bytes",
+            gate.stdout.len()
+        );
+        assert!(
+            gate.stdout.contains("test result: FAILED"),
+            "the failure summary in the tail must survive truncation: …{:?}",
+            gate.stdout.chars().rev().take(200).collect::<String>()
+        );
+        assert!(
+            gate.stdout
+                .trim_end()
+                .ends_with("test result: FAILED. 0 passed; 1 failed"),
+            "the summary must sit at the end of the kept output"
         );
     }
 

@@ -215,7 +215,7 @@ impl ToolSpec for WebSearchTool {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default: 5, max: 10)"
+                    "description": "Maximum number of results to return (default: 10, max: 25)"
                 },
                 "timeout_ms": {
                     "type": "integer",
@@ -2598,11 +2598,14 @@ mod tests {
 
     #[test]
     fn optional_max_results_uses_default_when_neither_set() {
-        assert_eq!(optional_search_max_results(&json!({"query": "x"})), 5);
+        // Literal pins: the fallback must equal DEFAULT_SEARCH_RESULTS and the
+        // hard max must bound it, so a default raised past the cap fails here.
+        assert_eq!(optional_search_max_results(&json!({"query": "x"})), 10);
         assert_eq!(
             optional_search_max_results(&json!({"search_query": [{"q": "y"}]})),
-            5,
+            10,
         );
+        assert_eq!(crate::tools::web_search::DEFAULT_SEARCH_RESULTS, 10);
     }
 
     #[test]

@@ -50,13 +50,6 @@ const MAX_CANDIDATES: usize = 20_000;
 /// [`MAX_CANDIDATES`] looking for matches; only this many hits are merged.
 const MAX_RESCAN_HITS: usize = 512;
 
-/// Default walk depth used by the picker's own tests. Production callers pass
-/// the configured `mention_walk_depth` (default 10, `0` = unlimited) through
-/// [`FilePickerView::new_with_relevance_and_depth`], mirroring the `Workspace`
-/// fuzzy index default (`DEFAULT_COMPLETIONS_WALK_DEPTH`).
-#[cfg(test)]
-const WALK_DEPTH: usize = 10;
-
 /// Visible candidate rows in the overlay.
 const VISIBLE_ROWS: usize = 14;
 
@@ -186,13 +179,14 @@ struct CandidateWalk {
 }
 
 impl FilePickerView {
-    /// Build a picker with working-set relevance hints, using the default
-    /// walk depth ([`WALK_DEPTH`]). Test-only convenience; production code uses
-    /// [`FilePickerView::new_with_relevance_and_depth`] with the configured
-    /// `mention_walk_depth`.
+    /// Build a picker with working-set relevance hints at the default walk
+    /// depth of 10 (mirrors the `Workspace` fuzzy index default
+    /// `DEFAULT_COMPLETIONS_WALK_DEPTH`). Test-only convenience; production
+    /// code uses [`FilePickerView::new_with_relevance_and_depth`] with the
+    /// configured `mention_walk_depth`.
     #[cfg(test)]
     pub fn new_with_relevance(workspace_root: &Path, relevance: FilePickerRelevance) -> Self {
-        Self::new_with_relevance_and_depth(workspace_root, relevance, WALK_DEPTH, Locale::En)
+        Self::new_with_relevance_and_depth(workspace_root, relevance, 10, Locale::En)
     }
 
     /// Build a picker with working-set relevance hints and an explicit walk
@@ -1230,7 +1224,7 @@ mod tests {
         );
 
         // The new default reaches files inside a 6-level-deep directory.
-        let default = collect_candidates(root, Some(WALK_DEPTH));
+        let default = collect_candidates(root, Some(10));
         assert!(
             default.iter().any(|p| p == "a/b/c/d/e/f/deep.rs"),
             "default walk depth should reach depth-7 files: {default:?}"
@@ -1271,7 +1265,7 @@ mod tests {
         )
         .unwrap();
 
-        let candidates = collect_candidates(root, Some(WALK_DEPTH));
+        let candidates = collect_candidates(root, Some(10));
 
         assert!(candidates.iter().any(|path| path == "src/main.rs"));
         assert!(
@@ -1309,14 +1303,14 @@ mod tests {
             fs::write(root.join("pad").join(format!("n{i:02}.txt")), "").unwrap();
         }
 
-        let walk = collect_candidates_limited(root, Some(WALK_DEPTH), 12);
+        let walk = collect_candidates_limited(root, Some(10), 12);
         assert!(
             walk.truncated,
             "hitting the cap must mark the index incomplete"
         );
         assert_eq!(walk.paths.len(), 12);
         assert!(
-            !collect_candidates_limited(root, Some(WALK_DEPTH), 64).truncated,
+            !collect_candidates_limited(root, Some(10), 64).truncated,
             "a cap above the file count is a complete index"
         );
     }
@@ -1334,9 +1328,9 @@ mod tests {
         fs::create_dir_all(root.join("zzz")).unwrap();
         fs::write(root.join("zzz/room_chat_shell.dart"), "late").unwrap();
 
-        let walk = collect_candidates_limited(root, Some(WALK_DEPTH), 15);
+        let walk = collect_candidates_limited(root, Some(10), 15);
         assert!(walk.truncated);
-        let hits = collect_query_matches(root, Some(WALK_DEPTH), "room_chat_shell", 64);
+        let hits = collect_query_matches(root, Some(10), "room_chat_shell", 64);
         assert!(
             hits.iter().any(|path| path == "zzz/room_chat_shell.dart"),
             "targeted rescan must recover the file past the cap: {hits:?}"
@@ -1365,7 +1359,7 @@ mod tests {
             root,
             vec!["pad/n00.txt".into(), "pad/n01.txt".into()],
             true,
-            Some(WALK_DEPTH),
+            Some(10),
         );
         assert_eq!(
             view.visible_count(),
@@ -1393,7 +1387,7 @@ mod tests {
         fs::write(root.join("secret.txt"), "").unwrap();
 
         let mut view =
-            FilePickerView::from_preloaded(root, vec!["keep.txt".into()], false, Some(WALK_DEPTH));
+            FilePickerView::from_preloaded(root, vec!["keep.txt".into()], false, Some(10));
         for ch in "secret".chars() {
             view.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
         }
@@ -1482,7 +1476,7 @@ mod tests {
         let mut view = FilePickerView::new_with_relevance_and_depth(
             ws.path(),
             FilePickerRelevance::default(),
-            WALK_DEPTH,
+            10,
             Locale::En,
         );
 
@@ -1532,7 +1526,7 @@ mod tests {
         let mut view = FilePickerView::new_with_relevance_and_depth(
             ws.path(),
             FilePickerRelevance::default(),
-            WALK_DEPTH,
+            10,
             Locale::En,
         );
         assert!(view.is_loading);
@@ -1572,12 +1566,8 @@ mod tests {
         let ws = TempDir::new().unwrap();
         fs::write(ws.path().join("late_unique_file.rs"), "x").unwrap();
 
-        let mut view = FilePickerView::from_preloaded(
-            ws.path(),
-            vec!["unrelated.rs".into()],
-            true,
-            Some(WALK_DEPTH),
-        );
+        let mut view =
+            FilePickerView::from_preloaded(ws.path(), vec!["unrelated.rs".into()], true, Some(10));
         for ch in "late_unique_file".chars() {
             view.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
         }

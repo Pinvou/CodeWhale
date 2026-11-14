@@ -5,7 +5,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Output;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -14,9 +13,16 @@ use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_bool, optional_str, optional_u64, required_str,
 };
-use crate::dependencies::ExternalTool;
 
-const MAX_OUTPUT_CHARS: usize = 40_000;
+/// Inline cap on git stdout, in characters. The shell-tool spillover helpers
+/// are not a drop-in here: `shell_output::truncate_with_meta` is hard-wired to
+/// the shell tools' 30KB budget and their cargo/rustc preserved-summary
+/// heuristics, and the spill writers in `truncate.rs` need a tool-call id plus
+/// ownership publication these call sites do not carry. Oversized results are
+/// still spilled engine-side by the evidence router (`truncate.rs`, applied to
+/// every tool result before fan-out) at its own thresholds, so raising this cap
+/// only moves when the transcript copy condenses.
+const MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_LOG_MAX_COUNT: u64 = 20;
 const MAX_LOG_MAX_COUNT: u64 = 200;
 const DEFAULT_UNIFIED: u64 = 3;
@@ -116,7 +122,7 @@ impl ToolSpec for GitLogTool {
         }
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_command_async(git_ctx.working_dir.clone(), args).await?;
+        let output = super::git::run_git_command(&git_ctx.working_dir, &args).await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(
@@ -238,7 +244,7 @@ impl ToolSpec for GitShowTool {
         }
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_command_async(git_ctx.working_dir.clone(), args).await?;
+        let output = super::git::run_git_command(&git_ctx.working_dir, &args).await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(
@@ -372,7 +378,7 @@ impl ToolSpec for GitBlameTool {
         args.push(pathspec.display().to_string());
 
         let command_str = format_command(working_dir, &args);
-        let output = run_git_command_async(working_dir.to_path_buf(), args).await?;
+        let output = super::git::run_git_command(working_dir, &args).await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(
@@ -487,33 +493,6 @@ fn pathspec_from(working_dir: &Path, resolved: &Path) -> PathBuf {
     }
 }
 
-fn run_git_command(working_dir: &Path, args: &[String]) -> Result<Output, ToolError> {
-    let Some(mut cmd) = crate::dependencies::Git::command() else {
-        return Err(ToolError::not_available(
-            "git is not installed or not in PATH",
-        ));
-    };
-    cmd.args(args).current_dir(working_dir);
-    cmd.output().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            ToolError::not_available("git is not installed or not in PATH")
-        } else {
-            ToolError::execution_failed(format!("Failed to run git: {e}"))
-        }
-    })
-}
-
-/// Async wrapper that offloads the blocking `git` invocation onto a
-/// blocking-capable thread so the tokio worker is not stalled.
-async fn run_git_command_async(
-    working_dir: PathBuf,
-    args: Vec<String>,
-) -> Result<Output, ToolError> {
-    tokio::task::spawn_blocking(move || run_git_command(&working_dir, &args))
-        .await
-        .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))?
-}
-
 fn format_command(working_dir: &Path, args: &[String]) -> String {
     format!(
         "git -C {} {}",
@@ -556,6 +535,7 @@ fn char_boundary_index(text: &str, max_chars: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dependencies::ExternalTool as _;
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;

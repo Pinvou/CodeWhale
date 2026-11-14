@@ -8,6 +8,19 @@ use crate::tools::spec::{ApprovalRequirement, ToolContext, ToolSpec};
 
 use super::{GrepFilesTool, matches_glob};
 
+/// The audited result cap moved 100 → 250 with the limits batch; pin the
+/// literal so a silent revert does not leave the description copy ("default
+/// 250") lying about where the walk actually stops.
+#[test]
+fn grep_max_results_pins_the_audited_literal() {
+    assert_eq!(super::MAX_RESULTS, 250, "the audited grep result cap");
+    assert_eq!(
+        super::GREP_FILES_TIMEOUT.as_secs(),
+        120,
+        "the audited grep timeout"
+    );
+}
+
 #[test]
 fn grep_description_matches_default_exclusion_behavior() {
     let description = GrepFilesTool.description();
@@ -28,7 +41,7 @@ fn grep_description_matches_default_exclusion_behavior() {
     assert!(description.contains(
         "Include globs support only `*`, `**`, and `?` — brace expansion like `*.{rs,ts}` matches nothing"
     ));
-    assert!(description.contains("after 30s"));
+    assert!(description.contains("after 120s"));
     assert!(description.contains("replaces that default list entirely"));
 }
 

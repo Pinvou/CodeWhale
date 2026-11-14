@@ -36,7 +36,7 @@ This is stage 1 of the loop: **orient → [cw-slice](../cw-slice/SKILL.md) →
    checkouts of this repo are usually live, each with its own dirty state.
    ```bash
    git worktree list
-   git branch --sort=-committerdate --format='%(committerdate:short) %(refname:short)' | head -20
+   git branch --sort=-committerdate --format='%(committerdate:short) %(refname:short)' | head -50
    ```
    If the work you were asked to do already has a worktree, use it. Do not
    start a second copy of the same lane.

@@ -13,8 +13,16 @@ use uuid::Uuid;
 use crate::task_manager::{TaskArtifactRef, TaskGithubEvent};
 use crate::tools::spec::{ToolContext, ToolError};
 
-pub(super) const BODY_ARTIFACT_THRESHOLD: usize = 4_000;
-pub(super) const DIFF_ARTIFACT_THRESHOLD: usize = 8_000;
+/// Byte thresholds (compared against `String::len`) above which an issue/PR
+/// body or a PR diff is condensed to a fixed-size excerpt instead of passing
+/// through verbatim. The excerpt sizes (~900-1200 chars) are unchanged by
+/// these thresholds; only how much content stays inline before condensation
+/// moves. Note the disclosure boundary: the full text is written to a task
+/// artifact ONLY when a durable task is active — `write_artifact_if_needed`
+/// returns `None` otherwise, so without an active task the excerpt is the
+/// only in-product copy and the rest must be re-fetched from GitHub.
+pub(super) const BODY_ARTIFACT_THRESHOLD: usize = 32_000;
+pub(super) const DIFF_ARTIFACT_THRESHOLD: usize = 64_000;
 
 pub(super) fn shape_large_text(
     context: &ToolContext,

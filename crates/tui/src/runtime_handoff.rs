@@ -121,7 +121,10 @@ const AGENT_TOPOLOGY_TURN_META: &str = concat!(
     "Runtime state: agent_topology_v1 (authoritative)\n",
     "</turn_meta>",
 );
-const MAX_AGENT_TOPOLOGY_ROWS: usize = 24;
+/// Rows retained in one agent-topology checkpoint. Fleet sessions can carry
+/// many agents, so the bound is generous, and any restore-time cut is
+/// disclosed in the rendered checkpoint instead of dropping rows silently.
+const MAX_AGENT_TOPOLOGY_ROWS: usize = 64;
 
 /// The Operate contract (docs/MODES.md, "Operate" and "Operate loop"), stated
 /// once to the model when a session first works in Operate.
@@ -671,6 +674,11 @@ fn render_restored_agent_topology(checkpoint: &SavedAgentTopologyCheckpoint) -> 
     let nonterminal = checkpoint.nonterminal.min(total);
     let terminal = checkpoint.terminal.min(total);
     let omitted = checkpoint.omitted.min(total);
+    // Rows the save wrote = total - save-time omitted. Anything missing from
+    // `agents` beyond that was dropped by the restore projection, and must be
+    // disclosed rather than silently lost.
+    let save_time_rows = total.saturating_sub(omitted);
+    let restore_omitted = save_time_rows.saturating_sub(checkpoint.agents.len());
     let mut display = format!(
         "{RESTORED_TOPOLOGY_HEADER}\nState at save: total={total}, nonterminal={nonterminal}, terminal={terminal}, omitted={omitted}"
     );
@@ -691,6 +699,11 @@ fn render_restored_agent_topology(checkpoint: &SavedAgentTopologyCheckpoint) -> 
             let parent = SafeLabel::identifier(parent);
             display.push_str(&format!(", parent_run_id={parent}"));
         }
+    }
+    if restore_omitted > 0 {
+        display.push_str(&format!(
+            "\nNote: {restore_omitted} further topology rows present at save were dropped on restore to keep this projection bounded"
+        ));
     }
     display.push_str(
         "\nAuthority: historical runtime checkpoint; newer live runtime state overrides it",
@@ -1816,6 +1829,88 @@ mod tests {
         assert!(!display.contains("prior worker processes are not assumed active"));
         assert!(!display.contains("\"status\":\"completed\""));
         assert_eq!(project_messages_for_restore(&projected), projected);
+    }
+
+    /// Hand-build a typed topology checkpoint carrying `rows` agent rows and a
+    /// save-time `total`, bypassing the writer's cap — the shape a payload
+    /// saved by a wider build would have.
+    fn hand_saved_topology_checkpoint_message(rows: usize, total: usize) -> Message {
+        let agents = (0..rows)
+            .map(|i| {
+                format!(
+                    "{{\"agent_id\":\"agent_{i:03}\",\"name\":\"Agent {i:03}\",\"role\":\"worker\",\"status\":\"completed\"}}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(
+            "{{\"schema\":\"codewhale.agent_topology.v1\",\"authority\":\"runtime_current\",\"scope\":\"current_session\",\"replaces\":\"all_prior_agent_lifecycle_claims\",\"total\":{total},\"nonterminal\":0,\"terminal\":{total},\"omitted\":{omitted},\"agents\":[{agents}]}}",
+            omitted = total - rows,
+        );
+        Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: format!(
+                        "{AGENT_TOPOLOGY_EVENT_PREFIX}{json}{AGENT_TOPOLOGY_EVENT_SUFFIX}"
+                    ),
+                    cache_control: None,
+                },
+                ContentBlock::Text {
+                    text: AGENT_TOPOLOGY_TURN_META.to_string(),
+                    cache_control: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn topology_checkpoint_keeps_up_to_max_rows_and_restored_cuts_are_disclosed() {
+        // Writer side: more snapshots than the cap still produce a bounded
+        // typed checkpoint with an explicit omitted count.
+        let snapshots: Vec<SubAgentResult> = (0..MAX_AGENT_TOPOLOGY_ROWS + 6)
+            .map(|i| {
+                topology_snapshot(
+                    &format!("agent_{i:03}"),
+                    &format!("Agent {i:03}"),
+                    SubAgentStatus::Completed,
+                )
+            })
+            .collect();
+        let mut messages = Vec::new();
+        replace_agent_topology_checkpoint(&mut messages, &snapshots);
+        let saved = message_text(messages.last().expect("topology checkpoint"));
+        assert!(saved.contains(&format!("\"total\":{}", MAX_AGENT_TOPOLOGY_ROWS + 6)));
+        assert!(saved.contains("\"omitted\":6"));
+        assert!(saved.contains(&format!(
+            "\"agent_id\":\"agent_{:03}\"",
+            MAX_AGENT_TOPOLOGY_ROWS - 1
+        )));
+        assert!(!saved.contains(&format!(
+            "\"agent_id\":\"agent_{:03}\"",
+            MAX_AGENT_TOPOLOGY_ROWS
+        )));
+
+        // Restore side: a saved payload carrying more rows than the restore
+        // projection retains is cut, and the cut is disclosed.
+        let saved_message = hand_saved_topology_checkpoint_message(
+            MAX_AGENT_TOPOLOGY_ROWS + 6,
+            MAX_AGENT_TOPOLOGY_ROWS + 6,
+        );
+        let projected = project_messages_for_restore(&[saved_message]);
+        let display = restored_subagent_checkpoint_display(
+            projected.last().expect("restored topology checkpoint"),
+        )
+        .expect("restored display");
+        assert!(display.contains(&format!(
+            "agent_id=agent_{:03}",
+            MAX_AGENT_TOPOLOGY_ROWS - 1
+        )));
+        assert!(!display.contains(&format!("agent_id=agent_{:03}", MAX_AGENT_TOPOLOGY_ROWS)));
+        assert!(
+            display.contains("6 further topology rows present at save were dropped on restore"),
+            "a restore-time cut must be disclosed: {display}"
+        );
     }
 
     #[test]

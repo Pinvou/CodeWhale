@@ -20,6 +20,13 @@ use super::spec::{
 
 const FILE_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Default and maximum values for the `limit` parameter (the limits batch
+/// moved this clamp 20/200 → 50/1000). The description and the `limit` schema
+/// copy state these numbers verbatim — `&'static str` literals cannot
+/// interpolate consts — so the pinning test keeps values and copy in sync.
+const FILE_SEARCH_DEFAULT_LIMIT: u64 = 50;
+const FILE_SEARCH_MAX_LIMIT: u64 = 1000;
+
 #[derive(Debug, Clone, Serialize)]
 struct FileSearchMatch {
     path: String,
@@ -40,7 +47,7 @@ impl ToolSpec for FileSearchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Find workspace files by name using fuzzy matching with score-based ranking. Use this instead of `find -name` or `fd` in `bash` for filename search. Respects .gitignore; by default skips target/**, node_modules/**, lock files, and similar generated artifacts — any `exclude` you provide fully replaces that default list, so repeat the defaults you still want. `limit` accepts at most 200. Pass `extensions` to filter by suffix."
+        "Find workspace files by name using fuzzy matching with score-based ranking. Use this instead of `find -name` or `fd` in `bash` for filename search. Respects .gitignore; by default skips target/**, node_modules/**, lock files, and similar generated artifacts — any `exclude` you provide fully replaces that default list, so repeat the defaults you still want. `limit` accepts at most 1000. Pass `extensions` to filter by suffix."
     }
 
     fn input_schema(&self) -> Value {
@@ -57,7 +64,7 @@ impl ToolSpec for FileSearchTool {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default: 20)."
+                    "description": "Maximum number of results to return (default: 50)."
                 },
                 "extensions": {
                     "type": "array",
@@ -93,7 +100,8 @@ impl ToolSpec for FileSearchTool {
             return Err(ToolError::invalid_input("query cannot be empty"));
         }
 
-        let limit = optional_u64(&input, "limit", 20)?.clamp(1, 200) as usize;
+        let limit = optional_u64(&input, "limit", FILE_SEARCH_DEFAULT_LIMIT)?
+            .clamp(1, FILE_SEARCH_MAX_LIMIT) as usize;
         // S1: enumerating names inside a denied tree is a read of that tree —
         // Seatbelt's `deny file-read*` blocks readdir of denied dirs, so a
         // denied search root is refused rather than walked. The raw spelling is
@@ -676,5 +684,52 @@ mod tests {
             .expect("execute");
         assert!(result.success);
         assert!(result.content.contains("needle.txt"));
+    }
+
+    /// Pin the audited clamp window (20/200 → 50/1000) and keep the
+    /// model-facing copy honest about it: the description and the `limit`
+    /// schema cannot interpolate consts, so a value change without a copy
+    /// edit must fail here.
+    #[test]
+    fn file_search_limit_pins_the_audited_literals_and_the_copy() {
+        assert_eq!(FILE_SEARCH_DEFAULT_LIMIT, 50, "the audited default limit");
+        assert_eq!(FILE_SEARCH_MAX_LIMIT, 1000, "the audited clamp maximum");
+        let description = FileSearchTool.description();
+        assert!(
+            description.contains(&format!("at most {FILE_SEARCH_MAX_LIMIT}")),
+            "description copy must state the clamp maximum: {description}"
+        );
+        let schema = FileSearchTool.input_schema();
+        let limit_copy = schema["properties"]["limit"]["description"]
+            .as_str()
+            .expect("limit schema description");
+        assert!(
+            limit_copy.contains(&format!("default: {FILE_SEARCH_DEFAULT_LIMIT}")),
+            "schema copy must state the default: {limit_copy}"
+        );
+    }
+
+    /// The clamp is inclusive on both ends: 1 is a legal floor, 1000 is a
+    /// legal ceiling, and anything above collapses to the ceiling rather
+    /// than erroring (mirrors the web-search clamp shape).
+    #[tokio::test]
+    async fn test_file_search_limit_clamps_to_the_audited_window() {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(root.join("a.txt"), "x\n").expect("write");
+        std::fs::write(root.join("b.txt"), "x\n").expect("write");
+
+        let ctx = ToolContext::new(root.to_path_buf());
+        let tool = FileSearchTool;
+        for limit in [0u64, 1, 5, 1000, 5000] {
+            let result = tool
+                .execute(json!({"query": "txt", "limit": limit}), &ctx)
+                .await
+                .expect("execute");
+            assert!(
+                result.success,
+                "limit {limit} is inside the clamped window and must not error"
+            );
+        }
     }
 }

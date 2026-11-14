@@ -71,8 +71,16 @@ pub const USER_CONSTITUTION_BACKUP_SUFFIX: &str = ".pre-migration.bak";
 
 /// Maximum number of clauses kept after bounding.
 pub const MAX_CLAUSES: usize = 40;
-/// Maximum length of a single clause body after bounding.
-pub const MAX_CLAUSE_TEXT_LEN: usize = 280;
+/// Maximum length of a single clause body after bounding. Roomy enough for a
+/// real standing rule. When a longer clause is cut, an explicit truncation
+/// marker is appended rather than silently dropping the tail, and bounding is
+/// idempotent, so the rendered form stays prompt-cache stable. Note the
+/// worst-case block (every clause at the cap) is ~80 K *characters* — up to
+/// ~320 KB in bytes for 4-byte chars — and is NOT bounded by the core
+/// fragment composer's 40 KB budget: the live TUI prompt path inlines the
+/// block without a fragment cap, so this constant is the only bound on total
+/// rendered size (MAX_CLAUSES × cap).
+pub const MAX_CLAUSE_TEXT_LEN: usize = 2000;
 /// Maximum length of a clause id after bounding.
 pub const MAX_CLAUSE_ID_LEN: usize = 64;
 
@@ -230,7 +238,7 @@ impl ConstitutionClause {
 
     fn bounded(&self) -> Option<Self> {
         let id = non_blank(&self.id).map(|s| truncate_chars(&s, MAX_CLAUSE_ID_LEN))?;
-        let text = non_blank(&self.text).map(|s| truncate_chars(&s, MAX_CLAUSE_TEXT_LEN))?;
+        let text = non_blank(&self.text).map(|s| truncate_clause_text(&s, MAX_CLAUSE_TEXT_LEN))?;
         Some(Self {
             id,
             text,
@@ -1284,6 +1292,86 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
+/// Prefix and suffix of the explicit marker [`truncate_clause_text`] appends
+/// to a cut clause. They are matched verbatim when re-bounding so an output
+/// passes through unchanged instead of the marker measuring itself as clause
+/// text and rewriting its own count.
+const TRUNCATION_MARKER_PREFIX: &str = "[…truncated ";
+const TRUNCATION_MARKER_SUFFIX: &str = " chars]";
+/// Maximum number of digits the marker recognizer accepts as a drop count. A
+/// genuine count can never exceed the clause's own bound (a clause is cut at
+/// [`MAX_CLAUSE_TEXT_LEN`] chars, so fewer than 5 digits is already
+/// generous); the slack only future-proofs a cap raise. Without this ceiling,
+/// a drafted clause ending in `[…truncated ` + tens of thousands of digits +
+/// ` chars]` would be recognized as marker-shaped and pass through verbatim,
+/// inflating the rendered block by an attacker-controlled amount.
+const MAX_MARKER_DIGITS: usize = 12;
+
+/// Truncate a clause body to at most `max` characters (not bytes), preserving
+/// UTF-8. Unlike [`truncate_chars`], a cut appends an explicit `[…truncated N
+/// chars]` marker so the rendered clause never silently loses its tail. The
+/// result is a deterministic function of the input, which keeps the rendered
+/// constitution block prompt-cache stable.
+///
+/// The function is idempotent: its own output re-passes unchanged, marker and
+/// count intact. This matters because bounding runs on every ingest, save,
+/// load, and render — without idempotence the first re-bound would measure
+/// the marker as clause text and rewrite `N` to a smaller, lying count (and
+/// shrink the kept body with it). The price is a narrow grammar: a clause
+/// that genuinely ends with marker-shaped text — a count of at most
+/// [`MAX_MARKER_DIGITS`] digits — and fits `max` plus one marker's length
+/// passes through verbatim, so the effective ceiling is `max` characters of
+/// body plus a single trailing marker. Longer digit runs are treated as
+/// clause text and re-bounded, which keeps the rendered size bounded even
+/// for marker-shaped drafts.
+fn truncate_clause_text(s: &str, max: usize) -> String {
+    // A prior output of this function ends with `body + marker`. Recognize
+    // that shape (the last marker wins) so re-bounding is a fixed point and
+    // `N` keeps counting the characters dropped from the original text.
+    if let Some(idx) = s.rfind(TRUNCATION_MARKER_PREFIX) {
+        let tail = &s[idx..];
+        if tail.ends_with(TRUNCATION_MARKER_SUFFIX) {
+            // `get` (not slice indexing) so a degenerate tail — e.g. exactly
+            // `[…truncated chars]`, where the prefix's own trailing space
+            // completes the suffix — yields an empty digit run instead of a
+            // start-after-end panic, and falls through to plain text.
+            let digits = tail
+                .get(TRUNCATION_MARKER_PREFIX.len()..tail.len() - TRUNCATION_MARKER_SUFFIX.len())
+                .unwrap_or_default();
+            if !digits.is_empty()
+                && digits.chars().count() <= MAX_MARKER_DIGITS
+                && digits.bytes().all(|b| b.is_ascii_digit())
+            {
+                let body = &s[..idx];
+                let body_len = body.chars().count();
+                if body_len <= max {
+                    // Already bounded (for this cap): keep verbatim, `N` intact.
+                    return s.to_string();
+                }
+                // Bounded under a larger cap earlier: re-bound the body and
+                // relabel the marker with the fresh, accurate count.
+                let dropped = body_len - max;
+                let mut out: String = body.chars().take(max).collect();
+                let _ = write!(
+                    out,
+                    "{TRUNCATION_MARKER_PREFIX}{dropped}{TRUNCATION_MARKER_SUFFIX}"
+                );
+                return out;
+            }
+        }
+    }
+    let dropped = s.chars().count().saturating_sub(max);
+    if dropped == 0 {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    let _ = write!(
+        out,
+        "{TRUNCATION_MARKER_PREFIX}{dropped}{TRUNCATION_MARKER_SUFFIX}"
+    );
+    out
+}
+
 /// FNV-1a 64-bit hash. Small, dependency-free, and deterministic across
 /// platforms — adequate for content fingerprinting (not cryptographic).
 fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -2076,14 +2164,17 @@ mod tests {
 
     #[test]
     fn clauses_are_bounded_in_count_length_and_uniqueness() {
-        let mut clauses: Vec<ConstitutionClause> = (0..MAX_CLAUSES + 10)
-            .map(|i| ConstitutionClause::accepted(format!("c{i:03}"), format!("rule {i}")))
-            .collect();
-        clauses.push(ConstitutionClause::accepted("c000", "duplicate id"));
-        clauses.push(ConstitutionClause::accepted(
+        // "long" is inserted first so it survives the count bound; the tail
+        // of the numbered clauses is what the bound is expected to cut.
+        let mut clauses: Vec<ConstitutionClause> = vec![ConstitutionClause::accepted(
             "long",
             "z".repeat(MAX_CLAUSE_TEXT_LEN + 50),
-        ));
+        )];
+        clauses.extend(
+            (0..MAX_CLAUSES + 10)
+                .map(|i| ConstitutionClause::accepted(format!("c{i:03}"), format!("rule {i}"))),
+        );
+        clauses.push(ConstitutionClause::accepted("c000", "duplicate id"));
         let bounded = UserConstitution {
             clauses,
             ..UserConstitution::default()
@@ -2094,9 +2185,151 @@ mod tests {
             bounded
                 .clauses
                 .iter()
-                .all(|c| c.text.chars().count() <= MAX_CLAUSE_TEXT_LEN)
+                .all(|c| c.text.chars().count()
+                    <= MAX_CLAUSE_TEXT_LEN + "[…truncated 1 chars]".len())
         );
+        let long = bounded
+            .clauses
+            .iter()
+            .find(|c| c.id == "long")
+            .expect("long clause kept");
+        assert!(long.text.starts_with(&"z".repeat(MAX_CLAUSE_TEXT_LEN)));
+        assert!(long.text.ends_with("[…truncated 50 chars]"));
         assert!(!bounded.render_body().contains("duplicate id"));
+    }
+
+    #[test]
+    fn truncate_clause_text_is_idempotent_and_keeps_the_original_drop_count() {
+        // Bounding runs on ingest, save, load, and render. The marker must not
+        // measure itself as clause text: the first re-bound would rewrite N
+        // (50 → 21) and shrink the kept body with it, breaking both the
+        // dropped-count disclosure and the ratified-preview == persisted
+        // invariant.
+        let original = "z".repeat(MAX_CLAUSE_TEXT_LEN + 50);
+        let once = truncate_clause_text(&original, MAX_CLAUSE_TEXT_LEN);
+        assert!(
+            once.ends_with("[…truncated 50 chars]"),
+            "{once_tail}",
+            once_tail = &once[..40.min(once.len())]
+        );
+        let twice = truncate_clause_text(&once, MAX_CLAUSE_TEXT_LEN);
+        assert_eq!(once, twice, "re-bounding a bounded clause is a fixed point");
+        let thrice = truncate_clause_text(&twice, MAX_CLAUSE_TEXT_LEN);
+        assert_eq!(once, thrice);
+
+        // A clause that fits the cap passes through untouched, marker-shaped
+        // tail or not.
+        let fitting = format!("{}[…truncated 50 chars]", "a".repeat(MAX_CLAUSE_TEXT_LEN));
+        assert_eq!(truncate_clause_text(&fitting, MAX_CLAUSE_TEXT_LEN), fitting);
+
+        // Bounded earlier under a larger cap, re-bounded under a smaller one:
+        // the body is cut again and the marker relabels with the fresh,
+        // accurate count for the re-bound input.
+        let rebound = truncate_clause_text(&once, 1000);
+        assert!(rebound.starts_with(&"z".repeat(1000)));
+        assert!(rebound.ends_with("[…truncated 1000 chars]"), "{rebound}");
+        assert_eq!(truncate_clause_text(&rebound, 1000), rebound);
+    }
+
+    /// A crafted clause ending in `[…truncated ` + a huge digit run +
+    /// ` chars]` must not be recognized as marker-shaped: the recognizer's
+    /// digit ceiling re-bounds it like any other text, so the rendered
+    /// inflation stays bounded (the fake "count" would otherwise pass
+    /// through verbatim at an attacker-chosen size).
+    #[test]
+    fn truncate_clause_text_bounds_marker_shaped_tails_with_impossible_counts() {
+        let giant_digits = "9".repeat(50_000);
+        let crafted = format!("{}[…truncated {giant_digits} chars]", "a".repeat(1_000));
+        let bounded = truncate_clause_text(&crafted, MAX_CLAUSE_TEXT_LEN);
+
+        // Total size is bounded: cap body + exactly one well-formed marker.
+        let total_chars = bounded.chars().count();
+        assert!(
+            total_chars <= MAX_CLAUSE_TEXT_LEN + "[…truncated 999999 chars]".len(),
+            "crafted marker-shaped clause must stay bounded, got {total_chars} chars"
+        );
+        assert!(
+            !bounded.contains(&giant_digits),
+            "the giant digit run must not survive into the rendered clause"
+        );
+        // The surviving terminal marker carries the accurate drop count
+        // (51019 crafted chars − 2000 kept = 49019), and the form is a
+        // fixed point from here on.
+        assert!(
+            bounded.ends_with("[…truncated 49019 chars]"),
+            "{bounded_tail}",
+            bounded_tail = &bounded[bounded.len().saturating_sub(60)..]
+        );
+        assert_eq!(
+            truncate_clause_text(&bounded, MAX_CLAUSE_TEXT_LEN),
+            bounded,
+            "the re-bounded form is a fixed point"
+        );
+
+        // A plausible count (within the digit ceiling) that fits the cap
+        // still passes through verbatim — the documented narrow grammar.
+        let small_fake = format!("{}[…truncated 5 chars]", "a".repeat(MAX_CLAUSE_TEXT_LEN));
+        assert_eq!(
+            truncate_clause_text(&small_fake, MAX_CLAUSE_TEXT_LEN),
+            small_fake
+        );
+    }
+
+    /// A clause whose terminal marker-shaped tail carries **no** digits —
+    /// exactly `[…truncated chars]`, where the prefix's own trailing space
+    /// completes the suffix — must not panic the recognizer's byte slicing
+    /// (the digit range degenerates to start-after-end). It falls through to
+    /// plain text: a fitting clause passes verbatim, an over-cap one is
+    /// re-bounded with one accurate marker, and both forms are fixed points.
+    #[test]
+    fn truncate_clause_text_survives_a_zero_digit_terminal_marker() {
+        let body = "review probe ".repeat(40);
+        let fitting = format!("{body}[…truncated chars]");
+        assert_eq!(
+            truncate_clause_text(&fitting, MAX_CLAUSE_TEXT_LEN),
+            fitting,
+            "a fitting zero-digit marker tail passes verbatim without panicking"
+        );
+        assert_eq!(
+            truncate_clause_text(&fitting, MAX_CLAUSE_TEXT_LEN),
+            fitting,
+            "the pass-through is idempotent"
+        );
+
+        let over_cap = format!("{}[…truncated chars]", "z".repeat(MAX_CLAUSE_TEXT_LEN + 50));
+        let bounded = truncate_clause_text(&over_cap, MAX_CLAUSE_TEXT_LEN);
+        assert!(
+            bounded.ends_with("[…truncated 68 chars]"),
+            "over-cap re-bound carries one accurate marker: {bounded_tail}",
+            bounded_tail = &bounded[bounded.len().saturating_sub(40)..]
+        );
+        assert_eq!(
+            truncate_clause_text(&bounded, MAX_CLAUSE_TEXT_LEN),
+            bounded,
+            "the re-bounded form is a fixed point"
+        );
+
+        // An interior zero-digit marker that is not terminal must not be
+        // recognized either (the suffix check fails), and the clause still
+        // bounds normally.
+        let interior = format!(
+            "{}[…truncated chars] tail",
+            "z".repeat(MAX_CLAUSE_TEXT_LEN + 50)
+        );
+        let bounded2 = truncate_clause_text(&interior, MAX_CLAUSE_TEXT_LEN);
+        assert!(bounded2.ends_with(" chars]"), "{bounded2}");
+        assert_eq!(
+            truncate_clause_text(&bounded2, MAX_CLAUSE_TEXT_LEN),
+            bounded2
+        );
+    }
+
+    /// Headline pins for the limits audit: a silent revert of either constant
+    /// must fail CI the way the other headline caps' pins do.
+    #[test]
+    fn constitution_headline_caps_are_pinned() {
+        assert_eq!(MAX_CLAUSE_TEXT_LEN, 2000);
+        assert_eq!(MAX_MARKER_DIGITS, 12);
     }
 
     #[test]

@@ -22,15 +22,16 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// Maximum number of results to return to avoid overwhelming output
-const MAX_RESULTS: usize = 100;
+const MAX_RESULTS: usize = 250;
 
 /// Maximum file size to search (skip large binaries)
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 
 /// Hard cap on a single grep_files run. The directory walk plus per-file regex
-/// is synchronous blocking work; without this it can run for minutes on a large
-/// tree. Mirrors the file_search tool so both blocking searches behave the same.
-const GREP_FILES_TIMEOUT: Duration = Duration::from_secs(30);
+/// is synchronous blocking work; without this it can run for minutes on a
+/// large tree. (The file_search tool keeps its own separate, shorter budget —
+/// these are intentionally no longer mirrored.)
+const GREP_FILES_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Result of a grep match
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,7 +57,7 @@ impl ToolSpec for GrepFilesTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search for a regex pattern in workspace files. Use this instead of `grep -r`, `rg`, or `find ... -exec grep` in `bash` — pure-Rust; skips common non-code directories (node_modules, .git, target, ...) by default, and any `exclude` you pass replaces that default list entirely; it does not apply .gitignore (built-in default exclusions only). Returns matching lines with context (default: 2 lines before/after each match). The result set is capped (default 100): when the cap is reached `truncated` is true — narrow the search instead of assuming the list is complete. Files over 10MB and files containing invalid UTF-8 are skipped silently, as are entries that cannot be read and (by default) symlinked entries. Include globs support only `*`, `**`, and `?` — brace expansion like `*.{rs,ts}` matches nothing. The run aborts with a timeout error after 30s."
+        "Search for a regex pattern in workspace files. Use this instead of `grep -r`, `rg`, or `find ... -exec grep` in `bash` — pure-Rust; skips common non-code directories (node_modules, .git, target, ...) by default, and any `exclude` you pass replaces that default list entirely; it does not apply .gitignore (built-in default exclusions only). Returns matching lines with context (default: 2 lines before/after each match). The result set is capped (default 250): when the cap is reached `truncated` is true — narrow the search instead of assuming the list is complete. Files over 10MB and files containing invalid UTF-8 are skipped silently, as are entries that cannot be read and (by default) symlinked entries. Include globs support only `*`, `**`, and `?` — brace expansion like `*.{rs,ts}` matches nothing. The run aborts with a timeout error after 120s."
     }
 
     fn input_schema(&self) -> Value {
@@ -91,7 +92,7 @@ impl ToolSpec for GrepFilesTool {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of results to return (default: 100)"
+                    "description": "Maximum number of results to return (default: 250)"
                 }
             },
             "required": ["pattern"]

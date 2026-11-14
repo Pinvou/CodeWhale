@@ -7,11 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 
-pub(crate) const MAX_SEARCH_RESULTS: u8 = 10;
+pub(crate) const MAX_SEARCH_RESULTS: u8 = 25;
 
 /// Shared retrieval defaults. `web_search` and `web.run` both derive their
 /// search knobs from these so the surfaces cannot drift apart.
-pub(crate) const DEFAULT_SEARCH_RESULTS: usize = 5;
+pub(crate) const DEFAULT_SEARCH_RESULTS: usize = 10;
 pub(crate) const DEFAULT_SEARCH_TIMEOUT_MS: u64 = 15_000;
 pub(crate) const MAX_SEARCH_TIMEOUT_MS: u64 = 60_000;
 
@@ -399,7 +399,7 @@ mod tests {
             Some(" en-US ".to_string()),
         );
 
-        assert_eq!(query.max_results, 10);
+        assert_eq!(query.max_results, 25);
         assert_eq!(query.domains, vec!["example.com"]);
         assert_eq!(query.locale.as_deref(), Some("en-US"));
         assert_eq!(query.recency.map(Recency::days), Some(7));

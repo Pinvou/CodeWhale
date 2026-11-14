@@ -14,7 +14,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const MAX_SCORER_READ_BYTES: u64 = 1_000_000;
+/// Upper bound on a scorer evidence file. Roomy enough for a full build/test
+/// log to serve as evidence; parsing a JSON file of this size is cheap, and a
+/// hard reject here fails the whole task verdict, not just slows it down.
+const MAX_SCORER_READ_BYTES: u64 = 10_000_000;
 const MAX_FLEET_ID_BYTES: usize = 128;
 const MAX_FLEET_NAME_BYTES: usize = 256;
 
@@ -630,7 +633,35 @@ fn read_bounded_to_string(
             ),
         });
     }
-    std::fs::read_to_string(&abs_path).map_err(|err| EvidenceReadError {
+    // The metadata check above is advisory: a file that grows between the
+    // stat and this read must not turn into an unbounded allocation. Read at
+    // most one byte past the cap and let the authoritative check below fail
+    // the read — the same `take(limit + 1)` + post-check shape the secrets
+    // and skills readers use.
+    use std::io::Read;
+    let file = std::fs::File::open(&abs_path).map_err(|err| EvidenceReadError {
+        failure_kind: FleetTaskFailureKind::Verifier,
+        evidence: format!("cannot read {}: {err}", path.display()),
+    })?;
+    let mut limited = file.take(MAX_SCORER_READ_BYTES + 1);
+    let mut buf = Vec::new();
+    limited
+        .read_to_end(&mut buf)
+        .map_err(|err| EvidenceReadError {
+            failure_kind: FleetTaskFailureKind::Verifier,
+            evidence: format!("cannot read {}: {err}", path.display()),
+        })?;
+    if buf.len() as u64 > MAX_SCORER_READ_BYTES {
+        return Err(EvidenceReadError {
+            failure_kind: FleetTaskFailureKind::Verifier,
+            evidence: format!(
+                "refusing to read oversized evidence {}: file grew past the {} byte cap",
+                path.display(),
+                MAX_SCORER_READ_BYTES
+            ),
+        });
+    }
+    String::from_utf8(buf).map_err(|err| EvidenceReadError {
         failure_kind: FleetTaskFailureKind::Verifier,
         evidence: format!("cannot decode {} as UTF-8: {err}", path.display()),
     })

@@ -20,7 +20,7 @@
 //!
 //! Uses platform-specific command-line tools (sox, rec, arecord) to capture
 //! 16kHz mono 16-bit PCM audio. Records until a silence gap is detected or
-//! the maximum duration is reached (default 10 s).
+//! the maximum duration is reached (default 60 s).
 
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
@@ -193,43 +193,125 @@ fn encode_wav(samples: &[i16]) -> Vec<u8> {
 
 // --- Recording -------------------------------------------------------------
 
-/// Maximum recording duration in seconds before auto-stopping.
-const MAX_RECORD_SECS: u64 = 10;
+/// Maximum recording duration in seconds before auto-stopping. Roomy enough
+/// for multi-sentence dictation; silence detection still stops early.
+const MAX_RECORD_SECS: u64 = 60;
+/// Transcription request budget, derived from the recording cap: a full-length
+/// recording must not race the ASR request timeout (1.5× is generous for
+/// upload plus transcription of ≤60 s of audio).
+const ASR_REQUEST_TIMEOUT: Duration = Duration::from_secs(MAX_RECORD_SECS * 3 / 2);
+/// How long the capture loop waits for the recorder to produce data before
+/// concluding it is silent or wedged. A healthy recorder emits a chunk every
+/// ~10 ms, so this only fires on a dead or stalled pipe; killing the child
+/// unblocks the read and lets the max-duration deadline stay meaningful.
+/// Applies only after the first chunk — see
+/// [`RECORDER_STARTUP_TIMEOUT`].
+const RECORDER_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Budget for the recorder's *first* chunk, covering process spawn plus the
+/// recorder's own startup. A loaded machine or cold start can legitimately
+/// take longer than [`RECORDER_IDLE_TIMEOUT`] to deliver the first PCM
+/// block, and that latency is not a stall: without a startup grace the
+/// capture would abort as "recorder stopped responding" on exactly the
+/// machines that are slowest to record. Once any chunk has arrived, the
+/// idle budget takes over.
+const RECORDER_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Interim-transcript polling cadence while a capture is running.
+const INTERIM_POLL_MS: u64 = 700;
+/// Extra polls past the recording cap before the interim loop gives up;
+/// capture-end is normally signalled via the shared done flag first.
+const INTERIM_TICK_MARGIN: u32 = 5;
 /// Minimum segment duration in seconds to consider as valid speech.
 const MIN_SEGMENT_SECS: f64 = 0.3;
 
+/// What a capture attempt produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordOutcome {
+    /// Speech captured: raw 16kHz mono S16_LE PCM samples plus elapsed time.
+    Audio(Vec<i16>, Duration),
+    /// Nothing usable captured: no recorder available, the recording failed,
+    /// or the capture is too short to contain speech.
+    TooShort,
+    /// The recorder stopped delivering data mid-capture (stalled pipe, e.g.
+    /// after a PipeWire restart or suspend/resume); captured audio discarded.
+    RecorderStalled,
+}
+
 /// Record audio from the default microphone.
 ///
-/// Returns raw 16kHz mono S16_LE PCM samples. Returns `None` if no recorder
-/// is available, the recording failed, or no speech was detected.
-fn record_audio() -> Option<(Vec<i16>, Duration)> {
-    let recorder = detect_recorder()?;
+/// Returns raw 16kHz mono S16_LE PCM samples on success. Returns
+/// [`RecordOutcome::TooShort`] when no recorder is available, the recording
+/// failed, or no speech was detected, and [`RecordOutcome::RecorderStalled`]
+/// when the recorder stopped delivering data and the partial capture had to
+/// be discarded.
+fn record_audio() -> RecordOutcome {
+    use std::io::Read;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::sync::{Arc, Mutex};
+
+    let Some(recorder) = detect_recorder() else {
+        return RecordOutcome::TooShort;
+    };
     let start = std::time::Instant::now();
 
-    let mut child = Command::new(recorder.cmd)
+    let Ok(mut child) = Command::new(recorder.cmd)
         .args(recorder.pipe_args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
+    else {
+        return RecordOutcome::TooShort;
+    };
 
-    let stdout = child.stdout.take()?;
-    let mut reader = std::io::BufReader::new(stdout);
+    let Some(stdout) = child.stdout.take() else {
+        return RecordOutcome::TooShort;
+    };
+    let child = Arc::new(Mutex::new(child));
+
+    // A blocking `read_exact` on the recorder pipe cannot time out, so reads
+    // run on a helper thread and the loop below receives chunks with an idle
+    // deadline. Without this, a recorder that emits nothing would wedge the
+    // capture thread forever: the max-duration check only runs after a
+    // successful read.
+    let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<[u8; 320]>>();
+    let reader_thread = std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut buf = [0u8; 320]; // 10ms of 16kHz S16_LE
+        loop {
+            match reader.read_exact(&mut buf) {
+                Ok(()) => {
+                    if tx.send(Ok(buf)).is_err() {
+                        break; // receiver gone; stop reading
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.send(Err(err));
+                    break;
+                }
+            }
+        }
+    });
+
     let mut all_samples: Vec<i16> = Vec::with_capacity(16000 * MAX_RECORD_SECS as usize);
-
-    // Read until timeout or silence
-    let mut buf = [0u8; 320]; // 10ms of 16kHz S16_LE
     let max_duration = Duration::from_secs(MAX_RECORD_SECS);
     let mut silence_samples = 0u32;
     let mut had_speech = false;
     let speech_threshold: i16 = 500; // RMS-based speech detection threshold
     let silence_duration_samples = 16000u32; // 1 second of silence to stop
+    let mut recorder_stalled = false;
+    // The idle budget judges a recorder that has already produced data;
+    // the first chunk waits on the startup budget instead.
+    let mut received_any_chunk = false;
 
     loop {
-        use std::io::Read;
-        match reader.read_exact(&mut buf) {
-            Ok(()) => {
+        let read_budget = if received_any_chunk {
+            RECORDER_IDLE_TIMEOUT
+        } else {
+            RECORDER_STARTUP_TIMEOUT
+        };
+        match rx.recv_timeout(read_budget) {
+            Ok(Ok(buf)) => {
+                received_any_chunk = true;
                 let chunk: Vec<i16> = buf
                     .as_chunks::<2>()
                     .0
@@ -256,31 +338,47 @@ fn record_audio() -> Option<(Vec<i16>, Duration)> {
                 }
 
                 if start.elapsed() > max_duration {
-                    let _ = child.kill();
+                    let _ = child.lock().unwrap().kill();
                     break;
                 }
                 if had_speech && silence_samples >= silence_duration_samples {
-                    let _ = child.kill();
+                    let _ = child.lock().unwrap().kill();
                     break;
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(_) => {
-                let _ = child.kill();
+            Ok(Err(_read_err)) => {
+                // Recorder exited or the pipe failed; keep what was captured.
+                let _ = child.lock().unwrap().kill();
                 break;
             }
+            Err(RecvTimeoutError::Timeout) => {
+                // No data within the budget (idle after the first chunk,
+                // startup before it): the recorder is silent or wedged. Kill
+                // it (which also unblocks the reader thread) and drop the
+                // partial capture — a half-buffered recording must not be
+                // transcribed as if it were complete.
+                let _ = child.lock().unwrap().kill();
+                recorder_stalled = true;
+                break;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 
-    let _ = child.wait();
+    let _ = child.lock().unwrap().wait();
+    let _ = reader_thread.join();
     let elapsed = start.elapsed();
+
+    if recorder_stalled {
+        return RecordOutcome::RecorderStalled;
+    }
 
     let min_samples = (MIN_SEGMENT_SECS * 16000.0) as usize;
     if all_samples.len() < min_samples {
-        return None;
+        return RecordOutcome::TooShort;
     }
 
-    Some((all_samples, elapsed))
+    RecordOutcome::Audio(all_samples, elapsed)
 }
 
 // --- Auto-send suffix ------------------------------------------------------
@@ -322,7 +420,7 @@ async fn post_chat_completions(
         .post(chat_completions_url(base_url))
         .header("Content-Type", "application/json")
         .header("Authorization", format!("Bearer {api_key}"))
-        .timeout(Duration::from_secs(30))
+        .timeout(ASR_REQUEST_TIMEOUT)
         .json(&body)
         .send()
         .await
@@ -583,23 +681,25 @@ pub async fn capture_and_transcribe(
         // poll the final buffer. A true streaming recorder (cpal/pw-record) is
         // the next step — see grokbuild's xai-grok-voice::audio for the subprocess
         // isolation pattern we should mirror.
-        let result = record_audio();
-        if let Some((samples, dur)) = result {
+        let outcome = record_audio();
+        if let RecordOutcome::Audio(samples, _dur) = &outcome {
             *shared_buf_clone.lock() = samples.clone();
-            shared_done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-            Some((samples, dur))
-        } else {
-            shared_done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-            None
         }
+        shared_done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        outcome
     });
 
     // Interim polling loop — updates composer with "original + interim ▍" so text
     // appears as you talk, just like Spark's live transcript.
     let mut last_interim = String::new();
     let mut ticks: u32 = 0;
+    // Keep the interim display alive for the whole recording cap (plus a small
+    // margin) — a fixed tick cap sized for the old, shorter recording limit
+    // would freeze the live transcript halfway through a legal capture.
+    let interim_max_ticks =
+        ((MAX_RECORD_SECS * 1000) / INTERIM_POLL_MS) as u32 + INTERIM_TICK_MARGIN;
     loop {
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        tokio::time::sleep(Duration::from_millis(INTERIM_POLL_MS)).await;
         ticks += 1;
         if shared_done.load(std::sync::atomic::Ordering::SeqCst) {
             break;
@@ -646,16 +746,19 @@ pub async fn capture_and_transcribe(
             // Also keep status as Spark does
             app.status_message = Some(format!("● Listening — “{trimmed}”  (⌥V to finish)"));
         }
-        if ticks > 40 {
-            break; // safety: ~28s max interim polling
+        if ticks > interim_max_ticks {
+            break; // safety cap; normally released earlier by shared_done
         }
     }
 
-    let (samples, _duration) = recorder_handle
-        .await
-        .ok()
-        .flatten()
-        .ok_or_else(|| tr(locale, MessageId::VoiceErrTooShort).to_string())?;
+    let outcome = recorder_handle.await.unwrap_or(RecordOutcome::TooShort);
+    let (samples, _duration) = match outcome {
+        RecordOutcome::Audio(samples, duration) => (samples, duration),
+        RecordOutcome::RecorderStalled => {
+            return Err(tr(locale, MessageId::VoiceErrRecorderStalled).to_string());
+        }
+        RecordOutcome::TooShort => return Err(tr(locale, MessageId::VoiceErrTooShort).to_string()),
+    };
 
     // Restore composer to original before final insert (interim was preview only)
     app.composer.input = original_input.clone();
@@ -757,6 +860,29 @@ pub fn voice_control(app: &mut App) -> CommandResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The startup grace must never be tighter than the idle budget: it
+    /// covers process spawn plus the recorder's own startup, which is
+    /// strictly more work than delivering a chunk on a healthy pipe. A
+    /// startup budget at or below the idle budget reintroduces the false
+    /// "recorder stopped responding" abort on slow machines this grace
+    /// exists to prevent.
+    #[test]
+    fn recorder_startup_budget_is_not_tighter_than_the_idle_budget() {
+        assert!(
+            RECORDER_STARTUP_TIMEOUT >= RECORDER_IDLE_TIMEOUT,
+            "startup ({RECORDER_STARTUP_TIMEOUT:?}) must grant at least the \
+             idle budget ({RECORDER_IDLE_TIMEOUT:?})"
+        );
+        assert!(
+            RECORDER_IDLE_TIMEOUT >= Duration::from_secs(1),
+            "the idle budget must stay meaningfully positive"
+        );
+        assert!(
+            RECORDER_STARTUP_TIMEOUT < Duration::from_secs(MAX_RECORD_SECS),
+            "startup grace must stay well inside the recording cap"
+        );
+    }
 
     #[test]
     fn wav_encoding_produces_valid_header() {

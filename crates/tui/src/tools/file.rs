@@ -23,7 +23,7 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 use unicode_normalization::UnicodeNormalization;
 
-const WRITE_FILE_MAX_CONTENT_BYTES: usize = 64 * 1024;
+const WRITE_FILE_MAX_CONTENT_BYTES: usize = 256 * 1024;
 
 fn validate_write_content_size(content: &str) -> Result<(), ToolError> {
     if content.len() > WRITE_FILE_MAX_CONTENT_BYTES {
@@ -1511,7 +1511,7 @@ impl ToolSpec for WriteFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write content to a UTF-8 file in the workspace. Use this instead of heredocs (`cat <<EOF > file`) or `echo > file` in `Bash` — diffs render inline and approval is handled cleanly. Creates or overwrites; parent directories are auto-created. Recommended at most 32KB; hard limit 64KB per call. Pass `expected_hash` (the `content_hash` from a prior `read`) to have the overwrite refused if the file changed since that read."
+        "Write content to a UTF-8 file in the workspace. Use this instead of heredocs (`cat <<EOF > file`) or `echo > file` in `Bash` — diffs render inline and approval is handled cleanly. Creates or overwrites; parent directories are auto-created. Recommended at most 32KB; hard limit 256KB per call. Pass `expected_hash` (the `content_hash` from a prior `read`) to have the overwrite refused if the file changed since that read."
     }
 
     fn input_schema(&self) -> Value {
@@ -1524,7 +1524,7 @@ impl ToolSpec for WriteFileTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Content; aim <=32KB, max 64KB"
+                    "description": "Content; aim <=32KB, max 256KB"
                 },
                 "expected_hash": {
                     "type": "string",

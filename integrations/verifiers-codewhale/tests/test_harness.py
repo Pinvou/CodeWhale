@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import sys
@@ -8,6 +9,7 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 def install_verifiers_stubs() -> None:
@@ -245,6 +247,47 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
                 "secret-not-in-error",
                 {},
             )
+
+    async def test_hung_rollout_fails_closed_on_timeout(self):
+        async def hang(argv, env):
+            await asyncio.sleep(30)
+            return ProgramResult(0, successful_stream(), "")
+
+        runtime = FakeRuntime()
+        runtime.run_program = hang
+        config = CodewhaleHarnessConfig(binary_path="/candidate/codewhale")
+
+        with mock.patch.object(harness_module, "ROLLOUT_TIMEOUT_SECS", 0.01):
+            with self.assertRaisesRegex(RuntimeError, "did not finish within"):
+                await CodewhaleHarness(config).launch(
+                    SimpleNamespace(model="test/model"),
+                    trace(),
+                    runtime,
+                    "https://intercept.example/v1",
+                    "secret-not-in-error",
+                    {},
+                )
+
+    async def test_hung_runtime_write_fails_closed_on_timeout(self):
+        async def hang(path, data):
+            await asyncio.sleep(30)
+
+        runtime = FakeRuntime()
+        runtime.write = hang
+        config = CodewhaleHarnessConfig(binary_path="/candidate/codewhale")
+
+        with mock.patch.object(harness_module, "ROLLOUT_TIMEOUT_SECS", 0.01):
+            with self.assertRaisesRegex(
+                RuntimeError, "mcp config write did not finish within"
+            ):
+                await CodewhaleHarness(config).launch(
+                    SimpleNamespace(model="test/model"),
+                    trace(),
+                    runtime,
+                    "https://intercept.example/v1",
+                    "secret-not-in-error",
+                    {},
+                )
 
     async def test_non_resolved_terminal_receipt_fails_closed(self):
         stdout = successful_stream().replace('"resolved"', '"approval_required"')
