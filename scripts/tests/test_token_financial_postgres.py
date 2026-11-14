@@ -15,6 +15,10 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 
 
+# Explicit, reviewed cardinality; do not derive the expectation from the runner.
+EXPECTED_RETAINED_ROOT_COUNT = 78
+
+
 CHECKPOINT_LEAF_ROOTS = {
     "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
     "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
@@ -879,7 +883,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(billing[-1], "./internal/billing")
         self.assertEqual(billing[billing.index("-run") + 1],
                          "^(" + "|".join(sorted(RUNNER.RETAINED_REQUIRED)) + ")$")
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 77)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), EXPECTED_RETAINED_ROOT_COUNT)
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, [
             "owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning",
@@ -1077,6 +1081,24 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(invalid, roots, **options)
 
+
+    def test_approval_pagination_source_real_children_and_job_selection(self):
+        name = "TestApprovalPaginationSourcePostgres"
+        roots, package = RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE
+        self.assertIn(name, roots)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(name, command[command.index("-run") + 1])
+        events = self.events(roots, package, children=True)
+        options = {"package": package, "exact_roots": True,
+                   "children_required": RUNNER.ACCOUNT_CHILD_REQUIRED}
+        RUNNER.verify_results(events, roots, **options)
+        for child in RUNNER.EXACT_REQUIRED_CHILDREN[name]:
+            full = name + "/" + child
+            for invalid in ([e for e in events if e.get("Test") != full],
+                            events + [{"Action": "skip", "Package": package, "Test": full}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, roots, **options)
 
     def test_forced_refund_member_terminal_root_and_children_are_mandatory(self):
         name = "TestForcedRefundMemberGrantTerminalStatePostgres"
@@ -1771,6 +1793,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
             "TestOrganizationUnitAuthorityWallClockPostgres",
             "TestApprovalListPoolRuntimePostgres",
+            "TestApprovalPaginationSourcePostgres",
             "TestPasswordPreparationAuthorizationPostgres",
             "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
             "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
@@ -1806,6 +1829,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
             "TestOrganizationUnitAuthorityWallClockPostgres",
             "TestApprovalListPoolRuntimePostgres",
+            "TestApprovalPaginationSourcePostgres",
             "TestPasswordPreparationAuthorizationPostgres",
         ):
             with self.subTest(root=root):
@@ -2146,7 +2170,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         }
         self.assertEqual(RUNNER.REFUND_REQUIRED, expected)
         self.assertTrue(expected <= RUNNER.RETAINED_REQUIRED)
-        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), 77)
+        self.assertEqual(len(RUNNER.RETAINED_REQUIRED), EXPECTED_RETAINED_ROOT_COUNT)
         valid = self.events(RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
         options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True,
                    "children_required": RUNNER.BILLING_CHILD_REQUIRED}
