@@ -848,10 +848,11 @@ impl ArtifactDownloads {
             && chunk.completed.is_some()
         {
             let deadline = now_b.saturating_add(self.registry.limits().ttl.as_millis() as u64);
-            active
-                .get_mut(handle_id)
-                .expect("locked admitted handle")
-                .completed = Some((deadline, Arc::new(chunk.clone())));
+            // 结果为 Ok 时 handle 必然仍被锁住；按工作区 expect 禁令以守卫
+            // 兜底（不变量被破坏时跳过写入，不得 panic）。
+            if let Some(handle) = active.get_mut(handle_id) {
+                handle.completed = Some((deadline, Arc::new(chunk.clone())));
+            }
         }
         result
     }
