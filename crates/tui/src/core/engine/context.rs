@@ -957,7 +957,7 @@ pub(super) fn context_input_budget_for_provider(
 /// request cap after explicit overrides, the documented ceiling intersected with
 /// the automatic per-request output cap, compatibility/route ceilings, and the
 /// route window are intersected (a concrete route cap replaces only the generic
-/// uncatalogued guess; the window rung clamps to `window − 2_048`, the input
+/// uncatalogued guess; the window rung clamps to `window - 2_048`, the input
 /// floor plus headroom reserve, and the result is floored at 1) — instead of
 /// hard-coding a constant and silently drifting from the engine. The wire model
 /// is normalized exactly as the transport normalizes it
@@ -968,9 +968,11 @@ pub(super) fn context_input_budget_for_provider(
 /// route (host-declared facts included); `None` falls back to catalogue
 /// defaults and diverges wherever the route carries declared facts. Pass the
 /// same `base_url` the request will actually dispatch on — custom endpoints
-/// own their model-id namespace and skip normalization entirely. Ambient
-/// `CODEWHALE_MAX_OUTPUT_TOKENS` / `DEEPSEEK_MAX_OUTPUT_TOKENS` overrides move
-/// this value exactly as they move the main turn's. Per-dialect field shape
+/// own their model-id namespace and skip alias normalization (whitespace is
+/// still trimmed; `OpencodeGo` normalizes even on an overridden `base_url`).
+/// Ambient `CODEWHALE_MAX_OUTPUT_TOKENS` / `DEEPSEEK_MAX_OUTPUT_TOKENS`
+/// overrides move this value exactly as they move the main turn's.
+/// Per-dialect field shape
 /// (the Codex Responses route omits the field; Xiaomi MiMo, OpenAI reasoning
 /// families, MiniMax M3, and the direct Moonshot K3 route rename it
 /// `max_completion_tokens`) remains transport knowledge.
@@ -1124,8 +1126,9 @@ mod tests {
         // catalogue: the short Kimi alias only reaches its catalogued 32,768
         // ceiling after canonicalization to `moonshotai/kimi-k2.7-code`; raw,
         // it is uncatalogued and fails closed at the 8,192 compatibility
-        // ceiling. Deleting the wrapper's normalization call turns this
-        // assertion red.
+        // ceiling. Deleting the normalization call in
+        // `route_budget::route_effective_max_output_tokens` — the helper this
+        // wrapper delegates to — turns this assertion red.
         let openrouter = crate::config::ApiProvider::Openrouter;
         let openrouter_url = "https://openrouter.ai/api/v1";
         assert_eq!(
