@@ -25,6 +25,7 @@
 import { useCallback, useSyncExternalStore } from 'react';
 import { answerRun, cancelRun, fetchActiveRuns, pollRunLog } from './model-store-api.js';
 import { reduceLogChunk } from './model-store-logic.js';
+import { rememberTaskOperationResult } from './operation-results.js';
 
 // 连续多少次轮询失败才判定这次运行真的断了。单次失败很常见(命令层短暂不可用、
 // 系统挂起唤醒),直接报错会把一个还在正常下载的任务标成失败。
@@ -108,10 +109,10 @@ function dropTask(id) {
 
 /**
  * 建一张任务卡。
- * @param {{key:string|undefined, kind:string, title:string, reattached?:boolean}} spec - 任务描述。
+ * @param {{key:string|undefined, kind:string, title:string, cardName?:string, reattached?:boolean}} spec - 任务描述。
  * @returns {number} 任务 id。
  */
-function createTask({ key, kind, title, reattached = false }) {
+function createTask({ key, kind, title, cardName, reattached = false }) {
   const id = nextTaskId++;
   setTaskList([
     ...taskList,
@@ -124,6 +125,7 @@ function createTask({ key, kind, title, reattached = false }) {
       // 会让旁边的「启用」按钮显示成「启用中…」。
       kind,
       title,
+      cardName,
       // 是不是从后端接回来的。接回来的那些没有等在 await 上的调用方,结局要靠
       // subscribeTaskSettled 广播出去才有人管。
       reattached,
@@ -272,6 +274,7 @@ function settleTask(id, outcome) {
     // 成功的任务直接从面板上移除,由调用方用一条 toast 报喜。
     dropTask(id);
     const result = { ok: true, result: outcome.result };
+    rememberTaskOperationResult(task, result);
     notifySettled(task, result);
     return result;
   }
@@ -305,16 +308,16 @@ function failTask(id, error) {
  * `key` 标识「同一件事」(比如 `download:<卡片id>`):同一个 key 已经有任务在跑时
  * 直接拒掉。按钮禁用只是视觉上的第一道防线,连点和事件竞态都能绕过去,这里必须
  * 再拦一道 —— 同一张卡跑两份下载不会更快,只会让两个进程抢同一批文件的锁。
- * @param {{title:string, kind:string, key:string|undefined, start:()=>Promise<{run_id?:string}>}} options - 任务描述与发起函数。
+ * @param {{title:string, cardName?:string, kind:string, key:string|undefined, start:()=>Promise<{run_id?:string}>}} options - 任务描述与发起函数。
  * @returns {Promise<{ok:boolean, duplicate?:boolean, aborted?:boolean, cancelled?:boolean, result?:unknown, error?:string}>} 结果。
  */
 async function runTask(options) {
-  const { title, kind, key, start } = options;
+  const { title, cardName, kind, key, start } = options;
   if (key && activeKeys.has(key)) {
     return { ok: false, duplicate: true };
   }
   if (key) activeKeys.add(key);
-  const id = createTask({ key, kind, title });
+  const id = createTask({ key, kind, title, cardName });
   let runId = null;
   try {
     const started = await start();
@@ -335,7 +338,7 @@ async function runTask(options) {
  * 已经有轮询挂着的运行会被跳过,所以重复调用是安全的——每次刷新列表顺手再问一次,
  * 就能把"轮询连续失败后前端自己放弃了、后端其实还在跑"这种失联也接回来。
  * @param {Array<{run_id?:string, card_id?:string, kind?:string}>} runs - 后端给的活跃运行。
- * @param {(run:object)=>({title:string, key:string}|null)} describe - 由视图层按 i18n 词典给出标题与 key;认不出的操作返回 null。
+ * @param {(run:object)=>({title:string, cardName?:string, key:string}|null)} describe - 由视图层按 i18n 词典给出标题与 key;认不出的操作返回 null。
  * @returns {number} 这次真正接回来的数量。
  */
 function reattachRuns(runs, describe) {
@@ -351,7 +354,7 @@ function reattachRuns(runs, describe) {
     // attachedRuns 要等 start() 返回才占上)。接回去就会给同一次操作建两张卡。
     if (meta.key && activeKeys.has(meta.key)) continue;
     if (meta.key) activeKeys.add(meta.key);
-    const id = createTask({ key: meta.key, kind: run.kind, title: meta.title, reattached: true });
+    const id = createTask({ key: meta.key, kind: run.kind, title: meta.title, cardName: meta.cardName, reattached: true });
     attached += 1;
     // 不 await:可能一次接回好几个,它们各自跑到结束。
     pumpRun(id, runId, { replayLimit: REATTACH_REPLAY_LINES })
@@ -367,7 +370,7 @@ function reattachRuns(runs, describe) {
 
 /**
  * 问一次后端有哪些运行还在跑,并把它们接回面板。
- * @param {(run:object)=>({title:string, key:string}|null)} describe - 同 reattachRuns。
+ * @param {(run:object)=>({title:string, cardName?:string, key:string}|null)} describe - 同 reattachRuns。
  * @returns {Promise<number>} 接回来的数量;问不到时返回 0。
  */
 async function reattachActiveRuns(describe) {
