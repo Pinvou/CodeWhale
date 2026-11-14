@@ -44,13 +44,25 @@ export function runReleaseProcess(command, args, {
     } catch { reject(failure("release_subgate_start_failed")); return; }
     let stderr = Buffer.alloc(0);
     let requested = null;
+    let stopRequested = false;
+    let outputReadFailed = false;
     let hardKilled = false;
     let finished = false;
     let hard;
+    let timeout;
+    const settle = (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout); clearTimeout(hard);
+      signal?.removeEventListener("abort", abort);
+      child.stdin.destroy();
+      if (error) reject(error); else resolve();
+    };
     const abandonUnconfirmed = () => {
       child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy();
       child.unref();
-      const primaryCode = interruptionFailureCode(requested) || "release_subgate_cleanup_unconfirmed";
+      const primaryCode = interruptionFailureCode(requested)
+        || (outputReadFailed ? "release_subgate_output_failed" : "release_subgate_cleanup_unconfirmed");
       settle(failure(primaryCode, { cleanupConfirmed: false, cleanupError: "release_subgate_cleanup_unconfirmed" }));
     };
     const forceUnconfirmed = () => {
@@ -63,15 +75,25 @@ export function runReleaseProcess(command, args, {
       finally { abandonUnconfirmed(); }
     };
     const requestStop = (reason) => {
-      if (requested !== null || finished) return;
+      if (stopRequested || finished) return;
+      stopRequested = true;
       requested = reason;
       clearTimeout(timeout);
-      if (!child.stdin.destroyed) child.stdin.end("cancel\n");
+      if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end("cancel\n");
       clearTimeout(hard);
       hard = setTimeout(forceUnconfirmed, 20000);
     };
     const abort = () => requestStop("cancelled");
     signal?.addEventListener("abort", abort, { once: true });
+    const outputReadError = () => {
+      if (finished) return;
+      outputReadFailed = true;
+      // Use the private stop channel, but keep a read failure distinct from
+      // a user cancellation. Repeated errors cannot restart the deadline.
+      requestStop(null);
+    };
+    child.stdout.on("error", outputReadError);
+    child.stderr.on("error", outputReadError);
     child.stdout.resume();
     child.stderr.on("data", (chunk) => {
       stderr = Buffer.concat([stderr, chunk]).subarray(-MAX_DIAGNOSTIC_BYTES);
@@ -87,18 +109,10 @@ export function runReleaseProcess(command, args, {
     });
     // Pipe errors remain non-success, without leaking the request/environment.
     child.stdin.on("error", () => {});
-    const timeout = setTimeout(() => requestStop("timeout"), timeoutMs);
+    timeout = setTimeout(() => requestStop("timeout"), timeoutMs);
     // Missing cleanup acknowledgement fails closed; this is never a retry or
     // a claimed successful retirement. The supervisor owns its own child Job.
     hard = setTimeout(forceUnconfirmed, timeoutMs + 20000);
-    const settle = (error) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timeout); clearTimeout(hard);
-      signal?.removeEventListener("abort", abort);
-      child.stdin.destroy();
-      if (error) reject(error); else resolve();
-    };
     child.once("error", () => {
       if (child.pid == null) settle(failure(interruptionFailureCode(requested) || "release_subgate_start_failed", { cleanupConfirmed: true }));
       else if (!hardKilled) forceUnconfirmed();
@@ -116,23 +130,29 @@ export function runReleaseProcess(command, args, {
         } catch { /* malformed child text is never a control receipt */ }
       }
       if (code !== 0 || !receipt
+        || typeof receipt.cleanup_confirmed !== "boolean"
+        || (receipt.reason !== null && receipt.reason !== "timeout" && receipt.reason !== "cancelled")
         || (receipt.execution_error !== null && receipt.execution_error !== "start_failed" && receipt.execution_error !== "execution_failed")
         || (!Number.isInteger(receipt.exit_code) && !(receipt.exit_code === null && receipt.execution_error !== null))
         || typeof receipt.forced !== "boolean"
         || (receipt.root_exit_code !== null && !Number.isInteger(receipt.root_exit_code))
         || (receipt.primary_exit_code !== null && (!Number.isInteger(receipt.primary_exit_code)
           || receipt.primary_exit_code === 0 || receipt.primary_exit_code !== receipt.root_exit_code))) {
-        settle(failure(interruptionFailureCode(requested) || "release_subgate_cleanup_unconfirmed", {
+        settle(failure(interruptionFailureCode(requested)
+          || (outputReadFailed ? "release_subgate_output_failed" : "release_subgate_cleanup_unconfirmed"), {
           cleanupConfirmed: false, cleanupError: "release_subgate_cleanup_unconfirmed",
           supervisorExitCode: Number.isInteger(code) && code >= 0 && code <= 0xffffffff ? code : null,
           receiptStatus: receipt === null ? "missing" : "invalid",
         })); return;
       }
-      const reason = requested || receipt.reason;
+      // A cooperative stop after a read error is acknowledged as cancelled
+      // by Python. Only an earlier local stop may relabel that primary error.
+      const reason = requested || (outputReadFailed ? null : receipt.reason);
       if (receipt.cleanup_confirmed !== true) {
         const primaryCode = receipt.primary_exit_code !== null ? "release_subgate_failed"
           : interruptionFailureCode(reason)
-            || (receipt.execution_error ? `release_subgate_${receipt.execution_error}` : "release_subgate_cleanup_unconfirmed");
+            || (receipt.execution_error ? `release_subgate_${receipt.execution_error}`
+              : outputReadFailed ? "release_subgate_output_failed" : "release_subgate_cleanup_unconfirmed");
         settle(failure(primaryCode,
           { exitCode: receipt.root_exit_code ?? receipt.exit_code, cleanupConfirmed: false,
             cleanupError: "release_subgate_cleanup_unconfirmed" }));
@@ -147,6 +167,8 @@ export function runReleaseProcess(command, args, {
           { exitCode: rootExit, supervisionExitCode: receipt.exit_code, cleanupConfirmed: true, forced: receipt.forced }));
       } else if (receipt.execution_error) {
         settle(failure(`release_subgate_${receipt.execution_error}`, { cleanupConfirmed: true }));
+      } else if (outputReadFailed) {
+        settle(failure("release_subgate_output_failed", { cleanupConfirmed: true, forced: receipt.forced }));
       } else if (receipt.exit_code !== 0) {
         settle(failure("release_subgate_failed", { exitCode: rootExit, supervisionExitCode: receipt.exit_code, cleanupConfirmed: true, forced: receipt.forced }));
       } else if (receipt.forced) {

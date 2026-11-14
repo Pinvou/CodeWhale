@@ -8,6 +8,10 @@ Windows 远控的本地校验和远程可信命令共用 `windows-e2e-process-gu
 
 Node 发布门禁通过 `release-process.mjs` 调用仓库现有 Python 进程所有权实现，使用 Windows 独立 Job / Linux subreaper；不修改 CI 夹具的门禁或失败规则。执行门禁需要现有开发/CI 工具 Python 3（Windows `python`、Linux `python3`；CI 可通过 `PINVOU_CI_PYTHON` 选择解释器），仅使用标准库。该监督实现支持 Windows 和 Linux；开关关闭仍不启动任何命令。Node 同时消费两条输出流，错误诊断仅保留有界控制回执；传给命令的环境仍为原用途白名单，解释器及监控不增加命令的敏感环境继承。
 
+解释器验证使用具有标准输入输出的 Python 命令行程序；GUI Python 或自定义嵌入宿主的标准句柄行为未验证。Windows 原生输入用例同时检查 Win32 标准输入是字符设备及 CRT 读取立即 EOF，不仅依赖 Node 对输入句柄的处理。
+
+两条输出流的读取错误均请求同一私有停止通道，在原清退期限内结束，重复错误不重置期限；诊断为 `release_subgate_output_failed`。已知本地取消/超时或已观察到的非零主错误仍优先；Python 为停止命令而回传的取消不替换先发生的读取故障。清理是否确认独立记录，缺少有效回执仍为未知。回执的 `reason` 只接受 `null`、`timeout`、`cancelled`，清理字段只接受布尔值；坏类型不参与成功或取消判定。
+
 超时/取消先通过私有输入控制管道通知监督器，等待精确清理回执；取消的额外等待上限二十秒，缺少回执始终失败，不当作已清理或允许重试。非预期的存活后代即使被收回，也不作为成功子门禁。原命令非零退出码、超时、取消、未知清理分别保留，原始错误文本不传播到公开异常。
 
 选择的 Python 必须能在用途白名单环境中直接启动，不能依赖被过滤的动态库环境变量。Linux CI 沿用 runner 已有 Python，不让工具安装步骤替换全局 PATH；自托管 Windows 同样沿用预装解释器，只有 GitHub 托管的 Windows 执行 Python 安装步骤。没有有效回执时，异常只增加监督器的有限整数退出码与 `missing` / `invalid` 回执类别，仍明确 `cleanupConfirmed=false`，不回显解释器路径、环境、nonce 或原始 stderr，也不把启动失败混同为清退期限耗尽。

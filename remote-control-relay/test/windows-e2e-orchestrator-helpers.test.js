@@ -131,7 +131,8 @@ test("legacy ownership registry is strict and recovers a lost response PID", () 
   assert.match(`${invalid.stdout}${invalid.stderr}`, /e2e_legacy_ownership_query_failed/u);
 });
 
-test("production bootstrap retains the complete helper call chain across runspace invocations", () => {
+nodeTest("production bootstrap retains the complete helper call chain across runspace invocations",
+  { skip: process.platform !== "win32" }, () => {
   const script = `$ErrorActionPreference='Stop'; $base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-scope-'+[Guid]::NewGuid().ToString('N')); `
     + `$runspace=[RunspaceFactory]::CreateRunspace(); $runspace.Open(); $ps=[PowerShell]::Create(); $ps.Runspace=$runspace; `
     + `try { New-Item -ItemType Directory -Path $base | Out-Null; `
