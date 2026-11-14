@@ -547,9 +547,11 @@ function assertFiniteAuditPGSetup(job) {
     "          PINVOU_TEST_NATS_SERVER_BINARY: ${{ runner.temp }}/pinvou-test-nats-server",
     "        run: |", "          set -euo pipefail",
     "          # Reuse only the preceding step's pinned executable; the test starts",
-    "          # its own TLS broker, applies public Token migrations and owns cleanup.",
+    "          # its own TLS broker and applies public Token migrations. The shared",
+    "          # supervisor owns the complete Python/Go/NATS process tree, including",
+    "          # panic, timeout and cancellation; always-run ledger recovery verifies it.",
     "          python3 -m unittest discover -s scripts/tests -p test_token_outbox_acceptance.py",
-    "          npm --prefix account-platform run test:token-outbox",
+    '          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/token-outbox-process.json" -- npm --prefix account-platform run test:token-outbox',
   ].join("\n"));
   assert.ok(text.indexOf(existingBroker) < text.indexOf(tokenOutbox),
     "Token outbox must follow the pinned NATS executable verification");
@@ -1032,6 +1034,7 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ["${{ runner.temp }}/pinvou-test-nats-server", "/unverified/nats-server"],
     ["python3 -m unittest discover -s scripts/tests -p test_token_outbox_acceptance.py", "true"],
     ["npm --prefix account-platform run test:token-outbox", "npm --prefix account-platform run test:token-outbox || true"],
+    ['python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/token-outbox-process.json" -- ', ""],
   ]) {
     rejectStepMutation(tokenOutboxStepName, tokenOutbox, tokenOutbox.replace(before, () => after));
   }
