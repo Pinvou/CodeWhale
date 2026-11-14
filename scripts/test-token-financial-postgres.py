@@ -59,6 +59,7 @@ REQUIRED = {
     "TestF05CancellationRecoveryClosurePublicPostgres",
     "TestF05RotationRetainedContentBoundaries",
     "TestF05UnsettledContentRetention",
+    "TestReplayRetentionBoundedCleanupPublicPostgres",
     "TestF05ExpiredUnacquiredDispatchRecovery",
     "TestF05PersonalHistoryAndCancellationPersistedOwnerScope",
     "TestOrganizationOriginalOwnerCancellationPublicPostgres",
@@ -94,6 +95,7 @@ ACCOUNT_REQUIRED = {
     "TestRegistrationUnknownInspectionPostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
     "TestRegistrationCompensationDatabaseErrorIdentityPostgres",
+    "TestRegistrationOutboxAggregateLookupPostgres",
     "TestPlatformRoleManagementRuntimePostgres",
     "TestUserCodeLookupRuntimePostgres",
     "TestAuditSearchOriginalMigrationRuntimePostgres",
@@ -110,6 +112,7 @@ ACCOUNT_REQUIRED = {
     "TestApprovalProofWallClockPostgres",
     "TestOrganizationUnitAuthorityWallClockPostgres",
     "TestApprovalListPoolRuntimePostgres",
+    "TestApprovalPaginationSourcePostgres",
     "TestPasswordPreparationAuthorizationPostgres",
     "TestApprovalWithdrawalOriginalReceiptPostgres",
     "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
@@ -289,10 +292,16 @@ EXACT_REQUIRED_CHILDREN = {
     "TestBillingManualAdjustmentProofRollbackPostgres": {
         f"{state}/{entry}" for state in ("empty", "retained-proof") for entry in ("public-api", "actual-cli", "renamed-history-cli")
     },
+    "TestApprovalPaginationSourcePostgres": {
+        "registered-replicas-use-distinct-admitted-client-keys",
+        "exhausted-client-is-shared-across-replicas-with-rollback",
+        "subject-budget-survives-source-change",
+    },
     "TestOrphanPaidOrderIndexPublicMigration": {
         "fresh-failure-atomicity-and-retry",
         "populated-upgrade-replay-and-own-ddl-rollback",
     },
+    "TestRegistrationOutboxAggregateLookupPostgres": {"fresh-install", "retained-upgrade"},
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)
@@ -301,6 +310,17 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestOrganizationStartupDiagnosticsPostgres": {
         "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestReplayRetentionBoundedCleanupPublicPostgres": {
+        "one-large-unsettled-stream-is-row-bounded-and-retryable",
+        "actual-worker-drains-full-batch-without-hourly-wait",
+        "locked-oldest-is-skipped-and-next-cycle-resumes",
+        "settled-stream-delete-is-bounded",
+        "active-case-parent-lock-serializes-copy-with-cleanup",
+        "tombstone-key-clear-is-atomic-bounded-and-protected-rows-do-not-starve",
+        "case-delete-and-payload-cascade-are-bounded",
+        "capacity-sample-10000-live-frames-plan-and-single-batch",
+        "content-lock-timeout-rolls-back-and-next-worker-tick-recovers",
     },
     "TestExpiredHoldProofRetryDiagnosticsPostgres": {
         "quick-failure", "timeout", "cancel", "unavailable", "invalid-proof",
@@ -364,6 +384,8 @@ EXACT_REQUIRED_CHILDREN = {
         "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",
         "installed-f07-36-upgrade", "installed-pre-runtime-37-upgrade",
         "installed-pre-cleanup-39-upgrade",
+        "installed-pre-dispatch-index-40-upgrade",
+        "installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip",
     },
     "TestUserUnusedIntentCancellationOwnerPostgres": {
         "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",
