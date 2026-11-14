@@ -211,7 +211,15 @@ class CmsdCiRoutingTests(unittest.TestCase):
         required = self.workflow.split("\n  required-gate:", 1)[1]
         self.assertIn("      - cmsd-check\n", required)
         self.assertIn("CMSD_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.cmsd == 'true' }}", required)
-        command = textwrap.dedent(required.split("        run: |\n", 1)[1])
+        # required-gate 的运行块之后可能还有后续 step（如 CI 复用的成功输入记录），
+        # 截断到首个非脚本缩进行，避免把 YAML 当 bash 执行。
+        run_body = required.split("        run: |\n", 1)[1]
+        script_lines = []
+        for line in run_body.splitlines():
+            if line and not line.startswith("          "):
+                break
+            script_lines.append(line)
+        command = textwrap.dedent("\n".join(script_lines))
         environment = {**os.environ, "GITHUB_EVENT_NAME": "pull_request", "BACKFLOW_MODE": "ordinary"}
         for key in re.findall(r"^          ([A-Z0-9_]+):", required, re.M):
             environment[key] = "success" if key.endswith("_RESULT") else "false"
