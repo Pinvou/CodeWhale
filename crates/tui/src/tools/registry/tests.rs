@@ -229,6 +229,12 @@ fn mcp_read_helpers_remain_auto_and_eagerly_loaded() {
         "mcp_read_resource",
         "read_mcp_resource",
         "mcp_get_prompt",
+        // The host's first-party session-reader read surface (see
+        // `is_mcp_read_helper`): genuinely read-only by the server-side
+        // contract, so it must not be approval-gated out of read-only
+        // postures like a Plan-pinned aux lane.
+        "mcp_session-reader_read_session",
+        "mcp_session-reader_list_sessions",
     ] {
         let adapter = mcp_tool_adapter_for_test(name);
         assert_eq!(
@@ -247,6 +253,10 @@ fn mcp_actions_require_approval_with_exact_helper_matching() {
         "mcp_github_create_pull_request",
         "mcp_github_list_mcp_resources_export",
         "read_mcp_resource_and_delete",
+        // Prefixed impostors of the session-reader read surface stay on the
+        // approval-required side: only the exact tool names are helpers.
+        "mcp_session-reader_read_session_export",
+        "mcp_other-server_read_session",
     ] {
         let adapter = mcp_tool_adapter_for_test(name);
         assert_eq!(
