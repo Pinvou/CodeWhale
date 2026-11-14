@@ -848,8 +848,13 @@ impl ArtifactDownloads {
             && chunk.completed.is_some()
         {
             let deadline = now_b.saturating_add(self.registry.limits().ttl.as_millis() as u64);
-            // 结果为 Ok 时 handle 必然仍被锁住；按工作区 expect 禁令以守卫
-            // 兜底（不变量被破坏时跳过写入，不得 panic）。
+            // 结果为 Ok 时 handle 必然仍被锁住（本函数全程持有 active 锁，
+            // Ok 路径无 remove）；按工作区 expect 禁令以守卫兜底，debug 构建
+            // 下不变量被破坏仍会立即暴露。
+            debug_assert!(
+                active.get(handle_id).is_some(),
+                "Ok 结果要求 admitted handle 仍被锁定"
+            );
             if let Some(handle) = active.get_mut(handle_id) {
                 handle.completed = Some((deadline, Arc::new(chunk.clone())));
             }
