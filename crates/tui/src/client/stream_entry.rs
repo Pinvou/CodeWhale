@@ -41,6 +41,75 @@ pub(crate) fn stream_open_timeout_from_env(value: Option<&str>) -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Open-timeout budget for local model endpoints. A model running on this
+/// machine (or the LAN) can legitimately spend minutes between TCP accept and
+/// response headers when it prefills a very long prompt before emitting the
+/// first byte — the 45s cloud budget exists to fail fast on dead cloud hosts,
+/// not to cut a local engine mid-prefill.
+///
+/// pinvou3 field data (2026-10-29, TensorFold dual-GPU card): a ~25K-token
+/// agent system prompt sits silent for ~30s on cold prefill (~854 tok/s
+/// first-pass), ~3.3s warm; the dspark family is the same order. 180s covers
+/// a full cold context on that class of hardware with headroom.
+pub(crate) const LOCAL_STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Resolve the SSE open timeout for a concrete endpoint: loopback/private
+/// hosts get [`LOCAL_STREAM_OPEN_TIMEOUT`], everything else keeps the cloud
+/// default. An explicit env override (`CODEWHALE_STREAM_OPEN_TIMEOUT_SECS`,
+/// legacy alias) still wins for **both** classes — it is the escape hatch for
+/// either side and must stay observable.
+pub(crate) fn stream_open_timeout_for(base_url: &str) -> Duration {
+    let env_set = std::env::var("CODEWHALE_STREAM_OPEN_TIMEOUT_SECS")
+        .or_else(|_| std::env::var("DEEPSEEK_STREAM_OPEN_TIMEOUT_SECS"))
+        .is_ok();
+    if !env_set && endpoint_is_local(base_url) {
+        LOCAL_STREAM_OPEN_TIMEOUT
+    } else {
+        stream_open_timeout()
+    }
+}
+
+/// True when the base URL terminates on this machine or its local network:
+/// loopback (v4+v6), `.localhost` names, RFC1918 private, link-local (v4+v6),
+/// unique-local v6, IPv4-mapped v6 (re-checked as v4), and CGNAT
+/// 100.64.0.0/10 — the range Tailscale-style overlays use, a very common way
+/// to reach a home/office GPU box (`validate_base_url_security` already
+/// invites llama.cpp-on-private-IP over HTTP, so those endpoints are in
+/// scope). Hostnames that are not `localhost` are conservatively treated as
+/// remote — no DNS resolution on this hot path, and a cloud host behind a
+/// resolvable name would be misclassified far more expensively in the other
+/// direction. `0.0.0.0` as a *destination* stays remote: nothing should
+/// dial it, and widening for it would only mask caller bugs.
+fn endpoint_is_local(base_url: &str) -> bool {
+    let Some(parsed) = url::Url::parse(base_url).ok() else {
+        return false;
+    };
+    match parsed.host() {
+        Some(url::Host::Domain(host)) => {
+            host.eq_ignore_ascii_case("localhost")
+                || host.to_ascii_lowercase().ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(ip)) => ipv4_is_local(ip),
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                // `[::ffff:127.0.0.1]`-style mapped addresses classify by
+                // their v4 payload, not by the v6 wrapper.
+                || ip.to_ipv4_mapped().is_some_and(ipv4_is_local)
+        }
+        None => false,
+    }
+}
+
+fn ipv4_is_local(ip: std::net::Ipv4Addr) -> bool {
+    // 100.64.0.0/10（CGNAT，Tailscale 类 overlay）：is_shared() 在本工具链
+    // 还是 unstable（feature ip），手写第二字节 64..=127 判定。
+    let o = ip.octets();
+    let cgnat = o[0] == 100 && (64..=127).contains(&o[1]);
+    ip.is_loopback() || ip.is_private() || ip.is_link_local() || cgnat
+}
+
 /// How the shared stream open path should pin HTTP version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamHttpPolicy {
@@ -251,6 +320,83 @@ mod tests {
             open_timeout,
             idle_timeout: Duration::from_secs(30),
         }
+    }
+
+    /// pinvou3 实测（2026-10-29 TensorFold 双机卡）：25K-token 系统提示词冷
+    /// prefill 静默 ~30s 才出首字节——本地端点的头等待必须显著宽于云预算。
+    /// env 是进程级状态，两个涉及 env 的测试用同一把锁串行。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn local_endpoints_get_the_wider_open_budget() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 评审 MINOR：宿主机可能 export 了超时变量——不清掉的话
+        // `== LOCAL_STREAM_OPEN_TIMEOUT` 断言在那种机器上必红。持锁清理后
+        // 本测试对环境完全密封。
+        unsafe { std::env::remove_var("CODEWHALE_STREAM_OPEN_TIMEOUT_SECS") };
+        unsafe { std::env::remove_var("DEEPSEEK_STREAM_OPEN_TIMEOUT_SECS") };
+        // 本地各形态：回环/私网/链路本地/localhost 名（含大小写）、v6 链路本地、
+        // IPv4-mapped v6、CGNAT（Tailscale 类）——后三类是评审 MINOR 补的口。
+        for url in [
+            "http://127.0.0.1:8889/v1",
+            "http://localhost:8080/v1",
+            "http://LOCALHOST:8080",
+            "http://127.0.0.1/v1",
+            "http://192.168.10.10:8888/v1",
+            "http://10.0.0.5:11434/v1",
+            "http://172.16.3.4/v1",
+            "http://169.254.7.7/v1",
+            "http://[::1]:9000/v1",
+            "http://[fd00::1]:9000/v1",
+            "http://[fe80::1]:9000/v1",
+            "http://[::ffff:127.0.0.1]:9000/v1",
+            "http://100.101.102.103:8000/v1",
+        ] {
+            assert!(endpoint_is_local(url), "应识别为本地端点：{url}");
+            assert_eq!(
+                stream_open_timeout_for(url),
+                LOCAL_STREAM_OPEN_TIMEOUT,
+                "本地端点应拿宽预算：{url}"
+            );
+        }
+        // 云端与不可解析输入维持默认/保守。0.0.0.0 作为目的地属调用方
+        // bug，刻意不放宽（见 endpoint_is_local 注释）。
+        for url in [
+            "https://api.deepseek.com/v1",
+            "https://gateway.example.com/v1",
+            "https://my-model.internal.example.com", // 可解析域名保守按远端
+            "http://0.0.0.0:8888/v1",
+            "",
+            "not a url",
+        ] {
+            assert!(!endpoint_is_local(url), "不该判本地：{url:?}");
+            assert_eq!(
+                stream_open_timeout_for(url),
+                DEFAULT_STREAM_OPEN_TIMEOUT,
+                "远端应维持 45s：{url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_override_wins_over_the_local_budget() {
+        // 环境变量是两侧共用的逃生口：显式设置后本地/远端都听它的。
+        // set/remove_var 在 edition 2024 是 unsafe：进程内其他线程可能并发
+        // 读 env——本测试与上面那个都持有 ENV_LOCK，且两个调用之间没有
+        // await 点，实际单线程访问。
+        // 评审 MINOR：断言 panic 时变量会泄进进程毒化其他测试——用 Drop
+        // 守卫保证无论怎么退出都清理。
+        struct EnvReset;
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("CODEWHALE_STREAM_OPEN_TIMEOUT_SECS") };
+            }
+        }
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _reset = EnvReset;
+        unsafe { std::env::set_var("CODEWHALE_STREAM_OPEN_TIMEOUT_SECS", "66") };
+        let r = stream_open_timeout_for("http://127.0.0.1:8889/v1");
+        assert_eq!(r, Duration::from_secs(66));
     }
 
     async fn ok_server() -> MockServer {
