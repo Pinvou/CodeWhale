@@ -31,6 +31,15 @@ use uuid::Uuid;
 /// Archived sessions are exempt: archiving is a deliberate user action, so the
 /// retention cap must not silently destroy what the user explicitly put away.
 const MAX_SESSIONS: usize = 1_000;
+/// Minimum wall-clock spacing between retention-janitor runs triggered by
+/// [`SessionManager::save_session`]. The janitor's scan reads every record
+/// file, and the archived set (exempt from [`MAX_SESSIONS`]) grows that set
+/// without bound over the life of the install, so an unthrottled per-save
+/// scan would tax every save — including the picker's synchronous rename and
+/// archive actions — with a cost that only grows. Sixty seconds keeps
+/// retention prompt (it is best-effort pruning, not a correctness bound)
+/// while making the per-save cost `O(1)` in save frequency.
+const JANITOR_MIN_INTERVAL_SECS: i64 = 60;
 /// Maximum session title length, in `char`s. Matches the bound the session
 /// picker's rename prompt has always enforced.
 pub const MAX_SESSION_TITLE_CHARS: usize = 100;
@@ -946,6 +955,15 @@ fn serialize_saved_session(session: &SavedSession) -> io::Result<String> {
 pub struct SessionManager {
     /// Directory where sessions are stored
     sessions_dir: PathBuf,
+    /// Unix seconds of the last save-triggered retention-janitor run (0 =
+    /// never run this instance). Throttles the per-save scan; see
+    /// [`JANITOR_MIN_INTERVAL_SECS`]. Direct
+    /// [`SessionManager::cleanup_old_sessions`] calls are never throttled.
+    janitor_last_run_secs: std::sync::atomic::AtomicI64,
+    /// Test-only count of retention-janitor executions (throttled and
+    /// direct), so tests can observe the throttle without timing races.
+    #[cfg(test)]
+    janitor_runs: std::sync::atomic::AtomicU32,
 }
 
 /// Origin of a crash-recovery checkpoint file.
@@ -1107,7 +1125,12 @@ impl SessionManager {
         let sessions_dir = normalize_managed_dir(sessions_dir)?;
         // Ensure the sessions directory exists
         fs::create_dir_all(&sessions_dir)?;
-        Ok(Self { sessions_dir })
+        Ok(Self {
+            sessions_dir,
+            janitor_last_run_secs: std::sync::atomic::AtomicI64::new(0),
+            #[cfg(test)]
+            janitor_runs: std::sync::atomic::AtomicU32::new(0),
+        })
     }
 
     /// Create a `SessionManager` using the default location.
@@ -1186,8 +1209,10 @@ impl SessionManager {
         write_atomic(&path, content.as_bytes())?;
         self.stamp_session_boot_owner_for_new_record(&session.metadata.id, already_persisted);
 
-        // Clean up old sessions if we have too many
-        self.cleanup_old_sessions()?;
+        // Clean up old sessions if we have too many — throttled, since the
+        // scan reads every record file and the archived set is unbounded
+        // (see [`JANITOR_MIN_INTERVAL_SECS`]).
+        self.run_janitor_throttled()?;
 
         Ok(path)
     }
@@ -1861,6 +1886,42 @@ impl SessionManager {
         self.cleanup_old_sessions_keeping(None)
     }
 
+    /// Run the retention janitor at most once per
+    /// [`JANITOR_MIN_INTERVAL_SECS`], on the save path only. The first save
+    /// on a fresh manager always runs (nothing has been scanned yet); a save
+    /// inside the window is a no-op. A failed compare-and-swap means a
+    /// concurrent save already claimed this run — skip. Explicit
+    /// [`SessionManager::cleanup_old_sessions`] calls bypass the throttle so
+    /// command surfaces and tests keep their exact semantics.
+    fn run_janitor_throttled(&self) -> std::io::Result<()> {
+        use std::sync::atomic::Ordering;
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let last = self.janitor_last_run_secs.load(Ordering::Relaxed);
+        if !Self::janitor_due(last, now_secs) {
+            return Ok(());
+        }
+        if self
+            .janitor_last_run_secs
+            .compare_exchange(last, now_secs, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            // A concurrent save claimed this window's run.
+            return Ok(());
+        }
+        self.cleanup_old_sessions()
+    }
+
+    /// Whether a save-triggered janitor run is due: always on the first run
+    /// of the instance, afterwards only once the spacing elapses. A wall
+    /// clock that jumped backwards simply waits for real time to pass.
+    fn janitor_due(last_run_secs: i64, now_secs: i64) -> bool {
+        last_run_secs == 0 || now_secs >= last_run_secs + JANITOR_MIN_INTERVAL_SECS
+    }
+
     /// As [`Self::cleanup_old_sessions`], but never deletes `keep` — the
     /// session being resumed at boot. Without this, a background cleanup that
     /// races session restore can prune the just-resumed session when
@@ -1869,6 +1930,9 @@ impl SessionManager {
     /// archiving is a deliberate act of putting a session away, not an
     /// invitation to delete it, so archived records may exceed the cap.
     pub fn cleanup_old_sessions_keeping(&self, keep: Option<&str>) -> std::io::Result<()> {
+        #[cfg(test)]
+        self.janitor_runs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let sessions = self.list_sessions()?;
 
         // Cap only the non-archived history: archived records are exempt (see
@@ -3340,6 +3404,71 @@ mod tests {
             MAX_SESSIONS,
             "archived records survive the retention janitor"
         );
+    }
+
+    /// The throttle arithmetic itself: first run always due, in-window saves
+    /// skipped, the boundary due, and a backwards wall clock simply waits.
+    #[test]
+    fn janitor_due_pins_the_throttle_arithmetic() {
+        // First run of an instance is always due.
+        assert!(SessionManager::janitor_due(0, 0));
+        assert!(SessionManager::janitor_due(0, 5));
+        // Inside the window: not due.
+        assert!(!SessionManager::janitor_due(
+            100,
+            100 + JANITOR_MIN_INTERVAL_SECS - 1
+        ));
+        assert!(!SessionManager::janitor_due(100, 100));
+        // At the boundary and after: due.
+        assert!(SessionManager::janitor_due(
+            100,
+            100 + JANITOR_MIN_INTERVAL_SECS
+        ));
+        assert!(SessionManager::janitor_due(
+            100,
+            100 + 10 * JANITOR_MIN_INTERVAL_SECS
+        ));
+        // A wall clock that jumped backwards waits for real time to pass.
+        assert!(!SessionManager::janitor_due(100, 50));
+    }
+
+    /// Save-triggered janitor runs are spaced by
+    /// [`JANITOR_MIN_INTERVAL_SECS`]; explicit cleanup calls bypass the
+    /// throttle. Observed through the test-only run counter rather than
+    /// wall-clock timing, so the test is race-free.
+    #[test]
+    fn save_triggered_janitor_is_throttled_but_explicit_cleanup_is_not() {
+        assert_eq!(
+            JANITOR_MIN_INTERVAL_SECS, 60,
+            "the audited per-save throttle window"
+        );
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let run_count = || {
+            manager
+                .janitor_runs
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+
+        write_session_record(&manager, "throttle-a", &workspace, Utc::now(), false);
+        assert_eq!(
+            run_count(),
+            1,
+            "the first save on a fresh manager runs the janitor"
+        );
+        write_session_record(&manager, "throttle-b", &workspace, Utc::now(), false);
+        assert_eq!(
+            run_count(),
+            1,
+            "a save inside the window does not re-run the janitor"
+        );
+        manager.cleanup_old_sessions().expect("explicit cleanup");
+        assert_eq!(run_count(), 2, "explicit cleanup calls bypass the throttle");
+        manager
+            .cleanup_old_sessions()
+            .expect("explicit cleanup again");
+        assert_eq!(run_count(), 3, "every explicit call runs");
     }
 
     #[test]
