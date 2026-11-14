@@ -35,9 +35,16 @@ func accountMigrationsThrough(version int64) ([]migrations.Migration, error) {
 
 // The first page commits through the real public prefix and account_service.
 // A fixture trigger interrupts the next page, without guessing a timing window.
-func registrationBonusCheckpoint(t *testing.T, through int64) (*PostgresRepository, time.Time) {
+func registrationBonusCheckpoint(t *testing.T, through ...int64) (*PostgresRepository, time.Time) {
 	t.Helper()
-	r := retainedWalletFenceActors(t).repositoryThroughVersion(t, through, nil)
+	if len(through) > 1 {
+		t.Fatal("one exact historical boundary required")
+	}
+	var version int64
+	if len(through) == 1 {
+		version = through[0]
+	}
+	r := retainedWalletFenceActors(t).repositoryThroughVersion(t, version, nil)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	r.now = func() time.Time { return now }
@@ -215,6 +222,8 @@ func TestRegistrationBonusCheckpointForeignFactsPostgresIntegration(t *testing.T
 }
 
 func TestRegistrationBonusCheckpointGuardsPostgresIntegration(t *testing.T) {
+	// Keep the original checkpoint/900015 refusal target independent of later
+	// reversible index migrations. Other checkpoint roots use the latest chain.
 	r, _ := registrationBonusCheckpoint(t, organizationEvidenceTruncateMigrationVersion)
 	ctx := context.Background()
 	before := registrationBonusCheckpointSnapshot(t, r)
@@ -253,7 +262,14 @@ func TestRegistrationBonusCheckpointGuardsPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The evidence release refuses at its forward-only head. Exercise the
+	var guardRelease []migrations.Migration
+	for _, m := range loaded {
+		if m.Version <= organizationEvidenceTruncateMigrationVersion {
+			guardRelease = append(guardRelease, m)
+		}
+	}
+	loaded = guardRelease
+	// This guard release refuses at its forward-only head. Exercise the
 	// original checkpoint guard independently so that refusal cannot mask it.
 	assertHistoricalRollbackRefusal(t, r, loaded, registrationBonusCheckpointMigrationVersion, "P0001", "registration bonus eligibility facts exist; destructive rollback is forbidden")
 	if err = accountschema.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "organization evidence truncate protection is forward-only") {

@@ -119,6 +119,8 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 					return nil
 				}
 			}
+			// This test owns the 900015 release's forward-only statement guard.
+			// Later reversible index migrations must not mask that exact Down.
 			r := f.repositoryThroughVersion(t, organizationEvidenceTruncateMigrationVersion, initial)
 			if scenario == "fresh-install" {
 				replay = seedOrganizationEvidence(t, ctx, r)
@@ -167,6 +169,13 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				var guardRelease []migrations.Migration
+				for _, m := range loaded {
+					if m.Version <= 900015 {
+						guardRelease = append(guardRelease, m)
+					}
+				}
+				loaded = guardRelease
 				connection, err := pgx.ConnectConfig(ctx, r.pool.Config().ConnConfig.Copy())
 				if err != nil {
 					t.Fatal(err)

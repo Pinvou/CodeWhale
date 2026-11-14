@@ -39,6 +39,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if err := validateUnstartedGrantInventory(input); err != nil {
 		return nil, err
 	}
+	if err := validateOutboxAggregateLookup(input); err != nil {
+		return nil, err
+	}
 	if err := validateOrganizationEvidenceGuard(input); err != nil {
 		return nil, err
 	}
