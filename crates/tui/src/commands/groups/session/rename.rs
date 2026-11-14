@@ -127,7 +127,7 @@ pub(crate) fn rename_with_manager(
     app.sync_cost_to_metadata(&mut session.metadata);
     session.metadata.title = new_title.to_string();
 
-    match manager.save_session(&session) {
+    match manager.save_session_edit(&session) {
         Ok(_) => {
             app.current_session_metadata = Some(session.metadata.clone());
             app.session_title = Some(new_title.to_string());
