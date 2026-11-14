@@ -85,6 +85,9 @@ func TestAuditExportPersistedBoundaries(t *testing.T) {
 	t.Run("csv_reference_masking", func(t *testing.T) {
 		testAuditExportCSVReferenceMasking(t, ctx, exports, principal, me.UserID)
 	})
+	t.Run("bounded_retry_policy", func(t *testing.T) {
+		testAuditExportRetryPolicy(t, ctx, exports, c, principal)
+	})
 	create := func(reason string) AuditExportJob {
 		t.Helper()
 		now := time.Now().UTC()
@@ -106,6 +109,26 @@ func TestAuditExportPersistedBoundaries(t *testing.T) {
 		}
 		return j
 	}
+	t.Run("generation_renews_and_recovers", func(t *testing.T) {
+		actor := principal
+		actor.Subject = uuid.NewString()
+		if _, _, err := repo.Bootstrap(ctx, actor); err != nil {
+			t.Fatal("FIXTURE_LEASE_ACTOR", err)
+		}
+		if err := NewWalletProvisioningWorker(repo, auditExportBoundaryWallet{}, time.Second).RunOnce(ctx); err != nil {
+			t.Fatal("FIXTURE_LEASE_WALLET", err)
+		}
+		createLeaseJob := func(reason string) AuditExportJob {
+			t.Helper()
+			now := time.Now().UTC()
+			job, err := exports.Create(ctx, actor, AuditExportRequest{Reason: reason, IdempotencyKey: uuid.NewString(), Filter: AuditExportFilter{From: now.Add(-time.Minute), To: now}})
+			if err != nil {
+				t.Fatal("FIXTURE_LEASE_CREATE", err)
+			}
+			return job
+		}
+		testAuditExportGenerationLease(t, ctx, exports, c, createLeaseJob)
+	})
 	t.Run("pending_ticket_nullable", func(t *testing.T) {
 		j := create("public test reason")
 		_, e := exports.IssueDownloadTicket(ctx, principal, j.ID)

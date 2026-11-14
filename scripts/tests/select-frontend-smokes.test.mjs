@@ -10,6 +10,18 @@ import {
 const labels = (items) => items.map(({ kind, target }) => `${kind}:${target}`);
 const fullLabels = labels(FULL_FRONTEND_SMOKES);
 
+test("remote download budget browser runs for production, test and full-suite paths", () => {
+  const target = "node:tests/remote_download_budget_smoke.mjs";
+  for (const paths of [["pinvou3-app/src/features/remote-control/remote-file-transfer.mjs"],
+    ["pinvou3-app/tests/remote_download_budget_smoke.mjs"], ["pinvou3-app/src/platform/tauri/bridge/desktop-remote-control.js"]]) {
+    assert.equal(labels(selectFrontendSmokes(paths)).filter(value => value === target).length, 1);
+  }
+  assert.equal(fullLabels.filter(value => value === target).length, 1);
+  const knip = JSON.parse(readFileSync(new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8"));
+  assert.ok(knip.entry.includes("tests/remote_download_budget_smoke.mjs"));
+  assert.ok(!knip.ignore.includes("tests/remote_download_budget_smoke.mjs"));
+});
+
 test("quarantine confirmation smoke runs in full CI and for its real public facade", () => {
   const smoke = "node:tests/remote_quarantine_smoke.mjs";
   assert.ok(fullLabels.includes(smoke));
@@ -32,6 +44,21 @@ test("remote operation ownership regression runs for its product and fixture pat
   const knip = JSON.parse(readFileSync(new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8"));
   assert.ok(knip.entry.includes("tests/remote_dispatch_ownership_smoke.mjs"));
   assert.ok(!knip.ignore.includes("tests/remote_dispatch_ownership_smoke.mjs"));
+});
+
+test("upload cleanup mounted contract runs for its real inputs and in full CI", () => {
+  const smoke = "node:tests/remote_upload_cleanup_smoke.mjs";
+  assert.ok(fullLabels.includes(smoke));
+  for (const path of ["pinvou3-app/src/features/chat/ChatView.jsx",
+    "pinvou3-app/src/features/remote-control/remote-file-transfer.mjs",
+    "pinvou3-app/src/platform/tauri/bridge/desktop-remote-control.js",
+    "pinvou3-app/tests/fixtures/remote_dispatch_ownership_smoke.jsx",
+    "pinvou3-app/tests/remote_upload_cleanup_smoke.mjs"]) {
+    assert.ok(labels(selectFrontendSmokes([path])).includes(smoke), path);
+  }
+  const knip = JSON.parse(readFileSync(new URL("../../pinvou3-app/knip.json", import.meta.url), "utf8"));
+  assert.ok(knip.entry.includes("tests/remote_upload_cleanup_smoke.mjs"));
+  assert.ok(!knip.ignore.includes("tests/remote_upload_cleanup_smoke.mjs"));
 });
 
 test("the real archive component smoke is included in the full CI suite", () => {
