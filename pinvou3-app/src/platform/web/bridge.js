@@ -3325,11 +3325,15 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
   // (t.uiAttachments.*)同源语义。与 tauri bridge chat.js 同一口径。
   // 远端折叠错误码(remote_control.rs 折叠族,原生错误链只留在桌面日志)与
   // edit_last_turn 乐观并发护栏码在此映射为三语文案;未识别文本仍走下方
-  // 脱敏兜底。码表与 Rust 侧 stable_web_error_codes_are_locked 同步演进。
+  // 脱敏兜底。码表分两档:官方树可达码(session/revision/admission 族,
+  // 折叠族由 Rust 侧 stable_web_error_codes_are_locked 锁定)与闭源侧
+  // 产物/分块车道码(官方 Rust 暂无对应 emit 点,映射保留以维持跨树同步,
+  // 官方侧落地时随上述锁扩列);官方树的 turn-in-progress 码是无 web_
+  // 前缀的 session_turn_in_progress,由上方前缀族先行命中。
   const WEB_TURN_ERROR_KEYS = {
     web_session_chat_failed: "webChatFailed",
     // 专属完整句文案:复用 newChatFailed(供 wireLaneError 拼接细节的前缀串)
-    // 会渲染成悬空冒号。码表与 Rust 侧 stable_web_error_codes_are_locked 同步演进。
+    // 会渲染成悬空冒号。
     web_session_create_session_failed: "webSessionCreateFailed",
     web_session_turn_in_progress: "turnAlreadyInProgress",
     session_revision_conflict: "editStaleRevision",
@@ -6329,7 +6333,7 @@ function currentMemoryArtifacts() { return pinvouSharedweb().currentMemoryArtifa
         offset: offset,
         limit: 262144,
       });
-      if (!part) throw new Error("Artifact download returned no data");
+      if (!part) throw new Error(bt("artifactNoData"));
       var partOffset = Number(part.offset);
       var partSize = Number(part.size);
       if (!Number.isSafeInteger(partOffset) || partOffset !== offset ||
@@ -7671,7 +7675,7 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     var selected = await dialogOpen({
       multiple: true,
       filters: [
-        { name: "Images and videos", extensions: ["png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "webm"] },
+        { name: bt("fileMediaFilterName"), extensions: ["png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "webm"] },
       ],
     });
     if (!selected) return [];

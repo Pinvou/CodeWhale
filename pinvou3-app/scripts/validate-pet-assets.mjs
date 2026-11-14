@@ -79,9 +79,9 @@ async function loadRegistry(registrySource, manifest) {
   check(registrySource.includes(importLine), 'registry must import the manifest SSOT');
   if (!registrySource.includes(importLine)) return null;
 
+  // eslint-disable-next-line unicorn/no-unsafe-string-replacement -- replacement value is a controlled literal
   const executableSource = registrySource.replace(
     importLine,
-    // eslint-disable-next-line unicorn/no-unsafe-string-replacement -- replacement value is a controlled literal
     `const manifest = ${JSON.stringify(manifest)};`,
   );
   const dataUrl = `data:text/javascript;base64,${Buffer.from(executableSource).toString('base64')}`;
