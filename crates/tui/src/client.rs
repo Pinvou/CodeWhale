@@ -9445,9 +9445,15 @@ mod tests {
                 "k3.1-pro-highspeed",
                 None,
             ),
+            (
+                "kimi code ignores a stale effort off",
+                "https://api.kimi.com/coding/v1",
+                "k3.1-pro",
+                Some("off"),
+            ),
             // The official overseas Kimi Code alias the app's model catalog
             // registers and prefs preserve verbatim (review P2,
-            // pinjou-agent#825): the replay contract must hold there too.
+            // pinvou-agent#825): the replay contract must hold there too.
             (
                 "kimi code overseas",
                 "https://api.kimi.ai/coding/v1",
