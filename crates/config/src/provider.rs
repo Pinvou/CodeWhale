@@ -514,7 +514,13 @@ pub fn is_exact_kimi_code_route(kind: ProviderKind, base_url: &str) -> bool {
         return false;
     }
 
+    // The membership plan serves both the default host and the official
+    // overseas alias the app's model catalog registers (pinvou-agent#825
+    // review P2: saved settings keep api.kimi.ai/coding/v1 verbatim, so the
+    // route gate must learn it or the K3.1 replay contract silently misses
+    // there).
     is_exact_https_route(base_url, "api.kimi.com", "coding/v1")
+        || is_exact_https_route(base_url, "api.kimi.ai", "coding/v1")
 }
 
 /// Whether a configured Ollama route is exactly the hosted OpenAI-compatible
@@ -627,7 +633,7 @@ pub fn credential_help_for_route(kind: ProviderKind, base_url: &str) -> Credenti
             acquisition: CredentialAcquisition::ApiKey,
             credential_url: Some(KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL),
             docs_url: None,
-            guidance: "Create a Kimi Code membership-plan API key in the Kimi Code console. This route uses api.kimi.com/coding/v1; Codewhale does not import Kimi CLI credentials.",
+            guidance: "Create a Kimi Code membership-plan API key in the Kimi Code console. This route uses an official Kimi Code coding endpoint (api.kimi.com/coding/v1 or api.kimi.ai/coding/v1); Codewhale does not import Kimi CLI credentials.",
         };
     }
 
@@ -2218,7 +2224,21 @@ mod tests {
             ProviderKind::Moonshot,
             "HTTPS://API.KIMI.COM/coding/v1/"
         ));
+        // The official overseas alias carries the same membership semantics.
+        assert!(is_exact_kimi_code_route(
+            ProviderKind::Moonshot,
+            "https://api.kimi.ai/coding/v1"
+        ));
+        assert!(is_exact_kimi_code_route(
+            ProviderKind::Moonshot,
+            "https://api.kimi.ai/coding/v1/"
+        ));
         for neighboring_route in [
+            "https://api.kimi.ai/CODING/v1",
+            "https://api.kimi.ai/coding/V1",
+            "http://api.kimi.ai/coding/v1",
+            "https://api.kimi.ai:443/coding/v1",
+            "https://api.kimi.ai/coding/v1?preview=1",
             "https://api.kimi.com/CODING/v1",
             "https://api.kimi.com/coding/V1",
             "http://api.kimi.com/coding/v1",

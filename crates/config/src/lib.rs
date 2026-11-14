@@ -4616,11 +4616,20 @@ fn default_base_url_for_provider(provider: ProviderKind) -> &'static str {
     }
 }
 
+/// Loose Kimi Code membership-endpoint recognition for default-model
+/// fallback and official-host scoping. The exact gate
+/// ([`provider::is_exact_kimi_code_route`]) must stay a subset of this —
+/// including for insignificant surrounding whitespace, which the exact gate
+/// trims: the membership plan serves both the default host and the overseas
+/// alias, so route canonicalization and credential scoping cannot disagree
+/// with it.
 fn moonshot_base_url_uses_kimi_code(base_url: &str) -> bool {
-    let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
+    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
     normalized == DEFAULT_KIMI_CODE_BASE_URL
         || normalized == "https://api.kimi.com/coding"
         || normalized.starts_with("https://api.kimi.com/coding/")
+        || normalized == "https://api.kimi.ai/coding"
+        || normalized.starts_with("https://api.kimi.ai/coding/")
 }
 
 /// Dual-wire vendors: dialect is config (`wire`), not a separate ProviderKind.

@@ -4496,7 +4496,8 @@ mod tests {
     use super::*;
     use crate::client::chat::{
         ReasoningDetailsBuffer, build_chat_messages, build_chat_messages_for_request,
-        build_chat_messages_for_request_and_provider, count_reasoning_replay_chars,
+        build_chat_messages_for_request_and_provider,
+        build_chat_messages_for_request_and_provider_and_route, count_reasoning_replay_chars,
         parse_chat_message, parse_sse_chunk, sanitize_thinking_mode_messages, tool_to_chat,
         tool_to_chat_for_base_url,
     };
@@ -9328,6 +9329,189 @@ mod tests {
             generic_assistant.get("reasoning_content").is_none(),
             "generic OpenAI-compatible providers reject DeepSeek-only reasoning_content (#1542)"
         );
+    }
+
+    /// K3.1 replay contract (2026-11-04 pinvou-agent#825 review): the K3.1
+    /// spellings inherit the K3 contract verbatim, and the Kimi Code error
+    /// reference makes a replayed tool-call assistant message WITHOUT its
+    /// `reasoning_content` an HTTP 400. The exact-K3 matchers only learn the
+    /// bare k3 ids, so the replay gate carries its own K3.1 arm — pin all
+    /// four spellings across both vendor routes (direct platform + Kimi Code
+    /// membership endpoint), the stale-effort-off always-replay case, the
+    /// case/padding normalization, and the custom-gateway / non-Moonshot
+    /// dialect boundary.
+    #[test]
+    fn kimi_k31_tool_rounds_replay_reasoning_content_on_the_vendor_routes() {
+        let tool_round = || {
+            vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "Need the date".to_string(),
+                        cache_control: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Thinking {
+                            signature: None,
+                            state: None,
+                            thinking: "Need to call a tool".to_string(),
+                            redacted_data: None,
+                            reasoning_details: None,
+                        },
+                        ContentBlock::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "get_date".to_string(),
+                            input: json!({}),
+                            caller: None,
+                            thought_signature: None,
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "tool-1".to_string(),
+                        content: "2026-04-23".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+            ]
+        };
+        let tool_assistant_reasoning = |label: &str,
+                                        provider: ApiProvider,
+                                        base_url: &str,
+                                        model: &str,
+                                        effort: Option<&str>|
+         -> Option<String> {
+            let request = MessageRequest {
+                model: model.to_string(),
+                messages: tool_round(),
+                max_tokens: 16,
+                system: None,
+                tools: None,
+                tool_choice: None,
+                metadata: None,
+                thinking: None,
+                reasoning_effort: effort.map(str::to_string),
+                stream: None,
+                temperature: None,
+                top_p: None,
+            };
+            let out = build_chat_messages_for_request_and_provider_and_route(
+                &request, provider, base_url,
+            );
+            let tool_assistant = out
+                .iter()
+                .find(|value| {
+                    value.get("role").and_then(Value::as_str) == Some("assistant")
+                        && value.get("tool_calls").is_some()
+                })
+                .unwrap_or_else(|| panic!("{label}: tool-call assistant message missing"));
+            tool_assistant
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        for (label, base_url, model, effort) in [
+            (
+                "direct platform",
+                "https://api.moonshot.cn/v1",
+                "kimi-k3.1-pro",
+                None,
+            ),
+            (
+                "direct platform highspeed",
+                "https://api.moonshot.ai/v1",
+                "kimi-k3.1-pro-highspeed",
+                None,
+            ),
+            // The arm must precede the effort check like bare K3: a stored
+            // effort off would otherwise strip the field via the generic
+            // path on the direct platform, where no catalog entry or
+            // `kimi-`-prefix-independent pin exists.
+            (
+                "direct platform ignores a stale effort off",
+                "https://api.moonshot.cn/v1",
+                "kimi-k3.1-pro",
+                Some("off"),
+            ),
+            (
+                "kimi code",
+                "https://api.kimi.com/coding/v1",
+                "k3.1-pro-highspeed",
+                None,
+            ),
+            (
+                "kimi code ignores a stale effort off",
+                "https://api.kimi.com/coding/v1",
+                "k3.1-pro",
+                Some("off"),
+            ),
+            // The official overseas Kimi Code alias the app's model catalog
+            // registers and prefs preserve verbatim (review P2,
+            // pinvou-agent#825): the replay contract must hold there too.
+            (
+                "kimi code overseas",
+                "https://api.kimi.ai/coding/v1",
+                "k3.1-pro",
+                None,
+            ),
+            (
+                "kimi code overseas highspeed",
+                "https://api.kimi.ai/coding/v1",
+                "k3.1-pro-highspeed",
+                None,
+            ),
+            // The spelling matcher normalizes case and padding; pin it on
+            // the bare Kimi Code ids, where no generic heuristic would
+            // replay in the matcher's place.
+            (
+                "kimi code is case-insensitive",
+                "https://api.kimi.com/coding/v1",
+                "K3.1-PRO",
+                None,
+            ),
+            (
+                "kimi code trims padding",
+                "https://api.kimi.com/coding/v1",
+                "  k3.1-pro  ",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                tool_assistant_reasoning(label, ApiProvider::Moonshot, base_url, model, effort),
+                Some("Need to call a tool".to_string()),
+                "{label}: the K3.1 replay contract must keep reasoning_content on the tool-round assistant message"
+            );
+        }
+
+        // The arm is pinned to the vendor's own routes: a custom
+        // Moonshot-compatible gateway keeps its own dialect, and so does a
+        // different provider that happens to point at the membership host.
+        for (label, provider, base_url, model) in [
+            (
+                "custom gateway keeps its own dialect",
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+                "k3.1-pro",
+            ),
+            (
+                "non-moonshot provider keeps its own dialect",
+                ApiProvider::Openai,
+                "https://api.kimi.com/coding/v1",
+                "k3.1-pro",
+            ),
+        ] {
+            assert_eq!(
+                tool_assistant_reasoning(label, provider, base_url, model, None),
+                None,
+                "{label}: reasoning_content must stay stripped outside the vendor routes"
+            );
+        }
     }
 
     #[test]
