@@ -59,6 +59,7 @@ REQUIRED = {
     "TestF05CancellationRecoveryClosurePublicPostgres",
     "TestF05RotationRetainedContentBoundaries",
     "TestF05UnsettledContentRetention",
+    "TestReplayRetentionBoundedCleanupPublicPostgres",
     "TestF05ExpiredUnacquiredDispatchRecovery",
     "TestF05PersonalHistoryAndCancellationPersistedOwnerScope",
     "TestOrganizationOriginalOwnerCancellationPublicPostgres",
@@ -304,6 +305,17 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestOrganizationStartupDiagnosticsPostgres": {
         "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestReplayRetentionBoundedCleanupPublicPostgres": {
+        "one-large-unsettled-stream-is-row-bounded-and-retryable",
+        "actual-worker-drains-full-batch-without-hourly-wait",
+        "locked-oldest-is-skipped-and-next-cycle-resumes",
+        "settled-stream-delete-is-bounded",
+        "active-case-parent-lock-serializes-copy-with-cleanup",
+        "tombstone-key-clear-is-atomic-bounded-and-protected-rows-do-not-starve",
+        "case-delete-and-payload-cascade-are-bounded",
+        "capacity-sample-10000-live-frames-plan-and-single-batch",
+        "content-lock-timeout-rolls-back-and-next-worker-tick-recovers",
     },
     "TestExpiredHoldProofRetryDiagnosticsPostgres": {
         "quick-failure", "timeout", "cancel", "unavailable", "invalid-proof",
