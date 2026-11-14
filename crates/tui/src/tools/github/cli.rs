@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::dependencies::ExternalTool;
 use crate::tools::spec::{ToolContext, ToolError};
 
 const DEFAULT_GH: &str = "/opt/homebrew/bin/gh";
@@ -71,12 +70,16 @@ pub(super) async fn run_gh_json(context: &ToolContext, args: &[&str]) -> Result<
     serde_json::from_str(&text).map_err(|e| ToolError::execution_failed(e.to_string()))
 }
 
-pub(super) fn ensure_github_repo(context: &ToolContext) -> Result<(), ToolError> {
-    let out = crate::dependencies::Git::output(
-        &["rev-parse", "--is-inside-work-tree"],
+pub(super) async fn ensure_github_repo(context: &ToolContext) -> Result<(), ToolError> {
+    // Bounded like every other git spawn (the git tool's runner: 120 s
+    // budget, `GIT_OPTIONAL_LOCKS=0`, null stdin). A hung `git rev-parse` on
+    // a huge or NFS-backed worktree previously ran on the executor thread
+    // with no timeout — the same hazard this tool's `gh` calls already had.
+    let out = super::super::git::run_git_command(
         &context.workspace,
+        &["rev-parse".to_string(), "--is-inside-work-tree".to_string()],
     )
-    .map_err(|e| ToolError::execution_failed(format!("failed to run git: {e}")))?;
+    .await?;
     if out.status.success() {
         Ok(())
     } else {
@@ -86,8 +89,11 @@ pub(super) fn ensure_github_repo(context: &ToolContext) -> Result<(), ToolError>
     }
 }
 
-pub(super) fn git_status_porcelain(context: &ToolContext) -> Result<String, ToolError> {
-    let out = crate::dependencies::Git::output(&["status", "--porcelain"], &context.workspace)
-        .map_err(|e| ToolError::execution_failed(format!("failed to run git status: {e}")))?;
+pub(super) async fn git_status_porcelain(context: &ToolContext) -> Result<String, ToolError> {
+    let out = super::super::git::run_git_command(
+        &context.workspace,
+        &["status".to_string(), "--porcelain".to_string()],
+    )
+    .await?;
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }

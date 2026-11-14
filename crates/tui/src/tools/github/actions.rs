@@ -22,7 +22,7 @@ impl GithubTool {
         input: &Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        ensure_github_repo(context)?;
+        ensure_github_repo(context).await?;
         let number = required_u64(input, "number")?;
         let include_comments = optional_bool(input, "include_comments", true)?;
         let fields = if include_comments {
@@ -50,7 +50,7 @@ impl GithubTool {
         input: &Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        ensure_github_repo(context)?;
+        ensure_github_repo(context).await?;
         let number = required_u64(input, "number")?;
         let number_s = number.to_string();
         let raw = run_gh_json(
@@ -163,7 +163,7 @@ pub(super) async fn close_github_thread(
 ) -> Result<ToolResult, ToolError> {
     validate_evidence(&input, true)?;
     if !optional_bool(&input, "allow_dirty", false)? {
-        let status = git_status_porcelain(context)?;
+        let status = git_status_porcelain(context).await?;
         if !status.trim().is_empty() {
             return Ok(ToolResult::error(format!(
                 "Refusing to close {}: worktree is dirty and allow_dirty was false.",
