@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 98 maintenance commits, ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 clean re-fork guard: 100 maintenance commits (EXPECTED_COMMITS), ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
-# Public maintenance after CodeWhale#136/#142/#148/#150/#152 merged.
-EXPECTED_HEAD="6f7a3a748f408568468ace45aa5cdbb34f882d73"
-EXPECTED_COMMITS=98
+# Public maintenance after CodeWhale#136/#142/#148/#150/#152,
+# CodeWhale#156 (rustc/clippy 1.100 stable lint adaptation) merged.
+EXPECTED_HEAD="687358f7efde6abd3592737b8ec48adc74ba5a84"
+EXPECTED_COMMITS=100
 # Published maintenance base of this integration.
 MAINTENANCE_BASE="6f7a3a748f408568468ace45aa5cdbb34f882d73"
 # The immutable r1 closure must remain an ancestor of the registered head.
@@ -75,6 +76,8 @@ fingerprints=(
   "T1|宿主显式保留新增来源字段兼容边界   |pinvou3-app/src-tauri/src/features/assistant/forwarder.rs|error_source: _,"
   "T2|待办缺省状态契约保持内容必填       |CodeWhale/crates/tui/src/tools/todo.rs|todo_item_status_is_optional_with_a_pending_default"
   "T2|待办缺省执行结果保持 pending       |CodeWhale/crates/tui/src/tools/todo.rs|work_update_treats_a_missing_status_as_pending"
+  "T2|会话读取面归入只读助手精确名匹配   |CodeWhale/crates/tui/src/tools/registry.rs|\"mcp_session-reader_read_session\""
+  "T2|会话列举面归入只读助手精确名匹配   |CodeWhale/crates/tui/src/tools/registry.rs|\"mcp_session-reader_list_sessions\""
   "T1|宿主输出预算复用真实组合导出       |CodeWhale/crates/tui/src/core/engine.rs|pub use context::route_effective_max_output_tokens;"
   "T1|输出预算导出覆盖真实组合结果       |CodeWhale/crates/tui/src/core/engine/context.rs|route_effective_max_output_tokens_matches_the_transport_composition"
   "T1|宿主单 execution-root 显式配置     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|workspace_roots: _, // host exposes one execution root"
@@ -246,6 +249,14 @@ fingerprints=(
   "T2|shell 指引与执行同一 dispatcher    |CodeWhale/crates/tui/src/tools/shell/guidance.rs|pub(super) fn runtime_command_guidance()"
   "T2|指引对齐 catalog 一致性回归        |CodeWhale/crates/tui/src/tools/shell/tests.rs|fn forkguard_shell_catalog_guidance_matches_execution"
   "T2|computer-use zoom 子栅格换算       |CodeWhale/plugins/computer-use/src/raster.mjs|export function zoomChildRaster(prev, region)"
+
+  # 来源 PR #850（评审 JensenChen28 5871983071，2026-11-12）：#148 todo schema
+  # 偏差已登记 fork-distinct（docs/fork-modifications.md 2026-11-10 对齐小节），
+  # 既有指纹只钉测试名（源文本），两条测试不以 forkguard_ 命名，第 2 层从未执行。
+  # 这里补 schema 字面量指纹（required 收缩与默认值陈述）；测试本身的执行由下方
+  # pinned runner 钉住。
+  "T2|todo item status leaves required  |CodeWhale/crates/tui/src/tools/todo.rs|\"required\": [\"content\"]"
+  "T2|todo default-pending stated in schema |CodeWhale/crates/tui/src/tools/todo.rs|\"description\": \"Task status. Defaults to pending when omitted.\""
 
   "T3|静态 prompt composer              |CodeWhale/crates/tui/src/prompts.rs|pub fn set_static_prompt_composer_override("
   "T3|ambient project authority 密封     |CodeWhale/crates/tui/src/project_context.rs|forkguard_runtime_loader_ignores_ambient_project_authority"
@@ -494,6 +505,42 @@ bold "── 第 2 层：CodeWhale forkguard 回归 ──"
 ( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked client::tests::model_aware_same_model_request_keeps_host_declared_route_limits -- --exact --test-threads=1 ) || fail=1
 ( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked client::tests::rebinding_the_same_model_keeps_host_declared_route_limits -- --exact --test-threads=1 ) || fail=1
 ( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked --features benchmark-eval-controls forkguard_benchmark_ -- --test-threads=1 ) || fail=1
+# #148 todo schema 测试不以 forkguard_ 命名，上方过滤器选不中；且
+# `cargo test <filter>` 零匹配时退出码仍为 0。按 run_pinned_* 的「1 passed」
+# 纪律按名钉住两条测试：改名或删除即响红，而非静默 no-op。
+run_pinned_todo_schema_tests() {
+  local test output
+  for test in \
+    todo_item_status_is_optional_with_a_pending_default \
+    work_update_treats_a_missing_status_as_pending; do
+    output=$( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked \
+      "$test" -- --test-threads=1 2>&1 ) || { printf '%s\n' "$output"; return 1; }
+    if ! grep -q '1 passed' <<<"$output"; then
+      printf '%s\n' "$output"
+      red "❌ pinned test $test did not run (renamed or deleted?)"
+      return 1
+    fi
+  done
+}
+run_pinned_todo_schema_tests || fail=1
+
+# #157 session-reader 只读分类不新增测试函数，而是扩展两个既有测试的表驱动
+# 条目；同样不落入 forkguard_ 过滤器，按名钉住防止改名或删除后静默 no-op。
+run_pinned_session_reader_tests() {
+  local test output
+  for test in \
+    mcp_read_helpers_remain_auto_and_eagerly_loaded \
+    mcp_actions_require_approval_with_exact_helper_matching; do
+    output=$( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked \
+      "$test" -- --test-threads=1 2>&1 ) || { printf '%s\n' "$output"; return 1; }
+    if ! grep -q '1 passed' <<<"$output"; then
+      printf '%s\n' "$output"
+      red "❌ pinned test $test did not run (renamed or deleted?)"
+      return 1
+    fi
+  done
+}
+run_pinned_session_reader_tests || fail=1
 
 echo
 bold "── 第 3 层：pinvou3-app forkguard 回归 ──"
