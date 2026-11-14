@@ -18,7 +18,11 @@ test('Windows release step retains every mandatory command and required-gate dep
   assert.equal(step.env.PINVOU_DESKTOP_CONTROLLER_ENABLED, '0');
   assert.equal(step['continue-on-error'], undefined);
   assert.ok(workflow.jobs['required-gate'].needs.includes('release-contract-test'));
-  assert.equal(step.run.split('\n').filter((line) => /^(?:npm|node)\b/u.test(line)).length, 3);
+  // Official 的第三条原生套件（windows-e2e-orchestrator 系列）被 python
+  // ci-fixture-process receipt 包装器包裹（行首不再是 npm|node），其退出码
+  // 传播契约由「Windows 原生命令退出码回归」步骤单独钉住；因此顶格
+  // npm/node 命令数在 Official 为 2，与 Community 工作流的 3 条直排不同。
+  assert.equal(step.run.split('\n').filter((line) => /^(?:npm|node)\b/u.test(line)).length, 2);
   assert.match(step.run, /npm --prefix remote-control-relay run release:gate/u);
   assert.match(step.run, /windows-e2e-orchestrator-helpers\.test\.js/u);
   assert.match(step.run, /remote_control_feature_gate_contract\.test\.mjs/u);
@@ -37,7 +41,7 @@ test('Windows release step retains every mandatory command and required-gate dep
   ]);
 });
 
-for (const [name, target, count] of [['contracts', step, 3], ['protected-build', buildStep, 5]]) {
+for (const [name, target, count] of [['contracts', step, 2], ['protected-build', buildStep, 5]]) {
  for (const shell of ['pwsh', 'powershell.exe']) {
   test(`real ${name} workflow stops on each native failure in ${shell}`, { skip: process.platform !== 'win32', timeout: nativeContractBudgetMs }, () => {
     const deadline = performance.now() + nativeContractBudgetMs;
