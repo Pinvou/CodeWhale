@@ -159,10 +159,7 @@ impl EngineHandle {
             .map_err(|_| anyhow!("engine idle-retirement proposal expired"))?;
         // Only the actor's ack proves it consumed the commit; the send above
         // can also succeed against a proposal the cancel arm just abandoned.
-        if ack.await.is_err() {
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(ack.await.is_ok())
     }
 
     /// Wait for this exact background run to return or terminate abnormally.
