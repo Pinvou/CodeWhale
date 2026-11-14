@@ -760,7 +760,7 @@ fn persist_workspace_switch_snapshot(
     manager: &SessionManager,
     snapshot: crate::session_manager::SavedSession,
 ) -> Option<WorkspaceSwitchReceipt> {
-    let save_error = manager.save_session(&snapshot).err();
+    let save_error = manager.save_session_edit(&snapshot).err();
     // The direct save bypasses the persistence actor, so a pre-`/cd`
     // snapshot already queued there (an autosave that fired moments ago)
     // could still land after it and revert the root swap on disk. Enqueue

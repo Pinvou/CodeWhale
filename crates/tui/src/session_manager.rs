@@ -1193,6 +1193,33 @@ impl SessionManager {
 
     /// Save a session to disk using atomic write (temp file + fsync + rename).
     pub fn save_session(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
+        let path = self.persist_session(session)?;
+
+        // Clean up old sessions if we have too many — throttled, since the
+        // scan reads every record file and the archived set is unbounded
+        // (see [`JANITOR_MIN_INTERVAL_SECS`]). Lifecycle edits must go
+        // through [`Self::save_session_edit`]; see its doc comment.
+        self.run_janitor_throttled()?;
+
+        Ok(path)
+    }
+
+    /// Persist a lifecycle edit (archive/rename/title/branch/import/PATCH)
+    /// without triggering the retention scan. These paths fire per user
+    /// action — usually on a fresh [`SessionManager`] whose throttle has not
+    /// armed (`janitor_due(0, _)` is always true), so routing them through
+    /// [`Self::save_session`] would run the full O(records) scan
+    /// synchronously on the caller's thread every time. Retention stays
+    /// enforced by the per-turn autosave actor (throttled), the boot janitor,
+    /// `codewhale exec`'s one-shot persist, and explicit `/sessions prune`.
+    pub fn save_session_edit(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
+        self.persist_session(session)
+    }
+
+    /// Shared persistence body of [`Self::save_session`] and
+    /// [`Self::save_session_edit`]: validate, archive-first-write receipts,
+    /// hydrate, and atomically write the record. No retention side effects.
+    fn persist_session(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
         let path = self.validated_session_path(&session.metadata.id)?;
         let already_persisted = path.exists()
             || self
@@ -1208,11 +1235,6 @@ impl SessionManager {
         // Atomic write via write_atomic (NamedTempFile + fsync + persist)
         write_atomic(&path, content.as_bytes())?;
         self.stamp_session_boot_owner_for_new_record(&session.metadata.id, already_persisted);
-
-        // Clean up old sessions if we have too many — throttled, since the
-        // scan reads every record file and the archived set is unbounded
-        // (see [`JANITOR_MIN_INTERVAL_SECS`]).
-        self.run_janitor_throttled()?;
 
         Ok(path)
     }
@@ -1673,7 +1695,7 @@ impl SessionManager {
             return Ok(session.metadata);
         }
         session.metadata.archived = archived;
-        self.save_session(&session)?;
+        self.save_session_edit(&session)?;
         Ok(session.metadata)
     }
 
@@ -1741,7 +1763,7 @@ impl SessionManager {
             return Ok(session.metadata);
         }
         session.metadata.title = title;
-        self.save_session(&session)?;
+        self.save_session_edit(&session)?;
         Ok(session.metadata)
     }
 
@@ -1912,6 +1934,10 @@ impl SessionManager {
             // A concurrent save claimed this window's run.
             return Ok(());
         }
+        // Best-effort retention: the window is consumed before the scan runs,
+        // so a failed scan locks the janitor out until the next window, and
+        // the error surfaces to the save caller even though the record itself
+        // was already written. Retention is advisory; the save is not.
         self.cleanup_old_sessions()
     }
 
@@ -3075,14 +3101,13 @@ mod tests {
         assert_eq!(usd_only.total_cny(), 0.0);
     }
 
-    fn write_session_record(
-        manager: &SessionManager,
+    fn make_saved_session(
         id: &str,
         workspace: &Path,
         updated_at: DateTime<Utc>,
         archived: bool,
-    ) {
-        let session = SavedSession {
+    ) -> SavedSession {
+        SavedSession {
             schema_version: CURRENT_SESSION_SCHEMA_VERSION,
             messages: vec![make_test_message("user", "hi")],
             metadata: SessionMetadata {
@@ -3114,8 +3139,52 @@ mod tests {
             work_state: None,
             window_title: None,
             last_auto_route: None,
-        };
+        }
+    }
+
+    fn write_session_record(
+        manager: &SessionManager,
+        id: &str,
+        workspace: &Path,
+        updated_at: DateTime<Utc>,
+        archived: bool,
+    ) {
+        let session = make_saved_session(id, workspace, updated_at, archived);
         manager.save_session(&session).expect("save");
+    }
+
+    /// Lifecycle edits (archive/rename/title/branch/import/PATCH) must not
+    /// trigger the retention scan: they fire per user action, usually on a
+    /// fresh manager whose throttle has not armed, so the full record scan
+    /// would be paid synchronously on the caller's thread every time. The
+    /// autosave-actor path keeps the throttled janitor.
+    #[test]
+    fn lifecycle_edit_save_skips_retention_but_actor_save_keeps_the_throttled_janitor() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let run_count = || {
+            manager
+                .janitor_runs
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+
+        let edited = make_saved_session("edit-a", &workspace, Utc::now(), false);
+        manager.save_session_edit(&edited).expect("edit save");
+        assert_eq!(
+            run_count(),
+            0,
+            "a lifecycle edit never runs the retention scan"
+        );
+        manager.save_session_edit(&edited).expect("edit save again");
+        assert_eq!(run_count(), 0, "repeated edits stay scan-free");
+
+        // The actor's per-turn autosave path still runs the throttled janitor
+        // (first run on a fresh manager), and the window spacing applies.
+        write_session_record(&manager, "actor-a", &workspace, Utc::now(), false);
+        assert_eq!(run_count(), 1, "the autosave path runs the janitor");
+        write_session_record(&manager, "actor-b", &workspace, Utc::now(), false);
+        assert_eq!(run_count(), 1, "a save inside the window is throttled");
     }
 
     fn write_empty_session_record(

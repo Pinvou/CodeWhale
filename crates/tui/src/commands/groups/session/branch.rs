@@ -70,7 +70,7 @@ fn branch(app: &mut App, arg: Option<&str>) -> CommandResult {
             // claim): this is a pure disk round-trip — load, move the
             // journal leaf, save — and the leaf move cannot change the
             // sandbox. The next autosave stamps the live set if it diverged.
-            if let Err(e) = manager.save_session(&session) {
+            if let Err(e) = manager.save_session_edit(&session) {
                 return CommandResult::error(format!("branch saved but persist failed: {e}"));
             }
             app.api_messages = session.messages.clone();

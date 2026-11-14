@@ -8443,7 +8443,7 @@ fn fork_session(
         Ok(roots) => roots,
         Err(reason) => bail!("source session root set no longer passes intake: {reason}"),
     };
-    manager.save_session(&forked)?;
+    manager.save_session_edit(&forked)?;
 
     let source_title = saved.metadata.title.trim();
     let source_label = if source_title.is_empty() {
