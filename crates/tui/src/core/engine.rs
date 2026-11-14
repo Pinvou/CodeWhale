@@ -491,7 +491,8 @@ pub struct EngineConfig {
     /// construction; the engine never touches disk for it.
     pub locale_tag: String,
     /// When true, force `tool_choice: "required"` and opt compatible function
-    /// schemas into DeepSeek beta strict mode.
+    /// schemas into DeepSeek beta strict mode — on official DeepSeek-family
+    /// routes only (`crate::config::strict_tool_mode_for_route`).
     pub strict_tool_mode: bool,
     /// Workshop / large-tool-output routing (#548). `None` disables routing.
     pub workshop: Option<crate::tools::large_output_router::WorkshopConfig>,
@@ -5720,13 +5721,24 @@ impl Engine {
         if self.config.features.enabled(Feature::Mcp) {
             apply_registry_first_shell_guidance(&mut catalog);
         }
+        // The strict pipeline encodes DeepSeek's strict-mode contract, so it
+        // acts only on official DeepSeek-family routes; elsewhere it would
+        // strip keywords the other provider documents (minItems/maxItems on
+        // OpenAI) and remove optional properties no other contract asks to
+        // remove. This gate also drives the turn loop's `tool_choice` and the
+        // preview surface, which read the flag off this policy.
+        let strict_tool_mode = crate::config::strict_tool_mode_for_route(
+            self.config.strict_tool_mode,
+            route.provider,
+            &route.api_config.deepseek_base_url(),
+        );
         let surface = ToolSurfacePolicy::new(
             tool_registry,
             Some(catalog),
             input_policy.mode,
             &always_load,
             &input_policy.dynamic_active_tools,
-            self.config.strict_tool_mode,
+            strict_tool_mode,
             allowed_tools,
             self.config.disallowed_tools.clone(),
             self.config.max_tool_calls,

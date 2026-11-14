@@ -3215,14 +3215,18 @@ pub(super) fn tool_to_chat_for_base_url(tool: &Tool, base_url: &str) -> Value {
 }
 
 fn deepseek_base_url_supports_strict_tools(base_url: &str) -> bool {
+    // The canonical URL sets are shared with the doctor's classifier and
+    // the beta routing (`config::DEEPSEEK_CANONICAL_*`), so the strip set
+    // cannot drift from the surfaces that report on it. Only the beta
+    // endpoints document strict mode; everywhere else the flag is stripped
+    // (including non-canonical official paths — but the strict gate only
+    // ever sets the flag on those when the reshaped wire keeps it, which
+    // the doctor's `official_route` verdict reports faithfully).
     let trimmed = base_url.trim_end_matches('/').to_ascii_lowercase();
-    let is_deepseek = trimmed == "https://api.deepseek.com"
-        || trimmed == "https://api.deepseek.com/v1"
-        || trimmed == "https://api.deepseek.com/beta"
-        || trimmed == "https://api.deepseeki.com"
-        || trimmed == "https://api.deepseeki.com/v1"
-        || trimmed == "https://api.deepseeki.com/beta";
-    !is_deepseek || trimmed.ends_with("/beta")
+    let is_beta = crate::config::DEEPSEEK_CANONICAL_BETA_URLS.contains(&trimmed.as_str());
+    let is_canonical_deepseek =
+        is_beta || crate::config::DEEPSEEK_CANONICAL_NON_BETA_URLS.contains(&trimmed.as_str());
+    !is_canonical_deepseek || is_beta
 }
 
 fn map_tool_choice_for_chat(choice: &Value) -> Option<Value> {

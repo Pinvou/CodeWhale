@@ -13701,3 +13701,144 @@ fn picker_and_request_path_disagree_when_the_secret_slot_marker_is_missing() -> 
     println!("CAPTURED first-fix: {:?}", resolution.first_fix());
     Ok(())
 }
+
+#[test]
+fn strict_pipeline_scope_is_official_deepseek_family_routes() {
+    // The DeepSeek strict pipeline reshapes schemas per DeepSeek's strict
+    // documents, so only provider-typed DeepSeek family routes on the
+    // official hosts may act on it — a misconfigured provider or a lookalike
+    // host must not receive the reshaping.
+    for provider in [
+        ApiProvider::Deepseek,
+        ApiProvider::DeepseekCN,
+        ApiProvider::DeepseekAnthropic,
+    ] {
+        for base_url in [
+            "https://api.deepseek.com",
+            "https://api.deepseek.com/",
+            "https://api.deepseek.com/v1",
+            "https://api.deepseek.com/beta",
+            "https://api.deepseek.com/anthropic",
+            "https://api.deepseeki.com",
+            "https://api.deepseeki.com/beta",
+        ] {
+            assert!(
+                super::route_is_official_deepseek_family(provider, base_url),
+                "{provider:?} on {base_url} is an official family route"
+            );
+        }
+    }
+
+    for (provider, base_url, why) in [
+        (
+            ApiProvider::Openai,
+            "https://api.deepseek.com/beta",
+            "a DeepSeek URL under a non-DeepSeek provider stays out of scope",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://llm.example.com/v1",
+            "a custom endpoint is not an official family route",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com.evil.example/beta",
+            "a lookalike host must not pass the host-boundary check",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "http://api.deepseek.com/beta",
+            "plaintext http is not the official endpoint",
+        ),
+        (
+            ApiProvider::Moonshot,
+            "https://api.moonshot.ai/v1",
+            "unrelated providers stay out of scope",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "  HTTPS://API.DEEPSEEK.COM/BETA  ",
+            "a whitespace-padded URL matches no surface that string-compares the base URL \
+             (this gate, the doctor classifier, the wire strip set), so admitting it here \
+             alone would leak the strict flag past the non-beta strip; it stays out of scope",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com/beta\t",
+            "whitespace padding after a path fails the same no-trim boundary check — \
+             the strip set string-compares this exact text and would not strip, \
+             so admitting it here alone would leak the strict flag",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com/v1 ",
+            "trailing whitespace after a path degrades the route out of scope",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https:// api.deepseek.com/beta",
+            "interior whitespace is rejected without any trimming",
+        ),
+    ] {
+        assert!(
+            !super::route_is_official_deepseek_family(provider, base_url),
+            "{why}: {provider:?} on {base_url}"
+        );
+    }
+}
+
+#[test]
+fn deepseek_canonical_url_sets_stay_inside_the_official_host_gate() {
+    // The chat strip, the beta routing, and the doctor's classifier all
+    // read `DEEPSEEK_CANONICAL_*`; every canonical URL must keep passing
+    // the broader official-host gate (`url_is_official_deepseek_host`)
+    // so no surface can recognize an endpoint the gate would reject, and
+    // the beta set must stay disjoint from the non-beta set so the strip
+    // decision cannot flip.
+    for url in super::DEEPSEEK_CANONICAL_BETA_URLS
+        .iter()
+        .chain(super::DEEPSEEK_CANONICAL_NON_BETA_URLS.iter())
+    {
+        assert!(
+            super::url_is_official_deepseek_host(url),
+            "canonical {url} must pass the official-host gate"
+        );
+    }
+    for url in super::DEEPSEEK_CANONICAL_BETA_URLS {
+        assert!(url.ends_with("/beta"), "{url} must be a beta endpoint");
+        assert!(
+            !super::DEEPSEEK_CANONICAL_NON_BETA_URLS.contains(url),
+            "{url} must not appear in the non-beta set"
+        );
+    }
+    for url in super::DEEPSEEK_CANONICAL_NON_BETA_URLS {
+        assert!(!url.ends_with("/beta"), "{url} must not be a beta endpoint");
+    }
+}
+
+#[test]
+fn strict_tool_mode_for_route_combines_the_flag_with_the_official_route_gate() {
+    // One composition answers for the engine turn surface, the child
+    // sub-agent surface, and the doctor — the user flag alone must never
+    // enable the pipeline, and an official URL alone must not either.
+    assert!(super::strict_tool_mode_for_route(
+        true,
+        ApiProvider::Deepseek,
+        "https://api.deepseek.com/beta"
+    ));
+    assert!(!super::strict_tool_mode_for_route(
+        false,
+        ApiProvider::Deepseek,
+        "https://api.deepseek.com/beta"
+    ));
+    assert!(!super::strict_tool_mode_for_route(
+        true,
+        ApiProvider::Openai,
+        "https://api.deepseek.com/beta"
+    ));
+    assert!(!super::strict_tool_mode_for_route(
+        true,
+        ApiProvider::Deepseek,
+        "https://llm.example.com/v1"
+    ));
+}
