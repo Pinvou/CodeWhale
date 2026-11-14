@@ -1379,7 +1379,8 @@ where
                         {
                             if let Some(probe) = pending_ping.take() {
                                 last_inbound = tokio::time::Instant::now();
-                                // probe 恰为 8 字节，rtt_sample 的 None 分支不可达；
+                                // 传入 rtt_sample 的切片恒为 8 字节（probe 是
+                                // [u8;16]，取前 8 字节），None 分支不可达；
                                 // 按工作区 unwrap 禁令以守卫处理而非 panic。
                                 if let Some(millis) = rtt_sample(config.clock.as_ref(), &probe[..8])
                                 {
@@ -1634,7 +1635,9 @@ pub(super) fn dispatch_test_transport_frame_to_sink(
     // c03bf63470 重构后 cfg(test) 包装 `dispatch_inbound` 的返回语义变为
     // `positive_lease.is_some()`（供退避调度自测），与 `controlling_inbound_tests`
     // 的「饱和帧仍算准入」等断言错位。适配器固定取 evidence.accepted 以保留
-    // 两个测试域各自需要的语义。
+    // 两个测试域各自需要的语义。注意与重构前旧 bool 的唯一分歧分支：被准入的
+    // error 帧旧版返回 false、accepted 为 true（本测试域现有用例的 error 帧直通
+    // ingress.enqueue，不经适配器；未来写 admit 断言时勿按旧 bool 预期）。
     dispatch_inbound_evidence(&config, sender, sink, &frame.to_string()).accepted
 }
 
