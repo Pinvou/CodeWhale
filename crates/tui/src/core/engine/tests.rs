@@ -36576,16 +36576,28 @@ async fn turn_surface_strict_tool_mode_follows_the_official_route_gate() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn strict_mode_full_catalog_census_pins_every_removal() {
-    // The strict pipeline removes every optional property from every
-    // tool on an in-scope route — a capability loss the catalog pays on
-    // every request. This census feeds the REAL turn-surface catalog
-    // through the pipeline and pins the per-tool outcome so a new tool
-    // (or a schema change) that adds removals — or worse, reduces a tool
-    // to a lone discriminator or an empty root — must update this test
-    // instead of silently degrading on the wire. Tools whose lost
-    // parameters break specific runtime actions carry a context note
-    // (STRICT_REMOVAL_CONTEXT_NOTES in tools/schema_sanitize.rs); the
-    // census asserts the note actually renders for each of them.
+    // The strict pipeline removes every optional property from every tool
+    // on an in-scope route — a capability loss the catalog pays on every
+    // request. This census feeds the REAL turn-surface catalog through the
+    // pipeline and pins what the shipped wire form must look like:
+    //
+    // - a tool that failed closed keeps its authored schema;
+    // - a strict-shipped tool that lost a parameter at any depth carries
+    //   the removal note;
+    // - no strict-shipped tool ships an empty property set (the gate's
+    //   empty-root arm makes that impossible);
+    // - every `STRICT_REMOVAL_CONTEXT_NOTES` entry names a real
+    //   model-visible catalog tool that ships strict and renders its
+    //   sentence, so a deleted, miskeyed, or renamed entry fails here
+    //   instead of silently degrading;
+    // - a meaningful fraction of the catalog ships strict at all, so a
+    //   regression that makes the gate reject wholesale cannot pass by
+    //   way of every check above being vacuously true.
+    //
+    // Per-tool runtime contracts (a tool whose `execute` demands
+    // schema-optional parameters on every call) are pinned by the per-tool
+    // census tests beside their definitions (`update_goal`, `send_later`,
+    // `agents/message`, `agents/followup`), not here.
     let _env_lock = lock_test_env();
     let tmp = tempdir().expect("tempdir");
     let home = tmp.path().join("home");
@@ -36607,6 +36619,10 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
             workspace,
             allow_shell: true,
             strict_tool_mode: true,
+            // `remember` registers only when the engine's memory feature
+            // is on; the census pins its context note, so the fixture
+            // must opt in.
+            memory_enabled: true,
             ..EngineConfig::default()
         },
         &api_config,
@@ -36663,6 +36679,18 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
         "the built-in catalog contains tools the strict pipeline fails closed \
          by name (the census ran on the full surface)"
     );
+    // Wholesale gate failure must not pass by making every check below
+    // vacuous: at minimum the context-note tools (git, lsp, bash, remember,
+    // plus pandoc where the binary exists) ship strict.
+    let strict_count = processed
+        .iter()
+        .filter(|tool| tool.strict == Some(true))
+        .count();
+    assert!(
+        strict_count >= 4,
+        "only {strict_count} tools shipped strict — the gate is failing the \
+         catalog closed wholesale"
+    );
 
     for (before, after) in original.iter().zip(&processed) {
         assert_eq!(
@@ -36679,53 +36707,14 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
             );
             continue;
         }
-        // Every strict-shipped tool that lost parameters must carry the
-        // removal note, and the tools whose lost parameters break specific
-        // runtime actions must carry their per-tool context sentence.
-        let removed_any = before
-            .input_schema
-            .get("properties")
-            .and_then(serde_json::Value::as_object)
-            .map(|before_properties| {
-                let after_properties = after
-                    .input_schema
-                    .get("properties")
-                    .and_then(serde_json::Value::as_object)
-                    .expect("strict keeps the properties map");
-                before_properties
-                    .keys()
-                    .any(|name| !after_properties.contains_key(name))
-            })
-            .unwrap_or(false);
-        if removed_any {
+        // Every strict-shipped tool that lost a parameter — at the root or
+        // nested — must carry the removal note.
+        if strict_census_removed_any_property(&before.input_schema, &after.input_schema) {
             assert!(
                 after.description.contains("Strict mode:"),
-                "{} lost optional parameters without the removal note",
+                "{} lost parameters without the removal note",
                 after.name
             );
-        }
-        let context_note_fragments: &[(&str, &str)] = &[
-            ("Git", "In strict mode `show` and `blame` are unavailable"),
-            (
-                "lsp",
-                "In strict mode `definition` and `references` are unavailable",
-            ),
-            (
-                "pandoc_convert",
-                "In strict mode binary target formats are unavailable",
-            ),
-            ("remember", "In strict mode only `append` is available"),
-            ("Bash", "the sandbox-escalation retry is unavailable"),
-        ];
-        for (name, fragment) in context_note_fragments {
-            if before.name == *name {
-                assert!(
-                    after.description.contains(fragment),
-                    "{name} lost runtime-required parameters — its context \
-                     note must name the dead capabilities: {}",
-                    after.description
-                );
-            }
         }
         // No strict tool may ship an empty property set: the gate fails
         // such roots closed, so an empty map here means the gate lost an
@@ -36743,4 +36732,95 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
             );
         }
     }
+
+    // The context notes are pinned from the production constant itself:
+    // each entry must name a model-visible catalog tool that ships strict
+    // and renders its sentence verbatim. A key the wire never sees (like
+    // the hidden capital-B `Bash`) or a rename on either side turns this
+    // red instead of silently dropping the sentence.
+    //
+    // The key set itself is the census manifest: iterating the constant
+    // alone could not catch a DELETED entry (it would simply stop being
+    // iterated), so the names are pinned exactly — a deletion, an
+    // addition, or a rename fails here, while the sentence text still
+    // lives only in the constant.
+    assert_eq!(
+        crate::tools::schema_sanitize::STRICT_REMOVAL_CONTEXT_NOTES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        ["Git", "lsp", "pandoc_convert", "remember", "bash"],
+        "STRICT_REMOVAL_CONTEXT_NOTES drifted from the census manifest — \
+         add the tool here AND a context-note entry in the constant, with \
+         the runtime contract cited at the schema"
+    );
+    for (name, note) in crate::tools::schema_sanitize::STRICT_REMOVAL_CONTEXT_NOTES {
+        let after = match processed.iter().find(|tool| &tool.name == name) {
+            Some(tool) => tool,
+            None if *name == "pandoc_convert"
+                && crate::dependencies::resolve_pandoc().is_none() =>
+            {
+                // Registered only when the binary exists on this host;
+                // the sentence is pinned on hosts that have it.
+                continue;
+            }
+            None => panic!(
+                "STRICT_REMOVAL_CONTEXT_NOTES keys {name}, but the \
+                 model-visible catalog has no such tool — the constant is \
+                 keyed to a name the wire never sees"
+            ),
+        };
+        assert_eq!(
+            after.strict,
+            Some(true),
+            "{name} carries a context note, so it must ship strict on its \
+             real schema"
+        );
+        assert!(
+            after.description.contains(note),
+            "{name} lost runtime-required parameters — its context note must \
+             render verbatim; got: {}",
+            after.description
+        );
+    }
+}
+
+/// Whether the strict pipeline removed a property anywhere in the schema:
+/// walks both shapes in parallel (skipping literal keyword values, whose
+/// members are values, not schemas) and reports a name present under
+/// `properties` in the authored shape but gone from the shipped one.
+fn strict_census_removed_any_property(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) -> bool {
+    let (Some(before_obj), Some(after_obj)) = (before.as_object(), after.as_object()) else {
+        if let (Some(before_items), Some(after_items)) = (before.as_array(), after.as_array()) {
+            return before_items
+                .iter()
+                .zip(after_items.iter())
+                .any(|(b, a)| strict_census_removed_any_property(b, a));
+        }
+        return false;
+    };
+    if let (Some(before_properties), Some(after_properties)) = (
+        before_obj.get("properties").and_then(|v| v.as_object()),
+        after_obj.get("properties").and_then(|v| v.as_object()),
+    ) && before_properties
+        .keys()
+        .any(|name| !after_properties.contains_key(name))
+    {
+        return true;
+    }
+    for (key, before_value) in before_obj {
+        if matches!(key.as_str(), "enum" | "const" | "default" | "examples") {
+            continue;
+        }
+        let Some(after_value) = after_obj.get(key) else {
+            continue;
+        };
+        if strict_census_removed_any_property(before_value, after_value) {
+            return true;
+        }
+    }
+    false
 }
