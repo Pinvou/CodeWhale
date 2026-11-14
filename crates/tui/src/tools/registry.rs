@@ -1460,6 +1460,19 @@ fn is_mcp_read_helper(name: &str) -> bool {
             | "mcp_read_resource"
             | "read_mcp_resource"
             | "mcp_get_prompt"
+            // The host's first-party session-reader surface (a bundled
+            // read-only MCP server, key "session-reader"): L0 transcript
+            // reads with a server-side contract — cursor-paginated,
+            // completed-turns-only, per-item truncation, isolated
+            // session-id prefixes refused — so it is genuinely read-only
+            // and misclassifying it as an approval-required network tool
+            // dead-ends every read-only posture (e.g. a Plan-pinned aux
+            // lane whose sole tool is the scoped read) before execution.
+            // Exact-name matching keeps prefixed impostors
+            // ("mcp_session-reader_read_session_export") on the
+            // approval-required side.
+            | "mcp_session-reader_read_session"
+            | "mcp_session-reader_list_sessions"
     )
 }
 
