@@ -1005,11 +1005,48 @@ pub fn route_is_official_deepseek_family(provider: ApiProvider, base_url: &str) 
     ) {
         return false;
     }
-    // No whitespace trimming: the doctor's URL classifier and the client's
-    // strict-host sets string-match the same URL without trimming, so
-    // admitting a padded URL here alone would put the pipeline in scope on
-    // a route the wire does not canonicalize — the flag would leak past the
-    // non-beta strip. A padded URL degrades to out-of-scope instead.
+    url_is_official_deepseek_host(base_url)
+}
+
+/// The canonical official DeepSeek beta endpoints, lowercase with any
+/// trailing `/` trimmed: where the wire keeps the `function.strict` flag
+/// (the chat strip), where the request is routed to
+/// `beta/chat/completions` (`client.rs`), and where the doctor reports
+/// the beta verdict — one constant so the three lists cannot drift.
+pub const DEEPSEEK_CANONICAL_BETA_URLS: &[&str] = &[
+    "https://api.deepseek.com/beta",
+    "https://api.deepseeki.com/beta",
+];
+
+/// The canonical official DeepSeek non-beta chat endpoints, lowercase
+/// with any trailing `/` trimmed: the chat wire strips `function.strict`
+/// here (only `/beta` supports it) and the doctor reports
+/// `fallback_non_beta`. The strict host gate
+/// (`url_is_official_deepseek_host`) is deliberately broader than both
+/// canonical lists — any path on the official hosts — and every URL in
+/// these lists is pinned to pass that gate in `config` tests.
+pub const DEEPSEEK_CANONICAL_NON_BETA_URLS: &[&str] = &[
+    "https://api.deepseek.com",
+    "https://api.deepseek.com/v1",
+    "https://api.deepseeki.com",
+    "https://api.deepseeki.com/v1",
+];
+
+/// Whether the URL sits on an official DeepSeek host: the scheme-and-host
+/// prefixes the strict gate, the client, and the doctor all recognize,
+/// matched with an exact boundary — a prefix must be the whole URL or be
+/// followed by a path (`/`), so `api.deepseek.com.evil.example`, userinfo
+/// tricks, explicit ports, and lookalike hosts all fail. No whitespace
+/// trimming anywhere in the match: the client's strict-host sets and the
+/// doctor's classifier string-match the URL without trimming, so
+/// admitting a padded URL here alone would put the pipeline in scope on a
+/// route the wire does not canonicalize — the flag would leak past the
+/// non-beta strip. A padded URL (leading, trailing, or interior
+/// whitespace) degrades to out-of-scope instead.
+pub fn url_is_official_deepseek_host(base_url: &str) -> bool {
+    if base_url.chars().any(char::is_whitespace) {
+        return false;
+    }
     let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
     let official_host = |prefix: &str| {
         normalized == prefix

@@ -7533,7 +7533,13 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
         config.api_provider(),
         &target.base_url,
     ) {
-        if known_deepseek_base_url_kind(&target.base_url).is_some() {
+        // The gate rejected on provider typing or the host. When the URL is
+        // on an official DeepSeek host — canonical or any other path — the
+        // provider is the problem, so the mismatch arm names it; anything
+        // else is genuinely a custom endpoint. (Canonicality used to gate
+        // this arm, which mislabeled an official path like `/v2` under a
+        // non-family provider as a custom endpoint.)
+        if crate::config::url_is_official_deepseek_host(&target.base_url) {
             return DoctorStrictToolModeStatus {
                 enabled: true,
                 status: "provider_mismatch",
@@ -7694,14 +7700,14 @@ enum DeepSeekBaseUrlKind {
 
 fn known_deepseek_base_url_kind(base_url: &str) -> Option<DeepSeekBaseUrlKind> {
     let normalized = base_url.trim_end_matches('/');
-    if normalized.eq_ignore_ascii_case("https://api.deepseek.com/beta")
-        || normalized.eq_ignore_ascii_case("https://api.deepseeki.com/beta")
+    if crate::config::DEEPSEEK_CANONICAL_BETA_URLS
+        .iter()
+        .any(|url| normalized.eq_ignore_ascii_case(url))
     {
         Some(DeepSeekBaseUrlKind::Beta)
-    } else if normalized.eq_ignore_ascii_case("https://api.deepseek.com")
-        || normalized.eq_ignore_ascii_case("https://api.deepseek.com/v1")
-        || normalized.eq_ignore_ascii_case("https://api.deepseeki.com")
-        || normalized.eq_ignore_ascii_case("https://api.deepseeki.com/v1")
+    } else if crate::config::DEEPSEEK_CANONICAL_NON_BETA_URLS
+        .iter()
+        .any(|url| normalized.eq_ignore_ascii_case(url))
     {
         Some(DeepSeekBaseUrlKind::NonBeta)
     } else {
@@ -14178,6 +14184,37 @@ mod doctor_endpoint_tests {
         let status = doctor_strict_tool_mode_status(&config);
 
         assert_eq!(status.status, "provider_mismatch");
+        assert!(!status.function_strict_sent);
+        assert!(status.message.contains("not the DeepSeek family"));
+        assert!(status.recommended_base_url.is_none());
+    }
+
+    #[test]
+    fn strict_tool_mode_doctor_names_the_provider_for_official_non_canonical_paths() {
+        // Any path on the official DeepSeek host is a DeepSeek endpoint;
+        // under a non-family provider the mismatch arm must name the
+        // provider, not mislabel the URL as a custom endpoint — the
+        // remedy is the provider setting, not the URL.
+        let config = Config {
+            provider: Some("openai".to_string()),
+            strict_tool_mode: Some(true),
+            providers: Some(crate::config::ProvidersConfig {
+                openai: crate::config::ProviderConfig {
+                    base_url: Some("https://api.deepseek.com/v2".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let status = doctor_strict_tool_mode_status(&config);
+
+        assert_eq!(
+            status.status, "provider_mismatch",
+            "an official-host path under a non-family provider is a provider mismatch, \
+             not a custom endpoint"
+        );
         assert!(!status.function_strict_sent);
         assert!(status.message.contains("not the DeepSeek family"));
         assert!(status.recommended_base_url.is_none());

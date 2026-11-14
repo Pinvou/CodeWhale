@@ -13762,11 +13762,57 @@ fn strict_pipeline_scope_is_official_deepseek_family_routes() {
              (this gate, the doctor classifier, the wire strip set), so admitting it here \
              alone would leak the strict flag past the non-beta strip; it stays out of scope",
         ),
+        (
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com/beta\t",
+            "whitespace padding after a path fails the same no-trim boundary check — \
+             the strip set string-compares this exact text and would not strip, \
+             so admitting it here alone would leak the strict flag",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com/v1 ",
+            "trailing whitespace after a path degrades the route out of scope",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https:// api.deepseek.com/beta",
+            "interior whitespace is rejected without any trimming",
+        ),
     ] {
         assert!(
             !super::route_is_official_deepseek_family(provider, base_url),
             "{why}: {provider:?} on {base_url}"
         );
+    }
+}
+
+#[test]
+fn deepseek_canonical_url_sets_stay_inside_the_official_host_gate() {
+    // The chat strip, the beta routing, and the doctor's classifier all
+    // read `DEEPSEEK_CANONICAL_*`; every canonical URL must keep passing
+    // the broader official-host gate (`url_is_official_deepseek_host`)
+    // so no surface can recognize an endpoint the gate would reject, and
+    // the beta set must stay disjoint from the non-beta set so the strip
+    // decision cannot flip.
+    for url in super::DEEPSEEK_CANONICAL_BETA_URLS
+        .iter()
+        .chain(super::DEEPSEEK_CANONICAL_NON_BETA_URLS.iter())
+    {
+        assert!(
+            super::url_is_official_deepseek_host(url),
+            "canonical {url} must pass the official-host gate"
+        );
+    }
+    for url in super::DEEPSEEK_CANONICAL_BETA_URLS {
+        assert!(url.ends_with("/beta"), "{url} must be a beta endpoint");
+        assert!(
+            !super::DEEPSEEK_CANONICAL_NON_BETA_URLS.contains(url),
+            "{url} must not appear in the non-beta set"
+        );
+    }
+    for url in super::DEEPSEEK_CANONICAL_NON_BETA_URLS {
+        assert!(!url.ends_with("/beta"), "{url} must not be a beta endpoint");
     }
 }
 
