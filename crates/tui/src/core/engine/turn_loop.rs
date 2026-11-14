@@ -3863,7 +3863,12 @@ impl Engine {
             ));
 
             let requested_tool_name = tool_name.clone();
-            let tool_def = resolve_tool_definition(&mut tool_name, tool_catalog, tool_registry);
+            let tool_def = resolve_tool_definition(
+                &mut tool_name,
+                tool_catalog,
+                tool_registry,
+                matches!(self.api_provider, ApiProvider::Moonshot),
+            );
             if requested_tool_name != tool_name {
                 tool.name = tool_name.clone();
             }
@@ -7544,6 +7549,7 @@ fn resolve_tool_definition<'a>(
     tool_name: &mut String,
     tool_catalog: &'a [Tool],
     tool_registry: Option<&crate::tools::ToolRegistry>,
+    moonshot_wire: bool,
 ) -> Option<&'a Tool> {
     let mut tool_def = tool_catalog
         .iter()
@@ -7574,6 +7580,37 @@ fn resolve_tool_definition<'a>(
         tool_def = tool_catalog.iter().find(|d| d.name == catalog_name);
         if tool_def.is_some() && !exact_hidden_handler {
             *tool_name = catalog_name.to_string();
+        }
+    }
+
+    // Moonshot digit-led wire recovery: the Moonshot request path prefixes a
+    // digit-led registry name with `_` to satisfy Kimi's documented `name`
+    // pattern, and the response decoder deliberately leaves that prefix in
+    // place — a bare underscore strip here would corrupt genuinely
+    // underscore-led names. Only when every exact and alias lookup above
+    // missed and the wire spelling carries the exact `_<digit>` shape the
+    // prefix produces does dispatch fall back to the unprefixed name, so a
+    // registry that really contains both spellings still resolves exactly.
+    // The recovery is Moonshot-gated (review 4539829148): only the Moonshot
+    // request path mints `_<digit>` spellings, so the same shape from any
+    // other provider can only be a hallucinated name, which must fail
+    // dispatch rather than resolve onto a digit-led registry tool it never
+    // saw advertised.
+    if moonshot_wire
+        && tool_def.is_none()
+        && tool_name.len() > 1
+        && tool_name.starts_with('_')
+        && tool_name.as_bytes()[1].is_ascii_digit()
+    {
+        let unprefixed = tool_name[1..].to_string();
+        if let Some(def) = tool_catalog
+            .iter()
+            .find(|def| def.name.as_str() == unprefixed)
+        {
+            tool_def = Some(def);
+            *tool_name = unprefixed;
+        } else if tool_registry.is_some_and(|registry| registry.get(&unprefixed).is_some()) {
+            *tool_name = unprefixed;
         }
     }
 
@@ -8580,7 +8617,7 @@ mod tests {
         let catalog = registry.to_api_tools();
         let mut tool_name = "read_file".to_string();
 
-        let tool_def = resolve_tool_definition(&mut tool_name, &catalog, Some(&registry));
+        let tool_def = resolve_tool_definition(&mut tool_name, &catalog, Some(&registry), false);
 
         assert!(tool_def.is_some());
         assert_eq!(tool_name, "read_file");
@@ -8599,9 +8636,169 @@ mod tests {
 
         for legacy in ["File", "read_file", "write_file", "edit_file"] {
             let mut name = legacy.to_string();
-            assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry)).is_some());
+            assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry), false).is_some());
             assert_eq!(name, legacy);
         }
+    }
+
+    /// Minimal registry tool with a caller-chosen name, for wire-name tests.
+    struct NamedProbeTool {
+        name: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::spec::ToolSpec for NamedProbeTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "probe"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            })
+        }
+
+        fn capabilities(&self) -> Vec<crate::tools::spec::ToolCapability> {
+            vec![crate::tools::spec::ToolCapability::ReadOnly]
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _context: &crate::tools::spec::ToolContext,
+        ) -> Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError> {
+            Ok(crate::tools::spec::ToolResult {
+                content: "probe ok".to_string(),
+                success: true,
+                metadata: None,
+            })
+        }
+    }
+
+    #[test]
+    fn moonshot_digit_led_wire_name_resolves_to_the_registry_tool() {
+        // The Moonshot chat path advertises a digit-led registry tool as
+        // `_3d_render` on the wire (Kimi's documented name pattern), the
+        // response decoder deliberately keeps that spelling, and dispatch
+        // must fall back to the unprefixed registry name — otherwise the
+        // model's calls can never dispatch.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        let mut registry = crate::tools::ToolRegistry::new(context);
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "3d_render" }));
+        let catalog = registry.to_api_tools();
+
+        let mut name = "_3d_render".to_string();
+        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true);
+        assert!(tool_def.is_some(), "digit-led wire name must resolve");
+        assert_eq!(name, "3d_render");
+        assert!(registry.get(&name).is_some());
+
+        // A genuinely underscore-led name resolves exactly as itself; the
+        // fallback must never strip it.
+        let mut name = "_flat_tool".to_string();
+        assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry), true).is_none());
+        assert_eq!(name, "_flat_tool");
+    }
+
+    #[test]
+    fn non_moonshot_wire_never_recovers_the_digit_led_spelling() {
+        // Only the Moonshot request path mints `_<digit>` spellings. On any
+        // other provider the same wire name can only be a hallucinated name
+        // (review 4539829148): dispatch must fail instead of resolving it
+        // onto the digit-led registry tool that provider never saw, per the
+        // registry invariant that a hallucinated name never dispatches.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        let mut registry = crate::tools::ToolRegistry::new(context);
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "3d_render" }));
+        let catalog = registry.to_api_tools();
+
+        let mut name = "_3d_render".to_string();
+        assert!(
+            resolve_tool_definition(&mut name, &catalog, Some(&registry), false).is_none(),
+            "a non-Moonshot provider must not resolve the prefixed spelling"
+        );
+        assert_eq!(
+            name, "_3d_render",
+            "the hallucinated spelling must stay untouched"
+        );
+
+        // The bare digit-led name itself still resolves by exact lookup on
+        // any provider — the gate only closes the underscore fallback.
+        let mut bare = "3d_render".to_string();
+        assert!(resolve_tool_definition(&mut bare, &catalog, Some(&registry), false).is_some());
+        assert_eq!(bare, "3d_render");
+    }
+
+    #[test]
+    fn moonshot_digit_led_collision_resolves_to_the_exact_spelling() {
+        // When the registry contains both spellings, the wire name
+        // `_3d_render` must keep resolving to the underscore twin — the
+        // fallback only fires after every exact lookup missed.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        let mut registry = crate::tools::ToolRegistry::new(context);
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "3d_render" }));
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "_3d_render" }));
+        let catalog = registry.to_api_tools();
+
+        let mut name = "_3d_render".to_string();
+        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true);
+        assert!(tool_def.is_some());
+        assert_eq!(name, "_3d_render");
+    }
+
+    #[test]
+    fn moonshot_collided_projection_resolves_exact_and_never_misdispatches() {
+        // End-to-end round trip over the PROJECTED catalog (review
+        // 5886233560): when both registry spellings exist, the Moonshot wire
+        // drops the digit-led twin, so dispatch only ever sees the
+        // underscore tool. A response call spelling `_3d_render` then
+        // resolves by exact match to that tool — the fallback never fires —
+        // and a hallucinated call for the dropped digit-led name fails
+        // dispatch instead of reaching either handler.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        let mut registry = crate::tools::ToolRegistry::new(context);
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "3d_render" }));
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "_3d_render" }));
+        let full_catalog = registry.to_api_tools();
+
+        // Project the full catalog the way the Moonshot wire does: the
+        // digit-led tool's minted name collides, so it is dropped and only
+        // the underscore tool is advertised.
+        let projected: Vec<crate::models::Tool> = full_catalog
+            .iter()
+            .filter(|tool| tool.name != "3d_render")
+            .cloned()
+            .collect();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].name, "_3d_render");
+
+        let mut name = "_3d_render".to_string();
+        let tool_def = resolve_tool_definition(&mut name, &projected, Some(&registry), true);
+        assert!(tool_def.is_some(), "the surviving wire name must dispatch");
+        assert_eq!(
+            name, "_3d_render",
+            "exact match wins; the digit-led fallback must not fire"
+        );
+        assert_eq!(
+            tool_def.expect("resolved").name, "_3d_render",
+            "the call must reach the underscore tool, never the digit-led twin"
+        );
+
+        let mut name = "3d_render".to_string();
+        assert!(
+            resolve_tool_definition(&mut name, &projected, Some(&registry), true).is_none(),
+            "a hallucinated call for the dropped tool must fail dispatch"
+        );
     }
 
     #[tokio::test]
@@ -8627,7 +8824,7 @@ mod tests {
             }),
         ] {
             let mut name = "File".to_string();
-            assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry)).is_some());
+            assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry), false).is_some());
             assert_eq!(name, "File");
             registry
                 .execute_full(&name, input)
@@ -8644,7 +8841,7 @@ mod tests {
         );
 
         let mut name = "Bash".to_string();
-        assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry)).is_some());
+        assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry), false).is_some());
         assert_eq!(name, "Bash");
         let command = if cfg!(windows) {
             "echo legacy-bash"
@@ -8687,7 +8884,7 @@ mod tests {
             }),
         ] {
             let mut name = "File".to_string();
-            assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry)).is_some());
+            assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry), false).is_some());
             let prepared = prepare_tool_call(&name, input.clone(), Some(&registry), false)
                 .expect("saved File call prepares through its hidden handler");
             assert!(!prepared.call.read_only);

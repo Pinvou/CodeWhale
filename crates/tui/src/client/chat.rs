@@ -17,8 +17,7 @@ use tokio::time::timeout as tokio_timeout;
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
     is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
-    is_exact_zai_tiered_effort_route, is_kimi_code_membership_model,
-    minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_kimi_code,
+    is_exact_zai_tiered_effort_route, minimax_m3_route_uses_max_completion_tokens,
     wire_model_for_provider_route,
 };
 
@@ -940,21 +939,62 @@ fn apply_direct_moonshot_k3_fixed_sampling(
     }
 }
 
-/// Kimi Code's documented membership models own their sampling behavior.
-/// Strip generic controls only on the exact first-party membership route;
-/// custom gateways and unknown model ids retain their own wire contract.
-/// Source: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
-/// (verified 2026-08-26).
-fn apply_kimi_code_fixed_sampling(
-    body: &mut Value,
-    provider: ApiProvider,
-    base_url: &str,
-    model: &str,
-) {
-    if provider != ApiProvider::Moonshot
-        || !moonshot_base_url_is_exact_kimi_code(base_url)
-        || !is_kimi_code_membership_model(model)
-    {
+/// Whether a configured route is exactly one of Kimi Code's official
+/// membership endpoints: China `https://api.kimi.com/coding/v1` or overseas
+/// `https://api.kimi.ai/coding/v1`.
+///
+/// The official Kimi Code documentation lists both hosts for the same
+/// product ("Kimi Code API address — China `https://api.kimi.com/coding/v1`,
+/// Overseas `https://api.kimi.ai/coding/v1`",
+/// <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>, re-verified
+/// 2026-11-05), so the membership route contract spans both spellings.
+///
+/// Classification runs through the shared config-crate primitive
+/// `codewhale_config::provider::is_exact_https_route` (the matcher behind
+/// `is_exact_kimi_code_route`), so the scheme/authority/path and
+/// trailing-slash semantics here cannot drift from the route predicates.
+/// Widening `is_exact_kimi_code_route` itself belongs to in-flight PR #137,
+/// so the two-host membership policy stays at this caller.
+#[must_use]
+fn kimi_code_sampling_route(base_url: &str) -> bool {
+    const KIMI_CODE_ENDPOINTS: [(&str, &str); 2] =
+        [("api.kimi.com", "coding/v1"), ("api.kimi.ai", "coding/v1")];
+
+    KIMI_CODE_ENDPOINTS.iter().any(|(host, endpoint_path)| {
+        codewhale_config::provider::is_exact_https_route(base_url, host, endpoint_path)
+    })
+}
+
+/// Kimi Code's membership endpoints own the sampling behavior of every model
+/// they serve. Strip generic controls from the exact first-party routes
+/// regardless of model id; custom gateways and the direct platform route
+/// keep their own wire contract.
+///
+/// The strip is deliberately route-scoped, not roster-scoped. The document
+/// backing is the Kimi Code guide's own instruction to omit generic sampling
+/// on these endpoints ("omit them from requests",
+/// <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>,
+/// verified 2026-08-26 and re-verified 2026-11-05). The 2026-11-04 live
+/// probe of the China endpoint (GET /models plus per-model requests) is an
+/// observation recorded alongside it, never the shipping basis: all six
+/// served ids — `k3`, `k3-256k`, `k3.1-pro`, `k3.1-pro-highspeed`,
+/// `kimi-for-coding`, `kimi-for-coding-highspeed` — rejected anything but
+/// the fixed values with a 400 ("invalid temperature: only 1 is allowed for
+/// this model" / "invalid top_p: only 0.95 is allowed for this model"). The
+/// roster has already lagged behind this endpoint three times (`k3-256k`,
+/// `kimi-for-coding-highspeed`, then both `k3.1-pro` spellings), so any
+/// model id the endpoint serves next is covered without a code change.
+///
+/// The overseas host `api.kimi.ai` joins on the same document: the official
+/// documentation presents both regional endpoints as the same product with
+/// the same wire contract (the 6/6-model probe covered only the China
+/// spelling — an observation on one host, not a widening of another). The
+/// failure mode is benign — not sending `temperature`/`top_p` is exactly
+/// the documented configuration for this endpoint, so an `.ai` route that
+/// would have tolerated generic sampling merely ships the documented shape
+/// instead.
+fn apply_kimi_code_fixed_sampling(body: &mut Value, provider: ApiProvider, base_url: &str) {
+    if provider != ApiProvider::Moonshot || !kimi_code_sampling_route(base_url) {
         return;
     }
     if let Some(object) = body.as_object_mut() {
@@ -1053,6 +1093,11 @@ fn mirror_minimax_reasoning_details_for_body(body: &mut Value, provider: ApiProv
 /// before transport. The tool name is safe to log — it is already visible in
 /// the UI — while the error's `Display` deliberately carries no schema values.
 ///
+/// One pipeline serves every Moonshot route: the wire contract is the MFJS
+/// specification's supported set, uniform across the platform and Kimi Code
+/// endpoints. The per-tool drop plus its projection warning stays the final
+/// safety net.
+///
 /// Returns the names of the dropped tools, in catalog order.
 fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
     let mut dropped = Vec::new();
@@ -1100,6 +1145,132 @@ fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
         }
     });
     dropped
+}
+
+/// Give digit-led API tool names the `_` prefix the Kimi wire requires.
+///
+/// Kimi's function-call `name` pattern is `^[a-zA-Z_][a-zA-Z0-9-_]{0,127}$`
+/// (platform.kimi.ai tool-use documents, fetched 2026-11-05): a leading
+/// digit sits outside the supported set, and `to_api_tool_name` only escapes
+/// characters the pattern cannot express at any position. Only the Moonshot
+/// path applies this — no other provider's documents carry the
+/// leading-character ban.
+///
+/// The mapping must stay reversible on two axes (review threads on
+/// 5896144003). Collision: when the catalog already carries the minted
+/// spelling (registry keys `3d_render` and `_3d_render` are distinct and can
+/// coexist — review 5886233560), both would advertise as `_3d_render` and
+/// every response call spelling `_3d_render` would resolve onto the
+/// underscore sibling through exact-match precedence — the digit-led tool is
+/// dropped from THIS request instead. Length: the pattern admits at most 128
+/// characters, so a 128-character digit-led name mints to 129 and the
+/// provider would 400 the whole request — that tool is dropped too. Both
+/// drops run against the catalog that already survived schema sanitization
+/// (the caller sanitizes first), so an invalid sibling never suppresses a
+/// valid tool. Returns the dropped tools' REGISTRY spellings plus the
+/// surviving mint spellings (registry -> wire), which the forced-choice
+/// check uses to tell a shadowed name from a live one.
+fn prefix_digit_led_tool_names_for_moonshot(
+    chat_tools: &mut Vec<Value>,
+) -> (Vec<String>, std::collections::HashMap<String, String>) {
+    let wire_names: Vec<String> = chat_tools
+        .iter()
+        .filter_map(|tool| {
+            tool.get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    const MFJS_MAX_NAME_LENGTH: usize = 128;
+    let mut dropped = Vec::new();
+    let mut minted_names = std::collections::HashMap::new();
+    chat_tools.retain_mut(|tool| {
+        let Some(function) = tool
+            .as_object_mut()
+            .and_then(|tool| tool.get_mut("function"))
+            .and_then(Value::as_object_mut)
+        else {
+            return true;
+        };
+        let Some(name) = function
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            return true;
+        };
+        if !name.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            return true;
+        }
+        let minted = format!("_{name}");
+        if minted.len() > MFJS_MAX_NAME_LENGTH {
+            tracing::warn!(
+                tool = %name,
+                wire_length = minted.len(),
+                "dropping Moonshot tool from this request: the minted wire name exceeds the documented 128-character maximum"
+            );
+            dropped.push(name);
+            return false;
+        }
+        if wire_names.iter().any(|existing| existing == &minted) {
+            tracing::warn!(
+                tool = %name,
+                wire = %minted,
+                "dropping Moonshot tool from this request: the minted wire name collides with an existing catalog tool"
+            );
+            dropped.push(name);
+            return false;
+        }
+        minted_names.insert(name, minted.clone());
+        function.insert("name".into(), json!(minted));
+        true
+    });
+    (dropped, minted_names)
+}
+
+/// Prefix one `function` object's `name` in place when it starts with an
+/// ASCII digit. The tools array goes through the collision-aware
+/// [`prefix_digit_led_tool_names_for_moonshot`] instead; this variant
+/// rewrites the replayed assistant `tool_calls`, which must carry the same
+/// wire spelling; dispatch resolves the prefixed spelling back to the
+/// registry name (see the digit-led wire recovery in the engine's tool
+/// resolution).
+fn prefix_digit_led_function_name(function: &mut serde_json::Map<String, Value>) {
+    let digit_led = function
+        .get("name")
+        .and_then(Value::as_str)
+        .and_then(|name| name.as_bytes().first())
+        .is_some_and(u8::is_ascii_digit);
+    if digit_led
+        && let Some(name) = function
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    {
+        function.insert("name".into(), json!(format!("_{name}")));
+    }
+}
+
+/// Re-prefix digit-led names on replayed assistant `tool_calls` for Moonshot.
+///
+/// Assistant turns persist the registry spelling (dispatch resolves the
+/// digit-led wire prefix back before executing), so the history carries
+/// `3d_render` while the tools array advertises `_3d_render`. Re-applying
+/// the prefix here keeps the replayed turns consistent with the tools array
+/// and inside Kimi's documented `name` pattern. Idempotent: names already
+/// carrying the wire prefix are not digit-led and stay untouched.
+fn prefix_digit_led_tool_call_names_for_moonshot(messages: &mut [Value]) {
+    for message in messages.iter_mut() {
+        let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for call in calls.iter_mut() {
+            if let Some(function) = call.get_mut("function").and_then(Value::as_object_mut) {
+                prefix_digit_led_function_name(function);
+            }
+        }
+    }
 }
 
 /// The final Chat Completions wire payload for one request.
@@ -1173,17 +1344,44 @@ pub(crate) fn build_chat_wire_body(
         body["top_p"] = json!(top_p);
     }
     let mut omitted_tool_names = Vec::new();
+    // Registry spellings that survived schema sanitization (pre-prefix):
+    // identity for the forced-choice check, distinct from the minted
+    // aliases below (review thread on 5897491074).
+    let mut moonshot_offered_registry_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut moonshot_minted_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     if let Some(tools) = request.tools.as_ref() {
         let mut chat_tools: Vec<_> = tools
             .iter()
             .map(|tool| tool_to_chat_for_base_url(tool, base_url))
             .collect();
-        // Moonshot function parameters must end at a plain object root.
-        // Flatten root composition, preserve valid nested anyOf, and drop
-        // only the tools whose parameters cannot pass MFJS validation so one
-        // incompatible tool never sinks the whole request.
+        // Moonshot function parameters must end at a plain object root (the
+        // Tool Use documentation; a root union is flattened on the strict
+        // face of the conflicting documents). Flatten remaining root
+        // composition, preserve valid nested anyOf, and drop only the tools
+        // whose parameters cannot pass MFJS validation so one incompatible
+        // tool never sinks the whole request.
         if matches!(provider, crate::config::ApiProvider::Moonshot) {
+            // Schema sanitization runs FIRST and records registry spellings:
+            // the collision check below must count only tools that survive
+            // it, or an invalid `_3d_render` sibling would suppress a valid
+            // `3d_render` as a phantom collision and neither tool would be
+            // advertised (review thread on 5896144003).
             omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools);
+            moonshot_offered_registry_names = chat_tools
+                .iter()
+                .filter_map(|tool| {
+                    tool.get("function")
+                        .and_then(|function| function.get("name"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect();
+            let (collision_dropped, minted_names) =
+                prefix_digit_led_tool_names_for_moonshot(&mut chat_tools);
+            omitted_tool_names.extend(collision_dropped);
+            moonshot_minted_names = minted_names;
         }
         // xAI rejects a parameters root that is not a plain object schema
         // (e.g. apply_patch's root `oneOf` required-groups) with a 400.
@@ -1222,15 +1420,56 @@ pub(crate) fn build_chat_wire_body(
     }
     if should_send_tool_choice_for_chat(provider, request.reasoning_effort.as_deref())
         && let Some(choice) = request.tool_choice.as_ref()
-        && let Some(mapped) = map_tool_choice_for_chat(choice)
+        && let Some(mut mapped) = map_tool_choice_for_chat(choice)
     {
         if matches!(provider, crate::config::ApiProvider::Moonshot)
-            && let Some(name) = mapped.pointer("/function/name").and_then(Value::as_str)
-            && omitted_tool_names.iter().any(|omitted| omitted == name)
+            && let Some(forced) = mapped
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
         {
-            bail!(
-                "Moonshot cannot force tool '{name}' because its input schema is incompatible with this route"
-            );
+            // A forced call must name the same wire spelling the tools array
+            // carries (see `prefix_digit_led_tool_names_for_moonshot`), both
+            // so the documented pattern holds and so the dropped-tool check
+            // below compares like against like.
+            let digit_led = forced.as_bytes().first().is_some_and(u8::is_ascii_digit);
+            let wire_name = if digit_led {
+                format!("_{forced}")
+            } else {
+                forced.clone()
+            };
+            if wire_name
+                != *mapped
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                && let Some(function) = mapped.get_mut("function").and_then(Value::as_object_mut)
+            {
+                function.insert("name".into(), json!(wire_name.clone()));
+            }
+            // A forced call must name the REGISTRY tool THIS request
+            // offers under the forced spelling. A digit-led forced name is
+            // live only when THAT registry tool survived to mint that
+            // exact wire name (a collision or length drop shadows it even
+            // though a namesake twin advertises the same spelling); a
+            // non-digit-led forced name is live only when the registry
+            // entry with THAT name itself survived — a minted alias of a
+            // different digit-led survivor must not answer for it, or a
+            // forced call for a schema-dropped underscore tool would
+            // dispatch onto the dropped registry handler through
+            // exact-match precedence (review thread on 5897491074).
+            let forced_is_offered = if digit_led {
+                moonshot_minted_names
+                    .get(&forced)
+                    .is_some_and(|minted| minted == &wire_name)
+            } else {
+                moonshot_offered_registry_names.contains(&forced)
+            };
+            if !forced_is_offered {
+                bail!(
+                    "Moonshot cannot force tool '{wire_name}' because it is not offered on this request (schema-incompatible or shadowed by a wire-name collision)"
+                );
+            }
         }
         if body.get("tools").is_some() {
             body["tool_choice"] = mapped;
@@ -1244,7 +1483,7 @@ pub(crate) fn build_chat_wire_body(
         request.reasoning_effort.as_deref(),
     );
     apply_direct_moonshot_k3_fixed_sampling(&mut body, provider, base_url, &model);
-    apply_kimi_code_fixed_sampling(&mut body, provider, base_url, &model);
+    apply_kimi_code_fixed_sampling(&mut body, provider, base_url);
 
     // Bulletproof final sanitizer: walk the wire payload and force
     // `reasoning_content` onto any assistant message that has tool_calls
@@ -1846,6 +2085,9 @@ impl<'a> PromptBuilder<'a> {
         }
         if !is_exact_google_chat_route(provider, base_url) {
             strip_google_tool_call_extra_content(&mut messages);
+        }
+        if provider == ApiProvider::Moonshot {
+            prefix_digit_led_tool_call_names_for_moonshot(&mut messages);
         }
         messages
     }
@@ -6506,7 +6748,6 @@ mod alias_thinking_detection_tests {
             &mut body,
             ApiProvider::Moonshot,
             crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-            crate::config::KIMI_CODE_K3_256K_MODEL,
         );
 
         assert_eq!(
@@ -6518,29 +6759,696 @@ mod alias_thinking_detection_tests {
         assert!(body.get("top_p").is_none());
     }
 
+    fn digit_led_name_probe_tool(name: &str) -> crate::models::Tool {
+        crate::models::Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: "probe".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    #[test]
+    fn moonshot_wire_prefixes_digit_led_tool_names_to_the_documented_pattern() {
+        // Kimi's function-call name pattern is
+        // `^[a-zA-Z_][a-zA-Z0-9-_]{0,127}$` (platform.kimi.ai tool-use
+        // documents, fetched 2026-11-05): a leading digit sits outside the
+        // supported set and `to_api_tool_name` only escapes characters the
+        // pattern cannot express anywhere. The Moonshot path gives such a
+        // name a `_` prefix; every other provider keeps the name unmodified.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            digit_led_name_probe_tool("mcp__server__tool"),
+        ]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "3d_render"}));
+
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+
+        let tools = body.body["tools"].as_array().expect("tools on the wire");
+        assert_eq!(tools[0]["function"]["name"], json!("_3d_render"));
+        assert_eq!(
+            tools[1]["function"]["name"],
+            json!("mcp__server__tool"),
+            "names already inside the pattern stay untouched"
+        );
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!("_3d_render"),
+            "a forced call must name the same wire spelling the tools array carries"
+        );
+
+        // A non-Moonshot provider has no documented leading-character ban and
+        // keeps the raw name.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        request.tools = Some(vec![digit_led_name_probe_tool("3d_render")]);
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Openai,
+            "https://api.openai.com/v1",
+            false,
+        )
+        .expect("OpenAI wire body");
+        assert_eq!(
+            body.body["tools"][0]["function"]["name"],
+            json!("3d_render"),
+            "other providers are not touched"
+        );
+    }
+
+    #[test]
+    fn moonshot_wire_drops_the_digit_led_tool_when_its_wire_name_collides() {
+        // Registry keys `3d_render` and `_3d_render` are distinct and can
+        // coexist; minting both onto `_3d_render` would advertise two
+        // schemas under one wire name, and dispatch's exact-match precedence
+        // would then route every `_3d_render` call onto the underscore
+        // sibling regardless of which description the model read (review
+        // 5886233560). The digit-led tool is dropped from THIS request
+        // instead: the array carries only the genuine underscore tool, the
+        // drop is reported like the schema drops, and forcing either
+        // spelling bails instead of dispatching ambiguously.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut underscore_probe = digit_led_name_probe_tool("_3d_render");
+        underscore_probe.description = "underscore probe".to_string();
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            underscore_probe,
+        ]);
+
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+
+        let tools = body.body["tools"].as_array().expect("tools on the wire");
+        assert_eq!(
+            tools.len(),
+            1,
+            "the colliding digit-led tool must be dropped: {tools:?}"
+        );
+        assert_eq!(tools[0]["function"]["name"], json!("_3d_render"));
+        assert_eq!(
+            tools[0]["function"]["description"],
+            json!("underscore probe"),
+            "the surviving entry must be the genuine underscore tool: {tools:?}"
+        );
+        assert_eq!(
+            body.omitted_tool_names,
+            vec!["3d_render".to_string()],
+            "the drop must be reported under its registry spelling so forced \
+             choice can refuse the shadowed name"
+        );
+    }
+
+    #[test]
+    fn moonshot_wire_refuses_forcing_the_shadowed_name_but_allows_the_survivor() {
+        // With the digit-led twin dropped for the collision, the wire name
+        // `_3d_render` stays advertised by the surviving underscore tool, so
+        // forcing THAT spelling proceeds unambiguously. Forcing the dropped
+        // digit-led registry name bails: it would map onto a wire name this
+        // request's drop shadows (review 5886233560).
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut underscore_probe = digit_led_name_probe_tool("_3d_render");
+        underscore_probe.description = "underscore probe".to_string();
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            underscore_probe,
+        ]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "3d_render"}));
+
+        let error = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .err()
+        .expect("forcing the shadowed registry spelling must bail");
+        let message = error.to_string();
+        assert!(
+            message.contains("_3d_render"),
+            "the bail must name the shadowed wire spelling: {message}"
+        );
+
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut underscore_probe = digit_led_name_probe_tool("_3d_render");
+        underscore_probe.description = "underscore probe".to_string();
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            underscore_probe,
+        ]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "_3d_render"}));
+
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("forcing the surviving underscore tool must proceed");
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!("_3d_render"),
+            "the surviving tool stays forceable under its own spelling"
+        );
+        assert!(
+            body.body["tools"].as_array().expect("tools on the wire").len() == 1,
+            "only the underscore tool is advertised"
+        );
+    }
+
+    #[test]
+    fn moonshot_wire_lets_a_valid_digit_led_tool_survive_an_invalid_namesake() {
+        // The collision check must count only tools that survive schema
+        // sanitization (review thread on 5896144003): a valid `3d_render`
+        // beside an invalid-schema `_3d_render` must advertise and force the
+        // valid tool under the minted spelling, not drop both — one
+        // incompatible tool never sinks a compatible sibling.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
+        invalid_underscore.description = "invalid sibling".to_string();
+        // A non-object parameters root is rejected outright by the Kimi
+        // candidate validator, so this sibling cannot survive sanitization.
+        invalid_underscore.input_schema = json!({"type": "string"});
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            invalid_underscore,
+        ]);
+
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+
+        let tools = body.body["tools"].as_array().expect("tools on the wire");
+        assert_eq!(
+            tools.len(),
+            1,
+            "the invalid sibling is dropped, the valid tool survives: {tools:?}"
+        );
+        assert_eq!(tools[0]["function"]["name"], json!("_3d_render"));
+        assert_eq!(
+            tools[0]["function"]["description"],
+            json!("probe"),
+            "the survivor is the VALID digit-led tool: {tools:?}"
+        );
+        assert_eq!(
+            body.omitted_tool_names,
+            vec!["_3d_render".to_string()],
+            "the schema drop is reported under its registry spelling"
+        );
+
+        // Forcing the dropped REGISTRY spelling fails: the offered check
+        // reads registry identity, not minted aliases, so a forced call
+        // naming the schema-dropped `_3d_render` cannot dispatch onto the
+        // dropped registry handler through exact-match precedence (review
+        // 5897491074).
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
+        invalid_underscore.input_schema = json!({"type": "string"});
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            invalid_underscore,
+        ]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "_3d_render"}));
+        let error = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .err()
+        .expect("forcing the dropped underscore registry spelling must bail");
+        assert!(
+            error.to_string().contains("not offered"),
+            "the bail must name the offered predicate: {error}"
+        );
+
+        // Forcing the survivor proceeds under both spellings.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
+        invalid_underscore.input_schema = json!({"type": "string"});
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            invalid_underscore,
+        ]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "3d_render"}));
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("forcing the surviving digit-led tool must proceed");
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!("_3d_render"),
+            "the forced call names the minted wire spelling"
+        );
+    }
+
+    #[test]
+    fn moonshot_wire_drops_a_digit_led_tool_whose_minted_name_exceeds_the_maximum() {
+        // The documented pattern caps names at 128 characters and minting
+        // adds one, so a 127-character digit-led name survives at the exact
+        // boundary (minted = 128) and a 128-character name would mint to 129
+        // — that tool is dropped instead of baiting a whole-request 400
+        // (review thread on 5896144003).
+        let name_127 = format!("3{}", "a".repeat(126));
+        let name_128 = format!("3{}", "a".repeat(127));
+        assert_eq!(name_127.len(), 127);
+        assert_eq!(name_128.len(), 128);
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut overlong = digit_led_name_probe_tool(&name_128);
+        overlong.description = "overlong".to_string();
+        request.tools = Some(vec![
+            digit_led_name_probe_tool(&name_127),
+            overlong,
+        ]);
+
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+
+        let tools = body.body["tools"].as_array().expect("tools on the wire");
+        assert_eq!(
+            tools.len(),
+            1,
+            "only the boundary-surviving tool is advertised: {tools:?}"
+        );
+        let minted = format!("_{name_127}");
+        assert_eq!(minted.len(), 128, "the survivor mints to exactly the cap");
+        assert_eq!(tools[0]["function"]["name"], json!(minted));
+        assert_eq!(
+            body.omitted_tool_names,
+            vec![name_128.clone()],
+            "the overlong tool is dropped under its registry spelling"
+        );
+
+        // Forcing the dropped tool fails fast; forcing the survivor
+        // proceeds.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut overlong = digit_led_name_probe_tool(&name_128);
+        overlong.description = "overlong".to_string();
+        request.tools = Some(vec![digit_led_name_probe_tool(&name_127), overlong]);
+        request.tool_choice = Some(json!({"type": "tool", "name": name_128}));
+        let error = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .err()
+        .expect("forcing the overlong-dropped tool must bail");
+        assert!(
+            error.to_string().contains("not offered"),
+            "the bail must name the offered predicate: {error}"
+        );
+
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        request.tools = Some(vec![digit_led_name_probe_tool(&name_127)]);
+        request.tool_choice = Some(json!({"type": "tool", "name": name_127}));
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("forcing the boundary survivor must proceed");
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!(minted),
+            "the forced call names the minted wire spelling"
+        );
+    }
+
+    #[test]
+    fn kimi_code_fixed_sampling_covers_every_model_id_on_the_route() {
+        // Observation record (2026-11-04 live probe, GET /models + per-model
+        // requests; the shipping basis is the documented "omit them from
+        // requests" contract): all six ids served by
+        // https://api.kimi.com/coding/v1 answer
+        // "invalid temperature: only 1 is allowed for this model" /
+        // "invalid top_p: only 0.95 is allowed for this model" with a 400.
+        // The roster has lagged this endpoint three times already
+        // (`k3-256k`, `kimi-for-coding-highspeed`, both `k3.1-pro`
+        // spellings), so the strip must not consult it — an id the endpoint
+        // serves next is covered without a code change.
+        for model in [
+            "k3",
+            "k3-256k",
+            "k3.1-pro",
+            "k3.1-pro-highspeed",
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+            // An id the endpoint does not serve (yet) sits on the same route
+            // and inherits the same route contract.
+            "k3-next-unknown",
+        ] {
+            let request = sampling_probe_request(model);
+            let body = crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                false,
+            )
+            .expect("Kimi Code wire body");
+            assert!(
+                body.body.get("temperature").is_none(),
+                "{model}: {}",
+                body.body
+            );
+            assert!(body.body.get("top_p").is_none(), "{model}: {}", body.body);
+            assert_eq!(body.body["model"], json!(model), "{model}");
+        }
+    }
+
+    fn sampling_probe_request(model: &str) -> crate::models::MessageRequest {
+        crate::models::MessageRequest {
+            model: model.to_string(),
+            messages: vec![crate::models::Message {
+                role: crate::models::Role::User,
+                content: vec![crate::models::ContentBlock::Text {
+                    text: "probe sampling".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: Some(0.3),
+            top_p: Some(0.8),
+        }
+    }
+
     #[test]
     fn kimi_code_fixed_sampling_does_not_leak_to_neighbor_routes() {
         for (provider, base_url, model) in [
+            // The direct platform route keeps its own model-scoped strip
+            // (only `kimi-k3`), never the membership route's.
             (
                 ApiProvider::Moonshot,
                 crate::config::DEFAULT_MOONSHOT_BASE_URL,
                 crate::config::KIMI_CODE_K3_256K_MODEL,
             ),
+            // A compatible gateway on a non-first-party base_url keeps its
+            // own wire contract even when it claims a membership model id.
+            (
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+                crate::config::KIMI_CODE_K3_256K_MODEL,
+            ),
+            // A different provider identity never inherits Moonshot shaping,
+            // even on the exact membership host.
             (
                 ApiProvider::Openrouter,
                 crate::config::DEFAULT_KIMI_CODE_BASE_URL,
                 crate::config::KIMI_CODE_K3_256K_MODEL,
             ),
+            // Neighboring paths on the overseas membership host are not the
+            // coding endpoint; the path must match exactly.
             (
                 ApiProvider::Moonshot,
-                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
-                "k3-256k-preview",
+                "https://api.kimi.ai/coding/v2",
+                crate::config::KIMI_CODE_K3_256K_MODEL,
+            ),
+            // Neighboring paths on the China membership host stay neighbors
+            // even when they share the `coding` prefix.
+            (
+                ApiProvider::Moonshot,
+                "https://api.kimi.com/coding/",
+                crate::config::KIMI_CODE_K3_256K_MODEL,
             ),
         ] {
-            let mut body = json!({ "temperature": 0.3, "top_p": 0.8 });
-            apply_kimi_code_fixed_sampling(&mut body, provider, base_url, model);
-            assert_eq!(body["temperature"], json!(0.3));
-            assert_eq!(body["top_p"], json!(0.8));
+            let request = sampling_probe_request(model);
+            let body =
+                crate::client::chat::build_chat_wire_body(&request, provider, base_url, false)
+                    .expect("neighbor wire body");
+            assert!(
+                body.body.get("temperature").is_some(),
+                "{base_url} {model}: generic sampling must survive: {}",
+                body.body
+            );
+            assert!(
+                body.body.get("top_p").is_some(),
+                "{base_url} {model}: generic sampling must survive: {}",
+                body.body
+            );
+        }
+    }
+
+    #[test]
+    fn moonshot_replay_prefixes_digit_led_assistant_tool_call_names() {
+        use crate::client::chat::build_chat_messages_for_request_and_provider;
+        use crate::models::{ContentBlock, Message, MessageRequest, Role};
+
+        // Assistant turns persist the registry spelling: dispatch resolves
+        // the digit-led wire prefix back before executing (see the engine's
+        // digit-led wire recovery). The replay must re-apply the prefix so
+        // the history matches the tools array
+        // (`moonshot_wire_prefixes_digit_led_tool_names_to_the_documented_pattern`)
+        // and stays inside Kimi's documented `name` pattern.
+        let request = MessageRequest {
+            model: crate::config::DEFAULT_MOONSHOT_MODEL.to_string(),
+            messages: vec![
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-probe-1".to_string(),
+                        name: "3d_render".to_string(),
+                        input: json!({"path": "scene.glb"}),
+                        caller: None,
+                        thought_signature: None,
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-probe-1".to_string(),
+                        content: "rendered".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "call-probe-2".to_string(),
+                        // A history entry that already carries the wire
+                        // prefix (pre-fixture sessions) is not digit-led
+                        // and must pass through untouched — idempotence.
+                        name: "_3d_render".to_string(),
+                        input: json!({"path": "scene.glb"}),
+                        caller: None,
+                        thought_signature: None,
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: "call-probe-2".to_string(),
+                        content: "rendered".to_string(),
+                        is_error: None,
+                        content_blocks: None,
+                    }],
+                },
+            ],
+            max_tokens: 16,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let messages =
+            build_chat_messages_for_request_and_provider(&request, ApiProvider::Moonshot);
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["name"],
+            json!("_3d_render"),
+            "the registry spelling is re-prefixed on the wire"
+        );
+        assert_eq!(
+            messages[2]["tool_calls"][0]["function"]["name"],
+            json!("_3d_render"),
+            "a stored wire spelling passes through unchanged"
+        );
+
+        // Other providers keep the registry spelling on the wire: the
+        // documented leading-character ban is Moonshot-only.
+        let messages = build_chat_messages_for_request_and_provider(&request, ApiProvider::Openai);
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["name"],
+            json!("3d_render")
+        );
+    }
+
+    #[test]
+    fn kimi_code_sampling_route_stays_in_sync_with_the_config_matcher_on_the_shared_host() {
+        use super::kimi_code_sampling_route;
+
+        // The sampling strip deliberately covers both membership hosts while
+        // the config-crate matcher is still .com-only (widening it belongs to
+        // in-flight PR #137). Classification now runs through the shared
+        // config-crate matcher, so drift is structurally impossible; this
+        // loop still pins the caller-side agreement on the shared host —
+        // port, scheme, casing, and neighboring-path rejections included —
+        // so a host-set edit here cannot quietly change the route contract.
+        for url in [
+            "https://api.kimi.com/coding/v1",
+            "https://api.kimi.com/coding/v1/",
+            "HTTPS://API.KIMI.COM/coding/v1",
+            "https://api.kimi.com/CODING/V1",
+            "https://api.kimi.com/coding/v2",
+            "https://api.kimi.com/coding",
+            "http://api.kimi.com/coding/v1",
+            "https://api.kimi.com:8443/coding/v1",
+            "https://api.kimi.com/coding/v1//",
+            "https://api.kimi.io/coding/v1",
+            "https://example.com/coding/v1",
+        ] {
+            assert_eq!(
+                kimi_code_sampling_route(url),
+                crate::config::moonshot_base_url_is_exact_kimi_code(url),
+                "route-contract drift on {url}"
+            );
+        }
+        // The overseas host is the deliberate caller-side widening until the
+        // shared matcher catches up; this assertion is what flips when the
+        // widening lands.
+        assert!(kimi_code_sampling_route("https://api.kimi.ai/coding/v1"));
+        assert!(!crate::config::moonshot_base_url_is_exact_kimi_code(
+            "https://api.kimi.ai/coding/v1"
+        ));
+    }
+
+    #[test]
+    fn kimi_code_fixed_sampling_covers_the_overseas_api_kimi_ai_endpoint() {
+        // The official Kimi Code documentation lists two regional endpoints
+        // for the same membership product: China
+        // `https://api.kimi.com/coding/v1` and overseas
+        // `https://api.kimi.ai/coding/v1` (codex.html, "Kimi Code API
+        // address"). A configured base_url on the overseas host is the same
+        // route contract, so the strip must follow the route, not one
+        // spelling of its host.
+        for base_url in [
+            "https://api.kimi.ai/coding/v1",
+            // A trailing slash is insignificant and scheme/host are ASCII
+            // case-insensitive — the same semantics the config-crate
+            // exact-route matcher applies to the `.com` spelling.
+            "https://api.kimi.ai/coding/v1/",
+            "https://API.KIMI.AI/coding/v1",
+        ] {
+            let request = sampling_probe_request("k3.1-pro");
+            let body = crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                base_url,
+                false,
+            )
+            .expect("overseas Kimi Code wire body");
+            assert!(
+                body.body.get("temperature").is_none(),
+                "{base_url}: fixed sampling must strip temperature: {}",
+                body.body
+            );
+            assert!(
+                body.body.get("top_p").is_none(),
+                "{base_url}: fixed sampling must strip top_p: {}",
+                body.body
+            );
+            assert_eq!(body.body["model"], json!("k3.1-pro"), "{base_url}");
+        }
+    }
+
+    #[test]
+    fn overseas_kimi_ai_endpoint_keeps_the_document_parameter_whitelist() {
+        // Widening the sampling strip to the overseas host must NOT widen the
+        // tool-schema contract: both Kimi Code hosts serve the same MFJS
+        // specification, so a keyword the specification does not list
+        // (`pattern`) degrades the tool on both, while the sampling strip
+        // (document-backed: "omit them from requests") covers both hosts.
+        let patterned_tool = crate::models::Tool {
+            tool_type: None,
+            name: "patterned".to_string(),
+            description: "Find a label.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "pattern": "^[a-z]+$"}
+                },
+                "required": ["label"]
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        };
+        let mut request = sampling_probe_request("k3.1-pro");
+        request.tools = Some(vec![patterned_tool]);
+
+        for base_url in [
+            "https://api.kimi.ai/coding/v1",
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+        ] {
+            let body = crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                base_url,
+                false,
+            )
+            .expect("Kimi Code wire body");
+            assert_eq!(
+                body.omitted_tool_names,
+                vec!["patterned".to_string()],
+                "the document-absent keyword drops the tool on {base_url}"
+            );
+            assert!(
+                body.body.get("tools").is_none(),
+                "the dropped tool must not ship on {base_url}: {}",
+                body.body
+            );
+            // The sampling strip covers the route regardless.
+            assert!(
+                body.body.get("temperature").is_none() && body.body.get("top_p").is_none(),
+                "fixed sampling must still strip on {base_url}: {}",
+                body.body
+            );
         }
     }
 
@@ -8337,6 +9245,225 @@ mod image_block_wire_tests {
             tools[1]["function"]["description"],
             format!("Lookup things. {NOTE}"),
             "a non-empty description keeps the appended-note form"
+        );
+    }
+
+    /// The Moonshot Tool Use documentation requires "The root of `parameters`
+    /// must be an `object`" (https://platform.kimi.ai/docs/api/tool-use,
+    /// fetched 2026-11-05). The MFJS specification lists `anyOf` as an
+    /// applicator but does not authorize it at a parameters root; on the
+    /// conflicting documents the strict face wins, so a root union of object
+    /// branches — even though a 2026-11-04 live probe observed the endpoint
+    /// returning 200 for one (probe facts are observations only and never a
+    /// shipping basis) — is flattened into one merged object on the wire.
+    #[test]
+    fn kimi_chat_flattens_root_union_of_object_branches() {
+        let union_schema = serde_json::json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "outline": {"type": "string"}
+                    },
+                    "required": ["kind", "outline"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "content": {"type": "string"}
+                    },
+                    "required": ["kind", "content"],
+                    "additionalProperties": false
+                }
+            ]
+        });
+        let tool = Tool {
+            tool_type: None,
+            name: "deck".to_string(),
+            description: "Build a slide deck.".to_string(),
+            input_schema: union_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        };
+        let request = MessageRequest {
+            model: crate::config::KIMI_CODE_K3_MODEL.to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "build the deck".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: Some(vec![tool]),
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            false,
+        )
+        .expect("Kimi Code wire body");
+
+        assert!(
+            body.omitted_tool_names.is_empty(),
+            "the flattenable union must not be dropped: {:?}",
+            body.omitted_tool_names
+        );
+        let parameters = &body.body["tools"][0]["function"]["parameters"];
+        assert_eq!(
+            parameters["type"], "object",
+            "the wire root must be a plain object schema: {parameters}"
+        );
+        assert!(
+            parameters.get("anyOf").is_none(),
+            "no root union may survive on the wire: {parameters}"
+        );
+        // The flatten merges the branch properties into one object; the
+        // per-branch required groups are gone, which is exactly the
+        // constraint loss the root composition note documents.
+        let properties = parameters["properties"].as_object().unwrap();
+        for name in ["kind", "outline", "content"] {
+            assert!(properties.contains_key(name), "{name} left the merge");
+        }
+        assert!(
+            parameters.get("required").is_none(),
+            "no required set survives a union of disagreeing branches: {parameters}"
+        );
+    }
+
+    fn single_tool_request(name: &str, schema: serde_json::Value) -> MessageRequest {
+        MessageRequest {
+            model: crate::config::KIMI_CODE_K3_MODEL.to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "probe".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: Some(vec![Tool {
+                tool_type: None,
+                name: name.to_string(),
+                description: "Probe the route's schema whitelist.".to_string(),
+                input_schema: schema,
+                allowed_callers: None,
+                defer_loading: None,
+                input_examples: None,
+                strict: None,
+                cache_control: None,
+            }]),
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    /// Keywords the 2026-11-04 live probe merely observed the endpoint
+    /// accepting (pattern, format, $schema, prefixItems, exclusiveMinimum,
+    /// exclusiveMaximum, nested allOf) sit outside the MFJS specification's
+    /// supported set. Probe facts are observations only and never a shipping
+    /// basis, so the tool carrying them degrades with a projection warning on
+    /// every Moonshot route — one pipeline, one wire contract.
+    #[test]
+    fn probe_observed_keywords_never_reach_the_wire() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "label": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]*$",
+                    "format": "uri"
+                }
+            },
+            "required": ["label"]
+        });
+        let request = single_tool_request("probe_tool", schema);
+
+        for base_url in [
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+        ] {
+            let body = build_chat_wire_body(&request, ApiProvider::Moonshot, base_url, false)
+                .expect("Moonshot wire body");
+
+            assert_eq!(
+                body.omitted_tool_names,
+                vec!["probe_tool".to_string()],
+                "the probe-observed keyword drops the tool on {base_url}"
+            );
+            assert!(
+                body.body.get("tools").is_none(),
+                "a fully dropped catalog must omit the tools key on {base_url}: {}",
+                body.body
+            );
+        }
+    }
+
+    /// Advisory keywords the MFJS specification does not list (title,
+    /// minLength, ...) are stripped in place — a semantics-lossless or
+    /// soft-constraint-losing simplification — so the tool still ships and
+    /// the wire carries only the document's supported set.
+    #[test]
+    fn advisory_keywords_are_stripped_from_the_wire() {
+        let schema = serde_json::json!({
+            "title": "Annotated tool",
+            "type": "object",
+            "properties": {
+                "label": {"type": "string", "title": "Label", "minLength": 1, "maxLength": 40},
+                "price": {"type": "number", "minimum": 0, "maximum": 100}
+            },
+            "required": ["label"]
+        });
+        let request = single_tool_request("annotated_tool", schema);
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            false,
+        )
+        .expect("Kimi Code wire body");
+
+        assert!(
+            body.omitted_tool_names.is_empty(),
+            "advisory keywords must not drop the tool: {:?}",
+            body.omitted_tool_names
+        );
+        let parameters = &body.body["tools"][0]["function"]["parameters"];
+        for keyword in ["title", "minLength", "maxLength", "minimum", "maximum"] {
+            assert!(
+                !serde_json::to_string(parameters)
+                    .unwrap()
+                    .contains(&format!("\"{keyword}\"")),
+                "{keyword} must not reach the wire: {parameters}"
+            );
+        }
+        assert_eq!(parameters["type"], "object");
+        assert_eq!(
+            parameters["properties"]["label"]["type"], "string",
+            "the supported vocabulary survives the strip: {parameters}"
         );
     }
 }
