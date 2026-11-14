@@ -2073,7 +2073,17 @@ jobs:
       - name: 安装 relay 依赖
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
       - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）
-        run: node scripts/run-windows-relay-tools-tests.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs
+      - name: Preserve Windows relay tools process receipt
+        if: always()
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-relay-tools-process.json
+          if-no-files-found: warn
+          retention-days: 7
 
   team-relay-hub-test:
     name: team-relay-hub-test

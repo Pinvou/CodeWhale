@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { RelayStateStore } from "../relay-state-store.js";
+import { RelayStateStore, verifyWindowsAncestors } from "../relay-state-store.js";
 import { RELAY_CONTROLLER_GUARD_FILENAME, RelayStateGuard } from "../relay-state-guard.js";
 import { WINDOWS_ACL_VERIFY_SCRIPT, buildGuardJournalAclScript } from "../windows-guard-acl.js";
 
@@ -28,6 +28,66 @@ if ($allowed -notcontains $owner) { throw 'unexpected ACL owner' }`;
 const security = process.platform === "win32" ? {
   protectPath: async () => {}, verifyPath: async () => {}, verifyAncestors: async () => {},
 } : {};
+function nativeSecurityAdapters(t, verify = verifyWindowsAncestors, platform = process.platform) {
+  return { protectPath: undefined, verifyPath: undefined,
+    verifyAncestors: platform !== "win32" ? undefined : async paths => {
+      let phase = "unknown";
+      try {
+        return await verify(paths, { onDiagnostic(value) {
+          phase = ["script_started", "payload_decoded", "paths_decoded", "checks_completed"].includes(value)
+            ? value : "unknown";
+        } });
+      } catch (error) {
+        try { t.diagnostic(`controller_guard_ancestor_failure ${JSON.stringify({ phase })}`); }
+        catch { /* Observation cannot replace the native refusal. */ }
+        throw error;
+      }
+    } };
+}
+
+test("native guard ancestor diagnostics preserve the verifier input and original refusal", async () => {
+  for (const observerThrows of [false, true]) {
+    const paths = ["PRIVATE_PATH_SENTINEL"], original = {}, messages = [];
+    const adapters = nativeSecurityAdapters({ diagnostic(message) {
+      messages.push(message);
+      if (observerThrows) throw Error("PRIVATE_OBSERVER_SENTINEL");
+    } }, async (actual, { onDiagnostic }) => {
+      assert.equal(actual, paths);
+      onDiagnostic("paths_decoded");
+      throw original;
+    }, "win32");
+    assert.equal(adapters.protectPath, undefined);
+    assert.equal(adapters.verifyPath, undefined);
+    await assert.rejects(adapters.verifyAncestors(paths), error => error === original);
+    assert.deepEqual(messages, ['controller_guard_ancestor_failure {"phase":"paths_decoded"}']);
+  }
+});
+
+test("native guard ancestor diagnostics are closed and reset on the next verification", async () => {
+  const original = {}, messages = [];
+  let call = 0;
+  const phases = ["script_started", "payload_decoded", "paths_decoded", "checks_completed",
+    "PRIVATE_PHASE_SENTINEL", { toString() { throw Error("PRIVATE_CONVERSION_SENTINEL"); } }];
+  const adapters = nativeSecurityAdapters({ diagnostic: message => messages.push(message) },
+    async (_paths, { onDiagnostic }) => {
+      if (call < phases.length) onDiagnostic(phases[call]);
+      call++;
+      throw original;
+    }, "win32");
+  for (let index = 0; index <= phases.length; index++) {
+    await assert.rejects(adapters.verifyAncestors([]), error => error === original);
+    const phase = index < 4 ? phases[index] : "unknown";
+    assert.equal(messages[index], `controller_guard_ancestor_failure ${JSON.stringify({ phase })}`);
+  }
+});
+
+test("native guard ancestor diagnostics preserve success and other platform defaults", async () => {
+  const result = {}, adapters = nativeSecurityAdapters({ diagnostic() { assert.fail("success is silent"); } },
+    async (_paths, { onDiagnostic }) => { onDiagnostic("checks_completed"); return result; }, "win32");
+  assert.equal(await adapters.verifyAncestors([]), result);
+  assert.deepEqual(nativeSecurityAdapters({}, () => assert.fail("not a Windows adapter"), "linux"),
+    { protectPath: undefined, verifyPath: undefined, verifyAncestors: undefined });
+});
 async function expectBootstrapFault(child, phase) {
   const expected = { "before-guard-protect": 81, "before-seed-commit": 82, "after-seed-commit": 83 }[phase];
   assert.ok(expected, "known bootstrap fault phase required");
@@ -369,7 +429,7 @@ test("controller guard native exit before protecting its new inode recovers thro
     assert.equal(metadata.matches_creator_default, true);
     assert.notEqual(metadata.token_owner, "other");
   }
-  const native = { protectPath: undefined, verifyPath: undefined, verifyAncestors: undefined };
+  const native = nativeSecurityAdapters(t);
   const restored = await f.open(native);
   await restored.compareAndSwap("guard_test", "0", { commits: 1 });
   await restored.close();
@@ -489,7 +549,7 @@ test("controller guard bootstrap recovery never tightens a nonempty unprotected 
   database.close();
   if (process.platform !== "win32") await fs.chmod(path, 0o644);
   const bytes = await fs.readFile(path), before = await fs.lstat(path, { bigint: true });
-  const native = { protectPath: undefined, verifyPath: undefined, verifyAncestors: undefined };
+  const native = nativeSecurityAdapters(t);
   const code = process.platform === "win32" ? "relay_state_acl_unverified" : "relay_state_permissions_unsafe";
   await assert.rejects(f.open(native), { code });
   await assert.rejects(f.open(native), { code }); // Refusal is persistent, not an implicit repair.
@@ -521,7 +581,7 @@ for (const phase of ["before", "after"]) {
     }
     // Restore through the real default permission adapters, including the
     // SQLite-created journal's inherited Windows ACL. No manual file cleanup.
-    const native = { protectPath: undefined, verifyPath: undefined, verifyAncestors: undefined };
+    const native = nativeSecurityAdapters(t);
     const restored = await f.open(native);
     assert.equal(restored.readNamespace("guard_test").store_revision, "0");
     await restored.compareAndSwap("guard_test", "0", { commits: 1 });

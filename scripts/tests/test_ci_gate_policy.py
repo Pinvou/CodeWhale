@@ -901,6 +901,10 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("runs-on: windows-latest", job)
         self.assertIn("needs: changes", job)
         self.assertIn("node scripts/run-windows-relay-tools-tests.mjs", job)
+        self.assertIn('run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs', job)
+        receipt = _step_named(job, "Preserve Windows relay tools process receipt")
+        self.assertIn('if: always()', receipt)
+        self.assertIn('path: ${{ runner.temp }}/windows-relay-tools-process.json', receipt)
         self.assertIn('node-version: "24"', job)
         self.assertIn("timeout-minutes: 10", job)
         expression = re.search(r"if: \$\{\{ (.*?) \}\}", job).group(1)
@@ -3645,6 +3649,7 @@ python3() { fixture_mock python3 "$@"; }
             "Account closure resource lifecycle receipts",
             "Preserve browser fixture exit receipts",
             "Preserve ACP fixture exit receipt",
+            "Preserve Windows relay tools process receipt",
         )
         self.assertEqual(
             len(step_level),
