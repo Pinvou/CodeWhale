@@ -5313,11 +5313,7 @@ fn pty_writer_dup_carries_close_on_exec() {
     // `pipe2`, and the production `dup_cloexec` helper must stay verifiable
     // there (review 4540510083).
     let mut fds = [0 as libc::c_int; 2];
-    assert_eq!(
-        unsafe { libc::pipe(fds.as_mut_ptr()) },
-        0,
-        "pipe() failed"
-    );
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe() failed");
     for fd in fds {
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
         assert!(flags >= 0, "F_GETFD on the fresh pipe failed: {flags}");
