@@ -15,7 +15,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 
-use crate::skills::install::is_safe_path;
+use crate::skills::install::{entry_type_is_link, is_safe_path};
 
 use super::PluginInstallError;
 use super::stage::{StagedPlugin, fresh_staging_dir, validate_staged};
@@ -155,7 +155,7 @@ fn extract_into(scan: &TarballScan, bytes: &[u8], dest: &Path, max_size: u64) ->
         if !is_safe_path(stripped_path) {
             return Err(PluginInstallError::PathTraversal(stripped).into());
         }
-        if entry_type.is_symlink() || entry_type.is_hard_link() {
+        if entry_type_is_link(entry_type) {
             return Err(PluginInstallError::SymlinkRejected.into());
         }
 
