@@ -37,10 +37,15 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_OUTBOUND_BATCH: usize = 8;
+// 本文件被 controller-crypto-harness 经 #[path] 复用；#[path] 引入上下文中
+// 子模块不会按本文件名建目录解析，显式指定路径让生产与 harness 两处一致。
+#[path = "relay_transport/connected_poll.rs"]
 mod connected_poll;
+#[path = "relay_transport/task_lifecycle.rs"]
 mod task_lifecycle;
 use connected_poll::ConnectedEvent;
 #[cfg(test)]
+#[path = "relay_transport/availability_tests.rs"]
 mod availability_tests;
 const MAX_CONTROLLER_INBOUND_TEXT_BYTES: usize = if MAX_ENCRYPTED_WIRE_BYTES < MAX_RELAY_FRAME_BYTES
 {
