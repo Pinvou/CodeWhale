@@ -521,11 +521,6 @@ a TLS or verified transport boundary.
 - `GET /v1/sessions/summary?…` (same query params; projected row shape)
 - `GET /v1/sessions/{id}` (add `?peek=true&entries=12` for a bounded, redacted
   read-only peek instead of the full transcript)
-- `POST /v1/sessions` (`{ "thread_id": string, "title"?: string }` — save a
-  thread's stored turns as a new session)
-- `PUT /v1/sessions` (`{ "thread_id"?: string, "session_id"?: string }` —
-  snapshot a thread's live engine state; a `session_id` overwrites that
-  session in place)
 - `PATCH /v1/sessions/{id}` (`{ "title"?: string, "archived"?: bool }`)
 - `DELETE /v1/sessions/{id}`
 - `POST /v1/sessions/{id}/resume-thread`
@@ -565,12 +560,9 @@ archive notion.
 
 While a session is open in an interactive Codewhale process, that process holds
 the authoritative copy in memory and rewrites the whole document on its next
-autosave. **Retracted (round-20 B20-3):** the `409 Conflict` guard on
-`PATCH` and `PUT /v1/sessions` was removed — the process-local live-session
-registry cannot coexist with the runtime HTTP server in any shipped
-topology, so the conflict was unobservable and the guard is gone. Same-
-process writers converge by last-write-wins at the store layer; change a
-session open in the terminal from the terminal.
+autosave. `PATCH` therefore fails closed on it with `409 Conflict` rather than
+writing something that would be silently reverted. Change it in the terminal
+instead. A standalone `codewhale web` holds nothing open and is never blocked.
 
 `GET /v1/sessions/{id}?peek=true` returns a bounded, redacted, read-only view
 instead of the transcript: at most 12 entries of at most 400 characters each
@@ -598,71 +590,9 @@ provider, model, workspace, and permission fields:
   "model_provider": "openai-codex",
   "model": "gpt-5.6",
   "reasoning_effort": "high",
-  "allowed_tools": ["read_file", "search"],
-  "workspace_roots": ["/Users/you/projects/codewhale", "/Users/you/projects/shared"]
+  "allowed_tools": ["read_file", "search"]
 }
 ```
-
-`workspace_roots` (added by the multi-root workspace theme) declares the
-thread's full accessible root set: the first entry is the primary root (the
-thread's `workspace`) and the rest are attached roots whose writes the
-thread's sandbox policy, write carve-out, and repo law also govern. Two
-server-side qualifications apply to "first entry" (round-39 B39-4): when
-the request omits `workspace`, the server fills in its own workspace,
-which takes the primary slot and demotes the client-sent first entry to an
-attached root; and when `workspace` IS present and `workspace_roots[0]`
-differs from it, the same silent demotion applies — the `workspace` field
-is always the primary, and the declared first entry rides as an attached
-root. Omitting
-the field yields the historical single-root thread: the stored set is
-`[workspace]`, serialized as a one-element array (see the ThreadRecord note
-under "Runtime data model"). `PATCH
-/v1/threads/{id}` accepts the same field to reshape a live thread (empty
-array clears back to the bare workspace); a change while a turn is active is
-rejected. `POST /v1/threads/{id}/fork` and `POST /v1/threads/{id}/resume`
-take no request body: both always inherit the thread's stored set, and a
-client posting `workspace_roots` to either gets plain inheritance — reshape
-through `PATCH` instead.
-
-Resuming or forking a thread id that does not exist answers `404 Not Found`
-(the stdio `thread/resume` / `thread/fork` methods answer the typed
-`thread_not_found` error, `-32004`) instead of a success envelope carrying
-`status: "missing"`, so a stale id no longer hides behind a 200. Declared
-`workspace_roots` are validated at intake rather than silently reshaped: a
-root that is not an absolute path (a `~/shared` spelling is refused, not
-dropped), a root that normalizes to the filesystem root (`/`, `/..`), and a
-root that is an ancestor of the primary workspace (its parent directory)
-all answer `400 Bad Request` with the reason — each of those would widen
-the per-turn sandbox past what the request declared. A root that sits under
-the primary is accepted, and an explicit empty array still clears back to
-the bare workspace. A declared set is additionally capped at **64 entries**
-(`MAX_WORKSPACE_ROOTS`): an over-cap declaration answers `400` instead of
-being truncated. The ancestor and filesystem-root rejections judge the
-path the filesystem resolves (round-37 M37-3): an EXISTING declared root is
-canonicalized before the comparison — and a NOT-YET-MATERIALIZED primary
-resolves through its deepest existing ancestor before comparing, so a
-symlink spelling — and, on case-insensitive filesystems, a case-folded
-spelling — of the primary's ancestor is rejected on both mixed-existence
-shapes; a declared root that does not exist yet keeps the lexical
-judgment (materialization stays the delivery lane's job; the same-disk
-TOCTOU is the disclosed inherent one). Disclosed residuals
-(round-41): the comparisons fold ASCII case only (non-Unicode), matching the
-block-only law contract's safe direction; and on Windows an SMB/UNC alias
-spelling of the primary's existing ancestor (`\\localhost\C$\…` for a
-`C:\…` primary, share reachable) canonicalizes to the UNC form the
-drive-letter comparison never unifies, so the ancestor rejection is defeated
-for that class — exploitability is tempered (a share of the ancestor
-directory; `C$` needs admin), and exec-policy scope matching treats the UNC
-operand as POSIX-rooted, so primary-scoped rules do not span the alias
-either.
-
-Stored rows persist the cwd-first full form (primary first, up to 64
-additional entries — 65 stored). Every resume/fork/load face that
-re-declares a stored row through the validating intake strips the stored
-head first (`validate_stored_workspace_roots`), so a legal full-load row
-round-trips whole; a client replaying a stored row's `workspace_roots` as
-a fresh declaration must strip the primary itself, or a full-load row
-answers `400` on the cap.
 
 `reasoning_effort` uses the canonical Runtime vocabulary (`auto`, `off`,
 `low`, `medium`, `high`, `xhigh`, `ultra`, or `max`; documented compatibility
@@ -844,31 +774,14 @@ the first returned event advances past exactly the omitted history.
 `/v1/snapshots` lists recent side-git restore points for the runtime workspace.
 `limit` defaults to `20` and must be between `1` and `100`. `POST
 /v1/snapshots/{id}/restore` restores workspace files from the snapshot and
-returns `{"restored": "<snapshot-id>"}`. The `id` must match any snapshot
-the side repo actually knows — including entries beyond the default listing
-window — exactly (full id, case-sensitive); an unknown or malformed id
-returns `404`, and a non-matching id is never passed to any git command.
-
-When the snapshot's owning thread declares a root outside the primary
-workspace, the restore response grows a `boundary` object naming what the
-rollback does not cover: `attached_roots_not_reverted` (always `true`) and
-`note` (human-readable text). Single-root restores keep the legacy bare
-shape above — no `boundary` key.
-
-```json
-{
-  "restored": "<snapshot-id>",
-  "boundary": {
-    "attached_roots_not_reverted": true,
-    "note": "Only the primary workspace was reverted; attached workspace roots were not rolled back."
-  }
-}
-```
+returns `{"restored": "<snapshot-id>"}`. The `id` must match a listed
+snapshot exactly (full id, case-sensitive); an unknown or malformed id
+returns `404` before any git command runs.
 
 ```json
 [
   {
-    "id": "9f2c7a01e5b34d6a89c0f1a2b3c4d5e6f708192a",
+    "id": "snap_...",
     "label": "post-turn:1",
     "timestamp": 1780730580
   }
@@ -896,11 +809,19 @@ shape above — no `boundary` key.
 - `POST /v1/automations/{id}/run`
 - `POST /v1/automations/{id}/pause`
 - `POST /v1/automations/{id}/resume`
-- `GET /v1/automations/{id}/runs?limit=20`
+- `GET /v1/automations/{id}/runs?limit=20&archived=false`
 
 Create and update requests accept an optional `model`. When present, each
 scheduled or manually triggered run uses that model; omitting it keeps the
 runtime's default task model.
+
+`archived=true` on the runs listing returns the archived terminal history
+instead of live runs. Deleting an automation archives up to 50 of its terminal
+runs (completed, failed, canceled), and the archive is served newest first by
+`ended_at` (falling back to `created_at`), honoring `limit`; a live automation
+and a run-free deleted automation both list an empty archive. `DELETE
+/v1/automations/{id}` is refused with `400` while any persisted run of the
+automation is still queued or running. Added in #85.
 
 **Operate** (always-on named operation; same `OperateRecord` as CWC
 `20de981` / PR #284)
@@ -1102,19 +1023,7 @@ The runtime uses a durable Thread/Turn/Item lifecycle.
 
 - **ThreadRecord** — `id`, `created_at`, `updated_at`, `model`,
   `model_provider` (generic kind), `model_provider_id` (optional exact configured
-  route), `workspace`, `workspace_roots` (the full accessible root set,
-  primary first; normalization prepends the workspace only when it is a
-  non-empty ABSOLUTE path, so an absolute-workspace thread created through
-  `POST /v1/threads` serializes at least one element — a single-root
-  thread reads `"workspace_roots": ["<workspace>"]` — while a relative
-  workspace collapses the set to empty and the key is omitted. NOTE
-  (round-39 B39-4): `POST /v1/threads` rejects only an EMPTY workspace —
-  a fresh relative-workspace row is mintable through this API today (the
-  inline guard records that "requires it to be absolute" overclaims), so
-  the collapsed shape is NOT legacy-only; any row whose normalized set is
-  empty — including every row persisted before the field existed — omits
-  the key entirely), `mode`,
-  `task_id`, `system_prompt`, `latest_turn_id`,
+  route), `workspace`, `mode`, `task_id`, `system_prompt`, `latest_turn_id`,
   `latest_response_bookmark`, `archived`
 - **TurnRecord** — `id`, `thread_id`, `status` (`queued|in_progress|completed|
   failed|interrupted|canceled`), `effective_provider`, `effective_model`,
@@ -1211,8 +1120,7 @@ Common event names: `thread.started`, `thread.forked`, `turn.started`,
 `turn.lifecycle`, `turn.steered`, `turn.interrupt_requested`,
 `turn.completed`, `item.started`, `item.delta`, `item.completed`,
 `item.failed`, `item.interrupted`, `approval.required`, `approval.decided`,
-`approval.timeout` (legacy, replay-only — see below), `user_input.required`,
-`user_input.answered`,
+`approval.timeout`, `user_input.required`, `user_input.answered`,
 `user_input.canceled`, `tool_call.requested`, `tool_call.resolved`,
 `tool_call.timeout`, `tool_call.canceled`, `sandbox.denied`.
 
@@ -1233,23 +1141,11 @@ Approval decisions wait for a human and have no wall-clock cap: a pending
 approval is resolved by a client decision, by interrupting the turn, or when
 the engine goes away. (Runtime shutdown can also resolve it via
 `RuntimeThreadManager::shutdown`, but no host invokes that API yet — it is
-exercised by tests until a host wires it into its exit path.) Every
-resolution of an approval whose `approval.required` event was published is
-itself published as `approval.decided` so clients can clear pending UI. (If
-the `approval.required` event itself fails to publish, the pending
-registration is rolled back, the tool call never executes, and the turn ends
-in error with no `approval.decided` — no client ever saw the request.) A
-resolution forced by an
+exercised by tests until a host wires it into its exit path.) Every resolution is published as
+`approval.decided` so clients can clear pending UI. A resolution forced by an
 interrupt, shutdown, or engine exit carries `decision: "deny"` plus
 `interrupted: true` (and no user selection was made); a decision the user
-actually made never carries `interrupted`. `approval.decided` also carries
-`posture` when an execution-policy posture **deny** rather than a human
-forced the outcome; it is absent for every other decision on the raw event
-stream (automatic non-posture resolutions carry `auto: true` instead), and
-the compat `/v1/stream` maps the absent field to `null`. A decision posted to
-`/v1/approvals/{id}` either resolves the approval (and is published as that
-decision) or is rejected with 404 — it is never accepted and then replaced by
-an interrupted deny. `approval.timeout` and the `timeout`
+actually made never carries `interrupted`. `approval.timeout` and the `timeout`
 field on `approval.decided` are legacy shapes produced only by journals written
 by older builds; current code never emits them.
 
