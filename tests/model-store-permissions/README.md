@@ -12,7 +12,9 @@ runner 使用 locked/offline 构建，在独立子进程中分别继承 umask000
 
 ## 覆盖
 
-直接编译生产 config.rs、platform filesystem.rs/paths.rs；build.rs 提取并编译生产 ScriptsSource::prepare 和 materialize_assets 的原始函数体。资产来源、HOME、keyring外围是隔离夹具，不等同于完整应用/ARM或真实引擎验证。
+直接编译生产 config.rs、platform filesystem.rs/paths.rs；build.rs 提取并编译生产 ScriptsSource::prepare 和 materialize_assets 的原始函数体。
+
+r36（2026-11-14）：main 合并给 prepare 引入两个 super:: 接缝，build.rs 现同样逐字提取生产 card_assets::is_mutable_runtime_asset 与 native_runtime::{checked_directory,prepare} 作编译缝（仅机械替换 sanitize 引用与 nix::libc→libc）；.runtime 历史权限断言按合并后语义适配（0755→收紧 0700 保内容；0775→fail-closed 拒改）。资产来源、HOME、keyring外围是隔离夹具，不等同于完整应用/ARM或真实引擎验证。
 
 - 不预置模型商店目录，验证实际配置路径与prepare新建目录0700。
 - 实际assets含native_engine_process.py时，prepare在脚本执行/健康日志前预建CARD_DIR/.runtime0700；普通多文件卡不创建runtime。

@@ -113,3 +113,4 @@ pinvou3-app/src-tauri/resources/platforms/macos/.codex-bridge-build.*/
 # permissions harness 的 CARGO_TARGET_DIR（评审 P3）
 tests/target/
 tests/model-store-lan/target/
+tests/model-store-permissions/target/

@@ -93,6 +93,7 @@ impl ScriptsSource {
     }
 }
 include!(concat!(env!("OUT_DIR"), "/prepare.rs"));
+include!(concat!(env!("OUT_DIR"), "/seams.rs"));
 
 fn mode(path: &Path) -> u32 {
     path.symlink_metadata().unwrap().permissions().mode() & 0o777
@@ -154,34 +155,58 @@ fn main() {
         "PASS actual config/prepare fresh700; native runtime700; generic no runtime mask={mask:04o}"
     );
 
-    for historical in [0o755, 0o775] {
-        for p in [&root, &staging, &models, &root.join("cards"), &runtime] {
-            std::fs::set_permissions(p, std::fs::Permissions::from_mode(historical)).unwrap();
-        }
-        std::fs::write(runtime.join("receipt"), "UNTRUSTED KEEP").unwrap();
-        assert_eq!(config::data_dir(), root);
-        settings.staging_path();
-        settings.models_path();
-        native.prepare("native", "deploy").unwrap();
-        for p in [&root, &staging, &models, &root.join("cards"), &runtime] {
-            assert_eq!(mode(p), historical, "initializer changed {}", p.display());
-        }
-        assert_eq!(
-            std::fs::read_to_string(runtime.join("receipt")).unwrap(),
-            "UNTRUSTED KEEP"
-        );
-        println!(
-            "PASS existing{historical:o} config/parents/runtime unchanged; no receipt adoption"
-        );
+    // r36 P1-1：main 合并（r35）引入 native_runtime::prepare 的权限收紧语义，
+    // 旧断言「历史权限不动」不再成立。按合并后生产语义如实断言：
+    //   0o755（组/其他无写位）→ Ok + .runtime 收紧 0700，receipt 字节保留；
+    //   0o775（组写位在）→ fail-closed Err，目录与内容不动。
+    for p in [&root, &staging, &models, &root.join("cards")] {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    // Original asset writer behavior is intentionally NOT changed by this patch.
-    std::fs::set_permissions(&card, std::fs::Permissions::from_mode(0o775)).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(runtime.join("receipt"), "UNTRUSTED KEEP").unwrap();
+    assert_eq!(config::data_dir(), root);
+    settings.staging_path();
+    settings.models_path();
     native.prepare("native", "deploy").unwrap();
+    for p in [&root, &staging, &models, &root.join("cards")] {
+        assert_eq!(mode(p), 0o755, "initializer changed {}", p.display());
+    }
+    assert_eq!(mode(&runtime), 0o700, "0755 runtime not tightened");
     assert_eq!(
-        mode(&card),
-        0o700,
-        "existing shared writer still chmods card directory"
+        std::fs::read_to_string(runtime.join("receipt")).unwrap(),
+        "UNTRUSTED KEEP"
     );
+    println!("PASS existing755 parents unchanged; runtime tightened 700; receipt kept");
+
+    for p in [&root, &staging, &models, &root.join("cards"), &runtime] {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o775)).unwrap();
+    }
+    let refused = match native.prepare("native", "deploy") {
+        Err(e) => format!("{e:?}"),
+        Ok(_) => panic!("0775 runtime should fail closed"),
+    };
+    assert!(
+        refused.to_string().contains("核对"),
+        "0775 runtime should fail closed, got: {refused}"
+    );
+    assert_eq!(mode(&runtime), 0o775, "refused path must not touch mode");
+    assert_eq!(
+        std::fs::read_to_string(runtime.join("receipt")).unwrap(),
+        "UNTRUSTED KEEP"
+    );
+    println!("PASS existing775 fail-closed; mode and receipt untouched");
+    // 收尾恢复 0700，供后续 shared-writer 断言沿用原基线。
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Original asset writer behavior is intentionally NOT changed by this patch.
+    // 前置恢复旧夹具初态：runtime=0o775（组写位在）。原生 prepare 对此 fail-closed
+    // 拒改，资产写入器也不碰它——双通道都不动它，正是本断言要证的事。
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o775)).unwrap();
+    std::fs::set_permissions(&card, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let shared = match native.prepare("native", "deploy") {
+        Ok(_) => panic!("0775 runtime must fail closed before asset writer runs"),
+        Err(e) => format!("{e:?}"),
+    };
+    assert!(shared.contains("核对"), "unexpected error: {shared}");
     assert_eq!(mode(&runtime), 0o775, "runtime is not an asset directory");
     println!("PASS original shared writer chmod behavior explicitly retained");
     let probe = temp.path().join("umask-probe");
