@@ -1008,10 +1008,8 @@ fn chat_completions_url(
 }
 
 fn is_official_deepseek_beta_base_url(base_url: &str) -> bool {
-    matches!(
-        base_url.trim_end_matches('/').to_ascii_lowercase().as_str(),
-        "https://api.deepseek.com/beta" | "https://api.deepseeki.com/beta"
-    )
+    let trimmed = base_url.trim_end_matches('/').to_ascii_lowercase();
+    crate::config::DEEPSEEK_CANONICAL_BETA_URLS.contains(&trimmed.as_str())
 }
 
 fn body_uses_strict_tools(body: &Value) -> bool {
