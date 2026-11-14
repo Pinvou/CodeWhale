@@ -285,6 +285,33 @@ VALUES('11111111-1111-4111-8111-111111111116','11111111-1111-4111-8111-111111111
 			}
 		})
 	}
+	if previousStage == 40 {
+		// Validate the complete current carrier before selecting the real
+		// historical SQL. Pending later migrations remain in the CLI package.
+		orderedCarrier, e := Ordered(loaded)
+		if e != nil {
+			t.Fatal(e)
+		}
+		var indexRelease []migrations.Migration
+		for _, migration := range orderedCarrier {
+			if migration.Version <= 900008 {
+				indexRelease = append(indexRelease, migration)
+			}
+		}
+		if e = migrations.UpWithHooks(ctx, connection, indexRelease, migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); e != nil {
+			t.Fatal("install frozen dispatch-index historical release", e)
+		}
+		migrations.Unlock(ctx, connection)
+		verified, e := migrations.VerifyApplied(ctx, connection, indexRelease)
+		if e != nil || verified.AppliedCount != len(indexRelease) {
+			t.Fatalf("dispatch-index historical carrier: %+v err=%v", verified, e)
+		}
+		if !t.Run("dispatch-index-public-cli-round-trip", func(t *testing.T) {
+			testDispatchIndexPublicRollback(t, ctx, connection, config, loaded)
+		}) {
+			return
+		}
+	}
 	if err = Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
@@ -348,11 +375,6 @@ WHERE i.indexrelid=to_regclass('public.usage_cancellation_dispatch_fence_idx')
 	// before testing a second independent invocation on this same connection.
 	migrations.Unlock(ctx, connection)
 	probeConfig := config.Copy()
-	if previousStage == 40 {
-		t.Run("dispatch-index-public-cli-round-trip", func(t *testing.T) {
-			testDispatchIndexPublicRollback(t, ctx, connection, config, loaded)
-		})
-	}
 	probeConfig.User = admin.Config().User
 	probe, err := connectManagementFixture(t, ctx, probeConfig)
 	if err != nil {

@@ -22,6 +22,10 @@ func testDispatchIndexPublicRollback(t *testing.T, ctx context.Context, connecti
 	if err != nil {
 		t.Fatal(err)
 	}
+	var installedHead int64
+	if err = connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&installedHead); err != nil || installedHead != 900008 {
+		t.Fatalf("dispatch-index rollback requires its actual installed head 900008: got %d err=%v", installedHead, err)
+	}
 	// Retained facts include one indexed row and both kinds of nonmatching row.
 	// Use the public schema and current runtime role; do not grant fixture DDL
 	// privileges or disable the evidence table's immutable-record trigger.
@@ -77,6 +81,10 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`).Scan(&usageID, &seed
 	if err = connection.QueryRow(ctx, snapshot).Scan(&after); err != nil || before != after {
 		t.Fatal("denied rollback changed persistent facts", err)
 	}
+	var predecessorVersions []int64
+	if err = connection.QueryRow(ctx, `SELECT array_agg(version ORDER BY version) FROM schema_migrations WHERE version<>900008`).Scan(&predecessorVersions); err != nil || len(predecessorVersions) == 0 {
+		t.Fatal("capture historical predecessor versions", err)
+	}
 	var retained string
 	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900008`).Scan(&retained); err != nil {
 		t.Fatal(err)
@@ -120,13 +128,15 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`).Scan(&usageID, &seed
 	if err = connection.QueryRow(ctx, evidenceSnapshot).Scan(&current); err != nil || current != retainedEvidence {
 		t.Fatal("reinstallation changed retained cancellation evidence", err)
 	}
-	// Ledger installation timestamps legitimately change on re-install. Check
-	// original rows separately and verify every current published SQL identity.
-	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900008`).Scan(&current); err != nil || current != retained {
-		t.Fatal("reinstallation changed predecessor ledger", err)
+	// CLI Up reinstalls the index and installs pending later migrations from
+	// the complete current carrier. Every pre-existing predecessor row remains
+	// byte-identical; new identities must match the entire published package.
+	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version=ANY($1)`, predecessorVersions).Scan(&current); err != nil || current != retained {
+		t.Fatal("reinstallation changed historical predecessor ledger", err)
 	}
-	if _, err = VerifyApplied(ctx, connection, loaded); err != nil {
-		t.Fatal("reinstalled public package failed identity verification", err)
+	verified, err := VerifyApplied(ctx, connection, loaded)
+	if err != nil || verified.AppliedCount != len(ordered) {
+		t.Fatalf("reinstalled complete public package: %+v err=%v", verified, err)
 	}
 	t.Log("token_migrator session: gateway Down denied atomically; owner CLI Down and gateway CLI Up passed")
 }
