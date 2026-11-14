@@ -85,7 +85,20 @@ pub(super) fn description() -> &'static str {
          \"wait\" blocks for a background task until completion or timeout; \
          \"interact\" sends stdin to a background task; \"cancel\" kills a background task. \
          Pass wait=false for a nonblocking task snapshot. Foreground mode is for bounded \
-         commands; use background=true for work expected to take >5 seconds. \
+         commands; use background=true for work expected to take >5 seconds. Foreground \
+         commands without `interactive`, `tty`, or `combined_output` run without a \
+         terminal stdin — interactive programs and a bare `$SHELL` receive EOF and \
+         exit; `tty` always selects a background terminal task, and a foreground \
+         command with `combined_output` runs on a terminal lane that nothing \
+         writes to unless a session member interacts with the task, so a \
+         stdin-reading command waits until the watchdog ends it. A foreground \
+         run without `combined_output` may carry one inline stdin payload \
+         (delivered to the command, then end-of-file); a `combined_output` \
+         foreground run delivers the payload but its terminal lane stays \
+         open, so no end-of-file follows it. For multi-write input-driven \
+         workflows supply stdin on the background lane: \
+         use background=true plus \
+         action=\"interact\". \
          Output is truncated per stream (~30KB: head/tail kept, middle summarized; \
          see metadata flags).",
             runtime_command_guidance()
