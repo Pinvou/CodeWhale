@@ -840,7 +840,7 @@ mod screen_mode_tests {
                         viewport: ratatui::Viewport::Inline(3),
                     },
                 )
-                .map_err(|err| io::Error::other(err.to_string()))
+                .map_err(io::Error::other)
             },
         )
         .expect("a successful probe must switch");
