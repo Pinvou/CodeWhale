@@ -109,6 +109,8 @@ job 自身只允许 `main`，Environment 可按发布策略进一步配置 prote
 运行时仓库已公开，不需要仓库级、组织级或 Environment Secret。checkout 设置
 `persist-credentials: false`，初始化脚本按锁定 URL、gitlink 和 manifest 匿名准备源码并下载固定 Release 附件。
 
+本地可运行 `npm --prefix pinvou3-app run test:windows-runtime-cache` 验证缓存及固定 Release 物化行为（下载由本地夹具替代，不代表真实 HTTP 验证）。两个直接 Windows PowerShell 5.1 测试入口会在使用内置命令前按宿主恢复进程内的模块路径，支持从 PowerShell 7 终端直接调用；无需预先清空 `PSModulePath`，不修改用户或机器级配置。PowerShell 7 入口及正常 5.1 默认路径保持不变。
+
 所有 PR（包括同仓 PR）只运行不拉取大型运行时的 Windows 打包契约测试。只有 `main` 的发布链路
 push 或在 `main` 上执行的 `workflow_dispatch` 才能进入 `windows-release` 构建正式 NSIS；
 运行时缺失、gitlink 不一致或 LFS 对象未物化时仍会明确失败，避免产生不完整发布。

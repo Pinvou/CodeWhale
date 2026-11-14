@@ -86,6 +86,10 @@ const runtimeCacheBehaviorHarness = readApp(
   "tests",
   "windows_runtime_cache_behavior.ps1",
 );
+const runtimeReleaseBehaviorHarness = readApp(
+  "tests",
+  "windows_runtime_release_behavior.ps1",
+);
 const runtimeWrapper = readApp("scripts", "tauri", "windows-runtime.js");
 const installerAdapter = readApp("scripts", "tauri", "windows-installer.js");
 const buildScript = readApp("scripts", "tauri", "build.js");
@@ -870,6 +874,18 @@ assert.match(
   modulePathGuard,
   "the runtime init script must restore the 5.1 module path before its lock-file hashing",
 );
+for (const [name, harness, firstDependency] of [
+  ["windows_runtime_cache_behavior.ps1", runtimeCacheBehaviorHarness, "$appRoot ="],
+  ["windows_runtime_release_behavior.ps1", runtimeReleaseBehaviorHarness, ". (Join-Path"],
+]) {
+  assert.match(harness, modulePathGuard, `${name} must restore its own 5.1 module path`);
+  const guardStart = harness.indexOf("if ($PSVersionTable.PSVersion.Major -lt 6)");
+  const dependencyStart = harness.indexOf(firstDependency);
+  assert.ok(
+    guardStart >= 0 && dependencyStart > guardStart,
+    `${name} must restore the module path before resolving or importing fixture dependencies`,
+  );
+}
 assert.ok(
   runtimeScript.indexOf("PSVersionTable.PSVersion.Major -lt 6") <
     runtimeScript.indexOf("Add-Type -AssemblyName"),
