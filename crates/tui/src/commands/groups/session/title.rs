@@ -173,7 +173,7 @@ pub(crate) fn set_window_title_with_manager(
     app.sync_cost_to_metadata(&mut session.metadata);
     session.window_title = title.clone();
 
-    match manager.save_session(&session) {
+    match manager.save_session_edit(&session) {
         Ok(_) => {
             app.window_title = title.clone();
             // The render loop syncs the resolved prefix into the terminal

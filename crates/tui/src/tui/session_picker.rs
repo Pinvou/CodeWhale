@@ -499,7 +499,7 @@ impl SessionPickerView {
             }
         };
         saved.metadata.title = new_title.to_string();
-        if let Err(e) = manager.save_session(&saved) {
+        if let Err(e) = manager.save_session_edit(&saved) {
             self.status = Some(
                 tr(self.locale, MessageId::SessionsRenameFailed).replace("{error}", &e.to_string()),
             );

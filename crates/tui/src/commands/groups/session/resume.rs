@@ -107,7 +107,7 @@ fn import_container(
             Err(e) => return CommandResult::error(format!("foreign import failed: {e}")),
         };
     let new_id = imported.metadata.id.clone();
-    if let Err(e) = manager.save_session(&imported) {
+    if let Err(e) = manager.save_session_edit(&imported) {
         return CommandResult::error(format!("imported session could not be saved: {e}"));
     }
     app.current_session_id = Some(new_id.clone());
