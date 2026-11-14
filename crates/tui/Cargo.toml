@@ -28,6 +28,7 @@ name = "codewhale-tui"
 path = "src/main.rs"
 
 [dependencies]
+http = "1.5"
 ahash = "0.8"
 anyhow.workspace = true
 codewhale-config = { path = "../config", version = "0.9.12" }
@@ -118,6 +119,7 @@ mimalloc.workspace = true
 codewhale-build-support = { path = "../build-support", version = "0.9.12" }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 cucumber = "0.23.0"
 jsonschema.workspace = true
 wiremock = "0.6"

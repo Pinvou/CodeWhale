@@ -638,3 +638,23 @@ mod tests {
         writer.join().expect("writer thread");
     }
 }
+
+/// Construct and drive Engine-sized fixtures with the production worker stack budget.
+pub(crate) fn run_on_engine_thread<F, Fut>(build: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    std::thread::Builder::new()
+        .stack_size(crate::CODEWHALE_MAIN_STACK_BYTES)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(build());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

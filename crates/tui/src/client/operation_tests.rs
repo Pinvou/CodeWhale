@@ -691,3 +691,47 @@ async fn forkguard_model_operation_http1_stream_keeps_id() {
             == id.to_string()
     }));
 }
+
+#[tokio::test]
+async fn forkguard_rate_limit_transport_preserves_logical_request() {
+    let server = MockServer::start().await;
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = count.clone();
+    Mock::given(method("POST")).respond_with(move |_: &wiremock::Request| {
+        if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            ResponseTemplate::new(429).insert_header("retry-after", "0")
+                .set_body_json(json!({"error":{"message":"fixture rate limit"}}))
+        } else {
+            ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+        }
+    }).mount(&server).await;
+    let mut cfg = config(&server.uri(), Some("idempotency-key"));
+    let mut policy = crate::config::RateLimitRetryPolicy::default();
+    policy.max_attempts = 2;
+    policy.initial_delay_secs = 1;
+    policy.max_delay_secs = 1;
+    cfg.retry = Some(crate::config::RetryConfig {
+        rate_limit: policy,
+        enabled: None,
+        max_retries: Some(0),
+        initial_delay: None,
+        max_delay: None,
+        exponential_base: None,
+    });
+    let client = DeepSeekClient::new(&cfg).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let mut stream = client
+        .create_message_stream_for_operation(request(), id)
+        .await
+        .unwrap();
+    while let Some(event) = stream.next().await {
+        event.unwrap();
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body, requests[1].body);
+    for request in requests {
+        assert_eq!(request.headers["idempotency-key"], id.to_string());
+    }
+}
