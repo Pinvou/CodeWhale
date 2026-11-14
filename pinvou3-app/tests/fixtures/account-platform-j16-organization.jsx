@@ -8,9 +8,16 @@ import { organizationRechargeTargetAllowed, requirePersonalAccount } from '../..
 import { dict, ensureLanguage, accountPlatformCopy, organizationCopy } from '../../src/shared/i18n.js';
 import mainSource from '../../src/app/main.jsx?raw';
 const org='0199a100-0001-7000-8000-000000000201', user='0199a100-0001-7000-8000-000000000202';
+const params=new URLSearchParams(location.search);
+const personalContext=params.has('personal-context'), personalNotice=params.has('personal-notice');
 const control={org,user,language:'en',calls:[],authenticated:true,denied:false,other:false};
-const profile=()=>({user_id:user,status:'ACTIVE',personal_permissions:[],platform_permissions:[],active_context:{context_type:'ORGANIZATION',organization_id:control.other?user:org,context_version:1,membership_version:1,organization_authorization_version:1,permissions:control.denied?[]:['org.entitlements.purchase']}});
-const client={financeSessionEpoch:0,versionObservationEpoch:0,contextVersion:1,authorizationVersions:{},session:async()=>({authenticated:control.authenticated}),bootstrap:async()=>{control.bootstrapReads=(control.bootstrapReads||0)+1;return profile();},request:async(area,path,options={})=>{
+const profile=()=>({user_id:user,status:'ACTIVE',personal_permissions:personalContext?['personal.billing.read','personal.recharge.create']:[],platform_permissions:[],active_context:personalContext?{context_type:'PERSONAL',context_version:1,permissions:[]}:{context_type:'ORGANIZATION',organization_id:control.other?user:org,context_version:1,membership_version:1,organization_authorization_version:1,permissions:control.denied?[]:['org.entitlements.purchase']}});
+const client={financeSessionEpoch:0,versionObservationEpoch:0,contextVersion:1,authorizationVersions:{},session:async()=>({authenticated:control.authenticated}),bootstrap:async()=>{control.bootstrapReads=(control.bootstrapReads||0)+1;return profile();},
+ balance:async()=>({available_microcredits:'0',reserved_microcredits:'0'}),
+ products:async()=>{control.personalProducts=(control.personalProducts||0)+1;return {items:[]};},
+ paymentCapabilities:async()=>({channels:['ALIPAY'],test_only:true,formal_collection_admitted:false}),
+ rechargeOrders:async()=>({items:[]}),
+ request:async(area,path,options={})=>{
  control.calls.push({area,path,method:options.method||'GET',key:options.idempotencyKey,body:options.body});
  if(path==='/v1/me/organizations')return {items:[{organization_id:org,version:1,status:'ACTIVE',name:'Controlled Org'}]};
  if(path.endsWith('/recharge/products'))return {items:[{product_id:'current-product',amount_fen:'100',channels:['ALIPAY'],availability_status:'AVAILABLE',plan_name:'Current product'}]};
@@ -25,8 +32,8 @@ function Fixture(){
  const values={walletRechargeTarget,organizationRechargeTargetAllowed,requirePersonalAccount,personalAccountAvailable:true,personalAccountClient:client,accountRechargeSequence:seq,setAccountRechargeRequest:setRequest,setPersonalAccountOpen:setOpen,setSettingsToast:setError,organizationCopy,language};
  const start=mainSource.indexOf('onOpenAccountRecharge: async userError => {'),end=mainSource.indexOf('        onGotoTools:',start);
  const callback=new Function(...Object.keys(values),'return ('+mainSource.slice(start,end).replace(/^onOpenAccountRecharge: /,'').trim().replace(/,$/,'')+')')(...Object.values(values));
- const notice={schema_version:1,code:'WALLET_INSUFFICIENT',stage:'INITIAL_RESERVATION',turn_outcome:'REJECTED',settlement_status:'NOT_STARTED',action:'OPEN_ORGANIZATION_RECHARGE',context_type:'ORGANIZATION',organization_id:org};
+ const notice={schema_version:1,code:'WALLET_INSUFFICIENT',stage:'INITIAL_RESERVATION',turn_outcome:'REJECTED',settlement_status:'NOT_STARTED',...(personalNotice?{action:'OPEN_RECHARGE',context_type:'PERSONAL'}:{action:'OPEN_ORGANIZATION_RECHARGE',context_type:'ORGANIZATION',organization_id:org})};
  const turn={id:'controlled-turn',lifecycleKnown:true,status:'failed',userError:timelineUserError({billing_notice:notice}),items:[],presentation:[],operationCount:0};
- return <><p role="status" data-host-error>{error}</p><ConversationTimeline turns={[turn]} sessionId="controlled-session" copy={dict[language].uiConversation} onUserErrorAction={callback}/><AccountPlatformPopover open={open} client={client} copy={accountPlatformCopy[language]} language={language} onLanguageChange={()=>{}} rechargeRequest={request} onClose={()=>{seq.current++;setRequest(null);setOpen(false);}}/></>;
+ return <><p role="status" data-host-error>{error}</p>{params.has('background-dialog')&&<div role="dialog" data-background-dialog>Background dialog</div>}<ConversationTimeline turns={[turn]} sessionId="controlled-session" copy={dict[language].uiConversation} onUserErrorAction={callback}/><AccountPlatformPopover open={open} client={client} copy={accountPlatformCopy[language]} language={language} onLanguageChange={()=>{}} rechargeRequest={request} onClose={()=>{seq.current++;setRequest(null);setOpen(false);}}/></>;
 }
 await ensureLanguage('en');createRoot(document.querySelector('#root')).render(<Fixture/>);window.j16=control;

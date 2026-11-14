@@ -123,13 +123,13 @@ func TestF02ApprovalStopLossExecutionFence(t *testing.T) {
 				if evaluations != 1 || events != 1 || mitigation == nil {
 					t.Fatal("durable per-request evaluation missing")
 				}
-				if err = begin(); !errors.Is(err, account.ErrConflict) {
+				if err = begin(); !errors.Is(err, account.ErrConflict) || !errors.Is(err, account.ErrApprovalExecutionPaused) {
 					t.Fatalf("paused request fresh retry: %v", err)
 				}
 				if _, err = c.Exec(ctx, `UPDATE manual_review_cases SET status='RESOLVED',resolved_at=clock_timestamp() WHERE id=$1`, caseID); err != nil {
 					t.Fatal(err)
 				}
-				if err = begin(); !errors.Is(err, account.ErrConflict) {
+				if err = begin(); !errors.Is(err, account.ErrConflict) || !errors.Is(err, account.ErrApprovalExecutionPaused) {
 					t.Fatalf("closing review cleared immutable pause: %v", err)
 				}
 				var executions int
