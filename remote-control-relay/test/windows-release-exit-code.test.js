@@ -18,9 +18,14 @@ test('Windows release step retains every mandatory command and required-gate dep
   assert.equal(step.env.PINVOU_DESKTOP_CONTROLLER_ENABLED, '0');
   assert.equal(step['continue-on-error'], undefined);
   assert.ok(workflow.jobs['required-gate'].needs.includes('release-contract-test'));
-  assert.equal(step.run.split('\n').filter((line) => /^(?:npm|node)\b/u.test(line)).length, 3);
+  // 主线把受监督回执（python ci-fixture-process.py）引入为第二条契约命令的
+  // 包装层；强制命令按 npm/node/python 三种外层形态清点，退出码契约不变。
+  assert.equal(step.run.split('\n').filter((line) => /^(?:npm|node|python)\b/u.test(line)).length, 3);
   assert.match(step.run, /npm --prefix remote-control-relay run release:gate/u);
+  assert.match(step.run, /python scripts\/ci-fixture-process\.py --receipt .+ -- node --test --test-concurrency=1 /u);
   assert.match(step.run, /windows-e2e-orchestrator-helpers\.test\.js/u);
+  assert.match(step.run, /release-evidence-artifacts\.test\.js/u);
+  assert.match(step.run, /controller-release-source-binding\.test\.js/u);
   assert.match(step.run, /remote_control_feature_gate_contract\.test\.mjs/u);
   const regression = job.steps.find((value) => value.name === 'Windows 原生命令退出码回归');
   assert.ok(job.steps.indexOf(regression) < job.steps.indexOf(step));
@@ -46,7 +51,7 @@ for (const [name, target, count] of [['contracts', step, 3], ['protected-build',
       // Substitute only the three external contracts. Execute their actual
       // workflow control flow so deleting a guard fails this regression.
       const script = target.run.split('\n').map((line) => {
-        if (!/^(?:npm|node)\b/u.test(line)) return line;
+        if (!/^(?:npm|node|python)\b/u.test(line)) return line;
         const index = command++;
         const exitCode = failure === index ? 17 : 0;
         return `& $env:PINVOU_NATIVE_EXIT_TEST_NODE -e 'console.log(${index});process.exit(${exitCode})'`;
