@@ -6930,7 +6930,11 @@ mod alias_thinking_detection_tests {
             "the surviving tool stays forceable under its own spelling"
         );
         assert!(
-            body.body["tools"].as_array().expect("tools on the wire").len() == 1,
+            body.body["tools"]
+                .as_array()
+                .expect("tools on the wire")
+                .len()
+                == 1,
             "only the underscore tool is advertised"
         );
     }
@@ -7042,10 +7046,7 @@ mod alias_thinking_detection_tests {
         let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
         let mut overlong = digit_led_name_probe_tool(&name_128);
         overlong.description = "overlong".to_string();
-        request.tools = Some(vec![
-            digit_led_name_probe_tool(&name_127),
-            overlong,
-        ]);
+        request.tools = Some(vec![digit_led_name_probe_tool(&name_127), overlong]);
 
         let body = crate::client::chat::build_chat_wire_body(
             &request,

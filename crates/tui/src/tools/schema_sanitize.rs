@@ -2219,13 +2219,8 @@ fn mfjs_schema_can_terminate(
         }
         let target = resolve_mfjs_reference(document, reference)
             .ok_or(KimiParameterSchemaError::InvalidReference)?;
-        let terminates = mfjs_schema_can_terminate(
-            target,
-            document,
-            visiting_refs,
-            structural_depth + 1,
-            work,
-        )?;
+        let terminates =
+            mfjs_schema_can_terminate(target, document, visiting_refs, structural_depth + 1, work)?;
         visiting_refs.remove(reference);
         return Ok(terminates);
     }
@@ -2239,8 +2234,7 @@ fn mfjs_schema_can_terminate(
                 &mut branch_refs,
                 structural_depth + 1,
                 work,
-            )?
-            {
+            )? {
                 return Ok(true);
             }
         }
@@ -2380,13 +2374,7 @@ fn validate_mfjs_expanded_depth(
         }
     }
     if let Some(items) = obj.get("items") {
-        validate_mfjs_expanded_depth(
-            items,
-            document,
-            property_depth,
-            structural_depth + 1,
-            state,
-        )?;
+        validate_mfjs_expanded_depth(items, document, property_depth, structural_depth + 1, state)?;
     }
     if let Some(additional) = obj
         .get("additionalProperties")

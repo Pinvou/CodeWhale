@@ -8790,7 +8790,8 @@ mod tests {
             "exact match wins; the digit-led fallback must not fire"
         );
         assert_eq!(
-            tool_def.expect("resolved").name, "_3d_render",
+            tool_def.expect("resolved").name,
+            "_3d_render",
             "the call must reach the underscore tool, never the digit-led twin"
         );
 
