@@ -1353,27 +1353,27 @@ impl DeepSeekClient {
             ));
         }
 
-        let http_client = Self::build_http_client_with_auth_mode(
-            &api_key,
-            &http_headers,
-            api_provider,
-            &base_url,
-            wire_format,
-            auth_disabled,
-            false,
-        )?;
+        let build_client = |force_http1| -> Result<reqwest::Client> {
+            let builder = Self::build_http_builder_with_auth_mode(
+                &api_key,
+                &http_headers,
+                api_provider,
+                &base_url,
+                wire_format,
+                auth_disabled,
+                force_http1,
+            )?;
+            let builder = match config.model_http_policy.as_ref() {
+                Some(policy) => policy.configure(builder, &base_url)?,
+                None => builder,
+            };
+            builder.build().map_err(Into::into)
+        };
+        let http_client = build_client(false)?;
         // Always keep an HTTP/1.1 twin for automatic stream-header fallback
         // when H2 stalls. When CODEWHALE_FORCE_HTTP1 is set, both clients are
         // HTTP/1.1 and the fallback is a no-op retry path.
-        let http1_client = Self::build_http_client_with_auth_mode(
-            &api_key,
-            &http_headers,
-            api_provider,
-            &base_url,
-            wire_format,
-            auth_disabled,
-            true,
-        )?;
+        let http1_client = build_client(true)?;
 
         Ok(Self {
             http_client,
@@ -1657,7 +1657,7 @@ impl DeepSeekClient {
         api_provider: ApiProvider,
         base_url: &str,
     ) -> Result<reqwest::Client> {
-        Self::build_http_client_with_auth_mode(
+        Self::build_http_builder_with_auth_mode(
             api_key,
             extra_headers,
             api_provider,
@@ -1665,10 +1665,12 @@ impl DeepSeekClient {
             provider_default_wire_format(api_provider),
             false,
             false,
-        )
+        )?
+        .build()
+        .map_err(Into::into)
     }
 
-    fn build_http_client_with_auth_mode(
+    fn build_http_builder_with_auth_mode(
         api_key: &str,
         extra_headers: &HashMap<String, String>,
         api_provider: ApiProvider,
@@ -1676,7 +1678,7 @@ impl DeepSeekClient {
         wire_format: WireFormat,
         auth_disabled: bool,
         force_http1: bool,
-    ) -> Result<reqwest::Client> {
+    ) -> Result<reqwest::ClientBuilder> {
         let headers = build_default_headers(
             api_key,
             extra_headers,
@@ -1705,7 +1707,7 @@ impl DeepSeekClient {
         {
             builder = add_extra_root_certs(builder, &cert_path);
         }
-        builder.build().map_err(Into::into)
+        Ok(builder)
     }
 
     /// HTTP/1.1 client for automatic stream-header fallback.
@@ -4441,6 +4443,9 @@ mod provider_native_search;
 mod responses;
 mod role_placement;
 mod stream_entry;
+#[cfg(test)]
+#[path = "client/transport_policy_tests.rs"]
+mod transport_policy_tests;
 mod wire;
 
 // Retain the crate-visible accounting helpers at the existing client seam.

@@ -17,7 +17,7 @@ use crate::tools::spec::{
 
 pub struct ImageAnalyzeTool {
     config: VisionModelConfig,
-    client: reqwest::Client,
+    client: Result<reqwest::Client, ()>,
     route_client: Option<DeepSeekClient>,
 }
 
@@ -56,15 +56,27 @@ impl ImageAnalyzeTool {
         config: VisionModelConfig,
         route_client: Option<DeepSeekClient>,
     ) -> Self {
-        let client = crate::tls::reqwest_client_builder()
-            // Bound only the connect handshake. A client- or request-level
-            // `read_timeout` would start counting at `send()` and never
-            // reset before the response headers, quietly re-introducing a
-            // total deadline on the upload + long non-streaming generation;
-            // the total bound lives in VISION_REQUEST_ENVELOPE instead.
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .expect("Failed to build HTTP client");
+        let client = (|| -> anyhow::Result<reqwest::Client> {
+            let builder = crate::tls::reqwest_client_builder()
+                // Bound only the connect handshake. A client- or request-level
+                // `read_timeout` would start counting at `send()` and never
+                // reset before the response headers, quietly re-introducing a
+                // total deadline on the upload + long non-streaming generation;
+                // the total bound lives in VISION_REQUEST_ENVELOPE instead.
+                .connect_timeout(Duration::from_secs(10));
+            let builder = match config.model_http_policy.as_ref() {
+                Some(policy) => policy.configure(
+                    builder,
+                    config
+                        .base_url
+                        .as_deref()
+                        .unwrap_or("https://api.openai.com/v1"),
+                )?,
+                None => builder,
+            };
+            Ok(builder.build()?)
+        })()
+        .map_err(|_| ());
         Self {
             config,
             client,
@@ -292,6 +304,10 @@ impl ToolSpec for ImageAnalyzeTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let client = self
+            .client
+            .as_ref()
+            .map_err(|_| ToolError::execution_failed("Vision HTTP transport unavailable"))?;
         let image_path = required_str(&input, "image_path")?;
         let prompt = input
             .get("prompt")
@@ -338,7 +354,7 @@ impl ToolSpec for ImageAnalyzeTool {
                 || {
                     let client = idempotency_route
                         .map(|route| route.http_client.clone())
-                        .unwrap_or_else(|| self.client.clone());
+                        .unwrap_or_else(|| client.clone());
                     let url = url.clone();
                     let api_key = api_key.clone();
                     let payload = payload.clone();
@@ -448,6 +464,7 @@ mod tests {
             model: "test-vision-model".to_string(),
             api_key: Some("test-key".to_string()),
             base_url: Some("https://example.invalid/v1".to_string()),
+            model_http_policy: None,
         }
     }
 
@@ -568,6 +585,7 @@ mod tests {
                 model,
                 api_key: None,
                 base_url: Some(base_url),
+                model_http_policy: None,
             },
             Some(client),
         );
@@ -776,6 +794,7 @@ mod tests {
             model: "test-vision-model".to_string(),
             api_key: Some("test-key".to_string()),
             base_url: Some(base_url),
+            model_http_policy: None,
         })
     }
 
@@ -1021,6 +1040,7 @@ mod tests {
                     model: "test-vision-model".into(),
                     api_key: Some(key.into()),
                     base_url: Some(server.uri()),
+                    model_http_policy: None,
                 },
                 Some(route),
             );
@@ -1108,6 +1128,7 @@ mod tests {
                     model: "test-vision-model".into(),
                     api_key: Some("owned-test-key".into()),
                     base_url: Some(base.clone()),
+                    model_http_policy: None,
                 },
                 Some(route),
             );
@@ -1172,6 +1193,7 @@ mod tests {
                 model: "test-vision-model".into(),
                 api_key: Some("owned-test-key".into()),
                 base_url: Some(format!("{}/v1", server.uri())),
+                model_http_policy: None,
             },
             Some(route.clone()),
         );
@@ -1218,6 +1240,7 @@ mod tests {
                 model: "test-vision-model".into(),
                 api_key: Some("ordinary-vision-key".into()),
                 base_url: Some(format!("{}/v1", server.uri())),
+                model_http_policy: None,
             },
             Some(route),
         );
