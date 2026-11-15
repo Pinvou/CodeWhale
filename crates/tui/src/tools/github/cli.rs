@@ -23,6 +23,11 @@ const FALLBACK_GH_PATHS: &[&str] = &[
 /// `gh` ran on the executor thread with no timeout and stalled the turn
 /// indefinitely.
 const GH_COMMAND_BUDGET: Duration = Duration::from_secs(60);
+// Audited pin (PR #154 limits review): one `gh` call stays inside the 60s
+// ceiling so a hung, network-bound invocation can never out-wait the turn.
+// Const-asserted (Duration's `PartialOrd` is not const, so compare `as_secs`)
+// because this module has no runtime test surface.
+const _: () = assert!(GH_COMMAND_BUDGET.as_secs() <= 60);
 
 fn gh_bin() -> String {
     if let Ok(bin) = std::env::var("CODEWHALE_GH_BIN").or_else(|_| std::env::var("DEEPSEEK_GH_BIN"))
@@ -42,8 +47,12 @@ pub(super) async fn run_gh_text(context: &ToolContext, args: &[&str]) -> Result<
     // `run_bounded_child` reports spawn failures generically; resolve the
     // install hint up front for the common "gh is not installed" case (the
     // fallback paths are absolute). A bare-name env override resolves via
-    // PATH at spawn and keeps the generic error.
-    if bin.contains('/') && !std::path::Path::new(&bin).is_file() {
+    // PATH at spawn and keeps the generic error. The pre-check fires only
+    // for paths that do not exist (a broken symlink included, where the
+    // spawn itself would fail with ENOENT anyway); a path that exists but
+    // cannot be spawned (a directory, a non-executable file) surfaces the
+    // real spawn error instead of install advice that would not fix it.
+    if bin.contains('/') && !std::path::Path::new(&bin).exists() {
         return Err(ToolError::not_available(
             "gh CLI not found; install it or set CODEWHALE_GH_BIN (legacy: DEEPSEEK_GH_BIN)",
         ));
