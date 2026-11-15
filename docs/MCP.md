@@ -333,8 +333,8 @@ The CLI also exposes helper tools when MCP is enabled:
 The host's bundled `session-reader` server contributes two more read
 helpers, `mcp_session-reader_read_session` and
 `mcp_session-reader_list_sessions`, which are classified as read-only the
-same way (auto-approved, admitted in Plan mode). That server's write tools
-remain approval-gated.
+same way (auto-approved, admitted in Plan mode when policy permits). That
+server's write tools remain approval-gated.
 
 ## Minimal Example
 

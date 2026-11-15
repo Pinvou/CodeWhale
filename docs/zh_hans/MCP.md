@@ -245,7 +245,7 @@ Codewhale 同时读取 `servers` 和 `mcpServers`，因此设置页生成的片�
 
 宿主自带的 `session-reader` 服务器还提供两个只读辅助工具
 `mcp_session-reader_read_session` 与 `mcp_session-reader_list_sessions`，
-按同样方式归类为只读（自动批准、Plan 模式可用）。该服务器的写工具仍需审批。
+按同样方式归类为只读（在策略允许时自动批准，Plan 模式可用）。该服务器的写工具仍需审批。
 
 ## 最小示例
 

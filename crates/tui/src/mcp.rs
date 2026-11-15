@@ -1117,8 +1117,9 @@ pub struct McpTool {
 /// loop and the fleet/subagent registries cannot drift apart (the drift that
 /// left the session-reader reads approval-gated on the engine path after the
 /// first half of the #157 fix landed only in the registry adapter). Tests
-/// deliberately enumerate the names literally so a change to this list
-/// cannot pass them unnoticed.
+/// enumerate the current names literally, so a removal from this list
+/// cannot pass unnoticed; the domain pin additionally keeps every entry
+/// inside the engine's `McpPool::is_mcp_tool` gate.
 ///
 /// Classification is exact-name and applies globally across lanes: a helper
 /// runs with `ApprovalRequirement::Auto` in every posture (including
