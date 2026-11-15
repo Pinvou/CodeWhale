@@ -28,34 +28,46 @@
 //! 局域网暴露、双机从机控制、硬件探测，排在后面的阶段）。
 
 pub mod boundary;
+mod card_assets;
+pub mod card_update;
 pub mod config;
 pub mod db;
+pub mod deploy_profiles;
 
 // 商店边界在 platform/mod.rs 经 `use linux as backend` 转发，必须先在本模块根
 // re-export（boundary 是子模块，别名不透传子模块条目）。
 pub(crate) use boundary::{
     ollama_base_url, ollama_base_url_checked, store_model_name, store_model_name_checked,
-    store_weights_roots, store_weights_roots_checked,
+    store_weights_roots, store_weights_roots_checked, with_weight_removal_boundary,
 };
 pub mod disk;
 pub mod errors;
 pub mod import_scan;
 pub mod lifecycle;
+mod linked_models;
+pub(crate) use linked_models::matches_current_model_route;
+pub mod native_card_compat;
+mod native_runtime;
 pub mod orphans;
 pub mod proc_timeout;
 pub mod run_state;
 pub mod script_runner;
 pub mod service;
+pub mod startup_updates;
 pub mod store_client;
 pub mod test_store_data;
+pub mod version_store;
+pub mod weight_identity;
 
 // 服务层的操作直接对外，签名与 `platform/unsupported.rs` 里的桩一一对应。
 // 命令层因此不必分平台分支。
 pub use service::{
-    ModelStoreService, active_runs, answer_run, api_keys, cancel_run, create_api_key,
-    disable_test_store, force_remove, library, list_cards, model_detail, run_log,
-    run_startup_cleanup, run_startup_refresh, set_storage_settings, start_deploy, start_download,
-    start_lifecycle, storage_settings, take_startup_cleanup, test_store_state, unlock_test_store,
+    ModelStoreService, active_runs, answer_run, api_keys, cancel_run, check_card_update,
+    create_api_key, disable_test_store, follow_deployment_context, force_remove, library,
+    list_cards, model_detail, run_log, run_startup_cleanup, run_startup_refresh,
+    set_storage_settings, start_card_update, start_deploy, start_download, start_lifecycle,
+    start_version_action, startup_update_check, storage_settings, take_startup_cleanup,
+    test_store_state, unlock_test_store, versions,
 };
 
 // 可见性契约：`installed_weight_paths_checked` 与 `installed_weight_candidate_names_checked`
@@ -66,7 +78,7 @@ pub use service::{
 pub(crate) use service::{
     installed_import_markers_checked, installed_ownership_unconfirmable_checked,
     installed_weight_candidate_names_checked, installed_weight_filenames_checked,
-    installed_weight_paths_checked,
+    installed_weight_paths_checked, installed_weight_paths_for_removal_checked,
 };
 
 /// Linux 上模型商店总是可用的。

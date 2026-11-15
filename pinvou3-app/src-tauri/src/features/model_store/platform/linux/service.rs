@@ -130,6 +130,8 @@ pub struct ModelStoreService {
     queue: Arc<DownloadQueue>,
     runs: Mutex<HashMap<String, Arc<RunLog>>>,
     startup_cleanup: StartupCleanup,
+    startup_updates: super::startup_updates::StartupUpdates,
+    models_changed: Mutex<Option<super::super::super::ModelsChangedHandler>>,
 }
 
 impl Default for ModelStoreService {
@@ -146,7 +148,34 @@ impl ModelStoreService {
             queue: Arc::new(DownloadQueue::default()),
             runs: Mutex::new(HashMap::new()),
             startup_cleanup: StartupCleanup::default(),
+            startup_updates: Default::default(),
+            models_changed: Mutex::new(None),
         }
+    }
+
+    pub fn set_models_changed_handler(&self, handler: super::super::super::ModelsChangedHandler) {
+        *self.models_changed.lock() = Some(handler);
+    }
+
+    fn sync_linked_models(&self, card_id: Option<&str>) -> Result<(), String> {
+        let changed = super::linked_models::sync(card_id)?;
+        self.notify_models_changed(&changed);
+        Ok(())
+    }
+
+    fn notify_models_changed(&self, changed: &[String]) {
+        if !changed.is_empty() {
+            let handler = self.models_changed.lock().clone();
+            if let Some(handler) = handler {
+                handler(changed);
+            }
+        }
+    }
+
+    fn refresh_enabled_model(&self, card_id: &str) -> Result<(), String> {
+        self.sync_linked_models(Some(card_id))?;
+        self.notify_models_changed(&super::linked_models::current_linked_ids(card_id));
+        Ok(())
     }
 
     fn new_run(&self, run_id: &str) -> Arc<RunLog> {
@@ -218,6 +247,9 @@ fn needs_redeploy(record: &db::StoreModelRecord) -> bool {
     if record.status != "deployed" {
         return false;
     }
+    if record.card_update_pending {
+        return true;
+    }
     if let (Some(deployed), Some(current)) = (
         record.deployed_script_sha256.as_deref(),
         record
@@ -275,11 +307,25 @@ fn strip_bulky_fields<T: serde::Serialize>(models: T) -> Value {
 /// 也没人提示。
 fn library_payload(models: Vec<db::StoreModelRecord>) -> Value {
     let flags: Vec<bool> = models.iter().map(needs_redeploy).collect();
+    let defaults: Vec<_> = models
+        .iter()
+        .map(|record| {
+            super::deploy_profiles::default_id(&record.card_id, &record.profiles).map(str::to_owned)
+        })
+        .collect();
+    let revisions: Vec<_> = models
+        .iter()
+        .map(|record| super::card_update::revision(&super::card_update::notice_manifest(record)))
+        .collect();
     let mut value = strip_bulky_fields(models);
     if let Some(items) = value.as_array_mut() {
-        for (item, needs) in items.iter_mut().zip(flags) {
+        for (((item, needs), default), revision) in
+            items.iter_mut().zip(flags).zip(defaults).zip(revisions)
+        {
             if let Some(obj) = item.as_object_mut() {
                 obj.insert("needs_redeploy".to_string(), Value::Bool(needs));
+                obj.insert("default_profile_id".to_string(), json!(default));
+                obj.insert("card_revision".to_string(), json!(revision));
             }
         }
     }
@@ -302,6 +348,7 @@ struct OpCleanup {
     /// 正常跑完时由工作线程填上；还是 `None` 就说明 panic 逃出了 catch_unwind，
     /// 那也得给 RunLog 一个结局，不能让调用方一直等下去。
     outcome: Option<Result<Value, String>>,
+    operation_lock: Option<std::fs::File>,
 }
 
 impl Drop for OpCleanup {
@@ -310,14 +357,36 @@ impl Drop for OpCleanup {
         self.registry_owner.active.finish(&self.card);
         // 下载之外的操作没进过队列，release 对它们是空操作
         self.registry_owner.queue.release(&self.run_id);
+        self.operation_lock.take();
         // finish 必须是最后一步：它一置位，长轮询就会立刻带着结局返回，调用方
         // 可能下一毫秒就来重试同一张卡——那时互斥必须已经放开了。
         let outcome = self
             .outcome
             .take()
             .unwrap_or_else(|| Err("内部错误：任务线程异常终止，没有留下结果".to_string()));
-        self.log.finish(outcome, self.control.cancelled());
+        let cancelled = self.control.cancelled() && outcome.is_err();
+        self.log.finish(outcome, cancelled);
     }
+}
+
+/// Cross-process serialization for all mutations of one public card.
+fn card_operation_lock(card_id: &str) -> Result<std::fs::File, String> {
+    let safe_id = config::safe_path_component(card_id)?;
+    let lock_dir = config::data_dir().join("operation-locks");
+    std::fs::create_dir_all(&lock_dir).map_err(|e| e.to_string())?;
+    // Keep the established path: moving a live lock would split exclusion
+    // between processes running different app versions.
+    let operation_lock = crate::platform::filesystem::open_private_lock_file(
+        &lock_dir.join(format!("{safe_id}.lock")),
+    )
+    .map_err(|e| e.to_string())?;
+    operation_lock
+        .try_lock()
+        .map_err(|_| "该模型正在其他窗口操作，请稍后重试".to_string())?;
+    // No previous operation can still own this card. Recover its stale plans
+    // before a new revision starts and the card lock becomes deliberately busy.
+    super::version_store::recover_interrupted_while_locked(card_id, &operation_lock)?;
+    Ok(operation_lock)
 }
 
 /// 把一个阻塞的生命周期操作跑起来，立刻返回 run_id。
@@ -341,6 +410,9 @@ where
     // 但登记表之外的东西一律等占坑成功再建——占不到坑就直接返回，不能留下一条
     // 没人会去读、也没人会去收的运行记录。
     let run_id = new_run_id();
+    // All lifecycle actions share the lock with package replacement, including
+    // another app process. Closing the fd releases it after panic/cancellation.
+    let operation_lock = card_operation_lock(card_id)?;
     // 卡片级互斥：同一张卡不许被两处同时操作。
     service.active.try_begin(card_id, op, Some(&run_id))?;
 
@@ -362,6 +434,7 @@ where
             log: Arc::clone(&log_for_thread),
             control: control_probe,
             outcome: None,
+            operation_lock: Some(operation_lock),
         };
         // catch_unwind 只负责把 panic 变成一句人话，"一定会收尾"是守卫保证的。
         // AssertUnwindSafe：job 只被调用一次，panic 之后我们不再碰它捕获的任何
@@ -402,16 +475,18 @@ pub async fn list_cards(test_mode: bool) -> Result<Value, String> {
     .map_err(|e| e.to_string())?
 }
 
-pub async fn library() -> Result<Value, String> {
-    tokio::task::spawn_blocking(|| {
+pub async fn library(service: Arc<ModelStoreService>) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
         let mgr = ModelManager::new(None, None);
         // 先按实际容器状态纠正一次 running：设备可能是重启之后才起的应用，
         // 库里的 running 标记这时候是过期的。
         let corrected = mgr.reconcile_running_status();
+        let link_sync_error = service.sync_linked_models(None).err();
         let models = db::list_store_models().map_err(|e| e.to_string())?;
         Ok(json!({
             "models": library_payload(models),
             "corrected": corrected,
+            "link_sync_error": link_sync_error,
         }))
     })
     .await
@@ -423,10 +498,125 @@ pub async fn model_detail(card_id: String) -> Result<Value, String> {
         ModelManager::new(None, None)
             .get_model_detail(&card_id)
             .map_err(|e| e.to_string())
-            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string()))
+            .and_then(|d| {
+                let default =
+                    super::deploy_profiles::default_id(&d.record.card_id, &d.record.profiles);
+                let mut value = serde_json::to_value(&d).map_err(|e| e.to_string())?;
+                value["record"]["default_profile_id"] = json!(default);
+                Ok(value)
+            })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+pub async fn follow_deployment_context(
+    service: Arc<ModelStoreService>,
+    card_id: String,
+    model_id: String,
+) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        super::linked_models::follow_deployment_context(&card_id, &model_id)?;
+        service.notify_models_changed(&[model_id]);
+        Ok(json!({"ok": true}))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn check_card_update(card_id: String) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || {
+        ModelManager::new(None, None)
+            .check_card_update(&card_id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub async fn startup_update_check(service: Arc<ModelStoreService>) -> Result<Value, String> {
+    let enabled = config::startup_update_check_enabled()?;
+    let report = service
+        .startup_updates
+        .once(super::available() && enabled, super::startup_updates::check)
+        .await;
+    serde_json::to_value(report).map_err(|e| e.to_string())
+}
+
+pub async fn versions(card_id: String, measure: Option<bool>) -> Result<Value, String> {
+    let measure = measure.unwrap_or(false);
+    tokio::task::spawn_blocking(move || {
+        ModelManager::new(None, None)
+            .versions(&card_id, measure)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+pub fn start_version_action(
+    service: &Arc<ModelStoreService>,
+    card_id: String,
+    action: String,
+    version_id: String,
+) -> Result<Value, String> {
+    let op = match action.as_str() {
+        "stage" => CardOp {
+            kind: "version_stage",
+            label: "下载新版",
+        },
+        "switch" => CardOp {
+            kind: "version_switch",
+            label: "切换版本",
+        },
+        "delete" => CardOp {
+            kind: "version_delete",
+            label: "清理旧版",
+        },
+        _ => return Err("不支持的版本操作".into()),
+    };
+    let card = card_id.clone();
+    let queue = Arc::clone(&service.queue);
+    spawn_op(service, &card_id, op, move |log, control, run_id| {
+        if action == "stage" {
+            let ticket = queue.enqueue(run_id);
+            while !queue.try_start(ticket, config::load_settings().max_concurrent_downloads()) {
+                if control.cancelled() {
+                    return Err("已取消".into());
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+        let mgr = ModelManager::new(None, None);
+        let mut progress = |line: &str| log.push(line);
+        match action.as_str() {
+            "stage" => mgr.stage_version(&card, &version_id, &mut progress, control),
+            "switch" => mgr.switch_version(&card, &version_id, &mut progress, control),
+            _ => mgr.delete_version(&card, &version_id, &mut progress, control),
+        }
+        .map_err(|e| e.to_string())
+    })
+}
+
+pub fn start_card_update(
+    service: &Arc<ModelStoreService>,
+    card_id: String,
+    revision: String,
+) -> Result<Value, String> {
+    let card = card_id.clone();
+    spawn_op(
+        service,
+        &card_id,
+        CardOp {
+            kind: "update",
+            label: "更新卡片",
+        },
+        move |log, control, _| {
+            ModelManager::new(None, None)
+                .update_card(&card, &revision, &mut |line| log.push(line), control)
+                .map_err(|e| e.to_string())
+        },
+    )
 }
 
 // ---------------------------------------------------------------- 长操作
@@ -547,15 +737,22 @@ pub fn start_lifecycle(
     }
 
     let card = card_id.clone();
+    let service_for_job = Arc::clone(service);
     spawn_op(service, &card_id, op, move |log, control, _run_id| {
         let log_cb = Arc::clone(log);
         let mut cb = move |line: &str| log_cb.push(line);
         let mgr = ModelManager::new(None, None);
         match action.as_str() {
-            "enable" => mgr
-                .enable(&card, &mut cb, control)
-                .map(|_| Value::Null)
-                .map_err(|e| e.to_string()),
+            "enable" => {
+                // Bind legacy rows while the old endpoint still exists. The second
+                // pass commits the actual new route even if the view was unmounted.
+                let changed = super::linked_models::sync_routes(Some(&card))?;
+                service_for_job.notify_models_changed(&changed);
+                mgr.enable(&card, &mut cb, control)
+                    .map_err(|e| e.to_string())?;
+                let link_sync_error = service_for_job.refresh_enabled_model(&card).err();
+                Ok(json!({"link_sync_error": link_sync_error}))
+            }
             "stop" => mgr
                 .stop(&card, &mut cb, control)
                 .map(|_| Value::Null)
@@ -717,19 +914,11 @@ pub fn disable_test_store() -> Result<Value, String> {
 }
 
 fn set_test_store_enabled(enabled: bool) -> Result<(), String> {
-    // 先读再改再整体写回：配置里还有 store_url / models_dir 等一堆字段，
-    // 只写自己关心的那个会把其余的全清掉。首读必须走严格读取（二十八轮评审
-    // P1）：宽松读取在瞬态 I/O 失败（fd 耗尽、一拍 EIO）时回退完整默认值，
-    // 而 save_settings 闸门的重读可能已恢复、只判 Err/Ok 就把这份默认快照
-    // 放行固化——真实 config.json（自定义 models_dir 等未知保护范围）被一次
-    // 普通开关整体洗掉。所以读不到就不改：错误原样上报（隔离/不可读等态的
-    // 恢复/放弃出路都在严格读取的报错里），本轮不落盘。
-    let mut settings =
-        config::try_load_settings().map_err(|e| format!("读取当前配置失败，未做任何修改：{e}"))?;
-    settings.test_mode_enabled = enabled;
-    // 写回被 save_settings 拒绝的情形（首读之后、落盘之前配置又被弄坏的
-    // TOCTOU 窗口）原样上报，错误信息里带恢复/放弃出路。
-    config::save_settings(&settings).map_err(|e| format!("保存设置失败：{e}"))
+    config::update_settings(|settings| {
+        settings.test_mode_enabled = enabled;
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 // ------------------------------------------------------ 启动时回收残留进程
@@ -766,7 +955,7 @@ pub fn run_startup_cleanup(service: &Arc<ModelStoreService>) {
 /// 手动点一次「检查卡片更新」。
 ///
 /// 失败不影响启动：它只碰 `card_source = 'builtin'` 的记录，刷不动就维持原样。
-pub fn run_startup_refresh() {
+pub fn run_startup_refresh(service: &Arc<ModelStoreService>) {
     let refreshed = ModelManager::refresh_builtin_cards();
     if !refreshed.is_empty() {
         eprintln!(
@@ -775,6 +964,12 @@ pub fn run_startup_refresh() {
             refreshed.join("、")
         );
     }
+    let service = Arc::clone(service);
+    std::thread::spawn(move || {
+        if let Err(error) = service.sync_linked_models(None) {
+            log::warn!("model-store linked model refresh failed: {error}");
+        }
+    });
 }
 
 /// 取走启动清理的报告。**取一次就没了**——否则用户每切一次视图就被同一条提示弹一遍。
@@ -813,6 +1008,15 @@ pub fn take_startup_cleanup(service: &Arc<ModelStoreService>) -> Result<Value, S
 /// 路径不得当未命中放行）。与 residual_paths 同一把 exists() 尺子但方向相反：
 /// 提示文案宁可漏报，保护集合宁可多报。
 pub(crate) fn installed_weight_paths_checked() -> Result<Vec<std::path::PathBuf>, String> {
+    installed_weight_paths_for_removal_checked(true)
+}
+
+/// Keep main's legacy reference guards for every removal. The card-update
+/// records add protection only for physical weight deletion, so unregistering
+/// an otherwise removable external record does not acquire a new restriction.
+pub(crate) fn installed_weight_paths_for_removal_checked(
+    include_persisted_roots: bool,
+) -> Result<Vec<std::path::PathBuf>, String> {
     let records = db::list_store_models().map_err(|e| format!("读取在册模型失败：{e}"))?;
     // 候选根取商店权重根全集（当前+历史 models_dir、导入目录及其历史、staging、
     // 内置家目录根）：旧版本允许一次设置变更同时换权重目录并移除扫描目录且
@@ -844,6 +1048,38 @@ pub(crate) fn installed_weight_paths_checked() -> Result<Vec<std::path::PathBuf>
                         out.push(resolved);
                     }
                 }
+            }
+        }
+    }
+    // The card-update PR persists authoritative roots that can outlive the
+    // bounded configuration history. Consume those references directly instead
+    // of attempting to reconstruct them only from current settings and names.
+    if include_persisted_roots {
+        let mut registered = Vec::new();
+        for record in &records {
+            if let Some(root) = &record.models_root {
+                registered.push(std::path::PathBuf::from(root));
+            }
+            registered.extend(super::version_store::download_paths(&record.card_id)?);
+        }
+        for version in super::version_store::list(None)? {
+            registered.extend(version.models_root.map(std::path::PathBuf::from));
+            registered.extend(version.resource_dir.map(std::path::PathBuf::from));
+        }
+        registered.extend(super::version_store::active_download_roots()?);
+        for path in registered {
+            if !path.is_absolute() {
+                return Err("model_store_weight_path_invalid".into());
+            }
+            // Keep a not-yet-created download target protected as well. A path
+            // resolution failure must not discard a registered reference.
+            let resolved = match path.canonicalize() {
+                Ok(resolved) => resolved,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => path,
+                Err(error) => return Err(format!("model_store_weight_path_unavailable: {error}")),
+            };
+            if !out.contains(&resolved) {
+                out.push(resolved);
             }
         }
     }
@@ -1126,7 +1362,7 @@ pub(crate) fn installed_ownership_unconfirmable_checked() -> Result<bool, String
 }
 
 pub fn storage_settings() -> Result<Value, String> {
-    let settings = config::load_settings();
+    let settings = config::read_settings()?;
     let models_dir = settings.models_path();
     let scan_dirs = import_scan::roots(
         &settings.import_scan_dirs,
@@ -1141,6 +1377,7 @@ pub fn storage_settings() -> Result<Value, String> {
             .map(|p| p.to_string_lossy().to_string())
             .collect::<Vec<_>>(),
         "free_bytes": disk::disk_free_bytes(&models_dir).ok(),
+        "startup_update_check_enabled": settings.startup_update_check_enabled,
     }))
 }
 
@@ -1156,98 +1393,88 @@ pub fn storage_settings() -> Result<Value, String> {
 pub fn set_storage_settings(
     models_dir: Option<String>,
     import_scan_dirs: Option<Vec<String>>,
+    startup_update_check_enabled: Option<bool>,
 ) -> Result<Value, String> {
-    // 先读再改再整体写回，理由同 set_test_store_enabled；首读同样必须走严格
-    // 读取（二十八轮评审 P1）——瞬态失败时宽松读取给出的默认快照，会在保存端
-    // 闸门重读已恢复的那一拍被放行固化，真实配置（含 models_dir_history 的
-    // 保护留痕）被一次普通保存整体洗掉。
-    let mut settings =
-        config::try_load_settings().map_err(|e| format!("读取当前配置失败，未做任何修改：{e}"))?;
-    // 先校验全部输入、再落任何副作用（36 轮评审 P3）：models_dir 臂的
-    // create_dir_all 是有副作用的，此前排在 import_scan_dirs 校验之后——一次
-    // 「合法新权重目录 + 相对扫描目录」的组合保存会先建出权重目录再整体报错，
-    // 配置没写、盘上多出一个空目录。
-    if let Some(dirs) = &import_scan_dirs {
-        // 与 models_dir 同一把绝对路径尺子：相对扫描目录的解析随调用方工作
-        // 目录漂移，设备侧移除守卫拿它做权重根前缀匹配时必然失配——"这个
-        // 目录里的权重属于商店"的保护会悄悄变 no-op（第七轮评审 P3）。设置
-        // 入口直接拒绝，读取侧的 trim/滤空口径保持不变。
-        for d in dirs.iter().map(|d| d.trim()).filter(|d| !d.is_empty()) {
-            if !std::path::Path::new(d).is_absolute() {
-                return Err(format!("导入扫描目录要填绝对路径，收到的是「{d}」"));
+    // Validate all paths before filesystem side effects. Directory preparation
+    // stays outside the settings lock; the locked transaction rereads the current
+    // roots before it records history and patches the requested fields.
+    let models_dir = models_dir
+        .map(|dir| {
+            let dir = dir.trim().to_string();
+            if dir.is_empty() {
+                return Err("权重目录不能为空".to_string());
             }
-        }
+            if !std::path::Path::new(&dir).is_absolute() {
+                return Err(format!("权重目录要填绝对路径，收到的是「{dir}」"));
+            }
+            Ok(dir)
+        })
+        .transpose()?;
+    let import_scan_dirs = import_scan_dirs
+        .map(|dirs| {
+            let cleaned: Vec<String> = dirs
+                .into_iter()
+                .map(|dir| dir.trim().to_string())
+                .filter(|dir| !dir.is_empty())
+                .collect();
+            for dir in &cleaned {
+                if !std::path::Path::new(dir).is_absolute() {
+                    return Err(format!("导入扫描目录要填绝对路径，收到的是「{dir}」"));
+                }
+            }
+            Ok(cleaned)
+        })
+        .transpose()?;
+    if let Some(dir) = &models_dir {
+        std::fs::create_dir_all(dir).map_err(|e| format!("无法创建权重目录「{dir}」：{e}"))?;
     }
-    if let Some(dir) = models_dir {
-        let dir = dir.trim().to_string();
-        if dir.is_empty() {
-            return Err("权重目录不能为空".into());
+    config::update_settings(|settings| {
+        if let Some(dir) = models_dir {
+            // Changing the active root never moves weights: retain the previous
+            // root for the device removal boundary, with main's existing cap.
+            if dir != settings.models_dir && !settings.models_dir.trim().is_empty() {
+                let old = settings.models_dir.clone();
+                settings
+                    .models_dir_history
+                    .retain(|d| d != &old && d != &dir);
+                settings.models_dir_history.push(old);
+                let keep = settings
+                    .models_dir_history
+                    .len()
+                    .saturating_sub(config::MAX_MODELS_DIR_HISTORY);
+                settings.models_dir_history.drain(..keep);
+            }
+            settings.models_dir = dir;
         }
-        // 相对路径在这里是陷阱：卡片脚本各自在不同的工作目录下跑，"./models"
-        // 是相对谁说不清楚，真出问题时现象是"模型下到了奇怪的地方"。
-        if !std::path::Path::new(&dir).is_absolute() {
-            return Err(format!("权重目录要填绝对路径，收到的是「{dir}」"));
-        }
-        // 建不出来就不写进配置。否则要等到下次下载才在脚本里炸，那时的报错
-        // （某个 mkdir 失败）离真正的原因——设置页填错了路径——已经很远了。
-        std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建权重目录「{dir}」：{e}"))?;
-        // 换目录不搬权重，老目录里的模型在库里仍然记着——把旧目录记进
-        // models_dir_history，设备管理的移除守卫才知道旧根同样是商店地盘
-        // （boundary.rs 的"全部权重根"）。回填出的默认值（空串）不值得记。
-        if dir != settings.models_dir && !settings.models_dir.trim().is_empty() {
-            let old = settings.models_dir.clone();
+        if let Some(cleaned) = import_scan_dirs {
+            // Removed scan roots can still contain in-place imported weights.
+            let mut removed: Vec<String> = settings
+                .import_scan_dirs
+                .iter()
+                .map(|d| d.trim().to_string())
+                .filter(|d| !d.is_empty() && !cleaned.contains(d))
+                .collect();
+            removed.sort();
+            removed.dedup();
+            for old in removed {
+                settings.import_scan_dirs_history.retain(|d| d != &old);
+                settings.import_scan_dirs_history.push(old);
+            }
             settings
-                .models_dir_history
-                .retain(|d| d != &old && d != &dir);
-            settings.models_dir_history.push(old);
+                .import_scan_dirs_history
+                .retain(|d| !cleaned.contains(d));
             let keep = settings
-                .models_dir_history
+                .import_scan_dirs_history
                 .len()
-                .saturating_sub(config::MAX_MODELS_DIR_HISTORY);
-            settings.models_dir_history.drain(..keep);
+                .saturating_sub(config::MAX_IMPORT_SCAN_DIRS_HISTORY);
+            settings.import_scan_dirs_history.drain(..keep);
+            settings.import_scan_dirs = cleaned;
         }
-        settings.models_dir = dir;
-    }
-    if let Some(dirs) = import_scan_dirs {
-        // 滤掉空白项：界面上多敲一次回车就会留一行空的，而空字符串进了搜索
-        // 根列表只会白占一行。
-        let cleaned: Vec<String> = dirs
-            .into_iter()
-            .map(|d| d.trim().to_string())
-            .filter(|d| !d.is_empty())
-            .collect();
-        // 移除留痕（2026-11-04 评审 P2，与上方 models_dir_history 同一先例）：
-        // 卡片脚本会在扫描目录里就地复用既有权重，已安装卡片的权重可能仍留在
-        // 被移除的目录里，而实际落点宿主无从枚举——移除不等于脱管，被移除的
-        // 目录记进 import_scan_dirs_history，设备管理的移除守卫才知道旧根同样
-        // 是商店地盘（boundary.rs 的"全部权重根"）。trim 后比对：登记进设置时
-        // 允许首尾空白，历史与保护集合必须以 cleaned 后的形状为准，否则守卫
-        // 前缀匹配失配（第七轮评审 P3 同一把尺子）。
-        let mut removed: Vec<String> = settings
-            .import_scan_dirs
-            .iter()
-            .map(|d| d.trim().to_string())
-            .filter(|d| !d.is_empty() && !cleaned.contains(d))
-            .collect();
-        removed.sort();
-        removed.dedup();
-        for old in removed {
-            settings.import_scan_dirs_history.retain(|d| d != &old);
-            settings.import_scan_dirs_history.push(old);
+        if let Some(enabled) = startup_update_check_enabled {
+            settings.startup_update_check_enabled = enabled;
         }
-        // 重新挂回的目录由当前值覆盖，历史里不留第二份（与 models_dir 的
-        // 「换回旧目录清历史」同一口径）。
-        settings
-            .import_scan_dirs_history
-            .retain(|d| !cleaned.contains(d));
-        let keep = settings
-            .import_scan_dirs_history
-            .len()
-            .saturating_sub(config::MAX_IMPORT_SCAN_DIRS_HISTORY);
-        settings.import_scan_dirs_history.drain(..keep);
-        settings.import_scan_dirs = cleaned;
-    }
-    config::save_settings(&settings).map_err(|e| format!("保存设置失败：{e}"))?;
+        Ok(())
+    })?;
     storage_settings()
 }
 
@@ -1273,6 +1500,7 @@ pub fn force_remove(
     }
     // 还是要过卡片互斥：真有一个卸载正在删文件时把记录抽走，脚本删到一半就会
     // 对着一个不存在的记录继续跑。
+    let _operation_lock = card_operation_lock(&card_id)?;
     service.active.try_begin(&card_id, OP_FORCE_REMOVE, None)?;
     let result = ModelManager::new(None, None)
         .force_remove_record(&card_id)
@@ -1284,7 +1512,179 @@ pub fn force_remove(
 
 #[cfg(test)]
 mod tests {
+    mod recovery;
     use super::*;
+
+    #[tokio::test]
+    async fn enable_synchronizes_linked_route_and_notifies_after_commit_without_a_view() {
+        use crate::platform::prefs::{SavedModel, UserPrefs};
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "sync-card",
+            model_name: "store-model",
+            card_name: "Local",
+            org: None,
+            description: None,
+            engine_name: "native",
+            engine_version: None,
+            size_bytes: 1,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &Default::default(),
+            status: "deployed",
+            profiles: &[],
+            deploy_topology: super::super::store_client::DeployTopology::Single,
+            card_source: "store",
+        })
+        .unwrap();
+        db::set_endpoint_info(
+            "sync-card",
+            Some("http://127.0.0.1:8000/v1"),
+            Some("old-model"),
+        )
+        .unwrap();
+        let script = "#!/bin/sh\necho LMM_ENDPOINT_URL=http://127.0.0.1:8001/v1/chat/completions\necho LMM_ENDPOINT_MODEL=new-model\n";
+        let scripts = std::collections::BTreeMap::from([(
+            "enable".into(),
+            db::ScriptBlob {
+                content: script.into(),
+                sha256: script_runner::sha256_hex(script),
+            },
+        )]);
+        db::set_scripts_content("sync-card", &scripts, &Default::default()).unwrap();
+        let row: SavedModel =
+            serde_json::from_value(json!({"id":"stable-id", "name":"Custom label",
+            "preset":"openai_compatible", "provider_kind":"custom", "model":"old-model",
+            "base_url":"http://127.0.0.1:8000/v1", "context_window_tokens":131072}))
+            .unwrap();
+        let mut responses = row.clone();
+        responses.id = "manual-responses".into();
+        responses.preset = crate::platform::prefs::ModelPreset::OpenaiResponses;
+        let mut messages = row.clone();
+        messages.id = "manual-messages".into();
+        messages.vendor = Some("anthropic".into());
+        let mut full_endpoint = row.clone();
+        full_endpoint.id = "manual-full-endpoint".into();
+        full_endpoint.endpoint_mode = Some("full_chat_completions".into());
+        let manual_rows = vec![responses, messages, full_endpoint];
+        UserPrefs::update_transaction(|prefs| {
+            prefs.advanced.saved_models.push(row);
+            prefs.advanced.saved_models.extend(manual_rows.clone());
+            prefs.advanced.active_model_id = Some("stable-id".into());
+            Ok(())
+        })
+        .unwrap();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observation = Arc::clone(&observed);
+        let service = Arc::new(ModelStoreService::new());
+        service.set_models_changed_handler(Arc::new(move |ids| {
+            let prefs = UserPrefs::load();
+            observation.lock().push((
+                ids.to_vec(),
+                prefs.model_by_id("stable-id").unwrap().model.clone(),
+            ));
+        }));
+        let started =
+            start_lifecycle(&service, "sync-card".into(), "enable".into(), false).unwrap();
+        let log = service.run(started["run_id"].as_str().unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while log.outcome.lock().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(log.outcome.lock().as_ref().is_some_and(Result::is_ok));
+        let observations = observed.lock();
+        assert!(
+            observations
+                .iter()
+                .any(|(ids, model)| ids == &["stable-id"] && model == "new-model")
+        );
+        assert!(observations.iter().all(|(ids, _)| ids == &["stable-id"]));
+        let reloaded = UserPrefs::load();
+        let row = reloaded.model_by_id("stable-id").unwrap();
+        assert_eq!(row.base_url, "http://127.0.0.1:8001/v1");
+        assert_eq!(row.name, "Custom label");
+        assert_eq!(row.context_window_tokens, Some(131072));
+        assert_eq!(
+            reloaded.advanced.active_model_id.as_deref(),
+            Some("stable-id")
+        );
+        // Pre-enable binding and the post-enable sync must both leave manual
+        // protocols alone. Without provenance these rows also remain ineligible
+        // for the uninstall UI and its conditional store-link deletion command.
+        for expected in &manual_rows {
+            assert_eq!(reloaded.model_by_id(&expected.id), Some(expected));
+            assert!(expected.model_store_card_id.is_none());
+        }
+        assert_eq!(
+            super::super::linked_models::current_linked_ids("sync-card"),
+            ["stable-id"]
+        );
+        drop(observations);
+        // A second enable keeps the exact same route. Its engine may now serve
+        // a different context profile, so the next turn still needs a fresh probe.
+        observed.lock().clear();
+        let restarted =
+            start_lifecycle(&service, "sync-card".into(), "enable".into(), false).unwrap();
+        let restarted_log = service.run(restarted["run_id"].as_str().unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while restarted_log.outcome.lock().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            restarted_log
+                .outcome
+                .lock()
+                .as_ref()
+                .is_some_and(Result::is_ok)
+        );
+        assert_eq!(observed.lock().len(), 1);
+        assert_eq!(observed.lock()[0].0, ["stable-id"]);
+        assert_eq!(
+            UserPrefs::load().advanced.saved_models,
+            reloaded.advanced.saved_models
+        );
+        // Routine library synchronization must not repeatedly invalidate engines.
+        observed.lock().clear();
+        service.sync_linked_models(None).unwrap();
+        assert!(observed.lock().is_empty());
+        // Explicit recovery notifies only after the changed settings are durable.
+        follow_deployment_context(Arc::clone(&service), "sync-card".into(), "stable-id".into())
+            .await
+            .unwrap();
+        assert_eq!(observed.lock().len(), 1);
+        assert!(
+            UserPrefs::load()
+                .model_by_id("stable-id")
+                .unwrap()
+                .context_window_tokens
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cancellation_after_a_successful_commit_is_reported_as_success() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let service = Arc::new(ModelStoreService::new());
+        let started = spawn_op(&service, "committed-card", OP_DEPLOY, |_, control, _| {
+            control
+                .cancel
+                .as_ref()
+                .unwrap()
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(json!({"committed":true}))
+        })
+        .unwrap();
+        let log = service.run(started["run_id"].as_str().unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while log.outcome.lock().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(log.outcome.lock().as_ref().is_some_and(Result::is_ok));
+        assert!(!*log.cancelled.lock());
+    }
 
     /// 「现在还有没有提示在等人答」只有后端知道，而这件事必须由后端说了算。
     ///
@@ -1340,6 +1740,101 @@ mod tests {
     }
 
     #[test]
+    fn storage_updates_preserve_the_startup_opt_out_and_failed_saves_do_not_apply_it() {
+        let _home = config::TempHome::new();
+        let first = set_storage_settings(None, None, Some(false)).unwrap();
+        assert_eq!(first["startup_update_check_enabled"], false);
+        let second = set_storage_settings(None, Some(vec!["/extra/models".into()]), None).unwrap();
+        assert_eq!(second["startup_update_check_enabled"], false);
+        assert_eq!(
+            second["import_scan_dirs"],
+            serde_json::json!(["/extra/models"])
+        );
+        let temporary = config::data_dir().join("config.json.tmp");
+        std::fs::create_dir(&temporary).unwrap();
+        assert!(set_storage_settings(None, None, Some(true)).is_err());
+        assert!(!config::startup_update_check_enabled().unwrap());
+        std::fs::remove_dir(temporary).unwrap();
+        assert_eq!(
+            set_storage_settings(None, None, Some(true)).unwrap()["startup_update_check_enabled"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_startup_command_respects_opt_out_without_consuming_the_attempt() {
+        let _home = config::TempHome::new();
+        set_storage_settings(None, None, Some(false)).unwrap();
+        let service = Arc::new(ModelStoreService::new());
+        assert_eq!(
+            startup_update_check(Arc::clone(&service)).await.unwrap()["checked"],
+            0
+        );
+        let probe = service
+            .startup_updates
+            .once(true, || super::super::startup_updates::Report {
+                checked: 7,
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(probe.checked, 7);
+    }
+    #[test]
+    fn card_operation_lock_is_shared_by_independent_service_instances() {
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let first = Arc::new(ModelStoreService::new());
+        let second = Arc::new(ModelStoreService::new());
+        let (release, wait) = std::sync::mpsc::channel();
+        let started = spawn_op(&first, "shared-card", OP_DEPLOY, move |_, _, _| {
+            wait.recv().unwrap();
+            Ok(Value::Null)
+        })
+        .unwrap();
+        assert!(spawn_op(&second, "shared-card", OP_ENABLE, |_, _, _| Ok(Value::Null)).is_err());
+        assert!(
+            force_remove(&second, "shared-card".into(), true)
+                .unwrap_err()
+                .contains("其他窗口")
+        );
+        release.send(()).unwrap();
+        let log = first.run(started["run_id"].as_str().unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while log.outcome.lock().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(log.outcome.lock().as_ref().is_some_and(Result::is_ok));
+        assert!(spawn_op(&second, "shared-card", OP_ENABLE, |_, _, _| Ok(Value::Null)).is_ok());
+    }
+
+    #[test]
+    fn card_operation_lock_refuses_symlinks_and_tightens_existing_permissions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let _home = config::TempHome::new();
+        db::init_db().unwrap();
+        let lock_dir = config::data_dir().join("operation-locks");
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let target = lock_dir.join("unrelated");
+        std::fs::write(&target, "keep").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&target, lock_dir.join("linked.lock")).unwrap();
+        assert!(card_operation_lock("linked").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        let existing = lock_dir.join("existing.lock");
+        std::fs::write(&existing, "").unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _lock = card_operation_lock("existing").unwrap();
+        assert_eq!(
+            std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
     fn changing_models_dir_records_the_old_dir_in_history() {
         let ctx = super::config::TempHome::new();
         let a = ctx.path().join("weights-a");
@@ -1348,7 +1843,7 @@ mod tests {
 
         // 默认（回填）→ A：旧值（数据根下的 models/）记入历史——它本就在
         // 保护根里，重复无害；关键是 A 不出现在历史。
-        set_storage_settings(Some(path_of(&a)), None).expect("set first models_dir");
+        set_storage_settings(Some(path_of(&a)), None, None).expect("set first models_dir");
         let settings = super::config::load_settings();
         assert_eq!(settings.models_dir, path_of(&a));
         assert!(
@@ -1357,13 +1852,13 @@ mod tests {
         );
 
         // A → B：A 进历史——换目录不搬权重，A 下的在册模型仍是商店地盘。
-        set_storage_settings(Some(path_of(&b)), None).expect("set second models_dir");
+        set_storage_settings(Some(path_of(&b)), None, None).expect("set second models_dir");
         let settings = super::config::load_settings();
         assert_eq!(settings.models_dir, path_of(&b));
         assert!(settings.models_dir_history.contains(&path_of(&a)));
 
         // B → 换回 A：A 从历史里清掉（它现在是当前值），B 进历史。
-        set_storage_settings(Some(path_of(&a)), None).expect("switch back");
+        set_storage_settings(Some(path_of(&a)), None, None).expect("switch back");
         let settings = super::config::load_settings();
         assert!(settings.models_dir_history.contains(&path_of(&b)));
         assert!(
@@ -1373,7 +1868,7 @@ mod tests {
 
         // 保护链路端到端：当前是 A、历史有 B 时，store_weights_roots 同时
         // 覆盖两个目录（历史目录的守卫面见 boundary 的直打测试）。
-        set_storage_settings(Some(path_of(&b)), None).expect("set to b again");
+        set_storage_settings(Some(path_of(&b)), None, None).expect("set to b again");
         let roots = crate::features::model_store::store_weights_roots();
         assert!(roots.contains(&std::path::PathBuf::from(&path_of(&a))));
         assert!(roots.contains(&std::path::PathBuf::from(&path_of(&b))));
@@ -1390,7 +1885,7 @@ mod tests {
         let path_of = |p: &std::path::Path| p.to_string_lossy().to_string();
         for index in 0..=(super::config::MAX_MODELS_DIR_HISTORY + 1) {
             let dir = ctx.path().join(format!("weights-{index:03}"));
-            set_storage_settings(Some(path_of(&dir)), None).expect("set models_dir");
+            set_storage_settings(Some(path_of(&dir)), None, None).expect("set models_dir");
         }
         let cap = super::config::MAX_MODELS_DIR_HISTORY;
         let settings = super::config::load_settings();
@@ -1428,7 +1923,7 @@ mod tests {
         let removed = ctx.path().join("scan-removed");
         let path_of = |p: &std::path::Path| p.to_string_lossy().to_string();
 
-        set_storage_settings(None, Some(vec![path_of(&kept), path_of(&removed)]))
+        set_storage_settings(None, Some(vec![path_of(&kept), path_of(&removed)]), None)
             .expect("set scan dirs");
         let settings = super::config::load_settings();
         assert!(
@@ -1438,7 +1933,7 @@ mod tests {
         );
 
         // 移除其一：被移除的目录入史，留下的不入。
-        set_storage_settings(None, Some(vec![path_of(&kept)])).expect("remove one scan dir");
+        set_storage_settings(None, Some(vec![path_of(&kept)]), None).expect("remove one scan dir");
         let settings = super::config::load_settings();
         assert_eq!(settings.import_scan_dirs, vec![path_of(&kept)]);
         assert!(
@@ -1453,7 +1948,7 @@ mod tests {
         assert!(roots.contains(&std::path::PathBuf::from(path_of(&removed))));
 
         // 重新挂回：由当前值接管，历史里的同一目录退掉（不重复占位）。
-        set_storage_settings(None, Some(vec![path_of(&kept), path_of(&removed)]))
+        set_storage_settings(None, Some(vec![path_of(&kept), path_of(&removed)]), None)
             .expect("re-add scan dir");
         let settings = super::config::load_settings();
         assert!(
@@ -1470,9 +1965,10 @@ mod tests {
         set_storage_settings(
             None,
             Some(vec![format!(" {} ", path_of(&blank)), path_of(&kept)]),
+            None,
         )
         .expect("set with whitespace");
-        set_storage_settings(None, Some(vec![path_of(&kept)])).expect("remove it");
+        set_storage_settings(None, Some(vec![path_of(&kept)]), None).expect("remove it");
         let settings = super::config::load_settings();
         assert!(settings.import_scan_dirs_history.contains(&path_of(&blank)));
     }
@@ -1568,6 +2064,7 @@ mod tests {
         let new_models_dir = ctx.path().join("weights-new");
         crate::features::model_store::set_storage_settings(
             Some(new_models_dir.to_string_lossy().into_owned()),
+            None,
             None,
         )
         .expect("switch models_dir");
@@ -2001,6 +2498,13 @@ mod tests {
             refs.contains(&resolved),
             ".env MODEL_PATH must be recovered, got {refs:?}"
         );
+        let unregister_refs =
+            crate::features::model_store::installed_weight_paths_for_removal_checked(false)
+                .expect("unregister-only keeps main's legacy reference guards");
+        assert!(
+            unregister_refs.contains(&resolved),
+            "the legacy .env reference guard must remain active without physical deletion"
+        );
         // 相对路径与不存在的路径不产生假引用。
         std::fs::write(
             card_dir.join(".env"),
@@ -2051,7 +2555,7 @@ mod tests {
         let cap = super::config::MAX_IMPORT_SCAN_DIRS_HISTORY;
         for index in 0..=(cap + 1) {
             let dir = ctx.path().join(format!("scan-{index:03}"));
-            set_storage_settings(None, Some(vec![path_of(&dir)])).expect("swap scan dir");
+            set_storage_settings(None, Some(vec![path_of(&dir)]), None).expect("swap scan dir");
         }
         let settings = super::config::load_settings();
         assert_eq!(settings.import_scan_dirs_history.len(), cap);
@@ -2076,6 +2580,7 @@ mod tests {
                 ctx.path().join("scan-ok").to_string_lossy().to_string(),
                 "relative/dir".to_string(),
             ]),
+            None,
         )
         .expect_err("relative import_scan_dir must be rejected");
         assert!(error.contains("绝对路径"), "unexpected error: {error}");
@@ -2087,6 +2592,7 @@ mod tests {
         let error = set_storage_settings(
             Some(fresh_weights.to_string_lossy().to_string()),
             Some(vec!["relative/dir".to_string()]),
+            None,
         )
         .expect_err("combined save must still be rejected");
         assert!(error.contains("绝对路径"), "unexpected error: {error}");
@@ -2096,8 +2602,9 @@ mod tests {
         );
         // 合法路径照常保存，空白项照常滤掉。
         let ok = ctx.path().join("scan-ok").to_string_lossy().to_string();
-        let settings = set_storage_settings(None, Some(vec![format!("  {ok}  "), String::new()]))
-            .expect("absolute dirs accepted");
+        let settings =
+            set_storage_settings(None, Some(vec![format!("  {ok}  "), String::new()]), None)
+                .expect("absolute dirs accepted");
         assert_eq!(settings["import_scan_dirs"], serde_json::json!([ok]));
     }
 
@@ -2139,8 +2646,9 @@ mod tests {
         // 存储入口同样的时序：改的只是补充扫描目录，真实设置必须原样保留。
         super::config::arm_transient_read_failure(1);
         let scan = ctx.path().join("scan-more");
-        let error = set_storage_settings(None, Some(vec![scan.to_string_lossy().to_string()]))
-            .expect_err("首读失败不得拿默认快照落盘");
+        let error =
+            set_storage_settings(None, Some(vec![scan.to_string_lossy().to_string()]), None)
+                .expect_err("首读失败不得拿默认快照落盘");
         assert!(
             error.contains("读取当前配置失败"),
             "unexpected error: {error}"
@@ -2154,7 +2662,7 @@ mod tests {
         // 注入耗尽后的下一次调用走真实设置：改动生效、自定义 models_dir 与真实
         // 字段不丢——若默认快照曾被固化，这里读到的就是默认值了。
         set_test_store_enabled(true).expect("恢复后普通开关放行");
-        set_storage_settings(None, Some(vec![scan.to_string_lossy().to_string()]))
+        set_storage_settings(None, Some(vec![scan.to_string_lossy().to_string()]), None)
             .expect("恢复后普通保存放行");
         let settings = super::config::try_load_settings().expect("恢复后严格读取应接受写回的配置");
         assert!(settings.test_mode_enabled, "开关改动要落进新配置");

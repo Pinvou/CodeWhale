@@ -17,8 +17,7 @@ export const desktopBridgeApi = {
   feedback: ['submitFeedback', 'listFailureDiagnostics', 'previewFailureDiagnostic', 'submitFailureDiagnostic', 'pickDiagnosticFiles'],
   vllm: ['discoverLocalVllm'],
   multiAgent: ['listSubagentTranscripts', 'readSubagentTranscript'],
-  // 三十三轮评审 P2：models 域新增 deleteModelIfMatches（移除回收的条件删除）。
-  models: ['deleteModel', 'deleteModelIfMatches', 'getEffectiveModelConfig', 'getImageInputCapability', 'loadModels', 'loadEffectiveModelConfig', 'loadSessionModel', 'probeLocalServerKind', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'switchModelRef', 'testImageInputCapability', 'testModelConnection'],
+  models: ['deleteModel', 'deleteModelIfStoreLink', 'deleteModelIfMatches', 'getEffectiveModelConfig', 'getImageInputCapability', 'loadModels', 'loadEffectiveModelConfig', 'loadSessionModel', 'probeLocalServerKind', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'switchModelRef', 'testImageInputCapability', 'testModelConnection'],
   interaction: ['acceptPlan', 'cancelUserInput', 'compactNow', 'confirmCodeYolo', 'discardPlan', 'dismissPinvouReview', 'editLastTurn', 'exitPlanToYolo', 'getCodePermissionPrefs', 'inspectPinvou', 'planStuckGo', 'planStuckReplan', 'refreshModeDefaults', 'resolvePinvouReview', 'setDraftMode', 'setModeLane', 'setMultiAgentMode', 'setPlanModeNext', 'submitUserInput', 'summonPinvou', 'syncModeState', 'toggleSuperPerm'],
   rendering: ['renderMarkdown'],
   remoteControl: ['getWebRelaySettings', 'refreshRemoteControlQr', 'refreshRemoteControlStatus', 'revokeRemoteHostWorkspace', 'setWebRelayAddress', 'startRemoteControl', 'stopRemoteControl'],
@@ -26,7 +25,7 @@ export const desktopBridgeApi = {
   // 只暴露 opaque ID、状态投影与任务编排，模型凭证、路径和密钥都留在 Rust。
   desktopRemoteControl: [
     'artifactDownloadAbort', 'artifactDownloadBegin', 'artifactDownloadChunk', 'artifactIndex', 'artifactPreview',
-    'attachmentAbort', 'attachmentBegin', 'attachmentChunk',
+    'attachmentAbort', 'attachmentAbortConfirmed', 'attachmentBegin', 'attachmentChunk',
     'capabilitiesSnapshot', 'clientEvent', 'controlledDisconnectNow',
     'controlledListWorkspaces', 'controlledRefresh', 'controlledStart', 'controlledStatus', 'controlledStop',
     'controlledSync', 'controlledTaskSend', 'controlledCapabilitiesSnapshot', 'controlledStopTask', 'controllerCapabilitySend',
