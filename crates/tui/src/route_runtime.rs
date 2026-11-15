@@ -916,6 +916,7 @@ fn root_base_url_belongs_to_non_deepseek_provider(base_url: &str) -> bool {
         "arcee.ai",
         "moonshot.ai",
         "api.kimi.com",
+        "api.kimi.ai",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
