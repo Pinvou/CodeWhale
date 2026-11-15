@@ -119,6 +119,33 @@ class ReuseTests(unittest.TestCase):
         self.assertNotEqual(self.tested, self.queued)
         self.assertEqual(self.lookup(), (sorted(TARGETS), 12))
 
+    def test_browser_matrix_lookup_requires_all_four_successful_shards(self):
+        name = 'frontend-browser-test'
+        policy = REUSE.JOBS[name]
+        self.proof['jobs'].append(name)
+        original = copy.deepcopy(self.jobs)
+        shards = [{'name': REUSE.PLAN['display_name'](policy, row), 'conclusion': 'success',
+                   'run_id': 12, 'labels': ['ubuntu-22.04'],
+                   'steps': [{'name': step['name'], 'conclusion': 'success'}
+                             for step in policy['steps'] if step['name']]}
+                  for row in REUSE.PLAN['matrix_rows'](policy, self.config)]
+        self.jobs = original + shards
+        self.assertEqual(self.lookup(), (sorted((*TARGETS, name)), 12))
+        for problem in ('missing', 'duplicate', 'failed', 'cancelled', 'retirement'):
+            with self.subTest(problem=problem):
+                broken = copy.deepcopy(shards)
+                if problem == 'missing': broken.pop()
+                elif problem == 'duplicate': broken.append(copy.deepcopy(broken[0]))
+                elif problem in ('failed', 'cancelled'):
+                    broken[2]['conclusion'] = 'failure' if problem == 'failed' else 'cancelled'
+                else:
+                    for step in broken[2]['steps']:
+                        if step['name'] == 'Confirm test resource retirement': step['conclusion'] = 'skipped'
+                self.jobs = original + broken
+                # Other independently proven jobs may reuse; the incomplete
+                # browser group must execute instead of gaining a waiver.
+                self.assertEqual(self.lookup(), (sorted(TARGETS), 12))
+
     def test_every_fingerprint_input_and_source_identity_invalidates(self):
         for key, bad in (('tree', 'f'*40), ('base', 'f'*40), ('configuration', 'bad'), ('policy', {}), ('selection', 'bad')):
             with self.subTest(input=key):
@@ -262,6 +289,8 @@ class ReuseTests(unittest.TestCase):
         self.assertIn('TESTED_SHA: ${{ github.sha }}', ready)
         self.assertIn('PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}', ready)
         command = textwrap.dedent(ready.split('        run: |\n', 1)[1])
+        self.assertEqual(command.count('${{ matrix.shard }}'), 1)
+        rows = REUSE.PLAN['matrix_rows'](REUSE.JOBS['frontend-browser-test'], {})
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             def git(*args):
@@ -269,9 +298,12 @@ class ReuseTests(unittest.TestCase):
             git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid')
             scripts = root/'scripts'; scripts.mkdir()
             (scripts/'select-frontend-smokes.mjs').write_bytes((ROOT/'scripts/select-frontend-smokes.mjs').read_bytes())
-            # Only the final browser-command executor is replaced. Git, the
-            # actual workflow Bash and selector execute unchanged.
-            (scripts/'run-frontend-smokes.mjs').write_text('process.stdin.pipe(process.stdout);\n', encoding='utf-8')
+            # Only the final browser executor is replaced. Keep real Git,
+            # workflow Bash and selector; assert each worker's actual options.
+            (scripts/'run-frontend-smokes.mjs').write_text(
+                "import assert from 'node:assert/strict';\n"
+                "assert.deepEqual(process.argv.slice(2), ['--selected', '--shard', process.env.EXPECTED_SHARD]);\n"
+                "process.stdin.pipe(process.stdout);\n", encoding='utf-8')
             old = root/'pinvou3-app/src/features/settings/review.js'
             new = root/'pinvou3-app/src/shared/review.js'
             old.parent.mkdir(parents=True); old.write_text(''.join(f'line {i}\n' for i in range(100)), encoding='utf-8')
@@ -297,17 +329,24 @@ class ReuseTests(unittest.TestCase):
             self.assertIn('test:bridge-smoke', expected)
             environment = {**os.environ, 'TESTED_SHA': tested, 'PR_HEAD_SHA': head,
                            'BASE_SHA': stale, 'HEAD_SHA': head}
-            def execute(changes=None):
-                return subprocess.run([shutil.which('bash'), '-c', command], cwd=root/'pinvou3-app',
-                                      env={**environment, **(changes or {})}, capture_output=True, encoding='utf-8')
-            result = execute()
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout, expected)
-            for invalid in ({'TESTED_SHA': head}, {'PR_HEAD_SHA': 'f'*40}):
-                with self.subTest(invalid=invalid):
-                    rejected = execute(invalid)
-                    self.assertNotEqual(rejected.returncode, 0)
-                    self.assertEqual(rejected.stdout, '')
+            def execute(shard, changes=None):
+                # Actions renders matrix expressions before starting Bash.
+                rendered = command.replace('${{ matrix.shard }}', shard)
+                return subprocess.run([shutil.which('bash'), '-c', rendered], cwd=root/'pinvou3-app',
+                                      env={**environment, 'EXPECTED_SHARD': shard+'/4', **(changes or {})},
+                                      capture_output=True, encoding='utf-8')
+            for row in rows:
+                shard = row['shard']
+                with self.subTest(shard=shard):
+                    result = execute(shard)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    # Every worker receives the same global, rename-aware list;
+                    # actual partition/CLI coverage lives in the runner tests.
+                    self.assertEqual(result.stdout, expected)
+                    for invalid in ({'TESTED_SHA': head}, {'PR_HEAD_SHA': 'f'*40}):
+                        rejected = execute(shard, invalid)
+                        self.assertNotEqual(rejected.returncode, 0)
+                        self.assertEqual(rejected.stdout, '')
 
     def test_record_rejections_are_observable_and_do_not_create_proofs(self):
         for problem in ('draft', 'fork', 'head-checkout', 'wrong-head', 'three-parents'):
