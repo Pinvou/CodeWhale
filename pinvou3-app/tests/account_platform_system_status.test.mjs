@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
-import { formatSystemCount, parseSystemStatusJSON, requireSystemStatus, systemDiagnosticMessage } from '../src/features/account-platform/admin-system-status.js';
+import { formatSystemCount, parseSystemStatusJSON, requireSystemStatus, systemDiagnosticMessage, systemRelatedReconciliationRoute } from '../src/features/account-platform/admin-system-status.js';
 import { adminPlatformCopy } from '../src/shared/i18n.js';
 import { localizedAccountPlatformError } from '../src/features/account-platform/error-localization.js';
+import { adminRouteLocation } from '../src/features/account-platform/admin-sections.js';
 
 test('actual client uses same-origin readonly status route, preserves raw int64 and float age', async () => {
   const original = globalThis.fetch;
@@ -125,4 +126,19 @@ test('bounded HTTP and dead-letter diagnostic facts survive translation without 
       assert.equal(systemDiagnosticMessage({code:'__proto__',message:'external detail'},labels),'external detail');
     }
   } finally {Object.defineProperty(Object, 'hasOwn', original);}
+});
+
+test('system related review route uses the usage read scope and clears stale review filters', () => {
+  const expected = { operations_tab: 'reconciliation', usage_request_id: null, reconciliation_q: null, reconciliation_status: null, reconciliation_severity: null, reconciliation_case_type: 'USAGE_RECONCILIATION_REVIEW', reconciliation_owner_id: null, reconciliation_sla_overdue: null, reconciliation_cursor: null };
+  for (const section of ['modelOperations', 'tokens']) assert.deepEqual(systemRelatedReconciliationRoute(['system', section], ['platform.usage.read']), { section, query: expected });
+  assert.equal(systemRelatedReconciliationRoute(['system', 'modelOperations'], ['platform.system.status.read']), null);
+  assert.equal(systemRelatedReconciliationRoute(['system'], ['platform.usage.read']), null);
+  const route = systemRelatedReconciliationRoute(['modelOperations', 'tokens'], ['platform.usage.read']);
+  assert.equal(route.section, 'modelOperations');
+  const url = new URL(adminRouteLocation('?section=system&language=en&usage_request_id=old&reconciliation_q=old&reconciliation_status=RESOLVED&reconciliation_severity=P0&reconciliation_owner_id=old&reconciliation_sla_overdue=true&reconciliation_cursor=old', route.section, route.query), 'https://portal.example');
+  assert.equal(url.searchParams.get('section'), 'modelOperations');
+  assert.equal(url.searchParams.get('operations_tab'), 'reconciliation');
+  assert.equal(url.searchParams.get('reconciliation_case_type'), 'USAGE_RECONCILIATION_REVIEW');
+  assert.equal(url.searchParams.get('language'), 'en');
+  for (const key of ['usage_request_id', 'reconciliation_q', 'reconciliation_status', 'reconciliation_severity', 'reconciliation_owner_id', 'reconciliation_sla_overdue', 'reconciliation_cursor']) assert.equal(url.searchParams.has(key), false);
 });

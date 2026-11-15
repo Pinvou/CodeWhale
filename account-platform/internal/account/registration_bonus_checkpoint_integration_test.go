@@ -18,9 +18,16 @@ import (
 
 // The first page commits through the real public schema and account_service.
 // A fixture trigger interrupts the next page, without guessing a timing window.
-func registrationBonusCheckpoint(t *testing.T) (*PostgresRepository, time.Time) {
+func registrationBonusCheckpoint(t *testing.T, through ...int64) (*PostgresRepository, time.Time) {
 	t.Helper()
-	r := retainedWalletFenceActors(t).repository(t)
+	if len(through) > 1 {
+		t.Fatal("one exact historical boundary required")
+	}
+	var version int64
+	if len(through) == 1 {
+		version = through[0]
+	}
+	r := retainedWalletFenceActors(t).repositoryThroughVersion(t, version, nil)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	r.now = func() time.Time { return now }
@@ -198,7 +205,9 @@ func TestRegistrationBonusCheckpointForeignFactsPostgresIntegration(t *testing.T
 }
 
 func TestRegistrationBonusCheckpointGuardsPostgresIntegration(t *testing.T) {
-	r, _ := registrationBonusCheckpoint(t)
+	// Keep the original checkpoint/900015 refusal target independent of later
+	// reversible index migrations. Other checkpoint roots use the latest chain.
+	r, _ := registrationBonusCheckpoint(t, 900015)
 	ctx := context.Background()
 	before := registrationBonusCheckpointSnapshot(t, r)
 	for _, mutation := range []map[string]string{
@@ -236,7 +245,14 @@ func TestRegistrationBonusCheckpointGuardsPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The current chain refuses at its new forward-only head. Exercise the
+	var guardRelease []migrations.Migration
+	for _, m := range loaded {
+		if m.Version <= 900015 {
+			guardRelease = append(guardRelease, m)
+		}
+	}
+	loaded = guardRelease
+	// This guard release refuses at its forward-only head. Exercise the
 	// original checkpoint guard independently so that refusal cannot mask it.
 	assertHistoricalRollbackRefusal(t, r, loaded, 900014, "P0001", "registration bonus eligibility facts exist; destructive rollback is forbidden")
 	if err = accountschema.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "organization evidence truncate protection is forward-only") {

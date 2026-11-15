@@ -1,0 +1,131 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Reconciliation case source context (read-only)",
+    "version": "1"
+  },
+  "paths": {
+    "/admin/v1/reconciliation-cases/{case_id}/repair-context": {
+      "get": {
+        "operationId": "readReconciliationRepairContext",
+        "description": "Current authenticated actor + platform.billing.reconciliation.read. Original case-to-run source only; three-second repository context budget. No evidence eligibility, approval or write. Portal GET proxy: /api/admin/billing/admin/v1/reconciliation-cases/{case_id}/repair-context. Exact int64 decimal strings; unavailable/malformed source amount is null, never an invented zero.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "case_id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Source facts, not an eligibility proof",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconciliationRepairContext"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or nil case identifier"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Current read authority denied"
+          },
+          "404": {
+            "description": "Case/original run not found"
+          },
+          "500": {
+            "description": "Repository read failed; not a business conflict"
+          },
+          "503": {
+            "description": "Read capability unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ReconciliationRepairContext": {
+        "type": "object",
+        "required": [
+          "case_id",
+          "reconciliation_run_id",
+          "case_type",
+          "status",
+          "case_version",
+          "channel",
+          "business_date",
+          "provider_id",
+          "provider_version",
+          "merchant_order_no",
+          "amount_fen",
+          "currency",
+          "provider_transaction_id",
+          "snapshot_available"
+        ],
+        "properties": {
+          "case_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reconciliation_run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "case_type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "case_version": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "business_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "provider_version": {
+            "type": "string"
+          },
+          "merchant_order_no": {
+            "type": "string"
+          },
+          "amount_fen": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^-?(0|[1-9][0-9]*)$"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "provider_transaction_id": {
+            "type": "string"
+          },
+          "snapshot_available": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

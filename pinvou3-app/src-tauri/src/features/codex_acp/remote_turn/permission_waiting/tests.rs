@@ -4,7 +4,7 @@ use crate::features::codex_acp::{
     mint_remote_permission_in_maps, remote_permission_response_key,
 };
 use crate::features::remote_control::controller::{
-    permission::{DecisionAuthority, PermissionDecision},
+    permission::{DecisionAuthority, PermissionDecision, PermissionDecisionOwner},
     protocol::LeaseContext,
     task::{RemoteTaskLedger, RemoteTaskRequest, RemoteTaskTerminal, task_input_digest_for_value},
 };
@@ -184,13 +184,16 @@ impl Fixture {
     fn decide(&self, callback: &str, decision: PermissionDecision) {
         let id = &self.registered[callback];
         self.authority
-            .decide(
+            .decide_for_owner(
                 DecisionAuthority::ControllerA,
                 &self.owner.lease,
                 &self.owner.task_id,
                 id,
                 decision,
-                self.authority.now_ms(),
+                &PermissionDecisionOwner {
+                    session_id: self.owner.session_id.clone(),
+                    task_sequence: self.owner.task_sequence,
+                },
             )
             .unwrap();
         if decision == PermissionDecision::Allow {
