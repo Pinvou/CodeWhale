@@ -28,6 +28,14 @@ use codewhale_secrets::Secrets;
 use serde::{Deserialize, Serialize};
 
 const MAX_PROMPT_CHARS: usize = 64_000;
+/// Hard transport bound for the harness command. The toolbox executes it as
+/// ONE shell command string, and Linux caps a single execve argument at
+/// MAX_ARG_STRLEN (131072 bytes) — the prompt rides inside that string after
+/// POSIX quoting, so a char-only cap can admit a prompt whose command still
+/// fails to exec. Validation therefore bounds the quoted command's bytes.
+const MAX_HARNESS_COMMAND_BYTES: usize = 128_000;
+const _HARNESS_COMMAND_UNDER_ARG_STRLEN: () =
+    assert!(MAX_HARNESS_COMMAND_BYTES <= 131_072, "Linux MAX_ARG_STRLEN");
 const MAX_REMOTE_BYTES: usize = 4 * 1024;
 const JOB_KIND: &str = "cloud";
 const DAYTONA_API_KEY_ENV: &str = "DAYTONA_API_KEY";
@@ -212,6 +220,10 @@ pub enum DispatchOutcome {
 pub enum DispatchError {
     EmptyPrompt,
     PromptTooLong,
+    /// The prompt fits the char cap, but its POSIX-quoted harness command
+    /// would exceed the sandbox's single-execve-argument limit (Linux
+    /// MAX_ARG_STRLEN) — carrying the command size that tripped it.
+    PromptTooLongForTransport(usize),
     InvalidBranch,
     UnknownForge,
     AmbiguousRemote,
@@ -227,6 +239,11 @@ impl std::fmt::Display for DispatchError {
             Self::PromptTooLong => write!(
                 f,
                 "A cloud dispatch prompt must be at most {MAX_PROMPT_CHARS} characters."
+            ),
+            Self::PromptTooLongForTransport(bytes) => write!(
+                f,
+                "The cloud dispatch prompt would need a {bytes}-byte shell command, above the \
+                 sandbox's {MAX_HARNESS_COMMAND_BYTES}-byte single-argument limit; shorten it."
             ),
             Self::InvalidBranch => write!(
                 f,
@@ -1810,7 +1827,28 @@ fn validate_prompt(prompt: &str) -> Result<String, DispatchError> {
     if prompt.chars().count() > MAX_PROMPT_CHARS {
         return Err(DispatchError::PromptTooLong);
     }
+    // Byte-truthful transport bound: the runner sends the prompt as one
+    // POSIX-quoted element of a single shell command string, and the sandbox
+    // executes that string as one execve argument (Linux MAX_ARG_STRLEN).
+    // Quote inflation (a `'`-heavy prompt) and multibyte content both count
+    // here, so this is the check that keeps the command actually runnable.
+    let command_bytes = shell_quote_join(&harness_argv(prompt)).len();
+    if command_bytes > MAX_HARNESS_COMMAND_BYTES {
+        return Err(DispatchError::PromptTooLongForTransport(command_bytes));
+    }
     Ok(prompt.to_string())
+}
+
+/// The harness argv for one prompt — the single source of truth shared by
+/// the runner's `harness_command` (dispatch_runner) and the byte-truthful
+/// validation above.
+pub(crate) fn harness_argv(prompt: &str) -> Vec<String> {
+    vec![
+        "codewhale".to_string(),
+        "exec".to_string(),
+        "--auto".to_string(),
+        prompt.to_string(),
+    ]
 }
 
 fn valid_branch(branch: &str) -> bool {
@@ -2137,6 +2175,60 @@ mod tests {
     #[test]
     fn cloud_prompt_cap_is_the_audited_literal() {
         assert_eq!(MAX_PROMPT_CHARS, 64_000, "4k → 64k audit raise");
+        assert_eq!(
+            MAX_HARNESS_COMMAND_BYTES, 128_000,
+            "byte-true transport bound (Linux MAX_ARG_STRLEN is 131072)"
+        );
+    }
+
+    #[test]
+    fn prompt_past_the_char_cap_is_rejected_in_chars() {
+        let prompt = "a".repeat(MAX_PROMPT_CHARS + 1);
+        assert_eq!(
+            validate_prompt(&prompt).unwrap_err(),
+            DispatchError::PromptTooLong
+        );
+    }
+
+    #[test]
+    fn prompt_under_the_char_cap_but_over_the_transport_bytes_is_rejected() {
+        // 50k CJK chars: 150k bytes once UTF-8 encoded, so the quoted command
+        // cannot survive a single execve argument even though the char cap
+        // (64k) never trips. This is the case a char-only cap used to admit.
+        let prompt = "修".repeat(50_000);
+        assert!(prompt.chars().count() <= MAX_PROMPT_CHARS);
+        match validate_prompt(&prompt) {
+            Err(DispatchError::PromptTooLongForTransport(bytes)) => {
+                assert!(bytes > MAX_HARNESS_COMMAND_BYTES);
+                assert_eq!(
+                    bytes,
+                    shell_quote_join(&harness_argv(&prompt)).len(),
+                    "the reported size is the actual quoted command"
+                );
+            }
+            other => panic!("expected the byte-true transport bound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quote_heavy_prompt_counts_posix_quote_inflation() {
+        // 33k single quotes are only 33k chars/bytes raw, but POSIX quoting
+        // turns each into 4 bytes — past the transport bound.
+        let prompt = "'".repeat(33_000);
+        assert!(prompt.chars().count() <= MAX_PROMPT_CHARS);
+        assert!(matches!(
+            validate_prompt(&prompt),
+            Err(DispatchError::PromptTooLongForTransport(_))
+        ));
+    }
+
+    #[test]
+    fn ascii_prompt_at_the_char_cap_still_fits_the_transport() {
+        let prompt = "a".repeat(MAX_PROMPT_CHARS);
+        assert_eq!(
+            validate_prompt(&prompt).unwrap(),
+            "a".repeat(MAX_PROMPT_CHARS)
+        );
     }
 
     fn remotes(rows: &[(&str, &str)]) -> Vec<GitRemote> {
