@@ -2538,6 +2538,11 @@ fn kimi_code_loose_route_recognition_covers_both_membership_hosts() {
         "https://api.kimi.ai/coding/v1",
         "https://api.kimi.ai/coding/v1/",
         "  https://api.kimi.com/coding/v1/  ",
+        // Padded AND uppercased: the exact gate trims whitespace and
+        // case-folds only the scheme/authority, so this must stay inside
+        // every gate without letting the path lose its case-sensitivity
+        // (the neighboring-route group below pins the uppercase-path side).
+        "  HTTPS://API.KIMI.AI/coding/v1/  ",
     ] {
         assert!(
             crate::moonshot_base_url_uses_kimi_code(base_url),
