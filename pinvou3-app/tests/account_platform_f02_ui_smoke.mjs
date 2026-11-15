@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 import { createServer } from './helpers/vite-fixture.mjs';
+import { adminLayoutCopy } from '../src/shared/i18n.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || [
@@ -322,8 +323,14 @@ try {
     assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/actions/submit')); return calls.length === 2 && calls[0].body === calls[1].body && JSON.parse(calls[1].body).expected_version === 1; }));
   });
   for (const product of [false, true]) await caseRun(`${product ? 'Product' : 'Provider'} resume submits only the actual owner draft`, async () => {
-    await fresh('admin'); await click('providerControls'); await page.waitForSelector('section textarea'); await settled(); await page.type('section textarea', 'Controlled payment resume reason');
-    await page.evaluate(product => { const label = window.f02.languageCopy().resume; const buttons = [...document.querySelectorAll('button')].filter(item => item.textContent.trim() === label && !item.disabled); buttons[product ? 1 : 0].click(); }, product);
+    await fresh('admin'); await click('providerControls'); await settled();
+    const recovery = adminLayoutCopy.en.providerControlRecovery;
+    await page.waitForFunction(label => [...document.querySelectorAll('button')].filter(item => item.textContent.trim() === label && !item.disabled && item.getClientRects().length).length === 2, {}, recovery.open);
+    await page.evaluate(({ product, label }) => { const buttons = [...document.querySelectorAll('button')].filter(item => item.textContent.trim() === label && !item.disabled && item.getClientRects().length); buttons[product ? 1 : 0].click(); }, { product, label: recovery.open });
+    await page.waitForSelector('[role=dialog] textarea');
+    assert.equal(await page.evaluate(() => window.f02.calls.some(call => call.method === 'POST' && call.url.endsWith('/api/admin/approvals/requests'))), false, 'opening a target does not create an approval');
+    await page.type('[role=dialog] textarea', 'Controlled payment resume reason');
+    await page.$eval('[role=dialog] form', form => form.requestSubmit());
     await page.waitForFunction(() => window.f02.approvalStatus === 'SUBMITTED'); await settled();
     assert.ok(await page.evaluate(product => { const call = window.f02.calls.find(call => call.url.endsWith('/api/admin/approvals/requests') && call.method === 'POST'); const body = JSON.parse(call.body); return body.command_type === (product ? 'PAYMENT_PRODUCT_RESUME' : 'PAYMENT_PROVIDER_RESUME') && body.normalized_command.provider_control_version === 3 && (!product || body.normalized_command.product_control_version === 4) && window.f02.calls.some(call => call.url.endsWith('/payment-provider-controls')); }, product));
   });
@@ -435,6 +442,12 @@ try {
     assert.equal(await closePosts(), 0); assert.ok(await page.$('[role=alertdialog]'), 'old callbacks must not consume or cancel the new intent');
     await page.evaluate(() => document.querySelectorAll('[role=alertdialog] button')[1].click()); await settled();
     assert.equal(await closePosts(), 1); assert.ok(await page.evaluate(() => window.f02.calls.find(call => call.url.endsWith('/close')).url.endsWith(`/orders/${window.f02.other}/close`)));
+  });
+  for (const [language, labels] of [['zh', ['充值积分', '赠送积分']], ['en', ['Recharge credits', 'Bonus credits']], ['ja', ['チャージポイント', '追加ポイント']]]) await caseRun(`Product entitlement labels and values are complete in ${language}`, async () => {
+    await fresh('products'); await page.select('[aria-label=fixture-language]', language);
+    await page.waitForFunction(labels => JSON.stringify([...document.querySelectorAll('.adm-product-points dt')].map(node => node.textContent)) === JSON.stringify(labels), {}, labels);
+    assert.deepEqual(await page.$$eval('.adm-product-points dd', nodes => nodes.map(node => node.textContent)), ['100', '0']);
+    assert.equal(await page.evaluate(() => window.f02.calls.some(call => call.method !== 'GET')), false, 'reading localized entitlement must not write');
   });
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } catch (error) {

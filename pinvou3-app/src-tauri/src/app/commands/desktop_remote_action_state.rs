@@ -4,14 +4,77 @@ use crate::features::remote_control::controller::relay_runtime::log_remote_actio
 use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 const MAX_PENDING_ACTIONS: usize = 64;
 pub(super) const MAX_UPLOAD_RECEIPTS: usize = 128;
 const UPLOAD_RECEIPT_TTL: Duration = Duration::from_secs(10 * 60);
+const MAX_ACTION_IDENTITIES: usize = 128;
+
+struct ActionIdentity {
+    request_id: String,
+    live: LiveRemoteContext,
+    busy: bool,
+    attempt: Arc<()>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ActionIdentityError {
+    pub(crate) code: &'static str,
+    pub(crate) request_id: Option<String>,
+}
+
+impl From<&'static str> for ActionIdentityError {
+    fn from(code: &'static str) -> Self {
+        Self {
+            code,
+            request_id: None,
+        }
+    }
+}
+
+/// Native ownership survives WebView/bridge replacement. Dropping an awaiting
+/// command proves no remote outcome: keep its identity until authenticated
+/// settlement or an authoritative lease transition.
+pub(crate) struct ActionIdentityReservation {
+    state: Arc<DesktopRemoteActionState>,
+    key: String,
+    pub(crate) request_id: String,
+    attempt: Arc<()>,
+    was_new: bool,
+    dispatched: AtomicBool,
+}
+
+impl ActionIdentityReservation {
+    pub(crate) fn mark_dispatched(&self) {
+        self.dispatched.store(true, Ordering::Release);
+    }
+    pub(crate) fn settle(&self, authoritative: bool) {
+        let mut inner = self.state.inner.lock();
+        if inner
+            .identities
+            .get(&self.key)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.attempt, &self.attempt))
+        {
+            if authoritative {
+                inner.identities.remove(&self.key);
+            } else if let Some(entry) = inner.identities.get_mut(&self.key) {
+                entry.busy = false;
+            }
+        }
+    }
+}
+
+impl Drop for ActionIdentityReservation {
+    fn drop(&mut self) {
+        self.settle(self.was_new && !self.dispatched.load(Ordering::Acquire));
+    }
+}
 
 struct PendingAction {
     registration: Arc<()>,
@@ -38,6 +101,7 @@ pub(super) struct CompletedUpload {
 pub(super) struct ActionInner {
     pending: HashMap<String, PendingAction>,
     pub(super) uploads: HashMap<String, CompletedUpload>,
+    identities: HashMap<String, ActionIdentity>,
 }
 
 #[derive(Default)]
@@ -46,6 +110,86 @@ pub(crate) struct DesktopRemoteActionState {
 }
 
 impl DesktopRemoteActionState {
+    pub(crate) fn reserve_identity(
+        self: &Arc<Self>,
+        local_session_id: &str,
+        remote_ref: &str,
+        live: &LiveRemoteContext,
+        operation: &str,
+        body: &Value,
+        proposed_id: &str,
+    ) -> Result<ActionIdentityReservation, ActionIdentityError> {
+        // Hash the exact canonical typed intent; never retain attachment bytes
+        // or credentials in a second cache. Include task/chunk fields via body.
+        let encoded = serde_json::to_vec(&json!([
+            local_session_id,
+            remote_ref,
+            live.peer_id,
+            live.connection_id,
+            live.controller_lease_id,
+            live.lease_epoch,
+            live.relay_epoch,
+            live.generation,
+            operation,
+            body
+        ]))
+        .map_err(|_| "remote_action_invalid")?;
+        let key = Sha256::digest(&encoded)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let mut inner = self.inner.lock();
+        let attempt = Arc::new(());
+        let was_new = !inner.identities.contains_key(&key);
+        let request_id = if let Some(entry) = inner.identities.get_mut(&key) {
+            if entry.busy {
+                return Err(ActionIdentityError {
+                    code: "remote_action_capacity",
+                    request_id: Some(entry.request_id.clone()),
+                });
+            }
+            if matches!(operation, "attachment_begin" | "attachment_chunk") {
+                return Err(ActionIdentityError {
+                    code: "result_unknown",
+                    request_id: Some(entry.request_id.clone()),
+                });
+            }
+            entry.busy = true;
+            entry.attempt = Arc::clone(&attempt);
+            entry.request_id.clone()
+        } else {
+            if inner.identities.len() >= MAX_ACTION_IDENTITIES {
+                return Err("remote_action_capacity".into());
+            }
+            // An explicit ID cannot alias another unresolved intent.
+            if inner
+                .identities
+                .values()
+                .any(|entry| entry.request_id == proposed_id)
+            {
+                return Err("remote_action_invalid".into());
+            }
+            inner.identities.insert(
+                key.clone(),
+                ActionIdentity {
+                    request_id: proposed_id.to_owned(),
+                    live: live.clone(),
+                    busy: true,
+                    attempt: Arc::clone(&attempt),
+                },
+            );
+            proposed_id.to_owned()
+        };
+        Ok(ActionIdentityReservation {
+            state: Arc::clone(self),
+            key,
+            request_id,
+            attempt,
+            was_new,
+            dispatched: AtomicBool::new(false),
+        })
+    }
+
     fn purge_expired_uploads(inner: &mut ActionInner) {
         let now = Instant::now();
         inner.uploads.retain(|_, upload| {
@@ -59,6 +203,10 @@ impl DesktopRemoteActionState {
         let mut inner = self.inner.lock();
         inner.pending.clear();
         inner.uploads.clear();
+        // Clearing waiters is not proof of a remote terminal outcome. A late
+        // connect/disconnect cleanup may also run after a new owner exists.
+        // Only purge_stale, called inside the current dispatch authority fence,
+        // retires old identity records; never clear a new owner's unknown IDs.
     }
 
     pub(crate) fn clear_connection(&self, connection_id: &str) {
@@ -93,6 +241,15 @@ impl DesktopRemoteActionState {
         Self::purge_expired_uploads(&mut inner);
         inner.pending.retain(|_, pending| pending.live == *live);
         inner.uploads.retain(|_, upload| upload.live == *live);
+        inner.identities.retain(|_, entry| {
+            // A resume-boundary change alone must not mint a new remote action.
+            entry.live.peer_id == live.peer_id
+                && entry.live.connection_id == live.connection_id
+                && entry.live.controller_lease_id == live.controller_lease_id
+                && entry.live.lease_epoch == live.lease_epoch
+                && entry.live.relay_epoch == live.relay_epoch
+                && entry.live.generation == live.generation
+        });
     }
 
     pub(crate) fn retire_uploaded_receipts(
@@ -273,7 +430,12 @@ impl DesktopRemoteActionState {
             }
             upload.touched_at = Instant::now();
         }
-        if ok && pending.operation == "attachment_abort" {
+        if ok
+            && matches!(
+                pending.operation.as_str(),
+                "attachment_abort" | "attachment_abort_confirmed"
+            )
+        {
             let Some(transfer_id) = pending.transfer_id.as_deref() else {
                 let _ = pending
                     .reply
@@ -292,12 +454,21 @@ impl DesktopRemoteActionState {
                     .send(Err("remote_attachment_binding_mismatch".into()));
                 return true;
             }
+            if pending.operation == "attachment_abort_confirmed"
+                && (body.get("cleanup_confirmed").and_then(Value::as_bool) != Some(true)
+                    || body.get("transfer_id").and_then(Value::as_str) != Some(transfer_id))
+            {
+                let _ = pending
+                    .reply
+                    .send(Err("remote_attachment_unconfirmed".into()));
+                return true;
+            }
             inner.uploads.remove(transfer_id);
         }
         if !ok
             && matches!(
                 pending.operation.as_str(),
-                "attachment_chunk" | "attachment_abort"
+                "attachment_chunk" | "attachment_abort" | "attachment_abort_confirmed"
             )
         {
             if let Some(transfer_id) = pending.transfer_id.as_deref() {
@@ -307,7 +478,12 @@ impl DesktopRemoteActionState {
                         && upload.live == pending.live
                         && Some(upload.task_id.as_str()) == pending.task_id.as_deref()
                 });
-                if bound && pending.operation == "attachment_chunk" {
+                if bound
+                    && matches!(
+                        pending.operation.as_str(),
+                        "attachment_chunk" | "attachment_abort_confirmed"
+                    )
+                {
                     // Retain only the authenticated binding for cleanup. An
                     // out-of-order successful reply cannot re-attest this upload.
                     if let Some(upload) = inner.uploads.get_mut(transfer_id) {
@@ -389,4 +565,356 @@ fn same_lease(lease: &LeaseContext, live: &LiveRemoteContext) -> bool {
         && lease.lease_epoch == live.lease_epoch
         && lease.relay_epoch == live.relay_epoch
         && lease.remote_control_generation == live.generation
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    fn live() -> LiveRemoteContext {
+        LiveRemoteContext {
+            peer_id: "peer".into(),
+            resume_boundary_id: "resume".into(),
+            connection_id: "connection".into(),
+            controller_lease_id: "lease".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "relay".into(),
+            generation: "generation".into(),
+            control_connected: true,
+            encrypted_channel_connected: true,
+        }
+    }
+
+    fn reserve(
+        state: &Arc<DesktopRemoteActionState>,
+        live: &LiveRemoteContext,
+        task: usize,
+        id: &str,
+    ) -> Result<ActionIdentityReservation, &'static str> {
+        state.reserve_identity("local", "remote", live, "permission_decide",
+            &json!({"task_id":format!("task-{task}"),"permission_request_id":"permission","decision":"allow"}), id).map_err(|error| error.code)
+    }
+
+    #[test]
+    fn unresolved_identity_capacity_never_evicts_and_reuses_original_after_renderer_loss() {
+        let state = Arc::new(DesktopRemoteActionState::default());
+        for task in 0..MAX_ACTION_IDENTITIES {
+            let entry = reserve(&state, &live(), task, &format!("request-{task}")).unwrap();
+            entry.mark_dispatched();
+            drop(entry); // command cancelled/renderer lost, no authenticated outcome
+        }
+        assert!(matches!(
+            reserve(&state, &live(), 128, "overflow"),
+            Err("remote_action_capacity")
+        ));
+        let retry = reserve(&state, &live(), 0, "new-renderer-request").unwrap();
+        assert_eq!(retry.request_id, "request-0");
+        retry.mark_dispatched();
+        retry.settle(true);
+        drop(retry);
+        let next = reserve(&state, &live(), 128, "next").unwrap();
+        assert_eq!(next.request_id, "next");
+    }
+
+    #[test]
+    fn unsent_new_reservations_release_but_unknown_retries_and_late_owners_do_not() {
+        let state = Arc::new(DesktopRemoteActionState::default());
+        drop(reserve(&state, &live(), 0, "unsent").unwrap());
+        assert!(state.inner.lock().identities.is_empty());
+        let old = reserve(&state, &live(), 0, "first").unwrap();
+        assert!(matches!(
+            reserve(&state, &live(), 0, "duplicate"),
+            Err("remote_action_capacity")
+        ));
+        old.mark_dispatched();
+        old.settle(false);
+        let retry = reserve(&state, &live(), 0, "second").unwrap();
+        assert_eq!(retry.request_id, "first");
+        drop(old); // must not clear the newer in-flight owner
+        assert!(matches!(
+            reserve(&state, &live(), 0, "third"),
+            Err("remote_action_capacity")
+        ));
+        drop(retry); // local retry failed before dispatch; original remains unknown
+        let retry = reserve(&state, &live(), 0, "fourth").unwrap();
+        assert_eq!(retry.request_id, "first");
+        retry.settle(true);
+        let next = reserve(&state, &live(), 0, "fresh").unwrap();
+        drop(retry); // old terminal guard cannot unlock a new same-intent attempt
+        assert_eq!(next.request_id, "fresh");
+        assert!(matches!(
+            reserve(&state, &live(), 0, "fifth"),
+            Err("remote_action_capacity")
+        ));
+    }
+
+    #[test]
+    fn canonical_intent_and_full_lease_own_identity_without_persisting_content() {
+        let state = Arc::new(DesktopRemoteActionState::default());
+        let original = live();
+        let body = json!({"task_id":"task","transfer_id":"transfer","chunk_index":0,"chunk_b64":"c2VjcmV0"});
+        let entry = state
+            .reserve_identity(
+                "local",
+                "remote",
+                &original,
+                "artifact_download_chunk",
+                &body,
+                "first",
+            )
+            .unwrap();
+        entry.mark_dispatched();
+        drop(entry);
+        let mut resumed = original.clone();
+        resumed.resume_boundary_id = "resumed".into();
+        state.purge_stale(&resumed);
+        let entry = state
+            .reserve_identity(
+                "local",
+                "remote",
+                &resumed,
+                "artifact_download_chunk",
+                &body,
+                "reload",
+            )
+            .unwrap();
+        assert_eq!(entry.request_id, "first");
+        drop(entry);
+        let changed = json!({"task_id":"task","transfer_id":"transfer","chunk_index":0,"chunk_b64":"b3RoZXI="});
+        assert!(matches!(
+            state.reserve_identity(
+                "local",
+                "remote",
+                &resumed,
+                "artifact_download_chunk",
+                &changed,
+                "first"
+            ),
+            Err(ActionIdentityError {
+                code: "remote_action_invalid",
+                ..
+            })
+        ));
+        let changed_entry = state
+            .reserve_identity(
+                "local",
+                "remote",
+                &resumed,
+                "artifact_download_chunk",
+                &changed,
+                "other-content",
+            )
+            .unwrap();
+        assert_eq!(changed_entry.request_id, "other-content");
+        for key in state.inner.lock().identities.keys() {
+            assert_eq!(key.len(), 64);
+            assert!(!key.contains("secret"));
+        }
+        drop(changed_entry);
+        for field in 0..5 {
+            let mut next = original.clone();
+            match field {
+                0 => next.connection_id.push('2'),
+                1 => next.controller_lease_id.push('2'),
+                2 => next.lease_epoch.push('2'),
+                3 => next.relay_epoch.push('2'),
+                _ => next.generation.push('2'),
+            }
+            state.purge_stale(&next);
+            assert!(state.inner.lock().identities.is_empty());
+            let entry = state
+                .reserve_identity(
+                    "local",
+                    "remote",
+                    &next,
+                    "artifact_download_chunk",
+                    &body,
+                    "next-lease",
+                )
+                .unwrap();
+            assert_eq!(entry.request_id, "next-lease");
+            drop(entry);
+        }
+    }
+
+    #[test]
+    fn old_authority_and_late_cleanup_cannot_retire_new_unknown_identity() {
+        use crate::features::remote_control::controller::{
+            controlling::{ControllerLease, ControllingDeviceManager},
+            crypto::ControllerRole,
+            encrypted_lane::ControllingLaneState,
+            test_support::{
+                bind_pairing_generation, lease_context, paired_session_keys, pairing_fixture,
+            },
+        };
+        fn activate(
+            manager: &ControllingDeviceManager,
+            lane: &ControllingLaneState,
+            generation: &str,
+        ) -> LiveRemoteContext {
+            let mut fixture = pairing_fixture("identity-owner-fence");
+            bind_pairing_generation(&mut fixture, generation);
+            let context = lease_context(&fixture.reservation);
+            let (keys, _) =
+                paired_session_keys(fixture.a_keys, fixture.b_keys, &fixture.reservation);
+            let operation = manager.connect("2345678").unwrap();
+            manager.complete_reserved(operation.clone()).unwrap();
+            manager
+                .complete_connected(
+                    operation,
+                    ControllerLease {
+                        context: context.clone(),
+                        peer_endpoint_id: "endpoint-0001".into(),
+                        reservation_id: "reservation-0001".into(),
+                        device_display_name: "test".into(),
+                        liveness_epoch_a: "live-a-1".into(),
+                        liveness_epoch_b: "live-b-1".into(),
+                        resume_deadline_b: 30000,
+                        resume_token: [1; 32],
+                        transport_key_fingerprint: [2; 32],
+                        negotiated_capabilities: vec![
+                            "encrypted_frames_v1".into(),
+                            "pairing_v1".into(),
+                            "task_v1".into(),
+                        ],
+                    },
+                )
+                .unwrap();
+            lane.install(ControllerRole::A, &context, keys).unwrap();
+            let identity = manager.authenticated_remote_proxy_identity().unwrap();
+            LiveRemoteContext {
+                peer_id: identity.1,
+                resume_boundary_id: identity.2,
+                connection_id: context.connection_id,
+                controller_lease_id: context.controller_lease_id,
+                lease_epoch: context.lease_epoch,
+                relay_epoch: context.relay_epoch,
+                generation: context.remote_control_generation,
+                control_connected: true,
+                encrypted_channel_connected: true,
+            }
+        }
+        let state = Arc::new(DesktopRemoteActionState::default());
+        let manager = ControllingDeviceManager::default();
+        let lane = ControllingLaneState::default();
+        let old = activate(&manager, &lane, "old-generation");
+        let expected = manager.authenticated_remote_proxy_identity().unwrap();
+        let (release, wait) = std::sync::mpsc::sync_channel(0);
+        let ran_old_mutation = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let old_manager = &manager;
+            let old_lane = &lane;
+            let old_state = &state;
+            let old_ran = &ran_old_mutation;
+            let old_call = scope.spawn(move || {
+                wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                old_manager.with_current_authenticated_remote_proxy_identity(
+                    old_lane,
+                    &expected,
+                    || {
+                        old_ran.store(true, Ordering::SeqCst);
+                        old_state.purge_stale(&old);
+                        Ok(())
+                    },
+                )
+            });
+            manager.disconnect();
+            let current = activate(&manager, &lane, "new-generation");
+            let identity = manager.authenticated_remote_proxy_identity().unwrap();
+            manager
+                .with_current_authenticated_remote_proxy_identity(&lane, &identity, || {
+                    state.purge_stale(&current);
+                    let request = reserve(&state, &current, 0, "new-owner-original").unwrap();
+                    request.mark_dispatched();
+                    drop(request);
+                    Ok(())
+                })
+                .unwrap();
+            release.send(()).unwrap();
+            assert!(old_call.join().unwrap().is_err());
+            assert!(!ran_old_mutation.load(Ordering::SeqCst));
+            // A delayed connect cleanup is allowed to drop waiters, never this
+            // new owner's result-unknown identity.
+            state.clear_all();
+            let retry = reserve(&state, &current, 0, "new-renderer-candidate").unwrap();
+            assert_eq!(retry.request_id, "new-owner-original");
+        });
+    }
+
+    #[test]
+    fn unknown_attachment_remains_fenced_until_native_authority_changes() {
+        let state = Arc::new(DesktopRemoteActionState::default());
+        let body = json!({"task_id":"task","file_name":"a.txt"});
+        let entry = state
+            .reserve_identity(
+                "local",
+                "remote",
+                &live(),
+                "attachment_begin",
+                &body,
+                "first",
+            )
+            .unwrap();
+        entry.mark_dispatched();
+        drop(entry);
+        assert!(matches!(
+            state.reserve_identity(
+                "local",
+                "remote",
+                &live(),
+                "attachment_begin",
+                &body,
+                "fresh"
+            ),
+            Err(ActionIdentityError { code: "result_unknown", request_id: Some(ref id) }) if id == "first"
+        ));
+        // Cleanup remains reconcilable; it cannot create another attachment.
+        let abort = state
+            .reserve_identity(
+                "local",
+                "remote",
+                &live(),
+                "attachment_abort",
+                &json!({"task_id":"task","transfer_id":"transfer"}),
+                "abort-original",
+            )
+            .unwrap();
+        abort.mark_dispatched();
+        drop(abort);
+        let retry = state
+            .reserve_identity(
+                "local",
+                "remote",
+                &live(),
+                "attachment_abort",
+                &json!({"task_id":"task","transfer_id":"transfer"}),
+                "abort-new-renderer",
+            )
+            .unwrap();
+        assert_eq!(retry.request_id, "abort-original");
+        retry.settle(true);
+        drop(retry);
+        state.clear_all();
+        assert!(matches!(
+            state.reserve_identity(
+                "local",
+                "remote",
+                &live(),
+                "attachment_begin",
+                &body,
+                "after-waiter-reset"
+            ),
+            Err(ActionIdentityError {
+                code: "result_unknown",
+                ..
+            })
+        ));
+        let mut next = live();
+        next.generation = "next-generation".into();
+        state.purge_stale(&next);
+        let entry = state
+            .reserve_identity("local", "remote", &next, "attachment_begin", &body, "fresh")
+            .unwrap();
+        assert_eq!(entry.request_id, "fresh");
+    }
 }

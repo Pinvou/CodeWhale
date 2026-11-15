@@ -12,13 +12,22 @@ const buildStep = Object.values(buildWorkflow.jobs).flatMap((value) => value.ste
   .find((value) => value.name === 'Build signed installer from checked-out commit');
 const nativeContractBudgetMs = 120_000;
 
+// Official 的第三条外部契约（windows-e2e-orchestrator 系列）被 python
+// ci-fixture-process receipt 包装器包裹（行首为 python，且行内含未展开的
+// `${{ … }}` GitHub 表达式），与 Community 的 3 条直排 npm/node 不同。三条
+// 契约统一按“外部契约命令”识别：变异测试把它们替换为确定性 node stub
+// （表达式行若原样交给 pwsh 会 ParserError，包装的真实套件也超出共享预算）。
+const externalContractCommand = /^(?:npm|node)\b|python scripts\/ci-fixture-process\.py --receipt /u;
+
 test('Windows release step retains every mandatory command and required-gate dependency', () => {
   assert.ok(step);
   assert.equal(step.if, "${{ runner.os == 'Windows' }}");
   assert.equal(step.env.PINVOU_DESKTOP_CONTROLLER_ENABLED, '0');
   assert.equal(step['continue-on-error'], undefined);
   assert.ok(workflow.jobs['required-gate'].needs.includes('release-contract-test'));
-  assert.equal(step.run.split('\n').filter((line) => /^(?:npm|node)\b/u.test(line)).length, 3);
+  // 顶格 npm/node 直排命令为 2 条；第三条外部契约是 python receipt 包装行。
+  assert.equal(step.run.split('\n').filter((line) => /^(?:npm|node)\b/u.test(line)).length, 2);
+  assert.equal(step.run.split('\n').filter((line) => externalContractCommand.test(line)).length, 3);
   assert.match(step.run, /npm --prefix remote-control-relay run release:gate/u);
   assert.match(step.run, /windows-e2e-orchestrator-helpers\.test\.js/u);
   assert.match(step.run, /remote_control_feature_gate_contract\.test\.mjs/u);
@@ -43,14 +52,19 @@ for (const [name, target, count] of [['contracts', step, 3], ['protected-build',
     const deadline = performance.now() + nativeContractBudgetMs;
     for (const failure of [...Array.from({ length: count }, (_, index) => index), null]) {
       let command = 0;
-      // Substitute only the three external contracts. Execute their actual
+      // Substitute only the external contracts (direct npm/node commands and,
+      // on Official, the python receipt-wrapped suite). Execute their actual
       // workflow control flow so deleting a guard fails this regression.
       const script = target.run.split('\n').map((line) => {
-        if (!/^(?:npm|node)\b/u.test(line)) return line;
+        if (!externalContractCommand.test(line)) return line;
         const index = command++;
         const exitCode = failure === index ? 17 : 0;
         return `& $env:PINVOU_NATIVE_EXIT_TEST_NODE -e 'console.log(${index});process.exit(${exitCode})'`;
-      }).join('\n');
+      }).join('\n')
+        // 被保留的行可能携带未展开的 `${{ … }}` GitHub 表达式；它们在真实
+        // 运行时由 Actions 渲染，本地契约模拟必须替换为无害字面量，否则
+        // pwsh 会把 `${` 当作变量解析直接 ParserError。
+        .replace(/\$\{\{[^}]*\}\}/gu, 'GH_RENDERED_EXPRESSION');
       assert.equal(command, count);
       // These are exit-code/control-flow contracts, not shell startup benchmarks.
       // All cases share the existing test budget, including cold PowerShell and

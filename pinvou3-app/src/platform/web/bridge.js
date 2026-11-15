@@ -463,6 +463,7 @@ function pinvouSharedweb() {
       imageUnsupported: "The current model does not support images. Switch to an image-capable model, or configure a vision model in model settings.",
       imageUnknown: "Image input capability of the current model is unknown. If it supports images, set image input to “Supports images” in model settings; you can also configure a vision model.",
       sessionModelStale: id => `The model selected for this conversation is no longer available (missing saved model: ${id}). Please pick a model again in this conversation.`,
+      modelSelectionRequired: "No model is selected yet. Pick a model in model settings before sending.",
       attachStillUploading: "⚠️ Attachment still uploading, try again shortly",
       deviceUploadTooLarge: name => `⚠️ ${name} exceeds the 20 MB attachment limit`,
       archiveTooManyEntries: "the archive contains more than 50 entries and cannot be attached",
@@ -596,6 +597,7 @@ function pinvouSharedweb() {
       imageUnsupported: "現在のモデルは画像に対応していません。画像対応モデルに切り替えるか、モデル設定でビジョンモデルを構成してください。",
       imageUnknown: "現在のモデルの画像入力能力は不明です。画像に対応している場合は、モデル設定で画像入力能力を「画像対応」に設定してください。ビジョンモデルを構成することもできます。",
       sessionModelStale: id => `この会話で選択したモデルの設定は無効になりました（見つからない設定: ${id}）。会話でモデルを選び直してください。`,
+      modelSelectionRequired: "モデルがまだ選択されていません。送信する前にモデル設定でモデルを選んでください。",
       attachStillUploading: "⚠️ 添付ファイルをアップロード中です。少し待ってから送信してください",
       deviceUploadTooLarge: name => `⚠️ ${name} は添付の上限 20 MB を超えています`,
       archiveTooManyEntries: "アーカイブに 50 個を超える項目が含まれているため添付できません",
@@ -729,6 +731,7 @@ function pinvouSharedweb() {
       imageUnsupported: "当前模型不支持图片。请切换到支持图片的模型，或在模型设置中配置视觉模型。",
       imageUnknown: "当前模型的图片输入能力未知。如果它支持图片，请在模型设置中将图片输入能力设为“支持图片”后重试；也可以配置视觉模型。",
       sessionModelStale: id => `当前会话选择的模型配置已失效（缺失配置：${id}），请在对话中重新选择模型。`,
+      modelSelectionRequired: "尚未选择模型。请先在模型设置中选择模型后再发送。",
       attachStillUploading: "⚠️ 附件还在上传,请稍后再发",
       deviceUploadTooLarge: name => `⚠️ ${name} 超过附件 20 MB 上限`,
       archiveTooManyEntries: "压缩包包含超过 50 个条目，无法添加",
@@ -3294,6 +3297,11 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
         text.slice("session_model_binding_stale:".length).trim(),
       );
     }
+    if (text.indexOf("model_selection_required") === 0) {
+      // engine_pool emits an English hint after the stable code; the
+      // recovery copy is fully localized, so drop the raw tail.
+      return bt("modelSelectionRequired");
+    }
     // Same policy as the tauri bridge: redact raw submit-failure bodies
     // before display (classification may miss, credentials must not). Pass
     // state so the placeholder matches the UI language. If the helper is
@@ -5356,6 +5364,29 @@ function stopMonitorPolling() { return pinvouSharedweb().stopMonitorPolling(); }
 async function loadSettings() { return pinvouSharedweb().loadSettings(); }
 async function loadSelectedPet() { return pinvouSharedweb().loadSelectedPet(); }
 async function setSelectedPet(id) { return pinvouSharedweb().setSelectedPet(id); }
+
+  // Store tasks finish independently of the visible page. Reload all model
+  // consumers after a route commit without changing global/session selection.
+  var modelsRefreshPromise = null;
+  var modelsRefreshPending = false;
+  function refreshChangedModels() {
+    modelsRefreshPending = true;
+    if (modelsRefreshPromise) return modelsRefreshPromise;
+    modelsRefreshPromise = (async function () {
+      do {
+        modelsRefreshPending = false;
+        await loadModels();
+        await loadSettings();
+        await loadEffectiveModelConfig();
+      } while (modelsRefreshPending);
+    })().finally(function () { modelsRefreshPromise = null; });
+    return modelsRefreshPromise;
+  }
+  listen("models:changed", function () {
+    return refreshChangedModels().catch(function () {
+      console.warn("[models] linked model refresh failed");
+    });
+  });
   // Builtin feature switches (docs/builtin-toolset-contract.md §3.3): the web
   // client proxies to the same desktop host, so the registry read is exposed
   // here too (access-policy allowlists list_builtin_features; the write side
@@ -5383,17 +5414,15 @@ async function setSelectedPet(id) { return pinvouSharedweb().setSelectedPet(id);
   async function setBehaviorTelemetryEnabled() {
     throw new Error("behavior telemetry is unsupported by the Web host");
   }
-  var effectiveModelLoadSeq = 0;
   async function loadEffectiveModelConfig(sessionId) {
-    var seq = ++effectiveModelLoadSeq;
     var requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
+    var read = window.PinvouBridgeShared.beginModelRead(state, requestedSessionId);
     try {
       var config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
-      // 快速切会话时，旧请求可能晚于新请求返回；禁止旧会话配置覆盖当前遮罩状态。
-      if (seq !== effectiveModelLoadSeq || (state.activeSessionId || null) !== requestedSessionId) return false;
+      if (!read.configIsCurrent()) return false;
       state.effectiveModelConfig = config;
     } catch (e) {
-      if (seq !== effectiveModelLoadSeq || (state.activeSessionId || null) !== requestedSessionId) return false;
+      if (!read.configIsCurrent()) return false;
       // Preserve the last authoritative snapshot across transient failures.
       return false;
     }
@@ -5405,7 +5434,8 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
   async function saveSettings(patch) {
     return enqueueSettingsWrite(async function () {
       try {
-        state.settings = await invoke(IS_WEB ? "web_access_update_settings" : "update_settings", { patch: patch });
+        const settings = await invoke(IS_WEB ? "web_access_update_settings" : "update_settings", { patch: patch });
+        window.PinvouBridgeShared.publishSettings(state, settings);
         notify();
         return true;
       } catch (e) {
@@ -5432,11 +5462,13 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
   async function saveSearchSettings(search) {
     return enqueueSettingsWrite(async function () {
       try {
+        let settings;
         if (IS_WEB) {
-          state.settings = await invoke("web_access_update_settings", { patch: { search: search } });
+          settings = await invoke("web_access_update_settings", { patch: { search: search } });
         } else {
-          state.settings = await invoke("update_search_settings", { search: search });
+          settings = await invoke("update_search_settings", { search: search });
         }
+        window.PinvouBridgeShared.publishSettings(state, settings);
         await loadEffectiveModelConfig();
         notify();
         return true;
@@ -5476,23 +5508,7 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
   // 整表覆盖加载：保存/删除/切换链式 loadModels 并发时旧列表不得覆盖新列表
   // （审计 b）。请求序号后发者胜（与 tauri settings 侧一致）。
   var modelsLoadSeq = 0;
-  async function loadModels() {
-    var seq = ++modelsLoadSeq;
-    try {
-      var v = await invoke("list_models");
-      if (seq !== modelsLoadSeq) return false;
-      state.savedModels = (v && v.models) || [];
-      state.activeModelId = (v && v.active_model_id) || null;
-      state.defaultModelRef = (v && v.default_model_ref) || null;
-      state.modelsLoaded = true;
-    } catch (e) {
-      if (seq !== modelsLoadSeq) return false;
-      // Keep the previous authoritative catalog on transport failure.
-      return false;
-    }
-    notify();
-    return true;
-  }
+  async function loadModels() { return pinvouSharedweb().loadModels(); }
   // model 对象字段须是 snake_case(SavedModel serde):
   // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
  async function saveModel(model) {
@@ -5506,6 +5522,12 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
    await loadModels();
    await loadEffectiveModelConfig();
   }
+ async function deleteModelIfStoreLink(id, cardId) {
+   var removed = await invoke("delete_model_if_store_link", { id: id, cardId: cardId });
+   await loadModels();
+   await loadEffectiveModelConfig();
+   return removed === true;
+ }
  // 设备管理移除回收专用（三十三轮评审 P2）：最终事务按期望身份核对，
  // 等待期间被用户改属的同 id 配置保留。true=已删，false=保留。
  async function deleteModelIfMatches(id, expectedBaseUrl, expectedModel) {
@@ -5526,8 +5548,8 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
   }
   // 读某会话当前绑定的模型 id(切会话时刷新 chip)。
   async function loadSessionModel(sessionId) {
-    var effectiveSeq = ++effectiveModelLoadSeq;
     var requestedSessionId = sessionId || null;
+    var read = window.PinvouBridgeShared.beginModelRead(state, requestedSessionId, true);
     var modelId = null;
     var modelRef = null;
     var configResult = { ok: false, value: null };
@@ -5551,14 +5573,13 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
       modelRef = null;
       configResult = { ok: false, value: null };
     }
-    // ChatView effect 可能并发加载相邻两个会话；只提交仍为当前会话的结果。
-    if ((state.activeSessionId || null) !== requestedSessionId) return false;
+    if (!read.selectionIsCurrent()) return false;
     state.currentSessionModelId = modelId;
     if (!modelRef && typeof modelId === "string" && modelId && modelId !== "builtin_account_platform") {
       modelRef = { source: "LOCAL_CONFIG", saved_model_id: modelId };
     }
     state.currentSessionModelRef = modelRef;
-    var effectiveCurrent = effectiveSeq === effectiveModelLoadSeq;
+    var effectiveCurrent = read.configIsCurrent();
     if (effectiveCurrent && configResult.ok) state.effectiveModelConfig = configResult.value;
     notify();
     return effectiveCurrent && configResult.ok;
@@ -7766,6 +7787,7 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
    saveModel: saveModel,
    revealModelApiKey: revealModelApiKey,
    deleteModel: deleteModel,
+   deleteModelIfStoreLink: deleteModelIfStoreLink,
    deleteModelIfMatches: deleteModelIfMatches,
     getImageInputCapability: getImageInputCapability,
     testImageInputCapability: testImageInputCapability,
