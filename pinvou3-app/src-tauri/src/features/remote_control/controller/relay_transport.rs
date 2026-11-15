@@ -37,10 +37,15 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_OUTBOUND_BATCH: usize = 8;
+// 本文件被 controller-crypto-harness 经 #[path] 复用；#[path] 引入上下文中
+// 子模块不会按本文件名建目录解析，显式指定路径让生产与 harness 两处一致。
+#[path = "relay_transport/connected_poll.rs"]
 mod connected_poll;
+#[path = "relay_transport/task_lifecycle.rs"]
 mod task_lifecycle;
 use connected_poll::ConnectedEvent;
 #[cfg(test)]
+#[path = "relay_transport/availability_tests.rs"]
 mod availability_tests;
 const MAX_CONTROLLER_INBOUND_TEXT_BYTES: usize = if MAX_ENCRYPTED_WIRE_BYTES < MAX_RELAY_FRAME_BYTES
 {
@@ -1372,13 +1377,19 @@ where
                             .as_ref()
                             .is_some_and(|probe| payload.as_ref() == probe)
                         {
-                            let probe = pending_ping.take().unwrap();
-                            last_inbound = tokio::time::Instant::now();
-                            let millis = rtt_sample(config.clock.as_ref(), &probe[..8]).unwrap();
-                            sink.emit(ControllerTransportEvent::RttSample {
-                                remote_control_generation: config.generation(),
-                                millis,
-                            });
+                            if let Some(probe) = pending_ping.take() {
+                                last_inbound = tokio::time::Instant::now();
+                                // 传入 rtt_sample 的切片恒为 8 字节（probe 是
+                                // [u8;16]，取前 8 字节），None 分支不可达；
+                                // 按工作区 unwrap 禁令以守卫处理而非 panic。
+                                if let Some(millis) = rtt_sample(config.clock.as_ref(), &probe[..8])
+                                {
+                                    sink.emit(ControllerTransportEvent::RttSample {
+                                        remote_control_generation: config.generation(),
+                                        millis,
+                                    });
+                                }
+                            }
                         }
                     }
                     Ok(Message::Close(_)) => break "Relay connection closed".to_string(),
@@ -1620,7 +1631,14 @@ pub(super) fn dispatch_test_transport_frame_to_sink(
 ) -> bool {
     let config =
         ControllerTransportConfig::new("ws://127.0.0.1:1", sender.role, sender.generation());
-    dispatch_inbound(&config, sender, sink, &frame.to_string())
+    // 返回值 = 帧是否被准入投递（accepted），不是 positive_lease 退避重置信用：
+    // c03bf63470 重构后 cfg(test) 包装 `dispatch_inbound` 的返回语义变为
+    // `positive_lease.is_some()`（供退避调度自测），与 `controlling_inbound_tests`
+    // 的「饱和帧仍算准入」等断言错位。适配器固定取 evidence.accepted 以保留
+    // 两个测试域各自需要的语义。注意与重构前旧 bool 的唯一分歧分支：被准入的
+    // error 帧旧版返回 false、accepted 为 true（本测试域现有用例的 error 帧直通
+    // ingress.enqueue，不经适配器；未来写 admit 断言时勿按旧 bool 预期）。
+    dispatch_inbound_evidence(&config, sender, sink, &frame.to_string()).accepted
 }
 
 /// Capture actual reader delivery, including schema/context rejection and
