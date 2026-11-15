@@ -288,7 +288,7 @@ where
     }
 
     let task = tokio::task::spawn_blocking(search);
-    let result = match cancel_token {
+    let result = match &cancel_token {
         Some(token) => {
             tokio::select! {
                 biased;
@@ -299,7 +299,16 @@ where
         None => tokio::time::timeout(timeout, task).await,
     };
 
-    let joined = result.map_err(|_| grep_timeout(timeout))?;
+    let joined = result.map_err(|_| {
+        // The timeout drops the JoinHandle, detaching the walk: it would keep
+        // consuming a blocking worker and file IO for its natural lifetime.
+        // The closure shares this token and checks it per file (and per line),
+        // so cancelling here stops the detached walk promptly.
+        if let Some(token) = cancel_token.as_ref() {
+            token.cancel();
+        }
+        grep_timeout(timeout)
+    })?;
     joined.map_err(|err| {
         ToolError::execution_failed(format!("grep_files worker failed before completion: {err}"))
     })?

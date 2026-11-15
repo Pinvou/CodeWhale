@@ -4,13 +4,15 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
-use crate::tools::spec::{ApprovalRequirement, ToolContext, ToolSpec};
+use crate::tools::spec::{ApprovalRequirement, ToolContext, ToolError, ToolSpec};
 
 use super::{GrepFilesTool, matches_glob};
 
 /// The audited result cap moved 100 → 250 with the limits batch; pin the
 /// literal so a silent revert does not leave the description copy ("default
-/// 250") lying about where the walk actually stops.
+/// 250") lying about where the walk actually stops. The description and the
+/// `max_results` schema cannot interpolate consts, so both copies are pinned
+/// here too (mirrors the file_search limit pin).
 #[test]
 fn grep_max_results_pins_the_audited_literal() {
     assert_eq!(super::MAX_RESULTS, 250, "the audited grep result cap");
@@ -18,6 +20,52 @@ fn grep_max_results_pins_the_audited_literal() {
         super::GREP_FILES_TIMEOUT.as_secs(),
         120,
         "the audited grep timeout"
+    );
+    let description = GrepFilesTool.description();
+    assert!(
+        description.contains("(default 250)"),
+        "description copy must state the default cap: {description}"
+    );
+    let schema = GrepFilesTool.input_schema();
+    let max_results_copy = schema["properties"]["max_results"]["description"]
+        .as_str()
+        .expect("max_results schema description");
+    assert!(
+        max_results_copy.contains("default: 250"),
+        "schema copy must state the default: {max_results_copy}"
+    );
+}
+
+/// A timed-out walk is detached when its JoinHandle is dropped. The shared
+/// cancel token must be signalled in the timeout path so the detached walk
+/// stops promptly instead of consuming a blocking worker and file IO for its
+/// natural lifetime (up to the 120s grep budget).
+#[tokio::test]
+async fn grep_timeout_cancels_the_detached_walk() {
+    let token = CancellationToken::new();
+    let walk_token = token.clone();
+    let err = super::run_blocking_grep(
+        std::time::Duration::from_millis(20),
+        Some(token.clone()),
+        move || {
+            // Stand in for a long walk that only ends early when cancelled.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !walk_token.is_cancelled() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok(json!({"stopped": walk_token.is_cancelled()}))
+        },
+    )
+    .await
+    .expect_err("a walk past the timeout must surface the timeout error");
+
+    assert!(
+        matches!(err, ToolError::Timeout { .. }),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        token.is_cancelled(),
+        "timeout must cancel the walk token so the detached walk stops"
     );
 }
 
