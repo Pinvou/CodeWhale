@@ -2341,11 +2341,13 @@ impl DeepSeekClient {
         requested_model: &str,
         route_limits: Option<RouteLimits>,
     ) -> u32 {
-        let wire_model =
-            wire_model_for_provider_route(self.api_provider, &self.base_url, requested_model);
-        crate::route_budget::effective_max_output_tokens_for_route(
+        // Delegate to the shared normalize-then-intersect copy in
+        // `route_budget`; the host-facing engine wrapper calls the same
+        // helper, so this clamp cannot drift from what hosts compute.
+        crate::route_budget::route_effective_max_output_tokens(
             self.api_provider,
-            &wire_model,
+            &self.base_url,
+            requested_model,
             route_limits,
         )
     }
