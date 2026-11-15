@@ -1215,6 +1215,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: wire_name.to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://example.invalid/v1".to_string(),
             provider_kind: None,
             vendor: None,
@@ -1903,15 +1911,15 @@ mod tests {
         assert_eq!(before.state, RemoteTaskState::Running);
         assert!(engine.copied_model.lock().unwrap().is_some());
         writes.0.store(true, Ordering::SeqCst);
-        assert!(
-            service
-                .interrupt_generation_and_clear_sessions(
-                    &context.remote_control_generation,
-                    "remote_control_stopped",
-                    1_200
-                )
-                .is_empty()
+        let report = service.interrupt_generation_and_clear_sessions(
+            &context.remote_control_generation,
+            "remote_control_stopped",
+            1_200,
         );
+        assert!(report.committed.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, "task-retirement-running");
+        assert_eq!(report.failed[0].1.code, "task_ledger_persist_failed");
         let cancellation_was_requested = cancel.is_cancelled();
         // Deterministic cleanup even for a deliberate broken-gate control;
         // capture the business assertion before rescue, never count rescue as
@@ -1944,16 +1952,14 @@ mod tests {
         );
         assert!(engine.copied_model.lock().unwrap().is_none());
         writes.0.store(false, Ordering::SeqCst);
-        assert_eq!(
-            service
-                .interrupt_generation(
-                    &context.remote_control_generation,
-                    "remote_control_stopped",
-                    1_400
-                )
-                .len(),
-            1
+        let report = service.interrupt_generation(
+            &context.remote_control_generation,
+            "remote_control_stopped",
+            1_400,
         );
+        assert!(report.failed.is_empty());
+        assert_eq!(report.committed.len(), 1);
+        assert_eq!(report.committed[0].task_id, "task-retirement-running");
         assert_eq!(
             ledger.record("task-retirement-running").unwrap().state,
             RemoteTaskState::Interrupted

@@ -205,6 +205,10 @@ kcadm() {
     def test_account_source_peers_are_explicit_and_pinned_in_production(self):
         compose = (DEPLOY / "production/compose.personal.yaml").read_text(encoding="utf-8")
         overlay = (DEPLOY / "production/compose.keycloak-personal-auth.yaml").read_text(encoding="utf-8")
+        account = re.search(r"(?ms)^  account-service:\n(.*?)(?=^  [a-z][\w-]*:|\Z)", compose)
+        self.assertIsNotNone(account)
+        # Rate-limit source trust is separate from the internal source-proof list.
+        self.assertRegex(account.group(1), r'(?m)^      HTTP_TRUSTED_PROXY_IPS: "\$\{PERSONAL_EDGE_BACKEND_IP:\?[^}]+\},\$\{PERSONAL_PORTAL_BACKEND_IP:\?[^}]+\}"$')
         self.assertRegex(compose, r"ACCOUNT_TRUSTED_SOURCE_PEER_IPS:.*PERSONAL_EDGE_BACKEND_IP.*PERSONAL_PORTAL_BACKEND_IP.*PERSONAL_KEYCLOAK_BACKEND_IP")
         self.assertRegex(compose, r"token-portal:\s+<<: \*runtime\s+networks:\s+backend:\s+ipv4_address: \$\{PERSONAL_PORTAL_BACKEND_IP:\?")
         self.assertRegex(overlay, r"keycloak:\s+networks:\s+backend:\s+ipv4_address: \$\{PERSONAL_KEYCLOAK_BACKEND_IP:\?")

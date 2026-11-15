@@ -1223,6 +1223,9 @@ pub fn run() {
             // 「同一张卡不许被两处同时操作」的唯一依据，各持一份等于没有约束。
             let model_store =
                 std::sync::Arc::new(features::model_store::ModelStoreService::default());
+            model_store.set_models_changed_handler(
+                app::model_store_events::live_models_changed_handler(app.handle().clone()),
+            );
             // 收掉上次没收干净的脚本进程。**这一步必须在这里真的被调用**：应用被强杀
             // 或崩溃之后，hf download 之类的子进程还活着、占着权重目录的文件锁，用户
             // 下一次下载会一直卡住且没有任何提示——真机上这么僵持过 16 小时。
@@ -1231,7 +1234,7 @@ pub fn run() {
             // 内置卡片的脚本编译在二进制里：应用升级就等于脚本升级，这里把已下载的
             // 内置卡刷到当前版本。不刷的话，卡片会一直跑下载那天固化的旧脚本——
             // 真机上因此白查过一轮：推了新应用、脚本改动一个都没生效。
-            features::model_store::run_startup_refresh();
+            features::model_store::run_startup_refresh(&model_store);
             app.handle().manage(model_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();
@@ -2073,6 +2076,12 @@ pub fn run() {
             commands::model_store::model_store_cards,
             commands::model_store::model_store_library,
             commands::model_store::model_store_model_detail,
+            commands::model_store::model_store_follow_deployment_context,
+            commands::model_store::model_store_check_card_update,
+            commands::model_store::model_store_startup_update_check,
+            commands::model_store::model_store_versions,
+            commands::model_store::model_store_start_version_action,
+            commands::model_store::model_store_start_card_update,
             commands::model_store::model_store_start_download,
             commands::model_store::model_store_start_deploy,
             commands::model_store::model_store_start_lifecycle,
@@ -2094,6 +2103,7 @@ pub fn run() {
             commands::settings::probe_local_server_kind,
             commands::settings::save_model,
             commands::settings::delete_model,
+            commands::settings::delete_model_if_store_link,
             commands::settings::delete_model_if_matches,
             commands::settings::set_active_model,
             commands::settings::set_session_model,
