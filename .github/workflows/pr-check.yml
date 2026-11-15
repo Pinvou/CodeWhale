@@ -1980,13 +1980,22 @@ jobs:
                   cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
                   assert cases == {"retained-link-refuses-down-without-fact-or-schema-loss", "forward-upgrade-replays-original-and-accepts-next-command"}, "retained invitation rollback cases did not execute"
           PY
+      - name: Python for financial runner policy regressions
+        id: financial-policy-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          update-environment: false
+
       - name: Financial runner policy regressions
         shell: bash
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
           python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
-          python3 -m unittest discover -s scripts/tests -p test_account_financial_ci.py
+          policy_python="${{ steps.financial-policy-python.outputs.python-path }}"
+          policy_library="$(dirname "$(dirname "$policy_python")")/lib"
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-policy-process.json" -- env "LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$policy_python" -m unittest discover -s scripts/tests -p test_account_financial_ci.py
 
       - name: Stop owned temporary PostgreSQL services
         if: ${{ always() }}
