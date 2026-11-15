@@ -1443,7 +1443,10 @@ pub(crate) struct ParsedControllerMessage {
     wire_bytes: usize,
 }
 
+// 本文件被 controller-crypto-harness 经 #[path] 复用；显式指定路径使
+// 生产与 harness 两种解析上下文都指向 protocol/parsed_message_tests.rs。
 #[cfg(test)]
+#[path = "protocol/parsed_message_tests.rs"]
 mod parsed_message_tests;
 
 pub(crate) struct ValidatedControllerMessage<'a> {
