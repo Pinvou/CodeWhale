@@ -1,9 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import {
-  financialRepairInputs, financialRepairPrecheckBody,
+  financialRepairInputs, financialRepairPrecheckBody, financialRepairDateCanUseCalendar,
   financialRepairProjectionRows, financialRepairDraftFromProjection,
 } from './admin-financial-repair-form.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
+import { requireFinanceID } from './finance-contract.js';
+import { reconciliationRepairHost, reconciliationSourceBusinessDate } from './reconciliation-repair-context.js';
 import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-workflow.js';
 
 // The repair page never asks the operator for amounts the owner already knows:
@@ -12,9 +14,14 @@ import { createAndSubmitFreshGovernedApproval } from './admin-governed-approval-
 // the request key.
 const reconciliationRepairCommandTypes = ['RECONCILIATION_FINANCIAL_REPAIR'];
 
-export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated, owner = '', operationCopy = copy, commandTypes = reconciliationRepairCommandTypes }) {
+export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated, owner = '', operationCopy = copy, commandTypes = reconciliationRepairCommandTypes, sourceCaseID = '', canReadCase = false }) {
+  const host = reconciliationRepairHost(sourceCaseID);
   const [commandType, setCommandType] = useState(commandTypes[0]);
-  const [values, setValues] = useState({});
+  const [values, setValues] = useState(() => host.initialValues);
+  const [caseContext, setCaseContext] = useState(null);
+  const [contextError, setContextError] = useState('');
+  const [manualBusinessDate, setManualBusinessDate] = useState(false);
+  const dateHintID = useId();
   const [facts, setFacts] = useState(null);
   const [projection, setProjection] = useState(null);
   const [reason, setReason] = useState('');
@@ -24,34 +31,58 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
   const [created, setCreated] = useState('');
   const [needsAuthentication, setNeedsAuthentication] = useState(false);
   const factsRevision = useRef(0);
+  const businessDateEdited = useRef(false);
+  const automaticBusinessDate = useRef('');
   const mounted = useRef(false);
   const currentClient = useRef(client);
   currentClient.current = client;
-  const operation = useFinanceOperation(owner, operationCopy, client, `financial-repair:${commandTypes.join(':')}`);
+  const operation = useFinanceOperation(owner, operationCopy, client, host.scope);
   const reconciliationRepair = commandType === 'RECONCILIATION_FINANCIAL_REPAIR';
   const governed = reconciliationRepair;
   const locked = busy !== '' || operation.busy || operation.unknown;
   const pending = operation.pendingFacts;
   const displayedFacts = pending ? financialRepairProjectionRows(pending.projection) : facts;
+  const displayedBusinessDate = pending ? String(pending.draft.normalized_command.business_date) : values.business_date || '';
+  const sourceIdentity = JSON.stringify([owner, client.financeSessionEpoch || 0, canReadCase, values.target_resource_id || '']);
+  const currentSource = useRef(sourceIdentity);
+  currentSource.current = sourceIdentity;
+  const visibleContext = !pending && canReadCase && caseContext?.client === client && caseContext.identity === sourceIdentity ? caseContext.value : null;
+  const activeProjection = pending?.projection || projection;
+  const matchingFacts = displayedFacts && activeProjection?.command_type === 'RECONCILIATION_FINANCIAL_REPAIR' ? [
+    ['reconciliation_case_id', activeProjection.target_resource_id],
+    ['run_id', activeProjection.critical_resource_versions.run_id],
+    ['payment_evidence_id', activeProjection.normalized_command.payment_evidence_id],
+    ['business_date', activeProjection.normalized_command.business_date],
+    ['amount_fen', String(activeProjection.financial_snapshot.amount_fen)],
+    ['currency', activeProjection.financial_snapshot.currency],
+    ['provider_transaction_id', activeProjection.financial_snapshot.provider_transaction_id],
+  ] : null;
+  const calendarAvailable = financialRepairDateCanUseCalendar(displayedBusinessDate);
+  const manualDateMode = manualBusinessDate || !calendarAvailable;
 
   useEffect(() => {
     mounted.current = true;
     setNeedsAuthentication(false);
     setFacts(null);
     setProjection(null);
-    setBusy((current) => current === 'facts' ? '' : current);
+    setCaseContext(null);
+    setContextError('');
+    automaticBusinessDate.current = '';
+    setBusy((current) => current === 'facts' || current === 'context' ? '' : current);
     return () => {
       mounted.current = false;
       factsRevision.current += 1;
     };
-  }, [client]);
+  }, [client, owner, client.financeSessionEpoch, canReadCase]);
 
   const fields = financialRepairInputs[commandType];
   const label = (field) => (field.key === 'target_resource_id' ? copy.targets[commandType] : copy.fields[field.key]);
   const setValue = (key, value) => {
     factsRevision.current += 1;
-    setBusy((current) => current === 'facts' ? '' : current);
+    setBusy((current) => current === 'facts' || current === 'context' ? '' : current);
     setValues((current) => ({ ...current, [key]: value }));
+    if (key === 'business_date') businessDateEdited.current = true;
+    if (key === 'target_resource_id') { setCaseContext(null); setContextError(''); }
     setFacts(null);
     setProjection(null);
     setFailure('');
@@ -59,13 +90,48 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
   };
   const changeCommand = (next) => {
     factsRevision.current += 1;
-    setBusy((current) => current === 'facts' ? '' : current);
+    setBusy((current) => current === 'facts' || current === 'context' ? '' : current);
     setCommandType(next);
-    setValues({});
+    setValues(host.initialValues);
+    businessDateEdited.current = false; automaticBusinessDate.current = '';
+    setCaseContext(null);
+    setContextError('');
     setFacts(null);
     setProjection(null);
     setFailure('');
     setCreated('');
+  };
+
+  const readCaseContext = async () => {
+    if (!canReadCase || locked || pending) return;
+    let caseID;
+    try { caseID = requireFinanceID(String(values.target_resource_id || '').toLowerCase()); }
+    catch { setContextError(copy.invalidInput); return; }
+    const identity = sourceIdentity;
+    const revision = ++factsRevision.current;
+    const live = () => mounted.current && currentClient.current === client && currentSource.current === identity && factsRevision.current === revision;
+    setBusy('context'); setContextError(''); setCaseContext(null);
+    setFacts(null); setProjection(null); setFailure(''); setCreated('');
+    try {
+      const value = await client.reconciliationRepairContext(caseID);
+      if (live()) {
+        setCaseContext({ identity, client, value });
+        const date = reconciliationSourceBusinessDate(values, value, businessDateEdited.current, automaticBusinessDate.current);
+        if (date !== null) {
+          setValues(current => ({ ...current, business_date: date }));
+          automaticBusinessDate.current = date;
+        }
+      }
+    } catch (error) {
+      if (live()) setContextError(error?.status === 403 ? copy.caseContextDenied : copy.caseContextUnavailable);
+    } finally { if (live()) setBusy(''); }
+  };
+
+  const adoptCaseDate = () => {
+    if (!visibleContext || locked || pending) return;
+    setValue('business_date', visibleContext.business_date);
+    businessDateEdited.current = false;
+    automaticBusinessDate.current = visibleContext.business_date;
   };
 
   const readFacts = async (event) => {
@@ -130,7 +196,10 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
       });
       if (result) {
         setCreated(result.approval_request_id); setProjection(null); setFacts(null);
-        setValues({}); setReason(''); setRequestKey(''); onCreated?.(result.approval_request_id);
+        setValues(host.initialValues); setCaseContext(null); setContextError('');
+        setReason(''); setRequestKey('');
+        businessDateEdited.current = false; automaticBusinessDate.current = '';
+        onCreated?.(result.approval_request_id);
       }
       return;
     }
@@ -139,24 +208,56 @@ export function AdminReconciliationFinancialRepairForm({ client, copy, onCreated
 
   return <section className="adm-financial-repair" aria-label={copy.title}>
     <h3>{copy.title}</h3>
-    <p>{copy.lead}</p>
+    <p>{copy.reconciliationLead}</p>
     <p>{copy.ledgerEffectNone}</p>
+    {reconciliationRepair && <small className="adm-financial-repair-code">{copy.fields.ledger_effect}: <code>NONE</code></small>}
     {governed && operation.error && <p role="alert">{operation.error}</p>}
     {needsAuthentication && <div className="adm-reconciliation-repair-reauthentication"><p>{copy.writeOffRecentAuthenticationRequired}</p><button type="button" disabled={busy !== '' || operation.busy} onClick={() => client.reauthenticate('/admin.html')}>{copy.reauthenticate}</button></div>}
+    {visibleContext && <section className="adm-financial-repair-facts" aria-label={copy.caseContextTitle}>
+      <h4>{copy.caseContextTitle}</h4><p>{copy.caseContextHelp}</p>
+      <dl>{['case_id', 'reconciliation_run_id', 'case_type', 'status', 'case_version', 'provider_id', 'provider_version', 'channel', 'business_date', 'merchant_order_no'].map(key => <div key={key}><dt>{copy.caseContextLabels[key]}</dt><dd><code>{visibleContext[key]}</code></dd></div>)}
+        <div><dt>{copy.caseContextLabels.amount_fen}</dt><dd>{visibleContext.snapshot_available ? <code>{visibleContext.amount_fen}</code> : copy.caseContextMissing}</dd></div>
+        <div><dt>{copy.caseContextLabels.currency}</dt><dd><code>{visibleContext.currency || '—'}</code></dd></div>
+        <div><dt>{copy.caseContextLabels.provider_transaction_id}</dt><dd><code>{visibleContext.provider_transaction_id || '—'}</code></dd></div>
+      </dl>
+      <p>{copy.caseDateHelp}</p>
+      {displayedBusinessDate !== visibleContext.business_date && <button type="button" disabled={locked} onClick={adoptCaseDate}>{copy.caseDateUse}</button>}
+    </section>}
+    {contextError && <p role="alert">{contextError}</p>}
+    {canReadCase && sourceCaseID && !pending && <>
+      {!visibleContext && <p>{copy.caseContextHelp}</p>}
+      <button type="button" disabled={locked} onClick={() => void readCaseContext()}>{busy === 'context' ? copy.caseContextReading : copy.caseContextRead}</button>
+    </>}
     <form className="adm-financial-repair-target" onSubmit={readFacts}>
       <label>{copy.command}
         <select disabled={governed && locked} value={commandType} onChange={(event) => changeCommand(event.target.value)}>
-          {commandTypes.map((command) => <option key={command} value={command}>{command}</option>)}
+          {commandTypes.map((command) => <option key={command} value={command}>{command === 'RECONCILIATION_FINANCIAL_REPAIR' ? copy.reconciliationRepairTitle : command}</option>)}
         </select>
+        {reconciliationRepair && <small className="adm-financial-repair-code"><code>{commandType}</code></small>}
       </label>
       {fields.map((field) => <label key={field.key}>{label(field)}
-        <input disabled={governed && locked} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
+        <input disabled={governed && locked} readOnly={host.targetLocked && field.key === 'target_resource_id'} required value={pending ? String(field.key === 'target_resource_id' ? pending.draft.target_resource_id : pending.draft.normalized_command[field.key]) : values[field.key] || ''} inputMode={field.kind === 'integer' ? 'numeric' : 'text'}
+          type={field.kind === 'date' ? manualDateMode ? 'text' : 'date' : undefined}
+          aria-describedby={field.kind === 'date' ? dateHintID : host.targetLocked && field.key === 'target_resource_id' ? `${dateHintID}-case` : undefined}
           onChange={(event) => setValue(field.key, event.target.value)} />
+        {field.kind === 'date' && <small id={dateHintID}>{copy.businessDateHint}</small>}
+        {host.targetLocked && field.key === 'target_resource_id' && <small id={`${dateHintID}-case`}>{copy.caseTargetLocked}</small>}
       </label>)}
       <button type="submit" disabled={locked}>{busy === 'facts' ? copy.reading : copy.readFacts}</button>
+      {canReadCase && !sourceCaseID && <button type="button" disabled={locked || Boolean(pending)} onClick={() => void readCaseContext()}>{busy === 'context' ? copy.caseContextReading : copy.caseContextRead}</button>}
+      {reconciliationRepair && <div className="adm-reconciliation-date-mode">
+        <button type="button" disabled={locked || Boolean(pending) || manualDateMode && !calendarAvailable}
+          aria-describedby={manualDateMode && !calendarAvailable ? `${dateHintID}-mode` : undefined}
+          onClick={() => setManualBusinessDate(!manualDateMode)}>{manualDateMode ? copy.dateUseCalendar : copy.dateManualEntry}</button>
+        {manualDateMode && !calendarAvailable && <small id={`${dateHintID}-mode`}>{copy.dateCalendarUnavailableHelp}</small>}
+      </div>}
     </form>
     {failure && <p role="alert">{failure}</p>}
     {created && <p role="status">{copy.createdHint} <code>{created}</code></p>}
+    {matchingFacts && <section className="adm-financial-repair-facts" aria-label={copy.evidenceMatchTitle}>
+      <h4>{copy.evidenceMatchTitle}</h4><p>{copy.evidenceMatchHelp}</p>
+      <dl>{matchingFacts.map(([key, value]) => <div key={key}><dt>{copy.caseContextLabels[key] || copy.fields[key]}</dt><dd><code>{value}</code></dd></div>)}</dl>
+    </section>}
     {displayedFacts && <div className="adm-financial-repair-facts">
       <h4>{copy.frozenFacts}</h4>
       <dl>{displayedFacts.rows.map((row) => <div key={row.key}><dt>{copy.fields[row.key] || row.key}</dt><dd><code>{row.value}</code></dd></div>)}</dl>

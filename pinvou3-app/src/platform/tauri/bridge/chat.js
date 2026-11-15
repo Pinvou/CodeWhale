@@ -464,6 +464,10 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
             errorText = bt("sessionModelStale")(
               errorText.slice("session_model_binding_stale:".length).trim(),
             );
+          } else if (errorText.indexOf("model_selection_required") === 0) {
+            // engine_pool emits an English hint after the stable code; the
+            // recovery copy is fully localized, so drop the raw tail.
+            errorText = bt("modelSelectionRequired");
           } else if (window.PinvouBridgeMessages && typeof window.PinvouBridgeMessages.redactRawError === "function") {
             // Raw submit-failure bodies can also carry gateway bodies or
             // credentials; redact through the same outlet as the

@@ -163,13 +163,27 @@ async function readStdin() {
   return chunks.join("");
 }
 
-async function main() {
-  if (process.argv.length === 3 && process.argv[2] === "--full") {
-    await runSelected(FULL_FRONTEND_SMOKES);
-    return;
+// Partition the validated global selection, never a per-job partial list.
+// Keeping the selector's order makes assignment stable and automatically
+// includes future smokes without a second, hand-maintained test inventory.
+export function selectShard(items, coordinate) {
+  const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(coordinate);
+  if (!match) throw new Error('invalid smoke shard; expected INDEX/COUNT (one-based)');
+  const [, index, count] = match.map(Number);
+  if (!Number.isSafeInteger(index) || !Number.isSafeInteger(count) || index > count) {
+    throw new Error('invalid smoke shard; INDEX must be within COUNT');
   }
-  if (process.argv.length === 3 && process.argv[2] === "--selected") {
-    const items = parseSelection(await readStdin());
+  if (items.length === 0) throw new Error('empty global frontend smoke selection; failing closed');
+  const identities = items.map(({ kind, target }) => `${kind}\t${target}`);
+  if (new Set(identities).size !== items.length) throw new Error('duplicate frontend smoke selection');
+  return items.filter((_, offset) => offset % count === index - 1);
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  if ((args.length === 1 || (args.length === 3 && args[1] === '--shard'))
+      && ['--full', '--selected'].includes(args[0])) {
+    const items = args[0] === '--full' ? FULL_FRONTEND_SMOKES : parseSelection(await readStdin());
     // selectFrontendSmokes never returns an empty set for any diff, so an
     // empty selection means the upstream selector (or its git diff) failed
     // inside a pipeline whose exit status was masked — fail closed instead of
@@ -179,10 +193,15 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    await runSelected(items);
+    const selected = args.length === 3 ? selectShard(items, args[2]) : items;
+    if (args.length === 3) {
+      console.log(`Frontend smoke shard ${args[2]}: ${selected.length}/${items.length} selected`);
+      if (selected.length === 0) console.log('Explicit empty shard of a valid nonempty global selection');
+    }
+    await runSelected(selected);
     return;
   }
-  console.error("usage: node scripts/run-frontend-smokes.mjs --full | --selected");
+  console.error("usage: node scripts/run-frontend-smokes.mjs --full | --selected [--shard INDEX/COUNT]");
   process.exitCode = 2;
 }
 

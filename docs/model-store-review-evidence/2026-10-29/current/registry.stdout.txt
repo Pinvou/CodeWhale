@@ -1,0 +1,1 @@
+test-registry-guard: ok — 5422 unique test paths, 12 required pins present
