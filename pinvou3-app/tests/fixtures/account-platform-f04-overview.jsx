@@ -23,4 +23,4 @@ globalThis.fetch=async(target,options={})=>{const url=new URL(target,location.hr
  throw new Error('UNEXPECTED_CONTROLLED_READ '+url.pathname);
 };
 function render(){root.render(control.host?<AdminPlatformView client={client} copy={adminPlatformCopy[control.language]} language={control.language} onLanguageChange={language=>{control.language=language;render();}}/>:<AdminManagementWorkspace client={client} copy={adminPlatformCopy[control.language]} language={control.language} permissions={control.permissions} owner={control.owner} credentialOrigin="https://credentials.example.invalid" overviewFlags={control.flags} overviewAuthorizationVersion={control.version}/>);}
-control.render=render;control.labels=()=>tokenManagementCopy[control.language].modelToken;window.overview=control;render();
+control.render=render;control.labels=()=>{const words=tokenManagementCopy[control.language].modelToken;return {...words,provisionings:words.provisioningPresentation.listTitle};};window.overview=control;render();

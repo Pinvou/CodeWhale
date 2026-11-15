@@ -626,9 +626,16 @@ impl DesktopRemoteTaskRuntime {
     }
 
     pub(crate) fn recover_after_restart(&self) -> usize {
-        self.service
-            .recover_after_restart(controlled_monotonic_millis())
-            .len()
+        let report = self
+            .service
+            .recover_after_restart(controlled_monotonic_millis());
+        if let Some((_, failure)) = report.failed.first() {
+            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                "task_restart_persistence_failed",
+                failure.code,
+            );
+        }
+        report.committed.len()
     }
 }
 
@@ -1279,7 +1286,7 @@ fn finish_prepared_admission_owned(
     use crate::features::remote_control::controller::task::PreparedTaskAdmission;
     let record = match &prepared {
         PreparedTaskAdmission::Accepted(AdmissionOutcome::Admitted(ticket)) => Some(&ticket.record),
-        PreparedTaskAdmission::InstallationFailed(record, _) => Some(record),
+        PreparedTaskAdmission::InstallationFailed(record, _, _) => Some(record),
         _ => None,
     };
     let mut cleanup = record.map(|record| AdmittedTaskCleanup {
@@ -3615,7 +3622,11 @@ mod tests {
         };
         struct PanicOnce(AtomicUsize);
         impl RemoteTaskModelScope for PanicOnce {
-            fn release_task_credentials(&self, _: &str) {
+            fn release_task_credentials(
+                &self,
+                _: &str,
+                _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+            ) {
                 if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                     panic!("test cleanup panic once");
                 }
@@ -3678,7 +3689,11 @@ mod tests {
         };
         struct PanicOnce(AtomicUsize);
         impl RemoteTaskModelScope for PanicOnce {
-            fn release_task_credentials(&self, _: &str) {
+            fn release_task_credentials(
+                &self,
+                _: &str,
+                _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+            ) {
                 if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                     panic!("test owned terminal cleanup panic once");
                 }
@@ -4516,6 +4531,8 @@ mod tests {
                 connection_id: lease.connection_id.clone(),
                 controller_lease_id: lease.controller_lease_id.clone(),
                 lease_epoch: 1,
+                relay_epoch: lease.relay_epoch.clone(),
+                remote_control_generation: lease.remote_control_generation.clone(),
                 task_id: "task-0001".into(),
             },
             primary: ExportRoute {

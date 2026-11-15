@@ -1,16 +1,16 @@
 # Pinvou 对 CodeWhale 底座的 fork 维护策略
 
-> 最后更新：2026-11-10。公开维护头 6f7a3a748 在 11cba403d 上包含 #136/#142/#148/#150/#152；父仓按严格公开维护头门禁对齐。
+> 最后更新：2026-11-15。公开维护头 687358f7e 在 8e8d52fdb 上包含 #157（session-reader 只读读取面分类修复）；父仓按严格公开维护头门禁对齐。
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
 
 已集成的上游回移及历史溯源见[修改清单](fork-modifications.md#web-jsonpath-upstream-backport-integrated-historical-candidate-evidence-756)。公开维护头门禁及第 6 节的明确授权要求继续生效。
 
 ## 0. 当前维护基线与验证边界
 
-- 当前公开维护头与父仓 gitlink：`6f7a3a748f408568468ace45aa5cdbb34f882d73`（2026-11-10）。在原 `11cba403d` 之上消费已合入的 #136 `37be2844f`、#142 `78804c83e`、#148 `5f15cce57` 、#150 `e972a9a05` 与 #152 `6f7a3a748`。父仓只消费已公开提交，不推进维护分支、不移动标签。
-- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 98 个提交，r1 `1fafee7e2` 之上 83 个；96 个带 DCO sign-off。未签名的 squash 为 #107 `f27672935` 与 #116 `e9a7f48da1`，不能继续声称只有一个未签名提交。保留已发布历史，不改写维护分支。
-- 不可变 tag `pinvou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
-- 实测 drift：548 files, +121115/-49797，净增 71318；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
+- 当前公开维护头与父仓 gitlink：`687358f7efde6abd3592737b8ec48adc74ba5a84`（2026-11-15）。在原 `8e8d52fdb` 之上消费已合入的 #157 `687358f7e`。父仓只消费已公开提交，不推进维护分支、不移动标签。
+- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 100 个提交，r1 `1fafee7e2` 之上 85 个；97 个带 DCO sign-off。未签名的提交为 #107 `f27672935`、#116 `e9a7f48da1` 与 #157 `687358f7e`（CodeWhale 仓 squash 合入未携带签署）。保留已发布历史，不改写维护分支。
+- 不可变 tag `pinjou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
+- 实测 drift：551 files, +121146/-49817，净增 71329；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
 
 
 - 升级前公开回退点是不可变 tag `pinvou-v0.9.5-r13`，head `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 branch `backup/pre-v0.9.12-sync` 只作便利引用。

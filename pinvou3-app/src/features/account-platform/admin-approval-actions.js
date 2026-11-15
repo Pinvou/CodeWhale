@@ -12,12 +12,22 @@ export function approvalCenterVisible(permissions) {
     'platform.tokens.credentials.revoke.request', 'platform.tokens.credentials.revoke.approve'].some(permission => permissions.includes(permission));
 }
 
+export function approvalExpiryDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return '';
+  const iso = value + 'T00:00:00Z';
+  const epoch = Date.parse(iso);
+  return Number.isFinite(epoch) && new Date(epoch).toISOString().slice(0, 10) === value ? iso : '';
+}
+
 export function readApprovalRoute(search = '') {
   const query = new URLSearchParams(search);
   const view = query.get('approval_view');
   const command = query.get('approval_command_type');
   const status = query.get('approval_status');
+  const from = query.get('approval_expires_from') || '', to = query.get('approval_expires_to') || '';
+  const validRange = (!from || approvalExpiryDate(from)) && (!to || approvalExpiryDate(to)) && !(from && to && from >= to);
   return { view: approvalViews.includes(view) ? view : 'mine',
+    ...(view === 'pending' ? { expiresFrom: validRange ? from : '', expiresTo: validRange ? to : '' } : {}),
     commandType: approvalCommands.includes(command) ? command : '', target: query.get('approval_target') || '',
     status: approvalStatuses.includes(status) ? status : '', requestID: query.get('approval_request_id') || '' };
 }
@@ -28,7 +38,11 @@ export function approvalQuery(route, userID) {
   if (route.commandType) query.command_type = route.commandType;
   if (route.target) query.target = route.target;
   if (route.view === 'mine') { query.requester_user_id = userID; if (route.status) query.status = route.status; }
-  if (route.view === 'pending') query.status = 'SUBMITTED';
+  if (route.view === 'pending') {
+    query.status = 'SUBMITTED';
+    if (approvalExpiryDate(route.expiresFrom)) query.expires_from = approvalExpiryDate(route.expiresFrom);
+    if (approvalExpiryDate(route.expiresTo)) query.expires_to = approvalExpiryDate(route.expiresTo);
+  }
   if (route.view === 'execution') query.status = executionStatuses.includes(route.status) ? route.status : 'EXECUTION_FAILED';
   return query;
 }
