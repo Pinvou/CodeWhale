@@ -165,9 +165,6 @@ const GIST_UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 async fn upload_gist(path: &Path) -> Result<String, String> {
     let mut cmd = crate::dependencies::Gh::tokio_command()
         .ok_or_else(|| "`gh gist create` failed: gh not found".to_string())?;
-    // Kill `gh` when the timeout below drops the output() future; otherwise
-    // a hung upload would keep running orphaned after /share gave up.
-    cmd.kill_on_drop(true);
     cmd.args([
         "gist",
         "create",
@@ -178,16 +175,31 @@ async fn upload_gist(path: &Path) -> Result<String, String> {
         "--desc",
         "codewhale Session Export",
     ]);
+    // `Command::output()` runs the child with stdin closed; keep that shape
+    // for the bounded runner, which leaves stdin as configured when no input
+    // is supplied.
+    cmd.stdin(std::process::Stdio::null());
 
-    let output = tokio::time::timeout(GIST_UPLOAD_TIMEOUT, cmd.output())
-        .await
-        .map_err(|_| {
-            format!(
+    // The bounded runner spawns `gh` in a private process group and kills
+    // the whole group on budget expiry, so a timed-out upload cannot leave
+    // grandchildren behind the way a child-only kill would.
+    let output = match crate::tools::process::run_bounded_child(
+        &mut cmd,
+        None,
+        GIST_UPLOAD_TIMEOUT,
+        "gh gist create",
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(crate::tools::spec::ToolError::Timeout { .. }) => {
+            return Err(format!(
                 "`gh gist create` timed out after {}s; the upload was aborted",
                 GIST_UPLOAD_TIMEOUT.as_secs()
-            )
-        })?
-        .map_err(|e| format!("Failed to run `gh gist create`: {e}"))?;
+            ));
+        }
+        Err(error) => return Err(format!("Failed to run `gh gist create`: {error}")),
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
