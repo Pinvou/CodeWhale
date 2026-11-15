@@ -109,6 +109,16 @@ fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
                         sanitize_in_instance(dep, &local_properties);
                     }
                 }
+            } else if key == "enum" || key == "const" {
+                // Instance data, not schema: each enum entry and the const
+                // value is a literal JSON value the tool can receive, so a
+                // schema-shaped entry (`enum: [{"required": ["x"]}]` for a
+                // property named `required`) must reach the wire
+                // byte-for-byte. The generic recursion used to normalize
+                // those literal objects — pruning their `required` into an
+                // all-accepting `{}` — excluding an argument the original
+                // contract admitted and advertising a different one (review
+                // 5911391551).
             } else {
                 sanitize_in_instance(v, &[]);
             }
@@ -1147,6 +1157,55 @@ mod tests {
         assert!(
             validator.is_valid(&json!({"confirm": true})),
             "the dependency must stay inactive without its trigger key: {schema}"
+        );
+    }
+
+    #[test]
+    fn object_valued_enum_entries_are_instance_data_and_stay_verbatim() {
+        // Review 5911391551: each enum entry is a literal argument value,
+        // not a subschema — a schema-shaped entry (`enum:
+        // [{"required": ["x"]}]` beside a property literally named
+        // `required`) must reach the wire byte-for-byte. The generic
+        // recursion used to normalize the literal object, pruning its
+        // `required` into an all-accepting `{}` and excluding the exact
+        // argument the original contract admitted. The same holds for a
+        // schema-shaped `const`.
+        let mut enum_schema = json!({
+            "type": "object",
+            "properties": {
+                "required": {"type": "array", "items": {"type": "string"}}
+            },
+            "enum": [{"required": ["x"]}]
+        });
+        sanitize(&mut enum_schema);
+        assert_eq!(
+            enum_schema["enum"],
+            json!([{"required": ["x"]}]),
+            "the enum entry is instance data and must stay verbatim: {enum_schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&enum_schema)
+            .expect("the sanitized schema must compile");
+        assert!(
+            validator.is_valid(&json!({"required": ["x"]})),
+            "the original enum-admitted argument must stay valid: {enum_schema}"
+        );
+
+        // The const value is instance data under the same rule: a
+        // schema-shaped const must not be normalized either.
+        let mut const_schema = json!({
+            "type": "object",
+            "properties": {
+                "required": {"type": "array", "items": {"type": "string"}}
+            },
+            "const": {"required": ["x"], "mode": "fast"}
+        });
+        sanitize(&mut const_schema);
+        assert_eq!(
+            const_schema["const"],
+            json!({"required": ["x"], "mode": "fast"}),
+            "the const value is instance data and must stay verbatim: {const_schema}"
         );
     }
 

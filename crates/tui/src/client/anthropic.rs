@@ -1528,6 +1528,57 @@ mod tests {
     }
 
     #[test]
+    fn object_valued_root_enum_reaches_the_native_lane_verbatim() {
+        // Review 5911391551: discovered live MCP tools clone their
+        // inputSchema into the catalog WITHOUT registry preprocessing, so
+        // the native-identity Messages branch's sanitizer is the only pass
+        // that sees this schema — and its generic recursion used to
+        // normalize a schema-shaped enum ENTRY (instance data, not a
+        // subschema), pruning the literal object's `required` into `{}`.
+        // The original permitted argument would be excluded and a
+        // different value advertised. The enum must reach the wire
+        // byte-for-byte.
+        let mcp_like_tool = crate::models::Tool {
+            tool_type: None,
+            name: "mcp__inspector__pick".to_string(),
+            description: "pick a literal".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "required": {"type": "array", "items": {"type": "string"}}
+                },
+                "enum": [{"required": ["x"]}]
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        };
+
+        let client = test_client();
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.tools = Some(vec![mcp_like_tool]);
+
+        let body = client.build_anthropic_body(&request, true);
+
+        let schema = &body["tools"][0]["input_schema"];
+        assert_eq!(
+            schema["enum"],
+            json!([{"required": ["x"]}]),
+            "the object-valued enum entry is instance data and must ship verbatim: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(schema)
+            .expect("the shipped schema must compile");
+        assert!(
+            validator.is_valid(&json!({"required": ["x"]})),
+            "the original enum-admitted argument must conform to the shipped contract: {schema}"
+        );
+    }
+
+    #[test]
     fn anthropic_identity_narrows_even_on_a_proxy_base_url() {
         // Provider identity stays in the gate because ANTHROPIC_BASE_URL-style
         // overrides commonly front the genuine validator through a proxy: a
