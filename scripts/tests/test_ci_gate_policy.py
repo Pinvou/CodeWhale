@@ -682,6 +682,13 @@ GATE_JOB_LEVEL_IFS = {
         "${{ !cancelled() && needs.changes.outputs.relay == 'true' && "
         "(github.event_name == 'merge_group' || github.event_name == 'pull_request') }}"
     ),
+    "frontend-browser-test": (
+        "${{ !cancelled() && github.event.action != 'closed' && "
+        "needs.changes.outputs.pure_release_backflow != 'true' && "
+        "(github.event_name == 'merge_group' || "
+        "(github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && "
+        "(needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}"
+    ),
     "release-contract-test": (
         "${{ !cancelled() && github.event.action != 'closed' && "
         "needs.changes.outputs.release_contract == 'true' && "
@@ -3644,6 +3651,7 @@ python3() { fixture_mock python3 "$@"; }
             "PR test success proof transport",
             "Windows 测试二进制导入诊断",
             "Test resource lifecycle receipts",
+            "Browser shard resource lifecycle receipts",
             "Financial parallel diagnostics",
             "Account test resource lifecycle receipts",
             "Account closure resource lifecycle receipts",
@@ -4048,6 +4056,7 @@ python3() { fixture_mock python3 "$@"; }
         for job, result_env in (
             ("rust-test", "RUST_RESULT"),
             ("frontend-test", "FRONTEND_RESULT"),
+            ("frontend-browser-test", "FRONTEND_BROWSER_RESULT"),
             ("relay-test", "RELAY_RESULT"),
             ("rust-lint", "RUST_LINT_RESULT"),
             ("macos-codex-runtime-test", "MACOS_CODEX_RESULT"),

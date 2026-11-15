@@ -331,6 +331,7 @@ class WebpkiCiContractTests(unittest.TestCase):
         # version may silently inherit this review.
         reviewed = [('required-gate', 'PR test success proof transport'),
                     ('frontend-test', 'Test resource lifecycle receipts'),
+                    ('frontend-browser-test', 'Browser shard resource lifecycle receipts'),
                     ('account-platform-test', 'Financial parallel diagnostics'),
                     ('account-platform-test', 'Account test resource lifecycle receipts'),
                     ('account-closure-test', 'Account closure resource lifecycle receipts'),

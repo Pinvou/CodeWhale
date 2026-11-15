@@ -25,7 +25,7 @@ export const desktopBridgeApi = {
   // 只暴露 opaque ID、状态投影与任务编排，模型凭证、路径和密钥都留在 Rust。
   desktopRemoteControl: [
     'artifactDownloadAbort', 'artifactDownloadBegin', 'artifactDownloadChunk', 'artifactIndex', 'artifactPreview',
-    'attachmentAbort', 'attachmentBegin', 'attachmentChunk',
+    'attachmentAbort', 'attachmentAbortConfirmed', 'attachmentBegin', 'attachmentChunk',
     'capabilitiesSnapshot', 'clientEvent', 'controlledDisconnectNow',
     'controlledListWorkspaces', 'controlledRefresh', 'controlledStart', 'controlledStatus', 'controlledStop',
     'controlledSync', 'controlledTaskSend', 'controlledCapabilitiesSnapshot', 'controlledStopTask', 'controllerCapabilitySend',

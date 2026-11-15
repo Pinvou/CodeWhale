@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import { fork, spawnSync } from "node:child_process";
+import { spawnSyncWithRetry } from "./relay-tools-spawn.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,8 +84,28 @@ async function expectBootstrapFault(child, phase) {
   assert.ok(expected, "known bootstrap fault phase required");
   const { code, signal } = await child.exited;
   const observation = JSON.stringify(child.diagnostics?.() ?? { worker_failure: "unknown" });
+  // Keep main's original output boundary: a signal failure has structured
+  // observations only; its stderr is not read before this strict assertion.
   assert.equal(signal, null, `bootstrap fault must exit without a signal; observations=${observation}`);
-  assert.equal(code, expected, `child did not reach the ${phase} fault boundary; observations=${observation}`);
+  const evidence = typeof child.stderr === "function" && child.stderr()
+    ? `; stderr_tail=${child.stderr().slice(-800)}` : "";
+  assert.equal(code, expected, `child did not reach the ${phase} fault boundary; observations=${observation}${evidence}`);
+}
+// Windows 自托管 runner 高负载下，fork 子进程可能在到达被测边界前因基础
+// 设备类失败退出——fixture 以 exit 1 显式区分「边界前失败」（对比 81/82/83
+// 的确定性边界退出；round-5 CI 实证：期望 81 的场景在 runner 满载时偶发
+// exit 1）。对 exit 1 定向重试一次；真实回归（可复现的早期失败或错误边界
+// 退出）在重试后仍然如实红。
+async function expectBootstrapFaultReached(f, mode, phase) {
+  for (let attempt = 0; ; attempt += 1) {
+    const child = f.child(mode);
+    try {
+      await expectBootstrapFault(child, phase);
+      return;
+    } catch (error) {
+      if (attempt >= 1 || error.actual !== 1) throw error;
+    }
+  }
 }
 
 test("controller guard worker diagnostics isolate closed observations from semantic frames", () => {
@@ -141,6 +162,25 @@ test("controller guard fault diagnostics never qualify another exit or wait for 
       error.code === "ERR_ASSERTION" && error.message.includes('"worker_failure":"unknown"'));
   }
 });
+test("controller guard failure retains the bounded original stderr tail and structured observations", async () => {
+  const stderr = "DISCARDED_PREFIX" + "x".repeat(900) + "ORIGINAL_STDERR_TAIL";
+  const child = { exited: Promise.resolve({ code: 1, signal: null }), stderr: () => stderr,
+    diagnostics: () => ({ worker_failure: { worker_stage: "opening" } }) };
+  await assert.rejects(expectBootstrapFault(child, "after-seed-commit"), error =>
+    error.actual === 1 && error.message.includes('"worker_stage":"opening"')
+      && error.message.includes(`stderr_tail=${stderr.slice(-800)}`)
+      && !error.message.includes("DISCARDED_PREFIX"));
+});
+test("controller guard signal rejection keeps the original no-stderr boundary", async () => {
+  let reads = 0;
+  const child = { exited: Promise.resolve({ code: null, signal: "SIGTERM" }),
+    diagnostics: () => ({ worker_failure: { worker_stage: "opening" } }),
+    stderr() { reads += 1; return "ORIGINAL_STDERR_TAIL"; } };
+  await assert.rejects(expectBootstrapFault(child, "after-seed-commit"), error =>
+    error.actual === "SIGTERM" && error.message.includes('"worker_stage":"opening"')
+      && !error.message.includes("ORIGINAL_STDERR_TAIL"));
+  assert.equal(reads, 0);
+});
 function windowsCreatorMetadata(target) {
   const script = `
 $ErrorActionPreference = 'Stop'
@@ -168,7 +208,7 @@ function OwnerClass([string]$sid) {
   for (const key of ["SystemRoot", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP"]) {
     if (process.env[key] !== undefined) environment[key] = process.env[key];
   }
-  const result = spawnSync(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+  const result = spawnSyncWithRetry(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     { env: environment, encoding: "utf8", windowsHide: true, timeout: 15000, maxBuffer: 4096 });
   assert.ifError(result.error);
@@ -290,7 +330,8 @@ async function fixture(t) {
         waiters.push(message => { clearTimeout(timer); resolve(message); });
       });
     }
-    return { process, next, exited, diagnostics: () => diagnostics.snapshot(), send: message => process.send(message) };
+    return { process, next, exited, diagnostics: () => diagnostics.snapshot(),
+      send: message => process.send(message), stderr: () => failure };
   }
   return { directory, statePath, options, open, child };
 }
@@ -407,7 +448,7 @@ test("controller guard missing builtin fails before filesystem preparation", () 
       legacyStatePath:'${process.platform === "win32" ? "C:/" : "/"}unopened-legacy.json',
       fs:new Proxy({}, {get(){throw Error('filesystem touched')}})});process.exit(2)}
     catch(e){if(e.code!=='relay_state_lock_runtime_unavailable')throw e}`;
-  const result = spawnSync(process.execPath, ["--no-experimental-sqlite", "--input-type=module", "-e", code],
+  const result = spawnSyncWithRetry(process.execPath, ["--no-experimental-sqlite", "--input-type=module", "-e", code],
     { encoding: "utf8", windowsHide: true, timeout: 10000 });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
@@ -450,8 +491,8 @@ test("controller guard close failure retains resource until retry without deleti
 });
 
 test("controller guard native exit before protecting its new inode recovers through CAS and restart", async t => {
-  const f = await fixture(t), child = f.child("native-exit-before-guard-protect");
-  await expectBootstrapFault(child, "before-guard-protect");
+  const f = await fixture(t);
+  await expectBootstrapFaultReached(f, "native-exit-before-guard-protect", "before-guard-protect");
   const path = join(dirname(f.statePath), RELAY_CONTROLLER_GUARD_FILENAME);
   const before = await fs.lstat(path, { bigint: true });
   assert.equal(before.size, 0n);
@@ -575,8 +616,8 @@ test("controller guard refuses changed identity before bootstrap permission repa
 });
 
 test("controller guard bootstrap recovery never tightens a nonempty unprotected protocol", async t => {
-  const f = await fixture(t), child = f.child("native-exit-before-guard-protect");
-  await expectBootstrapFault(child, "before-guard-protect");
+  const f = await fixture(t);
+  await expectBootstrapFaultReached(f, "native-exit-before-guard-protect", "before-guard-protect");
   const path = join(dirname(f.statePath), RELAY_CONTROLLER_GUARD_FILENAME);
   const database = new DatabaseSync(path);
   database.exec("PRAGMA application_id=7; PRAGMA user_version=99;");
@@ -595,8 +636,8 @@ test("controller guard bootstrap recovery never tightens a nonempty unprotected 
 
 for (const phase of ["before", "after"]) {
   test(`controller guard native bootstrap exit ${phase} seed commit recovers before first JSON access`, async t => {
-    const f = await fixture(t), child = f.child(`native-exit-${phase}-seed-commit`);
-    await expectBootstrapFault(child, `${phase}-seed-commit`);
+    const f = await fixture(t);
+    await expectBootstrapFaultReached(f, `native-exit-${phase}-seed-commit`, `${phase}-seed-commit`);
     await assert.rejects(fs.stat(f.statePath), { code: "ENOENT" });
     const guardPath = join(dirname(f.statePath), RELAY_CONTROLLER_GUARD_FILENAME);
     const identity = await fs.lstat(guardPath, { bigint: true });

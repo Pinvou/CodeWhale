@@ -1,15 +1,50 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { parseSelection, runSelected } from "../run-frontend-smokes.mjs";
+import { parseSelection, runSelected, selectShard } from "../run-frontend-smokes.mjs";
+import { FULL_FRONTEND_SMOKES, selectFrontendSmokes } from "../select-frontend-smokes.mjs";
 
 const item = (kind, target) => ({ kind, target });
 const label = ({ kind, target }) => `${kind}:${target}`;
+
+test('four shards conserve every selected identity exactly once, including future entries', () => {
+  const selections = [FULL_FRONTEND_SMOKES,
+    selectFrontendSmokes(['pinvou3-app/src/features/remote-control/RemoteProxyPanel.jsx']),
+    ...[1, 3, 4, 5, 59].map(count => Array.from({ length: count }, (_, i) => item('node', `future-${i}`)))];
+  for (const selected of selections) {
+    const shards = Array.from({ length: 4 }, (_, i) => selectShard(selected, `${i + 1}/4`));
+    assert.deepEqual(shards.flat().map(label).sort(), selected.map(label).sort());
+    assert.equal(new Set(shards.flat().map(label)).size, selected.length);
+    assert.ok(Math.max(...shards.map(part => part.length)) - Math.min(...shards.map(part => part.length)) <= 1);
+    assert.deepEqual(shards, Array.from({ length: 4 }, (_, i) => selectShard(selected, `${i + 1}/4`)));
+  }
+});
+
+test('invalid coordinates, empty global input and duplicates cannot become empty shards', () => {
+  for (const coordinate of ['0/4', '5/4', '1/0', '-1/4', '1.5/4', '1/4x', '1/04', '1/9007199254740992']) {
+    assert.throws(() => selectShard([item('node', 'a')], coordinate), /invalid smoke shard/);
+  }
+  assert.throws(() => selectShard([], '4/4'), /empty global/);
+  assert.throws(() => selectShard([item('node', 'a'), item('node', 'a')], '4/4'), /duplicate/);
+});
+
+test('CLI distinguishes a valid empty shard from global-empty and malformed input', () => {
+  const valid = runRunnerCli(['--selected', '--shard', '4/4'], 'node\tunused.mjs\n');
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.match(valid.stdout, /Explicit empty shard/);
+  for (const input of ['', 'shell\tbad\n', 'node\t\n']) {
+    assert.notEqual(runRunnerCli(['--selected', '--shard', '4/4'], input).status, 0);
+  }
+  for (const args of [['--selected', '--shard'], ['--selected', '--shard', '5/4'],
+    ['--selected', '--unknown', '1/4']]) {
+    assert.notEqual(runRunnerCli(args, 'node\tunused.mjs\n').status, 0);
+  }
+});
 
 test('unconfirmed resource retirement stops without retrying or starting the next item', async () => {
   const calls = [];
@@ -196,6 +231,26 @@ const writeSelfCountingSmoke = async (dir, name, log, exitCode) => {
   );
   return script;
 };
+
+test('four concurrent CLI workers execute the shared global list exactly once', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'smoke-runner-shards-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const logs = Array.from({ length: 5 }, (_, i) => path.join(dir, `attempts-${i}.log`));
+  const scripts = await Promise.all(logs.map((log, i) => writeSelfCountingSmoke(dir, `case-${i}.mjs`, log, 0)));
+  const input = scripts.map(script => `node\t${script}\n`).join('');
+  const results = await Promise.all(Array.from({ length: 4 }, (_, index) => new Promise(resolve => {
+    const child = spawn(process.execPath, [runnerCli, '--selected', '--shard', `${index + 1}/4`],
+      { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    let output = '';
+    child.stdout.on('data', data => { output += data; });
+    child.stderr.on('data', data => { output += data; });
+    child.on('error', error => resolve({ code: null, output: String(error) }));
+    child.on('close', code => resolve({ code, output }));
+    child.stdin.end(input);
+  })));
+  for (const result of results) assert.equal(result.code, 0, result.output);
+  for (const log of logs) assert.equal(await readFile(log, 'utf8'), 'run\n');
+});
 
 test("a real exit-2 skip runs once and never triggers a retry", async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), "smoke-runner-skip-"));
