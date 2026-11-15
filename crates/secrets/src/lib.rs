@@ -500,6 +500,24 @@ impl FileKeyringStore {
     }
 
     fn load_unlocked(&self) -> Result<FileSecretsBlob, SecretsError> {
+        // Fail-neutral stays the design: resolution paths map load errors to
+        // "not set" and fall back to env, so a pre-existing store that trips
+        // one of these errors would otherwise lose its credentials silently.
+        // This warning only makes the swallow observable. Log paths, sizes,
+        // and error kinds only — never secret material.
+        match self.load_unlocked_inner() {
+            Ok(blob) => Ok(blob),
+            Err(err) => {
+                tracing::warn!(
+                    "file-backed secret store at {} failed to load (falling back to env): {err}",
+                    self.path.display()
+                );
+                Err(err)
+            }
+        }
+    }
+
+    fn load_unlocked_inner(&self) -> Result<FileSecretsBlob, SecretsError> {
         if !self.path.exists() {
             return Ok(FileSecretsBlob::default());
         }
