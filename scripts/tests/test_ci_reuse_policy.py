@@ -100,9 +100,11 @@ class ReusePlanTests(unittest.TestCase):
                         self.assertNotIn('suite', PLAN.catalog(source, jobs={'suite'}))
 
     def test_real_ready_frontend_evidence_accepts_optional_failures_and_maps_smoke(self):
-        policy = PLAN.catalog((ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8'))['frontend-test']
+        policies = PLAN.catalog((ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8'))
+        policy = policies['frontend-browser-test']
         fixture = json.loads((ROOT/'scripts/tests/fixtures/ci-reuse-ready-frontend.json').read_text(encoding='utf-8'))
-        job = {'name': 'frontend-test', 'conclusion': 'success', 'labels': ['ubuntu-22.04'], 'steps': fixture['steps']}
+        job = {'name': 'frontend-browser-test (1)', 'conclusion': 'success', 'labels': ['ubuntu-22.04'], 'steps': fixture['steps']}
+        self.assertTrue(PLAN.complete(policies['frontend-test'], {**job, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))
         self.assertTrue(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
         # Real PR shape: queue-only smoke skipped, warning skipped, PR smoke
         # passed. Diagnostic delivery is advisory even if its action fails.
@@ -122,6 +124,23 @@ class ReusePlanTests(unittest.TestCase):
         for step in broken['steps']:
             if step['name'] == 'Confirm test resource retirement': step['conclusion'] = 'skipped'
         self.assertFalse(PLAN.complete(policy, broken, {}, 'refs/heads/queue', {}))
+
+    def test_browser_shard_reuse_requires_the_exact_complete_matrix_and_retirement(self):
+        policy = PLAN.catalog((ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8'))['frontend-browser-test']
+        rows = PLAN.matrix_rows(policy, {})
+        self.assertEqual(rows, [{'shard': str(i)} for i in range(1, 5)])
+        jobs = [self.successful_job(policy, row, ['ubuntu-22.04']) for row in rows]
+        self.assertTrue(PLAN.complete_group(policy, jobs, {}, 'refs/heads/queue', {}))
+        for broken in (jobs[:-1], jobs + [jobs[0]], [{**jobs[0], 'name': 'frontend-test'}] + jobs[1:]):
+            self.assertFalse(PLAN.complete_group(policy, broken, {}, 'refs/heads/queue', {}))
+        for status in ('failure', 'cancelled', 'skipped'):
+            broken = copy.deepcopy(jobs)
+            broken[2]['conclusion'] = status
+            self.assertFalse(PLAN.complete_group(policy, broken, {}, 'refs/heads/queue', {}))
+        broken = copy.deepcopy(jobs)
+        for step in broken[2]['steps']:
+            if step['name'] == 'Confirm test resource retirement': step['conclusion'] = 'skipped'
+        self.assertFalse(PLAN.complete_group(policy, broken, {}, 'refs/heads/queue', {}))
 
     def test_named_cache_and_run_only_diagnostics_do_not_replace_required_tests(self):
         real = PLAN.catalog((ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8'))
@@ -298,7 +317,7 @@ jobs:
     def test_real_catalog_covers_all_current_product_and_platform_jobs(self):
         source = (ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
         policies = PLAN.catalog(source)
-        for name in ('version-consistency', 'relay-test', 'account-platform-test', 'frontend-test',
+        for name in ('version-consistency', 'relay-test', 'account-platform-test', 'frontend-test', 'frontend-browser-test',
                      'team-relay-hub-test', 'release-contract-test', 'update-release-console-test',
                      'rust-test', 'rust-lint', 'knowledge-rust', 'cli-test', 'cli-lint',
                      'windows-rust-test', 'windows-codex-runtime-test', 'windows-runtime-test',
