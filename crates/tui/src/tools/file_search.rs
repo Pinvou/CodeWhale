@@ -175,7 +175,7 @@ where
     }
 
     let task = tokio::task::spawn_blocking(search);
-    let result = match cancel_token {
+    let result = match &cancel_token {
         Some(token) => {
             tokio::select! {
                 biased;
@@ -186,7 +186,16 @@ where
         None => tokio::time::timeout(timeout, task).await,
     };
 
-    let joined = result.map_err(|_| file_search_timeout(timeout))?;
+    let joined = result.map_err(|_| {
+        // The timeout drops the JoinHandle, detaching the walk: it would keep
+        // consuming a blocking worker and file IO for its natural lifetime.
+        // The closure shares this token and checks it per entry, so cancelling
+        // here stops the detached walk promptly.
+        if let Some(token) = cancel_token.as_ref() {
+            token.cancel();
+        }
+        file_search_timeout(timeout)
+    })?;
     joined.map_err(|err| {
         ToolError::execution_failed(format!(
             "file_search worker failed before completion: {err}"
@@ -597,6 +606,36 @@ mod tests {
         assert!(
             matches!(err, ToolError::Timeout { seconds: 1 }),
             "unexpected error: {err:?}"
+        );
+    }
+
+    /// A timed-out walk is detached when its JoinHandle is dropped. The shared
+    /// cancel token must be signalled in the timeout path so the detached walk
+    /// stops promptly instead of consuming a blocking worker and file IO for
+    /// its natural lifetime.
+    #[tokio::test]
+    async fn test_file_search_timeout_cancels_the_detached_walk() {
+        let token = CancellationToken::new();
+        let walk_token = token.clone();
+        let err =
+            run_blocking_file_search(Duration::from_millis(20), Some(token.clone()), move || {
+                // Stand in for a long walk that only ends early when cancelled.
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !walk_token.is_cancelled() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(Vec::new())
+            })
+            .await
+            .expect_err("a walk past the timeout must surface the timeout error");
+
+        assert!(
+            matches!(err, ToolError::Timeout { .. }),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            token.is_cancelled(),
+            "timeout must cancel the walk token so the detached walk stops"
         );
     }
 
