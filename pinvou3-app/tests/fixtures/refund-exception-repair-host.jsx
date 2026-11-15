@@ -26,11 +26,11 @@ window.fetch = async (url, options = {}) => {
     platform_permissions: params.has('deny') ? [] : params.has('approve') ? ['platform.billing.repairs.approve'] : ['platform.billing.repairs.request'], platform_authorization_version: 1 });
   if (url === '/api/admin/approvals/capability') return reply({ session_approval_wire_version: 2, control: { version: 1, epoch: 1, authorization_relay_epoch: 1 } });
   if (url === '/api/admin/approvals/directory') return reply({ schema_version: 1, platform_authorization_version: 1, items: [
-    { command_type: 'LEDGER_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'ENTITLEMENT_COMPONENT_ADJUSTMENT', policy_version: 2, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'RECEIVABLE_WRITE_OFF', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'REFUND_EXCEPTION_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
-    { command_type: 'UNKNOWN_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', requestable: true },
+    { command_type: 'LEDGER_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'ENTITLEMENT_COMPONENT_ADJUSTMENT', policy_version: 2, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'RECEIVABLE_WRITE_OFF', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'REFUND_EXCEPTION_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
+    { command_type: 'UNKNOWN_REPAIR', policy_version: 1, risk_class: 'FINANCIAL_FACT_CHANGE', visible: true, requestable: true },
   ] }, 200, { 'X-Platform-Authorization-Version': '1' });
   if (url === '/api/admin/account/admin/v2/approval-command-prechecks') {
     state.prechecks++;
@@ -53,7 +53,14 @@ window.fetch = async (url, options = {}) => {
     if (state.lose) { state.lose = false; throw new TypeError('controlled committed POST lost ACK'); }
     return reply({ approval_request_id: id(9) }, 201);
   }
-  if (String(url).startsWith('/api/admin/approvals/requests?')) return reply({ items: state.created ? [{ approval_request_id: id(9), command_type: 'REFUND_EXCEPTION_REPAIR', requester: { user_id: id(8) }, status: state.status, version: state.version, target: { resource_type: 'REFUND', resource_id: id(1) } }] : [], has_more: false });
+  if (String(url).startsWith('/api/admin/approvals/requests?')) {
+    const query = new URL(url, location.href).searchParams;
+    const collection = { items: state.created ? [{ approval_request_id: id(9), command_type: 'REFUND_EXCEPTION_REPAIR', requester: { user_id: id(8) }, status: state.status, version: state.version, target: { resource_type: 'REFUND', resource_id: id(1) } }] : [], has_more: false };
+    collection.items = collection.items.filter(item =>
+      (!query.get('requester_user_id') || item.requester.user_id === query.get('requester_user_id')) &&
+      (!query.get('status') || item.status === query.get('status')));
+    return reply(collection);
+  }
   if (url === `/api/admin/approvals/requests/${id(9)}` && options.method === 'PUT') {
     if (params.has('lost-recent') && !state.authenticatedAgain) return reply({ code: 'RECENT_AUTHENTICATION_REQUIRED' }, 401);
     if (state.denyReplay) return reply({ code: 'FORBIDDEN' }, 403);

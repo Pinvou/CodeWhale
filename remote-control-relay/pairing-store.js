@@ -10,6 +10,19 @@ export const PAIRING_CODE_ISSUE_QUARANTINE_MS = 10 * 60_000;
 export const PAIRING_CODE_TERMINAL_QUARANTINE_MS = 2 * 60_000;
 const MAX_GENERATION_ATTEMPTS = 32;
 const MAX_RECORDS = 100_000;
+// Registration owns a fraction of the shared 16 MiB state file. Retained
+// receipts (including failures/quarantine) are the durable accounting source.
+export const DEFAULT_PAIRING_REGISTRATION_LIMITS = Object.freeze({
+  maxPerEndpointRecords: 32,
+  maxGlobalRecords: 4096,
+  windowMs: 60_000,
+  maxPerEndpointWindow: 8,
+  maxGlobalWindow: 256,
+  maxNamespaceBytes: 4 * 1024 * 1024,
+});
+const MAX_REGISTRATION_ALLOCATION_BYTES = 16 * 1024;
+const MAX_PENDING_REGISTRATIONS = 64;
+const MAX_PENDING_PER_ENDPOINT = 2;
 const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const HEX = /^[a-f0-9]{64}$/u;
 const OPEN_TOKEN = Symbol("PairingStore.open");
@@ -24,6 +37,69 @@ export class PairingStoreError extends Error {
 
 function fail(code, cause) {
   throw new PairingStoreError(code, cause ? { cause } : undefined);
+}
+
+function registrationLimits(overrides = {}) {
+  if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)
+    || Object.keys(overrides).some((key) => !Object.hasOwn(DEFAULT_PAIRING_REGISTRATION_LIMITS, key))) {
+    fail("pairing_registration_limits_invalid");
+  }
+  const limits = { ...DEFAULT_PAIRING_REGISTRATION_LIMITS, ...overrides };
+  if (Object.values(limits).some((value) => !Number.isSafeInteger(value) || value <= 0)
+    || limits.maxGlobalRecords > MAX_RECORDS
+    || limits.maxPerEndpointRecords * 2 > limits.maxGlobalRecords
+    || limits.maxPerEndpointWindow > limits.maxPerEndpointRecords
+    || limits.maxGlobalWindow > limits.maxGlobalRecords
+    || limits.maxPerEndpointWindow * 2 > limits.maxGlobalWindow
+    || limits.windowMs > PAIRING_CODE_ISSUE_QUARANTINE_MS
+    || limits.maxNamespaceBytes < 2 * MAX_REGISTRATION_ALLOCATION_BYTES
+    || limits.maxNamespaceBytes > DEFAULT_PAIRING_REGISTRATION_LIMITS.maxNamespaceBytes) {
+    fail("pairing_registration_limits_invalid");
+  }
+  return Object.freeze(limits);
+}
+
+function requireRegistrationBytes(state, limits, reservedBytes = 0) {
+  if (Buffer.byteLength(JSON.stringify(state), "utf8") + reservedBytes > limits.maxNamespaceBytes) {
+    fail("controller_busy");
+  }
+}
+
+function requireRegistrationQuota(state, endpointId, now, limits, attempts = []) {
+  if (state.registrations.length >= limits.maxGlobalRecords || state.tombstones.length >= limits.maxGlobalRecords) {
+    fail("controller_busy");
+  }
+  const issued = new Map(state.tombstones.map((row) => [row.pairing_id, Number(row.issued_at_ms)]));
+  let endpointRecords = 0;
+  let endpointWindow = 0;
+  let globalWindow = 0;
+  for (const row of state.registrations) {
+    const own = row.endpoint_id === endpointId;
+    if (own) endpointRecords += 1;
+    const at = row.pairing_id === null
+      ? Number(row.retain_until_ms) - PAIRING_CODE_ISSUE_QUARANTINE_MS : issued.get(row.pairing_id);
+    // Future records also consume the window after a clock rollback.
+    if (at > now - limits.windowMs) {
+      globalWindow += 1;
+      if (own) endpointWindow += 1;
+    }
+  }
+  for (const attempt of attempts) {
+    if (attempt.at > now - limits.windowMs) {
+      globalWindow += 1;
+      if (attempt.endpointId === endpointId) endpointWindow += 1;
+    }
+  }
+  if (endpointRecords >= limits.maxPerEndpointRecords || endpointWindow >= limits.maxPerEndpointWindow
+    || globalWindow >= limits.maxGlobalWindow) fail("controller_busy");
+  // All closed registration fields, 32 digest-key rows and sealed-code bytes
+  // fit this bound; the exact candidate is checked again before its CAS.
+  requireRegistrationBytes(state, limits, MAX_REGISTRATION_ALLOCATION_BYTES);
+}
+
+function registrationAccountingKey(row) {
+  return JSON.stringify([row.registration_request_id, row.parameter_key_id, row.parameter_digest_hex,
+    row.pairing_id, row.pairing_id === null ? row.retain_until_ms : null]);
 }
 
 function exact(value, keys, code) {
@@ -165,8 +241,16 @@ function generateCode(randomBytes) {
 export class PairingStore {
   #store; #keyring; #clock; #randomBytes; #active = new Map();
   #reservationPairings = new Set();
+  #registrationLimits;
+  #registrationTail = Promise.resolve();
+  #registrationFlights = new Map();
+  #registrationEndpoints = new Map();
+  // Unpublished failed admissions still consumed work. Bound them by the same
+  // window; reconcile a lost commit ACK with its exact durable candidate once.
+  #registrationAttempts = [];
 
-  constructor({ stateStore, digestKeyring, clock = Date.now, randomBytes = crypto.randomBytes } = {}, token) {
+  constructor({ stateStore, digestKeyring, clock = Date.now, randomBytes = crypto.randomBytes,
+    registrationBudget } = {}, token) {
     if (token !== OPEN_TOKEN) fail("pairing_store_open_required");
     if (!stateStore || typeof stateStore.readNamespace !== "function" || typeof stateStore.compareAndSwap !== "function") {
       fail("pairing_state_store_invalid");
@@ -176,6 +260,7 @@ export class PairingStore {
     this.#keyring = keyring(digestKeyring);
     this.#clock = clock;
     this.#randomBytes = randomBytes;
+    this.#registrationLimits = registrationLimits(registrationBudget);
   }
 
   static async open(options) {
@@ -438,6 +523,106 @@ export class PairingStore {
 
   async register({ request, relayEpoch, sealCode } = {}) {
     if (!request || typeof request !== "object" || typeof sealCode !== "function") fail("pairing_registration_invalid");
+    const stable = structuredClone(request);
+    const registrationId = id(stable.registration_request_id, "registration_request_id");
+    const endpointId = id(stable.endpoint_id, "endpoint_id");
+    id(stable.remote_control_generation, "remote_control_generation");
+    id(relayEpoch, "relay_epoch");
+    const parameters = { ...stable };
+    delete parameters.request_id;
+    const snapshot = this.#read();
+    const now = this.#clock();
+    if (!Number.isSafeInteger(now) || now < 0) fail("pairing_clock_invalid");
+    const known = this.#replayRegistration(snapshot.state, stable, relayEpoch, now);
+    if (known) return known;
+    const fingerprint = canonical(parameters);
+    const existing = this.#registrationFlights.get(registrationId);
+    if (existing) {
+      if (existing.relayEpoch !== relayEpoch) fail("pairing_registration_stale_relay_epoch");
+      if (existing.fingerprint !== fingerprint) fail("pairing_registration_conflict");
+      const result = await existing.promise;
+      return Object.freeze({ result: Object.freeze({ ...result.result, request_id: stable.request_id }), replayed: true });
+    }
+    const queued = this.#registrationEndpoints.get(endpointId) || 0;
+    if (this.#registrationFlights.size >= MAX_PENDING_REGISTRATIONS || queued >= MAX_PENDING_PER_ENDPOINT) {
+      fail("controller_busy");
+    }
+    // Only this owner allocates codes. A single endpoint cannot fill the queue;
+    // CAS still rechecks the authoritative durable quota before publication.
+    const promise = this.#registrationTail.then(() => this.#registerOwned({ request: stable, relayEpoch, sealCode }));
+    this.#registrationTail = promise.then(() => undefined, () => undefined);
+    const flight = { relayEpoch, fingerprint, promise };
+    this.#registrationFlights.set(registrationId, flight);
+    this.#registrationEndpoints.set(endpointId, queued + 1);
+    try {
+      return await promise;
+    } finally {
+      if (this.#registrationFlights.get(registrationId) === flight) this.#registrationFlights.delete(registrationId);
+      const count = this.#registrationEndpoints.get(endpointId) || 0;
+      if (count <= 1) this.#registrationEndpoints.delete(endpointId);
+      else this.#registrationEndpoints.set(endpointId, count - 1);
+    }
+  }
+
+  #replayRegistration(state, request, relayEpoch, now) {
+    const known = state.registrations.find((row) => row.registration_request_id === request.registration_request_id
+      && Number(row.retain_until_ms) > now);
+    if (!known) return null;
+    if (known.outcome.relay_epoch !== undefined && known.outcome.relay_epoch !== relayEpoch) {
+      fail("pairing_registration_stale_relay_epoch");
+    }
+    const parameters = { ...request };
+    delete parameters.request_id;
+    const knownHash = digest(this.#keyring.keys.get(known.parameter_key_id), "pinvou-pairing-registration-v1\0", parameters);
+    if (!crypto.timingSafeEqual(Buffer.from(known.parameter_digest_hex, "hex"), Buffer.from(knownHash, "hex"))) {
+      fail("pairing_registration_conflict");
+    }
+    return Object.freeze({ result: Object.freeze({ ...structuredClone(known.outcome), request_id: request.request_id }), replayed: true });
+  }
+
+  #reconcileRegistrationAttempts(state, now) {
+    const published = new Set(state.registrations.map(registrationAccountingKey));
+    const reconciled = new Set();
+    this.#registrationAttempts = this.#registrationAttempts.filter((attempt) => {
+      if (attempt.at <= now - this.#registrationLimits.windowMs) return false;
+      const matched = [...attempt.candidates].find((key) => published.has(key) && !reconciled.has(key));
+      if (!matched) return true;
+      reconciled.add(matched);
+      return false;
+    });
+  }
+
+  #forgetRegistrationAttempt(attempt) {
+    this.#registrationAttempts = this.#registrationAttempts.filter((entry) => entry !== attempt);
+  }
+
+  async #recordGenerationFailure(snapshot, request, parameters, now, admission) {
+    const outcome = {
+      v: 1, type: "error", request_id: request.request_id,
+      registration_request_id: request.registration_request_id,
+      remote_control_generation: request.remote_control_generation,
+      code: "pairing_code_generation_failed", message: "pairing code generation failed",
+    };
+    validateControllerMessage(outcome, "relay");
+    const registration = {
+      registration_request_id: request.registration_request_id, parameter_key_id: this.#keyring.activeKeyId,
+      parameter_digest_hex: digest(this.#keyring.keys.get(this.#keyring.activeKeyId), "pinvou-pairing-registration-v1\0", parameters),
+      pairing_id: null, endpoint_id: request.endpoint_id,
+      remote_control_generation: request.remote_control_generation,
+      handshake_public_key_b64: request.handshake_public_key_b64,
+      capabilities: [...request.capabilities], outcome,
+      retain_until_ms: String(now + PAIRING_CODE_ISSUE_QUARANTINE_MS),
+    };
+    const next = { ...snapshot.state, registrations: [...snapshot.state.registrations, registration] };
+    requireRegistrationBytes(next, this.#registrationLimits);
+    admission.candidates.add(registrationAccountingKey(registration));
+    await this.#store.compareAndSwap(PAIRING_NAMESPACE, snapshot.revision, next);
+    this.#forgetRegistrationAttempt(admission);
+    return Object.freeze({ result: Object.freeze(outcome), replayed: false });
+  }
+
+  async #registerOwned({ request, relayEpoch, sealCode }) {
+    if (!request || typeof request !== "object" || typeof sealCode !== "function") fail("pairing_registration_invalid");
     const registrationId = id(request.registration_request_id, "registration_request_id");
     id(request.endpoint_id, "endpoint_id");
     id(request.remote_control_generation, "remote_control_generation");
@@ -445,6 +630,7 @@ export class PairingStore {
     await this.#compact();
     const parameters = { ...request };
     delete parameters.request_id;
+    let admission = null;
     for (let casAttempt = 0; casAttempt < 8; casAttempt += 1) {
       const snapshot = this.#read();
       const known = snapshot.state.registrations.find((row) => row.registration_request_id === registrationId);
@@ -457,6 +643,7 @@ export class PairingStore {
         if (!crypto.timingSafeEqual(Buffer.from(known.parameter_digest_hex, "hex"), Buffer.from(knownHash, "hex"))) {
           fail("pairing_registration_conflict");
         }
+        if (admission) this.#forgetRegistrationAttempt(admission);
         return Object.freeze({
           result: Object.freeze({ ...structuredClone(known.outcome), request_id: request.request_id }),
           replayed: true,
@@ -464,6 +651,13 @@ export class PairingStore {
       }
       const now = this.#clock();
       if (!Number.isSafeInteger(now) || now < 0) fail("pairing_clock_invalid");
+      this.#reconcileRegistrationAttempts(snapshot.state, now);
+      requireRegistrationQuota(snapshot.state, request.endpoint_id, now, this.#registrationLimits,
+        this.#registrationAttempts.filter((entry) => entry !== admission));
+      if (!admission) {
+        admission = { endpointId: request.endpoint_id, at: now, candidates: new Set() };
+        this.#registrationAttempts.push(admission);
+      }
       let code;
       let digests;
       for (let attempt = 0; attempt < MAX_GENERATION_ATTEMPTS; attempt += 1) {
@@ -478,31 +672,11 @@ export class PairingStore {
         code = null;
       }
       if (code === null) {
-        if (snapshot.state.registrations.length >= MAX_RECORDS) fail("pairing_capacity_reached");
-        const outcome = {
-          v: 1, type: "error", request_id: request.request_id,
-          registration_request_id: registrationId,
-          remote_control_generation: request.remote_control_generation,
-          code: "pairing_code_generation_failed", message: "pairing code generation failed",
-        };
-        validateControllerMessage(outcome, "relay");
-        const registration = {
-          registration_request_id: registrationId, parameter_key_id: this.#keyring.activeKeyId,
-          parameter_digest_hex: digest(
-            this.#keyring.keys.get(this.#keyring.activeKeyId), "pinvou-pairing-registration-v1\0", parameters,
-          ), pairing_id: null, endpoint_id: request.endpoint_id,
-          remote_control_generation: request.remote_control_generation,
-          handshake_public_key_b64: request.handshake_public_key_b64,
-          capabilities: [...request.capabilities], outcome,
-          retain_until_ms: String(now + PAIRING_CODE_ISSUE_QUARANTINE_MS),
-        };
         try {
-          await this.#store.compareAndSwap(PAIRING_NAMESPACE, snapshot.revision, {
-            ...snapshot.state, registrations: [...snapshot.state.registrations, registration],
-          });
-          return Object.freeze({ result: Object.freeze(outcome), replayed: false });
+          return await this.#recordGenerationFailure(snapshot, request, parameters, now, admission);
         } catch (error) {
           if (error?.code === "namespace_revision_conflict") continue;
+          if (error?.code === "controller_busy") throw error;
           fail("pairing_persist_failed", error);
         }
       }
@@ -533,14 +707,28 @@ export class PairingStore {
         relay_epoch: relayEpoch,
         expires_at_ms: expires,
       };
-      const sealed = sealCode({ code, codeWrapPublicKeyB64: request.code_wrap_public_key_b64, binding });
-      const outcome = {
-        v: 1, type: "desktop_pairing_registered", request_id: request.request_id,
-        registration_request_id: registrationId, pairing_id: pairingId,
-        remote_control_generation: request.remote_control_generation, sealed_code_b64: sealed,
-        expires_at_ms: expires, relay_epoch: relayEpoch,
-      };
-      validateControllerMessage(outcome, "relay");
+      let outcome;
+      try {
+        const sealed = sealCode({ code, codeWrapPublicKeyB64: request.code_wrap_public_key_b64, binding });
+        outcome = {
+          v: 1, type: "desktop_pairing_registered", request_id: request.request_id,
+          registration_request_id: registrationId, pairing_id: pairingId,
+          remote_control_generation: request.remote_control_generation, sealed_code_b64: sealed,
+          expires_at_ms: expires, relay_epoch: relayEpoch,
+        };
+        validateControllerMessage(outcome, "relay");
+      } catch (_) {
+        // Invalid/low-order wrapping keys must not obtain unlimited expensive
+        // attempts. Persist the existing bounded failure receipt, never raw
+        // crypto details or the generated plaintext code.
+        try {
+          return await this.#recordGenerationFailure(snapshot, request, parameters, now, admission);
+        } catch (error) {
+          if (error?.code === "namespace_revision_conflict") continue;
+          if (error?.code === "controller_busy") throw error;
+          fail("pairing_persist_failed", error);
+        }
+      }
       const tombstone = {
         pairing_id: pairingId, code_digests: digests, issued_at_ms: issued, expires_at_ms: expires,
         reuse_after_ms: String(now + PAIRING_CODE_ISSUE_QUARANTINE_MS), terminal_at_ms: null,
@@ -560,6 +748,8 @@ export class PairingStore {
         tombstones: [...snapshot.state.tombstones, tombstone],
         registrations: [...snapshot.state.registrations, registration],
       };
+      requireRegistrationBytes(next, this.#registrationLimits);
+      admission.candidates.add(registrationAccountingKey(registration));
       try {
         await this.#store.compareAndSwap(PAIRING_NAMESPACE, snapshot.revision, next);
         const active = Object.freeze({
@@ -570,6 +760,7 @@ export class PairingStore {
           code_digests: Object.freeze(digests.map(Object.freeze)),
         });
         this.#active.set(pairingId, active);
+        this.#forgetRegistrationAttempt(admission);
         return Object.freeze({ result: Object.freeze(outcome), replayed: false });
       } catch (error) {
         if (error?.code === "namespace_revision_conflict") continue;
