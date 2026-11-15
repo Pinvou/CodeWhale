@@ -2955,6 +2955,39 @@ fn bare_string_disallowed_tools_is_refused_not_dropped() {
     );
 }
 #[test]
+fn disallowed_tools_authority_provenance_is_parsed_not_assumed() {
+    // The exact-Fleet Workflow path forwards its DERIVED ChildAuthority
+    // clamp through the same `disallowed_tools` key a caller uses for
+    // genuine restrictions (review 5911268495). Provenance decides which
+    // bookkeeping the spawn merge performs — an authority rule recorded as
+    // caller-explicit would let the carve-out override veto the clamp
+    // itself and erase the bounded surface (canonical `bash` on an
+    // inspection role) that the authority deliberately kept — so the
+    // marker must be an explicit parsed field: set by the workflow path,
+    // absent (false) for every interactive caller.
+    let workflow = parse_spawn_request(&json!({
+        "prompt": "do a thing",
+        "disallowed_tools": ["exec_shell", "terminal/*"],
+        "disallowed_tools_from_authority": true,
+    }))
+    .expect("the workflow path's marked spawn parses");
+    assert!(workflow.disallowed_tools_from_authority);
+
+    let caller = parse_spawn_request(&json!({
+        "prompt": "do a thing",
+        "disallowed_tools": ["bash"],
+    }))
+    .expect("an ordinary caller spawn parses");
+    assert!(
+        !caller.disallowed_tools_from_authority,
+        "an interactive caller's deny list must keep caller provenance"
+    );
+
+    let bare =
+        parse_spawn_request(&json!({ "prompt": "do a thing" })).expect("a deny-free spawn parses");
+    assert!(!bare.disallowed_tools_from_authority);
+}
+#[test]
 fn spawn_parameters_refuse_type_mismatches_by_name() {
     // A representative sample across the parameter kinds the spawn parser
     // reads: string, aliased integer, boolean, and array-of-strings. One

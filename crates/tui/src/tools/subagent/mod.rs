@@ -1775,6 +1775,16 @@ struct SpawnRequest {
     /// Extra tool deny-list from the caller, unioned with the parent runtime's
     /// inherited deny-list. Deny always wins over allow (#4042).
     disallowed_tools: Option<Vec<String>>,
+    /// True when `disallowed_tools` carries AUTOMATIC authority-derived
+    /// clamp rules (the exact-Fleet Workflow path supplies the derived
+    /// `ChildAuthority` deny list here) rather than genuine caller or
+    /// operator restrictions. Provenance matters: the carve-out override
+    /// reads the explicit-bookkeeping set to decide which denials a
+    /// bounded surface may lift, so an automatic clamp recorded as
+    /// explicit would let that override veto the clamp itself and erase
+    /// the bounded surface the authority deliberately kept (review
+    /// 5911268495).
+    disallowed_tools_from_authority: bool,
     /// When true (default), the child inherits the parent runtime's
     /// `disallowed_tools`. Set `false` to start the child with a clean slate
     /// (only the explicit `disallowed_tools` above, if any, then apply).
@@ -10641,12 +10651,19 @@ async fn spawn_subagent_from_input(
             // Bookkeep the caller's provenance even when the rule string was
             // already present (e.g. the role clamp installed the same
             // `Bash` rule): the carve-outs override the clamp's automatic
-            // denial, never the caller's.
-            if !child_runtime
-                .worker_profile
-                .explicit_denied_tools
-                .iter()
-                .any(|existing| existing == tool)
+            // denial, never the caller's. Authority-derived rules — the
+            // exact-Fleet Workflow path forwarding its derived
+            // `ChildAuthority` clamp — are NOT caller restrictions: the
+            // bounded surfaces that authority deliberately kept (canonical
+            // `bash` on an inspection role) must stay liftable by the
+            // carve-outs, so they bypass this bookkeeping (review
+            // 5911268495).
+            if !spawn_request.disallowed_tools_from_authority
+                && !child_runtime
+                    .worker_profile
+                    .explicit_denied_tools
+                    .iter()
+                    .any(|existing| existing == tool)
             {
                 child_runtime
                     .worker_profile
@@ -11039,8 +11056,14 @@ pub(crate) async fn spawn_workflow_task(
     // A host-derived ceiling (e.g. an exact Fleet member's
     // `network_tool = false`) reaches the child as a deny list, which the child
     // registry applies to both the model-visible surface and the call guard.
+    // These rules are the derived `ChildAuthority` clamp, NOT caller
+    // restrictions: the provenance marker keeps them out of the child's
+    // explicit-bookkeeping set, whose carve-out override must stay able to
+    // lift a clamp-shaped denial for a bounded surface while never lifting
+    // a genuine caller deny (review 5911268495).
     if !request.disallowed_tools.is_empty() {
         input["disallowed_tools"] = json!(request.disallowed_tools);
+        input["disallowed_tools_from_authority"] = json!(true);
     }
     if let Some(value) = request.max_depth {
         input["max_depth"] = json!(value);
@@ -13964,6 +13987,10 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     // #4042: optional caller-supplied tool deny-list (unioned with the parent's
     // inherited deny-list) and the inheritance opt-out flag (default inherits).
     let disallowed_tools = parse_disallowed_tools(input)?;
+    let disallowed_tools_from_authority = input
+        .get("disallowed_tools_from_authority")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let inherit_disallowed_tools = parse_optional_bool(
         input,
         &["inherit_disallowed_tools", "inheritDisallowedTools"],
@@ -14092,6 +14119,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         max_steps,
         wall_time,
         disallowed_tools,
+        disallowed_tools_from_authority,
         inherit_disallowed_tools,
         write_authority,
         expected_artifact,
