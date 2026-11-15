@@ -1,0 +1,7 @@
+.adm-pricing-metering-basis{display:grid;gap:5px;min-width:12rem}
+.adm-pricing-metering-basis small,.adm-pricing-read-progress{color:var(--adm-muted);white-space:normal}
+.adm-pricing-metering-basis details p{margin:6px 0 0;line-height:1.55}
+.adm-pricing-workspace .adm-pricing-resource-tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:10px 0}
+.adm-pricing-resource-tools .adm-pricing-read-progress{flex-basis:100%;margin:0}
+.adm-pricing-workspace .adm-price-identifiers>summary:focus{outline:2px solid var(--adm-primary);outline-offset:3px}
+.adm-pricing-workspace .adm-pricing-unit-table td{vertical-align:top}
