@@ -117,11 +117,9 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 					return nil
 				}
 			}
-			through := int64(0) // Fresh installation covers the complete current chain.
-			if scenario == "retained-upgrade" {
-				through = 900015 // Retain this release's actual public rollback contract.
-			}
-			r := f.repositoryThroughVersion(t, through, initial)
+			// This test owns the 900015 release's forward-only statement guard.
+			// Later reversible index migrations must not mask that exact Down.
+			r := f.repositoryThroughVersion(t, 900015, initial)
 			if scenario == "fresh-install" {
 				replay = seedOrganizationEvidence(t, ctx, r)
 				before = organizationEvidenceFacts(t, ctx, r)
@@ -169,15 +167,13 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if through != 0 {
-					var prefix []migrations.Migration
-					for _, migration := range loaded {
-						if migration.Version <= through {
-							prefix = append(prefix, migration)
-						}
+				var guardRelease []migrations.Migration
+				for _, m := range loaded {
+					if m.Version <= 900015 {
+						guardRelease = append(guardRelease, m)
 					}
-					loaded = prefix
 				}
+				loaded = guardRelease
 				configuration := r.pool.Config().ConnConfig.Copy()
 				configuration.User, configuration.Password = "account_migrator", ""
 				connection, err := pgx.ConnectConfig(ctx, configuration)
@@ -196,9 +192,6 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 				}
 				assertHistoricalForwardOnlyMigration(t, r, loaded, 900015, "organization evidence truncate protection is forward-only")
 				wanted := "organization evidence truncate protection is forward-only"
-				if through == 0 {
-					wanted = "payment credit closure fence is forward-only; preserve pending and resolved outcomes"
-				}
 				err = accountschema.DownOne(ctx, connection, loaded)
 				var databaseError *pgconn.PgError
 				if !errors.As(err, &databaseError) || databaseError.Code != "55000" || databaseError.Message != wanted {

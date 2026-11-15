@@ -18,7 +18,6 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
-	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcredit"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 )
@@ -50,7 +49,7 @@ func main() {
 		log.Fatal("ACCOUNT_DATABASE_UNAVAILABLE")
 	}
 	defer repository.Close()
-	go observability.RunBackground(ctx, "mobile-retention", account.NewMobileRetentionWorker(repository, time.Hour).Run)
+	workers := []accountBackgroundTask{{"mobile-retention", account.NewMobileRetentionWorker(repository, time.Hour).Run}}
 	walletPolicyVersion := strings.TrimSpace(os.Getenv("WALLET_PROVISIONING_POLICY_VERSION"))
 	if walletPolicyVersion == "" {
 		walletPolicyVersion = "wallet-provisioning-v1"
@@ -97,9 +96,11 @@ func main() {
 		logOrganizationStartupFailure(ctx, err)
 		os.Exit(1)
 	}
-	if err := configureApprovals(ctx, repository, service, credential, cfg.Environment); err != nil {
+	approvalWorkers, err := configureApprovals(ctx, repository, service, credential, cfg.Environment)
+	if err != nil {
 		log.Fatal(err)
 	}
+	workers = append(workers, approvalWorkers...)
 	if err := configureRegistrationBonus(ctx, repository, enabled("MOBILE_AUTH_ENABLED"), os.Getenv("REGISTRATION_BONUS_FINGERPRINT_KEY_ID"), os.Getenv("REGISTRATION_BONUS_FINGERPRINT_HMAC_KEY_BASE64")); err != nil {
 		log.Fatal("REGISTRATION_BONUS_CONFIGURATION_INVALID")
 	}
@@ -109,44 +110,21 @@ func main() {
 	}
 	service.WithAuditExports(auditExports)
 	if auditExports != nil {
-		go observability.RunBackground(ctx, "audit-export", auditExports.Run)
+		workers = append(workers, accountBackgroundTask{"audit-export", auditExports.Run})
 	}
-	go observability.RunBackground(ctx, "wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run)
-	go observability.RunBackground(ctx, "role-binding-expiry", account.NewRoleBindingExpiryWorker(repository, time.Minute).Run)
+	workers = append(workers, accountBackgroundTask{"wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run})
+	workers = append(workers, accountBackgroundTask{"role-binding-expiry", account.NewRoleBindingExpiryWorker(repository, time.Minute).Run})
 	closureBilling, closureToken, err := configuredAccountClosureClients(credential)
 	if err != nil {
 		log.Fatal("ACCOUNT_CLOSURE_CONFIGURATION_INVALID")
 	}
-	closureDone := make(chan struct{})
 	creditResolver, err := paymentcredit.NewHTTPClient(os.Getenv("BILLING_HTTP_URL"), credential)
 	if err != nil {
 		log.Fatal("ACCOUNT_PAYMENT_CREDIT_CONFIGURATION_INVALID")
 	}
-	creditRecoveryDone := make(chan struct{})
-	go func() {
-		defer close(creditRecoveryDone)
-		observability.RunBackground(ctx, "payment-credit-recovery", func(ctx context.Context) { repository.RunPaymentCreditRecovery(ctx, creditResolver) })
-	}()
-	go func() {
-		defer close(closureDone)
-		observability.RunBackground(ctx, "account-closure", account.NewAccountClosureWorker(repository, 5*time.Second, closureBilling, closureToken).WithCleanup(identities, closureBilling, closureToken).Run)
-	}()
-	// Registered after repository.Close's defer: cancel and drain both recovery
-	// workers before pool closure, using the existing single shutdown budget.
-	drainClosure := func() {
-		stopWorkers()
-		timer := time.NewTimer(10 * time.Second)
-		defer timer.Stop()
-		for _, done := range []<-chan struct{}{closureDone, creditRecoveryDone} {
-			select {
-			case <-done:
-			case <-timer.C:
-				log.Print("ACCOUNT_CLOSURE_SHUTDOWN_TIMEOUT")
-				return
-			}
-		}
-	}
-	defer drainClosure()
+	workers = append(workers, accountBackgroundTask{"payment-credit-recovery", func(ctx context.Context) { repository.RunPaymentCreditRecovery(ctx, creditResolver) }})
+	workers = append(workers, accountBackgroundTask{"account-closure", account.NewAccountClosureWorker(repository, 5*time.Second, closureBilling, closureToken).WithCleanup(identities, closureBilling, closureToken).Run})
+
 	if enabled("MOBILE_AUTH_ENABLED") {
 		registrationQueryKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("REGISTRATION_QUERY_HMAC_KEY_BASE64")))
 		if decodeErr != nil {
@@ -222,8 +200,8 @@ func main() {
 			log.Fatal(err)
 		}
 		service.WithProfileChanges(profiles)
-		go observability.RunBackground(ctx, "profile-change", account.NewProfileChangeWorker(profiles, 5*time.Second).Run)
-		go observability.RunBackground(ctx, "registration-recovery", account.NewRegistrationRecoveryWorker(repository, auth, 5*time.Second).Run)
+		workers = append(workers, accountBackgroundTask{"profile-change", account.NewProfileChangeWorker(profiles, 5*time.Second).Run})
+		workers = append(workers, accountBackgroundTask{"registration-recovery", account.NewRegistrationRecoveryWorker(repository, auth, 5*time.Second).Run})
 
 		// Commerce availability does not gate authentication; persisted jobs are
 		// retained until the explicitly configured adapter becomes available.
@@ -232,7 +210,7 @@ func main() {
 			if err != nil {
 				log.Fatal("ACCOUNT_COMMERCE_ADAPTER_INVALID")
 			}
-			go observability.RunBackground(ctx, "commerce-customer-sync", account.NewCommerceCustomerSyncWorker(repository, adapter, commerceProviderID, commerceAdapterVersion, 5*time.Second).Run)
+			workers = append(workers, accountBackgroundTask{"commerce-customer-sync", account.NewCommerceCustomerSyncWorker(repository, adapter, commerceProviderID, commerceAdapterVersion, 5*time.Second).Run})
 		}
 	}
 
@@ -240,9 +218,21 @@ func main() {
 	if err != nil {
 		log.Fatal("ACCOUNT_TRUSTED_SOURCE_CONFIGURATION_INVALID")
 	}
+	// Start after Account configuration and task registration. Later HTTP setup
+	// errors take the same drain path before the repository is closed.
+	workersDone := startAccountBackground(ctx, workers)
+	drainWorkers := func() {
+		stopWorkers()
+		drainCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if waitAccountBackground(drainCtx, workersDone) != nil {
+			log.Print("ACCOUNT_BACKGROUND_SHUTDOWN_TIMEOUT")
+		}
+	}
+	defer drainWorkers()
 	if err := httpserver.RunWithApplicationContext(ctx, "account-service", repository.WithApprovalWriterReadiness(handler), repository.Ping, repository.ApprovalPaginationCollectors()...); err != nil {
 		// log.Fatal bypasses defers; explicitly perform the bounded worker drain.
-		drainClosure()
+		drainWorkers()
 		repository.Close()
 		log.Fatal("ACCOUNT_HTTP_SERVER_FAILED")
 	}

@@ -51,7 +51,7 @@ class ClosurePostgresResults(unittest.TestCase):
         self.addCleanup(environment.stop)
 
     def test_real_migration_cli_roots_cannot_silently_drop(self):
-        expected = {"TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown", "TestAccountClosureSagaIdentityDispatchPostgres"}
+        expected = {"TestAccountClosureLegacyRollbackCLI", "TestAccountClosureSagaIdentityDispatchPostgres", "TestMigrationCLIBudgetRecovery", "TestPhaseMigrationCLIPinsBeforeDown"}
         selected = [row for row in runner.CONTRACTS if row[0] == "migration-cli"]
         self.assertEqual(selected, [("migration-cli", "./cmd/migrate", expected, {})])
         runner.validate_closed_grant_contracts(runner.CONTRACTS)
@@ -65,6 +65,18 @@ class ClosurePostgresResults(unittest.TestCase):
         for missing in expected:
             with self.subTest(missing=missing), self.assertRaises(RuntimeError):
                 runner.verify_results(stream(*({"Action": "pass", "Test": name} for name in sorted(expected - {missing}))), expected)
+
+    def test_migration_budget_requires_each_recovery_case(self):
+        root = "TestMigrationCLIBudgetRecovery"
+        cases = {root + "/" + suffix for suffix in (
+            "invalid_budget_before_database", "domain_lock_wait", "partial_up_timeout",
+            "explicit_flag_overrides_invalid_env_and_retry", "transactional_down_timeout", "down_retry",
+            "successful_unlock_preserves_connection", "expired_unlock_retires_owned_connection")}
+        rows = [{"Action": "pass", "Test": name} for name in sorted(cases | {root})]
+        self.assertEqual(runner.verify_results(stream(*rows), {root}), 9)
+        for missing in cases:
+            with self.subTest(missing=missing), self.assertRaises(RuntimeError):
+                runner.verify_results(stream(*(row for row in rows if row["Test"] != missing)), {root})
 
     def test_current_membership_and_assessment_roots_cannot_silently_drop(self):
         original = {"TestClosedGrantPublishedOwnerEffects", "TestAccountClosureIsolationPreservesPriorAuditFacts",
@@ -188,6 +200,11 @@ class ClosurePostgresResults(unittest.TestCase):
                 rows += self.identity_rows()
             if runner.PAYMENT_CREDIT_F12_ROOT in roots:
                 rows += [{"Action":"pass","Test":runner.PAYMENT_CREDIT_F12_ROOT+"/"+child} for child in sorted(runner.PAYMENT_CREDIT_F12_CHILDREN)]
+            if "TestMigrationCLIBudgetRecovery" in roots:
+                rows += [{"Action": "pass", "Test": "TestMigrationCLIBudgetRecovery/" + suffix} for suffix in (
+                    "invalid_budget_before_database", "domain_lock_wait", "partial_up_timeout",
+                    "explicit_flag_overrides_invalid_env_and_retry", "transactional_down_timeout", "down_retry",
+                    "successful_unlock_preserves_connection", "expired_unlock_retires_owned_connection")]
             return subprocess_result(stream(*rows, package="github.com/Pinvou/pinvou3/account-platform/cmd/migrate" if name == "migration-cli" else "fixture"),
                                      1 if name == bad_group and failure == "process-failed" else 0)
 

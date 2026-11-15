@@ -23,7 +23,7 @@
 
 | 进程 | 私有文件中必需的实际输入 |
 | --- | --- |
-| Account | `DATABASE_URL`（TLS verify-full）、`WORKLOAD_IDENTITY_RULES_JSON`、`REGISTRATION_QUERY_HMAC_KEY_BASE64`、`SMS_VERIFICATION_HMAC_KEY_BASE64`、`SMS_PROVIDER` 及对应 Aliyun/HTTP provider 的真实凭证和四种用途模板；F04 起还须提供独立的 `OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64`（标准 Base64，解码后恰好 32 字节）；钱包策略版本与 1–1440 分钟 SLA 可沿既有默认。 |
+| Account | `DATABASE_URL`（TLS verify-full）、`WORKLOAD_IDENTITY_RULES_JSON`、`REGISTRATION_QUERY_HMAC_KEY_BASE64`、`SMS_VERIFICATION_HMAC_KEY_BASE64`、`SMS_PROVIDER` 及所选 provider 的真实凭证。Aliyun 需要签名、注册及登录模板，更换手机号/重置密码模板可沿既有 login 回退；管理数据库版本须显式填齐四用途，见[模板兼容与迁移](../../docs/sms-configuration-conflict-recovery.md#阿里云模板用途与兼容迁移)。HTTP provider 不使用 Aliyun 模板；F04 起还须提供独立的 `OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64`（标准 Base64，解码后恰好 32 字节）；钱包策略版本与 1–1440 分钟 SLA 可沿既有默认。 |
 | Identity | `IDENTITY_PASSWORD_HMAC_KEY_BASE64`、`AUTH_RISK_REDIS_URL`（identity ACL 用户、TLS）、`AUTH_RISK_HMAC_KEY_BASE64`、`WORKLOAD_IDENTITY_RULES_JSON`；挂载 Keycloak provisioner client-secret。没有风险 Redis 就无法提供必需的 OIDC token proxy，不可当作可运行装配。 |
 | Billing | `DATABASE_URL`（TLS verify-full）、仅本阶段钱包权限的 `WORKLOAD_IDENTITY_RULES_JSON`；同一当前 Billing 二进制仍须实际 `MANUAL_REVIEW_ON_CALL_USER_IDS`、`HUMAN_DELEGATION_VERIFICATION_KEYS_JSON`、显式 `BILLING_PAYMENT_PROVIDER` 与该已安装适配器要求的既有私有配置，见 [Finance 私有配置](README.finance.md#数据库和私有配置)。不能把本行原钱包业务范围当作二进制启动最小配置。 |
 | Token | 出站 workload token；只有个人余额 facade，无数据库、模型路由或 readiness GO。 |
