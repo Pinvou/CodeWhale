@@ -9491,7 +9491,7 @@ mod tests {
 
         // The arm is pinned to the vendor's own routes: a custom
         // Moonshot-compatible gateway keeps its own dialect, and so does a
-        // different provider that happens to point at the membership host.
+        // different provider that happens to point at either vendor host.
         for (label, provider, base_url, model) in [
             (
                 "custom gateway keeps its own dialect",
@@ -9505,11 +9505,41 @@ mod tests {
                 "https://api.kimi.com/coding/v1",
                 "k3.1-pro",
             ),
+            (
+                "non-moonshot provider keeps its own dialect on the direct platform",
+                ApiProvider::Openai,
+                "https://api.moonshot.ai/v1",
+                "kimi-k3.1-pro",
+            ),
         ] {
             assert_eq!(
                 tool_assistant_reasoning(label, provider, base_url, model, None),
                 None,
                 "{label}: reasoning_content must stay stripped outside the vendor routes"
+            );
+        }
+
+        // The spelling matcher is route-family-wide (documented: "all four
+        // spellings on both vendor routes"), so the cross-family pairings —
+        // the direct spelling on the membership endpoint and vice versa —
+        // replay too, even though config validation rejects those pairings
+        // before a request can be built.
+        for (label, base_url, model) in [
+            (
+                "direct spelling on the membership route",
+                "https://api.kimi.com/coding/v1",
+                "kimi-k3.1-pro",
+            ),
+            (
+                "membership spelling on the direct route",
+                "https://api.moonshot.ai/v1",
+                "k3.1-pro-highspeed",
+            ),
+        ] {
+            assert_eq!(
+                tool_assistant_reasoning(label, ApiProvider::Moonshot, base_url, model, None),
+                Some("Need to call a tool".to_string()),
+                "{label}: the replay contract is spelling-family-wide on vendor routes"
             );
         }
     }
