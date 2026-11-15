@@ -25,14 +25,9 @@ type grantRecoveryRepository interface {
 func (s *Service) registerGrantRecoveryRoutes(admin *httpserver.RouteGroup) {
 	admin.GET("/approval-grant-recovery-cases", httpserver.AdaptFunc(s.adminGrantRecoveryCases))
 	admin.GET("/approval-grant-recovery-cases/:case_id", httpserver.AdaptFunc(s.adminGrantRecoveryCase))
-	for _, route := range []struct{ path, action, policy string }{
-		{"observations", "OBSERVE", "APPROVAL_GRANT_RECOVERY_OBSERVE"},
-		{"proposals", "PROPOSE", "APPROVAL_GRANT_RECOVERY_PROPOSE"},
-		{"reviews", "REVIEW", "APPROVAL_GRANT_RECOVERY_REVIEW"},
-	} {
-		action := route.action
-		admin.POST("/approval-grant-recovery-cases/:case_id/"+route.path, approvalpolicy.Require(route.policy, approvalpolicy.AuditOnly), httpserver.AdaptFunc(func(w http.ResponseWriter, r *http.Request) { s.adminGrantRecoveryMutation(w, r, action) }))
-	}
+	admin.POST("/approval-grant-recovery-cases/:case_id/observations", approvalpolicy.Require("APPROVAL_GRANT_RECOVERY_OBSERVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(func(w http.ResponseWriter, r *http.Request) { s.adminGrantRecoveryMutation(w, r, "OBSERVE") }))
+	admin.POST("/approval-grant-recovery-cases/:case_id/proposals", approvalpolicy.Require("APPROVAL_GRANT_RECOVERY_PROPOSE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(func(w http.ResponseWriter, r *http.Request) { s.adminGrantRecoveryMutation(w, r, "PROPOSE") }))
+	admin.POST("/approval-grant-recovery-cases/:case_id/reviews", approvalpolicy.Require("APPROVAL_GRANT_RECOVERY_REVIEW", approvalpolicy.AuditOnly), httpserver.AdaptFunc(func(w http.ResponseWriter, r *http.Request) { s.adminGrantRecoveryMutation(w, r, "REVIEW") }))
 }
 
 func (s *Service) grantRecoveryRepository(w http.ResponseWriter, r *http.Request) (grantRecoveryRepository, bool) {
