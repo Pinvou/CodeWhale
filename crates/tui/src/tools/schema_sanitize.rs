@@ -345,6 +345,13 @@ impl DefectWalk {
 #[derive(Default)]
 struct PairAdmission<'a> {
     enclosing: SchemaView<'a>,
+    /// Whether the enclosing schema constrains instances through nothing
+    /// beyond `type`/`properties`/`required` (own-level composition aside):
+    /// the broad-matcher arm's omission witness is only guaranteed
+    /// root-valid under that bounded shape — a `minProperties` floor with
+    /// `additionalProperties: false` can make every omission impossible
+    /// while the keys stay otherwise ordinary (review 4580299113).
+    enclosing_omission_clean: bool,
     /// Every branch of the union under judgment. The pin arm's witness
     /// must fail not only the pair's right branch but every OTHER branch
     /// together (review 4511007764): pairwise-distinct witnesses — one
@@ -490,7 +497,11 @@ fn entries_admit_common_value(left: &Value, right: &Value) -> bool {
     let left_type = left.get("type").and_then(Value::as_str);
     let right_type = right.get("type").and_then(Value::as_str);
     match (left_set, right_set) {
-        (Some(left), Some(right)) => left.iter().any(|candidate| right.contains(candidate)),
+        (Some(left), Some(right)) => left.iter().any(|candidate| {
+            right
+                .iter()
+                .any(|allowed| schema_value_equal(allowed, candidate))
+        }),
         (Some(values), None) => values.iter().any(|candidate| {
             right_type.is_none_or(|expected| json_value_is_type(candidate, expected))
         }),
@@ -517,6 +528,22 @@ fn shape_is_structural(schema: &Value) -> bool {
                 "type" | "properties" | "required" | "oneOf" | "anyOf"
             )
         })
+    })
+}
+
+/// Whether the schema carries a composition keyword at its OWN level. The
+/// witness arms evaluate only the outer `required`/`properties` and the
+/// carried field entries' value pins, so an `anyOf` beside the admitted
+/// keywords — the CR's shape (review 4574653781) — constrains the same
+/// instance through constraints the arms never read, and the witness
+/// stays unproven (fail closed to the flattening fallback). Own-level
+/// composition is also the complete same-instance chain: `properties.*` /
+/// `items` / `additionalProperties` subtrees are DIFFERENT instances
+/// (their constraints are judged by the permissiveness checks), so
+/// nothing deeper can constrain the witnessed object.
+fn schema_carries_unproven_composition(schema: &Value) -> bool {
+    schema.as_object().is_some_and(|obj| {
+        obj.contains_key("oneOf") || obj.contains_key("anyOf") || obj.contains_key("allOf")
     })
 }
 
@@ -557,7 +584,11 @@ fn pinned_value_set(entry: &Value) -> Option<Vec<Value>> {
     // `const` and `enum` constrain jointly: a co-present `enum` admits the
     // pinned const only when the const is one of its members.
     if let Some(allowed) = obj.get("enum").and_then(Value::as_array) {
-        values.retain(|candidate| allowed.contains(candidate));
+        values.retain(|candidate| {
+            allowed
+                .iter()
+                .any(|allowed| schema_value_equal(allowed, candidate))
+        });
     }
     values.retain(|candidate| {
         declared.is_none_or(|expected| json_value_is_type(candidate, expected))
@@ -566,6 +597,102 @@ fn pinned_value_set(entry: &Value) -> Option<Vec<Value>> {
         return None;
     }
     Some(values)
+}
+
+/// Exact JSON Schema numeric equality. Integer/integer pairs compare
+/// through their stored i64/u64 values — distinct pins such as
+/// `9007199254740992` and `9007199254740993` both collapse to the same
+/// f64, and a rounding comparison would declare a real discriminator
+/// equal, flatten the union, and drop one branch's previously valid
+/// input (review 4579521065). When a float participates, JSON Schema
+/// still equates `1` with `1.0`, but an integer converts through f64
+/// losslessly only within ±2^53; outside that window equality is
+/// DECLINED (reported unequal) and the pair fails closed to the
+/// flattening fallback rather than risking a collided proof.
+fn schema_number_equal(a: &serde_json::Number, b: &serde_json::Number) -> bool {
+    let a_int = a
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| a.as_u64().map(i128::from));
+    let b_int = b
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| b.as_u64().map(i128::from));
+    if let (Some(x), Some(y)) = (a_int, b_int) {
+        return x == y;
+    }
+    let (fa, fb) = (a.as_f64(), b.as_f64());
+    if fa != fb {
+        return false;
+    }
+    let converts_exactly = |int_side: Option<i128>| match int_side {
+        Some(value) => value.abs() <= 9_007_199_254_740_992,
+        None => true,
+    };
+    converts_exactly(a_int) && converts_exactly(b_int)
+}
+
+/// Whether two pin values are PROVABLY disjoint. Pairwise exclusion is an
+/// affirmative proof, so unknown must not masquerade as disjoint: an
+/// integer outside ±2^53 beside a float of the same rounded value is
+/// mathematically equal or different beyond what f64 can decide, and
+/// treating the comparison as unequal would "prove" a discriminator
+/// between semantically equivalent branches and keep an unsatisfiable
+/// union (review thread PRRT_kwDOTh_H9863shgR). Numbers with float
+/// participation outside the exact window are therefore NOT provably
+/// disjoint; non-numeric pairs compare structurally.
+fn pin_values_provably_disjoint(a: &Value, b: &Value) -> bool {
+    match (a.as_number(), b.as_number()) {
+        (Some(x), Some(y)) => {
+            let xi = x
+                .as_i64()
+                .map(i128::from)
+                .or_else(|| x.as_u64().map(i128::from));
+            let yi = y
+                .as_i64()
+                .map(i128::from)
+                .or_else(|| y.as_u64().map(i128::from));
+            if let (Some(p), Some(q)) = (xi, yi) {
+                return p != q;
+            }
+            let (fx, fy) = (x.as_f64(), y.as_f64());
+            if fx != fy {
+                return true;
+            }
+            // f64-equal with a float (or an in-window integer) side:
+            // mathematically equal as far as the representation decides.
+            false
+        }
+        _ => !schema_value_equal(a, b),
+    }
+}
+
+/// JSON Schema semantic equality for pin values. JSON Schema `const`/`enum`
+/// membership treats `1` and `1.0` as the same number, while serde_json's
+/// derived equality compares across integer/float variants as unequal —
+/// representation equality would falsely prove two semantically equivalent
+/// branches disjoint and keep an unsatisfiable union (review 4578150947).
+/// Numbers compare by mathematical value through [`schema_number_equal`]
+/// (never routed through f64); arrays and objects recurse element-wise;
+/// everything else compares structurally.
+fn schema_value_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(a), Value::Number(b)) => schema_number_equal(a, b),
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| schema_value_equal(x, y))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter().all(|(key, value)| {
+                    b.get(key)
+                        .is_some_and(|other| schema_value_equal(value, other))
+                })
+        }
+        _ => left == right,
+    }
 }
 
 /// Bounded type check for the pin arm's enclosing-admissibility test.
@@ -586,6 +713,12 @@ fn json_value_is_type(candidate: &Value, expected: &str) -> bool {
 
 /// A branch's surviving `required` group: the string names, sorted and
 /// deduplicated.
+/// The branch's surviving required group when it is non-empty.
+fn constrained_group(branch: &Value) -> Option<Vec<&str>> {
+    let group = branch_required_names(branch);
+    (!group.is_empty()).then_some(group)
+}
+
 fn branch_required_names(branch: &Value) -> Vec<&str> {
     let mut names: Vec<&str> = branch
         .get("required")
@@ -660,7 +793,9 @@ impl<'a> PairAdmission<'a> {
                 (pinned_value_set(left_entry), pinned_value_set(right_entry))
                 && self.witness_provable(left, left_group, &self.enclosing)
                 && left_set.iter().any(|candidate| {
-                    !right_set.contains(candidate)
+                    right_set
+                        .iter()
+                        .all(|value| pin_values_provably_disjoint(value, candidate))
                         && self.enclosing_entry_admits(name.as_str(), candidate)
                         && self.branches.iter().enumerate().all(|(index, other)| {
                             index == left_index
@@ -668,7 +803,11 @@ impl<'a> PairAdmission<'a> {
                                     .get("properties")
                                     .and_then(|props| props.get(name.as_str()))
                                     .and_then(pinned_value_set)
-                                    .is_some_and(|set| !set.contains(candidate))
+                                    .is_some_and(|set| {
+                                        set.iter().all(|value| {
+                                            pin_values_provably_disjoint(value, candidate)
+                                        })
+                                    })
                         })
                 })
             {
@@ -702,6 +841,65 @@ impl<'a> PairAdmission<'a> {
                 return true;
             }
         }
+        // Arm 4 — broad-matcher pair (review thread PRRT_kwDOTh_H9863sevQ):
+        // one branch constrains nothing beyond objectness (structural keys,
+        // no surviving required group, no property entries) while the other
+        // carries a non-empty surviving required group. Instances omitting
+        // that group match the broad branch and fail the constrained one,
+        // so the union's exactly-one accepted set is non-empty and
+        // pass-through preserves the original contract verbatim — while
+        // the flattening fallback merges the constrained branch's fields
+        // into the root and silently widens it ({"x":"v"} flipping from
+        // rejected to accepted). The multi-branch pin overlap that demands
+        // two-directional proofs is untouched: those branches carry their
+        // own required groups, so no branch here is broad.
+        let broad = |branch: &Value| -> bool {
+            // Own-level composition is excluded along with the rest: a
+            // branch carrying an `anyOf` whose entries require the sibling's
+            // group accepts exactly the sibling's objects while this
+            // predicate would otherwise call it broad, and the pairwise
+            // proof preserves an impossible union (review 4579889873) —
+            // the same-instance blindness the witness guard exists for.
+            !schema_carries_unproven_composition(branch)
+                && shape_is_structural(branch)
+                && branch
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .is_none_or(|required| required.is_empty())
+                && branch
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .is_none_or(|props| props.is_empty())
+        };
+
+        // The omission witness must stay ROOT-VALID: a group name the
+        // enclosing schema itself requires cannot be omitted, and when the
+        // enclosing schema requires the constrained branch's whole group,
+        // every root-valid instance matches both branches and exactly-one
+        // accepts nothing over the root-valid domain (review 4580074704 —
+        // the valid pre-prune dependentRequired example stays
+        // reproducible). The arm fires only when the group carries at
+        // least one name free of the enclosing requirement.
+        let free_of_enclosing = |group: &[&str]| -> bool {
+            group
+                .iter()
+                .any(|name| !self.enclosing.required.contains(name))
+        };
+        if !self.enclosing_omission_clean {
+            return false;
+        }
+        if let Some(group) = constrained_group(right)
+            && broad(left)
+            && free_of_enclosing(&group)
+        {
+            return true;
+        }
+        if let Some(group) = constrained_group(left)
+            && broad(right)
+            && free_of_enclosing(&group)
+        {
+            return true;
+        }
         false
     }
 
@@ -722,6 +920,18 @@ impl<'a> PairAdmission<'a> {
         enclosing: &SchemaView<'a>,
     ) -> bool {
         if !shape_is_structural(left) || !enclosing.structural {
+            return false;
+        }
+        // A composition keyword at the left shape's own level constrains
+        // the same instance through constraints the witness arms never
+        // read (review 4574653781): the group arm builds an omission
+        // witness from the outer `required`/`properties` alone, so two
+        // branches whose nested `anyOf` entries require the OTHER field
+        // are semantically equivalent while both omission witnesses appear
+        // provable. An unproven composition keeps the pair unproven — the
+        // union takes the protective flattening fallback instead of
+        // shipping an unsatisfiable exactly-one.
+        if schema_carries_unproven_composition(left) {
             return false;
         }
         let left_props = left.get("properties").and_then(Value::as_object);
@@ -768,10 +978,12 @@ impl<'a> PairAdmission<'a> {
             return false;
         }
         if let Some(pinned) = obj.get("const") {
-            return pinned == candidate;
+            return schema_value_equal(pinned, candidate);
         }
         if let Some(values) = obj.get("enum").and_then(Value::as_array) {
-            return values.contains(candidate);
+            return values
+                .iter()
+                .any(|value| schema_value_equal(value, candidate));
         }
         if let Some(expected) = obj.get("type").and_then(Value::as_str) {
             return json_value_is_type(candidate, expected);
@@ -818,6 +1030,9 @@ fn unions_lack_pairwise_discrimination(
     }
     let admission = PairAdmission {
         enclosing: SchemaView::of_object(enclosing),
+        enclosing_omission_clean: enclosing
+            .keys()
+            .all(|key| matches!(key.as_str(), "type" | "properties" | "required" | "oneOf")),
         branches,
     };
     let groups: Vec<Vec<&str>> = branches.iter().map(branch_required_names).collect();
@@ -1033,6 +1248,20 @@ fn oneof_node_defect(
             "R2 {count} branches share the required group {group:?} at {path}"
         ));
     }
+    // R3: a branch carrying a dead inner union cannot match. Named BEFORE
+    // the pairwise admission arm: the witness guard (review 4574653781)
+    // leaves every branch carrying nested composition unproven, so a dead
+    // inner union would otherwise always be shadowed by the coarser R2
+    // naming — the R3 recursion is the more specific diagnosis of the
+    // same defect, and both rules flatten (this function only labels;
+    // the production caller flattens whenever any rule fires).
+    for (index, branch) in branches.iter().enumerate() {
+        if let Some(inner) = walk.subtree_defect(branch, &format!("{path}.oneOf[{index}]")) {
+            return Some(format!(
+                "R3 branch {index} at {path} carries a dead inner union: {inner}"
+            ));
+        }
+    }
     // R2 (pairwise admission, reviews 5812488975 and 5814012140): the
     // shared-group arm above only fires on signatures that normalize
     // equal. Two more registry forms slip past it while the union serves
@@ -1044,14 +1273,6 @@ fn oneof_node_defect(
     // takes the compatible flattening fallback.
     if let Some(reason) = unions_lack_pairwise_discrimination(branches, enclosing, path) {
         return Some(reason);
-    }
-    // R3: a branch carrying a dead inner union cannot match.
-    for (index, branch) in branches.iter().enumerate() {
-        if let Some(inner) = walk.subtree_defect(branch, &format!("{path}.oneOf[{index}]")) {
-            return Some(format!(
-                "R3 branch {index} at {path} carries a dead inner union: {inner}"
-            ));
-        }
     }
     None
 }
@@ -4028,6 +4249,402 @@ mod tests {
         assert!(
             branches.is_some_and(|branches| branches.len() == 2),
             "consistent const-in-enum pins must keep pass-through: {consistent}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_takes_the_fallback_for_nested_composition_branch_witnesses() {
+        // Review 4574653781: a branch may carry its own `anyOf` whose
+        // entries require the OTHER field. The witness arms evaluate only
+        // the outer `required`/`properties`, so both ordered pairs built an
+        // apparent omission witness while the two branches were in fact
+        // semantically equivalent — the retained union accepted nothing. An
+        // unproven composition at the branch's own level keeps the pair
+        // unproven and the union takes the protective flattening fallback,
+        // whose merged object admits the instances the original contract
+        // served.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {}, "b": {}},
+                    "required": ["a"],
+                    "anyOf": [
+                        {"type": "object", "properties": {"b": {}}, "required": ["b"]},
+                        {"type": "object", "properties": {"b": {}}, "required": ["b"]}
+                    ]
+                },
+                {
+                    "type": "object",
+                    "properties": {"a": {}, "b": {}},
+                    "required": ["b"],
+                    "anyOf": [
+                        {"type": "object", "properties": {"a": {}}, "required": ["a"]},
+                        {"type": "object", "properties": {"a": {}}, "required": ["a"]}
+                    ]
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "the semantically equivalent union must not reach the wire: {schema}"
+        );
+        assert!(
+            schema["properties"].get("a").is_some() && schema["properties"].get("b").is_some(),
+            "the shared root properties must survive the fallback: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x"})) && validator.is_valid(&json!({"b": "y"})),
+            "the flattened fallback must keep both field forms usable: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_takes_the_fallback_for_numeric_pins_equal_under_schema_semantics() {
+        // Review 4578150947: JSON Schema treats `1` and `1.0` as the same
+        // number, while serde_json's derived equality compares across
+        // integer/float variants as unequal. Two branches pinned to
+        // `kind: {const: 1}` and `{const: 1.0}` with opposite
+        // `dependentRequired` rules have valid original inputs, but the
+        // deliberate dependent-keyword drop makes the branches equivalent —
+        // and representation equality falsely proved them disjoint, keeping
+        // the now-unsatisfiable `oneOf` on the wire. Pin membership must use
+        // schema-semantic equality, so the pair stays unproven and the
+        // flattening fallback ships a usable contract.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "kind": {"type": "integer"},
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": 1}, "a": {"type": "string"}},
+                    "required": ["kind"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": 1.0}, "b": {"type": "string"}},
+                    "required": ["kind"]
+                }
+            ],
+            "dependentRequired": {"kind": ["a", "b"]}
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "the semantically equivalent numeric pins must not keep the union: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"kind": 1})),
+            "a kind-only argument must stay usable after the fallback: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_keeps_distinct_big_integer_pins_discriminated() {
+        // Review 4579521065: distinct integer pins such as 9007199254740992
+        // and 9007199254740993 collapse to the same f64, so a rounding
+        // comparison declared the real discriminator equal and flattened
+        // the union — which retains only one pin and rejects the other
+        // branch's previously valid input. Integers compare exactly, so
+        // the union keeps pass-through with both branches, and a compiled
+        // validator accepts either pin value.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"kind": {"type": "integer"}},
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": 9007199254740992u64}},
+                    "required": ["kind"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": 9007199254740993u64}},
+                    "required": ["kind"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_some(),
+            "exact integer pins are a real discriminator and must keep the union: {schema}"
+        );
+        assert_eq!(note, None);
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the shipped schema must compile");
+        assert!(
+            validator.is_valid(&json!({"kind": 9007199254740992u64}))
+                && validator.is_valid(&json!({"kind": 9007199254740993u64})),
+            "both branch inputs must stay valid: {schema}"
+        );
+
+        // An integer whose f64 conversion is lossy beside a float of the
+        // same rounded value: equality is declined (fail closed), so the
+        // equivalent-after-drop pair still takes the flattening fallback
+        // instead of a collided proof.
+        let mut collided = json!({
+            "type": "object",
+            "properties": {"kind": {"type": "integer"}, "a": {"type": "string"}},
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": 9007199254740993u64}},
+                    "required": ["kind"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": 9.007199254740993e15}},
+                    "required": ["kind"]
+                }
+            ],
+            "dependentRequired": {"kind": ["a"]}
+        });
+        sanitize_for_xai_parameters(&mut collided);
+        assert!(
+            collided.get("oneOf").is_none(),
+            "equality outside the exact-integer window must be declined, not collided: {collided}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_keeps_the_broad_and_narrow_object_union_through() {
+        // Review thread PRRT_kwDOTh_H9863sevQ: one branch constrains
+        // nothing beyond objectness while the other requires `x` — the
+        // union IS satisfiable (`{}` matches only the broad branch;
+        // `{"x":"v"}` matches both and exactly-one rejects it). The
+        // two-directional witness demand used to flatten this shape,
+        // merging `x` into the root and silently widening the contract
+        // (`{"x":"v"}` accepted, `{"x":3}` still accepted). The
+        // broad-matcher arm keeps the union verbatim, so the original
+        // accepted and rejected sets survive untouched.
+        let mut schema = json!({
+            "type": "object",
+            "oneOf": [
+                {"type": "object"},
+                {
+                    "type": "object",
+                    "properties": {"x": {"type": "string"}},
+                    "required": ["x"]
+                }
+            ]
+        });
+
+        let note = sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_some(),
+            "the satisfiable broad+narrow union must keep pass-through: {schema}"
+        );
+        assert_eq!(note, None);
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the shipped schema must compile");
+        assert!(
+            validator.is_valid(&json!({})),
+            "an object matching only the broad branch stays valid: {schema}"
+        );
+        assert!(
+            !validator.is_valid(&json!({"x": "v"})),
+            "an object matching both branches stays rejected: {schema}"
+        );
+        assert!(
+            validator.is_valid(&json!({"x": 3})),
+            "an object failing the narrow branch's type stays valid: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_takes_the_fallback_when_mixed_number_equality_is_unknown() {
+        // Review thread PRRT_kwDOTh_H9863shgR: `9007199254740994` and
+        // `9.007199254740994e15` are mathematically equal but only their
+        // f64 values agree — the integer exceeds the ±2^53 exact window,
+        // so disjointness is NOT provable. A root `type: number` union
+        // distinguishing these pins via branch-local `dependentSchemas`
+        // loses that distinction when the dependent keywords drop; treating
+        // the unknown comparison as disjoint "proved" a discriminator
+        // between now-equivalent branches and shipped an unsatisfiable
+        // union. Unknown equality keeps the pair unproven and the union
+        // takes the flattening fallback.
+        // The branches arrive at the admission arms with the dependent
+        // keywords already stripped (the pass-through drops them with the
+        // constraint note), so only the mixed-number pins remain to
+        // distinguish them.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"kind": {"type": "number"}, "a": {"type": "string"}},
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": 9007199254740994u64}},
+                    "required": ["kind"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": 9.007199254740994e15}},
+                    "required": ["kind"]
+                }
+            ],
+            "dependentRequired": {"kind": ["a"]}
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "an unknown mixed-number comparison must not prove disjointness: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_the_composition_broad_branch_pair() {
+        // Review 4579889873: a branch whose only same-instance constraint
+        // lives in its own `anyOf` has no top-level `required`/`properties`,
+        // so the broad-matcher arm used to call it broad beside a
+        // constrained sibling — but after normalization both branches
+        // accept exactly the same objects and the preserved outer `oneOf`
+        // accepts none. A broad branch must carry no own-level
+        // composition; this pair takes the flattening fallback.
+        let branch_with_anyof = |group: &str| {
+            json!({
+                "type": "object",
+                "anyOf": [
+                    {"type": "object", "properties": {group: {"type": "string"}}, "required": [group]},
+                    {"type": "object", "properties": {group: {"type": "string"}}, "required": [group]}
+                ]
+            })
+        };
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "oneOf": [
+                branch_with_anyof("x"),
+                {
+                    "type": "object",
+                    "properties": {"x": {"type": "string"}},
+                    "required": ["x"]
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "the composition-broad pair must not keep the impossible union: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"x": "v"})),
+            "the merged contract must keep the shared form usable: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_the_broad_pair_when_the_enclosing_requires_the_group() {
+        // Review 4580074703: when the ENCLOSING schema requires the same
+        // fields the constrained branch requires, every root-valid
+        // instance matches both branches — the omission witness cannot be
+        // root-valid — and the preserved union would accept nothing. The
+        // broad-matcher arm must stay silent here and let the flattening
+        // fallback ship a usable merged contract.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "required": ["x"],
+            "oneOf": [
+                {"type": "object"},
+                {
+                    "type": "object",
+                    "properties": {"x": {"type": "string"}},
+                    "required": ["x"]
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "a group fully required by the enclosing schema leaves no exactly-one instance: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"x": "v"})),
+            "the merged contract keeps the root-valid form usable: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_the_broad_pair_under_enclosing_floor_constraints() {
+        // Review 4580299113: the omission witness can be impossible even
+        // without an enclosing `required` — `minProperties: 1` beside
+        // `additionalProperties: false` with only root property `x` forces
+        // every root-valid instance to carry `x`, so the broad+narrow pair
+        // matches both branches everywhere and the preserved union accepts
+        // nothing. Enclosing schemas carrying instance-existence keywords
+        // beyond the bounded shape keep the arm silent; the flattening
+        // fallback ships the merged contract.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"x": {"type": "string"}},
+            "minProperties": 1,
+            "additionalProperties": false,
+            "oneOf": [
+                {"type": "object"},
+                {
+                    "type": "object",
+                    "properties": {"x": {"type": "string"}},
+                    "required": ["x"]
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "an enclosing floor can make every omission impossible: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"x": "v"})),
+            "the merged contract keeps the root-valid form usable: {schema}"
         );
     }
 
