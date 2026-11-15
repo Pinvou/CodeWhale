@@ -20,6 +20,15 @@ func DownOne(ctx context.Context, conn *pgx.Conn, input []migrations.Migration) 
 
 func retainedRollbackGuard(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
 	switch migration.Version {
+	case 10:
+		// The frozen Up overwrites the four legacy enabled flags, so the
+		// default-looking installed state cannot prove the prior catalog.
+		return errors.New("plan catalog rollback cannot preserve prior product availability")
+	case 14:
+		return requireNoHistoricalRollbackFacts(ctx, tx,
+			`LOCK TABLE payment_notifications,payment_order_repairs IN SHARE ROW EXCLUSIVE MODE`,
+			`SELECT EXISTS(SELECT 1 FROM payment_notifications WHERE result='MANUAL_REVIEW') OR EXISTS(SELECT 1 FROM payment_order_repairs)`,
+			"payment repair rollback cannot preserve review and repair facts")
 	case 23:
 		// Serialize both inputs to the frozen Down's SKU projection. Original
 		// 010 excludes empty SKUs; 023 Down's unique index includes them.
@@ -45,6 +54,20 @@ func retainedRollbackGuard(ctx context.Context, tx pgx.Tx, migration migrations.
 		// REPAIR_CREDIT journal types. Do not rewrite historical SQL or allow
 		// a successful rollback to advertise an incompatible prior schema.
 		return errors.New("receivable rollback does not restore the prior journal entry contract")
+	case 27:
+		// Up folds historical refund order and fulfillment states into payment
+		// success. A remaining paid or credited order cannot prove its old state.
+		return requireNoHistoricalRollbackFacts(ctx, tx,
+			`LOCK TABLE payment_orders,entitlement_packages,refunds,refund_component_reservations,refund_grant_reservations,forced_refund_cases,payment_evidence,member_quota_grants IN SHARE ROW EXCLUSIVE MODE`,
+			`SELECT EXISTS(SELECT 1 FROM payment_orders WHERE status IN ('PAID','PAID_LATE') OR fulfillment_status='CREDITED')
+ OR EXISTS(SELECT 1 FROM entitlement_packages WHERE status='REVOKED')
+ OR EXISTS(SELECT 1 FROM refunds)
+ OR EXISTS(SELECT 1 FROM refund_component_reservations)
+ OR EXISTS(SELECT 1 FROM refund_grant_reservations)
+ OR EXISTS(SELECT 1 FROM forced_refund_cases)
+ OR EXISTS(SELECT 1 FROM payment_evidence WHERE evidence_type='FORCED_REFUND')
+ OR EXISTS(SELECT 1 FROM member_quota_grants WHERE suspension_reason IN ('REFUND_PENDING','FORCED_REFUND_REVIEW'))`,
+			"targeted refund rollback cannot preserve original payment and refund facts")
 	case 29:
 		if _, err := tx.Exec(ctx, `LOCK TABLE manual_review_cases,manual_review_case_events IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 			return err
@@ -71,10 +94,31 @@ func retainedRollbackGuard(ctx context.Context, tx pgx.Tx, migration migrations.
 		// Frozen Down is a comment; removing its ledger would advertise a
 		// reversal without recovering the cleared external payment instructions.
 		return errors.New("terminal payment instruction cleanup is irreversible")
+	case 49:
+		// A later observation may move an expired order out of EXPIRED without
+		// recovering the original state or payment instructions cleared by Up.
+		return requireNoHistoricalRollbackFacts(ctx, tx,
+			`LOCK TABLE payment_orders IN SHARE ROW EXCLUSIVE MODE`,
+			`SELECT EXISTS(SELECT 1 FROM payment_orders)`,
+			"local expiry rollback cannot preserve original order state and payment instructions")
 	case 51:
 		// The comment-only Down preserves repaired concurrency facts. Keep
 		// their migration ledger as well instead of advertising a reversal.
 		return errors.New("pricing space version repair is irreversible")
+	}
+	return nil
+}
+
+func requireNoHistoricalRollbackFacts(ctx context.Context, tx pgx.Tx, lockSQL, factsSQL, reason string) error {
+	if _, err := tx.Exec(ctx, lockSQL); err != nil {
+		return err
+	}
+	var present bool
+	if err := tx.QueryRow(ctx, factsSQL).Scan(&present); err != nil {
+		return err
+	}
+	if present {
+		return errors.New(reason)
 	}
 	return nil
 }
