@@ -96,6 +96,45 @@ test('Account approval worker producer returns only its direct literal registry'
     text.replace(start, 'return append([]accountBackgroundTask{').replace(end, '\n\t}, dynamicTasks()...), nil'),
     text.replace(start, 'var tasks = []accountBackgroundTask{').replace(end, '\n\t}\n\ttasks[0].name = "changed"\n\treturn tasks, nil'),
     text.replace(start, 'tasks := []accountBackgroundTask{').replace(end, '\n\t}\n\treturn tasks, nil'),
+    text.replace(start, 'unused := func() ([]accountBackgroundTask, error) {\nreturn []accountBackgroundTask{')
+      .replace(end, '\n\t}, nil\n}\n_ = unused\nreturn nil, nil'),
+    text.replace(start, 'if false {\nreturn []accountBackgroundTask{')
+      .replace(end, '\n\t}, nil\n}\nreturn nil, nil'),
+    text.replace(start, 'if enabled("UNSUPPORTED_FACTORY_CONDITION") {\nreturn []accountBackgroundTask{')
+      .replace(end, '\n\t}, nil\n}\nreturn nil, errors.New("NO_WORKERS")'),
+    text.replace(start, '_ = accountBackgroundTask{"unconsumed-worker", account.NewApprovalExpiryWorker(repository, time.Minute).Run}\n' + start),
+    text.replace(start, 'if environment == "production" {\nreturn nil, err\n}\n' + start),
+    text.replace(start, 'if err != nil {\nerr = nil\nreturn nil, err\n}\n' + start),
+    text.replace(start, 'errors := dynamicErrorFactory()\n_ = errors\n' + start),
+    text.replace('\n\t"errors"\n', '\n\tstandardErrors "errors"\n'),
+  ]) {
+    assert.notEqual(replacement, text);
+    assert.throws(() => authorizationTasks(source, replacement), /unrecognized_background_task/);
+  }
+});
+
+test('production Account main consumes its complete registry at main scope', async () => {
+  const source = 'account-platform/cmd/account-service/main.go';
+  const text = await readFile(new URL('../../cmd/account-service/main.go', import.meta.url), 'utf8');
+  const startup = 'workersDone := startAccountBackground(ctx, workers)';
+  const merge = 'workers = append(workers, approvalWorkers...)';
+  const walletLines = text.split('\n').filter(line => line.includes('workers = append(workers, accountBackgroundTask{"wallet-provisioning",'));
+  assert.equal(walletLines.length, 1);
+  const wallet = walletLines[0];
+  assert.equal(text.split(startup).length, 2);
+  assert.equal(text.split(merge).length, 2);
+  assert.equal(authorizationTasks(source, text).length, 8);
+  for (const replacement of [
+    text.replace(startup, 'workersDone := make(chan struct{})'),
+    text.replace(startup, 'workersDone := startAccountBackground(ctx, []accountBackgroundTask{})'),
+    text.replace(startup, 'unused := func() <-chan struct{} {\n' + startup + '\nreturn workersDone\n}\n_ = unused\nworkersDone := make(chan struct{})'),
+    text.replace(startup, 'var workersDone <-chan struct{}\nif false {\n' + startup + '\n_ = workersDone\n}'),
+    text.replace(merge, '_ = approvalWorkers'),
+    text.replace(merge, '').replace(startup, startup + '\n' + merge),
+    text.replace(startup, '').replace(merge, merge + '\n' + startup),
+    text.replace(merge, merge + '\napprovalWorkers = append(approvalWorkers, accountBackgroundTask{"late-approval", worker.Run})'),
+    text.replace(wallet, 'unusedWallet := func() {\n' + wallet + '\n}\n_ = unusedWallet'),
+    text.replace(wallet, wallet + '\n_ = accountBackgroundTask{"unconsumed-worker", account.NewMobileRetentionWorker(repository, time.Hour).Run}'),
   ]) {
     assert.notEqual(replacement, text);
     assert.throws(() => authorizationTasks(source, replacement), /unrecognized_background_task/);

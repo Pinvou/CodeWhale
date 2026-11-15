@@ -161,7 +161,7 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {'TestBillingHistoricalCatalogRollbackPostgres', 'TestBillingOrdinaryReplayOriginalMigrationPostgres', 'TestChargebackPrincipalRegisteredIdentity', 'TestF04PublicTokenUserOwnerAuthorityAndDirectory', 'TestF09EntitlementPackageIndexPublicMigration', 'TestLatePaymentQueryRegisteredIdentity', 'TestLegacyEntitlementUpgradeAdmissionPostgres', 'TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres', 'TestManualRetentionHistoricalHardeningPostgres', 'TestOrphanPaidOrderIndexPublicMigration', 'TestReconciliationFairRetryRegisteredIdentity', 'TestTokenWalletReceiptSchemaPostgres', 'TestUnknownProviderEntryPublicMigrationPostgres', 'TestUsageWaiverHistoricalSchemaPostgres'}
+SCHEMA_REQUIRED = {"TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestChargebackPrincipalRegisteredIdentity", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestF09EntitlementPackageIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestManualRetentionHistoricalHardeningPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestReconciliationFairRetryRegisteredIdentity", "TestTokenWalletReceiptSchemaPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestUsageWaiverHistoricalSchemaPostgres"}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -311,6 +311,18 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestOrganizationStartupDiagnosticsPostgres": {
         "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestBillingHistoricalStateRollbackPostgres": {
+        f"version{version}/seeded={seeded}{suffix}"
+        for version in (10, 14, 27, 49)
+        for seeded in ("false", "true")
+        for suffix in ("", "/actual-cli")
+    } | {
+        f"version{version}/seeded=true/archived-cli" for version in (10, 14, 27, 49)
+    } | {
+        f"{scenario}{suffix}"
+        for scenario in ("version14/repair-only", "version27/revoked-only", "version49/advanced-after-expiry")
+        for suffix in ("", "/actual-cli")
     },
     "TestReplayRetentionBoundedCleanupPublicPostgres": {
         "one-large-unsettled-stream-is-row-bounded-and-retryable",
