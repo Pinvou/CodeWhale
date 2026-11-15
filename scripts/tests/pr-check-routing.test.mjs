@@ -329,6 +329,22 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
+  {
+    const receipt = namedStep(jobBlock("windows-runtime-test", text), "上传 Windows runtime 资源收据");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: 上传 Windows runtime 资源收据",
+      "        if: always()",
+      "        timeout-minutes: 3",
+      "        uses: actions/upload-artifact@v7",
+      "        continue-on-error: true",
+      "        with:",
+      "          name: windows-runtime-receipts-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: ${{ runner.temp }}/windows-runtime-${{ github.run_id }}-${{ github.run_attempt }}/",
+      "          retention-days: 7",
+      "          if-no-files-found: warn",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
   // Explicit YAML keys may put comments/newlines before their value indicator.
   const keySeparator = String.raw`(?:\s|#[^\n]*(?:\n|$))*:`;
   assert.doesNotMatch(remainder, new RegExp(String.raw`\bcontinue-on-error\s*['"]?` + keySeparator),
@@ -386,6 +402,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     ["account-closure-test", "Account closure resource lifecycle receipts"],
     ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
     ["windows-codex-runtime-test", "Preserve ACP fixture exit receipt"],
+    ["windows-runtime-test", "上传 Windows runtime 资源收据"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,

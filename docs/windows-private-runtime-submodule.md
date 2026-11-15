@@ -113,7 +113,7 @@ job 自身只允许 `main`，Environment 可按发布策略进一步配置 prote
 
 所有 PR（包括同仓 PR）只运行不拉取大型运行时的 Windows 打包契约测试。只有 `main` 的发布链路
 push 或在 `main` 上执行的 `workflow_dispatch` 才能进入 `windows-release` 构建正式 NSIS；
-运行时缺失、gitlink 不一致或 LFS 对象未物化时仍会明确失败，避免产生不完整发布。
+运行时缺失、gitlink 不一致，或 Release 附件无法取得或未通过大小与 SHA-256 校验时仍会明确失败，避免产生不完整发布。
 
 `scripts/tauri/build.js` 是项目内 `tauri build` / `tauri bundle` 的统一入口：Windows
 构建前自动执行 staging，所有平台都会加载对应 config overlay，并在调用 Tauri CLI 前
@@ -181,7 +181,7 @@ cargo check
 `private-runtimes/windows` 运行时子模块内，父仓库中没有这两个文件，不要在父仓查找。
 
 不得使用 `git submodule update --remote` 参与发布构建，也不得只更新 gitlink 而不更新
-lock。若 Git LFS 没有拉取成功，resolver 会识别 pointer 文件并在打包前失败。
+lock。若缓存和下载都不能提供符合 manifest 大小与 SHA-256 的固定 Release 附件，初始化会失败；残留的 LFS pointer 仍会被 resolver 在打包前拒绝。
 
 ## 多平台扩展
 
