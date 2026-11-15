@@ -140,6 +140,26 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             with self.subTest(child=child), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(invalid, {root}, **options)
 
+
+    def test_registration_outbox_index_requires_both_actual_install_shapes(self):
+        root="TestRegistrationOutboxAggregateLookupPostgres"
+        self.assertIn(root,RUNNER.ACCOUNT_REQUIRED)
+        self.assertIn(root,RUNNER.ACCOUNT_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command=self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root,command[command.index("-run")+1])
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root],{"fresh-install","retained-upgrade"})
+        events=self.events({root},RUNNER.ACCOUNT_PACKAGE,children=True)
+        options={"package":RUNNER.ACCOUNT_PACKAGE,"exact_roots":True,"require_children":True}
+        RUNNER.verify_results(events,{root},**options)
+        for child in (root,root+"/fresh-install",root+"/retained-upgrade"):
+            for invalid in (
+                [event for event in events if event.get("Test")!=child],
+                events+[{"Action":"skip","Package":RUNNER.ACCOUNT_PACKAGE,"Test":child}],
+            ):
+                with self.subTest(child=child),self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid,{root},**options)
+
     def test_catalog_rollback_requires_all_historical_versions_and_actual_cli(self):
         root = "TestBillingHistoricalCatalogRollbackPostgres"
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
@@ -262,6 +282,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_token_public_upgrade_phase_requires_retained_pre_cleanup_stage(self):
         root = "TestManagementPublicMigrationInstallation"
         self.assertEqual(RUNNER.TOKEN_SCHEMA_REQUIRED, {root})
+        self.assertIn("installed-pre-dispatch-index-40-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
+        self.assertIn("installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip", RUNNER.EXACT_REQUIRED_CHILDREN[root])
         self.run_main_fixture()
         index = self.fixture_phases.index("owner-token-schema")
         command = self.fixture_commands[index]
@@ -1383,6 +1405,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestOrganizationOriginalOwnerCancellationPublicPostgres",
     "TestRuntimeProtocolPublicationPublicPostgres",
             "TestReconciliationEvidenceMatchesPublicSchema",
+            "TestReplayRetentionBoundedCleanupPublicPostgres",
             "TestDispatchCircuitReadOnlyRecoveryPublicPostgres",
             "TestDispatchCircuitOpenAfterAdmissionNeverBecomesProbePostgres",
             "TestDispatchCircuitRecoveryDoesNotRequireSharedHealthClaimPostgres",
@@ -1396,6 +1419,29 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_zero_cases_is_not_success(self):
         with self.assertRaises(RuntimeError):
             RUNNER.verify_results([{"Action": "pass", "Package": "token"}])
+
+    def test_retention_batch_lock_and_atomic_retirement_children_are_required(self):
+        root = "TestReplayRetentionBoundedCleanupPublicPostgres"
+        names = {
+            "one-large-unsettled-stream-is-row-bounded-and-retryable",
+            "actual-worker-drains-full-batch-without-hourly-wait",
+            "locked-oldest-is-skipped-and-next-cycle-resumes",
+            "settled-stream-delete-is-bounded",
+            "active-case-parent-lock-serializes-copy-with-cleanup",
+            "tombstone-key-clear-is-atomic-bounded-and-protected-rows-do-not-starve",
+            "case-delete-and-payload-cascade-are-bounded",
+            "capacity-sample-10000-live-frames-plan-and-single-batch",
+            "content-lock-timeout-rolls-back-and-next-worker-tick-recovers",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], names)
+        for name in names:
+            full = root + "/" + name
+            for bad in (None, "skip", "fail"):
+                events = [event for event in self.events() if event.get("Test") != full]
+                if bad:
+                    events.append({"Action": bad, "Test": full})
+                with self.subTest(child=name, bad=bad), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(events)
 
     def test_missing_suite_is_not_success(self):
         with self.assertRaises(RuntimeError):
@@ -1772,6 +1818,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     "TestRegistrationUnknownInspectionPostgres",
             "TestRegistrationIdentityRejectionRuntimePostgres",
             "TestRegistrationCompensationDatabaseErrorIdentityPostgres",
+            "TestRegistrationOutboxAggregateLookupPostgres",
             "TestPlatformRoleManagementRuntimePostgres",
             "TestUserCodeLookupRuntimePostgres",
             "TestAuditSearchOriginalMigrationRuntimePostgres",

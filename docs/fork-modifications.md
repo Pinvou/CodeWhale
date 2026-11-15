@@ -85,12 +85,27 @@
 - 既有作者本地 Windows 验证：`cargo test -p codewhale-tui --lib --locked sandbox::tests -- --test-threads=1` 通过 23 项（19 项 `sandbox::tests::*` + 4 项 `repl::sandbox::tests::*`；Linux 因 cfg 差异选择 26 项）。两个显式工具测试分别用系统 Python 3.14 和捆绑 Python 3.13.14 通过（共四次），另一个 Git Bash 环境探测通过一次。此前恢复原构造器时，两个工具测试在两种解释器下均失败，表现为 Python 中文乱码而 PowerShell 中文正常。格式、架构和快速指纹检查通过。这些是既有作者证据，不代表后续文档修订重新执行了原生测试。
 - 父仓 Windows regression 步骤新增执行默认值合并、shell 默认值接线及大小写覆盖三个确定性筛选器；每个筛选器都要求至少执行一项测试。`91e262ba2` 的远端 [Windows regression job](https://github.com/Pinvou/pinvou-agent/actions/runs/39761405525/job/119767350755) 已实际执行并通过这三个筛选器；该证据对应这个旧头及不变的底座，不代替后续提交的 CI。两个需 Python 的显式测试仍为作者本地证据。`pinvou3-clean` CI 仅 Ubuntu，不运行 Windows 限定回归。Linux 上的 `windows_shell_default_env_forces_python_pipe_stdio_utf8` 只验证 helper 返回值，不验证构造器接线；Windows 大小写覆盖逻辑也需原生 Windows 回归。上游 codewhale-hq/Codewhale#7041 是未来上游 Windows CI 的贡献路径，不证明该 CI 已执行。未验证客户设备、PowerShell 7 或安装包发布。
 
-## 0. 当前状态（2026-11-10）
+## 0. 当前状态（2026-11-15）
 
-- 当前公开维护头与父仓 gitlink：`6f7a3a748f408568468ace45aa5cdbb34f882d73`（2026-11-10）。在原 `11cba403d` 之上消费已合入的 #136 `37be2844f`、#142 `78804c83e`、#148 `5f15cce57` 、#150 `e972a9a05` 与 #152 `6f7a3a748`。父仓只消费已公开提交，不推进维护分支、不移动标签。
-- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 98 个提交，r1 `1fafee7e2` 之上 83 个；96 个带 DCO sign-off。未签名的 squash 为 #107 `f27672935` 与 #116 `e9a7f48da1`，不能继续声称只有一个未签名提交。保留已发布历史，不改写维护分支。
-- 不可变 tag `pinvou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
-- 实测 drift：548 files, +121115/-49797，净增 71318；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
+- 当前公开维护头与父仓 gitlink：`687358f7efde6abd3592737b8ec48adc74ba5a84`（2026-11-15）。在原 `8e8d52fdb` 之上消费已合入的 #157 `687358f7e`。父仓只消费已公开提交，不推进维护分支、不移动标签。
+- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 100 个提交，r1 `1fafee7e2` 之上 85 个；97 个带 DCO sign-off。未签名的提交为 #107 `f27672935`、#116 `e9a7f48da1` 与 #157 `687358f7e`（CodeWhale 仓 squash 合入未携带签署），不能声称未签名集合有界于历史两项。保留已发布历史，不改写维护分支。
+- 不可变 tag `pinjou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
+- 实测 drift：551 files, +121146/-49817，净增 71329；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
+
+### 2026-11-15 公开维护头对齐（#157，随来源 PR #875）
+
+- 公共 CI 的 `verify-public-submodule.sh` 仍严格要求父仓 gitlink 等于 `pinjou3-clean`。公开维护分支以一个 squash 提交推进后，本批只按既定过渡规则更新消费点，保留 r3 标签及全部门禁；维护基线 `6f7a3a748` 仍是新头祖先，公开维护头门禁继续生效。
+- #157 `687358f7e` 归入 T2：一方 session-reader 只读读取面分类修复——`mcp_session-reader_read_session` 与 `mcp_session-reader_list_sessions` 以精确工具名加入引擎只读辅助名单。服务端契约（游标分页、仅已完成回合、逐条截断、跨 session 前缀拒绝）使其真只读；此前被误分类为需审批的网络工具，导致 Plan 钉死的 aux lane 唯一工具即此读取时在执行前死锁。名单精确匹配使前缀伪装（`mcp_session-reader_read_session_export`）仍留在需审批侧。`registry/tests.rs` 以数据条目扩展既有只读面测试（无新增 `forkguard_*` 行为名，登记数仍 301）；父仓无镜像分类，本批父仓源码零改动。
+- 父仓同步 gitlink 与 guard 登记头/提交数（99→100）及注释；不触及 Cargo manifest 或锁文件，无需重生成依赖锁；不修改底座源码、公开维护分支或不可变 r3 标签。
+- 验证按父仓门禁与原仓测试证据分开记录；原仓已合入和已有回归不代表本批次已重跑父仓 Rust 集成测试，完整编译验证由父仓 CI 与合入后最新 `main` 承担。
+
+### 2026-11-14 公开维护头对齐（#156，随来源 PR #850）
+
+- 公共 CI 的 `verify-public-submodule.sh` 仍严格要求父仓 gitlink 等于 `pinjou3-clean`。公开维护分支以一个已签署提交推进后，本批只按既定过渡规则更新消费点，保留 r3 标签及全部门禁；维护基线 `6f7a3a748` 仍是新头祖先，公开维护头门禁继续生效。
+- #156 `8e8d52fdb` 归入 T2：rustc/clippy 1.100 stable（2026-11-09 发布）新 lint 的五处等价改写，无行为变化——terminal 探针测试的 `map_err(|err| io::Error::other(err.to_string()))` 在 never 类型稳定后对 `Infallible`（ratatui 0.30 `with_options` 返回 `Result<_, B::Error>`、`TestBackend::Error` 不可 inhabitable）被 `unreachable_code` 证明为死代码，改为 `map_err(io::Error::other)` 直传（类型转换 load-bearing，保留）；`fleet/manager.rs`、subagent coord ledger 与 `tui/auto_review.rs` 三处 needless_bool 收尾表达式化；`tui/transcript/tests.rs` 两处 needless_range_loop 改 `per_cell[..3].iter().enumerate()`。对照纯净 `6f7a3a748` 以 1.99.1 复跑同款命令确认五处恰为 1.100 新增；all-targets 严格面遗留的既有债务（2 处 collapsible_if 与 `cargo doc -Dwarnings` 的 rustdoc 私有链接）在 1.99.1 下同样存在，本批未触碰。首次由父仓 Windows 回归腿（codewhale-tui lib test 编译）暴露。
+- 随来源 PR #850 补强 #148 todo schema 的守护：在既有两条测试名指纹（仅钉源文本）之上，新增两条 schema 字面量指纹（`"required": ["content"]` 与 Defaults to pending 描述行），guard 第 2 层新增按名执行 `todo_item_status_is_optional_with_a_pending_default` 与 `work_update_treats_a_missing_status_as_pending` 的 pinned runner（要求恰 1 passed，改名或删除即响红而非静默 no-op）。
+- 父仓同步 gitlink、guard 登记头/提交数（98→99）与注释；不触及 Cargo manifest 或锁文件（#152 批的依赖升级与 renormalization 已随 2026-11-10 对齐消费），无需重生成依赖锁；不修改底座源码、公开维护分支或不可变 r3 标签。
+- 验证按父仓门禁与原仓测试证据分开记录；原仓已合入和已有回归（来源 PR #850 报告五个触及模块 181 项测试通过）不代表本批次已重跑父仓 Rust 集成测试，完整编译验证由父仓 CI 与合入后最新 `main` 承担。
 
 ### 2026-11-10 公开维护头对齐（#136/#142/#148/#150/#152）
 
