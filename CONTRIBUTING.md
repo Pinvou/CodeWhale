@@ -94,6 +94,13 @@ up to 11.10 silently strips them and the same guard fails the strip.
 
 Tests requiring a live model, network service, credential, or large model asset must be ignored by default and provide an explicit opt-in command.
 
+Windows relay signer regressions report only closed spawn-error/signal categories,
+bounded status and elapsed time, and the last observed test instrumentation stage.
+Unknown values remain unknown; these observations do not establish an underlying
+timeout or infrastructure root cause. Invalid stored-key cases must prove refusal
+by the signer itself before publication, independently of the writer's safeguards.
+Raw child output and exception text must not enter failure diagnostics.
+
 ### Test resource lifetime
 
 One-shot CI fixtures must create resources through the shared lifetime boundary:
