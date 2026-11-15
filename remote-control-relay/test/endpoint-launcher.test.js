@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawnSyncWithRetry } from "./relay-tools-spawn.mjs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { join } from "node:path";
