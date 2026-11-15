@@ -10031,13 +10031,11 @@ pub(crate) fn is_exact_kimi_code_bare_k3_route(
 /// wire contract shares this single spelling list.
 #[must_use]
 pub(crate) fn is_kimi_k31_model_spelling(model: &str) -> bool {
-    matches!(
-        model.trim().to_ascii_lowercase().as_str(),
-        MOONSHOT_KIMI_K31_PRO_MODEL
-            | MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL
-            | KIMI_CODE_K31_PRO_MODEL
-            | KIMI_CODE_K31_PRO_HIGHSPEED_MODEL
-    )
+    let model = model.trim();
+    model.eq_ignore_ascii_case(MOONSHOT_KIMI_K31_PRO_MODEL)
+        || model.eq_ignore_ascii_case(MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL)
+        || model.eq_ignore_ascii_case(KIMI_CODE_K31_PRO_MODEL)
+        || model.eq_ignore_ascii_case(KIMI_CODE_K31_PRO_HIGHSPEED_MODEL)
 }
 
 /// Whether a route is the exact Kimi Code membership endpoint carrying any

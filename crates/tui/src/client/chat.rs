@@ -17,7 +17,7 @@ use tokio::time::timeout as tokio_timeout;
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
     is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
-    is_exact_zai_tiered_effort_route, is_kimi_code_membership_model,
+    is_exact_zai_tiered_effort_route, is_kimi_code_k31_route, is_kimi_code_membership_model,
     minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_direct_platform,
     moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
 };
@@ -205,7 +205,7 @@ fn apply_kimi_code_k3_reasoning_effort(
     effort: Option<&str>,
 ) {
     if !is_exact_kimi_code_k3_route(provider, base_url, model)
-        && !is_kimi_k31_on_kimi_code_route(provider, base_url, model)
+        && !is_kimi_code_k31_route(provider, base_url, model)
     {
         return;
     }
@@ -3514,15 +3514,11 @@ fn should_replay_reasoning_content_for_provider(
     should_replay_reasoning_content_for_provider_on_route(provider, "", model, effort)
 }
 
-/// Whether `model` is a K3.1 spelling on Kimi Code's exact membership
-/// endpoint. Custom Moonshot-compatible gateways keep their own dialect.
-fn is_kimi_k31_on_kimi_code_route(provider: ApiProvider, base_url: &str, model: &str) -> bool {
-    provider == ApiProvider::Moonshot
-        && moonshot_base_url_is_exact_kimi_code(base_url)
-        && crate::config::is_kimi_k31_model_spelling(model)
-}
-
 /// Whether `model` is a K3.1 spelling on Moonshot's exact direct platform.
+/// The membership-endpoint counterpart is the centralized
+/// [`crate::config::is_kimi_code_k31_route`], shared with route pinning and
+/// config validation; this direct-platform twin stays local because request
+/// shaping is its only consumer.
 fn is_kimi_k31_on_direct_platform_route(
     provider: ApiProvider,
     base_url: &str,
@@ -3572,7 +3568,7 @@ fn should_replay_reasoning_content_for_provider_on_route(
     // spellings carry their own arm. The gate is deliberately narrower than
     // extending the shared matchers, whose other consumers (effort shaping,
     // route validation, pickers) carry different K3-only contracts.
-    if is_kimi_k31_on_kimi_code_route(provider, base_url, model)
+    if is_kimi_code_k31_route(provider, base_url, model)
         || is_kimi_k31_on_direct_platform_route(provider, base_url, model)
     {
         return true;
@@ -3671,7 +3667,7 @@ fn is_reasoning_model_for_stream_on_route(
     // the replay gate: custom Moonshot-compatible gateways keep their own
     // dialect. (The `kimi-`-prefixed spellings already classify through the
     // generic heuristic below; this arm covers the bare membership ids.)
-    if is_kimi_k31_on_kimi_code_route(provider, base_url, model)
+    if is_kimi_code_k31_route(provider, base_url, model)
         || is_kimi_k31_on_direct_platform_route(provider, base_url, model)
     {
         return true;
