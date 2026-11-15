@@ -213,6 +213,7 @@ export function authorizationTasks(sourceName, sourceText) {
   }
   for (const [name, recognized] of registries) {
     for (const match of masked.matchAll(new RegExp(`\\b${name}\\s*=\\s*append\\s*\\(\\s*${name}\\s*,`, 'g'))) {
+      if (sourceName === 'account-platform/cmd/account-service/main.go' && name === 'approvalWorkers') invalid();
       const open = match.index + match[0].indexOf('(');
       let depth = 1;
       let end = open + 1;
@@ -239,6 +240,66 @@ export function authorizationTasks(sourceName, sourceText) {
   for (const [name, recognized] of registries) {
     if ([...masked.matchAll(new RegExp(`\\b${name}\\b`, 'g'))].some(match => !recognized.has(match.index))) invalid();
   }
+  // Production declarations must reach the real main consumer. Keep the
+  // supported wiring closed: an unused closure, conditional startup or helper
+  // mentioning the same names is not evidence that main starts its registry.
+  // Declaration-only parser fixtures outside this production file stay useful.
+  if (sourceName === 'account-platform/cmd/account-service/main.go') {
+    const mains = [...masked.matchAll(/\bfunc\s+main\s*\(\s*\)\s*\{/g)];
+    if (mains.length !== 1 || !registries.has('workers')) invalid();
+    const open = mains[0].index + mains[0][0].lastIndexOf('{');
+    const blockEnd = start => {
+      let depth = 1;
+      for (let cursor = start + 1; cursor < masked.length; cursor += 1) {
+        if (masked[cursor] === '{') depth += 1;
+        if (masked[cursor] === '}' && --depth === 0) return cursor;
+      }
+      invalid();
+    };
+    const end = blockEnd(open);
+    const closures = [];
+    for (const match of masked.matchAll(/\bfunc\b/g)) {
+      if (match.index <= open || match.index >= end) continue;
+      // Current main has a simple drain closure. Other function signatures
+      // need an explicit grammar update, not guessed function boundaries.
+      const header = masked.slice(match.index).match(/^func\s*\([^(){}]*\)\s*\{/);
+      if (!header) invalid();
+      const body = match.index + header[0].lastIndexOf('{');
+      closures.push([body, blockEnd(body)]);
+    }
+    const inMainRegistry = index => index > open && index < end
+      && !closures.some(([start, finish]) => index > start && index < finish);
+    for (const name of registries.keys()) {
+      if ([...masked.matchAll(new RegExp(`\\b${name}\\b`, 'g'))].some(match => !inMainRegistry(match.index))) invalid();
+    }
+    for (const match of masked.matchAll(/\baccountBackgroundTask\s*\{/g)) {
+      const before = masked.slice(0, match.index);
+      if (!inMainRegistry(match.index) || !(/\bworkers\s*:=\s*\[\s*\]\s*$/.test(before)
+          || /\bworkers\s*=\s*append\s*\(\s*workers\s*,\s*$/.test(before))) invalid();
+    }
+    const atMainLevel = index => {
+      if (index <= open) return false;
+      let depth = 1;
+      for (let cursor = open + 1; cursor < index; cursor += 1) {
+        if (masked[cursor] === '{') depth += 1;
+        if (masked[cursor] === '}' && --depth === 0) return false;
+      }
+      return depth === 1;
+    };
+    const required = [
+      /\bworkers\s*:=\s*\[\s*\]\s*accountBackgroundTask\s*\{/g,
+      /\bapprovalWorkers\s*,\s*err\s*:=\s*configureApprovals\(/g,
+      /\bworkers\s*=\s*append\s*\(\s*workers\s*,\s*approvalWorkers\s*\.\.\.\s*\)/g,
+      /\bworkersDone\s*:=\s*startAccountBackground\s*\(\s*ctx\s*,\s*workers\s*\)/g,
+    ].map(pattern => [...masked.matchAll(pattern)]);
+    if (required.some(matches => matches.length !== 1 || !atMainLevel(matches[0].index))) invalid();
+    if (required.some((matches, index) => index > 0 && matches[0].index <= required[index - 1][0].index)) invalid();
+    if ([...masked.matchAll(/\bstartAccountBackground\b/g)].length !== 1) invalid();
+    // Starting a slice snapshots its current length. Registrations appended
+    // afterwards are declarations but never reach that supervised group.
+    const startup = required[3][0].index;
+    if ([...masked.matchAll(/\bworkers\s*=\s*append\s*\(/g)].some(match => match.index >= startup)) invalid();
+  }
   // The main list's only cross-file producer must return the declared literals
   // themselves. Appending an unknown list or returning a writable temporary
   // would break the provenance promised by the approvalWorkers exception.
@@ -254,6 +315,27 @@ export function authorizationTasks(sourceName, sourceText) {
       if (masked[end] === '}') depth -= 1;
     }
     if (depth) invalid();
+    // This producer's supported form returns its literal list directly.
+    // A nested function's return cannot prove the enclosing producer's result;
+    // reject unsupported function scopes rather than count their returns.
+    if (/\bfunc\b/.test(masked.slice(open + 1, end - 1))) invalid();
+    for (const match of masked.matchAll(/\baccountBackgroundTask\s*\{/g)) {
+      if (match.index <= open || match.index >= end
+          || !/\breturn\s*\[\s*\]\s*$/.test(masked.slice(open + 1, match.index))) invalid();
+    }
+    // An error-looking expression may still be nil. Prove the supported error
+    // exits: a standard errors.New literal, or the direct err != nil branch.
+    const standardErrors = [...masked.matchAll(/\bimport\s*\(/g)].flatMap(match => {
+      const begin = match.index + match[0].lastIndexOf('(');
+      const finish = masked.indexOf(')', begin + 1);
+      if (finish < 0) invalid();
+      return code.slice(begin + 1, finish).split('\n').filter(line => line.trim() === '"errors"');
+    });
+    if (standardErrors.length !== 1) invalid();
+    const safeErrorReturns = new Set([...masked.slice(open + 1, end - 1)
+      .matchAll(/\bif\s+err\s*!=\s*nil\s*\{\s*return\s+nil\s*,\s*err\s*;?\s*\}/g)]
+      .map(match => open + 1 + match.index + match[0].indexOf('return')));
+    const errorReferences = new Set();
     let literalReturns = 0;
     for (const match of masked.slice(open + 1, end - 1).matchAll(/\breturn\b/g)) {
       const from = open + 1 + match.index + match[0].length;
@@ -267,13 +349,33 @@ export function authorizationTasks(sourceName, sourceText) {
         else if (')]}'.includes(token) && stack.pop() !== token) invalid();
       }
       if (stack.length) invalid();
-      const args = fields(from, to).map(([start, finish]) => code.slice(start, finish).trim());
+      const returnFields = fields(from, to);
+      const args = returnFields.map(([start, finish]) => code.slice(start, finish).trim());
       if (args.length !== 2) invalid();
-      if (args[0] === 'nil') continue;
+      if (args[0] === 'nil') {
+        if (/^errors\.New\("[A-Z][A-Z0-9_]*"\)$/.test(args[1].replace(/\s/g, ''))) {
+          const [start, finish] = returnFields[1];
+          errorReferences.add(start + masked.slice(start, finish).search(/\S/));
+        } else if (!(args[1] === 'err' && safeErrorReturns.has(from - match[0].length))) invalid();
+        continue;
+      }
+      // The success list is the producer's unconditional outer return, not a
+      // literal hidden in an optional branch before an empty success return.
+      let returnDepth = 1;
+      for (let cursor = open + 1; cursor < from - match[0].length; cursor += 1) {
+        if (masked[cursor] === '{') returnDepth += 1;
+        if (masked[cursor] === '}') returnDepth -= 1;
+      }
+      if (returnDepth !== 1) invalid();
       if (args[1] !== 'nil' || !/^\[\s*\]\s*accountBackgroundTask\s*\{[\s\S]*\}$/.test(args[0])) invalid();
       literalReturns += 1;
     }
     if (literalReturns !== 1) invalid();
+    // A local binding, parameter, or alias named errors must not impersonate
+    // the standard constructor whose non-nil result was just relied upon.
+    for (const match of masked.slice(producers[0].index, end).matchAll(/\berrors\b/g)) {
+      if (!errorReferences.has(producers[0].index + match.index)) invalid();
+    }
   }
   // Unknown/zero-value lists and function aliases cannot bypass the literal
   // registry census by entering through the supervised consumer instead.

@@ -118,6 +118,47 @@ func TestLegacyEntitlementAdmissionIdentity(t *testing.T) {
 	}
 }
 
+func TestLegacyEntitlementCleanupBudget(t *testing.T) {
+	t.Run("manual-cancel-keeps-earlier-caller-deadline", func(t *testing.T) {
+		deadline := time.Now().Add(5 * time.Second)
+		parent, stopParent := context.WithDeadline(context.Background(), deadline)
+		defer stopParent()
+		work, stopWork := context.WithCancel(parent)
+		stopWork()
+		cleanup, stopCleanup := legacyEntitlementCleanupContext(work)
+		defer stopCleanup()
+		if actual, ok := cleanup.Deadline(); !ok || !actual.Equal(deadline) || cleanup.Err() != nil {
+			t.Fatal("manual cancellation must allow cleanup within the existing deadline", actual, cleanup.Err())
+		}
+	})
+	t.Run("exhausted-caller-deadline-remains-exhausted", func(t *testing.T) {
+		deadline := time.Now().Add(-time.Second)
+		work, stopWork := context.WithDeadline(context.Background(), deadline)
+		defer stopWork()
+		cleanup, stopCleanup := legacyEntitlementCleanupContext(work)
+		defer stopCleanup()
+		if actual, ok := cleanup.Deadline(); !ok || !actual.Equal(deadline) || !errors.Is(cleanup.Err(), context.DeadlineExceeded) {
+			t.Fatal("cleanup must not renew an exhausted database budget", actual, cleanup.Err())
+		}
+	})
+	for _, callerBudget := range []time.Duration{0, time.Hour} {
+		t.Run("finite-cleanup-cap-"+callerBudget.String(), func(t *testing.T) {
+			work := context.Background()
+			if callerBudget != 0 {
+				var stopWork context.CancelFunc
+				work, stopWork = context.WithTimeout(work, callerBudget)
+				defer stopWork()
+			}
+			before := time.Now()
+			cleanup, stopCleanup := legacyEntitlementCleanupContext(work)
+			defer stopCleanup()
+			if actual, ok := cleanup.Deadline(); !ok || !actual.After(before) || actual.After(time.Now().Add(15*time.Second)) || cleanup.Err() != nil {
+				t.Fatal("cleanup must retain a finite local cap", actual, cleanup.Err())
+			}
+		})
+	}
+}
+
 func TestLegacyEntitlementUpgradeAdmissionPostgres(t *testing.T) {
 	raw := os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL")
 	if raw == "" {
