@@ -12,18 +12,22 @@ import { PricingLifecycleWorkspace } from './PricingLifecycleWorkspace.jsx';
 import { AdminOperationsWorkspace } from './AdminOperationsWorkspace.jsx';
 import { AdminAccountClosureWorkspace } from './AdminAccountClosureWorkspace.jsx';
 import { AdminRepairQueue } from './AdminRepairQueue.jsx';
+import { registrationQueueCopy } from '../../shared/admin-registration-queue-i18n.js';
+import { profileRepairQueueCopy } from '../../shared/admin-profile-repair-i18n.js';
 import { personalPortalSections } from './portal-sections.js';
 
 export function AdminProductsPage({ client, me, copy, language, permissions, route }) {
   const granted = new Set(permissions);
   const tabs = [granted.has('platform.products.read') && ['catalog', financeCopy[language].productAdmin], granted.has('platform.pricing.read') && ['prices', tokenManagementCopy[language].pricingLifecycle.priceVersions]].filter(Boolean);
-  const requested = (new URLSearchParams(route.search).get('finance_tab') || new URLSearchParams(route.search).get('products_tab'));
+  const query = new URLSearchParams(route.search);
+  const requested = query.get('finance_tab') || query.get('products_tab');
+  const pricingPane = query.get('pricing_pane') === 'units' ? 'units' : 'prices';
   const active = tabs.some(([key]) => key === requested) ? requested : tabs[0]?.[0];
   const words = { ...copy, billing: { ...copy.billing, pricingLifecycle: tokenManagementCopy[language].pricingLifecycle } };
   return <section><AdminFinanceOverview {...{ client, language, route, permissions }} surface={active === 'catalog' ? 'products' : 'pricing'} /><nav className="adm-tabs">{tabs.map(([key, label]) => <button key={key} aria-pressed={active === key} onClick={() => route.navigate('products', { finance_tab: key, products_tab: null })}>{label}</button>)}</nav>
     <RetainedWorkspace active={active} available={tabs.map(([key]) => key)}>{view => <>
       {view === 'catalog' && <RechargeProductWorkspace {...{ client, me, language, route }} copy={financeCopy[language]} />}
-      {view === 'prices' && <PricingLifecycleWorkspace client={client} owner={me.user_id} copy={words} permissions={permissions} />}
+      {view === 'prices' && <PricingLifecycleWorkspace client={client} owner={me.user_id} copy={words} permissions={permissions} pricingPane={pricingPane} onPricingPaneChange={value => route.navigate("products", { finance_tab: "prices", products_tab: null, pricing_pane: value })} />}
     </>}</RetainedWorkspace>
   </section>;
 }
@@ -31,12 +35,18 @@ export function AdminProductsPage({ client, me, copy, language, permissions, rou
 export function AdminOperationsPage({ client, me, copy, language, permissions, route, authorizationRefreshing, authorizationRefreshRef }) {
   const tabs = [
     ['policy', 'platform.registration-bonus.read', copy.operations.nav],
-    ['closures', 'platform.account-closures.read', accountClosureCopy[language].title],
+    ['closures', 'platform.account-closures.read', accountClosureCopy[language].listTitle],
     ['registration', 'platform.registrations.repair', copy.userManagement.registrationRepair],
     ['profile', 'platform.profile-changes.repair', copy.userManagement.profileRepair],
   ].filter(([, permission]) => permissions.includes(permission));
-  const active = tabs.some(([key]) => key === route.operationsTab) ? route.operationsTab : tabs[0]?.[0];
+  const closureDenied = route.operationsTab === 'closures' && !permissions.includes('platform.account-closures.read');
+  const registrationDenied = route.operationsTab === 'registration' && !permissions.includes('platform.registrations.repair');
+  const profileDenied = route.operationsTab === "profile" && !permissions.includes("platform.profile-changes.repair");
+  const active = closureDenied || registrationDenied || profileDenied ? null : tabs.some(([key]) => key === route.operationsTab) ? route.operationsTab : tabs[0]?.[0];
   return <section><nav className="adm-tabs">{tabs.map(([key, , label]) => <button key={key} aria-pressed={active === key} onClick={() => route.navigate('operations', { operations_page: key })}>{label}</button>)}</nav>
+    {closureDenied && <p role="alert">{accountClosureCopy[language].listPermissionDenied}</p>}
+    {registrationDenied && <p role="alert">{registrationQueueCopy[language].denied}</p>}
+    {profileDenied && <p role="alert">{profileRepairQueueCopy[language].denied}</p>}
     <RetainedWorkspace active={active} available={tabs.map(([key]) => key)}>{view => <>
       {view === 'policy' && <AdminOperationsWorkspace {...{ client, copy, language, permissions, authorizationRefreshing }} currentUserID={me.user_id} authorizationRefreshGuard={authorizationRefreshRef} />}
       {view === 'closures' && <AdminAccountClosureWorkspace {...{ client, me, language }} />}

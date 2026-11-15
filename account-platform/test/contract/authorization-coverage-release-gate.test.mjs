@@ -3,9 +3,172 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { authorizationRoutes, goSource, runAuthorizationCoverage } from '../../../scripts/check-account-platform-authorization-coverage.mjs';
+import { authorizationRoutes, authorizationTasks, goSource, runAuthorizationCoverage } from '../../../scripts/check-account-platform-authorization-coverage.mjs';
 
 const catalogURL = new URL('../../deploy/authorization-entrypoints.json', import.meta.url);
+
+test('task discovery includes supervised Account declarations and direct registrations', () => {
+  const source = 'account-platform/cmd/account-service/fixture.go';
+  const input = `
+    observability.RunBackground(ctx, "direct-worker", direct.Run)
+    tasks := []accountBackgroundTask{
+      {"first-worker", newWorker(repository, options{Names: []string{"a,b", "}"}}).Run},
+      {name: "second-worker", run: func(ctx context.Context) { call("}", ',') }},
+    }
+    tasks = append(tasks, accountBackgroundTask{run: worker.Run, name: "third-worker"})
+  `;
+  assert.deepEqual(authorizationTasks(source, input), ['direct-worker', 'first-worker', 'second-worker', 'third-worker']
+    .map(name => ({source, name})));
+  for (const text of [
+    '// accountBackgroundTask{"fake", worker.Run}\n// observability.RunBackground(ctx, "fake", worker.Run)',
+    '/* []accountBackgroundTask{{"fake", worker.Run}} */',
+    'var example = `accountBackgroundTask{"fake", worker.Run}; observability.RunBackground(ctx, "fake", worker.Run)`',
+    'var example = "accountBackgroundTask{\\\"fake\\\", worker.Run}"',
+  ]) assert.deepEqual(authorizationTasks(source, text), []);
+  // Literal-looking examples nested in a real worker remain inert.
+  assert.deepEqual(authorizationTasks(source, 'accountBackgroundTask{"real", func(ctx context.Context) { example := `accountBackgroundTask{"fake", run}`; _ = example }}'), [{source, name: 'real'}]);
+});
+
+test('task discovery accounts for nested executable declarations and rejects dynamic direct calls', async () => {
+  const source = 'account-platform/cmd/account-service/fixture.go';
+  const nested = '[]accountBackgroundTask{{"outer-worker", func(ctx context.Context) { startAccountBackground(ctx, []accountBackgroundTask{{"inner-worker", worker.Run}}) }}}';
+  assert.deepEqual(authorizationTasks(source, nested), ['outer-worker', 'inner-worker'].map(name => ({source, name})));
+  assert.throws(() => authorizationTasks(source, nested.replace('"inner-worker"', 'dynamicName')), /unrecognized_background_task/);
+  for (const name of ['dynamicName', '"listed-worker" + suffix', '"listed-worker" + "-other"', 'task.name']) {
+    assert.throws(() => authorizationTasks(source, `observability.RunBackground(ctx, ${name}, worker.Run)`), /unrecognized_background_task/);
+  }
+  assert.throws(() => authorizationTasks(source, 'start := observability.RunBackground'), /unrecognized_background_task/);
+  assert.deepEqual(authorizationTasks(source, 'observability . RunBackground(\n context.WithValue(ctx, key, value),\n "multiline-worker",\n worker.Run,\n)'), [{source, name: 'multiline-worker'}]);
+  const dispatcherSource = 'account-platform/cmd/account-service/background.go';
+  const dispatcher = await readFile(new URL('../../cmd/account-service/background.go', import.meta.url), 'utf8');
+  assert.deepEqual(authorizationTasks(dispatcherSource, dispatcher), []);
+  assert.throws(() => authorizationTasks(source, dispatcher), /unrecognized_background_task/);
+  assert.throws(() => authorizationTasks(dispatcherSource, dispatcher + '\n observability.RunBackground(ctx, task.name, task.run)'), /unrecognized_background_task/);
+  assert.throws(() => authorizationTasks(dispatcherSource, dispatcher.replace('task.name, task.run', '"renamed" + task.name, task.run')), /unrecognized_background_task/);
+  assert.throws(() => authorizationTasks(dispatcherSource, dispatcher.replace('workers.Add(len(tasks))', 'workers.Add(1)')), /unrecognized_background_task/);
+});
+
+test('task declaration discovery rejects unsupported dynamic and malformed shapes', () => {
+  for (const expression of [
+    'accountBackgroundTask{taskName, worker.Run}',
+    'accountBackgroundTask{name: taskName, run: worker.Run}',
+    'accountBackgroundTask{"partial"}',
+    'accountBackgroundTask{name: "first", name: "second"}',
+    'accountBackgroundTask{name: "first", other: worker.Run}',
+    'accountBackgroundTask{"first", run: worker.Run}',
+    '[]accountBackgroundTask{worker}',
+    'accountBackgroundTask{"first", worker.Run',
+    'accountBackgroundTask{"first", worker.Run(]}',
+  ]) assert.throws(() => authorizationTasks('fixture.go', expression), /unrecognized_background_task:fixture.go/, expression);
+});
+
+test('literal task registries cannot mutate identities or escape through writable aliases', () => {
+  const declaration = 'workers := []accountBackgroundTask{{"first-worker", worker.Run}}\n';
+  const source = 'account-platform/cmd/account-service/fixture.go';
+  for (const statement of [
+    'workers[0].name = "first-worker" + "-changed"',
+    'workers[0] = otherTask',
+    'alias := workers',
+    'alter(workers)',
+    'workers = append(workers, dynamicTask())',
+    'workers = append(workers, accountBackgroundTask{"second-worker", worker.Run}, dynamicTask())',
+    'for _, task := range workers { task.name = "changed" }',
+  ]) assert.throws(() => authorizationTasks(source, declaration + statement), /unrecognized_background_task/, statement);
+  assert.deepEqual(authorizationTasks(source, declaration + 'workers = append(workers, accountBackgroundTask{"second-worker", worker.Run})\nstartAccountBackground(ctx, workers)'),
+    ['first-worker', 'second-worker'].map(name => ({source, name})));
+  assert.throws(() => authorizationTasks(source, 'task := accountBackgroundTask{"first-worker", worker.Run}\ntask.name = dynamicName'), /unrecognized_background_task/);
+  for (const input of [
+    'var tasks []accountBackgroundTask\nstartAccountBackground(ctx, tasks)',
+    'tasks := make([]accountBackgroundTask, 0)\nstartAccountBackground(ctx, tasks)',
+    'var task accountBackgroundTask\ntask.name = dynamicName\nstartAccountBackground(ctx, []accountBackgroundTask{task})',
+    'startAccountBackground(ctx, dynamicTasks())',
+    'start := startAccountBackground',
+  ]) assert.throws(() => authorizationTasks(source, input), /unrecognized_background_task/, input);
+});
+
+test('Account approval worker producer returns only its direct literal registry', async () => {
+  const source = 'account-platform/cmd/account-service/approval_runtime.go';
+  const text = await readFile(new URL('../../cmd/account-service/approval_runtime.go', import.meta.url), 'utf8');
+  assert.equal(authorizationTasks(source, text).length, 3);
+  const start = 'return []accountBackgroundTask{', end = '\n\t}, nil';
+  assert.ok(text.includes(start) && text.includes(end));
+  for (const replacement of [
+    text.replace(start, 'return append([]accountBackgroundTask{').replace(end, '\n\t}, dynamicTasks()...), nil'),
+    text.replace(start, 'var tasks = []accountBackgroundTask{').replace(end, '\n\t}\n\ttasks[0].name = "changed"\n\treturn tasks, nil'),
+    text.replace(start, 'tasks := []accountBackgroundTask{').replace(end, '\n\t}\n\treturn tasks, nil'),
+    text.replace(start, 'unused := func() ([]accountBackgroundTask, error) {\nreturn []accountBackgroundTask{')
+      .replace(end, '\n\t}, nil\n}\n_ = unused\nreturn nil, nil'),
+    text.replace(start, 'if false {\nreturn []accountBackgroundTask{')
+      .replace(end, '\n\t}, nil\n}\nreturn nil, nil'),
+    text.replace(start, 'if enabled("UNSUPPORTED_FACTORY_CONDITION") {\nreturn []accountBackgroundTask{')
+      .replace(end, '\n\t}, nil\n}\nreturn nil, errors.New("NO_WORKERS")'),
+    text.replace(start, '_ = accountBackgroundTask{"unconsumed-worker", account.NewApprovalExpiryWorker(repository, time.Minute).Run}\n' + start),
+    text.replace(start, 'if environment == "production" {\nreturn nil, err\n}\n' + start),
+    text.replace(start, 'if err != nil {\nerr = nil\nreturn nil, err\n}\n' + start),
+    text.replace(start, 'errors := dynamicErrorFactory()\n_ = errors\n' + start),
+    text.replace('\n\t"errors"\n', '\n\tstandardErrors "errors"\n'),
+  ]) {
+    assert.notEqual(replacement, text);
+    assert.throws(() => authorizationTasks(source, replacement), /unrecognized_background_task/);
+  }
+});
+
+test('production Account main consumes its complete registry at main scope', async () => {
+  const source = 'account-platform/cmd/account-service/main.go';
+  const text = await readFile(new URL('../../cmd/account-service/main.go', import.meta.url), 'utf8');
+  const startup = 'workersDone := startAccountBackground(ctx, workers)';
+  const merge = 'workers = append(workers, approvalWorkers...)';
+  const walletLines = text.split('\n').filter(line => line.includes('workers = append(workers, accountBackgroundTask{"wallet-provisioning",'));
+  assert.equal(walletLines.length, 1);
+  const wallet = walletLines[0];
+  assert.equal(text.split(startup).length, 2);
+  assert.equal(text.split(merge).length, 2);
+  assert.equal(authorizationTasks(source, text).length, 8);
+  for (const replacement of [
+    text.replace(startup, 'workersDone := make(chan struct{})'),
+    text.replace(startup, 'workersDone := startAccountBackground(ctx, []accountBackgroundTask{})'),
+    text.replace(startup, 'unused := func() <-chan struct{} {\n' + startup + '\nreturn workersDone\n}\n_ = unused\nworkersDone := make(chan struct{})'),
+    text.replace(startup, 'var workersDone <-chan struct{}\nif false {\n' + startup + '\n_ = workersDone\n}'),
+    text.replace(merge, '_ = approvalWorkers'),
+    text.replace(merge, '').replace(startup, startup + '\n' + merge),
+    text.replace(startup, '').replace(merge, merge + '\n' + startup),
+    text.replace(merge, merge + '\napprovalWorkers = append(approvalWorkers, accountBackgroundTask{"late-approval", worker.Run})'),
+    text.replace(wallet, 'unusedWallet := func() {\n' + wallet + '\n}\n_ = unusedWallet'),
+    text.replace(wallet, wallet + '\n_ = accountBackgroundTask{"unconsumed-worker", account.NewMobileRetentionWorker(repository, time.Hour).Run}'),
+  ]) {
+    assert.notEqual(replacement, text);
+    assert.throws(() => authorizationTasks(source, replacement), /unrecognized_background_task/);
+  }
+});
+
+test('Account approval worker producer binding cannot be shadowed or aliased', async () => {
+  const source = 'account-platform/cmd/account-service/main.go';
+  const text = await readFile(new URL('../../cmd/account-service/main.go', import.meta.url), 'utf8');
+  const call = 'approvalWorkers, err := configureApprovals(';
+  assert.ok(text.includes(call));
+  for (const declaration of ['configureApprovals := dynamicFactory', 'factory := configureApprovals', 'var configureApprovals = dynamicFactory']) {
+    assert.throws(() => authorizationTasks(source, text.replace(call, declaration + '\n' + call)), /unrecognized_background_task/);
+  }
+});
+
+test('supervised Account catalog identities remain exact and required', async () => {
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  for (const [file, names] of [
+    ['main.go', ['mobile-retention', 'audit-export', 'wallet-provisioning', 'role-binding-expiry', 'account-closure', 'profile-change', 'registration-recovery', 'commerce-customer-sync']],
+    ['approval_runtime.go', ['approval-expiry', 'approval-pagination-cleanup', 'manual-review-sla']],
+  ]) {
+    const source = `account-platform/cmd/account-service/${file}`;
+    const text = await readFile(new URL(`../../cmd/account-service/${file}`, import.meta.url), 'utf8');
+    assert.deepEqual(authorizationTasks(source, text), names.map(name => ({source, name})));
+    assert.deepEqual(catalog.tasks.filter(task => task.source === source).map(task => task.name).sort(), [...names].sort());
+  }
+  await rejectedMutation(catalog => {
+    catalog.tasks = catalog.tasks.filter(task => task.name !== 'approval-expiry');
+  }, /unclassified_task:account-platform\/cmd\/account-service\/approval_runtime\.go\|approval-expiry/);
+  await rejectedMutation(catalog => {
+    catalog.tasks.push({source: 'account-platform/cmd/account-service/main.go', name: 'invented-worker', permission: 'internal.job.invented-worker'});
+  }, /stale_task_policy:account-platform\/cmd\/account-service\/main\.go\|invented-worker/);
+});
 
 async function rejectedMutation(mutate, expected) {
   const directory = await mkdtemp(path.join(tmpdir(), 'pinvou-authorization-coverage-'));
@@ -25,7 +188,7 @@ async function rejectedMutation(mutate, expected) {
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
-  // The six existing Portal transports use Any, alongside the 396 verb-specific
+  // The six existing Portal transports use Any, alongside the verb-specific
   // registrations. Keep the expected complete graph independent of its parser.
   const wildcardPaths = [
     '/api/account/*resource', '/api/token/*resource',
@@ -37,9 +200,34 @@ test('authorization release gate classifies every HTTP task event callback and C
     wildcardPaths.map(path => ({source: wildcardSource, receiver: 'router', method: 'ANY', path})));
   const portal = await readFile(new URL('../../internal/portal/service.go', import.meta.url), 'utf8');
   for (const route of wildcardPaths) assert.ok(portal.includes(`router.Any("${route}",`), `missing existing Portal transport ${route}`);
+  const billing = await readFile(new URL('../../internal/billing/service.go', import.meta.url), 'utf8');
+  const repairContext = authorizationRoutes('account-platform/internal/billing/service.go', billing)
+    .filter(route => route.path === '/reconciliation-cases/:case_id/repair-context');
+  assert.deepEqual(repairContext.map(route => route.registration.trim()), [
+    'admin.GET("/reconciliation-cases/:case_id/repair-context", s.authorizer.Require("platform.billing.reconciliation.read"), httpserver.AdaptFunc(s.adminReconciliationRepairContext))',
+  ]);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 412, tasks: 32, events: 18, cli: 27 });
+  // The existing complete graph includes the reconciliation repair-context GET.
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 414, tasks: 32, events: 18, cli: 28 });
+});
+
+test('existing grant inventory CLI retains its bounded read-only Account identity', async () => {
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  assert.deepEqual(catalog.cli.filter(item => item.name === 'approval-grant-inventory'), [{
+    name: 'approval-grant-inventory', source: 'account-platform/cmd/approval-grant-inventory/main.go',
+    strategy: 'workload.bounded-readonly-account-service-grant-inventory',
+  }]);
+  const command = await readFile(new URL('../../cmd/approval-grant-inventory/main.go', import.meta.url), 'utf8');
+  const repository = await readFile(new URL('../../internal/account/approval_unstarted_grants.go', import.meta.url), 'utf8');
+  assert.match(command, /\*limit < 1 \|\| \*limit > 200/);
+  assert.match(command, /getenv\("APPROVAL_GRANT_INVENTORY_DATABASE_URL"\)/);
+  assert.match(command, /context\.WithTimeout\(ctx, 5\*time\.Second\)/);
+  assert.match(command, /repo\.InspectUnstartedApprovalGrants\(bounded, limit, after\)/);
+  assert.match(repository, /pgx\.TxOptions\{IsoLevel: pgx\.RepeatableRead, AccessMode: pgx\.ReadOnly\}/);
+  await rejectedMutation(catalog => {
+    catalog.cli = catalog.cli.filter(item => item.name !== 'approval-grant-inventory');
+  }, /unclassified_cli:approval-grant-inventory/);
 });
 
 function assertLedgerRepairProofAuthorization(service, handler) {

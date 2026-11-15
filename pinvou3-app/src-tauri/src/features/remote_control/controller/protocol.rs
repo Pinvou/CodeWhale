@@ -105,7 +105,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63";
+    "98e97089e09533376d4e0df65a93d6434ab4ead2dc4dc6f403edfce3214748c1";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -179,6 +179,7 @@ pub(crate) const REMOTE_ACTION_OPERATIONS: &[&str] = &[
     "attachment_begin",
     "attachment_chunk",
     "attachment_abort",
+    "attachment_abort_confirmed",
     "artifact_index",
     "artifact_preview",
     "artifact_download_begin",
@@ -598,6 +599,8 @@ const NESTED_SCHEMAS: &[(&str, Schema)] = &[
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "task_id",
             ],
             optional: &[],
@@ -1433,6 +1436,98 @@ pub(crate) fn validate_controller_message_json(
     validate_controller_message_json_in_context(input, sender_role, None)
 }
 
+/// A size-bounded, duplicate-key-rejecting parse. Routing may inspect its shape,
+/// but only the validated view is an admitted controller message.
+pub(crate) struct ParsedControllerMessage {
+    value: Value,
+    wire_bytes: usize,
+}
+
+// 本文件被 controller-crypto-harness 经 #[path] 复用；显式指定路径使
+// 生产与 harness 两种解析上下文都指向 protocol/parsed_message_tests.rs。
+#[cfg(test)]
+#[path = "protocol/parsed_message_tests.rs"]
+mod parsed_message_tests;
+
+pub(crate) struct ValidatedControllerMessage<'a> {
+    value: &'a Value,
+}
+
+impl ValidatedControllerMessage<'_> {
+    pub(crate) fn value(&self) -> &Value {
+        self.value
+    }
+}
+
+impl ParsedControllerMessage {
+    pub(crate) fn parse(input: &str) -> Result<Self> {
+        if input.len() > MAX_ENCRYPTED_WIRE_BYTES {
+            return Err(ControllerProtocolError::new("message_too_large", "json"));
+        }
+        Ok(Self {
+            value: parse_unique_json(input)?,
+            wire_bytes: input.len(),
+        })
+    }
+
+    pub(crate) fn value(&self) -> &Value {
+        &self.value
+    }
+
+    pub(crate) fn validate(
+        &self,
+        sender_role: SenderRole,
+        expected_context: Option<&LeaseContext>,
+    ) -> Result<ValidatedControllerMessage<'_>> {
+        let object = as_object(&self.value, "message")?;
+        let kind = message_kind(object, "message")?;
+        let schema = message_schema(kind)
+            .ok_or_else(|| ControllerProtocolError::new("unknown_message_type", "message.type"))?;
+        if kind != "encrypted_frame" && self.wire_bytes > MAX_CONTROL_MESSAGE_BYTES {
+            return Err(ControllerProtocolError::new("message_too_large", "json"));
+        }
+        validate_object(object, kind, &schema, sender_role, "message")?;
+        if kind == "desktop_pairing_register"
+            && object.get("code_wrap_public_key_b64") == object.get("handshake_public_key_b64")
+        {
+            return Err(ControllerProtocolError::new(
+                "invalid_field",
+                "message.key_purpose_reuse",
+            ));
+        }
+        if kind == "controller_pairing_reserved" {
+            validate_reserved_transcript(object)?;
+        }
+        if matches!(
+            kind,
+            "controller_liveness_attestation_a" | "controller_liveness_attestation_b"
+        ) {
+            validate_uint(
+                required_value(object, "observed_age_ms", "message")?,
+                "observed_age_ms",
+                30_000,
+            )?;
+            validate_uint(
+                required_value(object, "remaining_ttl_ms", "message")?,
+                "remaining_ttl_ms",
+                30_000,
+            )?;
+        }
+        enforce_expected_context(object, expected_context)?;
+        Ok(ValidatedControllerMessage { value: &self.value })
+    }
+
+    pub(crate) fn validate_runtime(
+        &self,
+        sender_role: SenderRole,
+        lease: Option<&LeaseContext>,
+        capabilities: &[String],
+    ) -> Result<ValidatedControllerMessage<'_>> {
+        validate_runtime_capabilities(capabilities)?;
+        validate_runtime_parsed_contents(self, sender_role, lease, capabilities)
+    }
+}
+
 /// A/B 在线上报文里的角色字面量（`sender_role` / `receiver_role`）。
 pub(crate) const ROLE_A: &str = "A";
 pub(crate) const ROLE_B: &str = "B";
@@ -1458,46 +1553,9 @@ pub(crate) fn validate_controller_message_json_in_context(
     sender_role: SenderRole,
     expected_context: Option<&LeaseContext>,
 ) -> Result<Value> {
-    if input.len() > MAX_ENCRYPTED_WIRE_BYTES {
-        return Err(ControllerProtocolError::new("message_too_large", "json"));
-    }
-    let value = parse_unique_json(input)?;
-    let object = as_object(&value, "message")?;
-    let kind = message_kind(object, "message")?;
-    let schema = message_schema(kind)
-        .ok_or_else(|| ControllerProtocolError::new("unknown_message_type", "message.type"))?;
-    if kind != "encrypted_frame" && input.len() > MAX_CONTROL_MESSAGE_BYTES {
-        return Err(ControllerProtocolError::new("message_too_large", "json"));
-    }
-    validate_object(object, kind, &schema, sender_role, "message")?;
-    if kind == "desktop_pairing_register"
-        && object.get("code_wrap_public_key_b64") == object.get("handshake_public_key_b64")
-    {
-        return Err(ControllerProtocolError::new(
-            "invalid_field",
-            "message.key_purpose_reuse",
-        ));
-    }
-    if kind == "controller_pairing_reserved" {
-        validate_reserved_transcript(object)?;
-    }
-    if matches!(
-        kind,
-        "controller_liveness_attestation_a" | "controller_liveness_attestation_b"
-    ) {
-        validate_uint(
-            required_value(object, "observed_age_ms", "message")?,
-            "observed_age_ms",
-            30_000,
-        )?;
-        validate_uint(
-            required_value(object, "remaining_ttl_ms", "message")?,
-            "remaining_ttl_ms",
-            30_000,
-        )?;
-    }
-    enforce_expected_context(object, expected_context)?;
-    Ok(value)
+    let parsed = ParsedControllerMessage::parse(input)?;
+    parsed.validate(sender_role, expected_context)?;
+    Ok(parsed.value)
 }
 
 pub(crate) fn validate_controller_payload_json(
@@ -2008,8 +2066,26 @@ pub(crate) fn validate_controller_runtime_message_json(
         ControllerProtocolError::new("unsupported_capability", "negotiated_capabilities")
     })?;
     validate_runtime_capabilities(&context.negotiated_capabilities)?;
-    let shape = validate_controller_message_json(input, sender_role)?;
-    let kind = message_kind(as_object(&shape, "message")?, "message")?;
+    let parsed = ParsedControllerMessage::parse(input)?;
+    validate_runtime_parsed_contents(
+        &parsed,
+        sender_role,
+        context.lease.as_ref(),
+        &context.negotiated_capabilities,
+    )?;
+    Ok(parsed.value)
+}
+
+// Callers validate capabilities first, preserving the JSON API's error order.
+fn validate_runtime_parsed_contents<'a>(
+    parsed: &'a ParsedControllerMessage,
+    sender_role: SenderRole,
+    lease: Option<&LeaseContext>,
+    capabilities: &[String],
+) -> Result<ValidatedControllerMessage<'a>> {
+    let validated = parsed.validate(sender_role, None)?;
+    let object = as_object(validated.value(), "message")?;
+    let kind = message_kind(object, "message")?;
     if LEASE_INSTALL_MESSAGE_TYPES.contains(&kind) {
         return Err(ControllerProtocolError::new(
             "missing_field",
@@ -2021,34 +2097,27 @@ pub(crate) fn validate_controller_runtime_message_json(
         .required
         .contains(&"controller_lease_id")
     {
-        Some(require_runtime_lease(context)?)
+        Some(lease.ok_or_else(|| {
+            ControllerProtocolError::new("missing_field", "runtime_context.lease")
+        })?)
     } else {
-        context.lease.as_ref()
+        lease
     };
-    let value = if lease.is_some() {
-        validate_controller_message_json_in_context(input, sender_role, lease)?
-    } else {
-        shape
-    };
-    let kind = message_kind(as_object(&value, "message")?, "message")?;
+    enforce_expected_context(object, lease)?;
     if kind != "controller_capabilities" && kind != "error" {
         for required in outer_message_capabilities(kind) {
-            if !context
-                .negotiated_capabilities
-                .iter()
-                .any(|value| value == required)
-            {
+            if !capabilities.iter().any(|value| value == required) {
                 return Err(ControllerProtocolError::new("unsupported_capability", kind));
             }
         }
     }
     if kind == "encrypted_frame" {
         enforce_negotiated_payload(
-            object_string(as_object(&value, "message")?, "payload_kind", "message")?,
-            &context.negotiated_capabilities,
+            object_string(object, "payload_kind", "message")?,
+            capabilities,
         )?;
     }
-    Ok(value)
+    Ok(validated)
 }
 
 pub(crate) fn validate_controller_runtime_payload_json(
@@ -2904,7 +2973,9 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
             ],
             &[],
         ),
-        (false, "attachment_abort") => (&["task_id", "transfer_id"], &[]),
+        (false, "attachment_abort" | "attachment_abort_confirmed") => {
+            (&["task_id", "transfer_id"], &[])
+        }
         (false, "artifact_index") => (&[], &[]),
         (false, "artifact_preview") => (&["artifact_id"], &[]),
         (false, "artifact_download_begin") => (&["task_id", "artifact_id"], &[]),
@@ -2934,6 +3005,7 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
         (true, "attachment_begin") => (&["transfer_id", "chunk_bytes", "total_bytes"], &[]),
         (true, "attachment_chunk") => (&["state", "received_bytes"], &["sha256"]),
         (true, "attachment_abort") => (&["aborted"], &[]),
+        (true, "attachment_abort_confirmed") => (&["transfer_id", "cleanup_confirmed"], &[]),
         (true, "artifact_index") => (&["artifacts"], &[]),
         (true, "artifact_preview") => (&["artifact_id", "preview_kind", "truncated"], &["text"]),
         (true, "artifact_download_begin") => (&["transfer_id", "chunk_bytes", "total_bytes"], &[]),
@@ -2966,7 +3038,7 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
     for field in required.iter().chain(optional.iter()) {
         if let Some(value) = body.get(*field) {
             match *field {
-                "aborted" | "completed" | "truncated" => {
+                "aborted" | "completed" | "truncated" | "cleanup_confirmed" => {
                     if !value.is_boolean() {
                         return Err(ControllerProtocolError::new(
                             "invalid_field",
@@ -3105,7 +3177,13 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
         binding_schema.optional,
         "temporary_model_package.binding",
     )?;
-    for field in ["connection_id", "controller_lease_id", "task_id"] {
+    for field in [
+        "connection_id",
+        "controller_lease_id",
+        "relay_epoch",
+        "remote_control_generation",
+        "task_id",
+    ] {
         validate_identifier(
             required_value(binding, field, "temporary_model_package.binding")?,
             &format!("temporary_model_package.binding.{field}"),
@@ -3120,6 +3198,8 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
         "connection_id",
         "controller_lease_id",
         "lease_epoch",
+        "relay_epoch",
+        "remote_control_generation",
         "task_id",
     ] {
         if binding.get(field) != task.get(field) {
@@ -5665,6 +5745,12 @@ mod tests {
                 "attachment_abort",
                 json!({"task_id":"task-1","transfer_id":"ctr-up-1"}),
                 json!({"aborted":true}),
+                "attachment_v1",
+            ),
+            (
+                "attachment_abort_confirmed",
+                json!({"task_id":"task-1","transfer_id":"ctr-up-1"}),
+                json!({"transfer_id":"ctr-up-1","cleanup_confirmed":true}),
                 "attachment_v1",
             ),
             (
