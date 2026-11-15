@@ -1510,6 +1510,17 @@ fn strip_mfjs_unsupported_enum_values(value: &mut Value) {
         strip_mfjs_unsupported_enum_values(items);
     }
     if let Some(values) = obj.get("enum").and_then(Value::as_array) {
+        // A boolean or null literal is a FIXED-argument pin, not a soft
+        // constraint: stripping the keyword here would leave the bare
+        // declared type behind — `{"type": "boolean", "enum": [true]}`
+        // shipping as "any boolean" — and the engine never re-enforces the
+        // original schema before execution, the exact reasoning that fails
+        // bool/null `const`s closed. MFJS cannot represent the literal, so
+        // the enum stays and the validator rejects the whole tool
+        // (review 5910671961).
+        let has_unrepresentable_pin = values
+            .iter()
+            .any(|value| value.is_boolean() || value.is_null());
         // `None` kinds (non-scalars) or differing kinds make the enum
         // unsupported; an empty array stays for the validator to fail
         // closed, per the doc comment above. The all() below is vacuously
@@ -1519,7 +1530,7 @@ fn strip_mfjs_unsupported_enum_values(value: &mut Value) {
         // unsatisfiable constraint into "anything goes".
         let kinds: Option<Vec<MfjsLiteralKind>> = values.iter().map(mfjs_literal_kind).collect();
         let homogeneous = kinds.is_some_and(|kinds| kinds.iter().all(|kind| kind == &kinds[0]));
-        if !homogeneous {
+        if !homogeneous && !has_unrepresentable_pin {
             obj.shift_remove("enum");
         }
     }
@@ -3492,11 +3503,13 @@ mod kimi_tests {
         // int 和 str……不支持混合类型 (List 中的每个枚举值的类型必须相同)").
         // An enum carrying anything else loses the keyword — an
         // unconstrained node stays shippable — instead of dropping the tool.
+        // Boolean/null literal pins are the exception: they fail closed
+        // instead of widening (see the test below), so they are absent
+        // here (review 5910671961).
         let mut schema = json!({
             "type": "object",
             "properties": {
                 "mixed_kinds": {"type": "string", "enum": ["fast", 1]},
-                "boolean_values": {"type": "boolean", "enum": [true]},
                 "object_values": {"type": "object", "enum": [{"nested": true}]},
                 "array_values": {"type": "array", "enum": [["a"]]}
             }
@@ -3505,19 +3518,13 @@ mod kimi_tests {
         sanitize_for_kimi_parameters(&mut schema)
             .expect("unsupported enum values must strip, not drop the tool");
 
-        for name in [
-            "mixed_kinds",
-            "boolean_values",
-            "object_values",
-            "array_values",
-        ] {
+        for name in ["mixed_kinds", "object_values", "array_values"] {
             assert!(
                 schema["properties"][name].get("enum").is_none(),
                 "{name} must lose its unsupported enum: {schema}"
             );
         }
         assert_eq!(schema["properties"]["mixed_kinds"]["type"], "string");
-        assert_eq!(schema["properties"]["boolean_values"]["type"], "boolean");
         assert_eq!(schema["properties"]["object_values"]["type"], "object");
         assert_eq!(schema["properties"]["array_values"]["type"], "array");
         validate_mfjs_parameters(&schema).unwrap();
@@ -3554,6 +3561,47 @@ mod kimi_tests {
         );
         assert_eq!(schema["properties"]["level"]["enum"], json!([1, 2]));
         assert_eq!(schema["properties"]["ratio"]["enum"], json!([0.5, 1.5]));
+    }
+
+    #[test]
+    fn boolean_enum_pins_fail_closed_instead_of_widening() {
+        // A boolean (or null) enum literal is a fixed-argument pin: MFJS
+        // cannot represent it, but stripping the keyword used to leave the
+        // bare declared type behind — `{"type": "boolean", "enum": [true]}`
+        // shipping as "any boolean" — and the supported plugin path
+        // forwards input to its handler without revalidating the original
+        // enum, so a `false` argument would reach the handler that was
+        // authored to see only `true`. Consistently with the bool/null
+        // `const` handling, the unrepresentable pin stays on the schema
+        // and the validator rejects the whole tool (review 5910671961).
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "flag": {"type": "boolean", "enum": [true]}
+            }
+        });
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("a boolean enum pin must fail closed, not widen");
+        assert!(
+            matches!(error, KimiParameterSchemaError::InvalidKeywordValue),
+            "the kept pin drops via the validator: {error:?}"
+        );
+
+        // A mixed scalar/boolean enum keeps its unrepresentable literal too
+        // and fails closed the same way, instead of losing the keyword and
+        // shipping the bare declared type.
+        let mut mixed = json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["fast", true]}
+            }
+        });
+        let error = sanitize_for_kimi_parameters(&mut mixed)
+            .expect_err("a mixed enum with a boolean literal must fail closed");
+        assert!(
+            matches!(error, KimiParameterSchemaError::InvalidKeywordValue),
+            "{error:?}"
+        );
     }
 
     #[test]
