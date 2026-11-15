@@ -1,7 +1,8 @@
 import { statusLabel } from './status-label.js';
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useId, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { adminLayoutCopy, accountLayoutCopy, accountStatusCopy } from '../../shared/i18n.js';
 import { financeReadDefinition, financeListRouteUpdates, readFinanceListRoute } from './admin-finance-read-route.js';
+import { normalizeAnomalyStatus, anomalyStatusText } from './anomaly-queue-status.js';
 
 export function localFinanceDate(value) {
   if (!value) return '';
@@ -35,23 +36,31 @@ export function useFinanceRouteLoader({ route, signature, client, owner, operati
     if (route && !operation.busy && !operation.unknown && attempted.current !== identity) void load();
   }, [identity, Boolean(route), operation.busy, operation.unknown]); // eslint-disable-line react-hooks/exhaustive-deps
   return {
-    read: async action => {
+    read: async (action, classifyError) => {
       const stamp = identity;
       // A completed write may resume a callback from an older render. It must
       // not relabel that callback's captured query as the current URL.
       if (route && stamp !== live.current) return undefined;
-      const value = await operation.read(() => { attempted.current = stamp; return action(); });
+      const value = await operation.read(
+        () => { attempted.current = stamp; return action(); },
+        classifyError ? reason => classifyError(reason, stamp === live.current) : undefined,
+      );
       return !route || stamp === live.current ? value : undefined;
     },
   };
 }
 
-export function AdminFinanceFilters({ kind, language, value, onChange, onSubmit, disabled = false }) {
+export function AdminFinanceFilters({ kind, language, value, onChange, onSubmit, disabled = false, orderFilterOptions }) {
   const words = adminLayoutCopy[language].financeLists;
-  const statusLabels = kind === 'anomalies' ? accountStatusCopy[language].anomalies
-    : kind === 'late' ? accountStatusCopy[language].latePayments : { ...accountLayoutCopy[language].statuses, ...words };
-  const closedStatuses = kind === 'anomalies' || kind === 'late';
+  const orderListContext = orderFilterOptions ? adminLayoutCopy[language].orderListContext : null;
+  const orderOptionsID = useId();
   const config = financeReadDefinition(kind);
+  const statusLabels = kind === 'late' ? accountStatusCopy[language].latePayments : { ...accountLayoutCopy[language].statuses, ...words };
+  const closedStatuses = kind === 'late';
+  const anomalyStatus = kind === 'anomalies' ? adminLayoutCopy[language].anomalyQueueStatus : null;
+  const normalizedStatus = anomalyStatus ? normalizeAnomalyStatus(value.status) : '';
+  const anomalyHelp = anomalyStatus ? adminLayoutCopy[language].anomalyQueueResults : null;
+  const helps = anomalyHelp ? { q: anomalyHelp.queryHelp, owner_id: anomalyHelp.ownerHelp, provider_id: anomalyHelp.providerHelp } : {};
   const options = key => {
     if (['status', 'lifecycle_status'].includes(key)) return config.statuses;
     if (key === 'owner_type') return ['PERSONAL', 'ORGANIZATION', 'ORG_UNIT'];
@@ -63,7 +72,17 @@ export function AdminFinanceFilters({ kind, language, value, onChange, onSubmit,
     return null;
   };
   return <form className="adm-filter-row" onSubmit={event => { event.preventDefault(); onSubmit(); }}>
-    {config.fields.map(key => <label key={key}>{words[key]}{key === 'include_deleted' ? <input type="checkbox" disabled={disabled} checked={value[key] === 'true'} onChange={event => onChange({ ...value, [key]: event.target.checked ? 'true' : '' })} /> : options(key) ? <select disabled={disabled} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })}><option value="">{words.allValues}</option>{options(key).map(option => <option key={option} value={option}>{key.endsWith('status') ? statusLabel(option, language, statusLabels, closedStatuses) : words[option] || accountLayoutCopy[language].statuses[option] || option}</option>)}</select> : <input disabled={disabled} maxLength={key === 'q' || key === 'business_reference' ? 160 : 120} step={/_(from|to|before)$/.test(key) ? '0.001' : undefined} type={/_(from|to|before)$/.test(key) ? 'datetime-local' : 'text'} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })} />}</label>)}
+    {config.fields.map(key => key === 'include_deleted' ? (
+      <label key={key} className="adm-checkbox-field"><input type="checkbox" disabled={disabled} checked={value[key] === 'true'} onChange={event => onChange({ ...value, [key]: event.target.checked ? 'true' : '' })} />{words[key]}</label>
+    ) : <label key={key}>{words[key]}{helps[key] && <small>{helps[key]}</small>}{orderListContext && key === 'q' && <small>{orderListContext.searchHelp}</small>}{orderListContext && /_(from|to)$/.test(key) && <small>{orderListContext.inputZone} ({Intl.DateTimeFormat().resolvedOptions().timeZone})</small>}{orderListContext && ['provider_id', 'channel'].includes(key) ? <>
+      <input list={orderOptionsID + '-' + key} disabled={disabled} maxLength={key === 'channel' ? 32 : 120} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })} />
+      <datalist id={orderOptionsID + '-' + key}>{orderFilterOptions[key].map(option => <option key={option} value={option} />)}</datalist>
+      <small>{orderListContext.optionHelp}</small>
+    </> : options(key) ? <select disabled={disabled} value={anomalyStatus && key === 'status' ? normalizedStatus : value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })}>
+      <option value="">{anomalyStatus && key === 'status' ? anomalyStatus.all : words.allValues}</option>
+      {anomalyStatus && key === 'status' && normalizedStatus && !options(key).includes(normalizedStatus) && <option value={normalizedStatus}>{statusLabel(value.status, language, anomalyStatus, true)}</option>}
+      {options(key).map(option => <option key={option} value={option}>{anomalyStatus && key === 'status' ? anomalyStatusText(anomalyStatus, option) : ['status', 'lifecycle_status'].includes(key) ? statusLabel(option, language, statusLabels, closedStatuses) : words[option] || option}</option>)}
+    </select> : <input disabled={disabled} maxLength={key === 'q' || key === 'business_reference' ? 160 : 120} step={/_(from|to|before)$/.test(key) ? '0.001' : undefined} type={/_(from|to|before)$/.test(key) ? 'datetime-local' : 'text'} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })} />}</label>)}
     <label>{words.limit}<select disabled={disabled} value={value.limit} onChange={event => onChange({ ...value, limit: event.target.value })}>{['25', '50', '100', '200'].map(limit => <option key={limit}>{limit}</option>)}</select></label><button disabled={disabled}>{words.search}</button>
   </form>;
 }

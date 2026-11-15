@@ -34,25 +34,71 @@ function DetailSource({ title, titleID, state, copy, onRetry, children }) {
   </section>;
 }
 
+function runtimeProtocolPresentation(model, copy) {
+  const value = model.runtime_protocol;
+  return {
+    blocked: value === '',
+    label: value === '' ? copy.modelCallProtocolUnset : typeof value === 'string' && value.trim() ? value : copy.modelCallProtocolUnknown,
+  };
+}
+
+function ModelCallStatus({ model, copy, onViewOperations }) {
+  const desktopBlocked = runtimeProtocolPresentation(model, copy).blocked;
+  const catalogRemoved = model.lifecycle_status === 'REMOVED';
+  const sourceUnavailable = model.source_available === false;
+  const catalogBlocked = catalogRemoved || sourceUnavailable;
+  const blocked = desktopBlocked || catalogBlocked;
+  const heading = desktopBlocked ? copy.modelCallDesktopBlocked : catalogBlocked ? copy.modelCallCatalogBlocked : copy.modelCallNotVerified;
+  return <section className={'adm-model-call-summary' + (blocked ? ' is-blocked' : '')} aria-labelledby="admin-model-call-status">
+    <div>
+      <h3 id="admin-model-call-status">{heading}</h3>
+      {desktopBlocked && <p>{copy.modelCallDesktopBlockedHelp}</p>}
+      {catalogRemoved && <p>{copy.modelCallCatalogRemoved}</p>}
+      {sourceUnavailable && <p>{copy.modelCallSourceUnavailable}</p>}
+      {!blocked && <p>{copy.modelCallNotVerifiedHelp}</p>}
+    </div>
+    {onViewOperations && <button type="button" onClick={onViewOperations}>{copy.modelCallReviewOperations}</button>}
+  </section>;
+}
+
+function modelTokenCapacity(value, copy, allowZero) {
+  if (value == null) return copy.modelFieldUnavailable;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < (allowZero ? 0 : 1)) return copy.modelFieldInvalid;
+  if (!Number.isSafeInteger(value)) return copy.modelFieldPrecisionUnknown;
+  return value.toLocaleString(copy.modelFactLocale) + ' Token';
+}
+
+function modelModalitySummary(values, copy) {
+  if (!Array.isArray(values)) return copy.modelFieldUnavailable;
+  if (!values.length) return copy.modelNoModalities;
+  return values.map((code) => {
+    if (typeof code !== 'string' || !code.trim()) return copy.modelFieldUnavailable;
+    return Object.prototype.hasOwnProperty.call(copy.modelModalities, code) ? copy.modelModalities[code] : code;
+  }).join(copy.modelFactSeparator);
+}
+
 function OverviewTab({ detail, copy }) {
   const model = detail.model;
   return <section className="adm-card adm-model-detail-panel" aria-labelledby="model-overview-heading">
     <h2 id="model-overview-heading">{copy.detailOverview}</h2>
     <p className="adm-source-lead">{copy.detailOverviewLead}</p>
-    {!model.source_available && <p className="adm-source-lead adm-source-missing-policy">{copy.sourceMissingPolicy}</p>}
+    {model.source_available === false && <p className="adm-source-lead adm-source-missing-policy">{copy.sourceMissingPolicy}</p>}
     <Facts>
       <Fact label={copy.lifecycle}><Status value={model.lifecycle_status} copy={copy} /></Fact>
       <Fact label={copy.catalogVersion}>{model.catalog_version}</Fact>
       <Fact label={copy.capabilityVersion}>{model.capability_version}</Fact>
       <Fact label={copy.protocol}>{model.protocol_code} · v{model.protocol_version}</Fact>
-      <Fact label={copy.contextLength}>{Number(model.context_length || 0).toLocaleString()}</Fact>
-      <Fact label={copy.maximumOutputTokens}>{Number(model.maximum_output_tokens || 0).toLocaleString()}</Fact>
-      <Fact label={copy.modalities}>{(model.supported_modalities || []).join(', ') || '—'}</Fact>
-      <Fact label={copy.tokenizerVersion}>{model.tokenizer_version || '—'}</Fact>
-      <Fact label={copy.runtimeProtocol}>{model.runtime_protocol || copy.runtimeProtocolMissing}</Fact>
-      <Fact label={copy.source}><Status value={model.source_available ? 'ACTIVE' : 'UNAVAILABLE'} copy={copy} /></Fact>
+      <Fact label={copy.contextLength}>{modelTokenCapacity(model.context_length, copy, false)}</Fact>
+      <Fact label={copy.maximumOutputTokens}>{modelTokenCapacity(model.maximum_output_tokens, copy, true)}</Fact>
+      <Fact label={copy.modalities}>{modelModalitySummary(model.supported_modalities, copy)}</Fact>
+      <Fact label={copy.runtimeProtocol}>{runtimeProtocolPresentation(model, copy).label}</Fact>
+      <Fact label={copy.source}>{model.source_available === true ? copy.modelCallSourceAvailable : model.source_available === false ? copy.enumLabels.UNAVAILABLE : copy.modelCallSourceUnknown}</Fact>
     </Facts>
     {model.description && <p className="adm-model-detail-description">{model.description}</p>}
+    <details className="adm-model-technical-details">
+      <summary>{copy.modelTechnicalDetails}</summary>
+      <Facts><Fact label={copy.tokenizerVersion}>{typeof model.tokenizer_version === 'string' && model.tokenizer_version.trim() ? model.tokenizer_version : copy.modelFieldUnavailable}</Fact></Facts>
+    </details>
   </section>;
 }
 
@@ -88,7 +134,7 @@ function CapabilitiesTab({ detail, client, copy, historyQuery, onQueryChange, cu
         <Fact label={copy.capabilityVersion}>{model.capability_version}</Fact>
         <Fact label={copy.capabilityVersionID}><span className="adm-mono">{model.model_capability_version_id}</span></Fact>
         <Fact label={copy.protocol}>{protocol.protocol_code} · v{protocol.version}</Fact>
-        <Fact label={copy.runtimeProtocol}>{model.runtime_protocol || copy.runtimeProtocolMissing}</Fact>
+        <Fact label={copy.runtimeProtocol}>{runtimeProtocolPresentation(model, copy).label}</Fact>
         <Fact label={copy.protocolID}><span className="adm-mono">{protocol.protocol_definition_id}</span></Fact>
         <Fact label={copy.schemaSummary}>{copy.schemaFields(protocol.schema_field_count)}</Fact>
         <Fact label={copy.status}><Status value={protocol.status} copy={copy} /></Fact>
@@ -103,7 +149,7 @@ function CapabilitiesTab({ detail, client, copy, historyQuery, onQueryChange, cu
         <Fact label={copy.version}>{model.draft.draft_version}</Fact>
         <Fact label={copy.catalogVersion}>{model.draft.base_catalog_version}</Fact>
         <Fact label={copy.protocol}>{model.draft.protocol_code} · v{model.draft.protocol_version}</Fact>
-        <Fact label={copy.runtimeProtocol}>{model.draft.runtime_protocol || copy.runtimeProtocolMissing}</Fact>
+        <Fact label={copy.runtimeProtocol}>{runtimeProtocolPresentation(model.draft, copy).label}</Fact>
         <Fact label={copy.updatedAt}>{formatDate(model.draft.updated_at)}</Fact>
       </Facts> : <p className="adm-source-lead">{copy.noDraft}</p>}
     </section>
@@ -113,7 +159,7 @@ function CapabilitiesTab({ detail, client, copy, historyQuery, onQueryChange, cu
 
 function OperationsTab({ modelID, client, copy, query, onQueryChange, cursorHistory }) {
   const [refreshVersion, setRefreshVersion] = useState(0);
-  const load = useMemo(() => (filters, signal) => client.provisionings({ ...filters, model_id: modelID }, signal), [client, modelID]);
+  const load = useMemo(() => (filters, signal) => client.provisioningsForPresentation({ ...filters, model_id: modelID }, signal), [client, modelID]);
   const state = useAdminSource({ enabled: true, load, query, refreshVersion });
   const retry = () => {
     if (state.error?.status === 410) {
@@ -335,6 +381,7 @@ function AuditTab({ modelID, client, copy, query, onQueryChange, cursorHistory }
 export function AdminModelDetailWorkspace({ owner, modelID, client, copy, pricingCopy, permissions, actionsEnabled = false, pricingEditEnabled = false, routeVersion, onRouteChange, onNavigate, onQueryChange, cursorHistory, onTabsKeyDown }) {
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [readRejected, setReadRejected] = useState(null);
   const requestedTab = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('model_detail_tab') || 'overview', [routeVersion]);
   const managePricing = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('model_price_manage') === '1', [routeVersion]);
   const priceReturn = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('model_price_return') === 'products', [routeVersion]);
@@ -344,12 +391,22 @@ export function AdminModelDetailWorkspace({ owner, modelID, client, copy, pricin
     .filter((tab) => tab !== 'audit' || permissions.includes('platform.audit.read')), [permissions]);
   const tab = tabs.includes(requestedTab) ? requestedTab : tabs[0];
   const load = useMemo(() => async (_, signal) => {
-    const detail = await client.catalogModel(modelID, signal);
-    if (detail?.model?.model_id !== modelID) throw Object.assign(new Error('model detail mismatch'), { code: 'INVALID_MODEL_DETAIL' });
-    return asCollection(detail, detail.as_of);
+    try {
+      const detail = await client.catalogModel(modelID, signal);
+      if (detail?.model?.model_id !== modelID) throw Object.assign(new Error('model detail mismatch'), { code: 'INVALID_MODEL_DETAIL' });
+      if (!signal?.aborted) setReadRejected((previous) => previous?.client === client && previous.modelID === modelID ? null : previous);
+      return asCollection(detail, detail.as_of);
+    } catch (error) {
+      if (!signal?.aborted && ([401, 403, 404].includes(error?.status) || error?.code === 'INVALID_MODEL_DETAIL')) {
+        setReadRejected({ client, modelID });
+      }
+      throw error;
+    }
   }, [client, modelID]);
   const state = useAdminSource({ enabled: true, load, query: { model_id: modelID }, refreshVersion });
-  const detail = state.items[0];
+  const denied = readRejected?.client === client && readRejected.modelID === modelID;
+  const detail = denied ? null : state.items[0];
+  const currentDetail = !state.loading && !state.error ? detail : null;
   const provisioningQuery = useMemo(() => readAdminModelTokenQuery('modelProvisionings'), [routeVersion]);
   const auditQuery = useMemo(() => readAdminModelTokenQuery('modelAudit'), [routeVersion]);
   const historyQuery = useMemo(() => readAdminModelTokenQuery('modelHistory'), [routeVersion]);
@@ -363,8 +420,10 @@ export function AdminModelDetailWorkspace({ owner, modelID, client, copy, pricin
   return <article className="adm-model-detail">
     <header className="adm-card adm-model-detail-header">
       <button type="button" className="adm-back" onClick={back}>← {priceReturn ? copy.backToPricingGovernance : copy.backToModelDirectory}</button>
-      <div><p>{copy.modelDetail}</p><h2>{detail?.model?.display_name || copy.loading}</h2><div className="adm-model-id"><span className="adm-mono">{modelID}</span><button type="button" onClick={async () => { try { await globalThis.navigator?.clipboard?.writeText(modelID); setCopied(true); } catch { setCopied(false); } }}>{copied ? copy.copied : copy.copyID}</button></div></div>
+      <div><p>{copy.modelDetail}</p><h2>{detail?.model?.display_name || (state.error ? copy.sourceUnavailable : copy.loading)}</h2><div className="adm-model-id"><span className="adm-mono">{modelID}</span><button type="button" onClick={async () => { try { await globalThis.navigator?.clipboard?.writeText(modelID); setCopied(true); } catch { setCopied(false); } }}>{copied ? copy.copied : copy.copyID}</button></div></div>
       <div><small>{state.updatedAt ? `${copy.lastUpdated} ${new Date(state.updatedAt).toLocaleString()}` : copy.notUpdated}</small><button type="button" disabled={state.loading} onClick={() => setRefreshVersion((value) => value + 1)}>{copy.refreshSource}</button></div>
+      {currentDetail && <ModelCallStatus model={currentDetail.model} copy={copy} onViewOperations={tabs.includes('operations') && tab !== 'operations' ? () => onRouteChange({ model_detail_tab: 'operations' }, 'push') : null} />}
+      {detail && !currentDetail && <p className="adm-model-call-snapshot" role="status">{copy.modelDetailSnapshot}</p>}
     </header>
     <SourceFeedback state={state} copy={copy} onRetry={() => setRefreshVersion((value) => value + 1)} />
     {detail && <>

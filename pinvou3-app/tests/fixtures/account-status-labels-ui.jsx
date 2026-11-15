@@ -1,3 +1,4 @@
+import { AdminPlatformClient } from '../../src/features/account-platform/admin-client.js';
 import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Status } from '../../src/features/account-platform/AdminModelTokenPrimitives.jsx';
@@ -11,6 +12,8 @@ const bindings = ['ACTIVE', 'FUTURE_REVIEW'].map((status, index) => ({
   user_id: '00000000-0000-4000-8000-000000000003', role_code: 'PLATFORM_SUPPORT',
   status, starts_at: '2026-11-01T00:00:00Z', expires_at: null, grant_source: 'MANUAL',
 }));
+const bindingClient = new AdminPlatformClient();
+const bindingActor = { user_id: '00000000-0000-4000-8000-000000000003', platform_authorization_version: 1, platform_permissions: [] };
 const state = window.statusLabelsProbe = { viewed: [], reconciliationCalls: [] };
 const reconciliationClient = {
   reconciliationRuns: async query => { state.reconciliationCalls.push({ kind: 'runs', ...query }); return { items: [], next_cursor: null }; },
@@ -34,8 +37,8 @@ function Probe() {
   return <>
     <select id="probe-language" value={language} onChange={event => setLanguage(event.target.value)}>{['zh', 'en', 'ja'].map(code => <option key={code} value={code}>{code}</option>)}</select>
     <div id="probe-status"><Status value={value} copy={tokenManagementCopy[language].modelToken} /></div>
-    <PlatformRoleBindings {...{ words, copy, language, bindings }} target="" blocked={false} onApplyTarget={() => {}} canRevoke={() => false} onView={item => { state.viewed.push(item.status); setSelected(item); }} />
-    {selected && <PlatformRoleBindingDetail {...{ words, copy, language }} binding={selected} onClose={() => setSelected(null)} />}
+    <PlatformRoleBindings client={bindingClient} me={bindingActor} acceptedSessionEpoch={0} routeScope="status-probe" {...{ words, copy, language, bindings }} target="" blocked={false} onApplyTarget={() => {}} canRevoke={() => false} onView={item => { state.viewed.push(item.status); setSelected(item); }} />
+    {selected && <PlatformRoleBindingDetail client={bindingClient} me={bindingActor} acceptedSessionEpoch={0} routeScope="status-probe" {...{ words, copy, language }} binding={selected} onClose={() => setSelected(null)} />}
   </>;
 }
 createRoot(document.querySelector('#root')).render(<Probe />);

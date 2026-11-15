@@ -50,7 +50,7 @@ assert.match(bridge, /invoke\(["']set_selected_pet["'],\s*\{\s*(id:\s*id|id)\s*\
 assert.match(bridge, /setSelectedPet:\s*setSelectedPet/);
 assert.match(
   bridge,
-  /state\.settings\.pet\s*=\s*Object\.assign\(\{\},\s*state\.settings\.pet\s*\|\|\s*\{\}/,
+  /publishSettings\(state,\s*Object\.assign\(\{\},\s*state\.settings,\s*\{\s*pet:\s*Object\.assign\(\{\},\s*state\.settings\.pet\s*\|\|\s*\{\}/,
 );
 assert.doesNotMatch(
   bridge,

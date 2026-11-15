@@ -279,6 +279,9 @@ pub(crate) fn dir_read_only_or_skip(dir: &std::path::Path, test: &str) -> bool {
 #[cfg(test)]
 pub(crate) use filesystem::permission_bits;
 
+#[cfg(test)]
+pub(crate) use filesystem::with_read_permission_denied;
+
 /// Loosens `path` to 0644 the way a pre-hardening build's umask left it, so a
 /// test can prove the next write tightens it. No-op (and reports `false`)
 /// where the platform has no mode bits.

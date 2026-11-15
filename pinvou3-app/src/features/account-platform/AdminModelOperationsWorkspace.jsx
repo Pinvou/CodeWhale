@@ -200,7 +200,7 @@ export function AdminModelOperationsWorkspace({ client, copy, language, permissi
   const requestedTab = new URLSearchParams(globalThis.location?.search || '').get('operations_tab');
   const tab = tabs.includes(requestedTab) ? requestedTab : tabs[0];
   const overviewWindow = readAdminModelOperationsWindow();
-  const provisioningLoad = useMemo(() => (filters, signal) => client.provisionings(filters, signal), [client]);
+  const provisioningLoad = useMemo(() => (filters, signal) => client.provisioningsForPresentation(filters, signal), [client]);
   const id = readDetailID('usage_request_id');
   const usageLoad = useMemo(() => (filters, signal) => client.usageRequests(filters, signal), [client]);
   const reconciliationLoad = useMemo(() => (filters, signal) => client.usageReconciliationCases(filters, signal), [client]);

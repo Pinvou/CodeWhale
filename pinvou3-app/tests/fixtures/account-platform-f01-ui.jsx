@@ -43,6 +43,8 @@ globalThis.fetch = async (url, options = {}) => {
   if (url.endsWith('/admin/v1/sms-configuration')) {
     if (options.method !== 'PUT') return json(configuration());
     const command = JSON.parse(options.body); control.smsCalls.push({ key: options.headers['Idempotency-Key'], command });
+    if (control.smsWriteError === 'network') throw new TypeError('CONTROLLED_NETWORK_INTERRUPTION');
+    if (control.smsWriteError?.status) return json({ code: control.smsWriteError.code }, control.smsWriteError.status);
     if (control.smsFail) return json({ code: 'UPSTREAM_UNAVAILABLE' }, 503);
     control.smsRevision = command.expected_revision + 1;
     return json({ ...configuration(), ...command, revision: control.smsBad ? command.expected_revision : control.smsRevision });

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 98 maintenance commits, ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 clean re-fork guard: 100 maintenance commits (EXPECTED_COMMITS), ten maintained themes (r3 closed at pinjou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
-# Public maintenance after CodeWhale#136/#142/#148/#150/#152 merged.
-EXPECTED_HEAD="6f7a3a748f408568468ace45aa5cdbb34f882d73"
-EXPECTED_COMMITS=98
+# Public maintenance after CodeWhale#136/#142/#148/#150/#152,
+# CodeWhale#156 (rustc/clippy 1.100 stable lint adaptation),
+# CodeWhale#157 (session-reader read-only classification) merged.
+EXPECTED_HEAD="687358f7efde6abd3592737b8ec48adc74ba5a84"
+EXPECTED_COMMITS=100
 # Published maintenance base of this integration.
 MAINTENANCE_BASE="6f7a3a748f408568468ace45aa5cdbb34f882d73"
 # The immutable r1 closure must remain an ancestor of the registered head.
@@ -144,6 +146,15 @@ fingerprints=(
   "T2|Adaptive evidence keeps original line totals|CodeWhale/crates/tui/src/tools/truncate.rs|fn adaptive_evidence_footer_names_artifact_path_and_recovery"
   "T2|Preview metadata overflow fails closed|CodeWhale/crates/tui/src/tools/truncate.rs|fn refit_spilled_preview_rejects_overflowing_metadata"
   "T2|Unsaved wire previews are not full-content refs|CodeWhale/crates/tui/src/client/chat/tests/stream_decoder.rs|fn request_builder_never_deduplicates_unsaved_output_previews"
+  # PR #1995 补充 main 尚未登记的八项存在性门禁；保留 main 的全部既有登记。
+  "T3|Public maintenance result: forkguard_structured_recovery_footer_is_single_and_route_bounded|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_structured_recovery_footer_is_single_and_route_bounded"
+  "T3|Public maintenance result: forkguard_web_body_artifact_does_not_cover_the_response_envelope|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_web_body_artifact_does_not_cover_the_response_envelope"
+  "T6|Public maintenance result: id_shaped_session_name_requires_an_explicit_name_selector|CodeWhale/crates/tui/src/tools/subagent/tests.rs|fn id_shaped_session_name_requires_an_explicit_name_selector"
+  "T6|Public maintenance result: session_name_resolution_prefers_live_holder_then_newest_settled|CodeWhale/crates/tui/src/tools/subagent/tests.rs|fn session_name_resolution_prefers_live_holder_then_newest_settled"
+  "T6|Public maintenance result: spawn_session_name_still_held_by_interrupted_same_session_child|CodeWhale/crates/tui/src/tools/subagent/tests.rs|fn spawn_session_name_still_held_by_interrupted_same_session_child"
+  "T2|Public maintenance result: stored_tokens_flip_to_auth_required_when_the_issuer_mismatches|CodeWhale/crates/tui/src/mcp/tests.rs|fn stored_tokens_flip_to_auth_required_when_the_issuer_mismatches"
+  "T2|Public maintenance result: stored_tokens_still_load_when_the_authorization_server_omits_issuer|CodeWhale/crates/tui/src/mcp/tests.rs|fn stored_tokens_still_load_when_the_authorization_server_omits_issuer"
+  "T6|Public maintenance result: wait_rejects_a_malformed_timeout_on_every_face_like_completion|CodeWhale/crates/tui/src/tools/subagent/coord.rs|fn wait_rejects_a_malformed_timeout_on_every_face_like_completion"
   "T2|Web JSONPath schema agrees with parser results|CodeWhale/crates/tui/src/tools/web/contract.rs|fn forkguard_web_fields_description_matches_parser"
   "T2|Document the Web JSONPath subset|CodeWhale/crates/tui/src/tools/web_tool.rs|Recursive descent (..) and filters are not supported"
   "T2|Preserve failed tool-result flags|CodeWhale/crates/tui/src/core/engine/tests.rs|fn forkguard_tool_failure_flag_survives_recording_and_round_trip"
@@ -237,6 +248,14 @@ fingerprints=(
   "T2|shell 指引与执行同一 dispatcher    |CodeWhale/crates/tui/src/tools/shell/guidance.rs|pub(super) fn runtime_command_guidance()"
   "T2|指引对齐 catalog 一致性回归        |CodeWhale/crates/tui/src/tools/shell/tests.rs|fn forkguard_shell_catalog_guidance_matches_execution"
   "T2|computer-use zoom 子栅格换算       |CodeWhale/plugins/computer-use/src/raster.mjs|export function zoomChildRaster(prev, region)"
+
+  # 来源 PR #850（评审 JensenChen28 5871983071，2026-11-12）：#148 todo schema
+  # 偏差已登记 fork-distinct（docs/fork-modifications.md 2026-11-10 对齐小节），
+  # 既有指纹只钉测试名（源文本），两条测试不以 forkguard_ 命名，第 2 层从未执行。
+  # 这里补 schema 字面量指纹（required 收缩与默认值陈述）；测试本身的执行由下方
+  # pinned runner 钉住。
+  "T2|todo item status leaves required  |CodeWhale/crates/tui/src/tools/todo.rs|\"required\": [\"content\"]"
+  "T2|todo default-pending stated in schema |CodeWhale/crates/tui/src/tools/todo.rs|\"description\": \"Task status. Defaults to pending when omitted.\""
 
   "T3|静态 prompt composer              |CodeWhale/crates/tui/src/prompts.rs|pub fn set_static_prompt_composer_override("
   "T3|ambient project authority 密封     |CodeWhale/crates/tui/src/project_context.rs|forkguard_runtime_loader_ignores_ambient_project_authority"
@@ -485,6 +504,24 @@ bold "── 第 2 层：CodeWhale forkguard 回归 ──"
 ( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked client::tests::model_aware_same_model_request_keeps_host_declared_route_limits -- --exact --test-threads=1 ) || fail=1
 ( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked client::tests::rebinding_the_same_model_keeps_host_declared_route_limits -- --exact --test-threads=1 ) || fail=1
 ( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked --features benchmark-eval-controls forkguard_benchmark_ -- --test-threads=1 ) || fail=1
+# #148 todo schema 测试不以 forkguard_ 命名，上方过滤器选不中；且
+# `cargo test <filter>` 零匹配时退出码仍为 0。按 run_pinned_* 的「1 passed」
+# 纪律按名钉住两条测试：改名或删除即响红，而非静默 no-op。
+run_pinned_todo_schema_tests() {
+  local test output
+  for test in \
+    todo_item_status_is_optional_with_a_pending_default \
+    work_update_treats_a_missing_status_as_pending; do
+    output=$( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked \
+      "$test" -- --test-threads=1 2>&1 ) || { printf '%s\n' "$output"; return 1; }
+    if ! grep -q '1 passed' <<<"$output"; then
+      printf '%s\n' "$output"
+      red "❌ pinned test $test did not run (renamed or deleted?)"
+      return 1
+    fi
+  done
+}
+run_pinned_todo_schema_tests || fail=1
 
 echo
 bold "── 第 3 层：pinvou3-app forkguard 回归 ──"

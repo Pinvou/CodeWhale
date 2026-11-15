@@ -5,7 +5,6 @@ import react from '@vitejs/plugin-react';
 import { createServer } from './helpers/vite-fixture.mjs';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 import { navigateFixture } from './helpers/navigate-fixture.mjs';
-import { adminLayoutCopy } from '../src/shared/i18n.js';
 
 const chrome = process.env.CHROME || ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(fs.existsSync);
 assert.ok(chrome, 'Browser unavailable; status UI verification not performed');
@@ -52,11 +51,11 @@ try {
       await page.evaluate(() => { window.f01.status = 'constructor'; history.replaceState({}, '', '?section=users'); window.f01.render('admin'); });
       await page.waitForFunction(label => [...document.querySelectorAll('tbody td')].some(node => node.textContent === `${label} (constructor)`), {}, expected[language].unknown);
       assert.equal(await page.evaluate(() => window.f01.calls.filter(call => call.url.endsWith('/status')).length), 0);
-      await page.evaluate(() => { window.f01.status = 'DISABLED'; document.querySelector('.adm-filter-row form button').click(); });
+      await page.evaluate(() => { window.f01.status = 'DISABLED'; document.querySelector('form[data-user-directory-search]').requestSubmit(); });
       await page.waitForFunction(() => [...document.querySelectorAll('tbody tr button')].some(button => button.textContent === window.f01.copy().admin.accounts.enable));
       await page.evaluate(() => [...document.querySelectorAll('tbody tr button')].find(button => button.textContent === window.f01.copy().admin.accounts.enable).click());
       await page.waitForSelector('[role=dialog]');
-      await page.evaluate(label => [...document.querySelectorAll('[role=dialog] button')].find(button => button.textContent === label).click(), adminLayoutCopy[language].confirmAction);
+      await page.click('[role=dialog] [data-user-status-confirm=ACTIVE]');
       await page.waitForFunction(() => window.f01.status === 'ACTIVE');
       const commands = await page.evaluate(() => window.f01.calls.filter(call => call.url.endsWith('/status')).map(call => ({ method: call.method, body: JSON.parse(call.body) })));
       assert.deepEqual(commands, [{ method: 'PATCH', body: { status: 'ACTIVE' } }]);
@@ -85,6 +84,7 @@ try {
       const review = { zh: '复核中', en: 'Under review', ja: '確認中' };
       await navigateFixture(page, `${origin}/tests/fixtures/account-status-labels-ui.html?language=${language}&reconciliation=1`, signal => page.waitForFunction(() => window.statusLabelsProbe && document.querySelector('section nav button:nth-child(2)'), { signal }));
       await page.click('section nav button:nth-child(2)');
+      await page.click('.adm-case-scope button:first-child');
       await page.waitForFunction(label => document.querySelector('tbody tr td:nth-child(2)')?.textContent === label, {}, review[language]);
       const options = await page.$$eval('option', nodes => nodes.filter(node => ['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED'].includes(node.value)).map(node => ({ value: node.value, label: node.textContent })));
       assert.deepEqual(options.map(option => option.value), ['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED']);
@@ -93,10 +93,10 @@ try {
       await page.evaluate(() => { const select = [...document.querySelectorAll('select')].find(node => [...node.options].some(option => option.value === 'IN_REVIEW')); select.value = 'IN_REVIEW'; select.dispatchEvent(new Event('change', { bubbles: true })); });
       await page.waitForFunction(() => window.statusLabelsProbe.reconciliationCalls.some(call => call.kind === 'cases' && call.status === 'IN_REVIEW'));
       await page.click('tbody tr button');
-      assert.ok((await page.$eval('h3', node => node.nextElementSibling.textContent)).includes(review[language]));
+      assert.ok((await page.$eval('.adm-reconciliation-workspace > section.adm-panel h3', node => node.nextElementSibling.textContent)).includes(review[language]));
       const nextLanguage = language === 'ja' ? 'zh' : 'ja';
       await page.select('#probe-language', nextLanguage);
-      await page.waitForFunction(label => document.querySelector('tbody tr td:nth-child(2)')?.textContent === label && document.querySelector('h3')?.nextElementSibling.textContent.includes(label), {}, review[nextLanguage]);
+      await page.waitForFunction(label => document.querySelector('tbody tr td:nth-child(2)')?.textContent === label && document.querySelector('.adm-reconciliation-workspace > section.adm-panel h3')?.nextElementSibling.textContent.includes(label), {}, review[nextLanguage]);
     });
   }
 } catch (error) { primary = error; }
