@@ -5,7 +5,10 @@ use super::super::{
 use super::*;
 use crate::features::remote_control::controller::{
     journal::{RemoteJournal, ReplayOutcome},
-    permission::{DecisionAuthority, DispatchCommit, PermissionDecision, PermissionView},
+    permission::{
+        DecisionAuthority, DispatchCommit, PermissionDecision, PermissionDecisionOwner,
+        PermissionView,
+    },
     task::{RemoteTaskLedger, RemoteTaskRequest, RemoteTaskTerminal, task_input_digest_for_value},
 };
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -169,13 +172,16 @@ impl Fixture {
 
     fn decide(&self, id: &str, decision: PermissionDecision) {
         self.authority
-            .decide(
+            .decide_for_owner(
                 DecisionAuthority::ControllerA,
                 &self.owner.lease,
                 &self.owner.task_id,
                 id,
                 decision,
-                self.authority.now_ms(),
+                &PermissionDecisionOwner {
+                    session_id: self.owner.session_id.clone(),
+                    task_sequence: self.owner.task_sequence,
+                },
             )
             .unwrap();
         if decision == PermissionDecision::Allow {
@@ -382,13 +388,16 @@ async fn expiry_and_pending_terminal_denial_use_authority_state_without_false_al
         } else {
             fixture
                 .authority
-                .decide(
+                .decide_for_owner(
                     DecisionAuthority::ControllerA,
                     &fixture.owner.lease,
                     &fixture.owner.task_id,
                     &view.permission_request_id,
                     PermissionDecision::Allow,
-                    1_000,
+                    &PermissionDecisionOwner {
+                        session_id: fixture.owner.session_id.clone(),
+                        task_sequence: fixture.owner.task_sequence,
+                    },
                 )
                 .unwrap();
         }

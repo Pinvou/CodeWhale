@@ -157,7 +157,10 @@ impl ActiveCardOps {
     /// 现在有没有下载在跑。清理下载缓存前要确认——别把正在写的临时块删了。
     /// 只看下载：部署/启用这些不碰 .incomplete，没必要一并挡住。
     pub fn any_download_running(&self) -> bool {
-        self.0.lock().values().any(|e| e.op == OP_DOWNLOAD)
+        self.0
+            .lock()
+            .values()
+            .any(|e| e.op == OP_DOWNLOAD || e.op.kind == "version_stage")
     }
 
     /// 这张卡上还在跑的那次长操作。界面按卡片接回任务卡时问的就是它。
