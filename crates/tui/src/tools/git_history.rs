@@ -9,20 +9,12 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use super::git::MAX_OUTPUT_CHARS;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_bool, optional_str, optional_u64, required_str,
 };
 
-/// Inline cap on git stdout, in characters. The shell-tool spillover helpers
-/// are not a drop-in here: `shell_output::truncate_with_meta` is hard-wired to
-/// the shell tools' 30KB budget and their cargo/rustc preserved-summary
-/// heuristics, and the spill writers in `truncate.rs` need a tool-call id plus
-/// ownership publication these call sites do not carry. Oversized results are
-/// still spilled engine-side by the evidence router (`truncate.rs`, applied to
-/// every tool result before fan-out) at its own thresholds, so raising this cap
-/// only moves when the transcript copy condenses.
-const MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_LOG_MAX_COUNT: u64 = 20;
 const MAX_LOG_MAX_COUNT: u64 = 200;
 const DEFAULT_UNIFIED: u64 = 3;

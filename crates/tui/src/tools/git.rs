@@ -25,8 +25,9 @@ use super::spec::{
 /// ownership publication these call sites do not carry. Oversized results are
 /// still spilled engine-side by the evidence router (`truncate.rs`, applied to
 /// every tool result before fan-out) at its own thresholds, so raising this cap
-/// only moves when the transcript copy condenses.
-const MAX_OUTPUT_CHARS: usize = 100_000;
+/// only moves when the transcript copy condenses. Shared with `git_history`,
+/// which applies the same cap to the same kind of output.
+pub(super) const MAX_OUTPUT_CHARS: usize = 100_000;
 const DEFAULT_UNIFIED: u64 = 3;
 const MAX_UNIFIED: u64 = 50;
 
@@ -352,6 +353,25 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    // Pins for the audited git-tool budgets (PR #154 limits review): one git
+    // subprocess must stay inside the 120s ceiling shared with the grep walk,
+    // and the inline output cap stays at 100k chars (the cap `git_history`
+    // now imports from here). The upper bounds are const-asserted (a runtime
+    // `assert!` on a constant would trip clippy's `assertions_on_constants`
+    // under newer toolchains); the exact values stay runtime pins.
+    const _: () = assert!(GIT_COMMAND_BUDGET.as_secs() <= 120);
+    const _: () = assert!(MAX_OUTPUT_CHARS == 100_000);
+
+    #[test]
+    fn git_budgets_pin_the_audited_literals() {
+        assert_eq!(
+            GIT_COMMAND_BUDGET.as_secs(),
+            120,
+            "the audited git subprocess budget"
+        );
+        assert_eq!(MAX_OUTPUT_CHARS, 100_000, "the audited inline output cap");
+    }
 
     fn git_available() -> bool {
         crate::dependencies::Git::available()
