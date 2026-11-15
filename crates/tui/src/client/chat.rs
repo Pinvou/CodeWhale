@@ -1034,8 +1034,35 @@ fn mirror_minimax_reasoning_details_for_messages(messages: &mut [Value]) {
     }
 }
 
-fn mirror_minimax_reasoning_details_for_body(body: &mut Value, provider: ApiProvider) {
-    if provider != ApiProvider::Minimax {
+/// Whether this MiniMax route still speaks the `reasoning_details`
+/// continuity dialect.
+///
+/// MiniMax's own API reference (checked 2026-11-04) carries no
+/// `reasoning_details` in the Chat Completions request schema — the
+/// documented multi-turn contract is echoing `reasoning_content` (or
+/// preserving `<think>` content) alongside role:tool pairing — so mirroring
+/// on a first-party endpoint would only add an undocumented field.
+/// The route stays user-configurable through the `[providers.minimax]`
+/// `base_url` table override (or the global `CODEWHALE_BASE_URL` /
+/// `--base-url` flags; `MINIMAX_BASE_URL` never reaches this chat route),
+/// so gateway dialects behind a custom `base_url` (e.g. an
+/// OpenRouter-compatible proxy for MiniMax M2, which still documents the
+/// field) keep the mirror. Bare official hosts are classified first-party
+/// because the transport appends `/v1` to a version-less base URL.
+fn minimax_route_mirrors_reasoning_details(provider: ApiProvider, base_url: &str) -> bool {
+    provider == ApiProvider::Minimax
+        && !codewhale_config::provider::is_exact_minimax_chat_route(
+            codewhale_config::ProviderKind::Minimax,
+            base_url,
+        )
+}
+
+fn mirror_minimax_reasoning_details_for_body(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+) {
+    if !minimax_route_mirrors_reasoning_details(provider, base_url) {
         return;
     }
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
@@ -1265,7 +1292,7 @@ pub(crate) fn build_chat_wire_body(
     } else {
         None
     };
-    mirror_minimax_reasoning_details_for_body(&mut body, provider);
+    mirror_minimax_reasoning_details_for_body(&mut body, provider, base_url);
 
     Ok(ChatWireBody {
         body,
@@ -1838,7 +1865,7 @@ impl<'a> PromptBuilder<'a> {
         if provider == ApiProvider::Arcee {
             apply_arcee_waf_safe_message_encoding(&mut messages);
         }
-        if provider == ApiProvider::Minimax {
+        if minimax_route_mirrors_reasoning_details(provider, base_url) {
             mirror_minimax_reasoning_details_for_messages(&mut messages);
         }
         if is_exact_mistral_chat_route(provider, base_url) {
@@ -5061,12 +5088,9 @@ mod arcee_waf_message_encoding_tests {
 
 #[cfg(test)]
 mod minimax_reasoning_replay_tests {
-    use super::{
-        build_chat_messages_for_request_and_provider,
-        build_chat_messages_for_request_and_provider_and_route,
-    };
+    use super::{build_chat_messages_for_request_and_provider_and_route, build_chat_wire_body};
     use crate::config::{
-        ApiProvider, DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MINIMAX_MODEL,
+        ApiProvider, DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MINIMAX_BASE_URL, DEFAULT_MINIMAX_MODEL,
         DEFAULT_MODELSTUDIO_TOKEN_PLAN_BASE_URL, DEFAULT_MOONSHOT_BASE_URL, KIMI_CODE_K3_MODEL,
     };
     use crate::models::Role;
@@ -5105,10 +5129,126 @@ mod minimax_reasoning_replay_tests {
     }
 
     #[test]
-    fn minimax_history_replays_thinking_as_reasoning_details() {
+    fn minimax_official_route_replays_thinking_as_reasoning_content_only() {
+        // MiniMax's own API reference (checked 2026-11-04) no longer
+        // documents `reasoning_details` anywhere in the Chat Completions
+        // request schema; their multi-turn contract is to echo
+        // `reasoning_content` (or preserve `<think>` content) alongside
+        // role:tool pairing. First-party endpoints must not receive the
+        // synthesized field.
         let request = request_with_assistant_thinking();
 
-        let messages = build_chat_messages_for_request_and_provider(&request, ApiProvider::Minimax);
+        let messages = build_chat_messages_for_request_and_provider_and_route(
+            &request,
+            ApiProvider::Minimax,
+            DEFAULT_MINIMAX_BASE_URL,
+        );
+        let assistant = &messages[0];
+
+        assert_eq!(
+            assistant
+                .get("reasoning_content")
+                .and_then(|value| value.as_str()),
+            Some("Inspect tool state")
+        );
+        assert!(
+            assistant.get("reasoning_details").is_none(),
+            "the official endpoint dropped reasoning_details from its documented schema: {assistant}"
+        );
+    }
+
+    #[test]
+    fn minimax_bare_official_host_replays_thinking_as_reasoning_content_only() {
+        // A bare official host has no `/v1` in the configured `base_url`, but
+        // the transport appends `/v1` before dialing, so it reaches the same
+        // first-party endpoint and must not receive the synthesized field
+        // through either the prompt builder or the wire-body pass.
+        let request = request_with_assistant_thinking();
+
+        let messages = build_chat_messages_for_request_and_provider_and_route(
+            &request,
+            ApiProvider::Minimax,
+            "https://api.minimax.io",
+        );
+        let assistant = &messages[0];
+
+        assert_eq!(
+            assistant
+                .get("reasoning_content")
+                .and_then(|value| value.as_str()),
+            Some("Inspect tool state")
+        );
+        assert!(
+            assistant.get("reasoning_details").is_none(),
+            "the bare official host dials the official /v1 endpoint: {assistant}"
+        );
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Minimax,
+            "https://api.minimaxi.com/",
+            false,
+        )
+        .expect("MiniMax wire body");
+        for message in body.body["messages"].as_array().expect("messages array") {
+            assert!(
+                message.get("reasoning_details").is_none(),
+                "wire body for the bare official host must not gain reasoning_details: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn minimax_repeated_trailing_slash_host_dials_first_party_without_reasoning_details() {
+        // The transport trims every trailing slash (`trim_end_matches('/')`)
+        // before appending `/v1`, so `https://api.minimax.io//` reaches the
+        // official endpoint. The route guards must therefore strip all
+        // trailing slashes too (review 4539989149 / 4541485725): stripping
+        // only one left this spelling classified as a gateway and mirrored
+        // reasoning_details onto the first-party route.
+        let request = request_with_assistant_thinking();
+
+        let messages = build_chat_messages_for_request_and_provider_and_route(
+            &request,
+            ApiProvider::Minimax,
+            "https://api.minimax.io//",
+        );
+        let assistant = &messages[0];
+        assert!(
+            assistant.get("reasoning_details").is_none(),
+            "the repeated-slash official host dials the official /v1 endpoint: {assistant}"
+        );
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Minimax,
+            "https://api.minimaxi.com///",
+            false,
+        )
+        .expect("MiniMax wire body");
+        for message in body.body["messages"].as_array().expect("messages array") {
+            assert!(
+                message.get("reasoning_details").is_none(),
+                "wire body for the repeated-slash official host must not gain reasoning_details: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn minimax_gateway_route_still_mirrors_thinking_as_reasoning_details() {
+        // The route stays user-configurable through the `[providers.minimax]`
+        // `base_url` table override (or the global `CODEWHALE_BASE_URL` /
+        // `--base-url` flags), so gateway dialects stay reachable through the
+        // minimax provider slot; a gateway serving OpenRouter's MiniMax M2
+        // page still documents the `reasoning_details` round-trip, so
+        // non-official endpoints keep the mirror.
+        let request = request_with_assistant_thinking();
+
+        let messages = build_chat_messages_for_request_and_provider_and_route(
+            &request,
+            ApiProvider::Minimax,
+            "https://gateway.example/v1",
+        );
         let assistant = &messages[0];
 
         assert_eq!(
@@ -5129,6 +5269,29 @@ mod minimax_reasoning_replay_tests {
                 .and_then(|value| value.as_str()),
             Some("Inspect tool state")
         );
+    }
+
+    #[test]
+    fn minimax_wire_body_on_official_route_carries_no_reasoning_details() {
+        // The wire-body pass mirrors after the prompt builder; it must
+        // respect the same first-party-vs-gateway split so a cached or
+        // rebuilt body cannot reintroduce the field.
+        let request = request_with_assistant_thinking();
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Minimax,
+            DEFAULT_MINIMAX_BASE_URL,
+            false,
+        )
+        .expect("MiniMax wire body");
+
+        for message in body.body["messages"].as_array().expect("messages array") {
+            assert!(
+                message.get("reasoning_details").is_none(),
+                "official endpoint must not receive synthesized reasoning_details: {message}"
+            );
+        }
     }
 
     #[test]
