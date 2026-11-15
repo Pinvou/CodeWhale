@@ -692,6 +692,9 @@ struct DownloadBinding {
     session_id: String,
     task_id: String,
     artifact_id: String,
+    // Terminal receipts retain only the last bounded chunk. They reserve a
+    // handle slot at begin, not shared in-flight/byte accounting after finish.
+    completed: Option<(u64, Arc<DownloadChunk>)>,
 }
 
 impl ArtifactDownloads {
@@ -733,6 +736,18 @@ impl ArtifactDownloads {
         }
         let context = TransferContext::new(lease, session_id, task_id, TransferDirection::Download)
             .map_err(|error| error.code.to_owned())?;
+        let mut active = self.active.lock();
+        active.retain(|_, binding| {
+            binding
+                .completed
+                .as_ref()
+                .is_none_or(|(deadline, _)| now_b < *deadline)
+        });
+        // One bounded slot per admitted handle, including terminal receipts.
+        // Refuse a new begin rather than evict an accepted retry receipt.
+        if active.len() >= MAX_ARTIFACTS {
+            return Err("transfer_capacity".into());
+        }
         let (handle, progress) = self
             .registry
             .begin(
@@ -746,7 +761,13 @@ impl ArtifactDownloads {
                 now_b,
             )
             .map_err(|error| error.code.to_owned())?;
-        self.active.lock().insert(
+        if active.contains_key(handle.id()) {
+            // The shared core no longer owns completed IDs. Even a UUID
+            // collision must not turn an old handle into a fresh transfer.
+            self.registry.abort(&handle);
+            return Err("transfer_capacity".into());
+        }
+        active.insert(
             handle.id().to_owned(),
             DownloadBinding {
                 task_sequence,
@@ -754,6 +775,7 @@ impl ArtifactDownloads {
                 session_id: session_id.to_owned(),
                 task_id: task_id.to_owned(),
                 artifact_id: artifact_id.to_owned(),
+                completed: None,
             },
         );
         Ok(ArtifactDownloadBegin {
@@ -773,9 +795,10 @@ impl ArtifactDownloads {
         chunk_index: u64,
         now_b: u64,
     ) -> Result<Option<DownloadChunk>, String> {
-        let binding = self
-            .active
-            .lock()
+        // Serialize admitted reads/commits with abort and lifecycle
+        // retirement. No off-lock completion may resurrect a retired handle.
+        let mut active = self.active.lock();
+        let binding = active
             .get(handle_id)
             .cloned()
             .ok_or_else(|| "transfer_unknown".to_owned())?;
@@ -788,26 +811,53 @@ impl ArtifactDownloads {
         }
         self.index
             .require_admission(artifact_id, binding.task_sequence)?;
+        if let Some((deadline, chunk)) = &binding.completed {
+            if now_b >= *deadline {
+                active.remove(handle_id);
+                return Err("transfer_unknown".into());
+            }
+            if chunk_index != chunk.chunk_index {
+                return Err("transfer_chunk_out_of_order".into());
+            }
+            let (descriptor, _) =
+                self.index
+                    .resolve_for_task(session_id, artifact_id, task_id, lease)?;
+            let completed = chunk.completed.as_ref().ok_or("transfer_unknown")?;
+            if descriptor.sha256 != completed.sha256 || descriptor.total_bytes != completed.bytes {
+                return Err("transfer_binding_stale".into());
+            }
+            // Reuse the exact verified bytes and receipt, never re-read a
+            // mutable source or extend the terminal receipt's deadline.
+            return Ok(Some((**chunk).clone()));
+        }
         let source = match self
             .index
             .resolve_for_task(session_id, artifact_id, task_id, lease)
         {
             Ok((_, source)) => source,
             Err(error) => {
-                self.active.lock().remove(handle_id);
-                self.abort(handle_id);
+                active.remove(handle_id);
+                self.abort_registry_handle(handle_id);
                 return Err(error);
             }
         };
         let result = self.next_chunk_from_source(source, handle_id, chunk_index, now_b);
-        if result.as_ref().is_err()
-            || result
-                .as_ref()
-                .ok()
-                .and_then(|chunk| chunk.as_ref())
-                .is_some_and(|chunk| chunk.completed.is_some())
+        if result.is_err() {
+            active.remove(handle_id);
+        } else if let Ok(Some(chunk)) = &result
+            && chunk.completed.is_some()
         {
-            self.active.lock().remove(handle_id);
+            let deadline = now_b.saturating_add(self.registry.limits().ttl.as_millis() as u64);
+            // 结果为 Ok 时 handle 必然仍被锁住（本函数全程持有 active 锁，
+            // Ok 路径无 remove）；按工作区 expect 禁令以守卫兜底，debug 构建
+            // 下不变量被破坏仍会立即暴露。
+            debug_assert!(
+                active.get(handle_id).is_some(),
+                "Ok 结果要求 admitted handle 仍被锁定"
+            );
+            if let Some(handle) = active.get_mut(handle_id) {
+                handle.completed = Some((deadline, Arc::new(chunk.clone())));
+            }
         }
         result
     }
@@ -832,7 +882,10 @@ impl ArtifactDownloads {
             return Err("transfer_binding_stale".to_owned());
         }
         active.remove(handle_id);
-        Ok(self.abort(handle_id))
+        // Receipt-only abort is a successful retirement even though core
+        // accounting was already released on the verified final chunk.
+        self.abort_registry_handle(handle_id);
+        Ok(true)
     }
 
     pub(crate) fn next_chunk(
@@ -889,6 +942,12 @@ impl ArtifactDownloads {
     }
 
     pub(crate) fn abort(&self, handle_id: &str) -> bool {
+        let mut active = self.active.lock();
+        let removed = active.remove(handle_id).is_some();
+        self.abort_registry_handle(handle_id) || removed
+    }
+
+    fn abort_registry_handle(&self, handle_id: &str) -> bool {
         let Ok(handle) = super::core::TransferHandle::from_id(handle_id)
             .ok_or_else(|| "transfer_unknown".to_owned())
         else {
@@ -920,17 +979,16 @@ impl ArtifactDownloads {
     }
 
     pub(crate) fn cleanup_for_admission(&self, sequence: u64) -> usize {
-        let ids: Vec<_> = self
-            .active
-            .lock()
+        let mut active = self.active.lock();
+        let ids: Vec<_> = active
             .iter()
             .filter(|(_, binding)| binding.task_sequence == sequence)
             .map(|(id, _)| id.clone())
             .collect();
         let count = ids.len();
         for id in ids {
-            self.active.lock().remove(&id);
-            self.abort(&id);
+            active.remove(&id);
+            self.abort_registry_handle(&id);
         }
         count
     }
@@ -950,11 +1008,19 @@ impl ArtifactDownloads {
     /// DEV-18 审核修复：未完成下载同样受 TTL 约束（RC-F-003 的下载侧）。
     pub(crate) fn expire(&self, now_b: u64) -> usize {
         let expired = self.registry.take_expired_downloads(now_b);
-        self.active.lock().retain(|id, _| {
+        let mut completed_expired = 0;
+        self.active.lock().retain(|id, binding| {
+            if let Some((deadline, _)) = &binding.completed {
+                if now_b >= *deadline {
+                    completed_expired += 1;
+                    return false;
+                }
+                return true;
+            }
             super::core::TransferHandle::from_id(id)
                 .is_some_and(|handle| self.registry.progress(&handle).is_ok())
         });
-        expired.len()
+        expired.len() + completed_expired
     }
 }
 
@@ -1164,6 +1230,8 @@ mod tests {
         assert_eq!(chunk.bytes, b"report");
         assert!(chunk.completed.is_some());
         assert_eq!(downloads.cleanup_for_admission(1), 0);
+        assert!(downloads.active.lock().contains_key(&new.handle_id));
+        assert_eq!(downloads.cleanup_for_admission(257), 1);
         assert!(downloads.active.lock().is_empty());
     }
 
@@ -1685,6 +1753,346 @@ mod tests {
             index
                 .publish_task("session-0001", "task-0001", &lease())
                 .is_empty()
+        );
+    }
+
+    fn finish_bound(
+        downloads: &ArtifactDownloads,
+        artifact: &str,
+        now: u64,
+    ) -> (String, DownloadChunk) {
+        let begin = downloads
+            .begin(&lease(), "session-0001", "task-0001", artifact, now)
+            .unwrap();
+        let chunk = downloads
+            .next_chunk_bound(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                artifact,
+                &begin.handle_id,
+                0,
+                now + 1,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(chunk.completed.is_some());
+        (begin.handle_id, chunk)
+    }
+
+    #[test]
+    fn completed_receipt_replays_exact_final_without_rereading_or_reallocating_transfer() {
+        struct OnceSource(std::sync::atomic::AtomicUsize);
+        impl DownloadSource for OnceSource {
+            fn total_bytes(&self) -> u64 {
+                6
+            }
+            fn read_chunk(&self, _: u64, _: usize) -> Result<Option<Vec<u8>>, String> {
+                assert_eq!(
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                    0,
+                    "a final retry must not re-read mutable source bytes"
+                );
+                Ok(Some(b"report".to_vec()))
+            }
+        }
+        let (downloads, index) = downloads();
+        index
+            .register(
+                &lease(),
+                "session-0001",
+                "task-0001",
+                "artifact-retry",
+                "report.txt",
+                "text/plain",
+                &digest(b"report"),
+                Arc::new(OnceSource(std::sync::atomic::AtomicUsize::new(0))),
+            )
+            .unwrap();
+        let (handle, first) = finish_bound(&downloads, "artifact-retry", 100);
+        for now in [102, 200, 300] {
+            let repeated = downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    &handle,
+                    0,
+                    now,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(repeated, first);
+            assert_eq!(downloads.registry.active_count(), 0);
+            assert_eq!(downloads.registry.connection_bytes("connection-0001"), 0);
+        }
+        assert_eq!(downloads.active.lock().len(), 1);
+    }
+
+    #[test]
+    fn completed_receipt_rejects_wrong_scope_index_and_digest_without_consuming_valid_retry() {
+        let (downloads, index) = downloads();
+        register(
+            &index,
+            "artifact-retry",
+            "report.txt",
+            "text/plain",
+            b"report",
+        );
+        let (handle, first) = finish_bound(&downloads, "artifact-retry", 100);
+        let mut other = lease();
+        other.lease_epoch = "2".into();
+        for (context, session, task, artifact) in [
+            (&other, "session-0001", "task-0001", "artifact-retry"),
+            (&lease(), "other-session", "task-0001", "artifact-retry"),
+            (&lease(), "session-0001", "other-task", "artifact-retry"),
+            (&lease(), "session-0001", "task-0001", "other-artifact"),
+        ] {
+            assert_eq!(
+                downloads
+                    .next_chunk_bound(context, session, task, artifact, &handle, 0, 102)
+                    .unwrap_err(),
+                "transfer_binding_stale"
+            );
+        }
+        assert_eq!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    &handle,
+                    1,
+                    102
+                )
+                .unwrap_err(),
+            "transfer_chunk_out_of_order"
+        );
+        assert_eq!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    &handle,
+                    0,
+                    103
+                )
+                .unwrap()
+                .unwrap(),
+            first
+        );
+        index
+            .entries
+            .lock()
+            .get_mut("artifact-retry")
+            .unwrap()
+            .descriptor
+            .sha256 = digest(b"change");
+        assert_eq!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    &handle,
+                    0,
+                    104
+                )
+                .unwrap_err(),
+            "transfer_binding_stale"
+        );
+        assert_eq!(downloads.registry.active_count(), 0);
+    }
+
+    #[test]
+    fn completed_receipt_has_fixed_ttl_and_abort_retirement() {
+        let (downloads, index) = downloads();
+        register(
+            &index,
+            "artifact-retry",
+            "report.txt",
+            "text/plain",
+            b"report",
+        );
+        let (handle, _) = finish_bound(&downloads, "artifact-retry", 100);
+        let deadline = 101 + downloads.registry.limits().ttl.as_millis() as u64;
+        assert!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    &handle,
+                    0,
+                    deadline - 1
+                )
+                .is_ok()
+        );
+        assert_eq!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    &handle,
+                    0,
+                    deadline
+                )
+                .unwrap_err(),
+            "transfer_unknown"
+        );
+        assert!(downloads.active.lock().is_empty());
+        let (handle, _) = finish_bound(&downloads, "artifact-retry", deadline);
+        assert!(
+            downloads
+                .abort_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    &handle
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    &handle,
+                    0,
+                    deadline + 2
+                )
+                .unwrap_err(),
+            "transfer_unknown"
+        );
+    }
+
+    #[test]
+    fn completed_receipt_capacity_reserves_before_begin_and_expiry_reopens_admission() {
+        let (downloads, index) = downloads();
+        register(
+            &index,
+            "artifact-retry",
+            "report.txt",
+            "text/plain",
+            b"report",
+        );
+        let mut first = None;
+        for _ in 0..MAX_ARTIFACTS {
+            let result = finish_bound(&downloads, "artifact-retry", 100);
+            if first.is_none() {
+                first = Some(result);
+            }
+        }
+        assert_eq!(downloads.active.lock().len(), MAX_ARTIFACTS);
+        assert_eq!(downloads.registry.active_count(), 0);
+        assert_eq!(
+            downloads
+                .begin(&lease(), "session-0001", "task-0001", "artifact-retry", 102)
+                .unwrap_err(),
+            "transfer_capacity"
+        );
+        let (handle, chunk) = first.unwrap();
+        assert_eq!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    &handle,
+                    0,
+                    103
+                )
+                .unwrap()
+                .unwrap(),
+            chunk
+        );
+        let deadline = 101 + downloads.registry.limits().ttl.as_millis() as u64;
+        assert_eq!(downloads.expire(deadline), MAX_ARTIFACTS);
+        assert!(downloads.active.lock().is_empty());
+        assert!(
+            downloads
+                .begin(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    deadline
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn completed_receipt_cleanup_is_scoped_to_connection_and_task() {
+        let (downloads, index) = downloads();
+        register(
+            &index,
+            "artifact-retry",
+            "report.txt",
+            "text/plain",
+            b"report",
+        );
+        let (handle, chunk) = finish_bound(&downloads, "artifact-retry", 100);
+        assert_eq!(downloads.cleanup_for_task("other-task"), 0);
+        assert_eq!(downloads.cleanup_for_connection("other-connection"), 0);
+        assert_eq!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    &handle,
+                    0,
+                    103
+                )
+                .unwrap()
+                .unwrap(),
+            chunk
+        );
+        downloads.cleanup_for_task("task-0001");
+        assert_eq!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    &handle,
+                    0,
+                    104
+                )
+                .unwrap_err(),
+            "transfer_unknown"
+        );
+        let (handle, _) = finish_bound(&downloads, "artifact-retry", 105);
+        downloads.cleanup_for_connection("connection-0001");
+        assert!(downloads.active.lock().is_empty());
+        assert_eq!(
+            downloads
+                .next_chunk_bound(
+                    &lease(),
+                    "session-0001",
+                    "task-0001",
+                    "artifact-retry",
+                    &handle,
+                    0,
+                    107
+                )
+                .unwrap_err(),
+            "transfer_unknown"
         );
     }
 }
