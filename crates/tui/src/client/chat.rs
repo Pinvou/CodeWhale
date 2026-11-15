@@ -969,7 +969,11 @@ fn apply_direct_moonshot_k3_fixed_sampling(
 /// Strip generic controls only on the exact first-party membership route;
 /// custom gateways and unknown model ids retain their own wire contract.
 /// Source: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
-/// (verified 2026-08-26).
+/// (verified 2026-08-26; re-checked 2026-11-15 — that page no longer
+/// documents the sampling restriction, so the standing evidence is the
+/// models-overview K3-series parameter column
+/// <https://platform.kimi.com/docs/api/models-overview> plus the route's
+/// observed behavior).
 ///
 /// The K3.1 membership spellings (`k3.1-pro[-highspeed]`) inherit the K3
 /// parameter constraints verbatim (models-overview K3-series column), and
