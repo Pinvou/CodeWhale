@@ -1,0 +1,1 @@
+DROP INDEX public.usage_cancellation_dispatch_fence_idx;

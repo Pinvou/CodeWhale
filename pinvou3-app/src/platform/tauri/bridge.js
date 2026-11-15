@@ -2875,6 +2875,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       attachmentBegin: desktopRemoteControlFeature.attachmentBegin,
       attachmentChunk: desktopRemoteControlFeature.attachmentChunk,
       attachmentAbort: desktopRemoteControlFeature.attachmentAbort,
+      attachmentAbortConfirmed: desktopRemoteControlFeature.attachmentAbortConfirmed,
       artifactIndex: desktopRemoteControlFeature.artifactIndex,
       artifactPreview: desktopRemoteControlFeature.artifactPreview,
       artifactDownloadBegin: desktopRemoteControlFeature.artifactDownloadBegin,
