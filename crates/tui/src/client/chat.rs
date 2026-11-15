@@ -1172,6 +1172,7 @@ fn sanitize_moonshot_chat_tools(chat_tools: &mut Vec<Value>) -> Vec<String> {
 /// check uses to tell a shadowed name from a live one.
 fn prefix_digit_led_tool_names_for_moonshot(
     chat_tools: &mut Vec<Value>,
+    registry_names: &[String],
 ) -> (Vec<String>, std::collections::HashMap<String, String>) {
     let wire_names: Vec<String> = chat_tools
         .iter()
@@ -1213,7 +1214,14 @@ fn prefix_digit_led_tool_names_for_moonshot(
             dropped.push(name);
             return false;
         }
-        if wire_names.iter().any(|existing| existing == &minted) {
+        if wire_names.iter().any(|existing| existing == &minted)
+            || registry_names.iter().any(|existing| existing == &minted)
+        {
+            // A schema-dropped `_3d_render` sibling keeps its handler in the
+            // registry, and dispatch exact-matches the registry: letting the
+            // digit-led survivor take the minted spelling would route the
+            // survivor's calls onto the sibling's handler, so the ambiguity
+            // is refused — neither tool is advertised (review 5910671961).
             tracing::warn!(
                 tool = %name,
                 wire = %minted,
@@ -1363,11 +1371,21 @@ pub(crate) fn build_chat_wire_body(
         // whose parameters cannot pass MFJS validation so one incompatible
         // tool never sinks the whole request.
         if matches!(provider, crate::config::ApiProvider::Moonshot) {
+            // Registry spellings of the FULL catalog, captured before any
+            // filtering: a minted wire name must not collide with a tool
+            // that exists in the registry even when that tool's schema
+            // dropped it from THIS request. Dispatch exact-matches the
+            // registry, so advertising a survivor under a schema-dropped
+            // sibling's spelling sends the sibling's calls to the
+            // sibling's handler (review 5910671961).
+            let registry_names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
             // Schema sanitization runs FIRST and records registry spellings:
             // the collision check below must count only tools that survive
             // it, or an invalid `_3d_render` sibling would suppress a valid
             // `3d_render` as a phantom collision and neither tool would be
-            // advertised (review thread on 5896144003).
+            // advertised (review thread on 5896144003) — while the registry
+            // capture above keeps a schema-dropped sibling from lending its
+            // spelling to a survivor (review 5910671961).
             omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools);
             moonshot_offered_registry_names = chat_tools
                 .iter()
@@ -1379,7 +1397,7 @@ pub(crate) fn build_chat_wire_body(
                 })
                 .collect();
             let (collision_dropped, minted_names) =
-                prefix_digit_led_tool_names_for_moonshot(&mut chat_tools);
+                prefix_digit_led_tool_names_for_moonshot(&mut chat_tools, &registry_names);
             omitted_tool_names.extend(collision_dropped);
             moonshot_minted_names = minted_names;
         }
@@ -6940,12 +6958,17 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
-    fn moonshot_wire_lets_a_valid_digit_led_tool_survive_an_invalid_namesake() {
-        // The collision check must count only tools that survive schema
-        // sanitization (review thread on 5896144003): a valid `3d_render`
-        // beside an invalid-schema `_3d_render` must advertise and force the
-        // valid tool under the minted spelling, not drop both — one
-        // incompatible tool never sinks a compatible sibling.
+    fn moonshot_wire_refuses_the_ambiguity_when_a_schema_dropped_sibling_holds_the_minted_name() {
+        // Registry keys `3d_render` and `_3d_render` can coexist while the
+        // underscore sibling's schema drops it from THIS request. The mint
+        // once read only the surviving wire names (review 5896144003) and
+        // advertised the valid digit-led tool under the minted spelling —
+        // but dispatch exact-matches the FULL registry, where the
+        // schema-dropped sibling still holds `_3d_render`: an ordinary call
+        // to the advertised survivor selected the sibling's handler (review
+        // 5910671961). The ambiguity is therefore refused — the mint
+        // collision check now counts the whole registry catalog, so the
+        // survivor is dropped too and neither name is advertised.
         let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
         let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
         invalid_underscore.description = "invalid sibling".to_string();
@@ -6965,71 +6988,49 @@ mod alias_thinking_detection_tests {
         )
         .expect("Moonshot wire body");
 
-        let tools = body.body["tools"].as_array().expect("tools on the wire");
+        let tools = body
+            .body
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .map(|tools| tools.len())
+            .unwrap_or(0);
         assert_eq!(
-            tools.len(),
-            1,
-            "the invalid sibling is dropped, the valid tool survives: {tools:?}"
-        );
-        assert_eq!(tools[0]["function"]["name"], json!("_3d_render"));
-        assert_eq!(
-            tools[0]["function"]["description"],
-            json!("probe"),
-            "the survivor is the VALID digit-led tool: {tools:?}"
+            tools,
+            0,
+            "the ambiguity is refused: neither tool is advertised: {:?}",
+            body.body.get("tools")
         );
         assert_eq!(
             body.omitted_tool_names,
-            vec!["_3d_render".to_string()],
-            "the schema drop is reported under its registry spelling"
+            vec!["_3d_render".to_string(), "3d_render".to_string()],
+            "the schema drop and the collision drop are both reported under registry spellings"
         );
 
-        // Forcing the dropped REGISTRY spelling fails: the offered check
-        // reads registry identity, not minted aliases, so a forced call
-        // naming the schema-dropped `_3d_render` cannot dispatch onto the
-        // dropped registry handler through exact-match precedence (review
-        // 5897491074).
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
-        invalid_underscore.input_schema = json!({"type": "string"});
-        request.tools = Some(vec![
-            digit_led_name_probe_tool("3d_render"),
-            invalid_underscore,
-        ]);
-        request.tool_choice = Some(json!({"type": "tool", "name": "_3d_render"}));
-        let error = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .err()
-        .expect("forcing the dropped underscore registry spelling must bail");
-        assert!(
-            error.to_string().contains("not offered"),
-            "the bail must name the offered predicate: {error}"
-        );
-
-        // Forcing the survivor proceeds under both spellings.
-        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
-        let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
-        invalid_underscore.input_schema = json!({"type": "string"});
-        request.tools = Some(vec![
-            digit_led_name_probe_tool("3d_render"),
-            invalid_underscore,
-        ]);
-        request.tool_choice = Some(json!({"type": "tool", "name": "3d_render"}));
-        let body = crate::client::chat::build_chat_wire_body(
-            &request,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_MOONSHOT_BASE_URL,
-            false,
-        )
-        .expect("forcing the surviving digit-led tool must proceed");
-        assert_eq!(
-            body.body["tool_choice"]["function"]["name"],
-            json!("_3d_render"),
-            "the forced call names the minted wire spelling"
-        );
+        // Forcing either spelling fails: the dropped underscore registry
+        // spelling is not offered (review 5897491074), and the digit-led
+        // survivor has no minted alias to answer for it.
+        for forced in ["_3d_render", "3d_render"] {
+            let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+            let mut invalid_underscore = digit_led_name_probe_tool("_3d_render");
+            invalid_underscore.input_schema = json!({"type": "string"});
+            request.tools = Some(vec![
+                digit_led_name_probe_tool("3d_render"),
+                invalid_underscore,
+            ]);
+            request.tool_choice = Some(json!({"type": "tool", "name": forced}));
+            let error = crate::client::chat::build_chat_wire_body(
+                &request,
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                false,
+            )
+            .err()
+            .expect("forcing a refused tool must bail");
+            assert!(
+                error.to_string().contains("not offered"),
+                "the bail must name the offered predicate: {error}"
+            );
+        }
     }
 
     #[test]
