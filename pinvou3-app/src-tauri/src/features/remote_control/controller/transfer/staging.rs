@@ -884,6 +884,166 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_cleanup_requires_exact_binding_and_removes_real_staging() {
+        for completed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(directory.path().to_owned());
+            let begin = runtime
+                .uploads
+                .begin(context(), metadata(b"new"), 1)
+                .unwrap();
+            if completed {
+                runtime
+                    .uploads
+                    .accept_chunk(&begin.handle_id, 0, b"new", 2)
+                    .unwrap();
+            }
+            let staged = directory.path().join(STAGING_DIR).join(&begin.handle_id);
+            for field in 0..7 {
+                let mut wrong = lease();
+                let mut session = "session-0001";
+                let mut task = "task-0001";
+                match field {
+                    0 => wrong.connection_id = "connection-other".into(),
+                    1 => wrong.controller_lease_id = "lease-other".into(),
+                    2 => wrong.lease_epoch = "2".into(),
+                    3 => wrong.relay_epoch = "relay-other".into(),
+                    4 => wrong.remote_control_generation = "generation-other".into(),
+                    5 => session = "session-other",
+                    _ => task = "task-other",
+                }
+                assert_eq!(
+                    runtime
+                        .uploads
+                        .abort_confirmed(&begin.handle_id, &wrong, session, task),
+                    Err("transfer_binding_stale".into())
+                );
+                assert!(
+                    staged.exists(),
+                    "mismatched authority cannot revoke staging"
+                );
+            }
+            runtime
+                .uploads
+                .abort_confirmed(&begin.handle_id, &lease(), "session-0001", "task-0001")
+                .unwrap();
+            assert!(!staged.exists());
+            assert_eq!(
+                runtime.uploads.abort_confirmed(
+                    &begin.handle_id,
+                    &lease(),
+                    "session-0001",
+                    "task-0001"
+                ),
+                Err("transfer_unknown".into())
+            );
+            assert!(
+                runtime
+                    .uploads
+                    .accept_chunk(&begin.handle_id, 0, b"new", 3)
+                    .is_err(),
+                "a cleaned handle cannot publish late"
+            );
+        }
+    }
+
+    #[test]
+    fn confirmed_cleanup_waits_for_real_external_read_owner_then_releases() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_owned();
+        let stager = Arc::new(SessionIsolationStaging::new(Arc::new(move |_| {
+            Ok(root.clone())
+        })));
+        let uploads = AttachmentUploads::new(Arc::new(TransferRegistry::default()), stager.clone());
+        let begin = uploads.begin(context(), metadata(b"new"), 1).unwrap();
+        uploads
+            .accept_chunk(&begin.handle_id, 0, b"new", 2)
+            .unwrap();
+        let reader = stager.published_read_owner(&begin.handle_id).unwrap();
+        let staged = directory.path().join(STAGING_DIR).join(&begin.handle_id);
+        assert_eq!(
+            uploads.abort_confirmed(&begin.handle_id, &lease(), "session-0001", "task-0001"),
+            Err("transfer_staging_cleanup_failed".into())
+        );
+        assert_eq!(std::fs::read(reader.read_path()).unwrap(), b"new");
+        assert!(staged.exists());
+        assert!(
+            uploads
+                .accept_chunk(&begin.handle_id, 0, b"new", 3)
+                .is_err()
+        );
+        let mut wrong = lease();
+        wrong.lease_epoch = "2".into();
+        assert_eq!(
+            uploads.abort_confirmed(&begin.handle_id, &wrong, "session-0001", "task-0001"),
+            Err("transfer_binding_stale".into())
+        );
+        drop(reader);
+        uploads
+            .abort_confirmed(&begin.handle_id, &lease(), "session-0001", "task-0001")
+            .unwrap();
+        assert!(!staged.exists());
+    }
+
+    #[test]
+    fn confirmed_cleanup_cannot_revoke_an_admitted_or_consumed_upload() {
+        for consumed in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(directory.path().to_owned());
+            let begin = runtime
+                .uploads
+                .begin(context(), metadata(b"new"), 1)
+                .unwrap();
+            runtime
+                .uploads
+                .accept_chunk(&begin.handle_id, 0, b"new", 2)
+                .unwrap();
+            let readers = if consumed {
+                runtime
+                    .uploads
+                    .consume_completed(
+                        std::slice::from_ref(&begin.handle_id),
+                        &lease(),
+                        "session-0001",
+                        "task-0001",
+                    )
+                    .unwrap()
+            } else {
+                runtime
+                    .uploads
+                    .claim_for_admission(
+                        std::slice::from_ref(&begin.handle_id),
+                        &lease(),
+                        "session-0001",
+                        "task-0001",
+                        1,
+                    )
+                    .unwrap();
+                Vec::new()
+            };
+            let path = directory
+                .path()
+                .join(STAGING_DIR)
+                .join(&begin.handle_id)
+                .join("report.txt");
+            assert_eq!(
+                runtime.uploads.abort_confirmed(
+                    &begin.handle_id,
+                    &lease(),
+                    "session-0001",
+                    "task-0001"
+                ),
+                Err("transfer_binding_stale".into())
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"new");
+            runtime.uploads.cleanup_for_task("task-0001");
+            drop(readers);
+            runtime.uploads.expire(u64::MAX);
+            assert!(!path.parent().unwrap().exists());
+        }
+    }
+
+    #[test]
     fn completed_receipts_cleanup_without_deadlocking_their_own_read_owner() {
         for consumed in [false, true] {
             let directory = tempfile::tempdir().unwrap();

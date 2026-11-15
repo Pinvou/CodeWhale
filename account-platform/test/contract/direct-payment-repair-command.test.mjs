@@ -6,10 +6,10 @@ import { integerMoney } from '../../../pinvou3-app/src/features/account-platform
 const source = readFileSync(new URL('../../../pinvou3-app/src/features/account-platform/AdminFinanceWorkspace.jsx', import.meta.url), 'utf8');
 const repairStart = source.indexOf('  const repair = async () => {');
 const refundStart = source.indexOf('  const refund = async () => {', repairStart);
-const end = source.indexOf('  return <section>', refundStart);
+const end = source.indexOf('\n  };', refundStart) + '\n  };'.length;
 assert.ok(repairStart > 0 && refundStart > repairStart && end > refundStart);
-function callbacks(operation, client, detail, reason) {
-  return new Function('operation', 'client', 'detail', 'reason', 'targets', 'targetID', 'refundEnabled', 'permissions', 'copy', 'integerMoney', 'open', 'load', `${source.slice(repairStart, end)}\nreturn {repair, refund};`)(operation, client, detail, reason, [], '', false, [], {}, integerMoney, async () => {}, async () => {});
+function callbacks(operation, client, detail, reason, { route = null, refundReason = '' } = {}) {
+  return new Function('operation', 'client', 'detail', 'reason', 'route', 'refundReason', 'targets', 'targetID', 'refundEnabled', 'permissions', 'copy', 'integerMoney', 'open', 'load', `${source.slice(repairStart, end)}\nreturn {repair, refund};`)(operation, client, detail, reason, route, refundReason, [], '', false, [], {}, integerMoney, async () => {}, async () => {});
 }
 test('the actual initial repair and UNKNOWN retry callbacks carry one explicit protocol/key/facts', async () => {
   const client = new AdminPlatformClient(''), key = 'finance-original-direct-repair-1111', calls = [];
@@ -25,7 +25,7 @@ test('the actual initial repair and UNKNOWN retry callbacks carry one explicit p
     await assert.rejects(callbacks(operation, client, { order_id: 'original-order' }, ' original reason ').repair(), TypeError);
     assert.equal(original.action, 'repair'); assert.equal(original.commandProtocol, 1);
     operation.unknown = true; operation.pendingFacts = Object.freeze(original);
-    await callbacks(operation, client, { order_id: 'different-order' }, 'different form reason').refund();
+    await callbacks(operation, client, { order_id: 'different-order' }, 'different form reason', { route: {}, refundReason: 'different refund reason' }).refund();
     assert.equal(calls.length, 2); assert.deepEqual(calls.map(x => x.key), [key, key]); assert.equal(calls[0].body, calls[1].body);
     assert.deepEqual(JSON.parse(calls[0].body), { reason: 'original reason', command_protocol: 1 });
     assert.match(calls[1].url, /original-order\/repair$/);
@@ -38,9 +38,15 @@ test('an unversioned old pending repair is never upgraded by the real retry call
   try { await assert.rejects(callbacks(operation, new AdminPlatformClient(''), { order_id: 'new-order' }, 'new reason').refund(), /FINANCE_COMMAND_PROTOCOL_REQUIRED/); assert.equal(calls, 0); assert.equal(old.commandProtocol, undefined); } finally { globalThis.fetch = prior; }
 });
 test('refund facts and synchronization retain their existing protocol without repair provenance', async () => {
-  const line = source.slice(source.indexOf('    const facts = operation.pendingFacts || (detail && target &&'), source.indexOf('    if (!facts ||', refundStart));
-  const facts = new Function('operation', 'detail', 'target', 'targetID', 'reason', `${line}return facts;`)({}, { order_id: 'order' }, { transaction: { payment_transaction_id: 'transaction', amount_fen: '100' } }, 'package', 'reason');
-  assert.equal(facts.action, 'refund'); assert.equal(facts.commandProtocol, undefined);
+  const begin = source.indexOf('    const reasonForRefund =', refundStart);
+  const finish = source.indexOf('    if (!facts ||', begin);
+  assert.ok(begin > refundStart && finish > begin);
+  const build = new Function('operation', 'detail', 'target', 'targetID', 'reason', 'route', 'refundReason', `${source.slice(begin, finish)}return facts;`);
+  for (const [route, reason, refundReason, expected] of [[null, ' legacy reason ', 'ignored', 'legacy reason'], [{}, 'ignored', ' routed refund reason ', 'routed refund reason']]) {
+    const facts = build({}, { order_id: 'order' }, { transaction: { payment_transaction_id: 'transaction', amount_fen: '100' } }, 'package', reason, route, refundReason);
+    assert.equal(facts.action, 'refund'); assert.equal(facts.commandProtocol, undefined);
+    assert.equal(facts.reason, expected);
+  }
   const prior = globalThis.fetch; let body; globalThis.fetch = async (_url, options) => { body = JSON.parse(options.body); return new Response('{}', { status: 200 }); };
   try { await new AdminPlatformClient('').syncPaymentOrder('order'); assert.deepEqual(body, {}); } finally { globalThis.fetch = prior; }
 });

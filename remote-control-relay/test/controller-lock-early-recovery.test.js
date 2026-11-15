@@ -32,6 +32,7 @@ async function fixture(t, mode, options = {}) {
   await fs.mkdir(join(stage, "scripts"), { recursive: true });
   await fs.mkdir(old); await fs.mkdir(state);
   await fs.copyFile(helper, join(stage, "scripts/controller-lock-rollout.sh"));
+  await fs.copyFile(join(root, "remote-control-relay/scripts/relay-code-backup.sh"), join(stage, "scripts/relay-code-backup.sh"));
   await fs.writeFile(join(old, "server.js"), "original-service");
   await fs.writeFile(join(state, "state.json"), "preserve-state");
   if (options.guard) await fs.writeFile(join(state, ".pinvou-controller-state.guard"), "guard");
@@ -76,7 +77,7 @@ async function fixture(t, mode, options = {}) {
         *) return 41 ;;
       esac
     }
-    cp() { if [[ '${options.archiveFails ? "1" : "0"}' == 1 && "$1" == -a && "$2" == -- ]]; then return 31; fi; if [[ '${options.stageFailure || ""}' == backup && "$1" == -a && "$2" == "$remote_dir/server.js" ]]; then return 35; fi; command cp "$@"; }
+    cp() { if [[ '${options.archiveFails ? "1" : "0"}' == 1 && "$1" == -a && "$2" == -- ]]; then return 31; fi; if [[ '${options.stageFailure || ""}' == backup && "$1" == -a && "$2" == -- && "$3" == "$remote_dir/server.js" ]]; then return 35; fi; command cp "$@"; }
     install() { if [[ '${options.stageFailure || ""}' == install ]]; then return 32; fi; command mkdir -p "\${!#}"; }
     node() { if [[ '${options.stageFailure || ""}' == web ]]; then return 33; fi; return 0; }
     tar() { return 0; }
@@ -186,6 +187,7 @@ test("test deployment handles backup cleanup failure but never restarts after re
 test("production switches to complete-backup rollback before live replacement", async () => {
   const source = await fs.readFile(join(root, "scripts/deploy-remote-relay.sh"), "utf8");
   const switchAt = source.indexOf("controller_lock_early_armed=0\ntrap rollback_on_error ERR");
-  assert.ok(switchAt > source.indexOf('cp -a "$module" "$backup/code-js/"'));
+  const captureAt = source.indexOf('relay_code_capture "$remote_dir" "$backup/code-js"');
+  assert.ok(captureAt >= 0 && switchAt > captureAt);
   assert.ok(switchAt < source.indexOf("install_db() {"));
 });

@@ -3,7 +3,9 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import re
 import unittest
+from test_windows_runner_trust import configured_pools, context, evaluate_route, labels as route_labels
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('reuse_policy', ROOT/'scripts/ci-reuse-policy.py')
@@ -11,10 +13,98 @@ PLAN = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(PLAN)
 
 
 class ReusePlanTests(unittest.TestCase):
+    def trusted_runner_plans(self):
+        for filename, allowed in (('pr-check.yml', None), ('rustc-wrapper-smoke.yml', {'smoke'})):
+            source = (ROOT/'.github/workflows'/filename).read_text(encoding='utf-8')
+            policies = PLAN.catalog(source, jobs=allowed)
+            for name, policy in policies.items():
+                block = re.search(r'^  '+re.escape(name)+r':\n(.*?)(?=^  [\w-]+:|\Z)', source, re.M | re.S)[1]
+                # Keep the actual workflow expression independent of the
+                # verifier's normalized recipe, then replay its real routing.
+                runner = next(line.removeprefix('    runs-on: ')
+                              for line in block.splitlines() if line.startswith('    runs-on: '))
+                if 'github.' in runner:
+                    yield filename, name, runner, policy
+
+    @staticmethod
+    def successful_job(policy, row, labels):
+        return {'name': PLAN.display_name(policy, row), 'conclusion': 'success', 'labels': labels,
+                'steps': [{'name': step['name'], 'conclusion': 'success'}
+                          for step in policy['steps'] if step['name']]}
+
+    def test_trusted_windows_recipes_match_actual_pr_and_queue_routing(self):
+        plans = list(self.trusted_runner_plans())
+        self.assertEqual(len(plans), 9)
+        for configuration in ({}, configured_pools(),
+                {'PINVOU_WINDOWS_RUNNER': '["self-hosted","Windows","legacy"]',
+                 'PINVOU_LINUX_RUNNER': '["self-hosted","Linux","legacy"]'}):
+            for filename, name, runner, policy in plans:
+                for row in PLAN.matrix_rows(policy, configuration):
+                    expected = PLAN.labels(policy, row, configuration)
+                    for event in ('pull_request', 'merge_group', 'push'):
+                        actual = context(event, configuration)
+                        actual['matrix'] = row
+                        with self.subTest(workflow=filename, job=name, row=row, event=event,
+                                          configured=bool(configuration)):
+                            self.assertEqual(route_labels(evaluate_route(runner, actual)), expected)
+                            job = self.successful_job(policy, row, expected)
+                            self.assertTrue(PLAN.complete(policy, job, {}, 'refs/heads/queue', configuration))
+
+    def test_fork_missing_and_mismatched_identity_cannot_witness_private_queue_pool(self):
+        configuration = configured_pools()
+        changes = (
+            ('head-name', lambda value: value['github']['event']['pull_request']['head']['repo'].update(full_name='fork/project')),
+            ('base-name', lambda value: value['github']['event']['pull_request']['base']['repo'].update(full_name='other/project')),
+            ('head-id', lambda value: value['github']['event']['pull_request']['head']['repo'].update(id=999)),
+            ('base-id', lambda value: value['github']['event']['pull_request']['base']['repo'].update(id=999)),
+            ('missing-head', lambda value: value['github']['event']['pull_request']['head'].pop('repo')),
+            ('missing-base', lambda value: value['github']['event']['pull_request']['base'].pop('repo')),
+            ('missing-id', lambda value: value['github'].pop('repository_id')),
+            ('missing-repository', lambda value: value['github'].pop('repository')),
+        )
+        for filename, name, runner, policy in self.trusted_runner_plans():
+            for row in PLAN.matrix_rows(policy, configuration):
+                if row.get('os', 'windows-latest') != 'windows-latest': continue
+                for failure, mutate in changes:
+                    actual = context(variables=configuration)
+                    actual['matrix'] = row
+                    mutate(actual)
+                    with self.subTest(workflow=filename, job=name, row=row, failure=failure):
+                        labels = evaluate_route(runner, actual)
+                        self.assertEqual(labels, ['windows-latest'])
+                        job = self.successful_job(policy, row, labels)
+                        self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', configuration))
+
+    def test_modified_context_runner_recipes_remain_excluded(self):
+        changes = (
+            ("github.repository_id != '' && ", ''),
+            ('github.event.pull_request.head.repo.full_name == github.repository && ', ''),
+            ('github.event.pull_request.base.repo.full_name == github.repository && ', ''),
+            ('github.event.pull_request.head.repo.id == github.repository_id && ', ''),
+            ('github.event.pull_request.base.repo.id == github.repository_id', 'true'),
+            ("github.event_name == 'merge_group'", "github.event_name == 'workflow_dispatch'"),
+            ('vars.PINVOU_WINDOWS_RUNNER', 'vars.UNKNOWN_WINDOWS_RUNNER'),
+        )
+        for filename, name, runner, _ in self.trusted_runner_plans():
+            for old, new in changes:
+                changed = runner.replace(old, new)
+                with self.subTest(workflow=filename, job=name, mutation=old):
+                    self.assertNotEqual(changed, runner)
+                    source = 'name: fixture\njobs:\n  suite:\n    runs-on: '+changed+'\n    steps:\n      - name: Required test\n        run: test\n'
+                    self.assertNotIn('suite', PLAN.catalog(source, jobs={'suite'}))
+            if 'matrix.os' in runner:
+                for old, new in (("matrix.os == 'windows-latest'", "matrix.os != 'ubuntu-22.04'"),
+                                 (' || matrix.os }}', " || 'windows-latest' }}")):
+                    source = 'name: fixture\njobs:\n  suite:\n    runs-on: '+runner.replace(old, new)+'\n    steps:\n      - name: Required test\n        run: test\n'
+                    with self.subTest(workflow=filename, job=name, mutation=old):
+                        self.assertNotIn('suite', PLAN.catalog(source, jobs={'suite'}))
+
     def test_real_ready_frontend_evidence_accepts_optional_failures_and_maps_smoke(self):
-        policy = PLAN.catalog((ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8'))['frontend-test']
+        policies = PLAN.catalog((ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8'))
+        policy = policies['frontend-browser-test']
         fixture = json.loads((ROOT/'scripts/tests/fixtures/ci-reuse-ready-frontend.json').read_text(encoding='utf-8'))
-        job = {'name': 'frontend-test', 'conclusion': 'success', 'labels': ['ubuntu-22.04'], 'steps': fixture['steps']}
+        job = {'name': 'frontend-browser-test (1)', 'conclusion': 'success', 'labels': ['ubuntu-22.04'], 'steps': fixture['steps']}
+        self.assertTrue(PLAN.complete(policies['frontend-test'], {**job, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))
         self.assertTrue(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
         # Real PR shape: queue-only smoke skipped, warning skipped, PR smoke
         # passed. Diagnostic delivery is advisory even if its action fails.
@@ -34,6 +124,23 @@ class ReusePlanTests(unittest.TestCase):
         for step in broken['steps']:
             if step['name'] == 'Confirm test resource retirement': step['conclusion'] = 'skipped'
         self.assertFalse(PLAN.complete(policy, broken, {}, 'refs/heads/queue', {}))
+
+    def test_browser_shard_reuse_requires_the_exact_complete_matrix_and_retirement(self):
+        policy = PLAN.catalog((ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8'))['frontend-browser-test']
+        rows = PLAN.matrix_rows(policy, {})
+        self.assertEqual(rows, [{'shard': str(i)} for i in range(1, 5)])
+        jobs = [self.successful_job(policy, row, ['ubuntu-22.04']) for row in rows]
+        self.assertTrue(PLAN.complete_group(policy, jobs, {}, 'refs/heads/queue', {}))
+        for broken in (jobs[:-1], jobs + [jobs[0]], [{**jobs[0], 'name': 'frontend-test'}] + jobs[1:]):
+            self.assertFalse(PLAN.complete_group(policy, broken, {}, 'refs/heads/queue', {}))
+        for status in ('failure', 'cancelled', 'skipped'):
+            broken = copy.deepcopy(jobs)
+            broken[2]['conclusion'] = status
+            self.assertFalse(PLAN.complete_group(policy, broken, {}, 'refs/heads/queue', {}))
+        broken = copy.deepcopy(jobs)
+        for step in broken[2]['steps']:
+            if step['name'] == 'Confirm test resource retirement': step['conclusion'] = 'skipped'
+        self.assertFalse(PLAN.complete_group(policy, broken, {}, 'refs/heads/queue', {}))
 
     def test_named_cache_and_run_only_diagnostics_do_not_replace_required_tests(self):
         real = PLAN.catalog((ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8'))
@@ -210,7 +317,7 @@ jobs:
     def test_real_catalog_covers_all_current_product_and_platform_jobs(self):
         source = (ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
         policies = PLAN.catalog(source)
-        for name in ('version-consistency', 'relay-test', 'account-platform-test', 'frontend-test',
+        for name in ('version-consistency', 'relay-test', 'account-platform-test', 'frontend-test', 'frontend-browser-test',
                      'team-relay-hub-test', 'release-contract-test', 'update-release-console-test',
                      'rust-test', 'rust-lint', 'knowledge-rust', 'cli-test', 'cli-lint',
                      'windows-rust-test', 'windows-codex-runtime-test', 'windows-runtime-test',
