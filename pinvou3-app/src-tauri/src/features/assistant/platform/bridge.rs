@@ -1920,6 +1920,15 @@ impl Pinvou3Bridge {
         Self::credential_for_model(model, local_endpoint, "vision model")
     }
 
+    /// Shared with EnginePool's dependency snapshot: keep its reuse decision
+    /// aligned with the model the spawned image tool actually selects.
+    pub(crate) fn explicit_vision_model(&self, vision_id: &str) -> Option<&SavedModel> {
+        self.runtime_vision_model
+            .as_ref()
+            .filter(|model| model.id == vision_id)
+            .or_else(|| self.prefs.model_by_id(vision_id))
+    }
+
     /// Vision tool (`image_analyze`) config resolution (design §9.3, phase E).
     /// Rules:
     /// 1. Main model has `vision_model_id` set → use that SavedModel's
@@ -1949,7 +1958,7 @@ impl Pinvou3Bridge {
                 .runtime_vision_model
                 .as_ref()
                 .filter(|model| model.id == vision_id);
-            let Some(vision) = runtime_vision.or_else(|| self.prefs.model_by_id(vision_id)) else {
+            let Some(vision) = self.explicit_vision_model(vision_id) else {
                 eprintln!(
                     "[pinvou3-app] vision_model_id {vision_id} not found in saved_models; \
                      image_analyze disabled"
@@ -6069,6 +6078,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: model.to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: base_url.to_string(),
             provider_kind: None,
             vendor: None,
@@ -6096,6 +6113,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: model.to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://api.openai.com/v1".to_string(),
             provider_kind: None,
             vendor: None,

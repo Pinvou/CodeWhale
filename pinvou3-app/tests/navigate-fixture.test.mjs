@@ -12,7 +12,9 @@ const failure = (overrides = {}) => ({
 function pageWithFailures(failures) {
   const page = new EventEmitter();
   page.visits = 0;
-  page.goto = async () => {
+  page.waitConditions = [];
+  page.goto = async (_url, { waitUntil }) => {
+    page.waitConditions.push(waitUntil);
     const request = failures[page.visits++];
     if (request) page.emit('requestfailed', request);
   };
@@ -26,8 +28,9 @@ test('interrupted module GET restarts fixture load before a case acts', async ()
   await navigateFixture(page, url, signal => {
     signal.throwIfAborted();
     ready++;
-  }, options);
+  }, { ...options, waitUntil: 'networkidle0' });
   assert.equal(page.visits, 2);
+  assert.deepEqual(page.waitConditions, ['networkidle0', 'networkidle0']);
   assert.equal(ready, 1);
   assert.equal(page.listenerCount('requestfailed'), 0);
 });

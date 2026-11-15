@@ -8,6 +8,12 @@ identified user may log in. Realm roles do not grant Account platform permission
 Build the provider with `mvn -B -C package` in `mobile-authenticator/`, or build
 the supplied Dockerfile. The Java provisioning fixture test also requires the
 current Account-produced `account-platform/test/fixtures/provisioning-password-login.json`.
+
+The Dockerfile's Maven provider stage uses a pinned multi-platform index digest.
+See the [build-input metadata and update procedure](../../README.md#构建基础镜像)
+and [per-platform manifest evidence](../build-base-image-evidence.json). This
+metadata check is separate from SDK execution, image builds and realm acceptance.
+
 `test/provision_mobile_auth_test.py` exercises the shell with an inert local
 CLI double; it does not provision a real realm. Full deployment/E2E validation
 is separate from these component tests.

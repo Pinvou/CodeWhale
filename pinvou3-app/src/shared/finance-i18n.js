@@ -1,6 +1,12 @@
 export const financeCopy = {
   zh: {
     completionJournal: '实际账本分录', completionDigest: '资金事实摘要', financialCompletion: '确认财务完成', financialCompletionHelp: '仅核验已完成的资金回执，不新增余额或权益。须由另一名有权限的管理员复核；证据缺失或矛盾时继续阻断。无资金效果将重新查询服务商。', completionProposer: '提案人', completionEvidence: '完成证据', completionReference: '已提交修复或退款回执 ID', proposeFinancialCompletion: '提出财务完成核验', confirmFinancialCompletion: '独立复核并确认完成', completionProofs: { PAYMENT_REPAIR: '付款修复已入账', REFUND: '原交易全额退款已完成', NO_FINANCIAL_EFFECT: '权威失败且无资金效果' },
+    qrLoading: "正在加载付款二维码…",
+    paymentPreparing: "订单已创建，正在准备付款信息…",
+    paymentSlow: "加载时间较长，请稍候。可查询付款结果，请勿重复下单。",
+    qrLoadFailed: "二维码加载失败。请重试加载，或查询付款结果。",
+    qrRetry: "重新加载二维码",
+    paymentOrderCreated: "订单已创建，等待付款；尚未确认支付成功。",
     closureSerializationConflict: '本次注销提交因并发更新而中止。请在原账号下保留原确认内容，以同一请求重试。',
     forceCancelInflight: '取消在途调用', forceCancelInflightHelp: '仅批准并生效后请求取消；实际用量仍需结算。', forceCancelEnabled: '启用', forceCancelDisabled: '关闭',
     queryUnknown: '前次复核查询的结果尚未确认。重试仅确认原查询，不会再次派发。',
@@ -23,6 +29,12 @@ export const financeCopy = {
   },
   en: {
     completionJournal: 'Posted journal entry', completionDigest: 'Financial facts digest', financialCompletion: 'Confirm financial completion', financialCompletionHelp: 'Verify completed financial receipts without adding balance or entitlements. A different authorized administrator must review. Missing or conflicting evidence keeps the block. No-effect review queries the provider again.', completionProposer: 'Proposer', completionEvidence: 'Completion evidence', completionReference: 'Committed repair or refund receipt ID', proposeFinancialCompletion: 'Propose completion review', confirmFinancialCompletion: 'Independently review and confirm', completionProofs: { PAYMENT_REPAIR: 'Payment repair posted', REFUND: 'Original transaction fully refunded', NO_FINANCIAL_EFFECT: 'Authoritative failure with no financial effect' },
+    qrLoading: "Loading the payment QR code…",
+    paymentPreparing: "Order created. Preparing payment information…",
+    paymentSlow: "This is taking longer than usual. You can check payment status; do not create another order.",
+    qrLoadFailed: "The QR code could not load. Retry loading it or check payment status.",
+    qrRetry: "Reload QR code",
+    paymentOrderCreated: "Order created. Awaiting payment; payment is not yet confirmed.",
     closureSerializationConflict: 'A concurrent update interrupted this closure attempt. Retry the same request with the same account and confirmation.',
     forceCancelInflight: 'Cancel inflight calls', forceCancelInflightHelp: 'Requested only after approval and the effective time; actual usage remains billable.', forceCancelEnabled: 'Enabled', forceCancelDisabled: 'Disabled',
     queryUnknown: 'The previous review query is unconfirmed. Retry only checks that original query and never dispatches it again.',
@@ -45,6 +57,12 @@ export const financeCopy = {
   },
   ja: {
     completionJournal: '計上済み仕訳', completionDigest: '資金事実のダイジェスト', financialCompletion: '財務処理の完了確認', financialCompletionHelp: '完了済みの資金証跡のみを確認し、残高や利用権は追加しません。別の権限保有管理者による確認が必要です。証拠が不足または矛盾する場合は保留を続けます。資金効果がない場合は決済サービスに再照会します。', completionProposer: '提案者', completionEvidence: '完了証拠', completionReference: '確定済み修復または返金の証跡 ID', proposeFinancialCompletion: '財務完了の確認を提案', confirmFinancialCompletion: '独立して確認し完了を確定', completionProofs: { PAYMENT_REPAIR: '支払い修復の計上済み', REFUND: '元取引の全額返金完了', NO_FINANCIAL_EFFECT: '確定失敗かつ資金効果なし' },
+    qrLoading: "支払いQRコードを読み込み中…",
+    paymentPreparing: "注文を作成しました。支払い情報を準備中…",
+    paymentSlow: "通常より時間がかかっています。支払い結果を確認できます。重複注文は作成しないでください。",
+    qrLoadFailed: "QRコードを読み込めませんでした。再読み込みするか支払い結果を確認してください。",
+    qrRetry: "QRコードを再読み込み",
+    paymentOrderCreated: "注文を作成しました。支払い待ちで、支払い完了は未確認です。",
     closureSerializationConflict: '同時更新の競合により今回の退会要求は中止されました。同じアカウントと確認内容のまま、同じ要求を再試行してください。',
     forceCancelInflight: '実行中の呼び出しをキャンセル', forceCancelInflightHelp: '承認および適用後にのみ要求します。実際の使用量は精算されます。', forceCancelEnabled: '有効', forceCancelDisabled: '無効',
     queryUnknown: '前回の照会結果は未確認です。再試行は元の照会を確認するだけで、再送信しません。',
@@ -74,3 +92,19 @@ Object.assign(financeCopy.ja, { cancelClose: '注文を閉じない' });
 Object.assign(financeCopy.zh, { pendingOrders: '待支付订单', continuePayment: '继续支付', paymentDialog: '扫码支付', dismissPayment: '关闭扫码窗口' });
 Object.assign(financeCopy.en, { pendingOrders: 'Pending payments', continuePayment: 'Continue payment', paymentDialog: 'Pay this order', dismissPayment: 'Dismiss payment window' });
 Object.assign(financeCopy.ja, { pendingOrders: '支払い待ちの注文', continuePayment: '支払いを続ける', paymentDialog: '注文の支払い', dismissPayment: '支払い画面を閉じる' });
+
+Object.assign(financeCopy.zh, { approvalReadUnavailable: '暂时无法读取审批数据，请重试。' });
+Object.assign(financeCopy.en, { approvalReadUnavailable: 'Approval data could not be loaded. Please retry.' });
+Object.assign(financeCopy.ja, { approvalReadUnavailable: '承認データを取得できません。再試行してください。' });
+
+Object.assign(financeCopy.zh, {"catalogValueMissing":"未提供","catalogNameMissing":"名称未配置","catalogCurrencyMissing":"币种未提供","catalogConfigAmount":"目录配置金额","catalogEntitlement":"积分权益","catalogLifecycle":{"DRAFT":"草稿","ON_SALE":"在售","OFF_SALE":"停售","DELETED":"已删除"}});
+Object.assign(financeCopy.en, {"catalogValueMissing":"Not provided","catalogNameMissing":"Name not configured","catalogCurrencyMissing":"Currency not provided","catalogConfigAmount":"Catalog configured amount","catalogEntitlement":"Points entitlement","catalogLifecycle":{"DRAFT":"Draft","ON_SALE":"On sale","OFF_SALE":"Off sale","DELETED":"Deleted"}});
+Object.assign(financeCopy.ja, {"catalogValueMissing":"提供されていません","catalogNameMissing":"名称未設定","catalogCurrencyMissing":"通貨情報なし","catalogConfigAmount":"カタログ設定金額","catalogEntitlement":"付与ポイント","catalogLifecycle":{"DRAFT":"下書き","ON_SALE":"販売中","OFF_SALE":"販売停止","DELETED":"削除済み"}});
+
+Object.assign(financeCopy.zh, {"catalogMetricsMissing":"本次快照未提供全部指标。","catalogAdmissionStatus":{"PENDING":"待完成","MISSING":"缺少验证","FAILED":"验证失败","EXPIRED":"已过期","REVOKED":"已撤销"}});
+Object.assign(financeCopy.en, {"catalogMetricsMissing":"Some metrics were not provided in this snapshot.","catalogAdmissionStatus":{"PENDING":"Pending","MISSING":"Missing verification","FAILED":"Failed","EXPIRED":"Expired","REVOKED":"Revoked"}});
+Object.assign(financeCopy.ja, {"catalogMetricsMissing":"このスナップショットには一部の指標が含まれていません。","catalogAdmissionStatus":{"PENDING":"未完了","MISSING":"検証なし","FAILED":"失敗","EXPIRED":"期限切れ","REVOKED":"取り消し済み"}});
+
+Object.assign(financeCopy.zh, { catalogPagination: "商品目录分页" });
+Object.assign(financeCopy.en, { catalogPagination: "Product catalog pages" });
+Object.assign(financeCopy.ja, { catalogPagination: "商品カタログのページ" });

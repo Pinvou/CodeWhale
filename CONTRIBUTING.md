@@ -178,9 +178,26 @@ platform, permission, credential, session, remote-control, and other high-blast-
 radius paths automatically add full Linux and Windows Rust regression before
 queueing. Maintainers can apply `ci:full-rust` to force the same full regression
 for another ready Rust pull request; the label has no effect on a draft.
+
 The current lightweight Rust boundaries are internal-only changes under `feedback`,
 `personas`, and `pet`. Changing their registration, app commands, shared platform
 surface, Cargo metadata, or any unclassified Rust path still runs full regression.
+
+Frontend quality/build/logic remains in `frontend-test`. On Ready PRs and merge
+groups, `frontend-browser-test` runs four independent jobs alongside it. Every job
+selects the same actual tested diff, then assigns smoke entries by their stable
+selection order to one of four shards (`--shard INDEX/COUNT`, one-based). The union
+is the complete selected suite, with no duplicate assignments; a valid small
+selection can explicitly leave a shard empty, while an empty global selection
+fails. Each job prepares its own locked dependencies/builds and resource ledger;
+all applicable shards and the quality/logic job must pass `required-gate`.
+Matrix fail-fast is disabled so one failed shard does not cancel its peers.
+Successful-input reuse requires every configured shard and mandatory step,
+including retirement; partial or old monolithic evidence cannot replace them.
+The existing smoke retries, assertions, dependency-skip refusals and job timeouts
+are unchanged. Four workers permit parallel execution; actual elapsed time still
+depends on selected smoke duration and available runner capacity.
+
 Trusted same-repository `backflow/community-*` pull requests add a content-aware
 decision over the actual base-to-head diff. A pure release is accepted only when
 `VERSION` and every field managed by `scripts/sync-version.mjs` change mechanically
@@ -272,15 +289,40 @@ a dedicated Ubuntu 22.04 runner. Without that variable they use `ubuntu-22.04`.
 The runner needs passwordless sudo for dependency setup, Docker with Compose and
 Buildx, GitHub CLI, and access to the required package registries. It must be
 reserved for trusted repository code. Self-hosted jobs retain local npm caches
-and disable setup-node's remote cache upload. Set `PINVOU_WINDOWS_MAC_ENABLED`
-to the literal `false` to disable Windows/macOS jobs and their corresponding
-required results; Linux checks remain required. Unset or any other value keeps
-the existing three-platform policy. ARM release jobs keep their hosted ARM label.
+and disable setup-node's remote cache upload. Set `PINVOU_WINDOWS_ENABLED` or
+`PINVOU_MACOS_ENABLED` to the literal `false` to disable that platform's jobs and
+corresponding required results independently; Linux checks remain required.
+Unset or any other value keeps that platform enabled. ARM release jobs keep their
+hosted ARM label.
 Optional `PINVOU_LINUX_HEAVY_RUNNER`, `PINVOU_LINUX_MEDIUM_RUNNER`, and
 `PINVOU_LINUX_LIGHT_RUNNER` arrays override that default for compilation,
 application/integration tests, and fast policy checks respectively. Each falls
 back to `PINVOU_LINUX_RUNNER`, then to the hosted 22.04 image. Distinct pool labels
 keep large Rust compilations away from small policy runners.
+
+Windows jobs accept `PINVOU_WINDOWS_HEAVY_RUNNER`,
+`PINVOU_WINDOWS_MEDIUM_RUNNER`, and `PINVOU_WINDOWS_LIGHT_RUNNER` JSON label
+arrays, falling back to `PINVOU_WINDOWS_RUNNER` and then `windows-latest`.
+For `pull_request`, these overrides are used only when both the head and base
+repository names and IDs match the workflow's `github.repository` and
+`github.repository_id`. Forks and missing or inconsistent repository metadata
+use the hardcoded hosted `windows-latest` fallback, including Windows matrix
+legs. Actor membership and approval do not establish repository identity.
+Push, manual dispatch, and Merge Group keep their existing pool routing only in
+workflows that already declare that event. Missing or undeclared event names
+also use the hardcoded hosted fallback.
+The release-only `PINVOU_REMOTE_RELEASE_RUNNER` scalar override uses the same
+PR source check; its job still runs only for the existing release events.
+
+This is the checked-in routing policy, not a security boundary against a fork
+that changes its workflow YAML. Before exposing persistent Windows self-hosted
+runners to PR workflows, maintainers must configure and verify a runner group
+restricted to trusted workflow/ref entries. The persistent-runner security finding
+remains blocking until that configuration is demonstrated; routing tests alone do
+not resolve it. The workflow files do not configure or verify those
+administrator-managed controls. An Actions approval alone does not make untrusted
+code safe for a persistent host. See
+[GitHub's runner security guidance](https://docs.github.com/en/actions/reference/security/secure-use).
 
 Hosts use Ubuntu 26.04 while runner containers use the Ubuntu 22.04 image in
 `scripts/ci/runner-image/`. This retains the existing release glibc compatibility
@@ -361,6 +403,11 @@ cannot replace full queue regression. Unknown expressions require successful
 step evidence; unknown runner/matrix shapes, missing/duplicate/failed/skipped
 required evidence retain execution. Cache preparation and advisory diagnostics
 cannot substitute for a product test or resource-retirement step.
+
+Reuse recognizes the checked-in Windows same-repository name/ID routing recipe,
+including the existing native matrices, only when its exact expression matches
+the reviewed recipe. Source job labels must match the queue's selected pool;
+unknown or modified context-dependent runner expressions retain execution.
 
 Only a wholly successful ready-PR workflow donates proof; a red aggregate gate
 does not donate successful individual jobs. The recorded base comes from the
