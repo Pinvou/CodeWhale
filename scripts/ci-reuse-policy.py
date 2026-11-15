@@ -10,7 +10,7 @@ import re
 
 CONTEXT_JOBS = {'changes', 'required-gate', 'commit-message', 'merge-authored-audit', 'backflow-portability', 'fast-gate'}
 CONTENT_JOBS = {
-    'version-consistency', 'frontend-test', 'relay-test', 'account-platform-test', 'account-closure-test',
+    'version-consistency', 'frontend-test', 'frontend-browser-test', 'relay-test', 'account-platform-test', 'account-closure-test',
     'windows-relay-dacl', 'windows-relay-tools-test', 'team-relay-hub-test', 'update-release-console-test',
     'release-contract-test', 'knowledge-rust', 'rust-lint', 'rust-test', 'cli-test', 'cli-lint',
     'windows-static-updater-contract', 'windows-rust-test', 'windows-rustup-repair-test', 'macos-rust-check',
