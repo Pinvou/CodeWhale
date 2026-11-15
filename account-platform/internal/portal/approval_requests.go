@@ -186,6 +186,11 @@ func (s *Service) adminApprovalRequests(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
+	if response.StatusCode == http.StatusTooManyRequests {
+		if retryAfter := response.Header.Get("Retry-After"); retryAfter != "" {
+			w.Header().Set("Retry-After", retryAfter)
+		}
+	}
 	if kind == "detail" && wire == 1 && response.StatusCode == http.StatusOK {
 		w.Header().Set("X-Pinvou-Approval-Action-Control-Version", response.Header.Get("X-Pinvou-Approval-Action-Control-Version"))
 	}
