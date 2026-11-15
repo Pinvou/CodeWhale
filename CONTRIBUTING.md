@@ -101,6 +101,13 @@ timeout or infrastructure root cause. Invalid stored-key cases must prove refusa
 by the signer itself before publication, independently of the writer's safeguards.
 Raw child output and exception text must not enter failure diagnostics.
 
+Controller bootstrap workers retain a separate bounded diagnostic IPC cache.
+Unexpected exits report only closed opening/post-open, store-error and native-cause
+observations, plus an ancestor phase only when that verifier actually failed.
+Missing observations stay unknown and never add a wait. Ordinary worker messages,
+native defaults and the exact 81/82/83 fault-qualification exits remain unchanged;
+better diagnostics do not establish the cause of a previously unexplained exit.
+
 ### Test resource lifetime
 
 One-shot CI fixtures must create resources through the shared lifetime boundary:

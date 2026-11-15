@@ -2,6 +2,12 @@ import * as fs from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { RelayStateStore } from "../../relay-state-store.js";
 import { DatabaseSync } from "node:sqlite";
+import { observedNativeSecurityAdapters, workerFailureDiagnostic } from "./controller-guard-diagnostics.mjs";
+
+function reportDiagnostic(diagnostic) {
+  try { process.send({ event: "controller_guard_diagnostic", ...diagnostic }, () => {}); }
+  catch { /* Optional observation cannot replace the original failure or exit. */ }
+}
 
 const statePath = process.argv[2];
 const mode = process.argv[3];
@@ -48,7 +54,7 @@ const io = { ...fs, async rename(source, target) {
     && metadata.isFile() && (metadata.size === 0n || metadata.size === 0)) process.exit(bootstrapFaultExit[seedMode]);
   return metadata;
 } };
-let store;
+let store, workerStage = "opening";
 try {
   store = await RelayStateStore.open({
     statePath, legacyStatePath: join(dirname(dirname(statePath)), "legacy.json"), fs: io,
@@ -58,8 +64,9 @@ try {
     },
     ...(process.platform === "win32" && !mode.startsWith("native-") ? {
       protectPath: async () => {}, verifyPath: async () => {}, verifyAncestors: async () => {},
-    } : {}),
+    } : observedNativeSecurityAdapters(reportDiagnostic)),
   });
+  workerStage = "ready";
   process.send({ event: "ready", snapshot: store.readNamespace("guard_test") });
   process.on("message", async message => {
     try {
@@ -78,5 +85,6 @@ try {
     }
   });
 } catch (error) {
+  reportDiagnostic(workerFailureDiagnostic(error, workerStage));
   process.send({ event: "error", code: error.code || "unexpected" }, () => process.exit(1));
 }

@@ -9,6 +9,8 @@ import { DatabaseSync } from "node:sqlite";
 import { RelayStateStore, verifyWindowsAncestors } from "../relay-state-store.js";
 import { RELAY_CONTROLLER_GUARD_FILENAME, RelayStateGuard } from "../relay-state-guard.js";
 import { WINDOWS_ACL_VERIFY_SCRIPT, buildGuardJournalAclScript } from "../windows-guard-acl.js";
+import { createWorkerDiagnostics, observedNativeSecurityAdapters, storeOpenDiagnostic,
+  workerFailureDiagnostic } from "./fixtures/controller-guard-diagnostics.mjs";
 
 const childFile = fileURLToPath(new URL("./fixtures/controller-guard-child.mjs", import.meta.url));
 
@@ -29,20 +31,8 @@ const security = process.platform === "win32" ? {
   protectPath: async () => {}, verifyPath: async () => {}, verifyAncestors: async () => {},
 } : {};
 function nativeSecurityAdapters(t, verify = verifyWindowsAncestors, platform = process.platform) {
-  return { protectPath: undefined, verifyPath: undefined,
-    verifyAncestors: platform !== "win32" ? undefined : async paths => {
-      let phase = "unknown";
-      try {
-        return await verify(paths, { onDiagnostic(value) {
-          phase = ["script_started", "payload_decoded", "paths_decoded", "checks_completed"].includes(value)
-            ? value : "unknown";
-        } });
-      } catch (error) {
-        try { t.diagnostic(`controller_guard_ancestor_failure ${JSON.stringify({ phase })}`); }
-        catch { /* Observation cannot replace the native refusal. */ }
-        throw error;
-      }
-    } };
+  return observedNativeSecurityAdapters(({ phase }) =>
+    t.diagnostic(`controller_guard_ancestor_failure ${JSON.stringify({ phase })}`), verify, platform);
 }
 
 test("native guard ancestor diagnostics preserve the verifier input and original refusal", async () => {
@@ -92,9 +82,65 @@ async function expectBootstrapFault(child, phase) {
   const expected = { "before-guard-protect": 81, "before-seed-commit": 82, "after-seed-commit": 83 }[phase];
   assert.ok(expected, "known bootstrap fault phase required");
   const { code, signal } = await child.exited;
-  assert.equal(signal, null, "bootstrap fault must exit without a signal");
-  assert.equal(code, expected, `child did not reach the ${phase} fault boundary`);
+  const observation = JSON.stringify(child.diagnostics?.() ?? { worker_failure: "unknown" });
+  assert.equal(signal, null, `bootstrap fault must exit without a signal; observations=${observation}`);
+  assert.equal(code, expected, `child did not reach the ${phase} fault boundary; observations=${observation}`);
 }
+
+test("controller guard worker diagnostics isolate closed observations from semantic frames", () => {
+  const first = createWorkerDiagnostics(), second = createWorkerDiagnostics();
+  for (const event of ["ready", "error", "committed"]) assert.equal(first.accept({ event }), false);
+  assert.equal(first.accept({ event: "controller_guard_diagnostic", kind: "ancestor_failure", phase: "paths_decoded" }), true);
+  const cause = { code: "ETIMEDOUT", errno: -1, killed: true, signal: "SIGTERM", message: "PRIVATE_SENTINEL" };
+  first.accept({ event: "controller_guard_diagnostic", ...workerFailureDiagnostic({
+    code: "relay_state_path_component_unsafe", cause }, "opening") });
+  assert.deepEqual(first.snapshot(), { ancestor_failure: { phase: "paths_decoded" }, worker_failure: {
+    worker_stage: "opening", store_code: "relay_state_path_component_unsafe", code: "ETIMEDOUT",
+    errno: -1, killed: true, signal: "SIGTERM" } });
+  assert.deepEqual(second.snapshot(), { ancestor_failure: "unknown", worker_failure: "unknown" });
+  const snapshot = first.snapshot();
+  snapshot.worker_failure.code = "PRIVATE_SENTINEL";
+  assert.equal(first.snapshot().worker_failure.code, "ETIMEDOUT");
+  // A later failure after successful opening must not invent an ancestor cause.
+  second.accept({ event: "controller_guard_diagnostic", ...workerFailureDiagnostic({ code: "PRIVATE_SENTINEL" }, "ready") });
+  assert.deepEqual(second.snapshot(), { ancestor_failure: "unknown", worker_failure: {
+    worker_stage: "ready", store_code: "unknown", code: "unknown" } });
+  for (const value of ["PRIVATE_SENTINEL", Object("opening"), { toString() { throw Error("PRIVATE_SENTINEL"); } }]) {
+    second.accept({ event: "controller_guard_diagnostic", kind: "worker_failure", worker_stage: value,
+      store_code: value, code: value, exit_code: value, errno: value, killed: value, signal: value });
+    assert.deepEqual(second.snapshot().worker_failure, { worker_stage: "unknown", store_code: "unknown", code: "unknown" });
+  }
+  const reads = {}, hostile = { event: "controller_guard_diagnostic", kind: "worker_failure" };
+  for (const key of ["worker_stage", "store_code", "code", "exit_code", "errno", "killed", "signal"]) {
+    Object.defineProperty(hostile, key, { get() { reads[key] = (reads[key] || 0) + 1; throw Error("PRIVATE_SENTINEL"); } });
+  }
+  second.accept(hostile);
+  assert.ok(Object.values(reads).every(value => value === 1));
+  assert.deepEqual(second.snapshot().worker_failure, { worker_stage: "unknown", store_code: "unknown", code: "unknown" });
+  // Named native causes and numeric exits are independent wire fields. An
+  // invalid value in one field must not be promoted into the other's meaning.
+  for (const [code, exit_code, expected] of [
+    ["unknown", "ETIMEDOUT", { code: "unknown" }],
+    [1, undefined, { code: "unknown" }],
+    ["unknown", 1, { code: "unknown", exit_code: 1 }],
+    ["EACCES", 4294967295, { code: "EACCES", exit_code: 4294967295 }],
+    ["unknown", -2147483648, { code: "unknown", exit_code: -2147483648 }],
+    ["unknown", 4294967296, { code: "unknown" }],
+    ["unknown", -2147483649, { code: "unknown" }],
+  ]) {
+    second.accept({ event: "controller_guard_diagnostic", kind: "worker_failure", code, exit_code });
+    assert.deepEqual(second.snapshot().worker_failure, { worker_stage: "unknown", store_code: "unknown", ...expected });
+  }
+});
+
+test("controller guard fault diagnostics never qualify another exit or wait for missing metadata", async () => {
+  const child = (code, signal) => ({ exited: Promise.resolve({ code, signal }) });
+  await expectBootstrapFault(child(83, null), "after-seed-commit");
+  for (const [code, signal] of [[1, null], [null, "SIGTERM"], [82, null]]) {
+    await assert.rejects(expectBootstrapFault(child(code, signal), "after-seed-commit"), error =>
+      error.code === "ERR_ASSERTION" && error.message.includes('"worker_failure":"unknown"'));
+  }
+});
 function windowsCreatorMetadata(target) {
   const script = `
 $ErrorActionPreference = 'Stop'
@@ -139,20 +185,7 @@ async function openGuardStore(t, options, open = value => RelayStateStore.open(v
   } catch (error) {
     // TAP retains the store error but omits its native subprocess cause. Emit
     // only closed classifications, never PowerShell arguments, ACLs or stderr.
-    let cause;
-    try { cause = error?.cause; } catch { /* Preserve the original failure. */ }
-    const read = field => {
-      try { return cause?.[field]; } catch { return undefined; }
-    };
-    const code = read("code"), errno = read("errno");
-    const killed = read("killed"), signal = read("signal");
-    const diagnostic = { stage: "store_open", code: "unknown" };
-    if (["ETIMEDOUT", "EACCES", "EPERM", "ENOENT", "ENOTDIR", "EINVAL",
-      "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"].includes(code)) diagnostic.code = code;
-    if (Number.isSafeInteger(code) && code >= -2147483648 && code <= 4294967295) diagnostic.exit_code = code;
-    if (Number.isSafeInteger(errno) && errno >= -2147483648 && errno <= 2147483647) diagnostic.errno = errno;
-    if (typeof killed === "boolean") diagnostic.killed = killed;
-    if (["SIGTERM", "SIGKILL", "SIGABRT", "SIGINT"].includes(signal)) diagnostic.signal = signal;
+    const diagnostic = storeOpenDiagnostic(error);
     try { t.diagnostic(`controller_guard_store_open_failure ${JSON.stringify(diagnostic)}`); }
     catch { /* Diagnostics cannot replace the original open failure. */ }
     throw error;
@@ -244,8 +277,9 @@ async function fixture(t) {
     const exited = new Promise(resolve => process.once("exit", (code, signal) => resolve({ code, signal })));
     let failure = "";
     process.stderr.on("data", chunk => { failure += chunk; });
-    const messages = [], waiters = [];
+    const messages = [], waiters = [], diagnostics = createWorkerDiagnostics();
     process.on("message", message => {
+      if (diagnostics.accept(message)) return;
       if (waiters.length) waiters.shift()(message);
       else messages.push(message);
     });
@@ -256,7 +290,7 @@ async function fixture(t) {
         waiters.push(message => { clearTimeout(timer); resolve(message); });
       });
     }
-    return { process, next, exited, send: message => process.send(message) };
+    return { process, next, exited, diagnostics: () => diagnostics.snapshot(), send: message => process.send(message) };
   }
   return { directory, statePath, options, open, child };
 }
@@ -597,9 +631,10 @@ for (const phase of ["before", "after"]) {
 
 test("controller guard fault qualification rejects an early open failure", async t => {
   const f = await fixture(t), child = f.child("native-fail-before-seed-commit");
-  await assert.rejects(expectBootstrapFault(child, "before-seed-commit"), {
-    code: "ERR_ASSERTION", actual: 1, expected: 82,
-  });
+  await assert.rejects(expectBootstrapFault(child, "before-seed-commit"), error =>
+    error.code === "ERR_ASSERTION" && error.actual === 1 && error.expected === 82
+      && error.message.includes('"worker_stage":"opening"'));
+  assert.equal(child.diagnostics().worker_failure.worker_stage, "opening");
   assert.equal((await child.next()).event, "error");
   await assert.rejects(fs.stat(f.statePath), { code: "ENOENT" });
 });
