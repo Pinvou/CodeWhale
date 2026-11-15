@@ -257,6 +257,11 @@ fn mcp_actions_require_approval_with_exact_helper_matching() {
         // approval-required side: only the exact tool names are helpers.
         "mcp_session-reader_read_session_export",
         "mcp_other-server_read_session",
+        // The session-reader server's own write siblings must never inherit
+        // read-helper status — the realistic over-classification hazard for
+        // this surface is generating the list from the server manifest.
+        "mcp_session-reader_send_message_to_session",
+        "mcp_session-reader_create_session",
     ] {
         let adapter = mcp_tool_adapter_for_test(name);
         assert_eq!(

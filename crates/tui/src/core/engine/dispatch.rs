@@ -636,26 +636,19 @@ pub(super) fn plan_tool_execution_batches(
     batches
 }
 
+/// Same set as [`crate::mcp::MCP_READ_HELPER_TOOLS`] by policy: read-only
+/// MCP helpers have no parallel hazard, so keep both gates on the shared
+/// list instead of duplicating it here.
 pub(super) fn mcp_tool_is_parallel_safe(name: &str) -> bool {
-    matches!(
-        name,
-        "list_mcp_resources"
-            | "list_mcp_resource_templates"
-            | "mcp_read_resource"
-            | "read_mcp_resource"
-            | "mcp_get_prompt"
-    )
+    crate::mcp::is_mcp_read_helper(name)
 }
 
+/// Engine-side classification of MCP tools, shared with the registry
+/// adapter via [`crate::mcp::MCP_READ_HELPER_TOOLS`] so the turn loop and
+/// the fleet/subagent registries can never classify the same tool
+/// differently.
 pub(super) fn mcp_tool_is_read_only(name: &str) -> bool {
-    matches!(
-        name,
-        "list_mcp_resources"
-            | "list_mcp_resource_templates"
-            | "mcp_read_resource"
-            | "read_mcp_resource"
-            | "mcp_get_prompt"
-    )
+    crate::mcp::is_mcp_read_helper(name)
 }
 
 pub(super) fn mcp_tool_approval_description(name: &str) -> String {

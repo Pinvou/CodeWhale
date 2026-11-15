@@ -369,8 +369,8 @@ impl Engine {
                 if !mcp_tool_is_parallel_safe(&tool_name) {
                     return Err(ToolError::invalid_input(format!(
                         "Tool '{tool_name}' is an MCP tool and cannot run in parallel. \
-                         Allowed MCP tools: list_mcp_resources, list_mcp_resource_templates, \
-                         mcp_read_resource, read_mcp_resource, mcp_get_prompt."
+                         Allowed MCP tools: {}.",
+                        crate::mcp::MCP_READ_HELPER_TOOLS.join(", ")
                     )));
                 }
             } else {

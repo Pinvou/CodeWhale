@@ -7427,3 +7427,23 @@ fn reconnect_repend_preserves_the_failure_ladder_and_the_boot_diagnosis_split() 
         "the second failure must buy the ladder's 60s cooldown, got {remaining:?}"
     );
 }
+
+#[test]
+fn mcp_read_helper_tools_stay_in_engine_classification_domain() {
+    // The engine preparation path gates its entire MCP classification
+    // branch on `McpPool::is_mcp_tool`, so a `MCP_READ_HELPER_TOOLS` entry
+    // outside that domain would classify read-only in the registry adapter
+    // yet silently never reach engine classification - recreating the
+    // registry/engine lane divergence this shared list exists to prevent.
+    let mut seen = std::collections::HashSet::new();
+    for name in MCP_READ_HELPER_TOOLS {
+        assert!(
+            McpPool::is_mcp_tool(name),
+            "{name} is outside McpPool::is_mcp_tool's domain"
+        );
+        assert!(
+            seen.insert(*name),
+            "{name} is duplicated in MCP_READ_HELPER_TOOLS"
+        );
+    }
+}

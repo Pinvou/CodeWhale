@@ -1108,6 +1108,47 @@ pub struct McpTool {
     pub input_schema: serde_json::Value,
 }
 
+/// MCP tool names classified as read-only helpers instead of the
+/// conservative `[Network, RequiresApproval]` default.
+///
+/// Single source of truth: the registry adapter (`tools::registry`), the
+/// engine preparation path (`core::engine::dispatch::mcp_tool_is_read_only`),
+/// and the parallel-batch gate all consume this one list, so the engine turn
+/// loop and the fleet/subagent registries cannot drift apart (the drift that
+/// left the session-reader reads approval-gated on the engine path after the
+/// first half of the #157 fix landed only in the registry adapter). Tests
+/// deliberately enumerate the names literally so a change to this list
+/// cannot pass them unnoticed.
+///
+/// Classification is exact-name and applies globally across lanes: a helper
+/// runs with `ApprovalRequirement::Auto` in every posture (including
+/// read-only postures and `ApprovalMode::Never`) and is admitted to Plan
+/// mode. Adding a name here therefore grants silent, unprompted calls
+/// everywhere, so entries must stay first-party and read-only by contract.
+pub(crate) const MCP_READ_HELPER_TOOLS: &[&str] = &[
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "mcp_read_resource",
+    "read_mcp_resource",
+    "mcp_get_prompt",
+    // The host's first-party session-reader read surface (server key
+    // "session-reader"): cursor-paginated transcript reads plus a
+    // limit-capped listing, completed-turns-only with per-item truncation,
+    // isolated session-id prefixes (`sched-`/`eval_`/`aux-`/`agentic_`)
+    // refused per call, and an optional scoped `--only-session` mode. The
+    // server itself also exposes write tools
+    // (`mcp_session-reader_send_message_to_session`,
+    // `mcp_session-reader_create_session`); only these exact read names
+    // qualify, and the write names must stay off this list.
+    "mcp_session-reader_read_session",
+    "mcp_session-reader_list_sessions",
+];
+
+/// Whether `name` is a read-only MCP helper (see [`MCP_READ_HELPER_TOOLS`]).
+pub(crate) fn is_mcp_read_helper(name: &str) -> bool {
+    MCP_READ_HELPER_TOOLS.contains(&name)
+}
+
 const MCP_TOOL_DESCRIPTION_MAX_CHARS: usize = 80;
 
 /// Format an optional MCP tool description for terminal list surfaces.
