@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSyncWithRetry } from "./relay-tools-spawn.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -53,7 +53,7 @@ test("actual local stop rejects stale or foreign processes and never kills by po
     "}",
     "@{cases=$out;port_lookups=$script:portLookups;handle_before_start=$script:handleBeforeStart}|ConvertTo-Json -Depth 5 -Compress",
   ].join("\n");
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
+  const result = spawnSyncWithRetry("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
     env: { ...process.env, PINVOU_TEST_SELFTEST_PATH: selftest }, encoding: "utf8", timeout: 20_000,
   });
   assert.equal(result.status, 0, result.stderr);
@@ -96,7 +96,7 @@ test("actual local signer refuses replacement when env or recoverable state surv
     "}",
     "@{results=$results;writes=$script:writes}|ConvertTo-Json -Depth 4 -Compress",
   ].join("\n");
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
+  const result = spawnSyncWithRetry("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
     env: { ...process.env, PINVOU_TEST_SELFTEST_PATH: selftest }, encoding: "utf8", timeout: 20_000,
   });
   assert.equal(result.status, 0, result.stderr);
