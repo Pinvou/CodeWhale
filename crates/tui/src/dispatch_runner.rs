@@ -320,15 +320,12 @@ fn teardown_note(launcher: &dyn DaytonaLauncher, receipt: &SandboxReceipt) -> St
 
 /// The exact harness invocation the sandbox runs: the one-shot
 /// `codewhale exec --auto` entry — the same single-`Engine::run_turn` path
-/// local non-interactive callers use, never a second engine.
+/// local non-interactive callers use, never a second engine. The argv shape
+/// is owned by `cloud_dispatch::harness_argv` so validation and the wire
+/// cannot drift.
 pub fn harness_command(job: &CloudJob) -> HarnessCommand {
     HarnessCommand {
-        argv: vec![
-            "codewhale".to_string(),
-            "exec".to_string(),
-            "--auto".to_string(),
-            job.prompt.clone(),
-        ],
+        argv: crate::cloud_dispatch::harness_argv(&job.prompt),
         cwd: SANDBOX_WORKSPACE.to_string(),
         timeout_secs: HARNESS_TIMEOUT_SECS,
     }
@@ -389,17 +386,14 @@ pub fn compose_pr_body_for_head(job: &CloudJob, patch: &PatchReceipt, head_sha: 
     } else {
         patch.summary.trim().to_string()
     };
-    let body = format!(
-        "Automated change by a Codewhale cloud agent.\n\n\
-         ## What the agent did\n{summary}\n\n\
-         ## Task\n{}\n\n\
+    let receipts = format!(
+        "\n\n\
          ## Receipts\n\
          - Cloud job: {}\n\
          - Sandbox: {}\n\
          - Branch: `{}` (base `{}`)\n\
          - Head: `{}`\n\n\
          No-Issue: cloud dispatch {} (no tracked issue; receipts above)",
-        job.prompt,
         job.id,
         job.sandbox_id.as_deref().unwrap_or("(pending)"),
         job.branch,
@@ -407,6 +401,17 @@ pub fn compose_pr_body_for_head(job: &CloudJob, patch: &PatchReceipt, head_sha: 
         head_sha,
         job.id,
     );
+    let prefix = format!(
+        "Automated change by a Codewhale cloud agent.\n\n\
+         ## What the agent did\n{summary}\n\n\
+         ## Task\n"
+    );
+    // A near-cap prompt must truncate the Task section, never the receipts
+    // footer: the task line gets the room the rest of the body leaves.
+    let task_budget = MAX_BODY_CHARS
+        .saturating_sub(prefix.chars().count() + receipts.chars().count())
+        .max(1);
+    let body = format!("{prefix}{}{receipts}", one_line(&job.prompt, task_budget));
     one_line(&body, MAX_BODY_CHARS)
 }
 
@@ -1652,6 +1657,10 @@ mod tests {
         let patch = fixture_patch();
         let body = compose_pr_body_for_head(&job, &patch, &patch.head_sha);
         assert!(body.chars().count() <= MAX_BODY_CHARS);
+        // Truncation must eat the Task section, never the receipts footer.
+        assert!(body.contains("## Receipts"));
+        assert!(body.contains("No-Issue: cloud dispatch cloud_00000000000000bb"));
+        assert!(body.ends_with("(no tracked issue; receipts above)"));
         // Literal pins for the audited forge bounds (96/6000 → 200/60000):
         // GitHub's real caps are 256/65,536, so a bound raised past those or
         // lowered back toward the old ones fails here. The upper bounds are
