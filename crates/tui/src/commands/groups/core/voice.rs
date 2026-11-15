@@ -232,7 +232,12 @@ enum RecordOutcome {
     /// or the capture is too short to contain speech.
     TooShort,
     /// The recorder stopped delivering data mid-capture (stalled pipe, e.g.
-    /// after a PipeWire restart or suspend/resume); captured audio discarded.
+    /// after a PipeWire restart or suspend/resume). The chunks received
+    /// before the stall are complete and intact, but speech after the last
+    /// delivered chunk is unknowable — the stall may have swallowed tail
+    /// speech — and the command deliberately discards the capture and asks
+    /// the user to re-dictate, rather than transcribing a possibly truncated
+    /// dictation.
     RecorderStalled,
 }
 
@@ -241,8 +246,9 @@ enum RecordOutcome {
 /// Returns raw 16kHz mono S16_LE PCM samples on success. Returns
 /// [`RecordOutcome::TooShort`] when no recorder is available, the recording
 /// failed, or no speech was detected, and [`RecordOutcome::RecorderStalled`]
-/// when the recorder stopped delivering data and the partial capture had to
-/// be discarded.
+/// when the recorder stopped delivering data mid-capture; the pre-stall
+/// capture is intact but of unknown completeness (tail speech may have been
+/// lost), so it is discarded and the user re-dictates.
 fn record_audio() -> RecordOutcome {
     use std::io::Read;
     use std::sync::mpsc::RecvTimeoutError;
@@ -347,16 +353,28 @@ fn record_audio() -> RecordOutcome {
                 }
             }
             Ok(Err(_read_err)) => {
-                // Recorder exited or the pipe failed; keep what was captured.
+                // Recorder exited or the pipe failed; keep what was captured
+                // and transcribe it as-is. This is a deliberate contrast with
+                // the stall timeout below, which discards — not because the
+                // two captures differ in quality: both hold complete 10ms
+                // chunks, and in both cases speech after the last delivered
+                // chunk is unknowable.
                 let _ = child.lock().unwrap().kill();
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
                 // No data within the budget (idle after the first chunk,
                 // startup before it): the recorder is silent or wedged. Kill
-                // it (which also unblocks the reader thread) and drop the
-                // partial capture — a half-buffered recording must not be
-                // transcribed as if it were complete.
+                // it (which also unblocks the reader thread) and discard the
+                // capture. The chunks received before the stall are complete
+                // and intact — the capture is not half-buffered — but speech
+                // after the last delivered chunk is unknowable, and here the
+                // recorder may still be running with its tail silently
+                // eaten, so the command chooses to discard and ask the user
+                // to re-dictate rather than transcribe a possibly truncated
+                // dictation. (The EOF path above makes the opposite UX
+                // choice with the same-quality capture; the difference is
+                // deliberate, not a data-integrity distinction.)
                 let _ = child.lock().unwrap().kill();
                 recorder_stalled = true;
                 break;

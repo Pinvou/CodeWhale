@@ -90,13 +90,15 @@ pub(crate) const MAX_ROUTED_USAGE_RECORDS_PER_TURN: usize = 2_048;
 /// not rewrite + fsync the whole turn file per record — at the 2048-record
 /// cap that would be ~950 MB of O(N²) disk churn per turn. `load_turn` and
 /// the whole-directory turn listings return the staged form, so in-process
-/// readers stay coherent; the turn settlement save persists any residue. The
-/// disclosed trade: a process crash can lose at most one batch
-/// (`ROUTED_USAGE_FLUSH_BATCH`, ~5 KB) of billing detail that per-record
-/// saves would have written — between flushes at most `BATCH - 1` records
-/// are staged, but the batch flush itself persists the staged form only
-/// after the append that filled it, so a crash mid-flush loses the whole
-/// batch.
+/// readers stay coherent; the turn settlement save persists any residue.
+/// Disclosed trade: up to one batch (`ROUTED_USAGE_FLUSH_BATCH`, ~5 KB) of
+/// billing detail that per-record saves would have written can be lost —
+/// by a process crash, and also on graceful exit when a record arrives via
+/// a still-registered terminal-turn sink after that turn's settlement save
+/// (nothing flushes it, since a terminal turn runs no further saves).
+/// Between flushes at most `BATCH - 1` records are staged, but the batch
+/// flush itself persists the staged form only after the append that filled
+/// it, so a crash mid-flush loses the whole batch.
 const ROUTED_USAGE_FLUSH_BATCH: usize = 16;
 
 #[cfg(test)]
@@ -1471,15 +1473,18 @@ impl RuntimeThreadStore {
 
     pub fn save_turn(&self, turn: &TurnRecord) -> Result<()> {
         validated_record_id(&turn.thread_id, "thread id")?;
-        // Callers serialize on `turn_mutation`, and `load_turn` returns the
-        // staged routed-usage form, so the record being saved already carries
-        // any staged appends and persisting it supersedes the stage. The
-        // stage clears only after the write succeeds: on a failed write the
-        // staged batch stays resident and the next flush or settlement save
-        // retries it, so a transient disk error cannot silently drop the
-        // already-acknowledged records the journal never saw. (Writes that
-        // succeed are superseded, and out-of-band writers still invalidate
-        // the stage through this same success path.)
+        // Snapshot-style callers must have loaded the record via `load_turn`
+        // (which returns the staged routed-usage form), so the record being
+        // saved already carries any staged appends and persisting it
+        // supersedes the stage. Callers that hold `turn_mutation` serialize
+        // with the staging appends; out-of-band writers (fresh/regenerated
+        // turn ids) cannot collide with a stage entry. The stage clears only
+        // after the write succeeds: on a failed write the staged batch stays
+        // resident and the next flush or settlement save retries it, so a
+        // transient disk error cannot silently drop the already-acknowledged
+        // records the journal never saw. (Writes that succeed are
+        // superseded, and out-of-band writers still invalidate the stage
+        // through this same success path.)
         write_json_atomic(&self.turn_path(&turn.id)?, turn)?;
         self.routed_usage_staged.lock().remove(&turn.id);
         Ok(())
