@@ -129,6 +129,38 @@ class FinancialCIMatrixTests(unittest.TestCase):
         for dependency in ('ajv', 'ajv-formats'):
             self.assertIn(dependency, package['devDependencies'])
 
+    def test_policy_regressions_prepare_an_explicit_owned_python_runtime(self):
+        def assert_runtime(workflow):
+            core = job(workflow, 'account-platform-test')
+            setup = _step_named(core, 'Python for financial runner policy regressions')
+            regressions = _step_named(core, 'Financial runner policy regressions')
+            self.assertIn('id: financial-policy-python', setup)
+            self.assertIn('uses: actions/setup-python@v7', setup)
+            self.assertIn("python-version: '3.12'", setup)
+            self.assertIn('update-environment: false', setup)
+            self.assertNotRegex(setup, re.compile(r'^        (?:if|continue-on-error):', re.M))
+            self.assertLess(core.index(setup), core.index(regressions))
+            self.assertEqual(_step_run_lines(regressions), [
+                'set -euo pipefail',
+                'python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py',
+                'python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py',
+                'policy_python="${{ steps.financial-policy-python.outputs.python-path }}"',
+                'policy_library="$(dirname "$(dirname "$policy_python")")/lib"',
+                'python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-policy-process.json" -- env "LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$policy_python" -m unittest discover -s scripts/tests -p test_account_financial_ci.py',
+            ])
+            return setup, regressions
+
+        setup, regressions = assert_runtime(self.source)
+        variants = [self.source.replace(setup, '', 1),
+                    self.source.replace(setup, setup.replace("'3.12'", "'3.10'"), 1),
+                    self.source.replace(setup, setup.replace('update-environment: false', 'update-environment: true'), 1),
+                    self.source.replace(regressions, regressions.replace('"${{ steps.financial-policy-python.outputs.python-path }}"', 'python3'), 1),
+                    self.source.replace(regressions, regressions.replace('env "LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ', ''), 1),
+                    self.source.replace(regressions, regressions.replace(' -- env "LD_LIBRARY_PATH=', ' -- export "LD_LIBRARY_PATH='), 1)]
+        for wrong in variants:
+            with self.assertRaises(AssertionError):
+                assert_runtime(wrong)
+
     def test_wrong_profile_metadata_fails_before_any_docker_command(self):
         cases = [('core', {'financial-postgres': {}}),
                  ('financial', {'audit-export-postgres': {}}),
