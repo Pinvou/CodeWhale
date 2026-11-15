@@ -10371,6 +10371,29 @@ mod kimi_code_pairing_tests {
         }
     }
 
+    /// The pre-existing K3-generation membership roster must keep failing
+    /// closed on the direct platform endpoint, with the membership endpoint
+    /// named in the guidance — the K3.1 tests above cover the new family;
+    /// this restores the original four-id pin they replaced.
+    #[test]
+    fn membership_ids_fail_on_direct_moonshot_endpoint() {
+        for model in [
+            KIMI_CODE_K3_MODEL,
+            KIMI_CODE_K3_256K_MODEL,
+            DEFAULT_KIMI_CODE_MODEL,
+            KIMI_CODE_HIGHSPEED_MODEL,
+        ] {
+            let err = validate_kimi_code_api_model_id(
+                ApiProvider::Moonshot,
+                DEFAULT_MOONSHOT_BASE_URL,
+                model,
+            )
+            .expect_err("membership ids are not direct-platform catalog models");
+            assert!(err.contains(model), "{err}");
+            assert!(err.contains("api.kimi.com/coding/v1"), "{err}");
+        }
+    }
+
     /// The K3.1 family predicates stay route-scoped: canonical spellings on
     /// the membership endpoint (both hosts, any spelling) match, while the
     /// direct platform, custom gateways, and near-miss spellings do not.
