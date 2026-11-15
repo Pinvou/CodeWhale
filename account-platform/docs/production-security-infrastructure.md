@@ -35,3 +35,5 @@
 离线到期报告的原 service/timer、五项指标面板及其证据边界见[离线到期报告与账号平台面板](../deploy/runbooks/offline-expiry-and-dashboard.md)。恢复仓库载体不表示已安装计时器、导入面板或完成现场验收。
 
 Portal 的 session-lineage 注销保护始终启用；无效部署开关已移除，同等保护版本的回滚核对见[Session-lineage 版本与回滚](../deploy/runbooks/session-lineage-version-rollback.md)。此文档不授权实际切换。
+
+应急访问结束的精确归属、专用凭据/多层会话回收、未知结果续办和正常用户保护见 [Breakglass 收尾手册](../deploy/runbooks/breakglass-retirement.md)。该手册不授予生产操作权限，不把角色到期当成密码或会话自动回收。
