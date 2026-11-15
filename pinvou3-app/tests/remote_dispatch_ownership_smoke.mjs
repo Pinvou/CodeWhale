@@ -271,7 +271,7 @@ try {
     assert.deepEqual(errors, []);
   }
 
-  // Real mounted UI: switching sessions discards the local file snapshot.
+  // Real mounted UI with a controlled host bridge: switching sessions discards the local file snapshot.
   // The old task must never commit empty, and safe abandon must clean its
   // completed transfer using the preserved session binding.
   await load('loss');
@@ -298,9 +298,20 @@ try {
     if (!button) throw new Error('safe abandon unavailable');
     button.click();
   });
+  await page.waitForFunction(() => window.dispatchFixture.cleanups.length === 1);
+  assert.deepEqual(await page.evaluate(() => window.dispatchFixture.calls.filter(call => call.kind === 'confirmedCleanup')),
+    [{ kind: 'confirmedCleanup', id: 'remote-a', ref: 'ref-remote-a', taskId: 'task-remote-a-1', transferId: 'loss-transfer' }]);
+  assert.equal(await page.evaluate(() => window.dispatchFixture.calls.filter(call => call.kind === 'abandon').length), 0,
+    'local abandon waits for the pending physical cleanup acknowledgement');
+  await page.evaluate(() => {
+    const cleanup = window.dispatchFixture.cleanups[0];
+    cleanup.resolve({ transfer_id: cleanup.transferId, cleanup_confirmed: true });
+  });
   await page.waitForFunction(() => window.dispatchFixture.calls.some(call => call.kind === 'abandon'));
-  assert.deepEqual(await page.evaluate(() => window.dispatchFixture.calls.filter(call => call.kind === 'abort')),
-    [{ kind: 'abort', id: 'remote-a', ref: 'ref-remote-a', taskId: 'task-remote-a-1', transferId: 'loss-transfer' }]);
+  assert.deepEqual(await page.evaluate(() => window.dispatchFixture.calls.filter(call => call.kind === 'abandon')),
+    [{ kind: 'abandon', id: 'remote-a', request: 'request-remote-a-1', taskId: 'task-remote-a-1' }]);
+  assert.equal(await page.evaluate(() => window.dispatchFixture.calls.filter(call => call.kind === 'abort').length), 0,
+    'logical abort cannot substitute for the physical cleanup handshake');
   assert.equal(await page.evaluate(() => window.dispatchFixture.restoredText), 'Keep this prepared text');
   assert.deepEqual(errors, []);
 
