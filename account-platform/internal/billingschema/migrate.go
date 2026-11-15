@@ -59,6 +59,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if err := validatePaymentDispatchProvenance(input); err != nil {
 		return nil, err
 	}
+	if err := validateProviderHealthRecent(input); err != nil {
+		return nil, err
+	}
 	if err := validateManualProductAdmission(input); err != nil {
 		return nil, err
 	}
