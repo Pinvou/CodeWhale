@@ -35,12 +35,12 @@ function invalidKeys(valid) {
 
 test("actual local signing validator checks Ed25519 identity without sensitive output", () => {
   const valid = signingKey();
-  const good = spawnSync(process.execPath, [validator], { input: JSON.stringify(valid), encoding: "utf8", timeout: 10_000 });
+  const good = spawnSyncWithRetry(process.execPath, [validator], { input: JSON.stringify(valid), encoding: "utf8", timeout: 10_000 });
   assert.equal(good.status, 0);
   assert.equal(good.stdout, '{"ok":true}\n');
   assert.equal(good.stderr, "");
   for (const [kind, key] of invalidKeys(valid)) {
-    const bad = spawnSync(process.execPath, [validator], { input: JSON.stringify(key), encoding: "utf8", timeout: 10_000 });
+    const bad = spawnSyncWithRetry(process.execPath, [validator], { input: JSON.stringify(key), encoding: "utf8", timeout: 10_000 });
     assert.equal(bad.status, 1, kind);
     assert.equal(bad.stdout, "", kind);
     assert.equal(bad.stderr, "selftest_signing_identity_invalid\n", kind);
@@ -77,7 +77,7 @@ test("actual local signer rejects invalid stored material before touching either
   for (const [kind, key] of invalidKeys(signingKey())) {
     writeFileSync(keyFile, JSON.stringify(key));
     const before = [digest(keyFile), digest(relayEnv), digest(clientEnv)];
-    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
+    const result = spawnSyncWithRetry("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
       env: {
         ...process.env, PINVOU_TEST_SELFTEST_PATH: selftest, PINVOU_TEST_SIGNING_ROOT: root,
         PINVOU_TEST_RELAY_DIR: relayDir, PINVOU_TEST_NODE: process.execPath,
@@ -115,7 +115,7 @@ test("actual PowerShell fresh signer and validated reload preserve complete iden
     "$again=Write-EnvFiles -stateDir $stateDir -key $againKey",
     "@{ok=($againKey.signing_key_id -eq 'selftest-relay-key-1');env_stable=($envBefore -ceq [IO.File]::ReadAllText($again.RelayEnvPath));key_stable=($keyBefore -ceq [IO.File]::ReadAllText($keyFile))}|ConvertTo-Json -Compress",
   ].join("\n");
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
+  const result = spawnSyncWithRetry("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
     env: {
       ...process.env, PINVOU_TEST_SELFTEST_PATH: selftest, PINVOU_TEST_SIGNING_ROOT: root,
       PINVOU_TEST_RELAY_DIR: relayDir, PINVOU_TEST_NODE: process.execPath,

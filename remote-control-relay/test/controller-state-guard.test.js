@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import { fork, spawnSync } from "node:child_process";
+import { spawnSyncWithRetry } from "./relay-tools-spawn.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -80,7 +81,7 @@ function OwnerClass([string]$sid) {
   for (const key of ["SystemRoot", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP"]) {
     if (process.env[key] !== undefined) environment[key] = process.env[key];
   }
-  const result = spawnSync(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+  const result = spawnSyncWithRetry(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     { env: environment, encoding: "utf8", windowsHide: true, timeout: 15000, maxBuffer: 4096 });
   assert.ifError(result.error);
@@ -333,7 +334,7 @@ test("controller guard missing builtin fails before filesystem preparation", () 
       legacyStatePath:'${process.platform === "win32" ? "C:/" : "/"}unopened-legacy.json',
       fs:new Proxy({}, {get(){throw Error('filesystem touched')}})});process.exit(2)}
     catch(e){if(e.code!=='relay_state_lock_runtime_unavailable')throw e}`;
-  const result = spawnSync(process.execPath, ["--no-experimental-sqlite", "--input-type=module", "-e", code],
+  const result = spawnSyncWithRetry(process.execPath, ["--no-experimental-sqlite", "--input-type=module", "-e", code],
     { encoding: "utf8", windowsHide: true, timeout: 10000 });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
