@@ -329,6 +329,46 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
+  {
+    const receipt = namedStep(jobBlock("release-contract-test", text), "保留 Windows 发布进程原始回执");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: 保留 Windows 发布进程原始回执",
+      "        if: ${{ always() && runner.os == 'Windows' }}",
+      "        continue-on-error: true",
+      "        timeout-minutes: 3",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: remote-release-process-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/",
+      "            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/",
+      "            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/",
+      "          retention-days: 7",
+      "          if-no-files-found: warn",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
+    const receipt = namedStep(jobBlock("relay-test", text), "保留 Relay 进程作用域原始回执");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: 保留 Relay 进程作用域原始回执",
+      "        if: always()",
+      "        continue-on-error: true",
+      "        timeout-minutes: 3",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: relay-process-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/",
+      "          retention-days: 7",
+      "          if-no-files-found: warn",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
   // Explicit YAML keys may put comments/newlines before their value indicator.
   const keySeparator = String.raw`(?:\s|#[^\n]*(?:\n|$))*:`;
   assert.doesNotMatch(remainder, new RegExp(String.raw`\bcontinue-on-error\s*['"]?` + keySeparator),
@@ -386,6 +426,8 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     ["account-closure-test", "Account closure resource lifecycle receipts"],
     ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
     ["windows-codex-runtime-test", "Preserve ACP fixture exit receipt"],
+    ["release-contract-test", "保留 Windows 发布进程原始回执"],
+    ["relay-test", "保留 Relay 进程作用域原始回执"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,

@@ -2271,8 +2271,10 @@ jobs:
         with:
           name: remote-release-process-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/remote-release-process-${{ github.run_id }}-${{ github.run_attempt }}.json
-            ${{ runner.temp }}/remote-release-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/
+            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/
+            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/
             ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json
             ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/
           retention-days: 7
