@@ -924,12 +924,16 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "lifecycle-reconciliation", "create", "retained-token", "retained-billing", "drop",
         ])
 
-    def test_account_job_budget_includes_retained_billing_and_later_closure(self):
+    def test_account_financial_jobs_keep_retained_budgets_and_independent_closure(self):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
         job = workflow.split("\n  account-platform-test:\n", 1)[1].split("\n  account-closure-test:\n", 1)[0]
         closure = workflow.split("\n  account-closure-test:\n", 1)[1].split("\n  windows-relay-dacl:\n", 1)[0]
         self.assertIn("\n    timeout-minutes: 180\n", job)
-        self.assertIn("python3 scripts/test-financial-parallel.py", job)
+        financial = workflow.split("\n  account-financial-test:\n", 1)[1].split("\n  account-platform-test:\n", 1)[0]
+        self.assertIn("\n    timeout-minutes: 180\n", financial)
+        self.assertIn('python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP"', financial)
+        self.assertIn("\n    needs: changes\n", financial)
+        self.assertNotIn("python3 scripts/test-financial-parallel.py", job)
         self.assertNotIn("python3 scripts/test-account-closure-postgres.py", job)
         self.assertIn("python3 scripts/test-account-closure-postgres.py", closure)
         self.assertIn("\n    needs: changes\n", closure)
