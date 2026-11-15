@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
-import { lstat, open, readFile, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, normalize, resolve, sep } from "node:path";
+import { readFile } from "node:fs/promises";
+import { dirname, isAbsolute, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDirectCliEntry } from "../cli-entrypoint.js";
 import validateEvidenceSchema from "../docs/schemas/remote-control-release-evidence.v1.validator.mjs";
 import { verifyProviderAttestationForRun, validateReleaseQualificationWindow } from "./verify-provider-attestation.mjs";
+import { artifactIndex, readEvidenceArtifact } from "./release-evidence-artifacts.mjs";
 import { validateSpdx } from "./verify-installer-supply-chain.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -183,11 +184,9 @@ function journey(value, expected, evidenceBounds) {
   if (checkIds.size !== expected.required_checks.length) fail("evidence_journey_checks_invalid");
 }
 
-async function inspectArtifact(path, kind) {
-  const bytes = await readFile(path);
-  const maxSize = TEXT_ARTIFACT_KINDS.has(kind) ? 32 * 1024 * 1024 : 1024 * 1024 * 1024;
-  if (bytes.length === 0 || bytes.length > maxSize) fail("evidence_artifact_size_invalid");
-  if (!TEXT_ARTIFACT_KINDS.has(kind)) return crypto.createHash("sha256").update(bytes).digest("hex");
+async function inspectArtifact(root, item) {
+  const bytes = await readEvidenceArtifact(root, item);
+  if (!TEXT_ARTIFACT_KINDS.has(item.kind)) return;
   const text = bytes.toString("utf8");
   if (Buffer.byteLength(text, "utf8") !== bytes.length
     || /-----BEGIN [A-Z ]*PRIVATE KEY-----|\bBearer\s+\S+|\bsk-[A-Za-z0-9_-]{12,}|vault:\/\//u.test(text)
@@ -195,16 +194,19 @@ async function inspectArtifact(path, kind) {
     || /\b(?:\d{1,3}\.){3}\d{1,3}\b|\b\d{7}\b|[A-Za-z]:\\(?:Users|ProgramData)\\|\/(?:home|private|tmp)\//u.test(text)) {
     fail("evidence_artifact_sensitive_content");
   }
-  return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
+async function artifactJson(root, item) {
+  return JSON.parse((await readEvidenceArtifact(root, item)).toString("utf8"));
 }
 
 async function validateUiSmokeEvidence(root, artifacts, uiGateDigest, journeys) {
-  const byDigest = new Map(artifacts.map((item) => [item.sha256, item]));
+  const byDigest = artifactIndex(artifacts);
   const summaryArtifact = byDigest.get(uiGateDigest);
   if (!summaryArtifact || summaryArtifact.kind !== "ui-smoke" || summaryArtifact.machine_role !== "orchestrator") fail("evidence_ui_smoke_invalid");
   let summary;
   try {
-    summary = JSON.parse(await readFile(resolve(root, ...summaryArtifact.path.split("/")), "utf8"));
+    summary = await artifactJson(root, summaryArtifact);
   } catch { fail("evidence_ui_smoke_invalid"); }
   exactObject(summary, ["schema", "version", "result", "artifacts"], "evidence_ui_smoke_invalid");
   if (summary.schema !== "pinvou-remote-control-ui-suite" || summary.version !== 1
@@ -221,7 +223,7 @@ async function validateUiSmokeEvidence(root, artifacts, uiGateDigest, journeys) 
       || reference.sha256 === uiGateDigest) fail("evidence_ui_smoke_invalid");
     let phaseEvidence;
     try {
-      phaseEvidence = JSON.parse(await readFile(resolve(root, ...artifactEntry.path.split("/")), "utf8"));
+      phaseEvidence = await artifactJson(root, artifactEntry);
     } catch { fail("evidence_ui_smoke_invalid"); }
     const coordinatedPhase = new Set(["approval-allow", "approval-deny", "attachment"]).has(reference.phase);
     exactObject(phaseEvidence, coordinatedPhase
@@ -244,11 +246,11 @@ async function validateUiSmokeEvidence(root, artifacts, uiGateDigest, journeys) 
 }
 
 async function validateFeatureOffEvidence(root, artifacts, gateDigest, commitSha) {
-  const byDigest = new Map(artifacts.map((item) => [item.sha256, item]));
+  const byDigest = artifactIndex(artifacts);
   const gateArtifact = byDigest.get(gateDigest);
   if (!gateArtifact || gateArtifact.kind !== "check" || gateArtifact.machine_role !== "orchestrator") fail("evidence_feature_off_invalid");
   let summary;
-  try { summary = JSON.parse(await readFile(resolve(root, ...gateArtifact.path.split("/")), "utf8")); } catch { fail("evidence_feature_off_invalid"); }
+  try { summary = await artifactJson(root, gateArtifact); } catch { fail("evidence_feature_off_invalid"); }
   exactObject(summary, ["schema", "version", "result", "source_commit_sha", "relay_rejected", "roles"], "evidence_feature_off_invalid");
   if (summary.schema !== "pinvou-remote-control-feature-off-suite" || summary.version !== 1 || summary.result !== "pass"
     || summary.source_commit_sha !== commitSha || summary.relay_rejected !== true || !Array.isArray(summary.roles) || summary.roles.length !== 2) fail("evidence_feature_off_invalid");
@@ -261,7 +263,7 @@ async function validateFeatureOffEvidence(root, artifacts, gateDigest, commitSha
     const observation = byDigest.get(role.sha256);
     if (!observation || observation.kind !== "check" || observation.machine_role !== role.role) fail("evidence_feature_off_invalid");
     let measured;
-    try { measured = JSON.parse(await readFile(resolve(root, ...observation.path.split("/")), "utf8")); } catch { fail("evidence_feature_off_invalid"); }
+    try { measured = await artifactJson(root, observation); } catch { fail("evidence_feature_off_invalid"); }
     exactObject(measured, ["schema", "version", "role", "source_commit_sha", "successful_socket_count", "relay_allocation_delta",
       "registry_before_sha256", "registry_after_sha256", "tombstone_before_sha256", "tombstone_after_sha256", "relay_rejected",
       "ui_entry_hidden", "registered_command_count", "all_commands_fail_closed", "error_code", "mock"], "evidence_feature_off_invalid");
@@ -279,26 +281,26 @@ async function validateFeatureOffEvidence(root, artifacts, gateDigest, commitSha
 async function validateControlledAttachmentReceipt(root, artifacts, document) {
   const journey = document.journeys.find((item) => item.id === "RC-E2E-008");
   const check = journey?.checks.find((item) => item.id === "controlled_attachment_received");
-  const entry = artifacts.find((item) => item.sha256 === check?.artifact_sha256);
+  const entry = artifactIndex(artifacts).get(check?.artifact_sha256);
   if (!entry || entry.kind !== "check" || entry.machine_role !== "B") fail("evidence_controlled_attachment_receipt_invalid");
   let receipt;
-  try { receipt = JSON.parse(await readFile(resolve(root, ...entry.path.split("/")), "utf8")); } catch { fail("evidence_controlled_attachment_receipt_invalid"); }
+  try { receipt = await artifactJson(root, entry); } catch { fail("evidence_controlled_attachment_receipt_invalid"); }
   exactObject(receipt, ["schema", "version", "source_commit_sha", "run_nonce", "role", "coordination_digest", "attachment_sha256", "received", "mock"], "evidence_controlled_attachment_receipt_invalid");
   if (receipt.schema !== "pinvou-controlled-attachment-receipt" || receipt.version !== 1 || receipt.source_commit_sha !== document.commit_sha
     || receipt.run_nonce !== document.attestations[0].run_nonce || receipt.role !== "B" || receipt.received !== true || receipt.mock !== false
     || receipt.coordination_digest !== journey.coordination_digest) fail("evidence_controlled_attachment_receipt_invalid");
   digest(receipt.attachment_sha256, "evidence_controlled_attachment_receipt_invalid");
-  const uiSummaryEntry = artifacts.find((item) => item.sha256 === document.gates.ui_smoke.artifact_sha256);
-  const summary = JSON.parse(await readFile(resolve(root, ...uiSummaryEntry.path.split("/")), "utf8"));
+  const uiSummaryEntry = artifactIndex(artifacts).get(document.gates.ui_smoke.artifact_sha256);
+  const summary = await artifactJson(root, uiSummaryEntry);
   const uiReference = summary.artifacts.find((item) => item.phase === "attachment");
-  const uiEntry = artifacts.find((item) => item.sha256 === uiReference?.sha256);
-  const ui = JSON.parse(await readFile(resolve(root, ...uiEntry.path.split("/")), "utf8"));
+  const uiEntry = artifactIndex(artifacts).get(uiReference?.sha256);
+  const ui = await artifactJson(root, uiEntry);
   if (ui.attachment_sha256 !== receipt.attachment_sha256) fail("evidence_controlled_attachment_receipt_invalid");
 }
 
 async function validateLegacyRuntimeEvidence(root, artifacts, legacy, document) {
   const commitSha = document.commit_sha;
-  const byDigest = new Map(artifacts.map((item) => [item.sha256, item]));
+  const byDigest = artifactIndex(artifacts);
   const runtimeEntry = byDigest.get(legacy.runtime_artifact_sha256);
   const routeSpecEntry = byDigest.get(legacy.route_spec_artifact_sha256);
   const configurationEntry = byDigest.get(legacy.configuration_artifact_sha256);
@@ -307,12 +309,12 @@ async function validateLegacyRuntimeEvidence(root, artifacts, legacy, document) 
   const restorationEntry = byDigest.get(legacy.restoration_artifact_sha256);
   let runtime; let routeSpec; let configuration; let probe; let bareV2; let restoration;
   try {
-    runtime = JSON.parse(await readFile(resolve(root, ...runtimeEntry.path.split("/")), "utf8"));
-    routeSpec = JSON.parse(await readFile(resolve(root, ...routeSpecEntry.path.split("/")), "utf8"));
-    configuration = JSON.parse(await readFile(resolve(root, ...configurationEntry.path.split("/")), "utf8"));
-    probe = JSON.parse(await readFile(resolve(root, ...probeEntry.path.split("/")), "utf8"));
-    bareV2 = JSON.parse(await readFile(resolve(root, ...bareV2Entry.path.split("/")), "utf8"));
-    restoration = JSON.parse(await readFile(resolve(root, ...restorationEntry.path.split("/")), "utf8"));
+    runtime = await artifactJson(root, runtimeEntry);
+    routeSpec = await artifactJson(root, routeSpecEntry);
+    configuration = await artifactJson(root, configurationEntry);
+    probe = await artifactJson(root, probeEntry);
+    bareV2 = await artifactJson(root, bareV2Entry);
+    restoration = await artifactJson(root, restorationEntry);
   } catch { fail("evidence_legacy_relay_invalid"); }
   exactObject(runtime, ["schema", "version", "source_commit_sha", "pid", "relay_version", "binary_sha256", "executable_sha256", "executable_verified", "listener_scope", "listener_port", "listener_owner_pid", "process_started", "mock"], "evidence_legacy_relay_invalid");
   exactObject(routeSpec, ["schema", "version", "run_nonce", "route_id", "gateway_url_sha256", "target", "no_bypass", "endpoint_inventory_sha256", "gateway_config_sha256", "canonical_inventory_sha256", "canonical_gateway_config_sha256", "canonical_input_state_digest"], "evidence_legacy_relay_invalid");
@@ -360,10 +362,10 @@ async function validateLegacyRuntimeEvidence(root, artifacts, legacy, document) 
 async function validateProviderAttestation(root, artifacts, document, qualificationClock) {
   const validity = { validFrom: 0, validUntil: Number.MAX_SAFE_INTEGER };
   for (const attestation of document.attestations) {
-    const entry = artifacts.find((item) => item.sha256 === attestation.provider_attestation_artifact_sha256);
+    const entry = artifactIndex(artifacts).get(attestation.provider_attestation_artifact_sha256);
     if (!entry || entry.kind !== "check" || entry.machine_role !== attestation.role) fail("evidence_attestation_provider_invalid");
     let value;
-    try { value = JSON.parse(await readFile(resolve(root, ...entry.path.split("/")), "utf8")); } catch { fail("evidence_attestation_provider_invalid"); }
+    try { value = await artifactJson(root, entry); } catch { fail("evidence_attestation_provider_invalid"); }
     const issuedAt = Date.parse(value.issued_at);
     const runStartedAt = Date.parse(document.started_at); const runFinishedAt = Date.parse(document.finished_at);
     if (!Number.isFinite(issuedAt) || issuedAt < runStartedAt || issuedAt > runFinishedAt) fail("evidence_attestation_provider_invalid");
@@ -390,21 +392,8 @@ async function validateRunCompletion(root, artifacts, document) {
     || entry.machine_role !== "orchestrator") fail("evidence_run_completion_invalid");
   // Authenticate the same bounded bytes that supply the interval. An earlier
   // whole-directory hash pass alone leaves an await/read TOCTOU window.
-  const file = await open(resolve(root, ...entry.path.split("/")), "r").catch(() => fail("evidence_run_completion_invalid"));
-  let bytes;
-  try {
-    const buffer = Buffer.alloc(16 * 1024 + 1);
-    let size = 0;
-    while (size < buffer.length) {
-      const { bytesRead } = await file.read(buffer, size, buffer.length - size, size);
-      if (!bytesRead) break;
-      size += bytesRead;
-    }
-    if (size === 0 || size > 16 * 1024) fail("evidence_run_completion_invalid");
-    bytes = buffer.subarray(0, size);
-  } catch { fail("evidence_run_completion_invalid"); }
-  finally { await file.close().catch(() => fail("evidence_run_completion_invalid")); }
-  if (crypto.createHash("sha256").update(bytes).digest("hex") !== entry.sha256) fail("evidence_run_completion_invalid");
+  const bytes = await readEvidenceArtifact(root, entry, { maxBytes: 16 * 1024 })
+    .catch(() => fail("evidence_run_completion_invalid"));
   let value;
   try { value = JSON.parse(bytes.toString("utf8")); } catch { fail("evidence_run_completion_invalid"); }
   exactObject(value, ["schema", "version", "source_commit_sha", "run_nonce", "started_at", "finished_at",
@@ -420,11 +409,11 @@ async function validateBuildProvenance(root, artifacts, document, {
   expectedRepository, expectedWorkflow, expectedRunId,
 } = {}) {
   const installer = document.installers[0];
-  const entry = artifacts.find((item) => item.sha256 === installer.build_provenance_artifact_sha256);
-  const sbom = artifacts.find((item) => item.sha256 === installer.sbom_artifact_sha256);
+  const entry = artifactIndex(artifacts).get(installer.build_provenance_artifact_sha256);
+  const sbom = artifactIndex(artifacts).get(installer.sbom_artifact_sha256);
   if (!entry || entry.kind !== "check" || entry.machine_role !== "orchestrator" || !sbom || sbom.kind !== "log") fail("evidence_installer_provenance_invalid");
   let value;
-  try { value = JSON.parse(await readFile(resolve(root, ...entry.path.split("/")), "utf8")); } catch { fail("evidence_installer_provenance_invalid"); }
+  try { value = await artifactJson(root, entry); } catch { fail("evidence_installer_provenance_invalid"); }
   exactObject(value, ["schema", "version", "source_commit_sha", "installer_sha256", "attestation_bundle_sha256", "sbom_sha256", "sbom_attestation_bundle_sha256", "installer_subject_name", "sbom_subject_name", "repository", "workflow", "build_run_id", "protected_environment", "verification_tool", "mock"], "evidence_installer_provenance_invalid");
   if (value.schema !== "pinvou-installer-supply-chain-verification" || value.version !== 1 || value.source_commit_sha !== document.commit_sha
     || value.installer_sha256 !== installer.sha256 || value.sbom_sha256 !== installer.sbom_artifact_sha256
@@ -439,7 +428,7 @@ async function validateBuildProvenance(root, artifacts, document, {
     || (expectedWorkflow && value.workflow !== expectedWorkflow)
     || (expectedRunId && value.build_run_id !== Number(expectedRunId))) fail("evidence_installer_provenance_untrusted");
   let spdxValue;
-  try { spdxValue = JSON.parse(await readFile(resolve(root, ...sbom.path.split("/")), "utf8")); } catch { fail("evidence_installer_provenance_invalid"); }
+  try { spdxValue = await artifactJson(root, sbom); } catch { fail("evidence_installer_provenance_invalid"); }
   try { validateSpdx(spdxValue, { installerName: installer.attested_subject_name, installerSha256: installer.sha256, sourceCommit: document.commit_sha }); }
   catch { fail("evidence_installer_provenance_invalid"); }
 }
@@ -593,7 +582,7 @@ export async function validateReleaseEvidence(document, {
   if (!Array.isArray(document.artifacts) || document.artifacts.length === 0) fail("evidence_artifacts_invalid");
   const artifacts = document.artifacts.map(artifact);
   if (new Set(artifacts.map(({ path }) => path)).size !== artifacts.length) fail("evidence_artifact_path_duplicate");
-  const artifactDigests = new Set(artifacts.map(({ sha256 }) => sha256));
+  const byDigest = artifactIndex(artifacts);
   const byPath = new Map(artifacts.map((item) => [item.path, item]));
   for (const item of artifacts) {
     let signature;
@@ -603,7 +592,7 @@ export async function validateReleaseEvidence(document, {
   }
   const requireArtifact = (path, sha256, kind) => {
     const item = byPath.get(path);
-    if (!item || item.sha256 !== sha256 || item.kind !== kind) fail("evidence_artifact_reference_missing");
+    if (!item || item.sha256 !== sha256 || item.kind !== kind || item.machine_role !== "orchestrator") fail("evidence_artifact_reference_missing");
   };
   for (const item of document.installers) requireArtifact(item.artifact_path, item.sha256, "installer");
   requireArtifact("build/installer-provenance.json", document.installers[0].build_provenance_artifact_sha256, "check");
@@ -615,12 +604,12 @@ export async function validateReleaseEvidence(document, {
   requireArtifact(legacy.artifact_path, legacy.sha256, "legacy-relay");
   const claimedCheckDigests = new Set();
   const claimUniqueEvidence = (sha256) => {
-    if (!artifactDigests.has(sha256)) fail("evidence_artifact_reference_missing");
+    if (!byDigest.get(sha256)) fail("evidence_artifact_reference_missing");
     if (claimedCheckDigests.has(sha256)) fail("evidence_artifact_reused");
     claimedCheckDigests.add(sha256);
   };
   for (const legacyDigest of [legacy.route_spec_artifact_sha256, legacy.runtime_artifact_sha256, legacy.configuration_artifact_sha256, legacy.probe_artifact_sha256, legacy.bare_v2_artifact_sha256, legacy.restoration_artifact_sha256]) {
-    const legacyArtifact = artifacts.find((item) => item.sha256 === legacyDigest);
+    const legacyArtifact = artifactIndex(artifacts).get(legacyDigest);
     const expectedRole = legacyDigest === legacy.route_spec_artifact_sha256 ? "orchestrator" : "A";
     if (!legacyArtifact || legacyArtifact.kind !== "rollback" || legacyArtifact.machine_role !== expectedRole) fail("evidence_legacy_relay_invalid");
     claimUniqueEvidence(legacyDigest);
@@ -630,11 +619,11 @@ export async function validateReleaseEvidence(document, {
   requireArtifact("gates/run-completion.json", document.run_completion_artifact_sha256, "check");
   claimUniqueEvidence(document.run_completion_artifact_sha256);
   for (const item of document.journeys) {
-    const trace = artifacts.find((artifact) => artifact.sha256 === item.trace_sha256);
+    const trace = artifactIndex(artifacts).get(item.trace_sha256);
     if (!trace || trace.kind !== "trace" || trace.machine_role !== "A") fail("evidence_journey_artifact_invalid");
     claimUniqueEvidence(item.trace_sha256);
     for (const check of item.checks) {
-      const artifact = artifacts.find((entry) => entry.sha256 === check.artifact_sha256);
+      const artifact = artifactIndex(artifacts).get(check.artifact_sha256);
       const role = item.id === "RC-E2E-008" && check.id === "controlled_attachment_received" ? "B" : "A";
       if (!artifact || artifact.kind !== "check" || artifact.machine_role !== role) fail("evidence_journey_artifact_invalid");
       claimUniqueEvidence(check.artifact_sha256);
@@ -647,7 +636,7 @@ export async function validateReleaseEvidence(document, {
     digest(value.artifact_sha256);
     // Match the actual orchestrator producers: the four driver gates come
     // from A; only the aggregate UI and flag-off suites come from orchestrator.
-    const artifact = artifacts.find((item) => item.sha256 === value.artifact_sha256);
+    const artifact = artifactIndex(artifacts).get(value.artifact_sha256);
     const aggregate = gate === "ui_smoke" || gate === "feature_flag_off";
     if (!artifact || artifact.machine_role !== (aggregate ? "orchestrator" : "A")
       || artifact.kind !== (gate === "ui_smoke" ? "ui-smoke" : "check")) fail("evidence_gate_artifact_invalid");
@@ -656,26 +645,11 @@ export async function validateReleaseEvidence(document, {
   let providerValidity = null;
   if (evidenceRoot) {
     const root = resolve(evidenceRoot);
-    const rootMetadata = await lstat(root).catch(() => fail("evidence_root_unsafe"));
-    if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) fail("evidence_root_unsafe");
-    const realRoot = await realpath(root).catch(() => fail("evidence_root_unsafe"));
     for (const item of artifacts) {
-      const path = resolve(root, ...item.path.split("/"));
-      if (path !== root && !path.startsWith(`${root}${sep}`)) fail("evidence_artifact_path_escape");
-      let cursor = root;
-      for (const component of item.path.split("/")) {
-        cursor = resolve(cursor, component);
-        const metadata = await lstat(cursor).catch(() => fail("evidence_artifact_unreadable"));
-        if (metadata.isSymbolicLink()) fail("evidence_artifact_path_escape");
-      }
-      const realTarget = await realpath(path).catch(() => fail("evidence_artifact_unreadable"));
-      if (realTarget !== realRoot && !realTarget.startsWith(`${realRoot}${sep}`)) fail("evidence_artifact_path_escape");
-      let actual;
-      try { actual = await inspectArtifact(path, item.kind); } catch (error) {
-        if (error?.code === "evidence_artifact_sensitive_content" || error?.code === "evidence_artifact_size_invalid") throw error;
+      try { await inspectArtifact(root, item); } catch (error) {
+        if (error?.code?.startsWith("evidence_")) throw error;
         fail("evidence_artifact_unreadable");
       }
-      if (actual !== item.sha256) fail("evidence_artifact_digest_mismatch");
     }
     await validateUiSmokeEvidence(root, artifacts, document.gates.ui_smoke.artifact_sha256, document.journeys);
     await validateFeatureOffEvidence(root, artifacts, document.gates.feature_flag_off.artifact_sha256, document.commit_sha);
