@@ -7129,7 +7129,8 @@ mod pre_tool_snapshot_gate_tests {
             );
         }
         // The same server's write siblings stay blocked under their prepared
-        // classification.
+        // classification (`create_session` ships with the planned
+        // session-creation server, parent PR Pinvou/pinvou-agent#657).
         for name in [
             "mcp_session-reader_send_message_to_session",
             "mcp_session-reader_create_session",

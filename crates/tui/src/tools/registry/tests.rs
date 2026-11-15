@@ -260,6 +260,9 @@ fn mcp_actions_require_approval_with_exact_helper_matching() {
         // The session-reader server's own write siblings must never inherit
         // read-helper status — the realistic over-classification hazard for
         // this surface is generating the list from the server manifest.
+        // (`send_message_to_session` is already in the shipped manifest;
+        // `create_session` ships with the planned session-creation server,
+        // parent PR Pinvou/pinvou-agent#657.)
         "mcp_session-reader_send_message_to_session",
         "mcp_session-reader_create_session",
     ] {

@@ -478,6 +478,9 @@ mod tests {
         }
         // The same server's write siblings keep the conservative engine
         // classification: not read-only, Suggest approval, never parallel.
+        // (`create_session` ships with the planned session-creation server,
+        // parent PR Pinvou/pinvou-agent#657 — pinned here so its arrival can
+        // never silently join the read-helper list.)
         for name in [
             "mcp_session-reader_send_message_to_session",
             "mcp_session-reader_create_session",

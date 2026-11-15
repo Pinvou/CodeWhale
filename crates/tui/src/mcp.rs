@@ -1123,8 +1123,12 @@ pub struct McpTool {
 /// Classification is exact-name and applies globally across lanes: a helper
 /// runs with `ApprovalRequirement::Auto` in every posture (including
 /// read-only postures and `ApprovalMode::Never`) and is admitted to Plan
-/// mode. Adding a name here therefore grants silent, unprompted calls
-/// everywhere, so entries must stay first-party and read-only by contract.
+/// mode, so a name added here is granted approval-free execution on all of
+/// those surfaces and entries must stay first-party and read-only by
+/// contract. (The standalone auto-review policy still tiers MCP names by
+/// its own prefix heuristic in `tui::approval::policy::get_tool_category`
+/// and may consult its reviewer for non-`list_/read_/get_mcp_*` shapes;
+/// unifying that classifier with this list is a planned follow-up.)
 pub(crate) const MCP_READ_HELPER_TOOLS: &[&str] = &[
     "list_mcp_resources",
     "list_mcp_resource_templates",
@@ -1133,13 +1137,15 @@ pub(crate) const MCP_READ_HELPER_TOOLS: &[&str] = &[
     "mcp_get_prompt",
     // The host's first-party session-reader read surface (server key
     // "session-reader"): cursor-paginated transcript reads plus a
-    // limit-capped listing, completed-turns-only with per-item truncation,
+    // limit-capped listing, best-effort completed-turns-only with per-item
+    // truncation (the server labels the turn alignment approximate),
     // isolated session-id prefixes (`sched-`/`eval_`/`aux-`/`agentic_`)
-    // refused per call, and an optional scoped `--only-session` mode. The
-    // server itself also exposes write tools
-    // (`mcp_session-reader_send_message_to_session`,
-    // `mcp_session-reader_create_session`); only these exact read names
-    // qualify, and the write names must stay off this list.
+    // refused on read calls and excluded from unscoped listings, and an
+    // optional scoped `--only-session` mode. The server also exposes write
+    // tools (`mcp_session-reader_send_message_to_session`, plus a
+    // `mcp_session-reader_create_session` sibling planned under parent PR
+    // Pinvou/pinvou-agent#657); only these exact read names qualify, and
+    // the write names must stay off this list.
     "mcp_session-reader_read_session",
     "mcp_session-reader_list_sessions",
 ];
@@ -4558,6 +4564,12 @@ impl McpPool {
     }
 
     /// Check if a tool name is an MCP tool
+    ///
+    /// The three bare names are unprefixed read helpers that predate the
+    /// `mcp_` naming scheme; keep them in tandem with
+    /// `MCP_READ_HELPER_TOOLS` — a bare helper on one list must be on both
+    /// (the const's entries are domain-pinned to this check in
+    /// `mcp::tests::mcp_read_helper_tools_stay_in_engine_classification_domain`).
     pub fn is_mcp_tool(name: &str) -> bool {
         name.starts_with("mcp_")
             || matches!(
