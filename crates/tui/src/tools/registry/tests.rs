@@ -1761,3 +1761,74 @@ fn registered_apply_patch_schema_keeps_its_required_only_branch_groups() {
         );
     }
 }
+
+struct TypedRequiredOnlyUnionTool;
+
+#[async_trait::async_trait]
+impl ToolSpec for TypedRequiredOnlyUnionTool {
+    fn name(&self) -> &str {
+        "typed_union_probe"
+    }
+
+    fn description(&self) -> &str {
+        "typed required-only union fixture"
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {"type": "object", "required": ["a"]},
+                {"type": "object", "required": ["b"]}
+            ]
+        })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+
+    async fn execute(
+        &self,
+        _input: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("ok"))
+    }
+}
+
+#[test]
+fn registered_typed_required_only_union_keeps_its_branch_groups() {
+    // A plugin-provided TYPED union — each branch carries its own
+    // `type: "object"` beside the required group — must survive the
+    // registry sanitize/canonicalize pass with its contract intact. The
+    // bare-object injection used to add a synthetic empty `properties`
+    // map that the pruner then read as the branch's own declaration, so
+    // both branches collapsed into identical all-accepting
+    // `{type: "object"}` schemas and the union admitted nothing (review
+    // 5910284697). Mirrors the untyped builtin pin above with the typed
+    // shape the builtin's untyped branches never exercised.
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let registry = ToolRegistryBuilder::new()
+        .with_tool(Arc::new(TypedRequiredOnlyUnionTool))
+        .build(ctx);
+    let tool = registry
+        .to_api_tools()
+        .into_iter()
+        .find(|tool| tool.name == "typed_union_probe")
+        .expect("typed union tool registered");
+    assert_eq!(
+        tool.input_schema["oneOf"],
+        json!([
+            {"type": "object", "required": ["a"]},
+            {"type": "object", "required": ["b"]}
+        ]),
+        "the registered typed union must keep every required group: {}",
+        tool.input_schema
+    );
+}

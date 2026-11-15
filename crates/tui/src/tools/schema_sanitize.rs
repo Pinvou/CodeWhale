@@ -58,7 +58,7 @@ fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
         .as_object()
         .is_some_and(|obj| obj.contains_key("properties"));
     inject_properties_on_bare_objects(schema);
-    prune_dangling_required(schema, enclosing_properties);
+    prune_dangling_required(schema, enclosing_properties, declared_properties);
     collapse_single_element_unions(schema);
     // Recurse into all sub-schemas
     if let Some(obj) = schema.as_object_mut() {
@@ -93,6 +93,22 @@ fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
                 "oneOf" | "anyOf" | "allOf" | "not" | "if" | "then" | "else"
             ) {
                 sanitize_in_instance(v, &local_properties);
+            } else if key == "dependentSchemas" {
+                // Draft 2020-12: each dependentSchemas value applies to the
+                // SAME instance as the object schema holding it, so a
+                // dependency naming only fields declared at this scope
+                // (`{required: ["confirm"]}` against the enclosing
+                // properties) must resolve here instead of pruning into an
+                // all-accepting `{}` — the compatible-Messages lane would
+                // otherwise forward a contract that admits a `mode`-only
+                // argument with no `confirm` at all (review 5910284697).
+                // The name keys route instances; they are not schema
+                // scopes, so the reset applies inside the map's values only.
+                if let Some(dep_map) = v.as_object_mut() {
+                    for (_name, dep) in dep_map.iter_mut() {
+                        sanitize_in_instance(dep, &local_properties);
+                    }
+                }
             } else {
                 sanitize_in_instance(v, &[]);
             }
@@ -186,7 +202,9 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
     obj.remove("enum");
     obj.remove("not");
     ensure_properties_object(obj);
-    prune_dangling_required(schema, &[]);
+    // The map here is derived from the merged composition arms — the
+    // schema's own post-collapse declaration — so it keeps local authority.
+    prune_dangling_required(schema, &[], true);
     combine_constraint_notes(constraint_note, dependent_note)
 }
 
@@ -280,7 +298,9 @@ pub fn sanitize_for_anthropic_messages(schema: &mut Value) -> Option<String> {
     if !stripped_compositions.is_empty() && !obj.contains_key("type") {
         obj.insert("type".into(), Value::String("object".to_string()));
     }
-    prune_dangling_required(schema, &[]);
+    // Same provenance as the strict flatten above: the merged map is the
+    // schema's own declaration, so it keeps local authority.
+    prune_dangling_required(schema, &[], true);
     // One note per STRIPPED root composition keyword, in the recorded
     // keyword order: the specific sentence when that keyword carried two or
     // more labeled groups, otherwise the generic sentence (review 4539837534
@@ -391,6 +411,18 @@ fn inject_properties_on_bare_objects(schema: &mut Value) {
     if obj.contains_key("properties") || obj.contains_key("additionalProperties") {
         return;
     }
+    // A required-bearing bare object is always a composition branch on the
+    // supported lanes (strict validation rejects compositions outright, so
+    // the synthetic map buys nothing there), while persisting the map
+    // poisons the pruning twice over: this pass's pruner would read it as a
+    // local declaration and strip `required` entries that resolve against
+    // the enclosing properties (review 5910284697), and later passes cannot
+    // distinguish the synthetic map from a declared one — the branch would
+    // re-prune into `{}` on the second sanitize. Skipped here, the branch
+    // stays property-less and the pass stays idempotent.
+    if obj.contains_key("required") {
+        return;
+    }
     // A composition-bearing bare object never reaches the strict-mode
     // validator this injection exists for (strict mode rejects root and
     // nested compositions outright), so the synthetic map buys nothing
@@ -416,7 +448,19 @@ fn inject_properties_on_bare_objects(schema: &mut Value) {
 /// keeps the strictly local resolution (the DeepSeek strict validator reads
 /// required against the schema object it validates, so an injected empty
 /// properties map must not silently adopt the enclosing names).
-fn prune_dangling_required(schema: &mut Value, enclosing_properties: &[String]) {
+///
+/// `declared_local` carries the PRE-injection declaration state: a
+/// synthetic map that `inject_properties_on_bare_objects` added after that
+/// capture is not the schema's own declaration, so a typed required-only
+/// branch must still resolve against the enclosing names instead of being
+/// pruned into an all-accepting `{type: "object"}` — both branches of a
+/// oneOf would become identical and exactly-one semantics would admit
+/// nothing (review 5910284697).
+fn prune_dangling_required(
+    schema: &mut Value,
+    enclosing_properties: &[String],
+    declared_local: bool,
+) {
     let Some(obj) = schema.as_object_mut() else {
         return;
     };
@@ -426,7 +470,7 @@ fn prune_dangling_required(schema: &mut Value, enclosing_properties: &[String]) 
         .and_then(|v| v.as_object())
         .map(|props| props.keys().cloned().collect())
         .unwrap_or_default();
-    let known_keys: &[String] = if obj.contains_key("properties") {
+    let known_keys: &[String] = if obj.contains_key("properties") && declared_local {
         &local_keys
     } else {
         enclosing_properties
@@ -1007,6 +1051,102 @@ mod tests {
             schema["oneOf"][0]["oneOf"],
             json!([{"required": ["a"]}, {"required": ["b"]}]),
             "the nested required-only branches must survive both passes: {schema}"
+        );
+    }
+
+    #[test]
+    fn typed_required_only_union_branches_keep_their_declared_contract() {
+        // A typed required-only branch (`{type: "object", required: ["a"]}`)
+        // under a root that declares `a` and `b` admits an a-only object.
+        // The bare-object injection used to add a synthetic empty
+        // `properties` map BEFORE the pruner ran, the pruner read that map
+        // as the branch's own declaration, and both branches pruned into
+        // identical all-accepting `{type: "object"}` schemas — under
+        // exactly-one semantics the union then admits nothing at all
+        // (review 5910284697). The pre-injection declaration distinction
+        // must survive the pruning, the branch must not gain a synthetic
+        // map, and the pass must stay idempotent.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {"type": "object", "required": ["a"]},
+                {"type": "object", "required": ["b"]}
+            ]
+        });
+        sanitize(&mut schema);
+        assert_eq!(
+            schema["oneOf"],
+            json!([
+                {"type": "object", "required": ["a"]},
+                {"type": "object", "required": ["b"]}
+            ]),
+            "typed required-only branches must keep their required groups: {schema}"
+        );
+        let once = schema.clone();
+        sanitize(&mut schema);
+        assert_eq!(
+            schema, once,
+            "a second sanitize pass must be a no-op: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the sanitized union must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x"})),
+            "the a-only form must stay valid after sanitization: {schema}"
+        );
+        assert!(
+            !validator.is_valid(&json!({"a": "x", "b": "y"})),
+            "an object satisfying both branches must stay rejected: {schema}"
+        );
+    }
+
+    #[test]
+    fn dependent_schemas_resolve_against_the_same_instance_properties() {
+        // Draft 2020-12: each dependentSchemas value applies to the SAME
+        // instance as the object schema holding it, so a dependency naming
+        // only fields declared at that scope — `{required: ["confirm"]}`
+        // against the root `properties` — keeps its entries. The traversal
+        // used to reset the context at `dependentSchemas` and again at its
+        // name map, pruning the dependency into an all-accepting `{}` and
+        // letting a `mode`-only argument ship without the advertised
+        // confirmation (review 5910284697).
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string"},
+                "confirm": {"type": "boolean"}
+            },
+            "dependentSchemas": {
+                "mode": {"required": ["confirm"]}
+            }
+        });
+        sanitize(&mut schema);
+        assert_eq!(
+            schema["dependentSchemas"]["mode"],
+            json!({"required": ["confirm"]}),
+            "the dependency must keep its root-declared required entry: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the sanitized schema must compile");
+        assert!(
+            !validator.is_valid(&json!({"mode": "x"})),
+            "a mode-only argument must be rejected by the kept dependency: {schema}"
+        );
+        assert!(
+            validator.is_valid(&json!({"mode": "x", "confirm": true})),
+            "the confirmed form must stay valid: {schema}"
+        );
+        assert!(
+            validator.is_valid(&json!({"confirm": true})),
+            "the dependency must stay inactive without its trigger key: {schema}"
         );
     }
 

@@ -1434,6 +1434,99 @@ mod tests {
         );
     }
 
+    struct TypedRequiredOnlyUnionFixture;
+
+    #[async_trait::async_trait]
+    impl crate::tools::spec::ToolSpec for TypedRequiredOnlyUnionFixture {
+        fn name(&self) -> &str {
+            "typed_union_probe"
+        }
+
+        fn description(&self) -> &str {
+            "typed required-only union fixture"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "string"},
+                    "b": {"type": "string"}
+                },
+                "oneOf": [
+                    {"type": "object", "required": ["a"]},
+                    {"type": "object", "required": ["b"]}
+                ]
+            })
+        }
+
+        fn capabilities(&self) -> Vec<crate::tools::spec::ToolCapability> {
+            vec![crate::tools::spec::ToolCapability::ReadOnly]
+        }
+
+        async fn execute(
+            &self,
+            _input: Value,
+            _context: &crate::tools::spec::ToolContext,
+        ) -> Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError> {
+            Ok(crate::tools::spec::ToolResult::success("ok"))
+        }
+    }
+
+    #[test]
+    fn registry_produced_typed_required_only_union_ships_a_valid_contract_on_the_compatible_lane() {
+        // The untyped builtin pin above exercises the registry-produced
+        // patch tool, whose branches carry no `type` — the TYPED variant
+        // (`{type: "object", required: [...]}` per branch) reached the
+        // compatible-Messages lane with both branches collapsed into
+        // identical all-accepting `{type: "object"}` schemas: the bare-
+        // object injection added a synthetic empty `properties` map that
+        // the pruner read as the branch's own declaration (review
+        // 5910284697). The end-to-end pin runs the ACTUAL registry-
+        // produced typed union through the same non-native Messages lane:
+        // every required group must reach the wire intact, and an a-only
+        // argument must conform while an a-and-b argument stays rejected.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        let registry = crate::tools::ToolRegistryBuilder::new()
+            .with_tool(std::sync::Arc::new(TypedRequiredOnlyUnionFixture))
+            .build(context);
+        let union_tool = registry
+            .to_api_tools()
+            .into_iter()
+            .find(|tool| tool.name == "typed_union_probe")
+            .expect("typed union tool registered");
+
+        let client = deepseek_test_client(crate::config::DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL);
+        let mut request = request_with("deepseek-chat", None, None, None);
+        request.tools = Some(vec![union_tool.clone()]);
+
+        let body = client.build_anthropic_body(&request, true);
+
+        let schema = &body["tools"][0]["input_schema"];
+        assert_eq!(
+            schema["oneOf"],
+            json!([
+                {"type": "object", "required": ["a"]},
+                {"type": "object", "required": ["b"]}
+            ]),
+            "the registry-produced typed union must reach the wire intact: {schema}"
+        );
+
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(schema)
+            .expect("the shipped typed contract must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x"})),
+            "an a-only call must conform to the shipped union: {schema}"
+        );
+        assert!(
+            !validator.is_valid(&json!({"a": "x", "b": "y"})),
+            "an argument satisfying both branches must stay rejected: {schema}"
+        );
+    }
+
     #[test]
     fn anthropic_identity_narrows_even_on_a_proxy_base_url() {
         // Provider identity stays in the gate because ANTHROPIC_BASE_URL-style
