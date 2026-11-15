@@ -1,18 +1,28 @@
 import React, { useEffect, useState } from 'react';
 import { adminLayoutCopy } from '../../shared/i18n.js';
 import { requireFinanceCollection } from './finance-contract.js';
-import { loadFinancePage } from './admin-finance-pagination.js';
+import { isFinanceSnapshotExpired, loadFinancePage } from './admin-finance-pagination.js';
 import { useFinanceOperation } from './useFinanceOperation.js';
 import { paymentAnomalyResolutions } from './payment-anomaly-resolutions.js';
 import { freshLatePaymentQuery, latePaymentQueryAuthority } from './late-payment-query-contract.js';
 import { useLatePaymentQuery } from './useLatePaymentQuery.js';
 import { AdminFinanceFilters, useFinanceReadRoute, useFinanceRouteLoader } from './AdminFinanceFilters.jsx';
 import { LatePaymentQueryConfirmation } from './LatePaymentQueryConfirmation.jsx';
+import { AdminLateReviewFilters } from './AdminLateReviewFilters.jsx';
+import { AdminLateReviewDeadlineTools, AdminLateReviewDeadlines } from './AdminLateReviewDeadlines.jsx';
+import { normalizeAnomalyStatus, anomalyStatusText } from './anomaly-queue-status.js';
+import { AdminPaymentAnomalyTable } from './AdminPaymentAnomalyTable.jsx';
 
 export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, route, language = 'zh' }) {
   const filters = useFinanceReadRoute(anomaly ? 'anomalies' : 'late', route);
   const attemptedDetail = React.useRef('');
   const [page, setPage] = useState(null);
+  const queueRoute = Boolean(route);
+  const lateRoute = queueRoute && !anomaly;
+  const queueWords = adminLayoutCopy[language][anomaly ? 'anomalyQueueResults' : 'lateReviewResults'];
+  const anomalyStatusCopy = anomaly ? adminLayoutCopy[language].anomalyQueueStatus : null;
+  const [queueList, setQueueList] = useState({ kind: 'loading' });
+  const recoveredQueuePage = React.useRef(null);
   const [cursor, setCursor] = useState('');
   const [previous, setPrevious] = useState([]);
   useEffect(() => { setPrevious([]); }, [filters.filterSignature]);
@@ -25,7 +35,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
   const permissions = me.platform_permissions || [];
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
   const operation = useFinanceOperation(owner, copy, client, anomaly ? 'anomaly-review' : 'late-review');
-  const list = useFinanceRouteLoader({ route, signature: filters.signature, client, owner, operation, load: () => load(filters.query.cursor), reset: () => setPage(null) });
+  const list = useFinanceRouteLoader({ route, signature: filters.signature, client, owner, operation, load: () => load(filters.query.cursor), reset: () => { setPage(null); if (queueRoute) setQueueList({ kind: 'loading' }); } });
   const queryAuthority = latePaymentQueryAuthority(me);
   const query = useLatePaymentQuery(me.user_id, copy, client, !anomaly, queryAuthority);
   const busy = operation.busy || query.busy;
@@ -35,8 +45,40 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
   useEffect(() => { setQueryConfirmation(null); }, [client, owner, anomaly, query.retired]);
   const canRepair = permissions.includes('platform.billing.repairs.request');
   const load = async (next = cursor) => {
-    const result = await list.read(() => loadFinancePage({ ...(route ? filters.query : { status }), cursor: next }, filters => anomaly ? client.paymentAnomalies(filters) : client.latePaymentReviews(filters), () => { setCursor(''); setPrevious([]); }));
-    if (result) { setPage(result.value); setCursor(result.query.cursor); }
+    const readQuery = { ...(route ? filters.query : { status }), cursor: next };
+    if (!queueRoute) {
+      const result = await list.read(() => loadFinancePage(readQuery, filters => anomaly ? client.paymentAnomalies(filters) : client.latePaymentReviews(filters), () => { setCursor(''); setPrevious([]); }));
+      if (result) { setPage(result.value); setCursor(result.query.cursor); }
+      return;
+    }
+    const epoch = client.financeSessionEpoch || 0, queryKey = JSON.stringify(readQuery);
+    const result = await list.read(async () => {
+      const recovered = recoveredQueuePage.current;
+      recoveredQueuePage.current = null;
+      if (recovered?.client === client && recovered.owner === owner && recovered.epoch === epoch && recovered.anomaly === anomaly && recovered.queryKey === queryKey) return { kind: 'ready', ...recovered.result, recovered: true };
+      setQueueList({ kind: 'loading' }); setPage(null);
+      let restarted = false;
+      try {
+        const current = await loadFinancePage(readQuery, query => anomaly ? client.paymentAnomalies(query) : client.latePaymentReviews(query), () => { restarted = true; });
+        return { kind: 'ready', ...current, restarted };
+      } catch (reason) {
+        const kind = reason?.status === 403 ? 'denied' : isFinanceSnapshotExpired(reason) ? 'cursorExpired' : reason?.code === 'PAGINATION_CURSOR_INVALID' ? 'cursorInvalid' :
+          reason?.code === 'INVALID_FILTER' ? 'filterInvalid' : 'unavailable';
+        return { kind, restarted };
+      }
+    });
+    if (!result) return;
+    if (result.restarted) { setCursor(''); setPrevious([]); }
+    if (result.kind !== 'ready') { setQueueList(result); return; }
+    if (result.restarted) {
+      // This response was already read for the first batch of the same query.
+      // Replace the expired address without fetching the same batch again.
+      recoveredQueuePage.current = { client, owner, epoch, anomaly, queryKey: JSON.stringify(result.query), result: { value: result.value, query: result.query } };
+      filters.move(result.query, filters.selectedID || null, 'replace');
+      return;
+    }
+    setPage(result.value); setCursor(result.query.cursor);
+    setQueueList({ kind: 'ready', recovered: Boolean(result.recovered) });
   };
   useEffect(() => { if (!route) void load(''); }, [client, owner, anomaly]); // eslint-disable-line react-hooks/exhaustive-deps
   const open = async id => {
@@ -121,16 +163,48 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
     if (value) { await open(value.case_id); await load(); }
   };
 
-  return <section><h3>{anomaly ? copy.resolve : copy.sla}</h3>{route ? <AdminFinanceFilters kind={anomaly ? 'anomalies' : 'late'} language={language} value={filters.draft} onChange={filters.setDraft} disabled={busy || blocked} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} /> : <form onSubmit={event => { event.preventDefault(); setPrevious([]); void load(''); }}><label>{copy.status}<select value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.more}</option>{statuses.map(value => <option key={value} value={value}>{value}</option>)}</select></label><button disabled={busy}>{copy.refresh}</button></form>}
-    {busy && <p role="status">{copy.loading}</p>}{operation.error && !(legacyQuery && operation.error === copy.unknown) && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
+  const hasQueueFilters = Boolean((!anomaly && filters.query.overdue === 'true') ||
+    ['q', 'status', 'severity', 'owner_id', 'provider_id', 'created_from', 'created_to', ...(anomaly ? ['anomaly_type'] : ['entered_from', 'entered_to', 'next_review_before'])]
+      .some(key => filters.query[key]?.trim().replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '')));
+  const anomalyConditions = anomaly ? ['q','anomaly_type','severity','owner_id','provider_id','created_from','created_to']
+    .filter(key => filters.query[key]?.trim()).map(key => ({ key, label: adminLayoutCopy[language].financeLists[key], value: filters.query[key] })) : [];
+  const clearQueueFilters = () => { setPrevious([]); filters.move({ limit: filters.query.limit, cursor: '' }, null); };
+  const emptyMessage = cursor ? queueWords.emptyBatch : hasQueueFilters ? queueWords.emptyFiltered : queueWords.empty;
+  const clearWhenFiltered = !cursor && hasQueueFilters && <div className="adm-row-actions"><button type="button" onClick={clearQueueFilters} disabled={busy || blocked}>{queueWords.clear}</button></div>;
+  const retryQueueRead = () => {
+    const first = queueList.restarted || ['cursorInvalid', 'cursorExpired'].includes(queueList.kind);
+    if (first) setPrevious([]);
+    filters.move({ ...filters.query, ...(first ? { cursor: '' } : {}) }, filters.selectedID || null, 'replace');
+  };
+  const queueFailure = queueRoute && !['loading', 'ready'].includes(queueList.kind);
+  return <section><h3>{anomaly ? copy.resolve : copy.sla}</h3>{route && !anomaly ? <AdminLateReviewFilters language={language} draft={filters.draft} applied={filters.query} setDraft={filters.setDraft} disabled={busy || blocked} onApply={value => { setPrevious([]); filters.move({ ...value, cursor: '' }, null); }} /> : route ? <AdminFinanceFilters kind="anomalies" language={language} value={filters.draft} onChange={filters.setDraft} disabled={busy || blocked} onSubmit={() => { setPrevious([]); filters.move({ ...filters.draft, cursor: '' }, null); }} /> : <form onSubmit={event => { event.preventDefault(); setPrevious([]); void load(''); }}><label>{copy.status}<select value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.more}</option>{statuses.map(value => <option key={value} value={value}>{value}</option>)}</select></label><button disabled={busy}>{copy.refresh}</button></form>}
+    {route && anomaly && <div className="adm-inline-message">
+      <p><strong>{anomalyStatusCopy.applied}:</strong> {anomalyStatusText(anomalyStatusCopy, filters.query.status, true)}. {anomalyStatusCopy.snapshotNote}</p>
+      {normalizeAnomalyStatus(filters.query.status) && <div className="adm-row-actions"><button type="button" disabled={busy || blocked} onClick={() => { setPrevious([]); filters.move({ ...filters.query, status: '', cursor: '' }, null); }}>{anomalyStatusCopy.showAll}</button></div>}
+    </div>}
+    {route && anomaly && (anomalyConditions.length > 0 || hasQueueFilters) && <div className="adm-inline-message adm-anomaly-query-summary">
+      {anomalyConditions.length > 0 && <><p><strong>{queueWords.applied}:</strong></p><ul>{anomalyConditions.map(({ key, label, value }) => <li key={key}>{label} <bdi>{value}</bdi></li>)}</ul></>}
+      {hasQueueFilters && (!page || page.items.length > 0 || cursor) && <div className="adm-row-actions"><button type="button" disabled={busy || blocked} onClick={clearQueueFilters}>{queueWords.clear}</button></div>}
+    </div>}
+    {route && !anomaly && <AdminLateReviewDeadlineTools language={language} query={filters.query} snapshot={page?.snapshot_as_of} disabled={busy || blocked} onChange={value => { setPrevious([]); filters.move({ ...value, cursor: '' }, null); }} />}
+    {queueRoute && queueList.kind === 'loading' && <p className="adm-inline-message" role="status">{queueWords.loading}</p>}
+    {queueFailure && <div className="adm-inline-message error">
+      <p role="alert">{queueWords[queueList.kind]}</p>
+      {queueList.kind !== 'denied' && <div className="adm-row-actions"><button type="button" onClick={retryQueueRead} disabled={busy || blocked}>{queueList.restarted || ['cursorInvalid', 'cursorExpired'].includes(queueList.kind) ? queueWords.firstBatch : copy.retry}</button></div>}
+    </div>}
+    {queueRoute && queueList.recovered && <p className="adm-inline-message" role="status">{queueWords.recovered}</p>}
+    {busy && (!queueRoute || queueList.kind !== 'loading') && <p role="status">{copy.loading}</p>}{operation.error && !(legacyQuery && operation.error === copy.unknown) && <p role="alert">{operation.error}</p>}{operation.message && <p role="status">{operation.message}</p>}
     {operation.unknown && <div data-retained-finance-command><code>{operation.pendingFacts?.id} / {operation.pendingKey}</code><button disabled={busy || query.unknown} onClick={() => void act('')}>{copy.retry}</button></div>}
     {legacyQuery && <p role="alert">{copy.queryUnknown} <code>{operation.pendingKey}</code></p>}
     {query.message && <p role="status">{query.message}</p>}
     {query.unknownQueries.map(value => <div key={value.key} role="alert"><p>{copy.queryUnknown}</p><code>{value.facts.id} / {value.key}</code><button disabled={busy || query.retired} onClick={() => void retryQuery(value.key)}>{copy.retry}</button></div>)}
-    {page && <table><thead><tr><th>{copy.orderID}</th><th>{copy.status}</th><th>{copy.severity}</th><th>{copy.sla}</th><th>{copy.actions}</th></tr></thead><tbody>{page.items.map(value => <tr key={value.case_id}><td>{value.payment_order_id || value.case_id}</td><td>{reviewStatus(value)}</td><td>{value.severity}</td><td>{value.claim_due_at}<br />{value.resolution_due_at || value.next_review_at}</td><td><button disabled={busy || (operation.unknown && !legacyQuery)} onClick={() => { if (route) { attemptedDetail.current = value.case_id; filters.move(filters.query, value.case_id); } void open(value.case_id); }}>{copy.details}</button></td></tr>)}</tbody></table>}
+    {page && anomaly && <AdminPaymentAnomalyTable items={page.items} emptyState={queueRoute && !page.items.length ? <><strong>{emptyMessage}</strong>{clearWhenFiltered}</> : null} language={language} detailsLabel={copy.details} disabled={busy || (operation.unknown && !legacyQuery)} onView={id => { if (route) { attemptedDetail.current = id; filters.move(filters.query, id); } void open(id); }} />}
+    {page && !anomaly && <table className="adm-table"><thead><tr><th>{copy.orderID}</th><th>{copy.status}</th><th>{copy.severity}</th><th>{copy.sla}</th><th>{copy.actions}</th></tr></thead><tbody>{lateRoute && !page.items.length && <tr><td colSpan={5} className="adm-late-empty-cell">
+      <strong>{emptyMessage}</strong>{clearWhenFiltered}
+    </td></tr>}{page.items.map(value => <tr key={value.case_id}><td data-label={anomaly ? undefined : copy.orderID}>{value.payment_order_id || value.case_id}</td><td data-label={anomaly ? undefined : copy.status}>{anomaly ? anomalyStatusText(anomalyStatusCopy, reviewStatus(value)) : reviewStatus(value)}</td><td data-label={anomaly ? undefined : copy.severity}>{value.severity}</td><td data-label={anomaly ? undefined : copy.sla}>{anomaly ? <>{value.claim_due_at}<br />{value.resolution_due_at || value.next_review_at}</> : <AdminLateReviewDeadlines value={value} language={language} snapshot={page.snapshot_as_of} />}</td><td data-label={anomaly ? undefined : copy.actions}><button disabled={busy || (operation.unknown && !legacyQuery)} onClick={() => { if (route) { attemptedDetail.current = value.case_id; filters.move(filters.query, value.case_id); } void open(value.case_id); }}>{copy.details}</button></td></tr>)}</tbody></table>}
     <button disabled={busy || !previous.length} onClick={() => { const values = [...previous]; const value = values.pop(); setPrevious(values); if (route) filters.move({ ...filters.query, cursor: value }, null); else void load(value); }}>{copy.previous}</button><button disabled={busy || !page?.next_cursor} onClick={() => { setPrevious(values => [...values, cursor]); if (route) filters.move({ ...filters.query, cursor: page.next_cursor }, null); else void load(page.next_cursor); }}>{copy.next}</button>
     {route && filters.selectedID && <nav><button disabled={busy || blocked} onClick={() => filters.move(filters.query, null)}>{adminLayoutCopy[language].backToDirectory}</button><code>{filters.selectedID}</code>{operation.error && !blocked && <button disabled={busy} onClick={() => void open(filters.selectedID)}>{copy.retry}</button>}</nav>}
-    {item && <article><h4>{item.case_id}</h4><p>{reviewStatus(item)} / {item.severity} / {copy.owner}: {item.owner_id || copy.empty}</p><p>{item.claim_due_at}<br />{item.first_response_due_at}<br />{item.mitigation_due_at}<br />{item.resolution_due_at}</p>
+    {item && <article><h4>{item.case_id}</h4><p>{anomaly ? anomalyStatusText(anomalyStatusCopy, reviewStatus(item)) : reviewStatus(item)} / {item.severity} / {copy.owner}: {item.owner_id || copy.empty}</p>{anomaly ? <p>{item.claim_due_at}<br />{item.first_response_due_at}<br />{item.mitigation_due_at}<br />{item.resolution_due_at}</p> : <AdminLateReviewDeadlines value={item} language={language} detailed />}
       <label>{copy.reason}<textarea disabled={busy || blocked} maxLength={2000} value={reason} onChange={event => setReason(event.target.value)} /></label>
       {active && item.owner_id && !owned && <p role="status">{copy.reviewAssignedOther}</p>}
       {canQuery && active && !item.owner_id && <button disabled={busy || blocked} onClick={() => void act('claim')}>{copy.claimCase}</button>}

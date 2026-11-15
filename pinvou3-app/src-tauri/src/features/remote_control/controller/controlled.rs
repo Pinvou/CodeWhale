@@ -1156,6 +1156,17 @@ impl ControlledDeviceManager {
         &self,
         operation: ControlledOperation,
     ) -> Result<ControlledOperation> {
+        self.complete_refresh_revoked_with_projection(operation, |_| {})
+    }
+
+    /// Publish the new Registering binding before another lifecycle transition
+    /// can publish a terminal status for it. The publisher must not re-enter
+    /// this manager; generation cleanup still runs outside the lock.
+    pub(crate) fn complete_refresh_revoked_with_projection(
+        &self,
+        operation: ControlledOperation,
+        publish: impl FnOnce(&ControlledStatus),
+    ) -> Result<ControlledOperation> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
         if inner.phase != ControlledStatusKind::RetiringGeneration {
@@ -1165,6 +1176,7 @@ impl ControlledDeviceManager {
         clear_sensitive(&mut inner, 0, false);
         let next = prepare_generation(&mut inner);
         inner.phase = ControlledStatusKind::Registering;
+        publish(&status_locked(&inner));
         drop(inner);
         self.notify_cleanup(&retired_generation);
         Ok(next)
@@ -1232,7 +1244,20 @@ impl ControlledDeviceManager {
         operation: ControlledOperation,
         error_code: String,
     ) -> Result<(ControlledStatus, Option<LeaseContext>)> {
-        self.fail_operation_with_cleanup_inner(operation, None, error_code, || {})
+        self.fail_operation_with_cleanup_inner(operation, None, error_code, || {}, |_| {})
+    }
+
+    /// Emit the captured operation's terminal projection before releasing its
+    /// lifecycle fence. Like the registration publisher, this callback must
+    /// not re-enter the manager.
+    pub(crate) fn fail_operation_with_projection(
+        &self,
+        operation: ControlledOperation,
+        error_code: String,
+        publish: impl FnOnce(&ControlledStatus),
+    ) -> Result<ControlledStatus> {
+        self.fail_operation_with_cleanup_inner(operation, None, error_code, || {}, publish)
+            .map(|(status, _)| status)
     }
 
     pub(crate) fn fail_owned_transport(
@@ -1245,6 +1270,7 @@ impl ControlledDeviceManager {
             Some(owner),
             error_code,
             || {},
+            |_| {},
         )
         .map(|(status, _)| status)
     }
@@ -1255,6 +1281,7 @@ impl ControlledDeviceManager {
         owner: Option<&ControlledTransportOwner>,
         error_code: String,
         cleanup: impl FnOnce(),
+        publish: impl FnOnce(&ControlledStatus),
     ) -> Result<(ControlledStatus, Option<LeaseContext>)> {
         let mut inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
@@ -1270,6 +1297,7 @@ impl ControlledDeviceManager {
         inner.phase = ControlledStatusKind::Error;
         inner.error_code = Some(error_code);
         let status = terminal_status_with_retired_generation(&inner, retired_generation);
+        publish(&status);
         drop(inner);
         self.notify_cleanup(&generation);
         Ok((status, retired_lease))
@@ -1430,6 +1458,52 @@ impl ControlledDeviceManager {
         now_b: u64,
     ) -> Result<ControlledResumeMaterial> {
         self.begin_resume_inner(owner.operation.clone(), Some(owner), now_b)
+    }
+
+    /// Authorize only a fresh enqueue for the original Prepared attempt. This
+    /// is read-only: no prepare transition, token rotation or deadline renewal.
+    /// The synchronous action may acquire endpoint/transport locks, never
+    /// reenter this manager or await. Token copies are zeroed on return.
+    pub(crate) fn with_owned_prepared_resume<T>(
+        &self,
+        owner: &ControlledTransportOwner,
+        clock: impl FnOnce() -> u64,
+        action: impl FnOnce(&LeaseContext, &[u8; 32], u64, u64) -> T,
+    ) -> Result<Option<T>> {
+        let inner = self.inner.lock();
+        ensure_transport_owner(&inner, owner)?;
+        if inner.phase != ControlledStatusKind::Reconnecting
+            || inner.reconnect_reason != Some(ReconnectReason::Transport)
+        {
+            return Ok(None);
+        }
+        let Some(gate) = inner
+            .resume_gate
+            .as_ref()
+            .filter(|gate| gate.phase() == ResumePhase::Prepared)
+        else {
+            return Ok(None);
+        };
+        let Some(deadline_b) = gate
+            .frozen_deadline_b()
+            .zip(
+                inner
+                    .watchdog
+                    .as_ref()
+                    .and_then(|watchdog| watchdog.deadline_b()),
+            )
+            .map(|(frozen, current)| frozen.min(current))
+            .filter(|deadline| clock() < *deadline)
+        else {
+            return Ok(None);
+        };
+        let token = Zeroizing::new(gate.current_token());
+        Ok(Some(action(
+            owner.lease(),
+            &token,
+            gate.relay_deadline_identity_ms(),
+            deadline_b,
+        )))
     }
 
     fn begin_resume_inner(
@@ -2771,6 +2845,68 @@ mod tests {
                 1_000,
             )
             .unwrap();
+    }
+
+    #[test]
+    fn refresh_registration_projection_precedes_its_failure_and_next_open() {
+        use serde_json::{Value, json};
+        let manager = ControlledDeviceManager::default();
+        let initial = manager.start(Some("B"), Vec::new()).unwrap();
+        register(&manager, &initial);
+        let old = manager.status();
+        let retiring = manager.begin_refresh().unwrap();
+        let retiring_status = manager.status();
+        let mut registering = None;
+        let operation = manager
+            .complete_refresh_revoked_with_projection(retiring, |status| {
+                assert!(manager.inner.try_lock().is_none());
+                assert_eq!(status.kind(), ControlledStatusKind::Registering);
+                registering = Some(status.clone());
+            })
+            .unwrap();
+        let mut failed = None;
+        manager
+            .fail_operation_with_projection(
+                operation.clone(),
+                "pairing_registration_failed".into(),
+                |status| {
+                    assert!(manager.inner.try_lock().is_none());
+                    failed = Some(status.clone());
+                },
+            )
+            .unwrap();
+        let next = manager.start(Some("B"), Vec::new()).unwrap();
+        register(&manager, &next);
+        assert!(
+            manager
+                .fail_operation_with_projection(
+                    operation.clone(),
+                    "pairing_registration_failed".into(),
+                    |_| { panic!("a retired operation cannot publish over the new pairing") }
+                )
+                .is_err()
+        );
+
+        // Verify the actual Rust serialized fields consumed by the JS bridge.
+        // Only random generated identities are normalized, not phase/intent.
+        let project = |status: ControlledStatus, generation: &str, alias: &str| {
+            let value = serde_json::to_value(status).unwrap();
+            assert_eq!(value["generation"], generation);
+            json!({"status":value["status"],"statusIntent":value["statusIntent"],
+                "generation":alias,"errorCode":value["errorCode"]})
+        };
+        let actual = json!({
+            "old":project(old,initial.generation(),"generation-old"),
+            "retiring":project(retiring_status,initial.generation(),"generation-old"),
+            "registering":project(registering.unwrap(),operation.generation(),"generation-new"),
+            "failed":project(failed.unwrap(),operation.generation(),"generation-new"),
+            "next":project(manager.status(),next.generation(),"generation-next"),
+        });
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/controller_registration_exit.json"
+        ))
+        .unwrap();
+        assert_eq!(actual, fixture);
     }
 
     pub(super) fn enter_handshake(
