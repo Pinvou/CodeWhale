@@ -29,6 +29,10 @@ const WRAPPER = fileURLToPath(new URL(
 const SESSION_ID = 'windows-lifecycle-a';
 const SESSION_TOKEN = '0123456789abcdef';
 const OTHER_SESSION_TOKEN = 'fedcba9876543210';
+// A missing workspace may require prepare (25s), a CDP probe (1s), and
+// list/select (15s each). Observe that existing path without shortening its
+// deadlines; this changes only these read-only recovery test requests.
+const WORKSPACE_RECOVERY_OBSERVATION_MS = 60_000;
 
 const FAKE_MCP = String.raw`
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -649,6 +653,12 @@ function driveWrapper(fixture) {
       driver.dropRequest(id, { abandoned: true });
     },
   };
+}
+
+// Held tools share one observation policy, above the 30s release barrier.
+// The real slow-snapshot regression below rejects a return to the 15s default.
+function requestHeldTool(wrapper, name, args = {}) {
+  return wrapper.request('tools/call', { name, arguments: args }, 31_000);
 }
 
 async function initializeWrapper(wrapper, clientName) {
@@ -1351,6 +1361,93 @@ test('Windows proxy: stdin shutdown tombstones an in-flight close before exit', 
   }
 });
 
+test('Windows proxy: workspace recovery observes a prepare response beyond the driver default', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const fixture = await makeFixture();
+  const host = createFakeHost(fixture);
+  const wrapper = driveWrapper(fixture);
+  let settled = false;
+  try {
+    await initializeWrapper(wrapper, 'windows-delayed-prepare-test');
+    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    host.stopSessionA();
+    const before = host.state.prepareCalls;
+    host.state.deferredOperations.add('prepare');
+    const pending = wrapper.request('tools/call', {
+      name: 'list_pages', arguments: {},
+    }, WORKSPACE_RECOVERY_OBSERVATION_MS).then(
+      response => { settled = true; return { response }; },
+      error => { settled = true; return { error }; },
+    );
+    const requestDirectory = join(fixture.root, 'host-requests');
+    await waitUntil(() => readdirSync(requestDirectory).some(name => {
+      if (!name.endsWith('.json')) return false;
+      const raw = readPendingHostRequest(join(requestDirectory, name));
+      return raw !== null && JSON.parse(raw).operation === 'prepare';
+    }), 'workspace recovery did not publish its deferred prepare request');
+    // This remains below the real prepare deadline (25s), but above the
+    // driver's default (15s). There is no active input-authority heartbeat.
+    try {
+      await sleep(16_000);
+      assert.equal(settled, false, 'the observer must not terminate a valid in-flight prepare');
+    } finally {
+      host.state.deferredOperations.delete('prepare');
+    }
+    const outcome = await pending;
+    assert.ifError(outcome.error);
+    assert.equal(outcome.response.result.structuredContent.pages[0].id, 2);
+    assert.equal(host.state.prepareCalls - before, 1);
+    assert.equal(readAudit(fixture.auditPath).filter(entry => entry.kind === 'start').length, 1);
+    assert.equal(existsSync(fixture.otherWorkspacePath), true);
+    assert.equal(fixture.cdp.listening, true);
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
+  } finally {
+    host.state.deferredOperations.delete('prepare');
+    await cleanupFixture(fixture, host, wrapper);
+  }
+});
+
+test('Windows proxy: held response observation exceeds fifteen seconds without an input lease', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const fixture = await makeFixture();
+  const host = createFakeHost(fixture);
+  const wrapper = driveWrapper(fixture);
+  try {
+    await initializeWrapper(wrapper, 'windows-held-observer-test');
+    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    writeFileSync(fixture.modePath, JSON.stringify({ snapshotDelayMs: 15_500 }));
+    const before = {
+      begin: host.state.operationCalls.get('begin_agent_operation') || 0,
+      refresh: host.state.operationCalls.get('refresh_agent_operation') || 0,
+      input: host.state.operationCalls.get('refresh_agent_input') || 0,
+      end: host.state.operationCalls.get('end_agent_operation') || 0,
+    };
+    const started = Date.now();
+    const response = await requestHeldTool(wrapper, 'take_snapshot');
+    assert.equal(response.result.content[0].text, 'snapshot');
+    assert.ok(Date.now() - started >= 15_500, 'the real tool must outlive the default observer');
+    assert.equal((host.state.operationCalls.get('begin_agent_operation') || 0) - before.begin, 1);
+    assert.ok((host.state.operationCalls.get('refresh_agent_operation') || 0) - before.refresh >= 1);
+    assert.equal(host.state.operationCalls.get('refresh_agent_input') || 0, before.input);
+    assert.equal((host.state.operationCalls.get('end_agent_operation') || 0) - before.end, 1);
+    const audit = readAudit(fixture.auditPath);
+    assert.equal(audit.filter(entry => entry.kind === 'tool' && entry.name === 'take_snapshot').length, 1);
+    assert.equal(audit.filter(entry => entry.kind === 'tool-complete' && entry.name === 'take_snapshot').length, 1);
+    assert.equal(audit.filter(entry => entry.kind === 'start').length, 1);
+    assert.equal(existsSync(fixture.otherWorkspacePath), true);
+    assert.equal(fixture.cdp.listening, true);
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
+  } finally {
+    await cleanupFixture(fixture, host, wrapper);
+  }
+});
+
 test('Windows proxy: same wrapper recovers A once after stop while B keeps shared CDP alive', {
   skip: process.platform !== 'win32',
 }, async () => {
@@ -1415,7 +1512,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     const recovered = await wrapper.request('tools/call', {
       name: 'list_pages',
       arguments: {},
-    });
+    }, WORKSPACE_RECOVERY_OBSERVATION_MS);
     assert.equal(recovered.result.structuredContent.pages[0].id, 2);
     assert.equal(host.state.prepareCalls, 2, 'A is prepared exactly once after its workspace disappears');
     assert.equal(readAudit(fixture.auditPath).filter((entry) => entry.kind === 'start').length, 1, 'the MCP child remains the same process');
@@ -1427,7 +1524,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     const failedRecovery = await wrapper.request('tools/call', {
       name: 'list_pages',
       arguments: {},
-    });
+    }, WORKSPACE_RECOVERY_OBSERVATION_MS);
     assert.match(failedRecovery.error.message, /^browser\/workspace-missing/);
     assert.equal(host.state.prepareCalls - beforeFailedRecovery, 1);
     await sleep(100);
@@ -1438,7 +1535,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     const recoveredAgain = await wrapper.request('tools/call', {
       name: 'list_pages',
       arguments: {},
-    });
+    }, WORKSPACE_RECOVERY_OBSERVATION_MS);
     assert.equal(recoveredAgain.result.structuredContent.pages[0].id, 3);
 
     // Hold a >1.5s input tool until multiple real refreshes have arrived. Each
@@ -1457,10 +1554,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     };
     // 31s per-request ceiling sits just above the 30s heartbeat barrier:
     // the barrier, not the driver's 15s default, bounds a held request.
-    const longInputRequest = wrapper.request('tools/call', {
-      name: 'click',
-      arguments: { uid: 'slow-button' },
-    }, 31_000);
+    const longInputRequest = requestHeldTool(wrapper, 'click', { uid: 'slow-button' });
     const longInput = await releaseAfterRefreshes({
       request: longInputRequest,
       before: longInputBefore,
@@ -1516,10 +1610,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     };
     // 31s per-request ceiling sits just above the 30s heartbeat barrier:
     // the barrier, not the driver's 15s default, bounds a held request.
-    const slowSnapshotRequest = wrapper.request('tools/call', {
-      name: 'take_snapshot',
-      arguments: {},
-    }, 31_000);
+    const slowSnapshotRequest = requestHeldTool(wrapper, 'take_snapshot');
     const slowSnapshot = await releaseAfterRefreshes({
       request: slowSnapshotRequest,
       before: slowSnapshotBefore,
@@ -1562,15 +1653,11 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     );
     writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 1_600 }));
 
-    // Deterministic late-recovery boundary for the 31s held-request ceiling.
-    // On a starved runner the wrapper pauses its heartbeat timer for many
-    // seconds and only then catches up in a burst, so the barrier can sit at
-    // zero observed refreshes far past the driver's historical 15s request
-    // default. Windows cannot suspend the wrapper process, so the fake host
-    // answers every refresh normally (the wrapper lease stays healthy) while
-    // freezing their barrier-visible observation for 15.5s: the held request,
-    // the 30s barrier, and the post-release response settle experience exactly
-    // the timing shape the ceiling must tolerate.
+    // Freeze observations until four real refreshes have been acknowledged,
+    // then expose the backlog as a burst. Requiring 15.5s of live input
+    // authority here couples the observer regression to dozens of unrelated
+    // 400ms host round trips. The separate slow-snapshot test above covers
+    // the historical 15s ceiling without an active native-input lease.
     const lateRecoveryReleasePath = join(fixture.root, 'late-recovery.release');
     writeFileSync(
       fixture.modePath,
@@ -1584,20 +1671,26 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       clicks: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
     };
-    const lateRecoveryStartedAt = Date.now();
-    const lateRecoveryRequest = wrapper.request('tools/call', {
-      name: 'click',
-      arguments: { uid: 'late-heartbeat-button' },
-    }, 31_000);
+    const lateRecoveryRequest = requestHeldTool(wrapper, 'click', { uid: 'late-heartbeat-button' });
     host.state.deferredObservations.add('refresh_agent_input');
-    await sleep(15_500);
+    await Promise.race([
+      waitUntil(
+        () => host.state.pendingObservations
+          .filter(operation => operation === 'refresh_agent_input').length >= 4,
+        'four acknowledged input refreshes did not reach the frozen observation backlog',
+        30_000,
+      ),
+      lateRecoveryRequest.then(response => assert.fail(
+        'tool completed before its frozen observations were released: ' +
+        JSON.stringify(heldRequestResultDiagnostic(response)),
+      )),
+    ]);
     assert.equal(
       (host.state.operationCalls.get('refresh_agent_input') || 0) - lateRecoveryBefore.refresh,
       0,
       'the fixture must really withhold every barrier-visible heartbeat during the stall',
     );
-    // The backlog burst lands inside the 30s barrier window and the whole flow
-    // still settles: the barrier, not a 15s ceiling, bounds a held request.
+    // The real four-refresh backlog must cross the same release barrier.
     host.state.deferredObservations.delete('refresh_agent_input');
     const lateRecovery = await releaseAfterRefreshes({
       request: lateRecoveryRequest,
@@ -1606,10 +1699,6 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       count: 4,
       releasePath: lateRecoveryReleasePath,
     });
-    assert.ok(
-      Date.now() - lateRecoveryStartedAt >= 15_500,
-      'the barrier must hold past the historical 15s default before the backlog burst',
-    );
     assert.equal(lateRecovery.result.content[0].text, 'clicked');
     assert.equal(
       (host.state.operationCalls.get('begin_agent_operation') || 0) - lateRecoveryBefore.begin,
