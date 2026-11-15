@@ -50,11 +50,19 @@ async function setup(t) {
       else
         controller_lock_before_rollback fixture.service "$2/state" "$2/code"
       fi`;
-    const result = spawnSync(bash, ["-c", script, "--", helper.replaceAll("\\", "/"),
-      directory.replaceAll("\\", "/"), operation, confirmed], {
-      encoding: "utf8", windowsHide: true, timeout: 10000,
-      env: { ...process.env, MSYS_NO_PATHCONV: "1" },
-    });
+    let result;
+    // Windows 自托管 runner 高负载下 bash.exe 孵化/执行可能超过单次预算
+    // （CI 实证 spawnSync ETIMEDOUT，2026-11-14 round-5 与重跑各挂一次不同
+    // 文件）。单次 10s→20s 并对 ETIMEDOUT 定向重试一次；持续挂死仍在
+    // 第二次超时后如实失败。
+    for (let attempt = 0; ; attempt += 1) {
+      result = spawnSync(bash, ["-c", script, "--", helper.replaceAll("\\", "/"),
+        directory.replaceAll("\\", "/"), operation, confirmed], {
+        encoding: "utf8", windowsHide: true, timeout: 20000,
+        env: { ...process.env, MSYS_NO_PATHCONV: "1" },
+      });
+      if (!result.error || result.error.code !== "ETIMEDOUT" || attempt >= 1) break;
+    }
     assert.ifError(result.error);
     return result;
   }
