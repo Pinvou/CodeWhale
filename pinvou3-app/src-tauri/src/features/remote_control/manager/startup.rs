@@ -7,11 +7,9 @@
 use super::*;
 
 pub(super) struct ControllerRelayStart {
-    pub(super) sender: tokio::sync::mpsc::Sender<ControllerRelayFrame>,
     pub(super) receiver: tokio::sync::mpsc::Receiver<ControllerRelayFrame>,
     pub(super) owner: RelaySender,
     pub(super) binding: u64,
-    pub(super) synthetic_registration: Option<Value>,
 }
 
 pub(super) struct EndpointReader {
@@ -20,8 +18,8 @@ pub(super) struct EndpointReader {
 }
 
 impl RemoteControlManager {
-    // A synchronous boundary prevents a non-Send lifecycle guard crossing the
-    // caller's synthetic-registration send await.
+    // Queue registration synchronously within the same lifecycle/owner fence.
+    // Never await capacity before handing the sole receiver to its consumer.
     pub(super) fn begin_controller_relay(
         &self,
         generation: &str,
@@ -97,12 +95,27 @@ impl RemoteControlManager {
             .endpoint
             .as_ref()
             .is_some_and(|endpoint| endpoint.status != WebAccessStatusKind::ConnectingRelay);
+        let enqueue = if let Some(message) = synthetic_registration.filter(|_| already_registered) {
+            enqueue_controller_inbound(
+                &mut inner,
+                ControllerRelayFrame {
+                    message,
+                    receipt: None,
+                },
+            )
+        } else {
+            Ok(())
+        };
+        drop(inner);
+        drop(_lifecycle);
+        if let Err(code) = enqueue {
+            report_controller_inbound_failure(code);
+            return Err(code.to_owned());
+        }
         Ok(ControllerRelayStart {
-            sender,
             receiver,
             owner,
             binding,
-            synthetic_registration: synthetic_registration.filter(|_| already_registered),
         })
     }
 

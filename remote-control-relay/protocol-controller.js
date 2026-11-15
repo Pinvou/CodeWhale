@@ -120,7 +120,7 @@ export const TASK_REJECTION_CODES = [
   "task_payload_replay",
 ];
 
-export const CONTROLLER_CONTRACT_SHA256 = "5208650492c4e37286a7322d12ffc6c401724b8f261f8672d830146839db9f63";
+export const CONTROLLER_CONTRACT_SHA256 = "98e97089e09533376d4e0df65a93d6434ab4ead2dc4dc6f403edfce3214748c1";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -144,7 +144,7 @@ export const CONTROLLER_PAYLOAD_TYPES = Object.freeze([
   "remote_action_request", "remote_action_result", "session_snapshot_request", "session_snapshot", "journal_replay_request", "journal_event",
 ]);
 export const REMOTE_ACTION_OPERATIONS = Object.freeze([
-  "permission_list", "permission_decide", "attachment_begin", "attachment_chunk", "attachment_abort",
+  "permission_list", "permission_decide", "attachment_begin", "attachment_chunk", "attachment_abort", "attachment_abort_confirmed",
   "artifact_index", "artifact_preview", "artifact_download_begin", "artifact_download_chunk", "artifact_download_abort",
 ]);
 export const LEASE_INSTALL_MESSAGE_TYPES = Object.freeze(["controller_joined"]);
@@ -256,7 +256,7 @@ const PARSED_TRANSCRIPT_TOKEN = Symbol("parsed-controller-transcript");
 const NESTED_SCHEMAS = Object.freeze({
   task_input: schema(["text", "attachment_ids", "skill_ids"], ["workspace_id"], []),
   temporary_model_package_v1: schema(["schema", "package_id", "binding", "primary", "primary_credential"], ["vision_fallback"], []),
-  temporary_model_binding: schema(["connection_id", "controller_lease_id", "lease_epoch", "task_id"], [], []),
+  temporary_model_binding: schema(["connection_id", "controller_lease_id", "lease_epoch", "relay_epoch", "remote_control_generation", "task_id"], [], []),
   vision_fallback: schema(["route", "credential"], [], []),
   route: schema(ROUTE_REQUIRED, ROUTE_OPTIONAL, []),
   credential: schema(["kind", "secret"], [], []),
@@ -936,6 +936,7 @@ function validateRemoteAction(payload, result) {
     attachment_begin: ["task_id", "file_name", "mime_type", "total_bytes", "sha256"],
     attachment_chunk: ["task_id", "transfer_id", "chunk_index", "chunk_b64", "chunk_bytes"],
     attachment_abort: ["task_id", "transfer_id"],
+    attachment_abort_confirmed: ["task_id", "transfer_id"],
     artifact_index: [],
     artifact_preview: ["artifact_id"],
     artifact_download_begin: ["task_id", "artifact_id"],
@@ -948,6 +949,7 @@ function validateRemoteAction(payload, result) {
     attachment_begin: [["transfer_id", "chunk_bytes", "total_bytes"], []],
     attachment_chunk: [["state", "received_bytes"], ["sha256"]],
     attachment_abort: [["aborted"], []],
+    attachment_abort_confirmed: [["transfer_id", "cleanup_confirmed"], []],
     artifact_index: [["artifacts"], []],
     artifact_preview: [["artifact_id", "preview_kind", "truncated"], ["text"]],
     artifact_download_begin: [["transfer_id", "chunk_bytes", "total_bytes"], []],
@@ -966,7 +968,7 @@ function validateRemoteAction(payload, result) {
   const body = exactObject(payload.body, required, optional, "body");
   for (const field of [...required, ...optional]) {
     if (body[field] === undefined) continue;
-    if (["aborted", "completed", "truncated"].includes(field)) {
+    if (["aborted", "completed", "truncated", "cleanup_confirmed"].includes(field)) {
       if (typeof body[field] !== "boolean") fail("invalid_field", `body.${field}`);
     } else if (field === "permissions") {
       if (!Array.isArray(body.permissions) || body.permissions.length > 8) fail("invalid_field", "body.permissions");
@@ -1000,9 +1002,9 @@ function validateTemporaryModelPackage(value, task) {
   if (object.schema !== "temporary_model_package/v1") fail("unsupported_version", "temporary_model_package.schema");
   identifier(object.package_id, "temporary_model_package.package_id");
   const binding = exactObject(object.binding, NESTED_SCHEMAS.temporary_model_binding.required, NESTED_SCHEMAS.temporary_model_binding.optional, "temporary_model_package.binding");
-  for (const field of ["connection_id", "controller_lease_id", "task_id"]) identifier(binding[field], `temporary_model_package.binding.${field}`);
+  for (const field of ["connection_id", "controller_lease_id", "relay_epoch", "remote_control_generation", "task_id"]) identifier(binding[field], `temporary_model_package.binding.${field}`);
   decimal(binding.lease_epoch, "temporary_model_package.binding.lease_epoch");
-  for (const field of ["connection_id", "controller_lease_id", "lease_epoch", "task_id"]) if (binding[field] !== task[field]) fail("stale_context", `temporary_model_package.binding.${field}`);
+  for (const field of ["connection_id", "controller_lease_id", "lease_epoch", "relay_epoch", "remote_control_generation", "task_id"]) if (binding[field] !== task[field]) fail("stale_context", `temporary_model_package.binding.${field}`);
   validateRoute(object.primary, "temporary_model_package.primary");
   validateCredential(object.primary_credential, "temporary_model_package.primary_credential");
   if (object.vision_fallback !== undefined) {

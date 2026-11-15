@@ -56,8 +56,161 @@ fn real_controller_start_lifecycle_fences() {
 }
 
 #[test]
+fn real_registration_task_exit_closes_start_refresh_and_preserves_successors() {
+    const CHILD: &str = "PINVOU_READER_RESUME_TEST_CHILD";
+    if std::env::var(CHILD).as_deref() != Ok("1") {
+        run_reader_child(
+            "real_registration_task_exit_closes_start_refresh_and_preserves_successors",
+            false,
+            false,
+            25,
+        );
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        use crate::features::remote_control::controller::controlled::{ControlledDeviceManager, ControlledStatusKind};
+        use crate::features::remote_control::controller::relay_runtime::ControlledRelayWorker;
+        use crate::features::remote_control::RemoteControlManager;
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::{Value, json};
+        use tokio_tungstenite::tungstenite::Message;
+        let home = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}/relay", listener.local_addr().unwrap());
+        // This process owns all runtime overrides and its ephemeral endpoint.
+        unsafe {
+            std::env::set_var("PINVOU3_HOME", home.path());
+            std::env::set_var("PINVOU_REMOTE_RELAY_WS_URL", &url);
+            std::env::set_var("PINVOU_REMOTE_RUNTIME_RELAY_WS_URL", &url);
+        }
+        let mut context = crate::build_tauri_context();
+        context.config_mut().app.windows.clear();
+        let app = tauri::Builder::default().any_thread()
+            .manage(ControlledDeviceManager::default())
+            .build(context).unwrap();
+        let handle = app.handle().clone();
+        let relay = RemoteControlManager::new(handle.clone());
+        let manager = handle.state::<ControlledDeviceManager>();
+        let mut socket = None;
+        for refreshed in [false, true] {
+            // No race / stopped / replacement start / replacement refresh.
+            for interference in 0..4 {
+                for while_waiting in [false, true] {
+                    let initial = manager.start(None, Vec::new()).unwrap();
+                    let operation = if refreshed {
+                        let retiring = manager.begin_refresh().unwrap();
+                        manager.complete_refresh_revoked(retiring).unwrap()
+                    } else { initial };
+                    let registration = ControlledRelayWorker::start(
+                        handle.clone(), relay.clone(), operation.clone(),
+                        std::sync::Arc::new(super::super::desktop_remote_controller_business::DesktopControlledBusiness { app:handle.clone() }),
+                    ).await.unwrap();
+                    if socket.is_none() {
+                        let (stream, _) = listener.accept().await.unwrap();
+                        let mut connected = tokio_tungstenite::accept_hdr_async(stream,
+                            crate::features::remote_control::controller::test_support::ControllerReaderProtocol).await.unwrap();
+                        let Message::Text(frame) = connected.next().await.unwrap().unwrap() else { panic!("endpoint register") };
+                        let frame:Value=serde_json::from_str(&frame).unwrap();
+                        assert_eq!(frame["type"], "desktop_endpoint_register");
+                        connected.send(Message::Text(json!({"v":2,"type":"desktop_endpoint_registered","endpoint_id":frame["endpoint_id"],"web_client_connected":false}).to_string().into())).await.unwrap();
+                        socket=Some(connected);
+                    }
+                    // Observe the actual production registration request before
+                    // aborting its real task; no result or watchdog is fabricated.
+                    loop {
+                        match socket.as_mut().unwrap().next().await.unwrap().unwrap() {
+                            Message::Text(text) => {
+                                let frame:Value=serde_json::from_str(&text).unwrap();
+                                if frame["type"]=="desktop_pairing_register" {
+                                    assert_eq!(frame["remote_control_generation"], operation.generation());
+                                    break;
+                                }
+                            },
+                            Message::Ping(data) => socket.as_mut().unwrap().send(Message::Pong(data)).await.unwrap(),
+                            _ => {},
+                        }
+                    }
+                    assert_eq!(manager.status().kind(), ControlledStatusKind::Registering);
+                    let abort = registration.abort_handle_for_test();
+                    let mut emitted = None;
+                    let mut replacement_channel = None;
+                    {
+                        let wait = super::super::desktop_remote_controlled::wait_controlled_registration(
+                            &manager, operation.clone(), registration.wait(),
+                            |generation| relay.stop_controller_relay(generation),
+                            |status| emitted=Some(status.clone()),
+                        );
+                        tokio::pin!(wait);
+                        if while_waiting {
+                            std::future::poll_fn(|cx| {
+                                assert!(std::future::Future::poll(wait.as_mut(),cx).is_pending());
+                                std::task::Poll::Ready(())
+                            }).await;
+                        }
+                        if interference != 0 {
+                            manager.stop();
+                            relay.stop_controller_relay(operation.generation());
+                        }
+                        if interference >= 2 {
+                            manager.start(None, Vec::new()).unwrap();
+                            if interference == 3 {
+                                let old=manager.begin_refresh().unwrap();
+                                manager.complete_refresh_revoked(old).unwrap();
+                            }
+                            let next = manager.current_operation().unwrap();
+                            replacement_channel = Some(relay.start_controller_relay(next.generation()).await.unwrap());
+                        }
+                        abort.abort();
+                        let error=tokio::time::timeout(Duration::from_secs(3),wait).await.unwrap().unwrap_err();
+                        assert_eq!(error,"pairing_registration_failed");
+                    }
+                    if interference==0 {
+                        assert_eq!(manager.status().kind(),ControlledStatusKind::Error);
+                        assert!(emitted.is_some());
+                    } else {
+                        assert!(emitted.is_none());
+                        assert_eq!(manager.status().kind(),if interference==1 {ControlledStatusKind::Stopped} else {ControlledStatusKind::Registering});
+                    }
+                    // A real lane can be installed again after the old task is
+                    // joined. A stale command must not retire this new owner.
+                    if interference<=1 { manager.start(None,Vec::new()).unwrap(); }
+                    let next=manager.current_operation().unwrap();
+                    let channel = if let Some(channel) = replacement_channel {
+                        assert!(matches!(relay.start_controller_relay(next.generation()).await,
+                            Err(code) if code=="desktop_controller_relay_busy"));
+                        channel
+                    } else {
+                        relay.start_controller_relay(next.generation()).await.unwrap()
+                    };
+                    assert!(manager.is_pending_handshake(next.clone()));
+                    manager.stop();
+                    relay.stop_controller_relay(next.generation());
+                    drop(channel);
+                }
+            }
+        }
+        relay.shutdown_loopback_test_endpoint();
+        if let Some(mut socket)=socket {let _=socket.close(None).await;}
+    });
+}
+
+#[test]
 fn real_reader_manager_worker_resume_round_trip() {
     run_isolated_reader(false, false, false, None);
+}
+
+#[test]
+fn real_reader_resume_prepare_survives_failed_write() {
+    run_isolated_reader(false, false, false, Some("prepare_write"));
+}
+
+#[test]
+fn real_reader_resume_prepare_survives_legacy_socket_epoch() {
+    run_isolated_reader(false, false, false, Some("prepare_legacy"));
 }
 
 #[test]
@@ -250,6 +403,8 @@ fn run_isolated_reader(
         Some("disconnect") => "real_reader_old_received_disconnect_cannot_mutate_successor",
         Some("joined") => "real_reader_old_received_joined_cannot_install_or_clear_successor",
         Some("activation") => "real_reader_resume_activation_holds_lifecycle_owner_commit",
+        Some("prepare_write") => "real_reader_resume_prepare_survives_failed_write",
+        Some("prepare_legacy") => "real_reader_resume_prepare_survives_legacy_socket_epoch",
         Some("challenge") => "real_reader_old_tick_challenge_cannot_mask_successor_suspicion",
         Some(other) => panic!("unknown isolated ownership case: {other}"),
         None if final_admission => {
