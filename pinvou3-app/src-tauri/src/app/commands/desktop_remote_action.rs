@@ -66,6 +66,10 @@ pub enum RemoteActionIntent {
         task_id: String,
         transfer_id: String,
     },
+    AttachmentAbortConfirmed {
+        task_id: String,
+        transfer_id: String,
+    },
     ArtifactIndex,
     ArtifactPreview {
         artifact_id: String,
@@ -95,6 +99,7 @@ impl RemoteActionIntent {
             Self::AttachmentBegin { .. } => "attachment_begin",
             Self::AttachmentChunk { .. } => "attachment_chunk",
             Self::AttachmentAbort { .. } => "attachment_abort",
+            Self::AttachmentAbortConfirmed { .. } => "attachment_abort_confirmed",
             Self::ArtifactIndex => "artifact_index",
             Self::ArtifactPreview { .. } => "artifact_preview",
             Self::ArtifactDownloadBegin { .. } => "artifact_download_begin",
@@ -110,6 +115,7 @@ impl RemoteActionIntent {
             | Self::AttachmentBegin { task_id, .. }
             | Self::AttachmentChunk { task_id, .. }
             | Self::AttachmentAbort { task_id, .. }
+            | Self::AttachmentAbortConfirmed { task_id, .. }
             | Self::ArtifactDownloadBegin { task_id, .. }
             | Self::ArtifactDownloadChunk { task_id, .. }
             | Self::ArtifactDownloadAbort { task_id, .. } => Some(task_id),
@@ -121,6 +127,7 @@ impl RemoteActionIntent {
         match self {
             Self::AttachmentChunk { transfer_id, .. }
             | Self::AttachmentAbort { transfer_id, .. }
+            | Self::AttachmentAbortConfirmed { transfer_id, .. }
             | Self::ArtifactDownloadChunk { transfer_id, .. }
             | Self::ArtifactDownloadAbort { transfer_id, .. } => Some(transfer_id),
             _ => None,
@@ -180,6 +187,10 @@ impl serde::Serialize for RemoteActionIntent {
             Self::AttachmentAbort {
                 task_id,
                 transfer_id,
+            }
+            | Self::AttachmentAbortConfirmed {
+                task_id,
+                transfer_id,
             } => (
                 self.operation(),
                 json!({"task_id":task_id,"transfer_id":transfer_id}),
@@ -217,6 +228,14 @@ impl serde::Serialize for RemoteActionIntent {
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteActionError {
+    code: String,
+    request_id: String,
+    authoritative: bool,
+}
+
 #[tauri::command]
 pub async fn desktop_remote_action_a(
     app: AppHandle,
@@ -224,7 +243,7 @@ pub async fn desktop_remote_action_a(
     remote_ref: String,
     request_id: String,
     intent: RemoteActionIntent,
-) -> Result<Value, String> {
+) -> Result<Value, RemoteActionError> {
     let operation = intent.operation();
     log_remote_action_event(
         "controller",
@@ -232,12 +251,18 @@ pub async fn desktop_remote_action_a(
         operation,
         "requested",
     );
-    super::desktop_remote_state::ensure_ready(&app).map_err(|code| {
-        log_remote_action_event("controller", "remote_action_failed", operation, &code);
-        code
-    })?;
+    super::desktop_remote_state::ensure_ready(&app)
+        .map_err(|code| {
+            log_remote_action_event("controller", "remote_action_failed", operation, &code);
+            code
+        })
+        .map_err(|code| RemoteActionError {
+            code,
+            request_id: request_id.clone(),
+            authoritative: false,
+        })?;
     let started = std::time::Instant::now();
-    let metric = match &intent {
+    let mut metric = match &intent {
         RemoteActionIntent::AttachmentBegin { .. } => {
             Some((RemoteStage::Attachment, request_id.clone()))
         }
@@ -252,6 +277,8 @@ pub async fn desktop_remote_action_a(
         }
         _ => None,
     };
+    let mut actual_request_id = request_id.clone();
+    let mut authoritative = false;
     let result = async {
         let store = app.state::<SessionStore>();
         let manager = app.state::<ControllingDeviceManager>();
@@ -266,7 +293,6 @@ pub async fn desktop_remote_action_a(
         if !lease_matches_remote_binding(&lease, &live) {
             return Err("remote_binding_mismatch".to_owned());
         }
-        state.purge_stale(&live);
         sessions
             .state(&remote_ref, &lease)
             .map_err(|_| "remote_session_unavailable".to_owned())?;
@@ -286,7 +312,7 @@ pub async fn desktop_remote_action_a(
         }
         let operation = operation.to_owned();
         let body = intent.body()?;
-        let payload = json!({"v":1,"type":"remote_action_request",
+        let mut payload = json!({"v":1,"type":"remote_action_request",
         "connection_id":lease.connection_id,"controller_lease_id":lease.controller_lease_id,
         "lease_epoch":lease.lease_epoch,"relay_epoch":lease.relay_epoch,
         "remote_control_generation":lease.remote_control_generation,
@@ -309,23 +335,60 @@ pub async fn desktop_remote_action_a(
             );
             "remote_action_invalid".to_owned()
         })?;
-        let receiver = with_current_dispatch_binding(&app, &live, || {
+        // Retire/reserve/register inside the same current owner/lane and store
+        // binding fence. A captured old context must never prune new identities.
+        let (receiver, identity) = with_current_dispatch_binding(&app, &live, || {
             store
                 .require_live_remote_mutation(&local_session_id, &remote_ref, &live)
                 .map_err(|_| "remote_binding_mismatch".to_owned())?;
-            state
-                .register(
-                    request_id.clone(),
-                    local_session_id.clone(),
-                    remote_ref.clone(),
-                    live.clone(),
-                    operation.clone(),
-                    intent.task_id().map(str::to_owned),
-                    intent.transfer_id().map(str::to_owned),
-                )
-                .map_err(str::to_owned)
+            // Preserve action errors as the inner result: this shared task
+            // fence otherwise maps unfamiliar errors to binding mismatch.
+            Ok((|| {
+                state.purge_stale(&live);
+                let identity = state
+                    .reserve_identity(
+                        &local_session_id,
+                        &remote_ref,
+                        &live,
+                        &operation,
+                        &body,
+                        &request_id,
+                    )
+                    .map_err(|failure| {
+                        if let Some(id) = failure.request_id {
+                            actual_request_id = id;
+                        }
+                        failure.code.to_owned()
+                    })?;
+                actual_request_id = identity.request_id.clone();
+                let receiver = state
+                    .register(
+                        identity.request_id.clone(),
+                        local_session_id.clone(),
+                        remote_ref.clone(),
+                        live.clone(),
+                        operation.clone(),
+                        intent.task_id().map(str::to_owned),
+                        intent.transfer_id().map(str::to_owned),
+                    )
+                    .map_err(str::to_owned)?;
+                Ok::<_, String>((receiver, identity))
+            })())
         })
-        .map_err(|error| error.code().to_owned())?;
+        .map_err(|error| error.code().to_owned())??;
+        let request_id = identity.request_id.clone();
+        actual_request_id = request_id.clone();
+        if matches!(
+            &intent,
+            RemoteActionIntent::AttachmentBegin { .. }
+                | RemoteActionIntent::ArtifactDownloadBegin { .. }
+        ) {
+            if let Some((_, id)) = &mut metric {
+                *id = request_id.clone();
+            }
+        }
+        payload["request_id"] = json!(request_id);
+        identity.mark_dispatched();
         let result = send_action_encrypted(&app, &live, &payload);
         if result.is_err() {
             state.detach_uncertain(&request_id);
@@ -339,7 +402,11 @@ pub async fn desktop_remote_action_a(
         }
         log_remote_action_event("controller", "remote_action_sent", &operation, "sent");
         match tokio::time::timeout(std::time::Duration::from_secs(15), receiver).await {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => {
+                authoritative = !matches!(&result, Err(code) if code == "result_unknown");
+                identity.settle(authoritative);
+                result
+            }
             _ => {
                 state.detach_uncertain(&request_id);
                 log_remote_action_event(
@@ -386,7 +453,11 @@ pub async fn desktop_remote_action_a(
             crate::features::behavior_telemetry::track_remote_transfer(&app, event, &transfer_id);
         }
     }
-    result
+    result.map_err(|code| RemoteActionError {
+        code,
+        request_id: actual_request_id,
+        authoritative,
+    })
 }
 
 fn send_action_encrypted(
@@ -459,6 +530,10 @@ mod tests {
                 chunk_bytes: 3,
             },
             RemoteActionIntent::AttachmentAbort {
+                task_id: "task-1".into(),
+                transfer_id: "transfer-1".into(),
+            },
+            RemoteActionIntent::AttachmentAbortConfirmed {
                 task_id: "task-1".into(),
                 transfer_id: "transfer-1".into(),
             },
@@ -564,6 +639,86 @@ mod tests {
             );
             assert_eq!(reply.try_recv().unwrap(), Err("result_unknown".into()));
         }
+    }
+
+    #[test]
+    fn confirmed_cleanup_requires_authenticated_exact_positive_receipt() {
+        for body in [
+            json!({"aborted":true}),
+            json!({"transfer_id":"transfer-1","cleanup_confirmed":false}),
+            json!({"transfer_id":"transfer-other","cleanup_confirmed":true}),
+            json!({"transfer_id":"transfer-1","cleanup_confirmed":true}),
+        ] {
+            let state = DesktopRemoteActionState::default();
+            let mut begin = register(&state, "begin-1", "attachment_begin", Some("task-1"), None);
+            settle(
+                &state,
+                json!({"request_id":"begin-1","session_id":"remote-0001","operation":"attachment_begin","ok":true,"body":{"transfer_id":"transfer-1"}}),
+            );
+            assert!(begin.try_recv().unwrap().is_ok());
+            let mut cleanup = register(
+                &state,
+                "cleanup-1",
+                "attachment_abort_confirmed",
+                Some("task-1"),
+                Some("transfer-1"),
+            );
+            let payload = json!({"request_id":"cleanup-1","session_id":"remote-0001","operation":"attachment_abort_confirmed","ok":true,"body":body});
+            let mut wrong = lease();
+            wrong.lease_epoch = "2".into();
+            assert!(!state.settle_authenticated(&wrong, &live(), &payload));
+            assert_eq!(cleanup.try_recv(), Err(TryRecvError::Empty));
+            settle(&state, payload.clone());
+            let positive = body == json!({"transfer_id":"transfer-1","cleanup_confirmed":true});
+            assert_eq!(cleanup.try_recv().unwrap().is_ok(), positive);
+            assert_eq!(
+                state.inner.lock().uploads.contains_key("transfer-1"),
+                !positive
+            );
+            assert!(
+                !state.settle_authenticated(&lease(), &live(), &payload),
+                "duplicate has no pending request to settle"
+            );
+        }
+    }
+
+    #[test]
+    fn confirmed_cleanup_error_is_not_logical_absence_and_cannot_attest_completion() {
+        let state = DesktopRemoteActionState::default();
+        let mut begin = register(&state, "begin-1", "attachment_begin", Some("task-1"), None);
+        settle(
+            &state,
+            json!({"request_id":"begin-1","session_id":"remote-0001","operation":"attachment_begin","ok":true,"body":{"transfer_id":"transfer-1"}}),
+        );
+        assert!(begin.try_recv().unwrap().is_ok());
+        let mut cleanup = register(
+            &state,
+            "cleanup-1",
+            "attachment_abort_confirmed",
+            Some("task-1"),
+            Some("transfer-1"),
+        );
+        let mut late = register(
+            &state,
+            "late-chunk",
+            "attachment_chunk",
+            Some("task-1"),
+            Some("transfer-1"),
+        );
+        settle(
+            &state,
+            json!({"request_id":"cleanup-1","session_id":"remote-0001","operation":"attachment_abort_confirmed","ok":false,"error_code":"transfer_unknown","body":{}}),
+        );
+        assert_eq!(cleanup.try_recv().unwrap(), Err("transfer_unknown".into()));
+        assert!(state.inner.lock().uploads.contains_key("transfer-1"));
+        settle(
+            &state,
+            json!({"request_id":"late-chunk","session_id":"remote-0001","operation":"attachment_chunk","ok":true,"body":{"state":"completed"}}),
+        );
+        assert_eq!(
+            late.try_recv().unwrap(),
+            Err("remote_attachment_unconfirmed".into())
+        );
     }
 
     #[test]

@@ -60,6 +60,7 @@ REQUIRED = {
     "TestF05CancellationRecoveryClosurePublicPostgres",
     "TestF05RotationRetainedContentBoundaries",
     "TestF05UnsettledContentRetention",
+    "TestReplayRetentionBoundedCleanupPublicPostgres",
     "TestF05ExpiredUnacquiredDispatchRecovery",
     "TestF05PersonalHistoryAndCancellationPersistedOwnerScope",
     "TestOrganizationOriginalOwnerCancellationPublicPostgres",
@@ -95,6 +96,7 @@ ACCOUNT_REQUIRED = {
     "TestRegistrationUnknownInspectionPostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
     "TestRegistrationCompensationDatabaseErrorIdentityPostgres",
+    "TestRegistrationOutboxAggregateLookupPostgres",
     "TestPlatformRoleManagementRuntimePostgres",
     "TestUserCodeLookupRuntimePostgres",
     "TestAuditSearchOriginalMigrationRuntimePostgres",
@@ -104,12 +106,14 @@ ACCOUNT_REQUIRED = {
     "TestTokenAuthorizationWriterToBillingNonTargetPostgres",
     "TestOwnerCombinedActualHTTPPostgres",
     "TestApprovalRecoveryQueryAllRegisteredCommandsPostgres",
+    "TestUnstartedApprovalGrantInventoryPostgres",
     "TestApprovalRecoveryQueryForwardMigrationPostgres",
     "TestApprovalAuthorizationWallClockPostgres",
     "TestApprovalMutationWallClockPostgres",
     "TestApprovalProofWallClockPostgres",
     "TestOrganizationUnitAuthorityWallClockPostgres",
     "TestApprovalListPoolRuntimePostgres",
+    "TestApprovalPaginationSourcePostgres",
     "TestPasswordPreparationAuthorizationPostgres",
     "TestApprovalWithdrawalOriginalReceiptPostgres",
     "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
@@ -122,6 +126,7 @@ ACCOUNT_REQUIRED = {
 # These Account roots are real named leaf tests; all other required roots
 # still need completed child-case evidence. Root run/pass and no-skip stay mandatory.
 ACCOUNT_LEAF_REQUIRED = {
+    "TestUnstartedApprovalGrantInventoryPostgres",
     "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
     "TestRegistrationBonusCheckpointGuardsPostgresIntegration",
     "TestRegistrationBonusCheckpointMigrationPostgresIntegration",
@@ -158,7 +163,7 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {"TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres"}
+SCHEMA_REQUIRED = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres"}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -197,6 +202,7 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestRetainedOrganizationOrderHistoryPagination",
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
     "TestExpiredHoldProofRetryDiagnosticsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
@@ -209,6 +215,7 @@ RETAINED_REQUIRED = {
     "TestPaymentPersonalWalletAdmissionStatusRacePostgres",
     "TestReceivableSettlementGuardedWritesPostgres",
     "TestPostgresManagedPricePagination",
+    "TestPriceFallbackMissingBindingPostgres",
     "TestLedgerRepairProofHistoricalUpgradePostgres",
     "TestLedgerRepairAuthorityDuplicateForcedRefundPostgres",
     "TestLedgerRepairAuthorityCrossDatePostgres",
@@ -288,6 +295,16 @@ EXACT_REQUIRED_CHILDREN = {
         "all-active-states-preserve-full-facts", "repeated-read-stable-and-read-only",
         "historical-only-preserves-other-dependencies",
     },
+    "TestApprovalPaginationSourcePostgres": {
+        "registered-replicas-use-distinct-admitted-client-keys",
+        "exhausted-client-is-shared-across-replicas-with-rollback",
+        "subject-budget-survives-source-change",
+    },
+    "TestOrphanPaidOrderIndexPublicMigration": {
+        "fresh-failure-atomicity-and-retry",
+        "populated-upgrade-replay-and-own-ddl-rollback",
+    },
+    "TestRegistrationOutboxAggregateLookupPostgres": {"fresh-install", "retained-upgrade"},
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)
@@ -297,11 +314,40 @@ EXACT_REQUIRED_CHILDREN = {
     "TestOrganizationStartupDiagnosticsPostgres": {
         "profile", "token", "billing-earlier-wallet-guard",
     },
+    "TestBillingHistoricalStateRollbackPostgres": {
+        f"version{version}/seeded={seeded}{suffix}"
+        for version in (10, 14, 27, 49)
+        for seeded in ("false", "true")
+        for suffix in ("", "/actual-cli")
+    } | {
+        f"version{version}/seeded=true/archived-cli" for version in (10, 14, 27, 49)
+    } | {
+        f"{scenario}{suffix}"
+        for scenario in ("version14/repair-only", "version27/revoked-only", "version49/advanced-after-expiry")
+        for suffix in ("", "/actual-cli")
+    },
+    "TestReplayRetentionBoundedCleanupPublicPostgres": {
+        "one-large-unsettled-stream-is-row-bounded-and-retryable",
+        "actual-worker-drains-full-batch-without-hourly-wait",
+        "locked-oldest-is-skipped-and-next-cycle-resumes",
+        "settled-stream-delete-is-bounded",
+        "active-case-parent-lock-serializes-copy-with-cleanup",
+        "tombstone-key-clear-is-atomic-bounded-and-protected-rows-do-not-starve",
+        "case-delete-and-payload-cascade-are-bounded",
+        "capacity-sample-10000-live-frames-plan-and-single-batch",
+        "content-lock-timeout-rolls-back-and-next-worker-tick-recovers",
+    },
     "TestExpiredHoldProofRetryDiagnosticsPostgres": {
         "quick-failure", "timeout", "cancel", "unavailable", "invalid-proof",
         "valid-proof", "persistence-failure", "operator",
     },
     "TestRechargeProductCommandAtomicityPostgres": {"active-provider-admission-candidate-progress"},
+    "TestPriceFallbackMissingBindingPostgres": {
+        "missing-binding-and-rollback",
+        "permission-denied-before-mutation",
+        "binding-read-fault-and-later-retry",
+        "valid-binding-fallback-and-receipt-replay",
+    },
     "TestPostgresManagedPricePagination": {
         "bounded-batch-queries",
         *{f"bounded-batch-queries/{kind}-{size}" for kind in ("list", "namespace") for size in (1, 100, 200)},
@@ -344,6 +390,10 @@ EXACT_REQUIRED_CHILDREN = {
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres": {
         "account_closure_grant_isolations", "account_closed_grant_reclaim_commands",
     },
+    "TestRetainedOrganizationOrderHistoryPagination": {
+        "same-timestamp-cursor-and-owner-isolation",
+        "concurrent-new-order-does-not-shift-older-pages",
+    },
     "TestManagementPublicMigrationInstallation": {
         "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",
         "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",
@@ -351,6 +401,8 @@ EXACT_REQUIRED_CHILDREN = {
         "installed-pre-cleanup-39-upgrade",
         "installed-pre-governance-index-40-upgrade",
         "installed-pre-governance-index-40-upgrade/governance-index-public-cli-rollback",
+        "installed-pre-dispatch-index-40-upgrade",
+        "installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip",
     },
     "TestUserUnusedIntentCancellationOwnerPostgres": {
         "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",

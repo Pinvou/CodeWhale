@@ -10,6 +10,7 @@ import {
   canForceRemove,
   formatBytes,
   missingFormFields,
+  operationErrorText,
   progressPercent,
   etaSeconds,
   splitDuration,
@@ -182,6 +183,7 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
   }, [task.lines, task.expanded]);
 
   const isError = task.status === 'error';
+  const errorText = isError ? operationErrorText(copy, task.error) : '';
   // 终态 = 不会再变了。取消完成的任务也留在面板上（用户要看得见自己停了什么），
   // 它和失败一样需要一个「关闭」按钮，也一样不该再显示进度条——只判 isError
   // 会让取消掉的卡片渲染出「取消」按钮，点一下变 cancelling 就被 disabled，
@@ -203,7 +205,7 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
         <div className="min-w-0 flex-1">
           <div className={`truncate text-[13px] font-medium ${TEXT_PRIMARY}`}>{task.title}</div>
           {isError ? (
-            <div className={`mt-0.5 line-clamp-2 text-[11px] ${TEXT_DANGER}`}>{task.error.split('\n')[0]}</div>
+            <div data-testid="model-store-task-error" className={`mt-0.5 line-clamp-2 text-[11px] ${TEXT_DANGER}`}>{errorText.split('\n')[0]}</div>
           ) : (
             <div className={`mt-0.5 truncate text-[11px] ${TEXT_SECONDARY}`}>{taskSubtitle(task, copy)}</div>
           )}
@@ -249,7 +251,7 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
           data-testid="model-store-task-log"
           className="mx-4 mt-2 h-40 overflow-auto whitespace-pre-wrap break-all rounded-[12px] bg-[#202124] p-2.5 text-[11px] leading-4 text-[#E3E3E3] dark:bg-[#131314]"
         >
-          {(isError ? [...task.lines, '', task.error] : task.lines).join('\n') || copy.taskNoOutput}
+          {(isError ? [...task.lines, '', errorText] : task.lines).join('\n') || copy.taskNoOutput}
         </pre>
       ) : null}
 

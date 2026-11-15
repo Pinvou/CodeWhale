@@ -13,6 +13,30 @@ use crate::platform::credential_store::{
     CredentialReference, CredentialState, CredentialStore, SystemCredentialStore,
 };
 
+// Test-only fault seam for the settings read used by transactions. Thread-local
+// state cannot affect unrelated tests or worker threads.
+#[cfg(test)]
+std::thread_local! {
+    static SETTINGS_READ_FAULT: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+fn read_settings_text(path: &std::path::Path) -> std::io::Result<String> {
+    #[cfg(test)]
+    SETTINGS_READ_FAULT.with(|fault| {
+        if let Some((reads, fail_on)) = fault.get() {
+            let next = reads + 1;
+            fault.set(Some((next, fail_on)));
+            if next == fail_on {
+                return Err(std::io::Error::other(
+                    "injected transient settings read failure",
+                ));
+            }
+        }
+        Ok(())
+    })?;
+    std::fs::read_to_string(path)
+}
+
 mod search;
 pub use search::{SearchCredential, SearchPrefs, SearchProvider};
 
@@ -400,6 +424,12 @@ impl<'de> Deserialize<'de> for ImageCapabilityOverride {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+const EXPLICIT_MODEL_CONTEXT_SELECTION: &str = "user-context-choice-v1";
+
 /// Stable, source-aware model selection used by global defaults and session bindings.
 /// Platform catalog model IDs are deliberately not SavedModel IDs: the built-in
 /// SavedModel is only a runtime route carrier and must never collapse the catalog.
@@ -499,6 +529,36 @@ pub struct SavedModel {
     pub reasoning_effort: Option<String>,
     pub model: String,
     pub base_url: String,
+    /// Stable link to a locally installed store card; wire model IDs may change on upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_store_card_id: Option<String>,
+    /// A manual route edit opts out of legacy migration until explicit re-linking.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub model_store_link_detached: bool,
+    /// Incoming explicit store-link intent; stale card endpoints must be rejected.
+    #[serde(default, skip_serializing)]
+    pub model_store_link_requested: bool,
+    /// Incoming repeat-link intent: apply only the reviewed store route to the
+    /// latest still-linked row, preserving user options and credentials.
+    #[serde(default, skip_serializing)]
+    pub model_store_link_only: bool,
+    /// Incoming editor intent only: untouched endpoint and protocol fields use
+    /// the latest persisted route and store association.
+    #[serde(default, skip_serializing)]
+    pub preserve_model_store_route: bool,
+    /// Incoming editor intent only: the context-window field was not edited,
+    /// so the persisted value (possibly raised by a background store sync)
+    /// wins over the stale editor snapshot. An edited field keeps its explicit
+    /// value, including a deliberate downgrade. Cleared before persisting.
+    #[serde(default, skip_serializing)]
+    pub preserve_context_window_tokens: bool,
+    /// Incoming explicit context-field edit. Distinct from an omitted legacy
+    /// field or a machine-created default; never persisted or returned to clients.
+    #[serde(default, skip_serializing)]
+    pub context_window_edit_requested: bool,
+    /// Incoming composer intent: update only reasoning effort on the latest row.
+    #[serde(default, skip_serializing)]
+    pub reasoning_effort_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -651,6 +711,14 @@ impl SavedModel {
             max_output_tokens: None,
             model: BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL.to_string(),
             base_url: BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL.to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.to_string()),
             vendor: None,
             endpoint_mode: None,
@@ -681,6 +749,22 @@ impl SavedModel {
             || self.preset == ModelPreset::OpenaiCompatible
             || self.provider_kind.as_deref() == Some("custom"))
             && self.provider_kind.as_deref() != Some("coding_plan")
+    }
+
+    /// Compare the fields that jointly select an endpoint and wire protocol.
+    /// Normalize metadata as persistence does, so an omitted legacy provider
+    /// kind and its inferred value do not detach an otherwise unchanged route.
+    pub fn has_same_endpoint_route(&self, other: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = other.clone();
+        left.normalize_provider_metadata();
+        right.normalize_provider_metadata();
+        left.preset == right.preset
+            && left.provider_kind == right.provider_kind
+            && left.vendor == right.vendor
+            && left.endpoint_mode == right.endpoint_mode
+            && left.model == right.model
+            && left.base_url == right.base_url
     }
 
     fn normalize_alias(&mut self) {
@@ -918,6 +1002,11 @@ pub struct AdvancedPrefs {
     /// (见 `UserPrefs::migrate_models`),把旧 model_preset+custom_* 合成一条。
     #[serde(default)]
     pub saved_models: Vec<SavedModel>,
+    /// One-time corrections of the store's erroneous 32K defaults, or a stable
+    /// explicit-user-choice receipt independent of a not-yet-migrated card link.
+    /// Kept with the model list so intentional limits survive restarts/upgrades.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_store_context_repairs: std::collections::BTreeMap<String, String>,
     /// 全局默认/当前激活模型 id(新建会话继承它)。None = 回退列表首条。
     #[serde(default)]
     pub active_model_id: Option<String>,
@@ -1233,16 +1322,63 @@ impl UserPrefs {
     /// must be handled by the normal settings flow before task submission.
     pub(crate) fn load_read_only_model_snapshot() -> Result<Self, &'static str> {
         let _guard = lock_user_prefs();
+        Self::load_read_only_model_snapshot_unlocked()
+    }
+
+    /// Cleanup admission requires an existing settings file. Preserve the same
+    /// model-only projection as remote task preparation, but never interpret a
+    /// removed settings file as a successful empty/default candidate list.
+    pub(crate) fn load_existing_read_only_model_snapshot() -> Result<Self, &'static str> {
+        let _guard = lock_user_prefs();
+        let raw = Self::read_model_settings_unlocked()?.ok_or("model_settings_unavailable")?;
+        let prefs = serde_json::from_str(&raw).map_err(|_| "model_settings_invalid")?;
+        Self::prepare_read_only_model_snapshot(prefs)
+    }
+
+    /// The caller owns `USER_PREFS_LOCK`; read bytes only once, so validation
+    /// and use cannot select different settings snapshots.
+    fn read_model_settings_unlocked() -> Result<Option<String>, &'static str> {
         let path = super::paths::settings_path();
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(raw) => Some(raw),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => return Err("model_settings_unavailable"),
-        };
-        let mut prefs: Self = match raw {
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => Ok(Some(raw)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err("model_settings_unavailable"),
+        }
+    }
+
+    /// Model-only projection used by remote task preparation. Preserve its
+    /// original in-memory model normalization and first-run defaults; it does
+    /// not perform whole-preferences legacy migrations or write anything.
+    fn load_read_only_model_snapshot_unlocked() -> Result<Self, &'static str> {
+        let prefs = match Self::read_model_settings_unlocked()? {
             Some(raw) => serde_json::from_str(&raw).map_err(|_| "model_settings_invalid")?,
             None => Self::default(),
         };
+        Self::prepare_read_only_model_snapshot(prefs)
+    }
+
+    /// A whole-preferences write must retain the same legacy interpretation as
+    /// an ordinary settings transaction, without its fallback or credential I/O.
+    /// Missing settings are rejected here instead of recreating a removed file.
+    fn load_readable_model_transaction_snapshot_unlocked() -> Result<Self, &'static str> {
+        let raw = Self::read_model_settings_unlocked()?.ok_or("model_settings_unavailable")?;
+        let system_locale = crate::platform::os::current_system_locale();
+        let mut prefs = Self::parse_existing_settings(&raw, system_locale.as_deref())
+            .map_err(|_| "model_settings_invalid")?
+            .prefs;
+        if prefs.has_unmigrated_credentials() {
+            return Err("model_credential_migration_required");
+        }
+        // Match the ordinary transaction: retire the legacy platform carrier
+        // before the one-time local-thinking predicate and model normalization.
+        prefs.migrate_account_platform_model_path();
+        prefs.migrate_legacy_local_thinking_default();
+        let mut prefs = Self::prepare_read_only_model_snapshot(prefs)?;
+        prefs.enforce_memory_locale_policy();
+        Ok(prefs)
+    }
+
+    fn prepare_read_only_model_snapshot(mut prefs: Self) -> Result<Self, &'static str> {
         if prefs.has_unmigrated_credentials() {
             return Err("model_credential_migration_required");
         }
@@ -1293,27 +1429,11 @@ impl UserPrefs {
         }
     }
 
-    fn parse_settings_with_state(raw: Option<&str>, system_locale: Option<&str>) -> ParsedSettings {
-        let Some(raw) = raw else {
-            return ParsedSettings {
-                prefs: Self::defaults_for_system_locale(system_locale),
-                allow_normalization_persist: false,
-                color_scheme_derived: false,
-            };
-        };
-        let value: serde_json::Value = match serde_json::from_str(raw) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!(
-                    "[pinvou3-app] settings.json parse failed ({error}), using system-language defaults"
-                );
-                return ParsedSettings {
-                    prefs: Self::defaults_for_system_locale(system_locale),
-                    allow_normalization_persist: false,
-                    color_scheme_derived: false,
-                };
-            }
-        };
+    fn parse_existing_settings(
+        raw: &str,
+        system_locale: Option<&str>,
+    ) -> Result<ParsedSettings, serde_json::Error> {
+        let value: serde_json::Value = serde_json::from_str(raw)?;
         let has_language = value
             .as_object()
             .is_some_and(|settings| settings.contains_key("language"));
@@ -1322,24 +1442,12 @@ impl UserPrefs {
         // lack the key we cannot tell "the user explicitly picked theme" from
         // "never touched (default genesis, dark)", so derive from the legacy
         // effective appearance to keep the upgrade invisible; only a true
-        // fresh install (no settings.json, handled by the default branch
-        // above) stays on System and follows the OS.
+        // fresh install (no settings.json, handled by the caller's default
+        // branch) stays on System and follows the OS.
         let has_color_scheme = value
             .as_object()
             .is_some_and(|settings| settings.contains_key("color_scheme"));
-        let mut prefs: Self = match serde_json::from_value(value) {
-            Ok(prefs) => prefs,
-            Err(error) => {
-                eprintln!(
-                    "[pinvou3-app] settings.json parse failed ({error}), using system-language defaults"
-                );
-                return ParsedSettings {
-                    prefs: Self::defaults_for_system_locale(system_locale),
-                    allow_normalization_persist: false,
-                    color_scheme_derived: false,
-                };
-            }
-        };
+        let mut prefs: Self = serde_json::from_value(value)?;
         if !has_language {
             prefs.language = Language::from_system_locale(system_locale);
         }
@@ -1351,10 +1459,26 @@ impl UserPrefs {
             };
             color_scheme_derived = true;
         }
-        ParsedSettings {
+        Ok(ParsedSettings {
             prefs,
             allow_normalization_persist: true,
             color_scheme_derived,
+        })
+    }
+
+    fn parse_settings_with_state(raw: Option<&str>, system_locale: Option<&str>) -> ParsedSettings {
+        if let Some(raw) = raw {
+            match Self::parse_existing_settings(raw, system_locale) {
+                Ok(parsed) => return parsed,
+                Err(error) => eprintln!(
+                    "[pinvou3-app] settings.json parse failed ({error}), using system-language defaults"
+                ),
+            }
+        }
+        ParsedSettings {
+            prefs: Self::defaults_for_system_locale(system_locale),
+            allow_normalization_persist: false,
+            color_scheme_derived: false,
         }
     }
 
@@ -1372,7 +1496,15 @@ impl UserPrefs {
     /// as the GUI's `prepare_prefs_for_save`).
     fn load_unlocked_with_migration(persist_normalized: bool) -> (Self, CredentialMigrationResult) {
         let path = super::paths::settings_path();
-        let raw = std::fs::read_to_string(&path).ok();
+        let raw = read_settings_text(&path).ok();
+        Self::load_unlocked_with_migration_from_raw(raw, persist_normalized)
+    }
+
+    fn load_unlocked_with_migration_from_raw(
+        raw: Option<String>,
+        persist_normalized: bool,
+    ) -> (Self, CredentialMigrationResult) {
+        let path = super::paths::settings_path();
         let system_locale = crate::platform::os::current_system_locale();
         let mut parsed = Self::parse_settings_with_state(raw.as_deref(), system_locale.as_deref());
         let allow_normalization_persist = parsed.allow_normalization_persist;
@@ -1646,10 +1778,15 @@ impl UserPrefs {
         let _guard = lock_user_prefs();
         let _file_lock = lock_settings_file()
             .map_err(|error| format!("acquire settings lock failed: {error}"))?;
-        if fail_closed_read {
-            Self::ensure_settings_file_readable()?;
-        }
-        let (mut prefs, migration) = Self::load_unlocked_with_migration(false);
+        let (mut prefs, migration) = if fail_closed_read {
+            // Validate and migrate the same bytes. A second, lenient read here
+            // could turn a transient I/O failure into a default snapshot and
+            // overwrite the settings this transaction just validated.
+            let raw = Self::read_settings_file_strictly()?;
+            Self::load_unlocked_with_migration_from_raw(raw, false)
+        } else {
+            Self::load_unlocked_with_migration(false)
+        };
         // round-41 review M1：迁移失败时明文 key 只存在于内存，而 save_unlocked
         // 无条件 sanitize 后整文档落盘——凭据会从它唯一的持久位置被抹掉，写入方
         // 还报成功。与 GUI `prepare_prefs_for_save` 同一闸门：拒绝整个事务，
@@ -1668,19 +1805,44 @@ impl UserPrefs {
         Ok(Self::load_unlocked_with_migration(false).0)
     }
 
+    /// Conditional model cleanup must never replace missing, unreadable or
+    /// invalid user settings with defaults, or migrate credentials as a side
+    /// effect. Keep both transaction locks through the disk commit and deferred
+    /// credential cleanup, then return the normalized persisted snapshot.
+    pub(crate) fn update_readable_model_transaction_with_post_commit<F, C>(
+        mutate: F,
+        post_commit: C,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce(&mut Self) -> Result<(), String>,
+        C: FnOnce(),
+    {
+        let _guard = lock_user_prefs();
+        let _file_lock = lock_settings_file()
+            .map_err(|error| format!("acquire settings lock failed: {error}"))?;
+        let mut prefs =
+            Self::load_readable_model_transaction_snapshot_unlocked().map_err(str::to_owned)?;
+        mutate(&mut prefs)?;
+        prefs
+            .save_unlocked()
+            .map_err(|error| format!("save settings failed: {error:#}"))?;
+        post_commit();
+        Self::load_readable_model_transaction_snapshot_unlocked().map_err(str::to_owned)
+    }
+
     /// 破坏性事务的严格读预检（口径同 [`Self::load_read_only_model_snapshot`]）：
     /// NotFound 放行（合法缺项）；读取失败或解析失败报错——调用方不得在读不出
     /// 现状时用默认快照覆盖磁盘。
-    fn ensure_settings_file_readable() -> Result<(), String> {
+    fn read_settings_file_strictly() -> Result<Option<String>, String> {
         let path = super::paths::settings_path();
-        let raw = match std::fs::read_to_string(&path) {
+        let raw = match read_settings_text(&path) {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(format!("settings file read failed: {error}")),
         };
         serde_json::from_str::<Self>(&raw)
-            .map(|_: Self| ())
-            .map_err(|error| format!("settings file parse failed: {error}"))
+            .map_err(|error| format!("settings file parse failed: {error}"))?;
+        Ok(Some(raw))
     }
 
     /// Test-only probe for the deferred-delete barrier test: reports whether
@@ -1748,6 +1910,14 @@ impl UserPrefs {
             max_output_tokens: None,
             reasoning_effort: None,
             model,
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url,
             provider_kind: None,
             vendor: None,
@@ -2227,9 +2397,26 @@ impl UserPrefs {
         }
     }
 
-    /// 删一条模型;若删的是当前 active,回退到列表首条。
+    /// New clients identify actual context-field edits explicitly. Remember the
+    /// choice even before a legacy store route has acquired its card association,
+    /// so an in-flight capability probe cannot replace a freshly confirmed 32K.
+    pub fn record_explicit_model_context_selection(&mut self, id: &str) {
+        self.advanced
+            .model_store_context_repairs
+            .insert(id.to_owned(), EXPLICIT_MODEL_CONTEXT_SELECTION.to_owned());
+    }
+
+    pub fn has_explicit_model_context_selection(&self, id: &str) -> bool {
+        self.advanced
+            .model_store_context_repairs
+            .get(id)
+            .is_some_and(|receipt| receipt == EXPLICIT_MODEL_CONTEXT_SELECTION)
+    }
+
+    /// 删除用户模型；删除当前 typed 默认配置时清空默认引用，不自动另选。
     pub fn remove_model(&mut self, id: &str) {
         self.advanced.saved_models.retain(|m| m.id != id);
+        self.advanced.model_store_context_repairs.remove(id);
         let removed_default = matches!(
             self.advanced.default_model_ref.as_ref(),
             Some(ModelSelectionRef::LocalConfig { saved_model_id }) if saved_model_id == id
@@ -2412,6 +2599,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "qwen36_35b_256k".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -2467,6 +2662,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "qwen36_35b_256k".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -2824,6 +3027,14 @@ mod tests {
             reasoning_effort: Some("off".into()),
             model: "kimi-k3.1-pro".into(),
             base_url: "https://api.moonshot.cn/v1".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             provider_kind: None,
             vendor: Some("kimi".into()),
             endpoint_mode: None,
@@ -2952,6 +3163,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "qwen36_35b_256k".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -3051,6 +3270,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "m1".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://example.invalid/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -3138,6 +3365,54 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn fail_closed_transaction_uses_the_validated_bytes_before_transient_second_read_failure() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _home = TemporaryPrefsHome::new("pinvou3-strict-transaction-read");
+        let path = super::super::paths::settings_path();
+        let original = UserPrefs {
+            global_shortcut_enabled: true,
+            global_shortcut_accelerator: "Ctrl+Shift+F9".into(),
+            ..Default::default()
+        };
+        original.save().unwrap();
+        struct ResetReadFault;
+        impl Drop for ResetReadFault {
+            fn drop(&mut self) {
+                SETTINGS_READ_FAULT.with(|fault| fault.set(None));
+            }
+        }
+        let _reset = ResetReadFault;
+        SETTINGS_READ_FAULT.with(|fault| fault.set(Some((0, 2))));
+        UserPrefs::update_transaction_fail_closed(
+            |prefs| {
+                assert!(
+                    prefs.global_shortcut_enabled,
+                    "the validated non-default snapshot must reach the mutation"
+                );
+                assert_eq!(prefs.global_shortcut_accelerator, "Ctrl+Shift+F9");
+                SETTINGS_READ_FAULT.with(|fault| {
+                    assert_eq!(
+                        fault.get(),
+                        Some((1, 2)),
+                        "mutation must follow exactly one strict settings read"
+                    );
+                    // The fault is scoped to the admission-to-use window. The
+                    // ordinary post-commit reload is outside that window.
+                    fault.set(None);
+                });
+                prefs.voice_shortcut_enabled = true;
+                Ok(true)
+            },
+            || (),
+        )
+        .unwrap();
+        let persisted: UserPrefs = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(persisted.global_shortcut_enabled);
+        assert_eq!(persisted.global_shortcut_accelerator, "Ctrl+Shift+F9");
+        assert!(persisted.voice_shortcut_enabled);
     }
 
     #[test]
@@ -3501,6 +3776,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "glm-5-turbo".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions/".into(),
             provider_kind: None,
             vendor: None,
@@ -3540,6 +3823,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "glm-5.2".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://open.bigmodel.cn/api/paas/v4".into(),
             provider_kind: None,
             vendor: None,
@@ -3584,6 +3875,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "MiniMax-M3".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://api.minimax.chat/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -3616,6 +3915,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "MiniMax-M3".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://api.minimax.chat".into(),
             provider_kind: Some(MODEL_PROVIDER_KIND_OFFICIAL_API.into()),
             vendor: None,
@@ -3666,6 +3973,14 @@ mod tests {
                 max_output_tokens: Some(24_576),
                 reasoning_effort: None,
                 model: "qwen36_35b_256k".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
                 base_url: "http://127.0.0.1:8000/v1".into(),
                 provider_kind: None,
                 vendor: None,
@@ -3689,6 +4004,14 @@ mod tests {
                 max_output_tokens: Some(24_576),
                 reasoning_effort: None,
                 model: "custom-model".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
                 base_url: "https://gateway.example.com/v1".into(),
                 provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.into()),
                 vendor: None,
@@ -3781,6 +4104,14 @@ mod tests {
                 reasoning_effort: Some("off".into()),
                 model: "kimi-k3.1-pro".into(),
                 base_url: "https://api.moonshot.cn/v1".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
                 provider_kind: None,
                 vendor: None,
                 endpoint_mode: None,
@@ -3804,6 +4135,14 @@ mod tests {
                 reasoning_effort: Some("high".into()),
                 model: "kimi-k3.1-pro".into(),
                 base_url: "https://relay.example.com/v1".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
                 provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.into()),
                 vendor: None,
                 endpoint_mode: None,
@@ -3832,6 +4171,14 @@ mod tests {
                 reasoning_effort: Some("off".into()),
                 model: "kimi-k3.1-pro".into(),
                 base_url: "https://api.moonshot.cn/v1/chat/completions".into(),
+                model_store_card_id: None,
+                model_store_link_detached: false,
+                model_store_link_requested: false,
+                model_store_link_only: false,
+                preserve_model_store_route: false,
+                preserve_context_window_tokens: false,
+                context_window_edit_requested: false,
+                reasoning_effort_only: false,
                 provider_kind: None,
                 vendor: None,
                 endpoint_mode: None,
@@ -3929,6 +4276,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "qwen36_35b_256k".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "http://127.0.0.1:8000/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -3963,6 +4318,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: reasoning_effort.map(str::to_string),
             model: "qwen3-32b".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: base_url.into(),
             provider_kind: Some(
                 match preset {
@@ -4244,6 +4607,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "kimi-k2.6".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://api.moonshot.cn/v1".into(),
             provider_kind: None,
             vendor: None,
@@ -5115,6 +5486,14 @@ mod tests {
             max_output_tokens: None,
             reasoning_effort: None,
             model: "deepseek-chat".to_string(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
             base_url: "https://api.deepseek.com".to_string(),
             provider_kind: None,
             vendor: None,

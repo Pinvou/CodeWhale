@@ -23,7 +23,8 @@ func testGovernanceIndexPublicRollback(t *testing.T, ctx context.Context, connec
 	if err != nil {
 		t.Fatal(err)
 	}
-	account, credential, actor, wallet, usage := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	account, credential, actor, wallet := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	usage := nextIndexRollbackUsageID(t, ctx, connection)
 	if _, err := connection.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'controlled index rollback','ACTIVE',100,$2,now(),now(),'PLATFORM')`, account, actor, wallet); err != nil {
 		t.Fatal(err)
 	}
