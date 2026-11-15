@@ -421,6 +421,19 @@ CREATE TABLE IF NOT EXISTS `+ledger+` (
 	return nil
 }
 
-func Unlock(ctx context.Context, connection *pgx.Conn) {
-	_, _ = connection.Exec(ctx, `SELECT pg_advisory_unlock(hashtext('pinvou_account_platform_migrations'))`)
+// Unlock balances one acquisition within the caller's budget. If cancellation
+// happens before pgx sends the query, the connection can still be healthy and
+// holding session locks. Retire that connection on failure rather than lending
+// a locked session to its next caller. Close always closes the underlying socket.
+func Unlock(ctx context.Context, connection *pgx.Conn) error {
+	var released bool
+	err := connection.QueryRow(ctx, `SELECT pg_advisory_unlock(hashtext('pinvou_account_platform_migrations'))`).Scan(&released)
+	if err != nil {
+		_ = connection.Close(ctx)
+		return err
+	}
+	if !released {
+		return errors.New("migration lock was not held")
+	}
+	return nil
 }
