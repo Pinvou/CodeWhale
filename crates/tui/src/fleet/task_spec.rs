@@ -1193,4 +1193,84 @@ mod tests {
         assert_eq!(stale.result, FleetTaskResult::Fail);
         assert_eq!(winning.result, FleetTaskResult::Pass);
     }
+
+    // Boundary pins for `read_bounded_to_string`: the `take(limit + 1)` +
+    // post-check reader must accept a file of exactly MAX_SCORER_READ_BYTES
+    // (inclusive cap) and reject one byte more. If the `+1` on `take` were
+    // removed or the post-check deleted, the growth test below would pass a
+    // file one byte over the cap straight through to the scorer.
+
+    #[test]
+    fn regex_scorer_reads_evidence_at_exact_read_cap() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("evidence.txt");
+        std::fs::write(&path, vec![b'x'; MAX_SCORER_READ_BYTES as usize]).unwrap();
+        let verification = verify_regex_match(tmp.path(), &path, "x+");
+        assert_eq!(verification.result, FleetTaskResult::Pass);
+        assert!(verification.failure_kind.is_none());
+    }
+
+    #[test]
+    fn regex_scorer_refuses_evidence_one_byte_past_read_cap() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("evidence.txt");
+        std::fs::write(&path, vec![b'x'; MAX_SCORER_READ_BYTES as usize + 1]).unwrap();
+        let verification = verify_regex_match(tmp.path(), &path, "x+");
+        assert_eq!(verification.result, FleetTaskResult::Fail);
+        assert_eq!(
+            verification.failure_kind,
+            Some(FleetTaskFailureKind::Verifier)
+        );
+        let evidence = verification.evidence.join("\n");
+        assert!(
+            evidence.contains("refusing to read oversized evidence"),
+            "got: {evidence}"
+        );
+    }
+
+    // The stat-then-read post-check cannot be exercised through a regular
+    // file (its metadata length never changes between stat and read), so this
+    // test feeds a FIFO: `metadata.len()` is 0 (stat check passes) while the
+    // bytes streamed through it exceed the cap, which forces the
+    // `take(limit + 1)` post-check branch. Deleting the post-check, or
+    // dropping the `+1` so the read can never observe an over-cap length,
+    // makes this test fail. Unix-only because a named pipe is the primitive
+    // that decouples the stat from the read.
+    #[cfg(unix)]
+    #[test]
+    fn bounded_reader_post_check_rejects_stream_growing_past_cap() {
+        use std::io::Write;
+
+        let tmp = TempDir::new().unwrap();
+        let fifo = tmp.path().join("evidence.fifo");
+        // `std::os::unix::fs::mkfifo` is still unstable; the crate already
+        // ships `libc`, so create the named pipe through it directly.
+        let fifo_c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+        // Deliver MAX_SCORER_READ_BYTES + 1 bytes through the pipe; the
+        // writer blocks until the verifier opens the read end.
+        let fifo_for_writer = fifo.clone();
+        let writer = std::thread::spawn(move || {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&fifo_for_writer)
+                .ok()?;
+            let mut file = std::io::BufWriter::new(file);
+            file.write_all(&vec![b'x'; MAX_SCORER_READ_BYTES as usize + 1])
+                .ok()
+        });
+
+        let verification = verify_regex_match(tmp.path(), &fifo, "x+");
+        let _ = writer.join();
+        assert_eq!(verification.result, FleetTaskResult::Fail);
+        assert_eq!(
+            verification.failure_kind,
+            Some(FleetTaskFailureKind::Verifier)
+        );
+        // The stat branch reports "N bytes"; only the post-check reports
+        // growth, so pin the wording to prove which branch fired.
+        let evidence = verification.evidence.join("\n");
+        assert!(evidence.contains("file grew past the"), "got: {evidence}");
+    }
 }

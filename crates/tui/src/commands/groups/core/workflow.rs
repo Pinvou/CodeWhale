@@ -649,6 +649,39 @@ mod tests {
         assert_eq!(confirmed.objective.as_deref(), Some(objective));
     }
 
+    /// The `/workflow run <path>` bound added with this PR: a relative source
+    /// path of exactly `WORKFLOW_SOURCE_PATH_MAX_CHARS` chars passes the
+    /// path-sanity gate and drafts the saved-workflow review, and one char
+    /// more is refused (mirrors the objective-cap test above).
+    #[test]
+    fn workflow_run_source_path_respects_the_audited_char_bound() {
+        let mut app = test_app();
+
+        let ok_path = "a".repeat(WORKFLOW_SOURCE_PATH_MAX_CHARS);
+        let result = workflow(&mut app, Some(&format!("run {ok_path}")));
+        let Some(AppAction::WorkflowInstruction { instruction, .. }) = result.action else {
+            panic!("expected WorkflowInstruction action");
+        };
+        assert!(instruction.starts_with(WORKFLOW_DRAFT_INSTRUCTION_PREFIX));
+        assert!(!result.is_error, "{:?}", result.message);
+
+        let too_long_path = "a".repeat(WORKFLOW_SOURCE_PATH_MAX_CHARS + 1);
+        let result = workflow(&mut app, Some(&format!("run {too_long_path}")));
+        assert!(
+            result.is_error,
+            "a source path beyond the audited bound must be refused"
+        );
+        assert!(
+            result
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("bounded relative path"),
+            "{:?}",
+            result.message
+        );
+    }
+
     #[test]
     fn confirm_survives_ordinary_messages_between_draft_and_confirm() {
         let mut app = test_app();

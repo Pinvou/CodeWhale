@@ -982,3 +982,18 @@ async fn remote_install_surfaces_policy_gates_without_touching_disk() {
     );
     assert!(!plugins.join("demo").exists());
 }
+
+// The 64 MiB cap was sized by review to match the runtime registry staging
+// budget, which uses the same literal in two places (`plugins/registry.rs`
+// 64 * 1024 * 1024 on both `budget.bytes > ...` checks). A silent revert to
+// the old 5 MiB skill-installer cap would desync the two budgets and pass
+// every other test here, which passes the constant through symbolically.
+// The upper bound is const-asserted (a runtime `assert!` on a constant
+// comparison would trip clippy's `assertions_on_constants`); the exact
+// audited value stays a runtime pin.
+const _: () = assert!(DEFAULT_MAX_SIZE_BYTES <= 128 * 1024 * 1024);
+
+#[test]
+fn default_max_size_bytes_matches_audited_registry_budget() {
+    assert_eq!(DEFAULT_MAX_SIZE_BYTES, 64 * 1024 * 1024);
+}
