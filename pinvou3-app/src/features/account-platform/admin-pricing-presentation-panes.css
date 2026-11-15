@@ -1,0 +1,8 @@
+.adm-pricing-workspace .adm-pricing-panes{margin:0}
+.adm-pricing-workspace .adm-pricing-panes button:focus{outline:2px solid var(--adm-primary);outline-offset:2px}
+.adm-pricing-workspace .adm-pricing-pane{display:grid;min-width:0;gap:16px}
+.adm-pricing-workspace .adm-pricing-pane[hidden]{display:none}
+.adm-pricing-workspace .adm-pricing-pane-note{margin:0;color:var(--adm-muted);font-size:12px}
+.adm-finance-overview[data-finance-overview=pricing] .adm-finance-overview-grid{grid-template-columns:repeat(auto-fit,minmax(138px,1fr));gap:8px}
+.adm-finance-overview[data-finance-overview=pricing] .adm-finance-overview-card{min-height:0;padding:10px 12px}
+@media(max-width:400px){.adm-finance-overview[data-finance-overview=pricing] .adm-finance-overview-grid{grid-template-columns:1fr}}

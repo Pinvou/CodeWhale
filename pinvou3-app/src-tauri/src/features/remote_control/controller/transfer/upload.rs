@@ -396,6 +396,44 @@ impl AttachmentUploads {
         known || live
     }
 
+    /// Strong cleanup acknowledgement for an unsubmitted upload. Unlike the
+    /// legacy logical abort, success proves this handle's staging and every
+    /// published read owner were released. Absence alone is never this proof.
+    pub(crate) fn abort_confirmed(
+        &self,
+        handle_id: &str,
+        live: &LeaseContext,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<(), String> {
+        let handle = Self::handle(handle_id)?;
+        let mut state = self.state.lock();
+        let binding = if let Some(receipt) = state.completed.get(handle_id) {
+            if receipt.consumed {
+                return Err("transfer_binding_stale".into());
+            }
+            &receipt.binding
+        } else if let Some(context) = state.active.get(handle_id) {
+            &context.binding
+        } else {
+            state
+                .pending_cleanup
+                .get(handle_id)
+                .ok_or("transfer_unknown")?
+        };
+        if !binding_matches(binding, live, session_id, task_id)
+            || state.admission_owners.contains_key(handle_id)
+        {
+            return Err("transfer_binding_stale".into());
+        }
+        self.registry.abort(&handle);
+        self.release_staging(&mut state, handle_id);
+        if state.pending_cleanup.contains_key(handle_id) {
+            return Err("transfer_staging_cleanup_failed".into());
+        }
+        Ok(())
+    }
+
     pub(crate) fn cleanup_for_task(&self, task_id: &str) -> usize {
         self.cleanup_where(self.registry.take_for_task(task_id), |binding| {
             binding.task_id == task_id

@@ -81,7 +81,7 @@ function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, 
       </button>
     );
   }
-  if (model.state === 'downloaded') {
+  if (model.state === 'downloaded' || (model.state === 'deployed' && model.record?.card_update_pending)) {
     return (
       <button
         type="button"
@@ -90,7 +90,7 @@ function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, 
         data-testid="model-store-deploy"
         onClick={(event) => { event.stopPropagation(); onDeploy(model.record); }}
       >
-        {label('deploy', copy.deploying, copy.deploy)}
+        {label('deploy', copy.deploying, model.state === 'deployed' ? copy.redeploy : copy.deploy)}
       </button>
     );
   }
@@ -127,8 +127,10 @@ function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, 
  * @param {object} params - 参数。
  * @returns {React.ReactElement} 行卡。
  */
-function ModelRow({ model, copy, busyKind, onOpen, onDownload, onDeploy, onEnable, onStop, onUninstall }) {
-  const badge = STATE_BADGE[model.state] || STATE_BADGE.available;
+function ModelRow({ model, copy, busyKind, onOpen, onDownload, onDeploy, onEnable, onStop, onUninstall, onCheckUpdate, onVersions, hasUpdate = false }) {
+  const badge = model.state === 'deployed' && model.record?.card_update_pending
+    ? { key: 'cardUpdatePendingBadge', className: STATE_BADGE.downloaded.className }
+    : (STATE_BADGE[model.state] || STATE_BADGE.available);
   const busy = !!busyKind;
   const isDual = model.deploy_topology === 'dual';
 
@@ -181,6 +183,7 @@ function ModelRow({ model, copy, busyKind, onOpen, onDownload, onDeploy, onEnabl
             {copy[badge.key]}
           </span>
           {/* 双机是「这张卡能不能装」的前提，属于身份信息，不能混进下面那排参数里被略过 */}
+          {hasUpdate ? <span data-testid="model-store-update-badge" className="shrink-0 rounded-full bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 dark:bg-red-500/15 dark:text-red-300">{copy.startupUpdateBadge}</span> : null}
           {isDual ? (
             <span
               data-testid="model-store-row-dual"
@@ -193,6 +196,20 @@ function ModelRow({ model, copy, busyKind, onOpen, onDownload, onDeploy, onEnabl
         <div className="mt-0.5 truncate text-[13px] font-medium text-slate-500 dark:text-slate-400">
           {specLine(model)}
         </div>
+        {model.record && model.record.card_source !== 'builtin' ? (
+          <>
+          <button
+            type="button"
+            className={`mt-1 rounded text-[12px] hover:underline disabled:opacity-40 ${hasUpdate ? 'font-semibold text-red-700 dark:text-red-300' : 'text-blue-700 dark:text-blue-300'}`}
+            disabled={busy}
+            data-testid="model-store-check-card-update"
+            onClick={(event) => { event.stopPropagation(); onCheckUpdate(model.record); }}
+          >
+            {hasUpdate ? copy.startupUpdatesView : copy.cardUpdateCheck}
+          </button>
+          {onVersions ? <button type="button" className="ml-3 text-[11px] text-blue-600 dark:text-blue-400" onClick={(event) => { event.stopPropagation(); onVersions(model.record); }}>{copy.versionHistory}</button> : null}
+          </>
+        ) : null}
       </div>
 
       {/* biome-ignore lint/a11y/noStaticElementInteractions: 只是拦住冒泡，免得点按钮顺带打开详情 */}
@@ -206,7 +223,7 @@ function ModelRow({ model, copy, busyKind, onOpen, onDownload, onDeploy, onEnabl
             （见 model-store-logic.js 的 libraryStateOf），这里的 'deployed'
             已经隐含了「没在跑」。这个条件不是漏了——重新部署必须先停用，否则会
             撞上还占着端口的旧容器。 */}
-        {model.state === 'deployed' && model.record?.needs_redeploy ? (
+        {model.state === 'deployed' && model.record?.needs_redeploy && !model.record.card_update_pending ? (
           <button
             type="button"
             className={BTN_NEUTRAL}

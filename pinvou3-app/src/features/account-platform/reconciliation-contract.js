@@ -1,4 +1,4 @@
-import { encodeFinanceJSON, parseFinanceJSON, requireFinanceID } from './finance-contract.js';
+import { encodeFinanceJSON, integerMoney, parseFinanceJSON, requireFinanceID } from './finance-contract.js';
 
 export const RECONCILIATION_ACTIONS = ['CLAIM', 'ASSIGN', 'SET_REPAIR_ACTION', 'RESOLVE', 'IGNORE', 'REOPEN'];
 export function reconciliationCaseLabel(caseType, copy) {
@@ -23,18 +23,60 @@ export function requireReconciliationRun(item, facts) {
   if (item.channel !== facts.channel || item.business_date !== facts.business_date || item.status !== 'COMPLETED') throw new Error('INVALID_FINANCE_ACK');
   return item;
 }
+export const RECONCILIATION_BILL_MAX_BYTES = (64 << 20) - 1024;
+const BILL_FIELDS = Object.entries({ merchant_order_no: 256, provider_reference_id: 256, channel_transaction_id: 256, status: 64, currency: 16 });
+function billIssue(kind, row, field) {
+  return Object.assign(new Error('INVALID_RECONCILIATION_INPUT'), { kind, row, field });
+}
 export function reconciliationImportItems(text) {
-  if (typeof text !== 'string' || new TextEncoder().encode(text).length > (64 << 20) - 1024) throw new Error('INVALID_RECONCILIATION_INPUT');
-  const items = parseFinanceJSON(text);
-  if (!Array.isArray(items) || items.length === 0 || items.length > 100000) throw new Error('INVALID_RECONCILIATION_INPUT');
-  for (const item of items) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('INVALID_RECONCILIATION_INPUT');
-    for (const [key, limit] of Object.entries({ merchant_order_no: 256, provider_reference_id: 256, channel_transaction_id: 256, status: 64, currency: 16 })) {
-      if (item[key] !== undefined && (typeof item[key] !== 'string' || new TextEncoder().encode(item[key]).length > limit)) throw new Error('INVALID_RECONCILIATION_INPUT');
+  const encoder = new TextEncoder();
+  if (typeof text !== 'string') throw billIssue('billInvalid');
+  if (text.length > RECONCILIATION_BILL_MAX_BYTES || encoder.encode(text).length > RECONCILIATION_BILL_MAX_BYTES) throw billIssue('billTooLarge');
+  let items;
+  try { items = parseFinanceJSON(text); }
+  catch (reason) { throw billIssue(reason?.message === 'INVALID_FINANCE_AMOUNT' ? 'billInvalidAmount' : 'billInvalid'); }
+  if (!Array.isArray(items)) throw billIssue('billNotArray');
+  if (items.length === 0) throw billIssue('billEmpty');
+  if (items.length > 100000) throw billIssue('billTooMany');
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index];
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw billIssue('billInvalidRow', index + 1);
+    for (const [key, limit] of BILL_FIELDS) {
+      if (item[key] !== undefined && (typeof item[key] !== 'string' || encoder.encode(item[key]).length > limit)) throw billIssue('billInvalidField', index + 1, key);
+    }
+    // Go's optional string fields accept null as the empty/default value. Reject
+    // other JSON types before advertising a format-ready bill, without copying
+    // the server's entry-type or channel business rules into this preview.
+    for (const key of ['entry_type', 'channel']) {
+      if (item[key] !== undefined && item[key] !== null && typeof item[key] !== 'string') throw billIssue('billInvalidField', index + 1, key);
     }
   }
-  if (new TextEncoder().encode(encodeFinanceJSON(items)).length > (64 << 20) - 1024) throw new Error('INVALID_RECONCILIATION_INPUT');
+  if (encoder.encode(encodeFinanceJSON(items)).length > RECONCILIATION_BILL_MAX_BYTES) throw billIssue('billTooLarge');
   return items;
+}
+export function reconciliationImportPreview(text) {
+  const items = reconciliationImportItems(text);
+  const totals = new Map();
+  for (let index = 0; index < items.length; index++) {
+    const row = index + 1, item = items[index];
+    for (const field of ['merchant_order_no', 'currency', 'status', 'paid_at']) {
+      if (typeof item[field] !== 'string' || !item[field].trim()) throw billIssue('billInvalidField', row, field);
+    }
+    // time.Time's JSON contract is RFC3339, not the browser's permissive date
+    // parser. Validate the calendar too, without changing the original value.
+    const timestamp = /^(\d{4}-\d{2}-\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:[.,]\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.exec(item.paid_at);
+    try {
+      if (!timestamp) throw new Error('INVALID_RECONCILIATION_INPUT');
+      requireReconciliationDate(timestamp[1]);
+    } catch { throw billIssue('billInvalidField', row, 'paid_at'); }
+    if (![item.provider_reference_id, item.channel_transaction_id].some(value => typeof value === 'string' && value.trim())) throw billIssue('billMissingReference', row);
+    let amount;
+    try { amount = integerMoney(item.amount_fen); }
+    catch { throw billIssue('billInvalidField', row, 'amount_fen'); }
+    if (amount <= 0n) throw billIssue('billInvalidField', row, 'amount_fen');
+    totals.set(item.currency, (totals.get(item.currency) ?? 0n) + amount);
+  }
+  return { items, totals: Array.from(totals, ([currency, amount]) => ({ currency, fen: amount.toString() })) };
 }
 export function reconciliationCommand(action, fields, observation) {
   if (!RECONCILIATION_ACTIONS.includes(action) || [...fields.reason.trim()].length < 10) throw new Error('INVALID_RECONCILIATION_INPUT');

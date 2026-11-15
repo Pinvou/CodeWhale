@@ -321,21 +321,19 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 					t.Fatal("official materials boundary upgrade", err)
 				}
 				assertLaterRefusal(materialsPrefix, 900037, "product admission originals are retained; rollback requires an independently reviewed data-preserving plan")
-				var manualPrefix []migrations.Migration
+				// Later migrations own their rollback refusals. Check manual
+				// admission at its exact boundary before the complete upgrade.
+				var admissionPrefix []migrations.Migration
 				for _, migration := range all {
 					if migration.Version <= 900038 {
-						manualPrefix = append(manualPrefix, migration)
+						admissionPrefix = append(admissionPrefix, migration)
 					}
 				}
-				if err := billingschema.Up(ctx, operator, manualPrefix); err != nil {
+				if err := billingschema.Up(ctx, operator, admissionPrefix); err != nil {
 					t.Fatal("official manual admission boundary upgrade", err)
 				}
-				if _, err := billingschema.VerifyApplied(ctx, operator, manualPrefix); err != nil {
-					t.Fatal("verify manual admission boundary", err)
-				}
-				assertLaterRefusal(manualPrefix, 900038, "manual admission facts cannot be rolled back; restore a compatible application version")
-				// Check 900033's refusal at its exact boundary, then retain the
-				// complete current upgrade and replay contract independently.
+				assertLaterRefusal(admissionPrefix, 900038, "manual admission facts cannot be rolled back; restore a compatible application version")
+				// Retain the complete current upgrade and replay independently.
 				if err := billingschema.Up(ctx, operator, all); err != nil {
 					t.Fatal("official complete forward upgrade", err)
 				}

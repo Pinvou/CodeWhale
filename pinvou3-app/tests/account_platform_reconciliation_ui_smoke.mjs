@@ -10,7 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/snap/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(fs.existsSync);
 assert.ok(chrome, 'Browser unavailable; no UI validation performed');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-f03-ui-'));
-let vite; let browser; let page; let passed = 0;
+let vite; let browser; let page; let passed = 0; let currentCase = '';
 const errors = [];
 try {
   const producedCase = process.env.PINVOU_ORPHAN_CASE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.PINVOU_ORPHAN_CASE_FIXTURE, 'utf8')).case : null;
@@ -22,21 +22,52 @@ try {
   const url = `http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-reconciliation.html`;
   const fresh = async language => { errors.length = 0; await page.goto(url); await page.waitForFunction(() => window.f03); await page.evaluate(language => { window.f03.language = language; window.f03.render(); }, language); await page.waitForSelector('tbody tr'); };
   const click = async key => { assert.ok(await page.evaluate(key => { const text = window.f03.copy()[key]; const button = [...document.querySelectorAll('button')].find(value => value.textContent === text && !value.disabled); if (!button) return false; button.click(); return true; }, key), `Missing action ${key}`); };
-  const selectCase = async () => { await click('cases'); await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes(window.f03.orphanCase?.merchant_order_no || 'controlled-merchant')); await page.evaluate(() => document.querySelector('tbody button').click()); await page.waitForSelector('details'); };
-  const caseRun = async (name, action) => { await action(); assert.deepEqual(errors, []); passed++; console.log(`PASS ${name}`); };
+  const selectCase = async () => {
+    await click('cases');
+    await page.waitForSelector('.adm-case-scope');
+    assert.equal(await page.evaluate(() => window.f03.calls.some(call => call.url.includes('/reconciliation-cases?'))), false, 'the unselected range does not implicitly query all cases');
+    await click('caseScopeAll');
+    await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes(window.f03.orphanCase?.merchant_order_no || 'controlled-merchant'));
+    assert.equal(await page.evaluate(() => new URL(window.f03.calls.find(call => call.url.includes('/reconciliation-cases?')).url, location.origin).searchParams.has('run_id')), false, 'all batches is an explicit unscoped query');
+    await page.evaluate(() => document.querySelector('tbody button').click()); await page.waitForSelector('.adm-case-evidence');
+  };
+  const caseRun = async (name, action) => { currentCase = name; await action(); assert.deepEqual(errors, []); passed++; console.log(`PASS ${name}`); };
+  await caseRun('Cases require an explicit all or batch scope and retain filters when changing scope', async () => {
+    await fresh('en'); await click('cases'); await page.waitForSelector('.adm-case-scope');
+    const toolbar = '.adm-reconciliation-workspace > .adm-reconciliation-toolbar';
+    assert.equal(await page.$eval(toolbar + ' select', input => input.disabled), true);
+    assert.equal(await page.$eval(toolbar + ' button', button => button.disabled), true);
+    assert.equal(await page.evaluate(() => window.f03.calls.some(call => call.url.includes('/reconciliation-cases?'))), false);
+    await click('caseScopeAll'); await page.waitForSelector('.adm-reconciliation-cases tbody tr');
+    assert.equal(await page.$eval(toolbar + ' select', input => input.disabled), false);
+    const afterAll = await page.evaluate(() => window.f03.calls.filter(call => call.url.includes('/reconciliation-cases?')).length);
+    await click('caseScopeClear'); await page.waitForFunction(() => document.querySelector('.adm-reconciliation-workspace > .adm-reconciliation-toolbar select').disabled);
+    assert.equal(await page.$('.adm-reconciliation-cases tbody tr'), null);
+    assert.equal(await page.evaluate(() => window.f03.calls.filter(call => call.url.includes('/reconciliation-cases?')).length), afterAll);
+    await click('runs'); await page.waitForSelector('.adm-reconciliation-table tbody tr');
+    await page.click('.adm-reconciliation-table tbody button');
+    await page.waitForSelector('.adm-case-batch-summary'); await page.waitForSelector('.adm-reconciliation-cases tbody tr');
+    await page.select(toolbar + ' select', 'OPEN');
+    await page.waitForFunction(() => window.f03.calls.some(call => { const query = new URL(call.url, location.origin).searchParams; return call.url.includes('/reconciliation-cases?') && query.get('run_id') === window.f03.id && query.get('status') === 'OPEN'; }));
+    await click('caseScopeAll');
+    await page.waitForFunction(() => { const call = window.f03.calls.filter(call => call.url.includes('/reconciliation-cases?')).at(-1); const query = new URL(call.url, location.origin).searchParams; return !query.has('run_id') && query.get('status') === 'OPEN'; });
+    assert.equal(await page.$eval(toolbar + ' select', input => input.value), 'OPEN');
+    assert.equal(await page.evaluate(() => window.f03.calls.some(call => call.method === 'POST')), false, 'scope selection only reads facts');
+  });
   for (const language of ['zh', 'en', 'ja']) {
     await caseRun(`${language}: orphan review displays producer evidence and binds the refreshed observation`, async () => {
       await fresh(language); await page.evaluate(() => window.f03.useOrphanFixture()); await selectCase();
-      await page.click('details summary');
+      await page.click('.adm-case-evidence summary');
       assert.ok(await page.evaluate(() => {
         const item = window.f03.orphanCase;
-        const text = document.querySelector('details').textContent;
+        const text = document.querySelector('.adm-case-evidence').textContent;
         return text.includes(window.f03.copy().latestObservation) && text.includes(item.latest_observation.observation_id) &&
           text.includes(item.internal_snapshot.payment_order.amount_fen) && text.includes(item.latest_observation.internal_snapshot.payment_order.amount_fen) &&
           item.internal_snapshot.payment_date_verification_required && item.latest_observation.internal_snapshot.payment_order.paid_at === null;
       }));
-      await page.select('section section select', 'IGNORE');
-      const fields = await page.$$('section section textarea');
+      await page.select('.adm-reconciliation-workspace > .adm-panel select', 'IGNORE');
+      await page.waitForFunction(() => document.querySelectorAll('.adm-reconciliation-workspace > .adm-panel textarea').length === 2);
+      const fields = await page.$$('.adm-reconciliation-workspace > .adm-panel textarea');
       await fields[0].type('Controlled review of displayed observation'); await fields[1].type('Controlled explicit human review reason');
       const original = await page.evaluate(() => window.f03.orphanCase.latest_observation.observation_id);
       await page.evaluate(() => {
@@ -45,16 +76,16 @@ try {
         latest.latest_observation.internal_snapshot.payment_order.amount_fen = (BigInt(latest.latest_observation.internal_snapshot.payment_order.amount_fen) + 1n).toString();
         window.f03.orphanCase = latest;
       });
-      await click('submit'); await page.waitForFunction(() => document.querySelector('[role=alert]')?.textContent === window.f03.copy().sourceChanged);
-      await click('refresh'); await page.waitForFunction(() => document.querySelector('details').textContent.includes(window.f03.other));
-      await click('submit'); await page.waitForFunction(() => document.querySelector('[role=status]')?.textContent === window.f03.copy().saved);
+      await click('submit'); await page.waitForFunction(() => document.querySelector('.adm-reconciliation-workspace > .adm-panel [role=alert]')?.textContent === window.f03.copy().sourceChanged);
+      await click('refresh'); await page.waitForFunction(() => document.querySelector('.adm-case-evidence').textContent.includes(window.f03.other));
+      await click('submit'); await page.waitForFunction(() => document.querySelector('.adm-reconciliation-workspace > .adm-panel [role=status]')?.textContent === window.f03.copy().saved);
       const commands = await page.evaluate(() => window.f03.calls.filter(value => value.url.endsWith('/commands')).map(value => ({ facts: JSON.parse(value.body), key: value.key })));
       assert.equal(commands.length, 2); assert.equal(commands[0].facts.observed_observation_id, original);
       assert.notEqual(commands[0].key, commands[1].key); assert.equal(commands[1].facts.observed_observation_id, await page.evaluate(() => window.f03.other));
     });
     await caseRun(`${language}: missing supplier occurrence dates remain explicit manual review cases`, async () => {
       await fresh(language); await page.evaluate(() => { window.f03.caseType = 'REFUND_DATE_UNVERIFIED'; }); await selectCase();
-      assert.ok(await page.evaluate(() => document.querySelector('tbody').textContent.includes(window.f03.copy().caseTypes.REFUND_DATE_UNVERIFIED) && document.querySelector('section section h3').textContent.includes(window.f03.copy().caseTypes.REFUND_DATE_UNVERIFIED)));
+      assert.ok(await page.evaluate(() => document.querySelector('tbody').textContent.includes(window.f03.copy().caseTypes.REFUND_DATE_UNVERIFIED) && document.querySelector('.adm-reconciliation-workspace > .adm-panel > h3').textContent.includes(window.f03.copy().caseTypes.REFUND_DATE_UNVERIFIED)));
       await fresh(language); await page.evaluate(() => { window.f03.caseType = 'CHARGEBACK_DATE_UNVERIFIED'; }); await selectCase();
       assert.ok(await page.evaluate(() => document.querySelector('tbody').textContent.includes(window.f03.copy().caseTypes.CHARGEBACK_DATE_UNVERIFIED)));
     });
@@ -74,13 +105,13 @@ try {
     });
     await caseRun(`${language}: read-only differences retain exact financial facts`, async () => {
       await fresh(language); await page.evaluate(() => { window.f03.readonly = true; window.f03.switchIdentity(); }); await page.waitForSelector('tbody tr'); await selectCase();
-      assert.ok(await page.evaluate(() => document.querySelector('details').textContent.includes('9007199254740993')));
+      assert.ok(await page.evaluate(() => document.querySelector('.adm-case-evidence').textContent.includes('9007199254740993')));
       assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some(value => [window.f03.copy().submit, window.f03.copy().run, window.f03.copy().import].includes(value.textContent))), false);
     });
   }
   await caseRun('Changing filters retires the old cursor and RUNNING null completion remains visible', async () => {
     await fresh('en'); await page.evaluate(() => { window.f03.paginated = true; window.f03.running = true; }); await click('refresh');
-    await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes('RUNNING')); await click('next');
+    await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes(window.f03.copy().batchStatuses.RUNNING)); await click('next');
     await page.waitForFunction(() => window.f03.calls.some(call => call.url.includes('cursor=controlled-page-2')));
     await page.waitForFunction(() => [...document.querySelectorAll('button')].every(button => button.textContent !== window.f03.copy().refresh || !button.disabled));
     await page.select('select', 'ALIPAY');
@@ -98,36 +129,46 @@ try {
       }));
       await page.evaluate(() => { window.f03.unknownRun = true; });
       for (const action of ['run', 'import']) {
-        if (action === 'import') await page.evaluate(() => {
-          const field = document.querySelector('textarea');
-          const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-          set.call(field, '[{"entry_type":"PAYMENT","amount_fen":1}]'); field.dispatchEvent(new Event('input', { bubbles: true }));
-        });
+        if (action === 'import') {
+          await click('billAdvanced');
+          await page.waitForSelector('.adm-reconciliation-bill textarea');
+          await page.evaluate(() => {
+            const field = document.querySelector('.adm-reconciliation-bill textarea');
+            const date = document.querySelector('.adm-reconciliation-workspace > .adm-reconciliation-toolbar input[type=date]').value;
+            const channel = document.querySelector('.adm-reconciliation-workspace > .adm-reconciliation-toolbar select').value;
+            const items = [{ entry_type: 'PAYMENT', merchant_order_no: 'controlled-import-order', channel_transaction_id: 'controlled-import-transaction', channel, amount_fen: 1, currency: 'CNY', status: 'SUCCESS', paid_at: date + 'T10:00:00+08:00' }];
+            window.f03.importedItems = items;
+            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, JSON.stringify(items));
+            field.dispatchEvent(new Event('input', { bubbles: true }));
+          });
+          await click('billPreview');
+          await page.waitForFunction(() => document.querySelector('.adm-reconciliation-bill-preview [role=status]')?.textContent === window.f03.copy().billReady);
+        }
         await click(action);
-        await page.waitForFunction(() => document.querySelector('[role=alert]')?.textContent === window.f03.copy().runUnknown);
-        assert.notEqual(await page.evaluate(() => document.querySelector('[role=alert]').textContent), await page.evaluate(() => window.f03.copy().unknown));
+        await page.waitForFunction(() => document.querySelector('.adm-reconciliation-workspace > .adm-inline-message[role=alert] strong')?.textContent === window.f03.copy().runUnknown);
+        assert.notEqual(await page.evaluate(() => document.querySelector('.adm-reconciliation-workspace > .adm-inline-message[role=alert] strong').textContent), await page.evaluate(() => window.f03.copy().unknown));
       }
       await click('refresh');
       assert.ok(await page.evaluate(() => {
         const writes = window.f03.calls.filter(value => value.method === 'POST' && !value.url.endsWith('/commands'));
-        return writes.length === 2 && writes.every(value => !value.key) && window.f03.calls.filter(value => value.url.includes('/reconciliation-runs?')).length === 2;
+        return writes.length === 2 && writes.every(value => !value.key) && JSON.stringify(JSON.parse(writes[1].body).items) === JSON.stringify(window.f03.importedItems) && window.f03.calls.filter(value => value.url.includes('/reconciliation-runs?')).length === 2;
       }));
     });
   }
   await caseRun('Unknown command preserves actor resource facts and key across language changes', async () => {
-    await fresh('en'); await selectCase(); await page.type('section section textarea', 'Controlled reconciliation claim reason'); await page.evaluate(() => { window.f03.unknown = true; }); await click('submit'); await page.waitForSelector('[role=alert]');
-    assert.ok(await page.evaluate(() => [...document.querySelectorAll('section section input, section section textarea, section section select')].every(value => value.disabled)));
-    await page.evaluate(() => { window.f03.language = 'ja'; window.f03.unknown = false; window.f03.render(); }); await click('retry'); await page.waitForFunction(() => document.querySelector('[role=status]')?.textContent === window.f03.copy().saved);
+    await fresh('en'); await selectCase(); await page.type('.adm-reconciliation-workspace > .adm-panel textarea', 'Controlled reconciliation claim reason'); await page.evaluate(() => { window.f03.unknown = true; }); await click('submit'); await page.waitForSelector('[role=alert]');
+    assert.ok(await page.evaluate(() => [...document.querySelectorAll('.adm-reconciliation-workspace > .adm-panel input, .adm-reconciliation-workspace > .adm-panel textarea, .adm-reconciliation-workspace > .adm-panel select')].every(value => value.disabled)));
+    await page.evaluate(() => { window.f03.language = 'ja'; window.f03.unknown = false; window.f03.render(); }); await click('retry'); await page.waitForFunction(() => document.querySelector('.adm-reconciliation-workspace > .adm-panel > [role=status]')?.textContent === window.f03.copy().saved);
     assert.ok(await page.evaluate(() => { const values = window.f03.calls.filter(value => value.url.endsWith('/commands')); return values.length === 2 && values[0].key === values[1].key && values[0].body === values[1].body; }));
   });
   await caseRun('Wrong successful case ACK remains unknown and same-key retryable', async () => {
-    await fresh('en'); await selectCase(); await page.type('section section textarea', 'Controlled reconciliation claim reason'); await page.evaluate(() => { window.f03.wrong = true; }); await click('submit'); await page.waitForSelector('[role=alert]');
-    assert.ok(await page.evaluate(() => document.querySelector('[role=alert]').textContent === window.f03.copy().unknown));
-    await page.evaluate(() => { window.f03.wrong = false; }); await click('retry'); await page.waitForFunction(() => document.querySelector('[role=status]')?.textContent === window.f03.copy().saved);
+    await fresh('en'); await selectCase(); await page.type('.adm-reconciliation-workspace > .adm-panel textarea', 'Controlled reconciliation claim reason'); await page.evaluate(() => { window.f03.wrong = true; }); await click('submit'); await page.waitForSelector('[role=alert]');
+    assert.ok(await page.evaluate(() => document.querySelector('.adm-reconciliation-workspace > .adm-panel > [role=alert]').textContent === window.f03.copy().unknown));
+    await page.evaluate(() => { window.f03.wrong = false; }); await click('retry'); await page.waitForFunction(() => document.querySelector('.adm-reconciliation-workspace > .adm-panel > [role=status]')?.textContent === window.f03.copy().saved);
   });
   await caseRun('Late old-owner case completion cannot update the next identity', async () => {
-    await fresh('en'); await selectCase(); await page.type('section section textarea', 'Controlled reconciliation claim reason'); await page.evaluate(() => { window.f03.delayed = true; }); await click('submit'); await page.waitForFunction(() => typeof window.f03.release === 'function');
-    await page.evaluate(() => { window.f03.switchIdentity(); }); await page.waitForFunction(() => !document.querySelector('details')); await page.evaluate(() => window.f03.release());
+    await fresh('en'); await selectCase(); await page.type('.adm-reconciliation-workspace > .adm-panel textarea', 'Controlled reconciliation claim reason'); await page.evaluate(() => { window.f03.delayed = true; }); await click('submit'); await page.waitForFunction(() => typeof window.f03.release === 'function');
+    await page.evaluate(() => { window.f03.switchIdentity(); }); await page.waitForFunction(() => !document.querySelector('.adm-case-evidence')); await page.evaluate(() => window.f03.release());
     assert.equal(await page.evaluate(() => [...document.querySelectorAll('[role=status]')].some(value => value.textContent === window.f03.copy().saved)), false);
   });
   let repairFailures=0;
@@ -136,7 +177,7 @@ try {
     await repairRun(`${language}: current repair all producer types are localized in list and detail`, async()=> {
       for(const type of ['UNSUPPORTED_PROVIDER_ENTRY','DUPLICATE_TRANSACTION','INTERNAL_PAID_PROVIDER_MISSING','INTERNAL_REFUND_PROVIDER_MISSING','INTERNAL_CHARGEBACK_PROVIDER_MISSING','AMOUNT_MISMATCH','REFUND_AMOUNT_MISMATCH','PAYMENT_LEDGER_INVALID','REFUND_LEDGER_INVALID','CHARGEBACK_LEDGER_INVALID','PAYMENT_PACKAGE_INVALID','PAYMENT_LEDGER_MISSING','REFUND_LEDGER_MISSING','CHARGEBACK_LEDGER_MISSING','PROVIDER_PAID_INTERNAL_MISSING','PROVIDER_REFUND_INTERNAL_MISSING','PROVIDER_CHARGEBACK_INTERNAL_MISSING','REFUND_DATE_UNVERIFIED','CHARGEBACK_DATE_UNVERIFIED','FUTURE_PROVIDER_EVIDENCE']) {
         await fresh(language);await page.evaluate(type=>{window.f03.caseType=type;},type);await selectCase();
-        const actual=await page.evaluate(type=>({label:window.f03.copy().caseTypes[type],table:document.querySelector('tbody').textContent,detail:document.querySelector('section section h3').textContent}),type);
+        const actual=await page.evaluate(type=>({label:window.f03.copy().caseTypes[type],table:document.querySelector('tbody').textContent,detail:document.querySelector('.adm-reconciliation-workspace > .adm-panel > h3').textContent}),type);
         if(type==='FUTURE_PROVIDER_EVIDENCE') {assert.ok(actual.table.includes(type));assert.ok(actual.detail.includes(type));}
         else {assert.ok(actual.label,`Missing ${type}`);assert.notEqual(actual.label,type);assert.ok(actual.table.includes(actual.label));assert.ok(actual.detail.includes(actual.label));}
       }
@@ -145,25 +186,25 @@ try {
       await fresh(language);
       for(const [status,code,key] of [[400,'INVALID_FILTER','invalid'],[400,'INVALID_REQUEST','invalid'],[400,'PAGINATION_CURSOR_INVALID','sourceChanged'],[400,'UNRECOGNIZED_ERROR','sourceChanged'],[403,'PERMISSION_DENIED','permission'],[503,'AUTHORIZATION_UNAVAILABLE','unavailable']]) {
         await page.evaluate(value=>{window.f03.readStatus=value.status;window.f03.readCode=value.code;},{status,code});await click('refresh');
-        await page.waitForFunction(key=>document.querySelector('[role=alert]')?.textContent===window.f03.copy()[key],{},key);
+        await page.waitForFunction(key=>document.querySelector('.adm-case-query-state [role=alert]')?.textContent===window.f03.copy()[key],{},key);
       }
       for(const [status,code,key] of [[400,'INVALID_REQUEST','invalid'],[409,'BILLING_CONFLICT','sourceChanged'],[503,'COMMAND_RESULT_UNKNOWN','runUnknown']]) {
         await fresh(language);await page.evaluate(value=>{window.f03.writeStatus=value.status;window.f03.writeCode=value.code;},{status,code});await click('run');
-        await page.waitForFunction(key=>document.querySelector('[role=alert]')?.textContent===window.f03.copy()[key],{},key);
+        await page.waitForFunction(key=>document.querySelector('.adm-reconciliation-workspace > .adm-inline-message[role=alert] strong')?.textContent===window.f03.copy()[key],{},key);
       }
     });
     await repairRun(`${language}: current repair case input rejects remain editable and unknown writes keep the key`,async()=>{
-      await fresh(language);await selectCase();await page.type('section section textarea','Controlled reconciliation claim reason');
+      await fresh(language);await selectCase();await page.type('.adm-reconciliation-workspace > .adm-panel textarea','Controlled reconciliation claim reason');
       await page.evaluate(()=>{window.f03.commandStatus=400;window.f03.commandCode='INVALID_REQUEST';});await click('submit');
-      await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f03.copy().invalid);
-      assert.equal(await page.evaluate(()=>document.querySelector('section section textarea').disabled),false);
+      await page.waitForFunction(()=>document.querySelector('.adm-reconciliation-workspace > .adm-panel > [role=alert]')?.textContent===window.f03.copy().invalid);
+      assert.equal(await page.evaluate(()=>document.querySelector('.adm-reconciliation-workspace > .adm-panel textarea').disabled),false);
       await page.evaluate(()=>{window.f03.commandStatus=503;window.f03.commandCode='COMMAND_RESULT_UNKNOWN';});await click('submit');
-      await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f03.copy().unknown);
+      await page.waitForFunction(()=>document.querySelector('.adm-reconciliation-workspace > .adm-panel > [role=alert]')?.textContent===window.f03.copy().unknown);
       const unresolved=await page.evaluate(()=>window.f03.calls.filter(value=>value.url.endsWith('/commands')).at(-1));
       await page.evaluate(()=>{window.f03.commandStatus=400;window.f03.commandCode='INVALID_REQUEST';});await click('retry');
-      await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f03.copy().unknown);
+      await page.waitForFunction(()=>document.querySelector('.adm-reconciliation-workspace > .adm-panel > [role=alert]')?.textContent===window.f03.copy().unknown);
       await page.evaluate(()=>{window.f03.commandStatus=0;});await click('retry');
-      await page.waitForFunction(()=>document.querySelector('[role=status]')?.textContent===window.f03.copy().saved);
+      await page.waitForFunction(()=>document.querySelector('.adm-reconciliation-workspace > .adm-panel > [role=status]')?.textContent===window.f03.copy().saved);
       const calls=await page.evaluate(()=>window.f03.calls.filter(value=>value.url.endsWith('/commands')).slice(-3));
       assert.ok(calls.every(value=>value.key===unresolved.key && value.body===unresolved.body));
     });
@@ -172,14 +213,18 @@ try {
     await repairRun(`${language}: current repair scoped cases capacity requests narrower filters without declaring valid input invalid`,async()=>{
       await fresh(language);await selectCase();
       await page.evaluate(()=>{window.f03.readStatus=422;window.f03.readCode='PAGINATION_FILTER_REQUIRED';});await click('refresh');
-      await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f03.copy().narrowFilters);
+      await page.waitForFunction(()=>document.querySelector('.adm-case-query-state [role=alert]')?.textContent===window.f03.copy().narrowFilters);
       assert.equal(await page.evaluate(()=>[...document.querySelectorAll('input')].some(value=>value.disabled)),false);
       assert.ok(await page.evaluate(()=>window.f03.calls.at(-1).url.includes('/reconciliation-cases?')));
       await page.evaluate(()=>{window.f03.readCode='UNRECOGNIZED_ERROR';});await click('refresh');
-      await page.waitForFunction(()=>document.querySelector('[role=alert]')?.textContent===window.f03.copy().unavailable);
+      await page.waitForFunction(()=>document.querySelector('.adm-case-query-state [role=alert]')?.textContent===window.f03.copy().unavailable);
     });
   }
   if(repairFailures) throw new Error(`${repairFailures} current repair cases failed`);
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
-} catch (error) { console.error(`FAIL after ${passed} PASS: ${error.message}`); process.exitCode = 1; }
+} catch (error) {
+  console.error(`FAIL after ${passed} PASS: ${currentCase}: ${error.stack || error.message}`);
+  try { console.error(JSON.stringify(await page.evaluate(() => ({ text: document.body.innerText, calls: window.f03.calls })))); } catch { /* Preserve the original failure if the page has already closed. */ }
+  process.exitCode = 1;
+}
 finally { if (browser) await browser.close(); if (vite) await vite.close(); fs.rmSync(profile, { recursive: true, force: true }); }

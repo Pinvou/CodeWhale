@@ -212,9 +212,27 @@ const expectedProtocolHashes = {
   // now opts into deferBackgroundNotify so background output chunks ride the
   // existing terminal 50ms publication timer; invoke and event wire shapes
   // stay unchanged (publication timing is the deliberate change).
-  // Combined Account lifecycle receipts and main #2135 stream publication.
-  // Retains both call surfaces; digest recomputed from the fixed combined tree.
-  chat: '6d9277e52fc51d55680e832370673095ae41a8b890fc4ad9c23d0f986246a982',
+  // T0-d (#701 桥接面对齐, FFE4-1) 重算：remote_control:tools_changed 监听体
+  // 的内联 CustomEvent 派发改经 window.PinvouToolStoreEvents
+  // .notifyComposerToolsChanged()（shared/tool-store-events.js），命令面无增删。
+  // Recomputed for the #2135 review fix wave: the chat:done listener body in
+  // chat-events.js gains cancelPendingStreamNotify(sid) (with its trailing
+  // comment) so a background session's terminal cancels its own pending
+  // stream notify frame — the wave's only digest-input change. The desktop
+  // admission-reject flush pairing and its context parameter (chat.js) and
+  // the chat-events cluster export entry all sit outside every invoke/listen
+  // call span, so they ride along hash-neutral — no invoke or listen call-set
+  // change.
+  // r10 重钉（评审 r10 P1）：r9 的取消点修复改写了 chat:done 监听体/notify 抑制臂/
+  // refresh 钩子的载荷文本——签名清单不变（52 条），但 join 文本哈希随之漂移；
+  // 原钉 ec6881aa 是父提交 1d2aa96d8 的值。此钉=当前 head 实算值。
+  // r12 重钉（评审 r12 P2 收口批）：终态节流臂加 terminalForeground 前台门
+  // （runSyncOnSession 之前捕获）、isNotifySuppressed 谓词并入
+  // startupNotificationBatching——invoke/listen 调用面零增删（52 条不变），
+  // 抑制臂载荷文本漂移。此钉=当前 head 实算值。
+  // 合并 main fb01c48b6 重钉：main 侧 Account lifecycle receipts + 流式发布
+  // 载荷改动与本分支 r12 收口批叠加，chat 面哈希=合并树实算值。
+  chat: '1e18e33421ccd708e6cf931c8ad7dadfac332ff2fb0d6c130e251bab5618e105',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -275,9 +293,11 @@ const expectedProtocolHashes = {
   // the set_global_shortcut_config invoke (the dedicated command owns both
   // the plugin registration and the prefs persistence; update_settings
   // stays untouched).
-  // 三十三轮评审 P2 重算：settings 域新增 delete_model_if_matches invoke
-  // （设备管理移除回收的条件删除——最终事务按快照 base_url/model 核对）。
-  settings: '10c26a93bdea3a0d5cdca5f667cfaad0a28213b93194ed13e8b6b9ce10b7262d',
+  // Retain PR #1995 model refresh ordering and Account builtin toggles and typed voice references; updater also
+  // inherits main's Windows progress event and installation lifecycle.
+  // Guarded store deletion, endpoint-conditional deletion and models:changed are retained; list_models
+  // uses the shared loader so cross-cluster reads share one ordering boundary.
+  settings: 'c10e8fae21066d9b5c57f21d1b213734983dd9375c295e77fac5ac6b85cb14d6',
   updater: 'cfe92470008c2dade64f891c36a5fa70930478f803d4d2a6d100e68d9c29392b',
   // Voice draft preparation now carries its typed source/model reference;
   // session bindings remain authoritative and the command set is unchanged.
