@@ -3540,6 +3540,64 @@ mod tests {
         assert_eq!(run_count(), 3, "every explicit call runs");
     }
 
+    /// Boot checkpoint recovery (`lib.rs`'s
+    /// `recover_interrupted_checkpoint_for_resume`) persists the recovered
+    /// record on a fresh per-boot manager whose janitor throttle has not
+    /// armed. It must route through [`SessionManager::save_session_edit`]:
+    /// the throttled janitor's first run always fires with no `keep`, so a
+    /// `save_session` there would prune the just-recovered (stale) record
+    /// whenever `MAX_SESSIONS` newer non-archived records exist. Boot-time
+    /// retention belongs to the keep-protected boot janitor instead.
+    /// Observed behaviorally (the recovered record survives beyond the cap)
+    /// because the recovery path constructs its own manager, so the
+    /// instance-local `janitor_runs` counter cannot see it.
+    #[test]
+    fn boot_checkpoint_recovery_never_arms_the_retention_janitor() {
+        assert_eq!(MAX_SESSIONS, 1_000, "the audited retention cap");
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+        let _codewhale_home = crate::test_support::EnvVarGuard::remove("CODEWHALE_HOME");
+        let workspace = tmp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+
+        let manager = SessionManager::default_location().expect("manager");
+
+        // The interrupted checkpoint's record is stale: older than the
+        // retention window's newest occupants.
+        let recovered = make_saved_session(
+            "recover-a",
+            &workspace,
+            Utc::now() - chrono::Duration::hours(MAX_SESSIONS as i64 + 2),
+            false,
+        );
+        manager
+            .save_checkpoint(&recovered)
+            .expect("save checkpoint");
+
+        // Fill the retention window with newer non-archived records so a
+        // keep-less cleanup would delete the recovered record.
+        for i in 0..MAX_SESSIONS {
+            write_session_record(
+                &manager,
+                &format!("newer-{i:04}"),
+                &workspace,
+                Utc::now(),
+                false,
+            );
+        }
+
+        let session_id =
+            crate::recover_interrupted_checkpoint_for_resume(&workspace).expect("recovered");
+        assert_eq!(session_id, recovered.metadata.id);
+
+        let persisted = manager
+            .load_session(&session_id)
+            .expect("recovered session must survive boot recovery");
+        assert_eq!(persisted.metadata.id, session_id);
+    }
+
     #[test]
     fn only_a_real_uuid_can_gate_a_directory_removal() {
         // Real ids from a live ~/.codewhale.

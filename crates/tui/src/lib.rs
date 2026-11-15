@@ -10545,8 +10545,13 @@ fn recover_interrupted_checkpoint_for_resume(launch_workspace: &Path) -> Option<
     // id — unless a newer regular session file for the same id already
     // exists (e.g. `--continue` ran before and the session advanced since).
     // A stale checkpoint must never overwrite newer durable session state.
+    // This save must not arm the throttled retention janitor: on a fresh
+    // per-boot manager its first run always fires with no `keep`, so with
+    // `MAX_SESSIONS` newer records it would prune the just-recovered
+    // session immediately after recovery. Retention at boot belongs to the
+    // boot janitor's keep-protected cleanup.
     if !saved_session_is_newer(&manager, &best.session)
-        && manager.save_session(&best.session).is_err()
+        && manager.save_session_edit(&best.session).is_err()
     {
         return None;
     }
