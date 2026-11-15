@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join, matchesGlob } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 
 const workflow = await readFile(
   new URL("../../.github/workflows/pr-check.yml", import.meta.url),
@@ -254,17 +255,20 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
-  {
-    const receipt = namedStep(jobBlock("frontend-test", text), "Test resource lifecycle receipts");
+  for (const [job, name, id, artifact] of [
+    ["frontend-test", "Test resource lifecycle receipts", "frontend_receipts_upload", "frontend-resource-lifecycle-${{ github.run_attempt }}"],
+    ["frontend-browser-test", "Browser shard resource lifecycle receipts", "browser_receipts_upload", "frontend-browser-${{ matrix.shard }}-resource-lifecycle-${{ github.run_attempt }}"],
+  ]) {
+    const receipt = namedStep(jobBlock(job, text), name);
     assert.equal(receipt.trimEnd(), [
-      "      - name: Test resource lifecycle receipts",
-      "        id: frontend_receipts_upload",
+      "      - name: " + name,
+      "        id: " + id,
       "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
       "        with:",
-      "          name: frontend-resource-lifecycle-${{ github.run_attempt }}",
+      "          name: " + artifact,
       "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
       "          if-no-files-found: error",
       "          retention-days: 7",
@@ -422,6 +426,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   ];
   for (const [jobName, stepName] of [
     ["frontend-test", "Test resource lifecycle receipts"],
+    ["frontend-browser-test", "Browser shard resource lifecycle receipts"],
     ["account-platform-test", "Account test resource lifecycle receipts"],
     ["account-closure-test", "Account closure resource lifecycle receipts"],
     ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
@@ -1184,6 +1189,62 @@ test("required-gate rejects skipped applicable Go checks and permits unrelated s
   }
 });
 
+test('frontend shards are independently scheduled only on applicable Ready and queue trees', () => {
+  const browser = jobBlock('frontend-browser-test');
+  assert.match(browser, /^    needs: changes$/m);
+  assert.match(browser, /^      fail-fast: false$/m);
+  assert.match(browser, /^      max-parallel: 4$/m);
+  assert.match(browser, /^        shard: \[1, 2, 3, 4\]$/m);
+  assert.doesNotMatch(browser, /--receipt.*frontend-logic|-- npm test/);
+  assert.doesNotMatch(jobBlock('frontend-test'), /run-frontend-smokes\.mjs/);
+  for (const name of ['Vite build', 'Vite web build (remote relay)', 'Verify embedded Account Portal assets are current',
+    'Initialize owned test resource ledger', 'Confirm test resource retirement']) namedStep(browser, name);
+  for (const name of ['Ready PR 定向浏览器 smoke', 'Merge Queue diff-selected browser smoke']) {
+    const run = stepRun(browser, name);
+    assert.match(run, /^set -euo pipefail$/m);
+    assert.match(run, /run-frontend-smokes\.mjs --selected --shard "\$\{\{ matrix.shard \}\}\/4"/);
+  }
+  const expression = browser.match(/^    if: \$\{\{ (.*) \}\}$/m)[1];
+  for (const event of ['pull_request', 'merge_group', 'push']) {
+    for (const draft of [true, false]) for (const frontend of ['true', 'false']) {
+      for (const release of ['true', 'false']) for (const reused of [true, false]) {
+        const actual = runInNewContext(expression, {
+          github: { event_name: event, event: { action: 'synchronize', pull_request: { draft } } },
+          needs: { changes: { outputs: { frontend, pet: 'false', pure_release_backflow: release,
+            reuse_verified: reused ? 'true' : 'false', reused_jobs: '["frontend-browser-test"]' } } },
+          cancelled: () => false, fromJSON: JSON.parse, contains: (items, value) => items.includes(value),
+        });
+        const expected = frontend === 'true' && release !== 'true'
+          && (event === 'merge_group' ? !reused : event === 'pull_request' && !draft);
+        assert.equal(actual, expected, `${event}/${draft}/${frontend}/${release}/${reused}`);
+      }
+    }
+  }
+});
+
+test('required-gate rejects missing, skipped, failed and cancelled applicable frontend groups', () => {
+  const gate = jobBlock('required-gate');
+  assert.match(gate, /^      - frontend-browser-test$/m);
+  assert.match(gate, /FRONTEND_BROWSER_RESULT: \$\{\{ needs.frontend-browser-test.result \}\}/);
+  assert.match(gate, /FRONTEND_BROWSER_REQUIRED:.*github.event_name == 'merge_group'.*github.event.pull_request.draft == false/);
+  const run = stepRun(gate, '汇总所有适用检查');
+  const baseline = { ...process.env, FRONTEND_REQUIRED: 'true', FRONTEND_BROWSER_REQUIRED: 'true' };
+  for (const match of gate.matchAll(/^          ([A-Z0-9_]+_RESULT):/gm)) baseline[match[1]] = 'success';
+  for (const event of ['pull_request', 'merge_group']) for (const variable of ['FRONTEND_RESULT', 'FRONTEND_BROWSER_RESULT']) {
+    for (const status of ['success', 'skipped', 'failure', 'cancelled', '']) {
+      const result = spawnSync(bash, ['-c', run], { encoding: 'utf8', timeout: 30_000, windowsHide: true,
+        env: { ...baseline, GITHUB_EVENT_NAME: event, [variable]: status } });
+      assert.equal(result.status, status === 'success' ? 0 : 1, `${event}/${variable}/${status}: ${result.stderr}`);
+    }
+  }
+  for (const status of ['skipped', 'failure', 'cancelled']) {
+    const result = spawnSync(bash, ['-c', run], { encoding: 'utf8', timeout: 30_000, windowsHide: true,
+      env: { ...baseline, GITHUB_EVENT_NAME: 'merge_group', CI_REUSE_VERIFIED: 'true',
+        CI_REUSE_IDS: 'frontend-browser-test', FRONTEND_BROWSER_RESULT: status } });
+    assert.equal(result.status, status === 'skipped' ? 0 : 1, result.stderr);
+  }
+});
+
 test("queue reuse normalizes only verified skips and never failed executions", () => {
   const gate = jobBlock("required-gate");
   const run = stepRun(gate, "汇总所有适用检查");
@@ -1206,7 +1267,7 @@ test("queue reuse normalizes only verified skips and never failed executions", (
   assert.match(lookup, /if: \$\{\{ github.event_name == 'merge_group' \}\}/);
   assert.match(lookup, /timeout-minutes: 2/);
   assert.match(lookup, /python3 scripts\/ci-test-reuse.py lookup/);
-  const productJobs = ["version-consistency", "account-platform-test", "frontend-test", "relay-test",
+  const productJobs = ["version-consistency", "account-platform-test", "frontend-test", "frontend-browser-test", "relay-test",
     "windows-relay-dacl", "windows-relay-tools-test", "team-relay-hub-test", "update-release-console-test",
     "release-contract-test", "knowledge-rust", "rust-lint", "rust-test", "cli-test", "cli-lint",
     "windows-static-updater-contract", "windows-rust-test", "windows-rustup-repair-test", "macos-rust-check",
