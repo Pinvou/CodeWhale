@@ -927,6 +927,28 @@ mod tests {
     use super::*;
     use crate::config::{DEFAULT_TEXT_MODEL, DEFAULT_ZAI_MODEL, ProviderConfig, ProvidersConfig};
 
+    /// The DeepSeek identity switch clears a foreign Kimi Code root
+    /// `base_url` on both membership hosts, so a saved Kimi Code route cannot
+    /// survive a Deepseek/DeepseekCN identity change as a stale root.
+    /// Non-vendor and own-vendor roots stay untouched.
+    #[test]
+    fn deepseek_identity_clears_kimi_code_roots_on_both_membership_hosts() {
+        for host in ["api.kimi.com", "api.kimi.ai"] {
+            assert!(
+                root_base_url_belongs_to_non_deepseek_provider(&format!(
+                    "https://{host}/coding/v1"
+                )),
+                "https://{host}/coding/v1 belongs to a non-DeepSeek vendor and must be cleared"
+            );
+        }
+        assert!(!root_base_url_belongs_to_non_deepseek_provider(
+            "https://api.deepseek.com/v1"
+        ));
+        assert!(!root_base_url_belongs_to_non_deepseek_provider(
+            "https://gateway.example/v1"
+        ));
+    }
+
     /// Every rung keeps its own label and round-trips through it, and only
     /// the guesses read as unverified.  Two rungs sharing a label would let a
     /// guess be displayed as evidence.

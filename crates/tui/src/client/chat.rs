@@ -6989,6 +6989,19 @@ mod alias_thinking_detection_tests {
             assert_eq!(body["reasoning_effort"], json!("low"), "{base_url}");
             assert!(body.get("thinking").is_none(), "{base_url}: {body}");
         }
+
+        // An omitted effort leaves the provider default in control: a stale
+        // generic `thinking` payload is still stripped, but no tier is
+        // injected (the bare-K3 twin pins the same shape).
+        let mut stale = json!({ "thinking": { "type": "disabled" } });
+        apply_route_reasoning_controls(
+            &mut stale,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            None,
+        );
+        assert_eq!(stale, json!({}), "omitted effort: {stale}");
     }
 
     #[test]
