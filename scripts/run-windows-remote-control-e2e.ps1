@@ -48,6 +48,7 @@ $JourneyCatalog = [System.IO.Path]::Combine($RepoRoot, 'remote-control-relay', '
 $EvidenceSchema = [System.IO.Path]::Combine($RepoRoot, 'remote-control-relay', 'docs', 'schemas', 'remote-control-release-evidence.v1.schema.json')
 $EvidenceSchemaValidator = [System.IO.Path]::Combine($RepoRoot, 'remote-control-relay', 'docs', 'schemas', 'remote-control-release-evidence.v1.validator.mjs')
 $EvidenceValidator = [System.IO.Path]::Combine($RepoRoot, 'remote-control-relay', 'scripts', 'validate-controller-release-evidence.mjs')
+$EvidenceArtifactReader = [System.IO.Path]::Combine($RepoRoot, 'remote-control-relay', 'scripts', 'release-evidence-artifacts.mjs')
 $UiSmokeScript = [System.IO.Path]::Combine($RepoRoot, 'pinvou3-app', 'scripts', 'remote-control-ui-smoke.mjs')
 $ProcessGuardScript = [System.IO.Path]::Combine($PSScriptRoot, 'windows-e2e-process-guard.ps1')
 $OrchestratorHelperScript = [System.IO.Path]::Combine($PSScriptRoot, 'windows-e2e-orchestrator-helpers.ps1')
@@ -339,7 +340,7 @@ if ($ghVersion.ExitCode -ne 0 -or $ghVersion.StdOut -notmatch '(?m)^gh version \
 $trustedSourceHashes = @{}
 $trustedSourceBytes = @{}
 foreach ($trustedSource in @(
-    @($JourneyCatalog, ''), @($EvidenceSchema, ''), @($EvidenceSchemaValidator, ''), @($EvidenceValidator, ''), @($UiSmokeScript, ''),
+    @($JourneyCatalog, ''), @($EvidenceSchema, ''), @($EvidenceSchemaValidator, ''), @($EvidenceValidator, ''), @($EvidenceArtifactReader, ''), @($UiSmokeScript, ''),
     @($ProcessGuardScript, 'scripts/windows-e2e-process-guard.ps1'),
     @($OrchestratorHelperScript, 'scripts/windows-e2e-orchestrator-helpers.ps1'),
     @($RouteSpecPreparer, ''), @($ProviderAttestationVerifier, ''), @($InstallerSupplyChainVerifier, '')
@@ -355,6 +356,7 @@ $providerSourceHashes = @{ $ProviderAttestationVerifier = $trustedSourceHashes[$
 $supplyChainSourceHashes = @{ $InstallerSupplyChainVerifier = $trustedSourceHashes[$InstallerSupplyChainVerifier] }
 $validatorSourceHashes = @{
     $EvidenceValidator = $trustedSourceHashes[$EvidenceValidator]
+    $EvidenceArtifactReader = $trustedSourceHashes[$EvidenceArtifactReader]
     $ProviderAttestationVerifier = $trustedSourceHashes[$ProviderAttestationVerifier]
     $InstallerSupplyChainVerifier = $trustedSourceHashes[$InstallerSupplyChainVerifier]
     $JourneyCatalog = $trustedSourceHashes[$JourneyCatalog]

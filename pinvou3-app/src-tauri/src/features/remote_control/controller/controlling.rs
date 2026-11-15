@@ -1,8 +1,8 @@
 //! Windows controller-device (A) connection owner.
 //!
 //! A keeps the short pairing code and resume token only in memory. Closing the
-//! remote message window is invisible here; only an explicit disconnect or
-//! transport failure clears the live lease context.
+//! remote message window is invisible here; explicit disconnect, stop and
+//! terminal transport failure clear the live lease context.
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -259,6 +259,10 @@ impl ControllingDeviceManager {
 
     pub(crate) fn replace_transport(&self, transport: ControllerTransportSender) {
         let mut inner = self.inner.lock();
+        if inner.stopped {
+            transport.stop();
+            return;
+        }
         if let Some(previous) = inner.transport.replace(transport) {
             previous.stop();
         }
@@ -279,9 +283,13 @@ impl ControllingDeviceManager {
         Ok(())
     }
 
-    pub(crate) fn stop(&self) {
+    /// Stop the manager and its actual A lane under the same lifecycle fence.
+    /// Callers must pass the lane belonging to this manager, as for transport
+    /// installation; the B lane is a distinct type and cannot be cleared here.
+    pub(crate) fn stop(&self, business: &super::encrypted_lane::ControllingLaneState) {
         let mut inner = self.inner.lock();
         inner.stopped = true;
+        business.clear();
         clear_live_context(&mut inner);
         inner.phase = ControllingStatusKind::Disconnected;
         inner.error_code = None;
@@ -1799,7 +1807,7 @@ mod tests {
     #[test]
     fn stop_retires_each_operation_and_preserves_only_terminal_identity() {
         let idle = ControllingDeviceManager::default();
-        idle.stop();
+        idle.stop(&Default::default());
         assert_eq!(idle.status().status, ControllingStatusKind::Disconnected);
         assert!(idle.current_operation().is_none());
 
@@ -1831,7 +1839,10 @@ mod tests {
                     .unwrap();
             }
             let old_status = manager.status();
-            manager.stop();
+            if phase == "reconnecting" {
+                assert_eq!(old_status.status, ControllingStatusKind::Reconnecting);
+            }
+            manager.stop(&Default::default());
             let stopped = manager.status();
             assert_eq!(
                 stopped.status,
@@ -1847,7 +1858,7 @@ mod tests {
             if matches!(phase, "connected" | "reconnecting" | "connected_error") {
                 assert_eq!(stopped.lease, old_status.lease, "retired identity: {phase}");
             }
-            manager.stop();
+            manager.stop(&Default::default());
             assert_eq!(manager.status(), stopped, "repeat stop: {phase}");
             assert!(manager.current_operation().is_none(), "{phase}");
             assert!(manager.live_lease().is_err(), "{phase}");
@@ -1911,7 +1922,7 @@ mod tests {
             .unwrap();
         let registered_old = old.clone().for_transport(sender.owner());
         assert!(manager.is_running());
-        manager.stop();
+        manager.stop(&lane);
         assert!(sender.is_stopped());
         assert!(!manager.is_running());
         assert!(manager.with_lane_owner(&registered_old, || ()).is_err());
@@ -1929,6 +1940,31 @@ mod tests {
                 .is_err()
         );
         assert!(!manager.is_running());
+    }
+
+    #[test]
+    fn stopped_manager_rejects_transport_replacement_until_a_new_connect() {
+        let manager = ControllingDeviceManager::default();
+        manager.stop(&Default::default());
+        let make_transport = || {
+            super::super::relay_transport::transport_channels(
+                ControllerRole::ControllerA,
+                "generation-0001",
+                2,
+                2,
+                8192,
+                1024,
+            )
+        };
+        let (late, _receiver) = make_transport();
+        manager.replace_transport(late.clone());
+        assert!(late.is_stopped());
+        assert!(!manager.is_running());
+        manager.connect("2345678").unwrap();
+        let (next, _receiver) = make_transport();
+        manager.replace_transport(next.clone());
+        assert!(!next.is_stopped());
+        assert!(manager.is_running());
     }
 
     #[test]
@@ -1954,7 +1990,7 @@ mod tests {
         let stop_manager = Arc::clone(&manager);
         let stopper = std::thread::spawn(move || {
             started_tx.send(()).unwrap();
-            stop_manager.stop();
+            stop_manager.stop(&Default::default());
             stopped_tx.send(()).unwrap();
         });
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();

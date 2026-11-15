@@ -1,0 +1,36 @@
+.adm-restored-shell .adm-reconciliation-workspace{min-width:0}
+.adm-restored-shell .adm-reconciliation-toolbar{display:grid;grid-template-columns:repeat(2,minmax(0,15rem)) max-content;align-items:end;gap:12px;margin-block:16px}
+.adm-restored-shell .adm-reconciliation-toolbar label{display:grid;min-width:0;gap:6px}
+.adm-restored-shell .adm-reconciliation-toolbar input,.adm-restored-shell .adm-reconciliation-toolbar select{width:100%;min-width:0}
+.adm-restored-shell .adm-reconciliation-toolbar>button{justify-self:start}
+.adm-restored-shell .adm-reconciliation-run{display:grid;min-width:0;gap:8px;padding:14px;border:1px solid var(--adm-line);border-radius:12px}
+.adm-restored-shell .adm-reconciliation-run h3,.adm-restored-shell .adm-reconciliation-run p{margin:0}
+.adm-restored-shell .adm-reconciliation-run>button{justify-self:start}
+.adm-restored-shell .adm-reconciliation-table{max-width:100%;min-width:0;overflow:auto}
+.adm-restored-shell .adm-reconciliation-table table{min-width:38rem}
+.adm-restored-shell .adm-reconciliation-table code{overflow-wrap:anywhere}
+.adm-restored-shell .adm-reconciliation-pagination{display:grid;grid-template-columns:repeat(2,max-content);justify-content:end;gap:8px;margin-top:12px}
+@media(max-width:660px){.adm-restored-shell .adm-reconciliation-toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}.adm-restored-shell .adm-reconciliation-toolbar>button{grid-column:1/-1}}
+@media(max-width:420px){.adm-restored-shell .adm-reconciliation-toolbar{grid-template-columns:minmax(0,1fr)}}
+
+.adm-restored-shell .adm-case-batch-picker,.adm-restored-shell .adm-case-batch-summary{display:grid;min-width:0;gap:12px;margin-block:16px;padding:14px;border:1px solid var(--adm-line);border-radius:12px}
+.adm-restored-shell .adm-case-batch-picker h3,.adm-restored-shell .adm-case-batch-picker .adm-reconciliation-toolbar,.adm-restored-shell .adm-case-batch-summary dl{margin:0}
+.adm-restored-shell .adm-case-batch-candidates,.adm-restored-shell .adm-case-batch-summary dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr));gap:8px;margin:0;padding:0;list-style:none}
+.adm-restored-shell .adm-case-batch-candidates button{display:grid;width:100%;height:100%;gap:4px;text-align:start}
+.adm-restored-shell .adm-case-batch-candidates button[aria-pressed=true]{border-color:var(--adm-primary,#3159e8);background:var(--adm-soft)}
+.adm-restored-shell .adm-case-batch-summary dd{margin:0}
+.adm-restored-shell .adm-case-batch-summary code,.adm-restored-shell .adm-case-batch-candidates code{min-width:0;white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-case-batch-picker details>.adm-reconciliation-toolbar{margin-top:12px}
+
+.adm-restored-shell .adm-reconciliation-table.adm-reconciliation-cases table{min-width:58rem}
+.adm-restored-shell .adm-case-facts{display:grid;gap:6px;margin:0}
+.adm-restored-shell .adm-case-facts>div{display:grid;gap:2px;min-width:0}
+.adm-restored-shell .adm-case-facts dt{color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-case-facts dd{margin:0}
+.adm-restored-shell .adm-case-facts code{white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-case-evidence pre{max-width:100%;white-space:pre-wrap;overflow-wrap:break-word;overflow-wrap:anywhere}
+
+.adm-restored-shell .adm-case-scope{display:flex;min-width:0;align-items:center;gap:8px;flex-wrap:wrap;margin-top:16px}
+.adm-restored-shell .adm-case-scope>button[aria-pressed=true]{border-color:var(--adm-primary,#3159e8);background:var(--adm-soft)}
+.adm-restored-shell .adm-case-query-state{display:grid;justify-items:start;gap:8px;margin-block:12px}
+.adm-restored-shell .adm-case-query-state p{margin:0}
