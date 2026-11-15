@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CodeWhale v0.9.12 clean re-fork guard: 99 maintenance commits (EXPECTED_COMMITS), ten maintained themes (r3 closed at pinvou-v0.9.12-r3; inside a transition window the head may lead the tag).
+# CodeWhale v0.9.12 clean re-fork guard: 100 maintenance commits (EXPECTED_COMMITS), ten maintained themes (r3 closed at pinjou-v0.9.12-r3; inside a transition window the head may lead the tag).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -7,9 +7,10 @@ CODEWHALE="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="dcd4c200f72f0c1ffd60d8e7f6850313db879fc5"
 # Public maintenance after CodeWhale#136/#142/#148/#150/#152,
-# CodeWhale#156 (rustc/clippy 1.100 stable lint adaptation) merged.
-EXPECTED_HEAD="8e8d52fdb4a418bf4310db4b5d03dce5345c54d5"
-EXPECTED_COMMITS=99
+# CodeWhale#156 (rustc/clippy 1.100 stable lint adaptation),
+# CodeWhale#157 (session-reader read-only classification) merged.
+EXPECTED_HEAD="687358f7efde6abd3592737b8ec48adc74ba5a84"
+EXPECTED_COMMITS=100
 # Published maintenance base of this integration.
 MAINTENANCE_BASE="6f7a3a748f408568468ace45aa5cdbb34f882d73"
 # The immutable r1 closure must remain an ancestor of the registered head.
