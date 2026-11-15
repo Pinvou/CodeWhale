@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/jackc/pgx/v5"
 )
@@ -27,6 +28,7 @@ func testRetainedDataRollbacks(t *testing.T, ctx context.Context, f *stageFixtur
 		for _, seeded := range []bool{false, true} {
 			t.Run(fmt.Sprintf("version%d/seeded=%t", version, seeded), func(t *testing.T) {
 				c := f.database(t, ctx, "billing", "billing_schema_owner")
+				retireRetainedBillingDatabase(t, f, c)
 				var legacy []migrations.Migration
 				for _, m := range loaded {
 					if m.Version < version {
@@ -86,20 +88,8 @@ func testRetainedDataRollbacks(t *testing.T, ctx context.Context, f *stageFixtur
 					if err != nil {
 						t.Fatal(err)
 					}
-					childCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-					defer cancel()
-					child := exec.CommandContext(childCtx, binary, "--direction", "down", "--dir", directory)
-					for _, value := range os.Environ() {
-						key, _, _ := strings.Cut(value, "=")
-						switch key {
-						case "DATABASE_URL", "MIGRATIONS_DIR", "MIGRATION_ROLE", "PINVOU_DEPLOYMENT_ENVIRONMENT":
-							continue
-						}
-						child.Env = append(child.Env, value)
-					}
-					child.Env = append(child.Env, "DATABASE_URL="+f.serviceURL(t, c, "billing_migrator"), "MIGRATION_ROLE=billing_service", "PINVOU_DEPLOYMENT_ENVIRONMENT=test")
-					output, err := child.CombinedOutput()
-					if err == nil || childCtx.Err() != nil || !strings.Contains(string(output), "MIGRATION_EXECUTION_FAILED") {
+					output, err := runRetainedBillingDownCLI(t, ctx, binary, directory, f.serviceURL(t, c, "billing_migrator"))
+					if err == nil || !strings.Contains(string(output), "MIGRATION_EXECUTION_FAILED") {
 						t.Fatal("actual Billing CLI must refuse the retained historical Down")
 					}
 					if retainedDataRollbackSnapshot(t, ctx, c) != before {
@@ -111,6 +101,25 @@ func testRetainedDataRollbacks(t *testing.T, ctx context.Context, f *stageFixtur
 	}
 }
 
+func retireRetainedBillingDatabase(t *testing.T, fixture *stageFixture, connection *pgx.Conn) {
+	t.Helper()
+	name := connection.Config().Database
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := connection.Close(ctx); err != nil {
+			t.Error("close owned historical database connection")
+			return
+		}
+		if _, err := cifixture.DropDatabase(ctx, fixture.admin, fixture.databaseLeases[name], fixture.dbs[name]); err != nil {
+			t.Error("retire owned historical database")
+			return
+		}
+		delete(fixture.databaseLeases, name)
+		delete(fixture.dbs, name)
+	})
+}
+
 func TestBillingHistoricalCatalogRollbackPostgres(t *testing.T) {
 	raw := os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL")
 	if raw == "" {
@@ -118,6 +127,17 @@ func TestBillingHistoricalCatalogRollbackPostgres(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
+	t.Setenv("PINVOU_TEST_ACCOUNT_MIGRATE_BINARY", buildRetainedBillingMigrationCLI(t, ctx))
+	f := newStageFixture(t, ctx, raw)
+	loaded, err := migrations.Load("../../migrations/billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testRetainedDataRollbacks(t, ctx, f, loaded, []int64{35, 36, 37, 51})
+}
+
+func buildRetainedBillingMigrationCLI(t *testing.T, ctx context.Context) string {
+	t.Helper()
 	goName, binaryName := "go", "migrate"
 	if runtime.GOOS == "windows" {
 		goName += ".exe"
@@ -129,13 +149,28 @@ func TestBillingHistoricalCatalogRollbackPostgres(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build actual current migration CLI: %v\n%s", err, output)
 	}
-	t.Setenv("PINVOU_TEST_ACCOUNT_MIGRATE_BINARY", binary)
-	f := newStageFixture(t, ctx, raw)
-	loaded, err := migrations.Load("../../migrations/billing")
-	if err != nil {
-		t.Fatal(err)
+	return binary
+}
+
+func runRetainedBillingDownCLI(t *testing.T, ctx context.Context, binary, directory, databaseURL string) ([]byte, error) {
+	t.Helper()
+	childCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	child := exec.CommandContext(childCtx, binary, "--direction", "down", "--dir", directory)
+	for _, value := range os.Environ() {
+		key, _, _ := strings.Cut(value, "=")
+		switch key {
+		case "DATABASE_URL", "MIGRATIONS_DIR", "MIGRATION_ROLE", "PINVOU_DEPLOYMENT_ENVIRONMENT":
+			continue
+		}
+		child.Env = append(child.Env, value)
 	}
-	testRetainedDataRollbacks(t, ctx, f, loaded, []int64{35, 36, 37, 51})
+	child.Env = append(child.Env, "DATABASE_URL="+databaseURL, "MIGRATION_ROLE=billing_service", "PINVOU_DEPLOYMENT_ENVIRONMENT=test")
+	output, err := child.CombinedOutput()
+	if childCtx.Err() != nil {
+		t.Fatal("actual Billing CLI exceeded its test deadline")
+	}
+	return output, err
 }
 
 func seedRetainedDataRollback(t *testing.T, ctx context.Context, c *pgx.Conn, version int64) {
