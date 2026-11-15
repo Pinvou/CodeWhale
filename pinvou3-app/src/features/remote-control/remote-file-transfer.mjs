@@ -9,6 +9,8 @@ const MAX_FILES = 8;
 // could keep a `completed:false` chunk stream going and grow this WebView's
 // memory without bound.
 const MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024;
+const MAX_DOWNLOAD_CHUNKS = 4096;
+const MAX_DOWNLOAD_CHUNK_BYTES = 256 * 1024;
 // Unknown outcomes are retained for the lifetime of this process. Losing a
 // begin reply can also lose the server-minted handle, so retrying the batch
 // cannot safely be treated as a fresh operation.
@@ -47,6 +49,45 @@ export async function abortCompletedRemoteUpload(api, owner, binding, taskId, is
     }
   }
   if (uploadAttempts.get(key) === attempt) uploadAttempts.delete(key);
+  return true;
+}
+
+// A navigation cancellation is recoverable only after its producer has exited
+// and every issued RPC has a definitive successful reply. A lost begin ACK can
+// hide a server-minted handle; neither local abandon nor logical absence proves
+// that unknown batch was physically cleaned up.
+export async function abandonRemoteUpload(api, owner, binding, handle, isCurrent = () => true) {
+  const key = uploadAttemptKey(String(owner || ''), binding, handle.taskId);
+  const attempt = uploadAttempts.get(key);
+  let cleaned = false;
+  if (attempt && ['unknown', 'completed'].includes(attempt.state)
+    && attempt.settled && !attempt.rpcUnknown && isCurrent()) {
+    attempt.state = 'cleaning';
+    try {
+      cleaned = true;
+      for (const transferId of attempt.knownIds) {
+        if (!isCurrent() || uploadAttempts.get(key) !== attempt) { cleaned = false; break; }
+        if (attempt.cleanedIds.has(transferId)) continue;
+        const receipt = await api.attachmentAbortConfirmed(
+          binding.localSessionId, binding.remoteRef, handle.taskId, transferId,
+        );
+        if (receipt?.cleanup_confirmed !== true || receipt.transfer_id !== transferId) {
+          cleaned = false;
+          break;
+        }
+        attempt.cleanedIds.add(transferId);
+      }
+    } catch (_) {
+      cleaned = false;
+    } finally {
+      attempt.state = 'unknown';
+    }
+  }
+  if (!isCurrent()) return false;
+  // Offline or older peers still permit the local never-attempted task to be
+  // abandoned. Without both acknowledgements its upload fence remains intact.
+  await api.abandonRemoteTask(binding.localSessionId, handle.clientRequestId, handle.taskId);
+  if (cleaned && isCurrent() && uploadAttempts.get(key) === attempt) uploadAttempts.delete(key);
   return true;
 }
 
@@ -134,13 +175,18 @@ export async function uploadRemoteFiles(api, binding, taskId, files, onProgress 
     error.code = 'remote_attachment_fenced';
     throw error;
   }
+  if (previous?.state === 'completed' || matching?.state === 'completed') {
+    const error = new Error('remote_attachment_completed');
+    error.code = 'remote_attachment_completed';
+    throw error;
+  }
   if (previous || matching) throw uncertainUpload();
   if (uploadAttempts.size >= MAX_UPLOAD_ATTEMPTS) {
     const error = new Error('remote_attachment_capacity');
     error.code = 'remote_attachment_capacity';
     throw error;
   }
-  const attempt = { state: 'uploading', knownIds: [], files: selected, lease,
+  const attempt = { state: 'uploading', knownIds: [], cleanedIds: new Set(), files: selected, lease, settled: false, rpcUnknown: false,
     localSessionId: binding.localSessionId, remoteRef: binding.remoteRef };
   uploadAttempts.set(key, attempt);
   const attachmentIds = [];
@@ -153,22 +199,29 @@ export async function uploadRemoteFiles(api, binding, taskId, files, onProgress 
     const bytes = new Uint8Array(buffer);
     const sha256 = hex(new Uint8Array(await crypto.subtle.digest('SHA-256', buffer)));
     if (!isCurrent()) throw uncertainUpload();
+    attempt.rpcUnknown = true;
     const begin = await api.attachmentBegin(
       binding.localSessionId, binding.remoteRef, taskId,
       file.name, file.type || 'application/octet-stream', bytes.length, sha256,
     );
     if (!begin || typeof begin.transferId !== 'string' || !begin.transferId) throw uncertainUpload();
     attempt.knownIds.push(begin.transferId);
+    attempt.rpcUnknown = false;
     if (!isCurrent()) throw uncertainUpload();
     let completed = false;
     const chunkBytes = Math.max(1, Math.min(Number(begin.chunkBytes) || 1, 256 * 1024));
       for (let offset = 0, chunkIndex = 0; offset < bytes.length; offset += chunkBytes, chunkIndex += 1) {
         if (!isCurrent()) throw uncertainUpload();
         const chunk = bytes.subarray(offset, Math.min(offset + chunkBytes, bytes.length));
+        attempt.rpcUnknown = true;
         const receipt = await api.attachmentChunk(
           binding.localSessionId, binding.remoteRef, taskId, begin.transferId,
           chunkIndex, bytesToBase64(chunk), chunk.length,
         );
+        if (!receipt || !['accepted', 'duplicate', 'completed'].includes(receipt.state)
+          || !Number.isSafeInteger(receipt.receivedBytes) || receipt.receivedBytes < 0
+          || receipt.receivedBytes > bytes.length) throw uncertainUpload();
+        attempt.rpcUnknown = false;
         if (!isCurrent()) throw uncertainUpload();
         onProgress({ fileIndex, fileName: file.name, receivedBytes: receipt.receivedBytes, totalBytes: bytes.length });
         completed = receipt.state === 'completed';
@@ -200,6 +253,8 @@ export async function uploadRemoteFiles(api, binding, taskId, files, onProgress 
     }
     uploadAttempts.delete(key);
     throw error;
+  } finally {
+    attempt.settled = true;
   }
 }
 
@@ -211,26 +266,42 @@ export async function downloadRemoteArtifact(api, binding, artifact) {
   let nextChunk = 0;
   let receivedBytes = 0;
   try {
-    if (!Number.isSafeInteger(begin.totalBytes) || begin.totalBytes < 0
+    if (!Number.isSafeInteger(begin.totalBytes) || begin.totalBytes <= 0
       || begin.totalBytes > MAX_DOWNLOAD_BYTES) {
       throw new Error('remote_artifact_size_limit');
     }
+    if (!Number.isSafeInteger(begin.chunkBytes) || begin.chunkBytes <= 0
+      || begin.chunkBytes > MAX_DOWNLOAD_CHUNK_BYTES) {
+      throw new Error('remote_artifact_chunk_invalid');
+    }
     for (;;) {
+      // Bound array entries and requests independently of the byte budget.
+      // Reserve before requesting/decoding/retaining another chunk.
+      if (chunks.length >= MAX_DOWNLOAD_CHUNKS) throw new Error('remote_artifact_chunk_limit');
       const receipt = await api.artifactDownloadChunk(
         binding.localSessionId, binding.remoteRef, artifact.taskId, artifact.artifactId,
         begin.transferId, nextChunk,
       );
+      if (!receipt || receipt.chunkIndex !== nextChunk
+        || !Number.isSafeInteger(receipt.chunkBytes) || receipt.chunkBytes <= 0
+        || receipt.chunkBytes > begin.chunkBytes
+        || typeof receipt.chunkB64 !== 'string'
+        || receipt.chunkB64.length > 4 * Math.ceil(receipt.chunkBytes / 3)) {
+        throw new Error('remote_artifact_chunk_invalid');
+      }
       const bytes = base64ToBytes(receipt.chunkB64);
       if (bytes.length !== receipt.chunkBytes) throw new Error('remote_artifact_chunk_invalid');
       receivedBytes += bytes.length;
       if (receivedBytes > begin.totalBytes || receivedBytes > MAX_DOWNLOAD_BYTES) {
         throw new Error('remote_artifact_size_limit');
       }
-      chunks.push(bytes);
-      if (receipt.completed) break;
-      if (!Number.isSafeInteger(receipt.nextChunk) || receipt.nextChunk <= nextChunk) {
+      if (receipt.receivedBytes !== receivedBytes || receipt.nextChunk !== nextChunk + 1
+        || typeof receipt.completed !== 'boolean'
+        || receipt.completed !== (receivedBytes === begin.totalBytes)) {
         throw new Error('remote_artifact_chunk_invalid');
       }
+      chunks.push(bytes);
+      if (receipt.completed) break;
       nextChunk = receipt.nextChunk;
     }
     const blob = new Blob(chunks, { type: artifact.mimeType || 'application/octet-stream' });

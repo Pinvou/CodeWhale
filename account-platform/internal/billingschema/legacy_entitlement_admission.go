@@ -71,13 +71,12 @@ func withLegacyEntitlementAdmission(ctx context.Context, connection *pgx.Conn, i
 		return err
 	}
 	defer func() {
-		clean, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Balance only this admission layer even when apply cancelled its work.
+		// A bounded cleanup keeps an otherwise healthy caller session usable;
+		// Unlock still retires the connection if this release cannot complete.
+		cleanup, cancel := legacyEntitlementCleanupContext(ctx)
 		defer cancel()
-		var released bool
-		releaseErr := connection.QueryRow(clean, `SELECT pg_advisory_unlock(hashtext('pinvou_account_platform_migrations'))`).Scan(&released)
-		if releaseErr == nil && !released {
-			releaseErr = errors.New("billing entitlement admission lock was not held")
-		}
+		releaseErr := migrations.Unlock(cleanup, connection)
 		if releaseErr != nil {
 			err = errors.Join(err, releaseErr)
 		}
@@ -86,6 +85,16 @@ func withLegacyEntitlementAdmission(ctx context.Context, connection *pgx.Conn, i
 		return err
 	}
 	return apply()
+}
+
+// Ignore work cancellation only within the original database deadline. An
+// exhausted budget must still reach Unlock's connection-retirement boundary.
+func legacyEntitlementCleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(15 * time.Second)
+	if original, ok := ctx.Deadline(); ok && original.Before(deadline) {
+		deadline = original
+	}
+	return context.WithDeadline(context.WithoutCancel(ctx), deadline)
 }
 
 func checkLegacyEntitlementAdmission(ctx context.Context, source *pgx.Conn) error {
