@@ -3868,6 +3868,7 @@ impl Engine {
                 tool_catalog,
                 tool_registry,
                 matches!(self.api_provider, ApiProvider::Moonshot),
+                Some(&active_tools_at_batch_start),
             );
             if requested_tool_name != tool_name {
                 tool.name = tool_name.clone();
@@ -7550,10 +7551,41 @@ fn resolve_tool_definition<'a>(
     tool_catalog: &'a [Tool],
     tool_registry: Option<&crate::tools::ToolRegistry>,
     moonshot_wire: bool,
+    advertised_tool_names: Option<&std::collections::HashSet<String>>,
 ) -> Option<&'a Tool> {
-    let mut tool_def = tool_catalog
-        .iter()
-        .find(|def| def.name.as_str() == tool_name.as_str());
+    let mut tool_def = None;
+
+    // Moonshot mint ownership (review 5914916765): a `_<digit>` wire
+    // spelling that THIS request minted for an advertised digit-led tool
+    // dispatches that tool even when a hidden raw twin owns the same
+    // spelling in the full catalog — the twin was never advertised, so the
+    // response can only mean the mint. The ADVERTISED set decides, because
+    // catalog presence alone cannot: a dropped namesake (still in the
+    // catalog, not advertised) must not steal the spelling back from the
+    // advertised raw twin, and the twin keeps the spelling when it was the
+    // advertised tool. This claim runs before the raw exact lookup below,
+    // which would otherwise hand the spelling to the hidden twin; the
+    // batch-start snapshot of the active set is what the answered request
+    // actually advertised.
+    if moonshot_wire
+        && tool_name.len() > 1
+        && tool_name.starts_with('_')
+        && tool_name.as_bytes()[1].is_ascii_digit()
+        && let Some(advertised) = advertised_tool_names
+        && advertised.contains(&tool_name[1..])
+        && let Some(def) = tool_catalog
+            .iter()
+            .find(|def| def.name.as_str() == &tool_name[1..])
+    {
+        tool_def = Some(def);
+        *tool_name = tool_name[1..].to_string();
+    }
+
+    if tool_def.is_none() {
+        tool_def = tool_catalog
+            .iter()
+            .find(|def| def.name.as_str() == tool_name.as_str());
+    }
 
     // Moonshot digit-led wire recovery: the Moonshot request path prefixes a
     // digit-led registry name with `_` to satisfy Kimi's documented `name`
@@ -7565,14 +7597,16 @@ fn resolve_tool_definition<'a>(
     // alias onto a case-variant or suffix-variant sibling through the
     // resolver's equivalence chain (with catalog `3d_render` + `_3D_render`,
     // the wire spelling `_3d_render` must dispatch `3d_render`, not
-    // case-fold onto the sibling's handler — review 5914018939). A registry
-    // that really contains both spellings still resolves exactly: the exact
-    // catalog lookup above answers for a genuine `_3d_render` before this
-    // branch is reached. The recovery is Moonshot-gated (review 4539829148):
-    // only the Moonshot request path mints `_<digit>` spellings, so the same
-    // shape from any other provider can only be a hallucinated name, which
-    // must fail dispatch rather than resolve onto a digit-led registry tool
-    // it never saw advertised.
+    // case-fold onto the sibling's handler — review 5914018939). When the
+    // mint owner was advertised, the ownership claim above already answered;
+    // the raw exact lookup and this recovery cover the remaining shapes: a
+    // registry that really contains both spellings resolves exactly, and a
+    // spelling whose unprefixed name exists only in the registry restores
+    // that name (failing dispatch if no definition carries it). The recovery
+    // is Moonshot-gated (review 4539829148): only the Moonshot request path
+    // mints `_<digit>` spellings, so the same shape from any other provider
+    // can only be a hallucinated name, which must fail dispatch rather than
+    // resolve onto a digit-led registry tool it never saw advertised.
     if moonshot_wire
         && tool_def.is_none()
         && tool_name.len() > 1
@@ -8625,7 +8659,8 @@ mod tests {
         let catalog = registry.to_api_tools();
         let mut tool_name = "read_file".to_string();
 
-        let tool_def = resolve_tool_definition(&mut tool_name, &catalog, Some(&registry), false);
+        let tool_def =
+            resolve_tool_definition(&mut tool_name, &catalog, Some(&registry), false, None);
 
         assert!(tool_def.is_some());
         assert_eq!(tool_name, "read_file");
@@ -8644,7 +8679,10 @@ mod tests {
 
         for legacy in ["File", "read_file", "write_file", "edit_file"] {
             let mut name = legacy.to_string();
-            assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry), false).is_some());
+            assert!(
+                resolve_tool_definition(&mut name, &catalog, Some(&registry), false, None)
+                    .is_some()
+            );
             assert_eq!(name, legacy);
         }
     }
@@ -8703,7 +8741,7 @@ mod tests {
         let catalog = registry.to_api_tools();
 
         let mut name = "_3d_render".to_string();
-        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true);
+        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true, None);
         assert!(tool_def.is_some(), "digit-led wire name must resolve");
         assert_eq!(name, "3d_render");
         assert!(registry.get(&name).is_some());
@@ -8711,7 +8749,9 @@ mod tests {
         // A genuinely underscore-led name resolves exactly as itself; the
         // fallback must never strip it.
         let mut name = "_flat_tool".to_string();
-        assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry), true).is_none());
+        assert!(
+            resolve_tool_definition(&mut name, &catalog, Some(&registry), true, None).is_none()
+        );
         assert_eq!(name, "_flat_tool");
     }
 
@@ -8730,7 +8770,7 @@ mod tests {
 
         let mut name = "_3d_render".to_string();
         assert!(
-            resolve_tool_definition(&mut name, &catalog, Some(&registry), false).is_none(),
+            resolve_tool_definition(&mut name, &catalog, Some(&registry), false, None).is_none(),
             "a non-Moonshot provider must not resolve the prefixed spelling"
         );
         assert_eq!(
@@ -8741,7 +8781,9 @@ mod tests {
         // The bare digit-led name itself still resolves by exact lookup on
         // any provider — the gate only closes the underscore fallback.
         let mut bare = "3d_render".to_string();
-        assert!(resolve_tool_definition(&mut bare, &catalog, Some(&registry), false).is_some());
+        assert!(
+            resolve_tool_definition(&mut bare, &catalog, Some(&registry), false, None).is_some()
+        );
         assert_eq!(bare, "3d_render");
     }
 
@@ -8758,7 +8800,7 @@ mod tests {
         let catalog = registry.to_api_tools();
 
         let mut name = "_3d_render".to_string();
-        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true);
+        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true, None);
         assert!(tool_def.is_some());
         assert_eq!(name, "_3d_render");
     }
@@ -8791,7 +8833,7 @@ mod tests {
         assert_eq!(projected[0].name, "_3d_render");
 
         let mut name = "_3d_render".to_string();
-        let tool_def = resolve_tool_definition(&mut name, &projected, Some(&registry), true);
+        let tool_def = resolve_tool_definition(&mut name, &projected, Some(&registry), true, None);
         assert!(tool_def.is_some(), "the surviving wire name must dispatch");
         assert_eq!(
             name, "_3d_render",
@@ -8805,7 +8847,7 @@ mod tests {
 
         let mut name = "3d_render".to_string();
         assert!(
-            resolve_tool_definition(&mut name, &projected, Some(&registry), true).is_none(),
+            resolve_tool_definition(&mut name, &projected, Some(&registry), true, None).is_none(),
             "a hallucinated call for the dropped tool must fail dispatch"
         );
     }
@@ -8828,7 +8870,7 @@ mod tests {
         let catalog = registry.to_api_tools();
 
         let mut name = "_3d_render".to_string();
-        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true);
+        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true, None);
         assert!(
             tool_def.is_some(),
             "the minted wire spelling must dispatch to its own tool"
@@ -8845,10 +8887,87 @@ mod tests {
 
         // The sibling's own wire spelling still resolves exactly to itself.
         let mut name = "_3D_render".to_string();
-        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true);
+        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true, None);
         assert!(tool_def.is_some());
         assert_eq!(name, "_3D_render");
         assert_eq!(tool_def.expect("resolved").name, "_3D_render");
+    }
+
+    #[test]
+    fn moonshot_mint_owner_beats_a_hidden_raw_twin_on_the_same_spelling() {
+        // Review 5914916765: the request advertised the digit-led
+        // `3d_render` under the minted wire spelling `_3d_render`, while a
+        // raw `_3d_render` twin sits in the full catalog without ever being
+        // advertised (hidden handlers keep their executable names). The raw
+        // exact lookup would hand the spelling to the twin; mint ownership
+        // must claim it first — the response can only mean the tool this
+        // request advertised under that spelling.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        let mut registry = crate::tools::ToolRegistry::new(context);
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "3d_render" }));
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "_3d_render" }));
+        let catalog = registry.to_api_tools();
+        let advertised: std::collections::HashSet<String> =
+            ["3d_render".to_string()].into_iter().collect();
+
+        let mut name = "_3d_render".to_string();
+        let tool_def = resolve_tool_definition(
+            &mut name,
+            &catalog,
+            Some(&registry),
+            true,
+            Some(&advertised),
+        );
+        assert!(
+            tool_def.is_some(),
+            "the mint owner must dispatch under its advertised spelling"
+        );
+        assert_eq!(
+            name, "3d_render",
+            "the minted spelling must restore the advertised owner, not the hidden twin"
+        );
+        assert_eq!(
+            tool_def.expect("resolved").name,
+            "3d_render",
+            "the call must reach the mint owner, never the hidden raw twin"
+        );
+    }
+
+    #[test]
+    fn moonshot_dropped_namesake_does_not_steal_the_advertised_twin_spelling() {
+        // The flip side of mint ownership: the digit-led namesake was
+        // dropped from this request (the wire-collision reservation) and the
+        // raw twin was advertised under the spelling. Catalog presence of
+        // the dropped namesake must not claim the spelling back — the
+        // advertised set, not the catalog, decides ownership.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        let mut registry = crate::tools::ToolRegistry::new(context);
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "3d_render" }));
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "_3d_render" }));
+        let catalog = registry.to_api_tools();
+        let advertised: std::collections::HashSet<String> =
+            ["_3d_render".to_string()].into_iter().collect();
+
+        let mut name = "_3d_render".to_string();
+        let tool_def = resolve_tool_definition(
+            &mut name,
+            &catalog,
+            Some(&registry),
+            true,
+            Some(&advertised),
+        );
+        assert!(tool_def.is_some());
+        assert_eq!(
+            name, "_3d_render",
+            "the advertised twin keeps the spelling; the dropped namesake must not steal it"
+        );
+        assert_eq!(
+            tool_def.expect("resolved").name,
+            "_3d_render",
+            "the call must reach the advertised twin"
+        );
     }
 
     #[tokio::test]
@@ -8874,7 +8993,10 @@ mod tests {
             }),
         ] {
             let mut name = "File".to_string();
-            assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry), false).is_some());
+            assert!(
+                resolve_tool_definition(&mut name, &catalog, Some(&registry), false, None)
+                    .is_some()
+            );
             assert_eq!(name, "File");
             registry
                 .execute_full(&name, input)
@@ -8891,7 +9013,9 @@ mod tests {
         );
 
         let mut name = "Bash".to_string();
-        assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry), false).is_some());
+        assert!(
+            resolve_tool_definition(&mut name, &catalog, Some(&registry), false, None).is_some()
+        );
         assert_eq!(name, "Bash");
         let command = if cfg!(windows) {
             "echo legacy-bash"
@@ -8934,7 +9058,10 @@ mod tests {
             }),
         ] {
             let mut name = "File".to_string();
-            assert!(resolve_tool_definition(&mut name, &catalog, Some(&registry), false).is_some());
+            assert!(
+                resolve_tool_definition(&mut name, &catalog, Some(&registry), false, None)
+                    .is_some()
+            );
             let prepared = prepare_tool_call(&name, input.clone(), Some(&registry), false)
                 .expect("saved File call prepares through its hidden handler");
             assert!(!prepared.call.read_only);
