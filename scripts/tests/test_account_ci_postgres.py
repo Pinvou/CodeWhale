@@ -236,13 +236,14 @@ class AccountCIAdmissionTests(unittest.TestCase):
         job=source.split('\n  account-platform-test:',1)[1].split('\n  account-closure-test:',1)[0]
         routes=[line.strip() for line in job.splitlines() if line.lstrip().startswith('runs-on:')]
         self.assertEqual(routes, ["""runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}"""])
-        self.assertEqual(job.count('"127.0.0.1::5432"'),8);self.assertEqual(job.count('          --rm\n'),8)
+        self.assertEqual(job.count('"127.0.0.1::5432"'),2);self.assertEqual(job.count('          --rm\n'),2)
         for variable,key in [('PINVOU_TEST_SCHEMA_DATABASE_URL','broker'),('F17_TEST_DATABASE_URL','audit')]:
             self.assertIn(variable+': ${{ steps.account-pg.outputs.'+key+'_url }}',job)
-        self.assertIn('ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}',job)
-        self.assertEqual(job.count('          --memory 1g\n'),6)
-        self.assertEqual(job.count('          --memory-swap 1g\n'),6)
-        self.assertEqual(job.count('          --cpus 2\n'),6)
+        self.assertNotIn('ACCOUNT_FINANCIAL_SERVICES:',job)
+        self.assertIn('scripts/account-ci-postgres.py --profile core',job)
+        self.assertEqual(job.count('          --memory 1g\n'),0)
+        self.assertEqual(job.count('          --memory-swap 1g\n'),0)
+        self.assertEqual(job.count('          --cpus 2\n'),0)
         self.assertIn('ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}',job)
         self.assertIn('F17_TEST_SERVICE_PORT: ${{ steps.account-pg.outputs.audit_port }}',job)
         self.assertIn('lua5.1 postgresql-client',job)
