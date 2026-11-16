@@ -37,11 +37,22 @@ import (
 // live collection, supplier, NATS, or four-way reconciliation acceptance.
 func retainedFinanceRepository(t *testing.T, throughVersion ...int64) (*PostgresRepository, context.Context) {
 	t.Helper()
+	return retainedFinanceRepositoryWithBudgets(t, 60*time.Second, 10*time.Second, throughVersion...)
+}
+
+// Scale-only callers need time for full-row fingerprints and PostgreSQL's
+// acknowledgement that background maintenance has exited. Keep ownership and
+// no-force cleanup unchanged, and preserve the ordinary fixture budgets above.
+func retainedFinanceRepositoryWithBudgets(t *testing.T, workloadBudget, cleanupBudget time.Duration, throughVersion ...int64) (*PostgresRepository, context.Context) {
+	t.Helper()
+	if workloadBudget <= 0 || workloadBudget > 10*time.Minute || cleanupBudget <= 0 || cleanupBudget > 2*time.Minute {
+		t.Fatal("bounded owned fixture budgets required")
+	}
 	raw := os.Getenv("PINVOU_TEST_BILLING_DATABASE_URL")
 	if raw == "" {
 		t.Skip("PINVOU_TEST_BILLING_DATABASE_URL is required for actual PostgreSQL")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), workloadBudget)
 	t.Cleanup(cancel)
 	control, err := cifixture.Connect(ctx, raw)
 	if err != nil {
@@ -62,10 +73,10 @@ func retainedFinanceRepository(t *testing.T, throughVersion ...int64) (*Postgres
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
+		cleanup, done := context.WithTimeout(context.Background(), cleanupBudget)
 		defer done()
 		if _, err := cifixture.DropDatabase(cleanup, control, fixtureDatabase, "billing_schema_owner"); err != nil {
-			t.Error("own-database cleanup failed")
+			t.Error("own-database cleanup failed:", err)
 		}
 		control.Close(cleanup)
 	})

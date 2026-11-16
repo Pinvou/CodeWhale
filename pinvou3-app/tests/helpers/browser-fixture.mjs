@@ -2,14 +2,19 @@ import { fixtureScope, ownedDirectory } from './fixture-scope.mjs';
 import { confirmedChildStopper } from './browser-wrapper-fixture-cleanup.mjs';
 
 
-export async function launchBrowser(launchNative, options = {}) {
-  const directory = options.userDataDir ? null : ownedDirectory('chrome');
+export async function launchBrowser(launchNative, options = {}, { scope = fixtureScope, createDirectory = ownedDirectory } = {}) {
+  const directory = options.userDataDir ? null : createDirectory('chrome');
   let browser;
   let stop;
   let release;
-  try { release = fixtureScope.register({
+  try { release = scope.register({
     kind: 'browser',
-    close: async () => { if (stop) await stop(); },
+    close: async () => {
+      // A rejected launch may already have spawned a child without returning
+      // its handle. Only the outer process supervisor can retire that scope.
+      if (!stop) throw new Error('fixture browser shutdown is unconfirmed: no child lifecycle handle');
+      await stop();
+    },
     verify: async () => !browser?.connected,
     remove: () => directory?.remove(),
   }); } catch (primary) {
@@ -23,8 +28,9 @@ export async function launchBrowser(launchNative, options = {}) {
     const nativeClose = browser.close.bind(browser);
     const child = browser.process();
     if (!child) throw new Error('fixture browser process handle is unavailable');
-    // Every owned handle needs an observed close. Exit codes cannot prove
-    // stdio retirement, and an unobserved historical close fails closed.
+    // Every owned handle needs an observed close, even after exit.
+    // exitCode/nativeClose cannot prove stdio retirement; a missed
+    // acknowledgement or unobserved historical close fails closed.
     stop = confirmedChildStopper(child, nativeClose);
     browser.close = release;
     return browser;
