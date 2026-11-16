@@ -2264,6 +2264,16 @@
         "file": "900043_package_expiry_scan.up.sql",
         "version": 900043,
         "sha256": "010fb10ad9c02c80f86fece213a603b602dca7b3e19a263d5a498a51270dd205"
+      },
+      {
+        "file": "900045_provider_health_recent.down.sql",
+        "version": 900045,
+        "sha256": "07fe0346755f15f629f927ca3ac040e1b07e59b9fa248c3e932ce8197dd1d3ef"
+      },
+      {
+        "file": "900045_provider_health_recent.up.sql",
+        "version": 900045,
+        "sha256": "0d1b5cc17cce2342540c4c75d15c783f53f37177412247ca5eefcd24d942d961"
       }
     ],
     "payment-simulator": [

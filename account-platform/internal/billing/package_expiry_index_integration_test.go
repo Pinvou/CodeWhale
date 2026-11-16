@@ -174,6 +174,7 @@ func TestPackageExpiryCrossWalletIndexPostgres(t *testing.T) {
 	statement := packageExpiryCandidateStatement(t)
 	for _, scenario := range []string{"fresh-install", "retained-upgrade"} {
 		t.Run(scenario, func(t *testing.T) {
+			source, staged := stageBillingMigrationContract(t, 900043)
 			var r *PostgresRepository
 			var ctx context.Context
 			if scenario == "retained-upgrade" {
@@ -308,6 +309,13 @@ func TestPackageExpiryCrossWalletIndexPostgres(t *testing.T) {
 			if count, err := r.ExpirePackages(ctx, 10); err != nil || count != 0 || packageExpiryFacts(t, ctx, r) != after {
 				t.Fatal("next tick repeated or revived effects", count, err)
 			}
+			// Typed Down keeps a session lock even when its SQL refuses.
+			// Retire only this owned actor before the independent full-carrier CLI.
+			if err := owner.Close(ctx); err != nil {
+				t.Fatal(err)
+			}
+			completeBillingMigrationContract(t, ctx, r, source, staged, product)
+			packageExpiryIndex(t, ctx, r)
 			t.Logf("PACKAGE_EXPIRY_VERIFIED scenario=%s synthetic_history=100000 cross_wallets=100000 future_active=10000 original_paid_packages=4 expired=3 frozen_preserved=1", scenario)
 		})
 	}
