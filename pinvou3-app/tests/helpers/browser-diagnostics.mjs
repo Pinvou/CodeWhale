@@ -83,6 +83,9 @@ export function createDiagnosticWriter(ledger, limits = LIMITS) {
 // Runs in the page, immediately before its existing close. It neither reads
 // cookies/storage nor returns input values or inline application scripts.
 export function snapshotDocument({ maxCharacters, secretPattern, maskForScreenshot = true }) {
+  // Navigation may finish between page.url() and evaluate(). Check again in
+  // the document before reading or masking anything from the new origin.
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname) || !['http:', 'https:'].includes(location.protocol)) return null;
   const clone = document.documentElement.cloneNode(true);
   for (const element of clone.querySelectorAll('script, style, noscript, iframe, object, embed')) element.remove();
   for (const element of [clone, ...clone.querySelectorAll('*')]) {
@@ -120,11 +123,17 @@ export function observeBrowser(browser, { ledger = process.env.PINVOU_CI_RESOURC
   const pages = new Map();
   const contexts = new WeakSet();
   let pageNumber = 0, closing, failureCount = 0;
-  const recent = [];
+  const recent = [], critical = [];
   const record = event => {
     const value = { t: new Date().toISOString(), ...event };
     recent.push(value);
     if (recent.length > 32) recent.shift();
+    // Hundreds of successful Vite imports can displace the failed import
+    // from both the timeline and the bounded event file before a wait fails.
+    if (['requestfailed', 'pageerror', 'http-error'].includes(value.kind) || value.kind === 'console' && value.level === 'error') {
+      critical.push(value);
+      if (critical.length > 32) critical.shift();
+    }
     writer.record(value);
   };
   const listen = (page, event, callback) => page.on(event, (...args) => {
@@ -140,6 +149,9 @@ export function observeBrowser(browser, { ledger = process.env.PINVOU_CI_RESOURC
         return;
       }
       const snapshot = await page.evaluate(snapshotDocument, { maxCharacters: limits.dom, secretPattern: SECRET, maskForScreenshot: !failure });
+      if (!snapshot) return;
+      const capturedAddress = new URL(snapshot.url);
+      if (!['127.0.0.1', 'localhost', '[::1]'].includes(capturedAddress.hostname) || !['http:', 'https:'].includes(capturedAddress.protocol)) return;
       const metadata = {
         kind: 'page-state', page: state.number, phase: failure ? 'wait-rejected' : 'before-close',
         url: diagnosticUrl(snapshot.url), title: diagnosticText(snapshot.title), readyState: snapshot.readyState,
@@ -195,18 +207,19 @@ export function observeBrowser(browser, { ledger = process.env.PINVOU_CI_RESOURC
         catch (error) {
           if (failureCount < limits.pages) {
             const failure = { number: ++failureCount, method, error: diagnosticText(error?.message), page: state.number };
+            const errors = critical.filter(event => event.page === state.number).slice(-8);
             try {
               const pending = [...state.pending.values()].map(item => ({ url: item.url, type: item.type, ageMs: Date.now() - item.started }));
               const snapshot = await bounded(() => capture(page, state, failure), limits.captureMs);
-              const value = { ...failure, snapshot, pending, recent: recent.slice(-12) };
+              const value = { ...failure, snapshot, pending, critical: errors, recent: recent.slice(-12) };
               writer.write(`failure-${failure.number}.txt`, JSON.stringify(value));
               const compact = { ...value, pending: pending.slice(0, 8), recent: recent.slice(-8) };
               const shorten = (key, item) => typeof item === 'string' ? item.slice(0, 256) : item;
               let line = JSON.stringify(compact, shorten);
-              if (Buffer.byteLength(line) > 14_000) line = JSON.stringify({ ...failure, snapshot: { readyState: snapshot?.readyState, elements: snapshot?.elements }, pending: pending.slice(0, 3), recent: recent.slice(-3) }, shorten);
+              if (Buffer.byteLength(line) > 14_000) line = JSON.stringify({ ...failure, snapshot: { readyState: snapshot?.readyState, elements: snapshot?.elements }, pending: pending.slice(0, 3), critical: errors, recent: recent.slice(-3) }, shorten);
               emit('[browser-fixture-diagnostic] ' + line);
             } catch {
-              try { emit('[browser-fixture-diagnostic] ' + JSON.stringify({ ...failure, snapshot: 'unavailable' })); } catch { /* preserve the original rejection */ }
+              try { emit('[browser-fixture-diagnostic] ' + JSON.stringify({ ...failure, snapshot: 'unavailable', critical: errors })); } catch { /* preserve the original rejection */ }
             }
           }
           throw error;

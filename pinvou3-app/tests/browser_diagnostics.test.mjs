@@ -6,7 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { observeBrowser, createDiagnosticWriter, diagnosticText, diagnosticUrl } from './helpers/browser-diagnostics.mjs';
+import { observeBrowser, createDiagnosticWriter, diagnosticText, diagnosticUrl, snapshotDocument } from './helpers/browser-diagnostics.mjs';
 
 const limits = { bytes: 8192, events: 8, pages: 3, dom: 2048, image: 256, captureMs: 20 };
 function setup(t, options = {}) {
@@ -165,6 +165,52 @@ test('a failed later page is captured even after the ordinary page snapshot limi
   assert.ok(value.page > limits.pages);assert.equal(value.snapshot.elements, 3);
   assert.ok(f.files().some(file => file.name.startsWith('failure-') && file.name.endsWith('.dom.txt')));
   await f.diagnostics.close();
+});
+
+test('failed module evidence survives successful import traffic and the event file limit', async t => {
+  const f = setup(t);const page = await f.browser.newPage();
+  page.emit('requestfailed', { url: () => 'http://127.0.0.1/entry.jsx?token=private', method: () => 'GET', resourceType: () => 'script', failure: () => ({ errorText: 'net::ERR_NETWORK_CHANGED' }) });
+  for (let n = 0; n < 300; n++) {
+    const request = { url: () => `http://127.0.0.1/module-${n}.js`, resourceType: () => 'script' };
+    page.emit('request', request);page.emit('requestfinished', request);
+  }
+  page.waitError = new Error('blank page timeout');
+  await assert.rejects(page.waitForSelector('#ready'), error => error === page.waitError);
+  const value = JSON.parse(f.emitted[0].split('[browser-fixture-diagnostic] ')[1]);
+  assert.equal(value.critical.length, 1);assert.equal(value.critical[0].error, 'net::ERR_NETWORK_CHANGED');
+  assert.equal(value.critical[0].url, 'http://127.0.0.1/entry.jsx');
+  assert.ok(!f.emitted[0].includes('private'));
+  assert.ok(!value.recent.some(event => event.kind === 'requestfailed'));
+  await f.diagnostics.close();
+});
+
+test('a navigation racing with capture cannot persist a remote DOM or screenshot', async t => {
+  const f = setup(t);await f.browser.newPage();
+  f.page.evaluate = async () => ({ url: 'https://example.invalid/account', html: 'remote-private' });
+  await f.page.close();await f.diagnostics.close();
+  assert.ok(!f.order.includes('screenshot'));
+  assert.ok(f.files().every(file => !file.name.endsWith('.dom.txt') && !file.name.endsWith('.jpg') && !file.data.includes('remote-private')));
+});
+
+test('a stalled DOM capture still emits the triggering module error', async t => {
+  const f = setup(t);const page = await f.browser.newPage();
+  page.emit('pageerror', new Error('controlled failed module token=private'));
+  page.evaluate = () => new Promise(() => {});page.waitError = new Error('original wait failure');
+  await assert.rejects(page.waitForSelector('#ready'), error => error === page.waitError);
+  const value = JSON.parse(f.emitted[0].split('[browser-fixture-diagnostic] ')[1]);
+  assert.equal(value.snapshot, 'unavailable');assert.equal(value.critical[0].kind, 'pageerror');
+  assert.match(value.critical[0].text, /controlled failed module/);assert.ok(!f.emitted[0].includes('private'));
+  await f.diagnostics.close();
+});
+
+test('the document-side origin check runs before accessing or masking a remote document', () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: { hostname: 'example.invalid', protocol: 'https:' } });
+  try { assert.equal(snapshotDocument({ maxCharacters: 100, secretPattern: '' }), null); }
+  finally {
+    if (previous) Object.defineProperty(globalThis, 'location', previous);
+    else delete globalThis.location;
+  }
 });
 
 const chrome = process.env.CHROME || [

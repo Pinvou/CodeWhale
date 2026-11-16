@@ -125,7 +125,10 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   Rejected navigation/selector/function waits also emit bounded, redacted
   `[browser-fixture-diagnostic]` stderr records with pending requests, recent
   network events, script/resource timing and page readiness. These records
-  survive artifact-upload failures. Up to three read-only failure snapshots
+  survive artifact-upload failures. A separate bounded error ring retains
+  failed imports even when successful requests fill the ordinary timeline;
+  the failure record includes up to eight errors for that page, even if DOM
+  capture stalls. Up to three read-only failure snapshots
   per browser are allowed even after the first three page numbers; they do not
   mask the live page or change the original exception, wait arguments or budget.
 - Run one-shot commands through `scripts/ci-fixture-process.py`. Its Linux
