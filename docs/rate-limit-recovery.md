@@ -8,6 +8,18 @@ MiniMax/Zai successful JSON envelopes are inspected before model parsing. Reads 
 
 The fork additionally owns shared effective-credential/account admission, stable logical-operation budgets, suspendable leases, persisted server reset times, and root/owned-child interruption. A long server reset remains persisted advice for later continuation; it is not shortened to the upstream transport's temporary pause cap. Local token-bucket waits and ordinary network backoff count toward active-work deadlines; provider-directed backoff and shared quota waits use the existing recovery clock.
 
+The cumulative Engine turn budget also excludes its actual provider recovery
+sleeps. Normal request/generation time, response-body reads, local admission,
+ordinary network backoff and active tool execution remain charged. During
+parallel tools, the turn counts time while any owned work remains active; only
+intervals when all owned work is blocked on provider recovery are excluded.
+Tool-specific deadlines and the Fleet worker's separate task-wide deadline stay
+unchanged. Independent child engines have separate clocks and cannot pause an
+active parent. Each Engine turn owns a fresh
+wait clock, and dropping a cancelled sleep closes its interval synchronously.
+This changes the turn's active-work accounting, not its configured finite budget,
+step limit, terminal statuses or automatic-continuation policy.
+
 A transport error does not prove a checkpoint was saved. Checkpoint preservation and continued execution belong to the existing Engine and child lifecycle. No new scheduler, tool replay, credential resolver, or task UI protocol is introduced by these fixes. The older fork does not have the newer upstream HTTP-attempt transmission ledger or quota/account-guidance types, so those APIs are not imported independently.
 
 The branch still requires integration against its current target and applicable CI. Local loopback tests do not establish live-provider behavior, full host restart behavior, or non-Windows execution.

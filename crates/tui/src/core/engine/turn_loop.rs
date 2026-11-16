@@ -4835,7 +4835,7 @@ impl Engine {
                     let model = self.session.model.clone();
                     let route_limits = self.active_route_limits;
 
-                    tool_tasks.push(async move {
+                    let task = async move {
                         let _shell_permit =
                             if matches!(plan.name.as_str(), "bash" | "Bash" | "exec_shell") {
                                 shell_permits.acquire_owned().await.ok()
@@ -4915,7 +4915,8 @@ impl Engine {
                             terminal: ToolExecutionOutcome::from_legacy(legacy_result),
                             content_blocks,
                         }
-                    });
+                    };
+                    tool_tasks.push(crate::llm_client::rate_limit::with_provider_wait_work(task));
                 }
 
                 let mut parallel_cancelled = false;
@@ -4926,7 +4927,7 @@ impl Engine {
                             parallel_cancelled = true;
                             break;
                         }
-                        outcome = tool_tasks.next() => {
+                        outcome = crate::llm_client::rate_limit::with_suspended_wait_owner(tool_tasks.next()) => {
                             let Some(outcome) = outcome else { break; };
                             let index = outcome.index;
                             outcomes[index] = Some(outcome);

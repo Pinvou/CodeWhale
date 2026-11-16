@@ -7,6 +7,418 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+struct ClockWaitTool(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl crate::tools::spec::ToolSpec for ClockWaitTool {
+    fn name(&self) -> &str {
+        // Keep the real read-only path-claim preparation and scheduler. Only
+        // this fixture's execution is replaced with controlled timed work.
+        "read"
+    }
+    fn description(&self) -> &str {
+        "Controlled provider recovery fixture"
+    }
+    fn input_schema(&self) -> Value {
+        json!({"type":"object"})
+    }
+    fn capabilities(&self) -> Vec<crate::tools::spec::ToolCapability> {
+        vec![crate::tools::spec::ToolCapability::ReadOnly]
+    }
+    fn supports_parallel(&self) -> bool {
+        true
+    }
+    async fn execute(
+        &self,
+        input: Value,
+        _: &crate::tools::ToolContext,
+    ) -> Result<crate::tools::spec::ToolResult, ToolError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        let seconds = input["seconds"].as_u64().unwrap();
+        let recovering = input["recovering"].as_bool().unwrap();
+        if recovering {
+            crate::llm_client::rate_limit::wait(Duration::from_secs(seconds)).await;
+        } else {
+            tokio::time::sleep(Duration::from_secs(seconds)).await;
+        }
+        if seconds == 10 {
+            // Recovery has ended, but useful work still runs while its sibling waits.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+        Ok(crate::tools::spec::ToolResult::success(format!(
+            "clock task {seconds}/{recovering}"
+        )))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn turn_provider_clock_both_parallel_collectors_charge_active_siblings() {
+    use crate::core::engine::turn_budget::TurnWallClock;
+    use crate::llm_client::rate_limit::with_turn_provider_waits;
+
+    for explicit in [false, true] {
+        for all_recovering in [true, false] {
+            let workspace = tempdir().unwrap();
+            fs::write(workspace.path().join("first.txt"), "first").unwrap();
+            fs::write(workspace.path().join("second.txt"), "second").unwrap();
+            let client = Arc::new(MockLlmClient::new(vec![]));
+            let (mut engine, _handle) = Engine::new_with_model_client(
+                deterministic_engine_config(workspace.path()),
+                &Config::default(),
+                client,
+            );
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut registry =
+                crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(workspace.path()));
+            registry.register(Arc::new(ClockWaitTool(calls.clone())));
+            let catalog = registry.to_api_tools_with_cache(true);
+            let surface = test_tool_surface(&engine, registry, Some(catalog), AppMode::Agent);
+            let inputs = [
+                json!({"path":"first.txt","seconds":10,"recovering":true}),
+                json!({"path":"second.txt","seconds":20,"recovering":all_recovering}),
+            ];
+            with_turn_provider_waits(async {
+                let clock = TurnWallClock::start(Duration::from_secs(30));
+                let started = tokio::time::Instant::now();
+                let lock = Arc::new(tokio::sync::RwLock::new(()));
+                if explicit {
+                    let output = engine
+                        .execute_parallel_tool(
+                            json!({"tool_uses": inputs.iter().map(|input| json!({
+                            "recipient_name":"read","parameters":input
+                        })).collect::<Vec<_>>()}),
+                            Some(&surface.registry),
+                            lock,
+                            None,
+                        )
+                        .await
+                        .expect("explicit parallel fixture must execute");
+                    assert!(output.result.success);
+                    assert!(output.result.content.contains("clock task 10/true"));
+                    assert!(
+                        output
+                            .result
+                            .content
+                            .contains(&format!("clock task 20/{all_recovering}"))
+                    );
+                } else {
+                    let plans = inputs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, input)| {
+                            let call = super::super::tool_preparation::prepare_tool_call(
+                                "read",
+                                input.clone(),
+                                Some(&surface.registry),
+                                false,
+                            )
+                            .expect("real input preparation")
+                            .call;
+                            assert!(matches!(
+                                call.resources.as_slice(),
+                                [crate::tools::spec::ResourceClaim::ReadPath(_)]
+                            ));
+                            assert_eq!(
+                                call.approval,
+                                crate::tools::spec::ApprovalRequirement::Auto
+                            );
+                            ToolExecutionPlan {
+                                index,
+                                id: format!("clock-{index}"),
+                                name: call.name,
+                                input: call.input,
+                                caller: None,
+                                interactive: false,
+                                approval_required: call.approval
+                                    != crate::tools::spec::ApprovalRequirement::Auto,
+                                approval_description: call.description,
+                                approval_force_prompt: false,
+                                supports_parallel: call.supports_parallel,
+                                read_only: call.read_only,
+                                detached_start: call.starts_detached,
+                                resources: call.resources,
+                                blocked_error: None,
+                                guard_result: None,
+                            }
+                        })
+                        .collect();
+                    let mut catalog = surface.catalog.clone();
+                    let mut active = surface.active_names.clone();
+                    let outcomes = engine
+                        .execute_planned_tools(
+                            plans,
+                            "clock-turn",
+                            "",
+                            &mut catalog,
+                            &surface,
+                            &mut active,
+                            Some(&surface.registry),
+                            lock,
+                            None,
+                            &crate::sandbox::SandboxPolicy::default(),
+                            &mut AppMode::Agent,
+                            &mut true,
+                        )
+                        .await;
+                    assert_eq!(outcomes.len(), 2);
+                    for (index, outcome) in outcomes.iter().enumerate() {
+                        let outcome = outcome
+                            .as_ref()
+                            .expect("parallel plan must produce a result");
+                        assert_eq!(
+                            outcome.terminal.status,
+                            crate::tools::spec::ToolTerminalStatus::Succeeded
+                        );
+                        assert!(
+                            outcome
+                                .terminal
+                                .legacy_result()
+                                .expect("successful tool result")
+                                .content
+                                .contains(&format!(
+                                    "clock task {}/{}",
+                                    if index == 0 { 10 } else { 20 },
+                                    index == 0 || all_recovering
+                                ))
+                        );
+                    }
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), 2);
+                assert_eq!(started.elapsed(), Duration::from_secs(20));
+                assert_eq!(
+                    clock.spent(),
+                    Duration::from_secs(if all_recovering { 5 } else { 20 }),
+                    "explicit={explicit}, all_recovering={all_recovering}"
+                );
+            })
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn turn_provider_clock_http_recovery_preserves_the_next_step() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    for recovery in [true, false] {
+        let server = MockServer::start().await;
+        let wires = Arc::new(AtomicUsize::new(0));
+        let seen = wires.clone();
+        Mock::given(method("POST"))
+            .respond_with(move |_: &Request| {
+                let ordinal = seen.fetch_add(1, Ordering::SeqCst);
+                if recovery && ordinal == 0 {
+                    return ResponseTemplate::new(429)
+                        .insert_header("retry-after", "6")
+                        .set_body_json(json!({"error":{"code":"insufficient_quota","message":"TPM exceeded"}}));
+                }
+                let tool_step = ordinal == usize::from(recovery);
+                let delta = if tool_step {
+                    json!({"tool_calls":[{"index":0,"id":"clock-read","type":"function",
+                        "function":{"name":"read","arguments":r#"{"path":"fixture.txt"}"#}}]})
+                } else {
+                    json!({"content":"The requested work is complete."})
+                };
+                let body = format!(
+                    "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                    json!({"choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+                    json!({"choices":[{"index":0,"delta":{},"finish_reason":if tool_step { "tool_calls" } else { "stop" }}]}),
+                );
+                let response = ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body);
+                if !recovery && ordinal == 0 {
+                    response.set_delay(Duration::from_secs(6))
+                } else {
+                    response
+                }
+            })
+            .mount(&server)
+            .await;
+        let mut policy = crate::config::RateLimitRetryPolicy::default();
+        policy.max_attempts = 3;
+        policy.initial_delay_secs = 1;
+        policy.max_delay_secs = 1;
+        let config = Config {
+            provider: Some("custom".into()),
+            default_text_model: Some(crate::config::DEFAULT_TEXT_MODEL.to_string()),
+            api_key: Some(format!("owned-clock-{}", uuid::Uuid::new_v4())),
+            base_url: Some(server.uri()),
+            retry: Some(crate::config::RetryConfig {
+                rate_limit: policy,
+                enabled: None,
+                max_retries: Some(0),
+                initial_delay: None,
+                max_delay: None,
+                exponential_base: None,
+            }),
+            ..Default::default()
+        };
+        let workspace = tempdir().unwrap();
+        fs::write(
+            workspace.path().join("fixture.txt"),
+            "clock fixture content",
+        )
+        .unwrap();
+        let client = Arc::new(crate::client::DeepSeekClient::new(&config).unwrap());
+        let (engine, handle) = Engine::new_with_model_client(
+            EngineConfig {
+                // A short, directly constructed test budget; production's
+                // configuration resolver still enforces its 30-second minimum.
+                turn_wall_clock: Duration::from_secs(5),
+                ..deterministic_engine_config(workspace.path())
+            },
+            &config,
+            client,
+        );
+        let submissions: Vec<_> = (0..2)
+            .map(|ordinal| {
+                external_user_message_op_with_submission(
+                    "Read fixture.txt and report completion.",
+                    AppMode::Agent,
+                    &config,
+                    Some(format!("clock-{ordinal}")),
+                )
+            })
+            .collect();
+        let mut task = tokio::spawn(engine.run());
+        let mut batches = Vec::new();
+        let mut wire_counts = Vec::new();
+        let mut timed_out = false;
+        for submission in submissions {
+            handle.send(submission).await.unwrap();
+            let batch = tokio::time::timeout(Duration::from_secs(30), async {
+                let mut rx = handle.rx_event.write().await;
+                let mut events = Vec::new();
+                while let Some(event) = rx.recv().await {
+                    let complete = matches!(event, Event::TurnComplete { .. });
+                    events.push(event);
+                    if complete {
+                        break;
+                    }
+                }
+                events
+            })
+            .await;
+            match batch {
+                Ok(events) => {
+                    batches.push(events);
+                    wire_counts.push(wires.load(Ordering::SeqCst));
+                }
+                Err(_) => {
+                    timed_out = true;
+                    break;
+                }
+            }
+        }
+        if timed_out {
+            handle.cancel();
+            task.abort();
+            let _ = task.await;
+        } else {
+            handle.send(Op::Shutdown).await.unwrap();
+            match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
+                Ok(joined) => joined.expect("owned Engine must exit normally"),
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    panic!("owned Engine did not shut down");
+                }
+            }
+        }
+        assert!(
+            !timed_out,
+            "owned HTTP fixture must settle: {wire_counts:?}"
+        );
+        let mut tail = handle.rx_event.write().await;
+        assert!(
+            !std::iter::from_fn(|| tail.try_recv().ok()).any(|event| matches!(
+                event,
+                Event::TurnStarted { .. } | Event::TurnComplete { .. }
+            )),
+            "shutdown must leave no extra turn start or terminal"
+        );
+        drop(tail);
+        assert_eq!(wire_counts, if recovery { vec![3, 4] } else { vec![1, 2] });
+        for (ordinal, events) in batches.iter().enumerate() {
+            let starts: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::TurnStarted {
+                        turn_id,
+                        submission_id,
+                        ..
+                    } => Some((turn_id, submission_id)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(starts.len(), 1);
+            assert_eq!(
+                starts[0].1.as_deref(),
+                Some(format!("clock-{ordinal}").as_str())
+            );
+            let terminals: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::TurnComplete {
+                        turn_id,
+                        submission_id,
+                        status,
+                        error,
+                        ..
+                    } => Some((turn_id, submission_id, status, error)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(terminals.len(), 1);
+            assert_eq!(terminals[0].0.as_ref(), Some(starts[0].0));
+            assert_eq!(terminals[0].1, starts[0].1);
+            if ordinal == 0 && !recovery {
+                assert_eq!(*terminals[0].2, TurnOutcomeStatus::Failed);
+                assert!(
+                    terminals[0]
+                        .3
+                        .as_deref()
+                        .unwrap()
+                        .contains("wall-clock budget exhausted")
+                );
+            } else {
+                assert_eq!(
+                    *terminals[0].2,
+                    TurnOutcomeStatus::Completed,
+                    "{:?}",
+                    terminals[0].3
+                );
+            }
+        }
+        let reads: Vec<_> = batches[0]
+            .iter()
+            .filter_map(|event| match event {
+                Event::ToolCallComplete { id, result, .. } if id == "clock-read" => Some(result),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reads.len(), 1);
+        let read = reads[0].as_ref().expect("the real file read must succeed");
+        assert!(read.success && read.content.contains("clock fixture content"));
+        let requests = server.received_requests().await.unwrap();
+        // The final recovery request and the next normal turn must preserve
+        // the actual tool result, including in the delayed-200 failure case.
+        assert!(
+            String::from_utf8_lossy(&requests[wire_counts[0] - 1].body).contains(if recovery {
+                "clock fixture content"
+            } else {
+                "fixture.txt"
+            })
+        );
+        assert!(
+            String::from_utf8_lossy(&requests.last().unwrap().body)
+                .contains("clock fixture content")
+        );
+    }
+}
+
 struct OperationClient {
     // None means a controlled connection failure before any stream content.
     streams: Mutex<VecDeque<Option<Vec<crate::models::StreamEvent>>>>,

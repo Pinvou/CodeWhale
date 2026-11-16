@@ -278,7 +278,183 @@ pub async fn without_active_time<F: std::future::Future>(future: F) -> F::Output
     future.await
 }
 
+/// Actual provider recovery sleeps owned by one engine turn. This is separate
+/// from the request clock, which also excludes response-body and slot waits.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProviderWaitClock(Arc<Mutex<ProviderWaitTime>>);
+
+#[derive(Debug, Default)]
+struct ProviderWaitTime {
+    waited: Duration,
+    since: Option<tokio::time::Instant>,
+    active: usize,
+    recovering: usize,
+}
+
+impl ProviderWaitTime {
+    fn transition(&mut self, before: (bool, bool), after: (bool, bool)) {
+        self.active = self.active - usize::from(before.0) + usize::from(after.0);
+        self.recovering = self.recovering - usize::from(before.1) + usize::from(after.1);
+        if self.active == 0 && self.recovering > 0 {
+            self.since.get_or_insert_with(tokio::time::Instant::now);
+        } else if let Some(since) = self.since.take() {
+            self.waited = self.waited.saturating_add(since.elapsed());
+        }
+    }
+}
+
+impl ProviderWaitClock {
+    pub(crate) fn elapsed(&self) -> Duration {
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .waited
+            .saturating_add(state.since.map_or(Duration::ZERO, |since| since.elapsed()))
+    }
+
+    fn owner(&self) -> ProviderWaitOwner {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .transition((false, false), (true, false));
+        ProviderWaitOwner(Arc::new(ProviderWaitOwnerState {
+            clock: self.clone(),
+            work: Mutex::new(ProviderWork::default()),
+        }))
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProviderWork {
+    waits: usize,
+    suspensions: usize,
+}
+
+impl ProviderWork {
+    fn flags(&self) -> (bool, bool) {
+        (self.waits == 0 && self.suspensions == 0, self.waits > 0)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ProviderWaitOwner(Arc<ProviderWaitOwnerState>);
+
+#[derive(Debug)]
+struct ProviderWaitOwnerState {
+    clock: ProviderWaitClock,
+    work: Mutex<ProviderWork>,
+}
+
+impl Drop for ProviderWaitOwnerState {
+    fn drop(&mut self) {
+        let flags = self
+            .work
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .flags();
+        self.clock
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .transition(flags, (false, false));
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProviderWorkPause {
+    Recovery,
+    Children,
+}
+
+impl ProviderWaitOwner {
+    fn change(&self, kind: ProviderWorkPause, enter: bool) {
+        let mut work = self
+            .0
+            .work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = work.flags();
+        let depth = match kind {
+            ProviderWorkPause::Recovery => &mut work.waits,
+            ProviderWorkPause::Children => &mut work.suspensions,
+        };
+        if enter {
+            *depth += 1;
+        } else {
+            *depth -= 1;
+        }
+        self.0
+            .clock
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .transition(before, work.flags());
+    }
+
+    fn pause(&self, kind: ProviderWorkPause) -> ProviderWaitGuard {
+        self.change(kind, true);
+        ProviderWaitGuard {
+            owner: self.clone(),
+            kind,
+        }
+    }
+}
+
+struct ProviderWaitGuard {
+    owner: ProviderWaitOwner,
+    kind: ProviderWorkPause,
+}
+
+impl Drop for ProviderWaitGuard {
+    fn drop(&mut self) {
+        self.owner.change(self.kind, false);
+    }
+}
+
+tokio::task_local! {
+    static TURN_PROVIDER_WAITS: Option<ProviderWaitOwner>;
+}
+
+fn provider_wait_owner() -> Option<ProviderWaitOwner> {
+    TURN_PROVIDER_WAITS.try_with(Clone::clone).ok().flatten()
+}
+
+pub(crate) fn turn_provider_wait_clock() -> Option<ProviderWaitClock> {
+    provider_wait_owner().map(|owner| owner.0.clock.clone())
+}
+
+pub(crate) async fn with_turn_provider_waits<F: std::future::Future>(future: F) -> F::Output {
+    TURN_PROVIDER_WAITS
+        .scope(Some(ProviderWaitClock::default().owner()), future)
+        .await
+}
+
+/// Register work before queuing its future, including work not yet polled.
+/// Each parallel tool reports recovery independently of its active siblings.
+pub(crate) fn with_provider_wait_work<F: std::future::Future>(
+    future: F,
+) -> impl std::future::Future<Output = F::Output> {
+    let owner = provider_wait_owner().map(|owner| owner.0.clock.owner());
+    async move {
+        match owner {
+            Some(owner) => TURN_PROVIDER_WAITS.scope(Some(owner), future).await,
+            None => future.await,
+        }
+    }
+}
+
+/// The caller waits for registered work here; its result processing stays active.
+pub(crate) async fn with_suspended_wait_owner<F: std::future::Future>(future: F) -> F::Output {
+    let _suspended = provider_wait_owner().map(|owner| owner.pause(ProviderWorkPause::Children));
+    future.await
+}
+
 pub async fn wait(delay: Duration) {
+    // The guard banks only this real sleep, including cancellation. Waiting
+    // receipts and the broader request-clock exclusions are not timing proof.
+    let _turn_wait = provider_wait_owner().map(|owner| owner.pause(ProviderWorkPause::Recovery));
     without_active_time(tokio::time::sleep(delay)).await;
 }
 

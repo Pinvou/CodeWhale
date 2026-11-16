@@ -6411,16 +6411,18 @@ impl Engine {
         let foreground_children_for_turn = mailbox_for_runtime
             .as_ref()
             .map(|barrier| Arc::clone(&barrier.foreground_children));
-        let turn_result = std::panic::AssertUnwindSafe(async {
-            self.run_turn(
-                &mut turn,
-                surface,
-                foreground_children_for_turn,
-                Some(tool_surface),
-            )
-            .await
-        })
-        .catch_unwind()
+        let turn_result = crate::llm_client::rate_limit::with_turn_provider_waits(
+            std::panic::AssertUnwindSafe(async {
+                self.run_turn(
+                    &mut turn,
+                    surface,
+                    foreground_children_for_turn,
+                    Some(tool_surface),
+                )
+                .await
+            })
+            .catch_unwind(),
+        )
         .await;
         let (mut status, error) = match turn_result {
             Ok(outcome) => outcome,
