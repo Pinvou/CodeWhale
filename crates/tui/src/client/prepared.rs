@@ -293,6 +293,13 @@ pub(crate) struct PreparedOutboundRequest {
     /// check. This stopgap receipt is intentionally not a projection layer;
     /// it only transports a bounded user-visible warning.
     pub(crate) omitted_tool_names: Vec<String>,
+    /// Moonshot mint ownership from this exact outbound request:
+    /// registry spelling → minted `_<digit>` wire spelling, post schema
+    /// projection and collision/length filtering. Rides the same seam as
+    /// [`Self::omitted_tool_names`] so dispatch decides mint ownership from
+    /// the mapping the wire actually advertised, not from the engine's
+    /// active set (review 5915692444).
+    pub(crate) moonshot_mint_owners: std::collections::HashMap<String, String>,
 }
 
 impl PreparedOutboundRequest {
@@ -315,12 +322,22 @@ impl PreparedOutboundRequest {
             replay_input_tokens,
             entrypoint,
             omitted_tool_names: Vec::new(),
+            moonshot_mint_owners: std::collections::HashMap::new(),
         }
     }
 
     #[must_use]
     pub(crate) fn with_omitted_tool_names(mut self, names: Vec<String>) -> Self {
         self.omitted_tool_names = names;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_moonshot_mint_owners(
+        mut self,
+        owners: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.moonshot_mint_owners = owners;
         self
     }
 

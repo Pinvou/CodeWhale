@@ -813,6 +813,10 @@ struct StreamOutcome {
     /// blocks are parked here instead of being overwritten by the next one.
     completed_thinking: Vec<ContentBlock>,
     tool_uses: Vec<ToolUseState>,
+    /// Mint ownership from this request's pre-stream receipt (Moonshot
+    /// only; empty otherwise). Dispatch claims minted spellings only
+    /// through it (review 5915692444).
+    moonshot_mint_owners: std::collections::HashMap<String, String>,
     usage: Usage,
     usage_reported: bool,
     stop_reason: Option<String>,
@@ -2498,6 +2502,7 @@ impl Engine {
                 current_thinking_details,
                 mut completed_thinking,
                 mut tool_uses,
+                moonshot_mint_owners,
                 usage,
                 usage_reported,
                 stop_reason,
@@ -2522,6 +2527,10 @@ impl Engine {
                 )
                 .await;
             turn_error = turn_error.or(stream_error);
+            // Dispatch claims minted response spellings only through the
+            // ownership the request that is being answered actually
+            // advertised (review 5915692444).
+            turn.moonshot_mint_owners = moonshot_mint_owners;
             // These belong to post-stream response assembly, not stream
             // consumption: blocks are built from the completed stream state,
             // and truncation is derived from its terminal stop reason below.
@@ -3868,7 +3877,7 @@ impl Engine {
                 tool_catalog,
                 tool_registry,
                 matches!(self.api_provider, ApiProvider::Moonshot),
-                Some(&active_tools_at_batch_start),
+                Some(&turn.moonshot_mint_owners),
             );
             if requested_tool_name != tool_name {
                 tool.name = tool_name.clone();
@@ -5822,6 +5831,12 @@ impl Engine {
         // instead of being overwritten by the next block's deltas.
         let mut completed_thinking: Vec<ContentBlock> = Vec::new();
         let mut tool_uses: Vec<ToolUseState> = Vec::new();
+        // Mint ownership the outgoing Moonshot request advertised (arrives
+        // as a pre-stream receipt on the same seam as the projection
+        // warning); rides out on the outcome for dispatch (review
+        // 5915692444).
+        let mut moonshot_mint_owners: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         let mut usage = Usage {
             input_tokens: 0,
             output_tokens: 0,
@@ -6145,6 +6160,12 @@ impl Engine {
                             omitted_tool_count,
                         })
                         .await;
+                }
+                StreamEvent::MoonshotMintOwners { owners } => {
+                    // The outgoing request's post-filter mint ownership:
+                    // dispatch claims a minted spelling only through this
+                    // map (review 5915692444).
+                    moonshot_mint_owners.extend(owners);
                 }
                 StreamEvent::MessageStart { message } => {
                     // The chat-completions adapter emits a synthetic
@@ -6571,6 +6592,7 @@ impl Engine {
             current_thinking_details,
             completed_thinking,
             tool_uses,
+            moonshot_mint_owners,
             usage,
             usage_reported,
             stop_reason,
@@ -7551,34 +7573,43 @@ fn resolve_tool_definition<'a>(
     tool_catalog: &'a [Tool],
     tool_registry: Option<&crate::tools::ToolRegistry>,
     moonshot_wire: bool,
-    advertised_tool_names: Option<&std::collections::HashSet<String>>,
+    moonshot_mint_owners: Option<&std::collections::HashMap<String, String>>,
 ) -> Option<&'a Tool> {
     let mut tool_def = None;
 
-    // Moonshot mint ownership (review 5914916765): a `_<digit>` wire
-    // spelling that THIS request minted for an advertised digit-led tool
-    // dispatches that tool even when a hidden raw twin owns the same
-    // spelling in the full catalog — the twin was never advertised, so the
-    // response can only mean the mint. The ADVERTISED set decides, because
-    // catalog presence alone cannot: a dropped namesake (still in the
-    // catalog, not advertised) must not steal the spelling back from the
-    // advertised raw twin, and the twin keeps the spelling when it was the
-    // advertised tool. This claim runs before the raw exact lookup below,
-    // which would otherwise hand the spelling to the hidden twin; the
-    // batch-start snapshot of the active set is what the answered request
-    // actually advertised.
+    // Moonshot mint ownership (reviews 5914916765 + 5915692444): a
+    // `_<digit>` wire spelling that THIS request minted for a surviving
+    // digit-led tool dispatches that tool even when a hidden raw twin owns
+    // the same spelling in the full catalog — the twin was never
+    // advertised, so the response can only mean the mint. The oracle is
+    // the OUTGOING request's post-filter mapping (schema projection +
+    // collision/length filtering), not the engine's active set: an active
+    // tool whose schema failed projection or that lost a collision never
+    // owned its minted spelling on the wire, and claiming it for such a
+    // name would route a spelling the request advertised for someone else.
+    // A dropped namesake (in the catalog, absent from the map) therefore
+    // cannot steal the spelling back from the advertised raw twin, and the
+    // twin keeps the spelling when it was the advertised tool. This claim
+    // runs before the raw exact lookup below, which would otherwise hand
+    // the spelling to the hidden twin.
     if moonshot_wire
         && tool_name.len() > 1
         && tool_name.starts_with('_')
         && tool_name.as_bytes()[1].is_ascii_digit()
-        && let Some(advertised) = advertised_tool_names
-        && advertised.contains(&tool_name[1..])
+        && let Some(owners) = moonshot_mint_owners
+        // The map is registry → minted; the response carries the minted
+        // side, so the claim is a reverse lookup: find the registry name
+        // THIS wire spelling was minted for.
+        && let Some(registry_name) = owners
+            .iter()
+            .find(|(_, minted)| minted.as_str() == tool_name.as_str())
+            .map(|(registry, _)| registry.as_str())
         && let Some(def) = tool_catalog
             .iter()
-            .find(|def| def.name.as_str() == &tool_name[1..])
+            .find(|def| def.name.as_str() == registry_name)
     {
         tool_def = Some(def);
-        *tool_name = tool_name[1..].to_string();
+        *tool_name = registry_name.to_string();
     }
 
     if tool_def.is_none() {
@@ -7723,6 +7754,7 @@ fn stream_event_has_actionable_content(event: &StreamEvent) -> bool {
             Delta::ReasoningDetailsDelta { details } => !details.is_empty(),
         },
         StreamEvent::ToolProjectionWarning { .. }
+        | StreamEvent::MoonshotMintOwners { .. }
         | StreamEvent::MessageStart { .. }
         | StreamEvent::ContentBlockStop { .. }
         | StreamEvent::MessageDelta { .. }
@@ -8908,17 +8940,18 @@ mod tests {
         registry.register(std::sync::Arc::new(NamedProbeTool { name: "3d_render" }));
         registry.register(std::sync::Arc::new(NamedProbeTool { name: "_3d_render" }));
         let catalog = registry.to_api_tools();
-        let advertised: std::collections::HashSet<String> =
-            ["3d_render".to_string()].into_iter().collect();
+        // The outgoing request's post-filter map: `3d_render` survived
+        // projection and collision, so the wire advertised it as
+        // `_3d_render`; the raw twin is in the catalog but never advertised
+        // and therefore never owns a mint.
+        let owners: std::collections::HashMap<String, String> =
+            [("3d_render".to_string(), "_3d_render".to_string())]
+                .into_iter()
+                .collect();
 
         let mut name = "_3d_render".to_string();
-        let tool_def = resolve_tool_definition(
-            &mut name,
-            &catalog,
-            Some(&registry),
-            true,
-            Some(&advertised),
-        );
+        let tool_def =
+            resolve_tool_definition(&mut name, &catalog, Some(&registry), true, Some(&owners));
         assert!(
             tool_def.is_some(),
             "the mint owner must dispatch under its advertised spelling"
@@ -8947,17 +8980,15 @@ mod tests {
         registry.register(std::sync::Arc::new(NamedProbeTool { name: "3d_render" }));
         registry.register(std::sync::Arc::new(NamedProbeTool { name: "_3d_render" }));
         let catalog = registry.to_api_tools();
-        let advertised: std::collections::HashSet<String> =
-            ["_3d_render".to_string()].into_iter().collect();
+        // The post-filter map is EMPTY for the digit-led namesake: it lost
+        // the collision and never went out on the wire, so it owns no mint
+        // spelling even though it is still in the catalog. Only the raw
+        // twin was advertised (under its own spelling).
+        let owners: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
         let mut name = "_3d_render".to_string();
-        let tool_def = resolve_tool_definition(
-            &mut name,
-            &catalog,
-            Some(&registry),
-            true,
-            Some(&advertised),
-        );
+        let tool_def =
+            resolve_tool_definition(&mut name, &catalog, Some(&registry), true, Some(&owners));
         assert!(tool_def.is_some());
         assert_eq!(
             name, "_3d_render",

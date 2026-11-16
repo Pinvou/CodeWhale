@@ -1306,6 +1306,14 @@ pub(crate) struct ChatWireBody {
     /// rejected their parameter schemas. Kept outside the wire body so the
     /// caller can surface one bounded diagnostic without leaking schema data.
     pub(crate) omitted_tool_names: Vec<String>,
+    /// The post-filter mint ownership this request actually advertised:
+    /// registry spelling → minted `_<digit>` wire spelling, only for tools
+    /// that survived schema projection AND the collision/length filters.
+    /// Dispatch must decide mint ownership from THIS map, not from the
+    /// engine's active set — a tool that is active but schema-dropped or
+    /// collision-dropped never owned its minted spelling on the wire
+    /// (review 5915692444). Empty on every non-Moonshot route.
+    pub(crate) moonshot_mint_owners: std::collections::HashMap<String, String>,
 }
 
 /// Build the Chat Completions wire body for `request`.
@@ -1524,11 +1532,18 @@ pub(crate) fn build_chat_wire_body(
     };
     mirror_minimax_reasoning_details_for_body(&mut body, provider);
 
+    // The ownership map is exactly the minted spelling the post-filtered
+    // request carries: minted_names was built after schema projection and
+    // the collision/length drops, so its keys are the tools whose minted
+    // wire spellings are live on THIS body (review 5915692444).
+    let moonshot_mint_owners = moonshot_minted_names.clone();
+
     Ok(ChatWireBody {
         body,
         model,
         replay_input_tokens,
         omitted_tool_names,
+        moonshot_mint_owners,
     })
 }
 
@@ -6894,6 +6909,82 @@ mod alias_thinking_detection_tests {
             "the drop must be reported under its registry spelling so forced \
              choice can refuse the shadowed name"
         );
+    }
+
+    #[test]
+    fn moonshot_mint_owners_reflect_the_post_filtered_wire_exactly() {
+        // The ownership map dispatch resolves through must be the mapping
+        // the OUTGOING request actually advertised (review 5915692444): a
+        // live mint lists its owner; a collision- or projection-dropped
+        // digit-led tool lists nothing, so dispatch can never claim its
+        // spelling through the engine's active set.
+        // Live mint: `3d_render` survives and owns `_3d_render`.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        request.tools = Some(vec![digit_led_name_probe_tool("3d_render")]);
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+        assert_eq!(
+            body.moonshot_mint_owners
+                .get("3d_render")
+                .map(String::as_str),
+            Some("_3d_render"),
+            "a surviving digit-led tool owns its mint in the post-filter map"
+        );
+
+        // Collision drop: the raw `_3d_render` twin wins the spelling, so
+        // the digit-led tool went out on NO wire name and owns no mint —
+        // the map must be empty for it even though it stayed active.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        request.tools = Some(vec![
+            digit_led_name_probe_tool("3d_render"),
+            digit_led_name_probe_tool("_3d_render"),
+        ]);
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+        assert!(
+            !body.moonshot_mint_owners.contains_key("3d_render"),
+            "a collision-dropped tool owns no mint: {:?}",
+            body.moonshot_mint_owners
+        );
+
+        // Length drop: a 128-character digit-led name mints past the cap
+        // and is dropped whole — no mint, no owner.
+        let long_name = format!("3{}", "a".repeat(127));
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        request.tools = Some(vec![digit_led_name_probe_tool(&long_name)]);
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+        assert!(
+            !body.moonshot_mint_owners.contains_key(&long_name),
+            "a length-dropped tool owns no mint"
+        );
+
+        // Non-Moonshot routes never mint: the map stays empty.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        request.tools = Some(vec![digit_led_name_probe_tool("3d_render")]);
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Openai,
+            "https://api.openai.com/v1",
+            false,
+        )
+        .expect("OpenAI wire body");
+        assert!(body.moonshot_mint_owners.is_empty());
     }
 
     #[test]

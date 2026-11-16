@@ -2217,7 +2217,8 @@ impl DeepSeekClient {
                     wire.replay_input_tokens,
                     entrypoint,
                 )
-                .with_omitted_tool_names(wire.omitted_tool_names))
+                .with_omitted_tool_names(wire.omitted_tool_names)
+                .with_moonshot_mint_owners(wire.moonshot_mint_owners))
             }
             WireFormat::AnthropicMessages => {
                 let body = self.build_anthropic_body(&request, stream);
@@ -2452,6 +2453,23 @@ impl DeepSeekClient {
                 omitted_tool_names,
                 omitted_tool_count,
             });
+            let mut stream = stream;
+            while let Some(event) = stream.next().await {
+                yield event;
+            }
+        })
+    }
+
+    fn prepend_moonshot_mint_owners(
+        stream: crate::llm_client::StreamEventBox,
+        owners: std::collections::HashMap<String, String>,
+    ) -> crate::llm_client::StreamEventBox {
+        Box::pin(async_stream::stream! {
+            if !owners.is_empty() {
+                let mut pairs: Vec<(String, String)> = owners.into_iter().collect();
+                pairs.sort();
+                yield Ok(crate::models::StreamEvent::MoonshotMintOwners { owners: pairs });
+            }
             let mut stream = stream;
             while let Some(event) = stream.next().await {
                 yield event;
@@ -3434,6 +3452,11 @@ impl DeepSeekClient {
                 omitted_tool_count,
             )
         });
+        // Captured before the dialect match moves `prepared`: the mint
+        // ownership rides the same seam as the projection warning — the
+        // engine claims a minted response spelling for its owner only when
+        // THIS request's post-filtered mapping says so (review 5915692444).
+        let moonshot_mint_owners = prepared.moonshot_mint_owners.clone();
         let stream = match prepared.dialect {
             WireDialect::OpenAiResponses => self.handle_responses_stream(&prepared).await?,
             WireDialect::AnthropicMessages => self.handle_anthropic_stream(&prepared).await?,
@@ -3450,6 +3473,7 @@ impl DeepSeekClient {
             }
             None => stream,
         };
+        let stream = Self::prepend_moonshot_mint_owners(stream, moonshot_mint_owners);
         let stream = Self::hold_provider_request_permit_for_stream(stream, permit);
         Ok(Self::hold_remote_control_inference_permit_for_stream(
             stream, inference,
