@@ -487,6 +487,16 @@ assert.match(
   /Sync-RuntimeReleaseAssets/u,
   "runtime initialization must invoke the verified Release transport",
 );
+assert.match(releaseAssetsScript, /\$handler\.AllowAutoRedirect = \$false/u,
+  "redirects must remain subject to per-hop endpoint validation");
+assert.ok(releaseAssetsScript.indexOf("Assert-RuntimeReleaseUri -Uri $Uri", releaseAssetsScript.indexOf("function Write-RuntimeReleaseDownload")) <
+  releaseAssetsScript.indexOf("$client.GetAsync"), "URI policy must execute before every request");
+assert.match(releaseAssetsScript, /Get-RuntimeReleaseProxy/u,
+  "the production transport must preserve explicit Runner proxy routing");
+assert.doesNotMatch(releaseAssetsScript, /ServerCertificateCustomValidationCallback|ServerCertificateValidationCallback|DangerousAcceptAnyServerCertificateValidator/u,
+  "transport tests must never weaken production certificate validation");
+assert.match(releaseAssetsScript, /& \$Download \$uri \$temporary \(\[long\]\$entry\.bytes\)/u,
+  "the byte budget must come from the verified immutable manifest");
 assert.match(
   releaseAssetsScript,
   /Test-RuntimeReleaseFile -Path \$target -Entry \$entry/u,
@@ -757,6 +767,33 @@ const windowsBuildJob = releaseWorkflow.slice(
 assert.match(prValidationJob, /github\.event_name == 'pull_request'/);
 assert.match(prValidationJob, /npm run test:windows-runtime/);
 assert.match(prValidationJob, /npm run test:codex-acp-windows-runtime/);
+function verifyRuntimePrSupervision(job) {
+  for (const entry of ["test:windows-runtime", "test:windows-runtime-cache"]) {
+    assert.ok(job.includes(`python ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/${entry === "test:windows-runtime" ? "packaging" : "cache-release"}.json" -- cmd.exe /d /c "npm run ${entry}"`),
+      `${entry} must execute inside the owned process supervisor`);
+  }
+  assert.doesNotMatch(job, /^    continue-on-error:/mu, "the release PR job must remain blocking");
+  const steps = job.split("\n      - name: ").slice(1);
+  const advisory = steps.filter(step => step.includes("\n        continue-on-error:"));
+  assert.equal(advisory.length, 1, "only the reviewed receipt upload may be advisory");
+  assert.ok(advisory[0].startsWith("上传 Windows runtime PR 资源收据\n"));
+  for (const field of ["timeout-minutes: 3", "retention-days: 7", "if: always()",
+    "uses: actions/upload-artifact@v7", "continue-on-error: true", "if-no-files-found: warn",
+    "path: ${{ runner.temp }}/windows-runtime-pr-${{ github.run_id }}-${{ github.run_attempt }}/"]) {
+    assert.ok(advisory[0].includes(field), `release PR resource receipts must preserve ${field}`);
+  }
+  assert.doesNotMatch(advisory[0], /^        (?:run|env):/mu);
+}
+verifyRuntimePrSupervision(prValidationJob);
+for (const mutant of [
+  prValidationJob.replace('-- cmd.exe /d /c "npm run test:windows-runtime-cache"', '-- cmd.exe /d /c "echo ignored"'),
+  prValidationJob.replace('        timeout-minutes: 3\n', ''),
+  prValidationJob.replace('          retention-days: 7\n', '          retention-days: 90\n'),
+  prValidationJob.replace('        continue-on-error: true\n', '').replace('      - name: 验证 Windows 打包契约\n', '      - name: 验证 Windows 打包契约\n        continue-on-error: true\n'),
+]) {
+  assert.notEqual(mutant, prValidationJob, "the negative control must change the real entry");
+  assert.throws(() => verifyRuntimePrSupervision(mutant), "supervision or failure suppression must be rejected");
+}
 assert.match(prValidationJob, /submodules: false/);
 assert.doesNotMatch(
   prValidationJob,

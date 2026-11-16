@@ -222,11 +222,15 @@ function Assert-RuntimeTrackedFilesClean {
     $previousPreference = $ErrorActionPreference
     try {
       $ErrorActionPreference = 'Continue'
-      $null = & git -C $Root @arguments 2>&1
+      $diagnostic = @(& git -C $Root @arguments 2>&1)
       $code = $LASTEXITCODE
     } finally { $ErrorActionPreference = $previousPreference }
+    if ($code -gt 1 -or ($code -ne 0 -and $diagnostic.Count -gt 0)) {
+      # Do not print arbitrary filter output (URLs or proxy credentials).
+      throw 'Unable to inspect Windows runtime tracked content. Verify required Git filters, including git-lfs, then retry; do not update the lock to bypass an inspection failure.'
+    }
     if ($code -ne 0) {
-      throw 'Windows runtime submodule contains tracked local changes or cannot be inspected; commit and update the main-repository lock first.'
+      throw 'Windows runtime tracked content differs from HEAD. Verify required Git filters (including git-lfs) before committing intended changes and updating the main-repository lock.'
     }
   }
 }

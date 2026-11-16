@@ -80,6 +80,28 @@ try {
   [IO.File]::WriteAllText($probe,$code,[Text.UTF8Encoding]::new($false))
   & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $probe
   if($LASTEXITCODE -ne 0 -or -not(Test-Path -LiteralPath (Join-Path $destination 'node.exe'))){throw 'Real PowerShell 5.1 Node expansion failed'}
+  if(-not(Test-Path -LiteralPath (Join-Path $destination 'node_modules/npm/bin/npm-cli.js'))){throw 'Real Node archive must include npm'}
+  # Verify the complete copied file set and its deepest member, rather than
+  # accepting an early node.exe copy as evidence for npm's nested paths.
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $archive=[IO.Compression.ZipFile]::OpenRead($NodeRuntimeZip)
+  try {
+   $nodeEntries=@($archive.Entries|Where-Object {$_.FullName -match '(^|/)node\.exe$'})
+   if($nodeEntries.Count -ne 1){throw 'Node archive root is ambiguous'}
+   $prefix=$nodeEntries[0].FullName.Substring(0,$nodeEntries[0].FullName.Length-'node.exe'.Length)
+   $files=@($archive.Entries|Where-Object {$_.FullName.StartsWith($prefix,[StringComparison]::Ordinal) -and -not $_.FullName.EndsWith('/')})
+   if(@(Get-ChildItem -LiteralPath $destination -File -Recurse).Count -ne $files.Count){throw 'Expanded Node/npm file count differs from archive'}
+   foreach($entry in $files){
+    $copied=Join-Path $destination $entry.FullName.Substring($prefix.Length).Replace('/','\')
+    if(-not(Test-Path -LiteralPath $copied -PathType Leaf) -or (Get-Item -LiteralPath $copied).Length -ne $entry.Length){throw 'Expanded Node/npm member differs from archive'}
+   }
+   $deepest=$files|Sort-Object {$_.FullName.Length} -Descending|Select-Object -First 1
+   $deepPath=Join-Path $destination $deepest.FullName.Substring($prefix.Length).Replace('/','\')
+   $stream=$deepest.Open();$sha=[Security.Cryptography.SHA256]::Create()
+   try{$expected=[BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','').ToLowerInvariant()}finally{$stream.Dispose();$sha.Dispose()}
+   if((Get-FileHash -LiteralPath $deepPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expected){throw 'Deepest Node/npm member content differs'}
+   Write-Output "Real Node/npm copy: $($files.Count) files, deepest destination length $($deepPath.Length), TEMP length $($tempBase.Length)."
+  } finally {$archive.Dispose()}
  }
  # A naturally short checkout is reused and must survive cleanup.
  $shortState=Join-Path $fixture 'short-state.json'

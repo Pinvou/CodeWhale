@@ -173,9 +173,10 @@ cargo check
 2. 使用 `scripts/pack-component.ps1` 重新生成对应的确定性 ZIP；
 3. 执行 `scripts/update-manifest.ps1`；
 4. 提交并推送运行时仓库，只有变更组件产生新的 LFS 对象；
-5. 主仓库更新 submodule gitlink；
-6. 更新主仓库 lock 中的 commit 和 manifest SHA-256；
-7. 从干净 checkout 验证 staging 和安装包。
+5. 为该 commit 发布 `runtime-<完整 commit>` Release，上传 manifest 中的全部原名附件，并逐项核验大小与 SHA-256；
+6. 主仓库更新 submodule gitlink；
+7. 更新主仓库 lock 中的 commit 和 manifest SHA-256；
+8. 从干净 checkout 验证 staging 和安装包。
 
 上述 `scripts/pack-component.ps1` 与 `scripts/update-manifest.ps1` 位于
 `private-runtimes/windows` 运行时子模块内，父仓库中没有这两个文件，不要在父仓查找。

@@ -1230,13 +1230,31 @@ jobs:
         working-directory: pinvou3-app
         run: npm ci --prefer-offline --no-audit
 
+      - name: 准备 Windows runtime PR 资源收据
+        shell: pwsh
+        run: |
+          $directory = Join-Path $env:RUNNER_TEMP 'windows-runtime-pr-${{ github.run_id }}-${{ github.run_attempt }}'
+          New-Item -ItemType Directory -Path $directory -ErrorAction Stop | Out-Null
+          "PINVOU_CI_RESOURCE_LEDGER=$directory" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: 验证 Windows 打包契约
         working-directory: pinvou3-app
         run: |
-          npm run test:windows-runtime
-          npm run test:windows-runtime-cache
+          python ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/packaging.json" -- cmd.exe /d /c "npm run test:windows-runtime"
+          python ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/cache-release.json" -- cmd.exe /d /c "npm run test:windows-runtime-cache"
           pwsh -NoProfile -File ../scripts/tests/test_windows_release_workspace.ps1
           npm run test:codex-acp-windows-runtime
+
+      - name: 上传 Windows runtime PR 资源收据
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: windows-runtime-pr-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-runtime-pr-${{ github.run_id }}-${{ github.run_attempt }}/
+          retention-days: 7
+          if-no-files-found: warn
 
   build-windows-x64:
     name: 构建 Windows x86_64 nsis

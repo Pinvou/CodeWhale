@@ -3648,11 +3648,12 @@ python3() { fixture_mock python3 "$@"; }
             "Windows 测试二进制导入诊断",
             "Test resource lifecycle receipts",
             "Browser shard resource lifecycle receipts",
-            "Financial parallel diagnostics",
+            "Financial group lifecycle receipts",
             "Account test resource lifecycle receipts",
             "Account closure resource lifecycle receipts",
             "Preserve browser fixture exit receipts",
             "Preserve ACP fixture exit receipt",
+            "上传 Windows runtime 资源收据",
         )
         self.assertEqual(
             len(step_level),
@@ -3685,6 +3686,13 @@ python3() { fixture_mock python3 "$@"; }
                   run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
             """).rstrip(), "      "),
         )
+        runtime_receipt = _step_named(_extract_job_block(body, 'windows-runtime-test'), '上传 Windows runtime 资源收据')
+        for setting in ('if: always()', 'timeout-minutes: 3', 'uses: actions/upload-artifact@v7',
+                        'retention-days: 7', 'if-no-files-found: warn',
+                        'name: windows-runtime-receipts-${{ github.run_id }}-${{ github.run_attempt }}',
+                        'path: ${{ runner.temp }}/windows-runtime-${{ github.run_id }}-${{ github.run_attempt }}/'):
+            self.assertIn(setting, runtime_receipt)
+        self.assertNotRegex(runtime_receipt, r'(?m)^        (?:run|env):')
         transport = _step_named(_extract_job_block(body, 'required-gate'), 'PR test success proof transport')
         self.assertIn('timeout-minutes: 3', transport)
         self.assertIn('uses: actions/upload-artifact@v7', transport)
@@ -3761,31 +3769,31 @@ python3() { fixture_mock python3 "$@"; }
                     retention-days: 7
             """).rstrip(), "      "),
         )
-        diagnostic_job = _extract_job_block(body, 'account-platform-test')
+        diagnostic_job = _extract_job_block(body, 'account-financial-test')
         matches = list(re.finditer(
-            r"(?ms)^      - name: Financial parallel diagnostics\n.*?(?=^      - |\Z)", diagnostic_job
+            r"(?ms)^      - name: Financial group lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
         ))
         self.assertEqual(len(matches), 1, "expected one reviewed diagnostic step")
         self.assertEqual(
             matches[0].group(0).rstrip(),
             textwrap.indent(textwrap.dedent("""\
-                - name: Financial parallel diagnostics
-                  id: financial_diagnostics_upload
-                  if: ${{ always() }}
+                - name: Financial group lifecycle receipts
+                  id: financial_receipts_upload
+                  if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
                   with:
-                    name: account-financial-parallel-${{ github.run_attempt }}
-                    path: ${{ runner.temp }}/financial-parallel-*/
-                    if-no-files-found: ignore
+                    name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}
+                    path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                    if-no-files-found: error
                     retention-days: 7
             """).rstrip(), "      "),
         )
 
     def test_diagnostic_exemptions_cannot_move_to_business_tests_or_jobs(self):
         original = self.pr_workflow
-        financial_start = "      - name: Financial parallel diagnostics\n"
+        financial_start = "      - name: Financial group lifecycle receipts\n"
         financial_step = original.split(financial_start, maxsplit=1)[1].split(
             "\n      - name:", maxsplit=1
         )[0]

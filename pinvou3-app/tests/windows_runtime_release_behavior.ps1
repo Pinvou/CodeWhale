@@ -132,6 +132,7 @@ try {
   Assert-True ($proxy.IsBypassed([Uri]'https://github.com/a')) 'wildcard NO_PROXY must preserve direct routing'
   Assert-True ($proxy.Credentials.UserName -eq 'a' -and $proxy.Credentials.Password -eq 'b' -and -not $proxy.Address.UserInfo) 'proxy credentials must be separated from the address'
   Assert-Rejected { Get-RuntimeReleaseProxy -Environment @{ HTTPS_PROXY = 'file:///tmp/proxy' } } 'unsupported proxy schemes must fail closed'
+  . (Join-Path $PSScriptRoot 'windows_runtime_transport_behavior.ps1')
   Write-Host 'Windows runtime Release download, integrity, offline reuse, corruption repair and failure boundaries passed.'
 } finally {
   $resolved = [IO.Path]::GetFullPath($testRoot)

@@ -192,6 +192,8 @@ try {
   try { Assert-RuntimeTrackedFilesClean -Root $gitFixture } catch { $concealedIndexRejected = $true }
   Assert-True $concealedIndexRejected "a HEAD-equivalent worktree must not conceal staged edits"
 
+  . (Join-Path $PSScriptRoot 'windows_runtime_lfs_behavior.ps1')
+
   $stagingParent = Join-Path $testRoot "windows-runtime"
   $stagingRoot = Join-Path $stagingParent $stageId
   $stageManifestPath = Join-Path $stagingRoot ".stage-manifest.json"

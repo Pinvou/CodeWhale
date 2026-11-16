@@ -50,8 +50,7 @@ function Get-RuntimeReleaseProxy {
   return $proxy
 }
 
-function Write-RuntimeReleaseDownload {
-  param([Uri]$Uri, [string]$Destination)
+function New-RuntimeReleaseHttpClient {
   Add-Type -AssemblyName System.Net.Http
   $handler = New-Object System.Net.Http.HttpClientHandler
   $handler.AllowAutoRedirect = $false
@@ -62,13 +61,27 @@ function Write-RuntimeReleaseDownload {
   $client = New-Object System.Net.Http.HttpClient($handler)
   $client.Timeout = [TimeSpan]::FromMinutes(10)
   $client.DefaultRequestHeaders.UserAgent.ParseAdd('pinvou-windows-runtime/1')
+  # HttpClient owns the handler and releases it when the caller disposes it.
+  return $client
+}
+
+function Write-RuntimeReleaseDownload {
+  param([Uri]$Uri, [string]$Destination, [long]$ExpectedBytes)
+  if ($ExpectedBytes -le 0 -or $ExpectedBytes -ge 2GB) { throw 'Invalid locked runtime asset size.' }
+  if (-not ('Pinvou.RuntimeRelease.Body' -as [type])) {
+    Add-Type -Path (Join-Path $PSScriptRoot 'RuntimeReleaseBody.cs')
+  }
+  $client = New-RuntimeReleaseHttpClient
   $previousTls = [Net.ServicePointManager]::SecurityProtocol
   [Net.ServicePointManager]::SecurityProtocol = $previousTls -bor [Net.SecurityProtocolType]::Tls12
   try {
     for ($redirect = 0; $redirect -le 5; $redirect++) {
       Assert-RuntimeReleaseUri -Uri $Uri
-      $response = $client.GetAsync($Uri, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+      # Preserve the existing per-hop budget, extending it through the body.
+      $deadline = [Threading.CancellationTokenSource]::new($client.Timeout)
+      $response = $null
       try {
+        $response = $client.GetAsync($Uri, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead, $deadline.Token).GetAwaiter().GetResult()
         $status = [int]$response.StatusCode
         if ($status -in @(301, 302, 303, 307, 308)) {
           if ($null -eq $response.Headers.Location) { throw 'Runtime asset redirect has no location.' }
@@ -76,17 +89,29 @@ function Write-RuntimeReleaseDownload {
           continue
         }
         if ($status -ne 200) { throw "Runtime Release download failed with HTTP $status." }
-        $input = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
-        $output = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew)
-        try { $input.CopyTo($output) } finally { $output.Dispose(); $input.Dispose() }
+        $length = $response.Content.Headers.ContentLength
+        if ($null -ne $length -and $length -ne $ExpectedBytes) { throw 'Runtime Release Content-Length differs from the locked size.' }
+        $pendingStream = $response.Content.ReadAsStreamAsync()
+        $pendingStream.Wait($deadline.Token)
+        $body = $pendingStream.GetAwaiter().GetResult()
+        $output = $null
+        try {
+          $output = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew)
+          [Pinvou.RuntimeRelease.Body]::Copy($body, $output, $ExpectedBytes, $deadline.Token)
+        } finally {
+          if ($null -ne $output) { $output.Dispose() }
+          $body.Dispose()
+        }
         return
-      } finally { $response.Dispose() }
+      } finally {
+        if ($null -ne $response) { $response.Dispose() }
+        $deadline.Dispose()
+      }
     }
     throw 'Too many redirects downloading the pinned runtime Release asset.'
   } finally {
     [Net.ServicePointManager]::SecurityProtocol = $previousTls
     $client.Dispose()
-    $handler.Dispose()
   }
 }
 
@@ -134,7 +159,7 @@ function Sync-RuntimeReleaseAssets {
   param(
     [string]$RuntimeRoot, [string]$CacheRoot, $Lock, [string]$Commit,
     [switch]$OnnxOnly, [switch]$ForceDownload,
-    [scriptblock]$Download = { param($Uri, $Destination) Write-RuntimeReleaseDownload -Uri $Uri -Destination $Destination }
+    [scriptblock]$Download = { param($Uri, $Destination, $ExpectedBytes) Write-RuntimeReleaseDownload -Uri $Uri -Destination $Destination -ExpectedBytes $ExpectedBytes }
   )
   if ($Commit -cnotmatch '^[a-f0-9]{40}$' -or [string]$Lock.source.commit -cne $Commit -or
       [string]$Lock.source.url -cnotmatch '^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\.git$') {
@@ -182,7 +207,7 @@ function Sync-RuntimeReleaseAssets {
       try {
         $name = [IO.Path]::GetFileName([string]$entry.path)
         $uri = [Uri]("https://github.com/$repository/releases/download/$tag/$name")
-        & $Download $uri $temporary
+        & $Download $uri $temporary ([long]$entry.bytes)
         if (-not (Test-RuntimeReleaseFile -Path $temporary -Entry $entry)) {
           throw "Pinned runtime Release asset size/SHA256 mismatch: $name"
         }
