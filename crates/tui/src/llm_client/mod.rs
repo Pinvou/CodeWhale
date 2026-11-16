@@ -315,7 +315,7 @@ pub enum LlmError {
     /// Request timed out
     Timeout(Duration),
 
-    /// Authentication failed (HTTP 401, selected HTTP 403)
+    /// Authentication failed (HTTP 401, selected HTTP 403, or provider-native codes)
     AuthenticationError(AuthenticationErrorDetail),
 
     /// Authorization or provider-side blocking failed (HTTP 403)

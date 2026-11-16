@@ -430,7 +430,10 @@ where
     if let Ok(body) = serde_json::from_str::<serde_json::Value>(&raw) {
         let failed = body
             .pointer("/base_resp/status_code")
-            .and_then(serde_json::Value::as_i64)
+            .and_then(|code| {
+                code.as_i64()
+                    .or_else(|| code.as_str().and_then(|code| code.parse::<i64>().ok()))
+            })
             .is_some_and(|code| code != 0)
             || body.get("error").is_some_and(|error| !error.is_null());
         if failed {
@@ -593,6 +596,14 @@ pub fn provider_error(
         .unwrap_or_default();
     let provider = provider.to_ascii_lowercase();
     let code_lower = code.to_ascii_lowercase();
+    // Native authentication refusals may arrive inside a successful HTTP envelope.
+    if matches!(
+        provider.as_str(),
+        "minimax" | "minimax-anthropic" | "minimax_anthropic"
+    ) && matches!(code.as_str(), "1004" | "2049")
+    {
+        return Some(LlmError::authentication_error(safe));
+    }
     let window = match provider.as_str() {
         "minimax" | "minimax-anthropic" | "minimax_anthropic" => {
             matches!(code.as_str(), "2045" | "2046" | "2047")

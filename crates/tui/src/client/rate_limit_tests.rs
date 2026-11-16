@@ -1,5 +1,221 @@
 use super::*;
 
+fn native_auth_fixture_client(provider: &str, url: &str, key: &str) -> DeepSeekClient {
+    let route = crate::config::ProviderConfig {
+        api_key: Some(key.into()),
+        base_url: Some(url.into()),
+        ..Default::default()
+    };
+    DeepSeekClient::new(&Config {
+        provider: Some(provider.into()),
+        api_key: Some(key.into()),
+        base_url: Some(url.into()),
+        providers: Some(crate::config::ProvidersConfig {
+            minimax: route.clone(),
+            minimax_anthropic: route,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+async fn native_auth_public_call(
+    client: &DeepSeekClient,
+    isolated: bool,
+) -> Result<MessageResponse> {
+    let request = translation_message_request(
+        "owned auth fixture",
+        client.default_model.clone(),
+        "English",
+        64,
+    );
+    if isolated {
+        client.create_message_without_response_cache(request).await
+    } else {
+        client.create_message(request).await
+    }
+}
+
+// Config and dispatch must see the same private home and credential-source state.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn forkguard_rate_limit_native_auth_is_terminal_in_both_senders() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    let _env = crate::test_support::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _backend = crate::test_support::EnvVarGuard::remove("CODEWHALE_SECRET_BACKEND");
+    let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+    let _cli_source = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY_SOURCE");
+    let _legacy_source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+    let _local_rate = crate::test_support::EnvVarGuard::set("CODEWHALE_RATE_LIMIT_RPS", "0");
+    let mut cases = Vec::new();
+    for isolated in [false, true] {
+        for code in [1004, 2049] {
+            cases.push(("minimax", isolated, serde_json::json!(code)));
+            cases.push(("minimax", isolated, serde_json::json!(code.to_string())));
+        }
+    }
+    cases.push(("mini_max", false, serde_json::json!(1004)));
+    cases.push(("mini_max_anthropic", true, serde_json::json!("2049")));
+    for (provider, isolated, code) in cases {
+        let server = MockServer::start().await;
+        let secret = format!("owned-auth-{}", uuid::Uuid::new_v4());
+        let client = native_auth_fixture_client(provider, &server.uri(), &secret);
+        assert!(
+            client.retry.enabled,
+            "the regression must keep automatic retries enabled"
+        );
+        let escaped = secret
+            .chars()
+            .map(|ch| format!("\\u{:04x}", u32::from(ch)))
+            .collect::<String>();
+        let mut refusal = serde_json::json!({
+            "base_resp": {"status_code": code, "status_msg": format!("opaque {secret}")},
+            "retry_after": 7200,
+        })
+        .to_string();
+        if code.is_string() {
+            refusal = refusal.replace(&secret, &escaped);
+        }
+        let zero = if code.is_string() {
+            serde_json::json!("0")
+        } else {
+            serde_json::json!(0)
+        };
+        let success = if client.wire_format == WireFormat::AnthropicMessages {
+            serde_json::json!({"id":"owned-success","type":"message","role":"assistant","model":client.default_model,
+                "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1},
+                "base_resp":{"status_code":zero}})
+        } else {
+            serde_json::json!({"id":"owned-success","object":"chat.completion","model":client.default_model,
+                "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2},"base_resp":{"status_code":zero}})
+        };
+        let sends = Arc::new(AtomicUsize::new(0));
+        let seen = sends.clone();
+        Mock::given(method("POST"))
+            .respond_with(move |_: &Request| {
+                if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(200)
+                        .insert_header("Retry-After", "7200")
+                        .set_body_raw(refusal.clone(), "application/json")
+                } else {
+                    ResponseTemplate::new(200).set_body_json(success.clone())
+                }
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            native_auth_public_call(&client, isolated),
+        )
+        .await
+        .expect("native auth must terminate without waiting for Retry-After")
+        .unwrap_err();
+        let typed = error
+            .downcast_ref::<LlmError>()
+            .expect("preserve typed authentication error");
+        assert!(
+            matches!(typed, LlmError::AuthenticationError(_)),
+            "{provider}/{isolated}/{code}: {typed:?}"
+        );
+        assert!(!typed.is_retryable());
+        assert_eq!(typed.suggested_retry_delay(), None);
+        let diagnostic = format!("{error:#?}");
+        assert!(!diagnostic.contains(&secret) && !diagnostic.contains(&escaped));
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "no extra POST or health probe for a fresh client"
+        );
+        assert!(
+            client.shared_quota.remaining().is_none(),
+            "HTTP200 authentication must not create quota backoff"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            native_auth_public_call(&client, isolated),
+        )
+        .await
+        .expect("the same client must admit its next call")
+        .expect("next valid call succeeds");
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        assert!(client.shared_quota.remaining().is_none());
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn forkguard_rate_limit_native_auth_keeps_provider_and_429_boundaries() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _env = crate::test_support::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.path());
+    let _backend = crate::test_support::EnvVarGuard::remove("CODEWHALE_SECRET_BACKEND");
+    let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+    let _cli_source = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY_SOURCE");
+    let _legacy_source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+    let _local_rate = crate::test_support::EnvVarGuard::set("CODEWHALE_RATE_LIMIT_RPS", "0");
+    for isolated in [false, true] {
+        for (provider, status) in [("custom", 200), ("custom", 400), ("minimax", 429)] {
+            let server = MockServer::start().await;
+            let raw = r#"{"base_resp":{"status_code":1004,"status_msg":"opaque fixture"}}"#;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("Retry-After", "7200")
+                        .set_body_raw(raw, "application/json"),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let key = format!("owned-boundary-{}", uuid::Uuid::new_v4());
+            let mut client = native_auth_fixture_client(provider, &server.uri(), &key);
+            client.isolated_request_state = isolated;
+            let operation = client.for_operation(uuid::Uuid::new_v4());
+            let url = server.uri();
+            let body = serde_json::json!({"fixture":true});
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                operation.send_json_with_retry(&url, &body),
+            )
+            .await
+            .expect("boundary responses must terminate without retrying");
+            if status == 200 {
+                assert_eq!(result.unwrap().text().await.unwrap(), raw);
+                assert!(client.shared_quota.remaining().is_none());
+            } else {
+                let error = result.unwrap_err();
+                let typed = error.downcast_ref::<LlmError>().unwrap();
+                if status == 429 {
+                    assert!(matches!(typed, LlmError::AuthenticationError(_)));
+                    if isolated {
+                        assert!(client.shared_quota.remaining().is_none());
+                    } else {
+                        assert!(
+                            client.shared_quota.remaining().unwrap() > Duration::from_secs(7190),
+                            "retain the existing explicit HTTP429 minimum"
+                        );
+                    }
+                } else {
+                    assert!(matches!(
+                        typed,
+                        LlmError::InvalidRequest { status: 400, .. }
+                    ));
+                }
+            }
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+}
+
 #[tokio::test]
 async fn forkguard_rate_limit_native_and_raw_errors_reach_both_senders() {
     use wiremock::matchers::method;
