@@ -2273,6 +2273,25 @@ mod tests {
             truncate_clause_text(&small_fake, MAX_CLAUSE_TEXT_LEN),
             small_fake
         );
+
+        // The ceiling comparison itself is pinned at both sides: exactly 12
+        // digits is inside the recognized grammar (verbatim when it fits),
+        // 13 digits is re-bounded as plain text. Mutating `<=` to `<`
+        // (effective ceiling 11) fails the first assert.
+        let twelve = format!("x{}[…truncated 123456789012 chars]", "a".repeat(50));
+        assert_eq!(truncate_clause_text(&twelve, MAX_CLAUSE_TEXT_LEN), twelve);
+        let thirteen = format!(
+            "x{}[…truncated 1234567890123 chars]",
+            "a".repeat(MAX_CLAUSE_TEXT_LEN)
+        );
+        let re_bounded = truncate_clause_text(&thirteen, MAX_CLAUSE_TEXT_LEN);
+        assert!(
+            !re_bounded.contains("1234567890123"),
+            "a 13-digit count must be treated as plain text and re-bounded"
+        );
+        // 1 ("x") + 2000 ("a" run) + 32 (the unrecognized 13-digit marker
+        // counts as plain text) = 2033 chars in; 33 dropped past the cap.
+        assert!(re_bounded.ends_with("[…truncated 33 chars]"));
     }
 
     /// A clause whose terminal marker-shaped tail carries **no** digits —
