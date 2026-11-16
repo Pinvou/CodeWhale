@@ -42,6 +42,12 @@ test("run appends a byte-accurate truncation marker for CJK output past maxBuffe
     Buffer.byteLength(kept, "utf8") <= 100,
     `kept prefix should be <= 100 bytes, got ${Buffer.byteLength(kept, "utf8")}`,
   );
+  // Byte-truthful kept prefix: the cut drops the trailing partial sequence
+  // (floor(100/3) = 33 whole chars = 99 bytes), so no replacement character
+  // that was never in the output may appear, however the pipe chunked the
+  // stream.
+  assert.ok(!kept.includes("\uFFFD"), "kept prefix must not contain a fabricated replacement char");
+  assert.equal(kept, "\u6c49".repeat(33));
 });
 
 test("run does not mark truncation when output fits or exactly fills maxBuffer", async () => {
