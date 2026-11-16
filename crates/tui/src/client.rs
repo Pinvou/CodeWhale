@@ -1185,6 +1185,17 @@ impl DeepSeekClient {
             return Self::from_candidate(&route.config, &route.candidate);
         }
         let default_model = config.default_model();
+        let base_url = config.deepseek_base_url();
+        // The route resolution below is best-effort on this arm — its limits
+        // are advisory and a resolution failure must not take the whole
+        // client down. The pairing gate is different: `.ok()` here used to
+        // swallow the cross-pairing rejection, so a client built through
+        // this fallback (the per-turn auto-router classifier sends real
+        // requests with one) could carry a known-bad Kimi model/endpoint
+        // pairing that the request path would have refused with guidance.
+        // Validate exactly the pairing this client will bind to.
+        crate::config::validate_kimi_code_api_model_id(api_provider, &base_url, &default_model)
+            .map_err(anyhow::Error::msg)?;
         let route_limits =
             crate::route_runtime::resolve_runtime_route(config, api_provider, Some(&default_model))
                 .ok()
@@ -1192,7 +1203,7 @@ impl DeepSeekClient {
                     crate::route_budget::known_route_limits(route.candidate.limits())
                 });
         Self::from_parts(
-            config.deepseek_base_url(),
+            base_url,
             default_model,
             provider_wire_format_for_config(api_provider, Some(config)),
             route_limits,
@@ -4713,6 +4724,65 @@ mod tests {
             .and_then(|tools| tools.iter().find(|tool| tool["function"]["name"] == name))
             .map(|tool| &tool["function"])
             .unwrap_or_else(|| panic!("captured tool catalog is missing {name}: {body}"))
+    }
+
+    /// The client-construction fallback must fail closed on a known-bad
+    /// Kimi model/endpoint pairing: `.ok()` on the route resolution used to
+    /// swallow the pairing rejection, and the per-turn auto-router
+    /// classifier sends real requests through a client built this way.
+    #[test]
+    fn client_fallback_fails_closed_on_cross_paired_kimi_routes() {
+        for (base_url, model) in [
+            (
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+            // The K3-generation gate keeps the same coverage here.
+            (
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K3_MODEL,
+            ),
+        ] {
+            let error = DeepSeekClient::new(&Config {
+                provider: Some("moonshot".to_string()),
+                providers: Some(ProvidersConfig {
+                    moonshot: ProviderConfig {
+                        api_key: Some("fallback-pairing-key".to_string()),
+                        base_url: Some(base_url.to_string()),
+                        model: Some(model.to_string()),
+                        ..ProviderConfig::default()
+                    },
+                    ..ProvidersConfig::default()
+                }),
+                ..Config::default()
+            })
+            .map(|_| ())
+            .expect_err("cross-paired Kimi route must fail closed in the client fallback");
+            let error = error.to_string();
+            assert!(error.contains(model), "{error}");
+            assert!(error.contains("base_url"), "{error}");
+        }
+
+        // Canonical pairs still construct on the same arm.
+        let client = DeepSeekClient::new(&Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(ProvidersConfig {
+                moonshot: ProviderConfig {
+                    api_key: Some("fallback-pairing-key".to_string()),
+                    base_url: Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string()),
+                    model: Some("k3".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("canonical membership pair must construct");
+        assert_eq!(client.base_url, crate::config::DEFAULT_KIMI_CODE_BASE_URL);
     }
 
     fn moonshot_request_boundary_client(
@@ -9339,7 +9409,10 @@ mod tests {
     /// four spellings across both vendor routes (direct platform + Kimi Code
     /// membership endpoint), the stale-effort-off always-replay case, the
     /// case/padding normalization, and the custom-gateway / non-Moonshot
-    /// dialect boundary.
+    /// dialect boundary. The uniquely pinning legs are the effort-off ones
+    /// and the bare membership ids: the direct-platform default-effort legs
+    /// would also replay through the generic `kimi-` prefix heuristic with
+    /// this arm deleted (same honesty note as the stream gate's arm).
     #[test]
     fn kimi_k31_tool_rounds_replay_reasoning_content_on_the_vendor_routes() {
         let tool_round = || {
