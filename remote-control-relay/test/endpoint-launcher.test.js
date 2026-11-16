@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawnSyncWithRetry } from "./relay-tools-spawn.mjs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { join } from "node:path";
@@ -65,7 +65,7 @@ $generated = Write-EnvFiles -stateDir $stateDir -key $key
  hmac_length = $env:PINVOU_REMOTE_ENROLLMENT_HMAC_KEY.Length
 } | ConvertTo-Json -Compress
 `;
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
+  const result = spawnSyncWithRetry("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
     env: {
       ...process.env,
       PINVOU_TEST_SELFTEST_PATH: fileURLToPath(new URL("../../scripts/remote-control-local-selftest.ps1", import.meta.url)),
@@ -110,7 +110,7 @@ $Mode = 'Production'; . $block *> $null
 $production = @{}; foreach ($name in $names) { $production[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 @{test = $test; production = $production} | ConvertTo-Json -Compress
 `;
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
+  const result = spawnSyncWithRetry("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
     env: { ...process.env, PINVOU_TEST_LAUNCHER_PATH: launcher },
     encoding: "utf8",
     timeout: 20_000,
@@ -154,7 +154,7 @@ test("actual selftest prepare preserves both HMACs and refuses lost or corrupt i
     "$missing=$false; try{$null=Write-EnvFiles -stateDir $stateDir -key $key}catch{$missing=$true}",
     "@{same=$same;invalid_refused=$invalid;invalid_unchanged=$unchanged;missing_refused=$missing;no_new_env=(-not (Test-Path -LiteralPath $first.RelayEnvPath))}|ConvertTo-Json -Compress",
   ].join("\n");
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
+  const result = spawnSyncWithRetry("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
     env: { ...process.env, PINVOU_TEST_SELFTEST_PATH: fileURLToPath(new URL("../../scripts/remote-control-local-selftest.ps1", import.meta.url)), PINVOU_TEST_SELFTEST_ROOT: root },
     encoding: "utf8", timeout: 20_000,
   });

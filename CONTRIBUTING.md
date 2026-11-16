@@ -155,16 +155,22 @@ surviving child resources stopped; use the owning process supervisor and ledger.
 
 ## CI and merge queue
 
-Account Platform PostgreSQL closure contracts run in `account-closure-test`,
-independently of `account-platform-test`; both are mandatory for Account changes.
-The financial gate runs six independently admitted services (owners, Token, and
-four Billing shards). Billing assigns complete test roots by longest estimated
-duration first using `scripts/account-financial-test-durations.json`; new roots
-receive the documented default weight and remain included exactly once. Weights
-affect scheduling only: race detection, required subcases, exclusive actors,
-identity checks and strict resource retirement remain mandatory. Closure uses
-its own job-owned service and its own cleanup receipt. Runner capacity must cover
-the extra PostgreSQL workers; the original per-worker CPU/memory caps remain.
+Account Platform PostgreSQL closure contracts remain in `account-closure-test`.
+Nonfinancial Account contracts run in `account-platform-test`; six independent
+`account-financial-test` jobs (owners, Token, and four Billing groups) can start
+alongside it on separate runners. Every applicable group, the base contracts and
+closure are mandatory. Each financial job admits and retires one private service;
+the base job retains only its audit/broker services. Matrix fail-fast is disabled.
+The matrix validator rejects omitted, repeated or unknown groups, and successful
+input reuse requires all six exact jobs and their mandatory retirement checks;
+old monolithic or partial evidence is insufficient. Workflow/verifier/policy
+changes retain the existing requirement for real Merge Queue execution.
+Billing still assigns complete roots by longest estimated duration first using
+`scripts/account-financial-test-durations.json`; new roots receive the documented
+default weight and remain included exactly once. Race detection, required roots
+and subcases, exclusive actors, identity checks, per-worker limits and strict
+retirement are unchanged. Runner availability controls actual concurrency; this
+scheduling change does not promise a fixed speedup.
 
 
 Pull requests use a staged, path-aware gate. Draft pull requests run fast feedback
@@ -178,9 +184,26 @@ platform, permission, credential, session, remote-control, and other high-blast-
 radius paths automatically add full Linux and Windows Rust regression before
 queueing. Maintainers can apply `ci:full-rust` to force the same full regression
 for another ready Rust pull request; the label has no effect on a draft.
+
 The current lightweight Rust boundaries are internal-only changes under `feedback`,
 `personas`, and `pet`. Changing their registration, app commands, shared platform
 surface, Cargo metadata, or any unclassified Rust path still runs full regression.
+
+Frontend quality/build/logic remains in `frontend-test`. On Ready PRs and merge
+groups, `frontend-browser-test` runs four independent jobs alongside it. Every job
+selects the same actual tested diff, then assigns smoke entries by their stable
+selection order to one of four shards (`--shard INDEX/COUNT`, one-based). The union
+is the complete selected suite, with no duplicate assignments; a valid small
+selection can explicitly leave a shard empty, while an empty global selection
+fails. Each job prepares its own locked dependencies/builds and resource ledger;
+all applicable shards and the quality/logic job must pass `required-gate`.
+Matrix fail-fast is disabled so one failed shard does not cancel its peers.
+Successful-input reuse requires every configured shard and mandatory step,
+including retirement; partial or old monolithic evidence cannot replace them.
+The existing smoke retries, assertions, dependency-skip refusals and job timeouts
+are unchanged. Four workers permit parallel execution; actual elapsed time still
+depends on selected smoke duration and available runner capacity.
+
 Trusted same-repository `backflow/community-*` pull requests add a content-aware
 decision over the actual base-to-head diff. A pure release is accepted only when
 `VERSION` and every field managed by `scripts/sync-version.mjs` change mechanically

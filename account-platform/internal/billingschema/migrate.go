@@ -53,7 +53,13 @@ const memberQuotaBatchDownChecksum = "034594db8fcf381883b49a917c2b67b48efe4dbd17
 // numeric versions remains possible after the high-numbered fence is recorded.
 // The same validation is required before DownOne to prevent rollback-file edits.
 func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
+	if err := validateHistoricalStateRollbackIdentity(input); err != nil {
+		return nil, err
+	}
 	if err := validatePaymentDispatchProvenance(input); err != nil {
+		return nil, err
+	}
+	if err := validateProviderHealthRecent(input); err != nil {
 		return nil, err
 	}
 	if err := validateManualProductAdmission(input); err != nil {
