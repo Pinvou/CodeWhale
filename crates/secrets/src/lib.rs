@@ -2474,6 +2474,30 @@ mod tests {
     }
 
     #[test]
+    fn file_store_get_refuses_an_oversized_blob_with_the_explicit_error() {
+        // The load side of the 16 MiB mirror: a store file that grew past
+        // the cap by any means (hand-merge, older version, external writer)
+        // must fail reads with the explicit cap error instead of silently
+        // falling into the fail-neutral "not set" path.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("secrets.json");
+        std::fs::write(&path, "x".repeat((FILE_BLOB_READ_LIMIT as usize) + 1024)).unwrap();
+        // The permission gate runs first; the file must look like a store
+        // file so the size check is the one that fires.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let store = FileKeyringStore::new(path);
+        let err = store.get("deepseek").unwrap_err();
+        assert!(
+            matches!(err, SecretsError::SecretsFileTooLarge { .. }),
+            "over-cap load must fail with the explicit cap error; got: {err}"
+        );
+    }
+
+    #[test]
     fn file_store_set_still_creates_file_when_missing() {
         // Regression guard: the #281 fix removed `unwrap_or_default()` from
         // the load call. Make sure the original first-write-creates-the-file
