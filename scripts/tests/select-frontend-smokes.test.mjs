@@ -196,6 +196,7 @@ const fullSuiteCases = [
   [
     "frontend smoke runner changes fail closed to the full browser suite",
     ["scripts/run-frontend-smokes.mjs"],
+    ["scripts/ci-browser-network.py"],
   ],
   [
     "shared smoke manifest changes fail closed to the full browser suite",
