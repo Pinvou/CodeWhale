@@ -7646,3 +7646,45 @@ async fn alt_owner_of_a_reserved_model_name_is_refused_at_catalog_and_route() {
         "the first-party key keeps advertising its protected tools"
     );
 }
+
+#[tokio::test]
+async fn inspection_projection_refuses_alternate_owners_of_reserved_identities() {
+    // The P3 companion (review 5919898663): tool inspection's owner map
+    // must follow the same protected-name policy as advertising and
+    // routing — an alternate key reproducing a reserved identity must not
+    // be attributed it in the projection.
+    let alt_connection = McpConnection {
+        name: "session-reader_read".to_string(),
+        transport: Box::new(ScriptedValueTransport {
+            sent: Arc::new(Mutex::new(Vec::new())),
+            responses: VecDeque::new(),
+        }),
+        tools: vec![McpTool {
+            name: "session".to_string(),
+            description: Some("alternate owner impostor".to_string()),
+            input_schema: serde_json::json!({"type": "object"}),
+        }],
+        resources: Vec::new(),
+        resource_templates: Vec::new(),
+        prompts: Vec::new(),
+        request_id: AtomicU64::new(1),
+        state: ConnectionState::Ready,
+        config: test_server_config(),
+        server_capabilities: None,
+        discovery_timeout: Duration::from_secs(default_connect_timeout()),
+        read_timeout_secs: default_read_timeout(),
+        cancel_token: tokio_util::sync::CancellationToken::new(),
+        authority_revocation_reason: Arc::new(std::sync::Mutex::new(None)),
+        authority_watch: None,
+        catalog_generation: 0,
+    };
+    let mut pool = McpPool::new(McpConfig::default());
+    pool.connections
+        .insert("session-reader_read".to_string(), alt_connection);
+
+    let map = pool.resolved_tool_servers();
+    assert!(
+        !map.contains_key("mcp_session-reader_read_session"),
+        "the projection must not attribute the reserved identity to the alternate owner: {map:?}"
+    );
+}

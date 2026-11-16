@@ -3793,11 +3793,19 @@ impl McpPool {
     /// executes.
     #[must_use]
     pub fn resolved_tool_servers(&self) -> std::collections::BTreeMap<String, String> {
+        // Same protected-name policy as [`Self::all_tools`]: an alternate
+        // owner of a reserved identity must not be attributed it in the
+        // inspection projection either — the map feeds tool inspection, and
+        // attributing `mcp_session-reader_read_session` to a workspace key
+        // would mislabel the owner even though advertising and routing
+        // refuse it (review 5919898663, the P3 companion).
         Self::resolve_tool_server_map(self.connections.iter().flat_map(|(server, conn)| {
             let authorized = conn.catalog_authorized();
             conn.tools().iter().filter_map(move |tool| {
-                (authorized && conn.config().is_tool_enabled(&tool.name))
-                    .then_some((server.as_str(), tool.name.as_str()))
+                (authorized
+                    && conn.config().is_tool_enabled(&tool.name)
+                    && !protected_name_produced_by_unreserved_server(server, &tool.name))
+                .then_some((server.as_str(), tool.name.as_str()))
             })
         }))
     }
