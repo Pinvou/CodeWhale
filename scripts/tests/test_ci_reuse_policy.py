@@ -104,12 +104,13 @@ class ReusePlanTests(unittest.TestCase):
         policy = policies['frontend-browser-test']
         fixture = json.loads((ROOT/'scripts/tests/fixtures/ci-reuse-ready-frontend.json').read_text(encoding='utf-8'))
         job = {'name': 'frontend-browser-test (1)', 'conclusion': 'success', 'labels': ['ubuntu-22.04'], 'steps': fixture['steps']}
-        self.assertTrue(PLAN.complete(policies['frontend-test'], {**job, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))
-        # The historical payload predates mandatory network isolation. It must
-        # not witness the new recipe until that new required step also passed.
-        self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+        # Historical payloads cannot witness either current frontend recipe
+        # until the new required isolation preflight also passed.
         preflight = 'Verify browser loopback isolation and retirement'
+        self.assertFalse(PLAN.complete(policies['frontend-test'], {**job, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))
+        self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
         job['steps'] = [*job['steps'], {'name': preflight, 'conclusion': 'success'}]
+        self.assertTrue(PLAN.complete(policies['frontend-test'], {**job, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))
         self.assertTrue(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
         for bad in ('failure', 'skipped', 'missing'):
             broken = copy.deepcopy(job)
@@ -117,6 +118,7 @@ class ReusePlanTests(unittest.TestCase):
             if bad == 'missing': broken['steps'].pop()
             with self.subTest(isolation_preflight=bad):
                 self.assertFalse(PLAN.complete(policy, broken, {}, 'refs/heads/queue', {}))
+                self.assertFalse(PLAN.complete(policies['frontend-test'], {**broken, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))
         # Real PR shape: queue-only smoke skipped, warning skipped, PR smoke
         # passed. Diagnostic delivery is advisory even if its action fails.
         optional_failure = copy.deepcopy(job)

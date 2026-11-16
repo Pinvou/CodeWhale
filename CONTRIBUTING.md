@@ -132,6 +132,9 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   per browser are allowed even after the first three page numbers; they do not
   mask the live page or change the original exception, wait arguments or budget.
 - Linux CI browser shards pass `--isolate-network` to the shared smoke runner.
+  The frontend logic suite (including browser diagnostics regression tests) and
+  credential-origin real-browser matrix also run their complete fixture trees
+  through `scripts/ci-browser-network.py` inside the existing process supervisor.
   After dependency installation and builds, each smoke's driver, mock servers,
   Vite and Chrome share a private user/network namespace with loopback only.
   This prevents other jobs' Docker interface changes from canceling local module
