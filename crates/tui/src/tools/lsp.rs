@@ -480,6 +480,9 @@ mod tests {
 
     #[test]
     fn schema_documents_read_lints_contract_query_and_character_default() {
+        // Literal pin: the audited read_lints bound (16 → 64). Copy below
+        // interpolates the const, so this pins both the value and the copy.
+        assert_eq!(MAX_LINT_PATHS, 64);
         assert!(LspTool.description().contains("1-64 newline-separated"));
         assert!(LspTool.description().contains("success/error/timeout"));
         assert!(LspTool.description().contains("session configuration"));

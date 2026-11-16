@@ -145,6 +145,19 @@ fn walk(
     Ok(())
 }
 
+#[cfg(test)]
+mod digest_pin_tests {
+    use super::*;
+
+    /// Literal pin for the audited file-count ceiling (256 → 1024): a silent
+    /// revert passes every behavioral test, since >256-file packages are
+    /// rare in fixtures.
+    #[test]
+    fn package_digest_file_ceiling_is_the_audited_literal() {
+        assert_eq!(PACKAGE_DIGEST_MAX_FILES, 1024);
+    }
+}
+
 fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
     let bytes = bytes.as_ref();
     let mut out = String::with_capacity(bytes.len() * 2);
