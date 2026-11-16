@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "verified_at_utc": "2026-11-10T09:30:49.173841+00:00",
+  "source": "Docker official library registry over HTTPS; anonymous public metadata only",
+  "verification": "SHA256 of index bytes matches registry header; every runnable child manifest and config matches its descriptor, and config OS/architecture matches index. Variant is recorded from index. Attestations are counted but not verified as runnable images.",
+  "limits": "Metadata evidence, not a build-time resolver or automatic update policy. No image layers, publisher signatures, SDK execution, cross-architecture build/emulation or deployment verified. Recorded platforms do not expand project support.",
+  "images": [
+    {
+      "dockerfile": "account-platform/Dockerfile",
+      "stage": "build",
+      "build_argument": "GO_BUILD_IMAGE",
+      "reference": "golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83",
+      "repository": "docker.io/library/golang",
+      "tag": "1.26.6-alpine",
+      "index_digest": "sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83",
+      "index_source": "https://registry-1.docker.io/v2/library/golang/manifests/sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83",
+      "observed_tag_source": "https://registry-1.docker.io/v2/library/golang/manifests/1.26.6-alpine",
+      "platforms": [
+        {
+          "architecture": "amd64",
+          "os": "linux",
+          "manifest_digest": "sha256:1a9c10cf505a9e6b1e96ea77ebdbfe79a0f10380181faf88bc3b51d7e4315fae",
+          "config_digest": "sha256:0fe40429551153949b64503e465791d4a079141c41b04e6ceed6d7cdcb2512ad"
+        },
+        {
+          "architecture": "arm",
+          "os": "linux",
+          "variant": "v6",
+          "manifest_digest": "sha256:27e01cb6675935c4112ad52dffdf321dde0f68d17407672ccc15adf4c62070b0",
+          "config_digest": "sha256:843cd5c093d06c6bbb7ff093e2f6e6c3ae0c931a6f04508158423cc062746ec5"
+        },
+        {
+          "architecture": "arm",
+          "os": "linux",
+          "variant": "v7",
+          "manifest_digest": "sha256:23c67559d0da85bd5b8d64487ec1fd25ff9b06ba1c1843227d7081fec2ee618b",
+          "config_digest": "sha256:fa41fa9a09af0c963c8120a7f1d7d200898a2e9effdc3fc7239b92084662c9ed"
+        },
+        {
+          "architecture": "arm64",
+          "os": "linux",
+          "variant": "v8",
+          "manifest_digest": "sha256:1b2cb58c3df8b93b8bcb5739778692c35e491087599139deb2c8c03567cbb03e",
+          "config_digest": "sha256:d77e72e13ab7c12a3bbfc79766bb02ef7180864eb5a4d6d8c433a47119e3b2e1"
+        },
+        {
+          "architecture": "386",
+          "os": "linux",
+          "manifest_digest": "sha256:648921a68c7179241dd09daf8000fbfddc9e5ea9c1a24e7d0fe05b259dff2b5c",
+          "config_digest": "sha256:cc32041fe5b65ab8a9c4748450a37b1b57fe53a06f0f4b008ffb6bd27e4d1799"
+        },
+        {
+          "architecture": "ppc64le",
+          "os": "linux",
+          "manifest_digest": "sha256:828ca7f0f0de025bdefd031eb7fe995722e5fcd24b1efb2ef35169bb2f03a516",
+          "config_digest": "sha256:72e46d37fe0df7dcb515e8cbb30c36a6f3c5c08e00d75d9cb8d68e7f4f10cd7f"
+        },
+        {
+          "architecture": "riscv64",
+          "os": "linux",
+          "manifest_digest": "sha256:c75727aacd9fbd76a78651ae0302ff8cededf16ee05690dcf13548e77a6fd518",
+          "config_digest": "sha256:f67b301bfecabaf7c1c5c703f254d0deb76c68affedae50af757f07473b28062"
+        },
+        {
+          "architecture": "s390x",
+          "os": "linux",
+          "manifest_digest": "sha256:2943e7d08c789b7876aedc7c00591d66722a64de7de37672f17912e547384e9c",
+          "config_digest": "sha256:b00ecff9c33599f1c7c2143d3ee49b90b5c6647e019b5bec87863b6b133e16e3"
+        }
+      ],
+      "non_runnable_attestation_count": 8
+    },
+    {
+      "dockerfile": "account-platform/deploy/keycloak/Dockerfile",
+      "stage": "provider",
+      "build_argument": null,
+      "reference": "maven:3.9.11-eclipse-temurin-21@sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237",
+      "repository": "docker.io/library/maven",
+      "tag": "3.9.11-eclipse-temurin-21",
+      "index_digest": "sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237",
+      "index_source": "https://registry-1.docker.io/v2/library/maven/manifests/sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237",
+      "observed_tag_source": "https://registry-1.docker.io/v2/library/maven/manifests/3.9.11-eclipse-temurin-21",
+      "platforms": [
+        {
+          "architecture": "amd64",
+          "os": "linux",
+          "manifest_digest": "sha256:463a1849665463254b2dd56e3a5b316f1596bc93d0571065c06ea05bb48ab8f4",
+          "config_digest": "sha256:b9611ad9b2f6ebef1c9369a32d794718fc28ebe2b9bb37b81a64b731370907bd"
+        },
+        {
+          "architecture": "arm64",
+          "os": "linux",
+          "variant": "v8",
+          "manifest_digest": "sha256:d1d89ba5f782ba5dd52272e7da5aed592abb192dff6435523b852ffab3ee8484",
+          "config_digest": "sha256:3ead0ff36a4b796440e451013a4ce803dbd02f07b6c5b634cc2ad67927dfcc10"
+        },
+        {
+          "architecture": "ppc64le",
+          "os": "linux",
+          "manifest_digest": "sha256:057f75a6bd021a481992eaf00332f47cc6bcf3ec90500a5d9b46086036edb630",
+          "config_digest": "sha256:ac1029225045c56a274c7a138ce3d95fa32c1af66bc3fe21426c6ca4d9aaf09b"
+        },
+        {
+          "architecture": "riscv64",
+          "os": "linux",
+          "manifest_digest": "sha256:28723c7d56a369e0151e48d1c61abec8407e90b87852b02db25703ef0fd9c063",
+          "config_digest": "sha256:0388eadb420bbe9b265abe00eff45e0e1cf168c0efa72cefb4ecf21b0f358935"
+        },
+        {
+          "architecture": "s390x",
+          "os": "linux",
+          "manifest_digest": "sha256:e1cab1adddadb97da2137ffdce49776f1bad60d0d7d064e0ffdea56d377b26f4",
+          "config_digest": "sha256:bca3e10956948e33892b89fedfe33719dae054107518f7845baed03979c67ff7"
+        }
+      ],
+      "non_runnable_attestation_count": 5
+    }
+  ]
+}

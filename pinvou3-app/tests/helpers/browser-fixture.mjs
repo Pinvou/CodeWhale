@@ -23,12 +23,9 @@ export async function launchBrowser(launchNative, options = {}) {
     const nativeClose = browser.close.bind(browser);
     const child = browser.process();
     if (!child) throw new Error('fixture browser process handle is unavailable');
-    // Attach before sending close, including the already-exited path.
-    if (child.exitCode !== null || child.signalCode !== null) {
-      stop = nativeClose;
-    } else {
-      stop = confirmedChildStopper(child, nativeClose);
-    }
+    // Every owned handle needs an observed close. Exit codes cannot prove
+    // stdio retirement, and an unobserved historical close fails closed.
+    stop = confirmedChildStopper(child, nativeClose);
     browser.close = release;
     return browser;
   } catch (primary) {

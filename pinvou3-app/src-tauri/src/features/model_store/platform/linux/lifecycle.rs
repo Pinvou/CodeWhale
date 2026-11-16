@@ -23,6 +23,8 @@ use super::store_client::{
     DeployProfile, DeployTopology, StoreCardDetail, StoreCardSummary, StoreClient, StoreSource,
 };
 
+mod versions;
+
 pub type ModelManagerError = AppError;
 
 /// ollama 不是 docker 镜像，没有 LMM_ENGINE_IMAGE 标记可用，删除逻辑必须单独
@@ -77,10 +79,14 @@ pub struct ForcedRemoval {
     /// 记录里登记的体积。注意它**不是**"释放了多少空间"——这次什么都没释放。
     /// 名字特意不叫 freed_bytes，免得调用方顺手当成回收量显示给用户。
     pub recorded_bytes: i64,
-    /// 已确认此刻仍在磁盘上的目录（可能为空，为空也不等于干净，见 warning）
+    /// 仍在磁盘上或因链接/权限无法确认缺失的登记路径；并非独占归属声明。
     pub residual_paths: Vec<String>,
-    /// 一句可以直接显示给用户的话
-    pub warning: String,
+    /// 结构化警告码，前端按 i18n 渲染（`model-store-logic.js` 的
+    /// `operationWarningText`）：`force_remove_records_only` = 只删了记录、
+    /// 常见位置没发现残留；`force_remove_residual_paths` = 登记路径仍在或
+    /// 无法确认缺失。路径明细始终由 `residual_paths` 单独承载——那条列表
+    /// 在界面上本来就单独渲染，警告文本再拼一份既会溢出也无法按语言翻译。
+    pub warning: &'static str,
 }
 
 /// `uninstall` 的结果。整个结构体只为一件事存在：**如实说出这次到底做了什么**。
@@ -164,26 +170,6 @@ pub struct EngineRemoval {
     pub affected_models: Vec<String>,
     /// 一句可以直接显示给用户的话
     pub summary: String,
-}
-
-/// 已下载的模型里，脚本比商店旧的那些。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct OutdatedCard {
-    pub card_id: String,
-    pub card_name: String,
-    /// 已部署/运行中——刷新脚本后必须重新部署才会生效，光刷新没用
-    pub needs_redeploy: bool,
-    pub running: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct StoreSyncResult {
-    /// 商店当前的卡片总数
-    pub total: usize,
-    /// 已下载但商店已下架的卡片名（本地仍可用，只是不能再重新下载）
-    pub delisted: Vec<String>,
-    /// 有脚本更新可用的已下载卡片
-    pub outdated: Vec<OutdatedCard>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -281,6 +267,7 @@ fn may_run_as_root(script_type: &str) -> bool {
 }
 
 /// 一张卡片抓下来的完整脚本包：六个入口脚本 + 附属文件。
+#[cfg_attr(test, derive(Clone))]
 struct CardPackage {
     scripts: BTreeMap<String, db::ScriptBlob>,
     assets: BTreeMap<String, db::ScriptBlob>,
@@ -293,6 +280,18 @@ struct CardPackage {
 struct PreparedScript {
     entry: std::path::PathBuf,
     cwd: Option<std::path::PathBuf>,
+}
+
+fn validate_remote_assets(assets: &BTreeMap<String, String>) -> Result<(), ModelManagerError> {
+    if let Some(path) = assets
+        .keys()
+        .find(|path| super::card_assets::is_runtime_cache(path))
+    {
+        return Err(ModelManagerError::new(format!(
+            "卡片附属文件 {path} 是运行缓存，不能作为部署配方下载；请修复卡片文件清单。"
+        )));
+    }
+    Ok(())
 }
 
 impl ScriptsSource {
@@ -376,11 +375,26 @@ impl ScriptsSource {
         // card_id 来自商店响应，直接 join 的话 `../` 或绝对路径会整体逃出 cards 目录。
         let safe_id = config::safe_path_component(card_id)
             .map_err(|e| ModelManagerError::new(format!("卡片 id 不合法：{e}")))?;
-        let dir = config::data_dir().join("cards").join(safe_id);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| ModelManagerError::new(format!("创建卡片目录失败：{e}")))?;
-
-        let assets = self.asset_contents(policy)?;
+        let cards_dir = config::data_dir().join("cards");
+        let dir = cards_dir.join(safe_id);
+        let mut assets = self.asset_contents(policy)?;
+        if matches!(self, Self::Local { .. }) {
+            assets.retain(|name, _| !super::card_assets::is_mutable_runtime_asset(name));
+        }
+        if assets.contains_key("native_engine_process.py") {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::create_dir_all(&cards_dir)
+                .map_err(|e| ModelManagerError::new(e.to_string()))?;
+            match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(ModelManagerError::new(error.to_string())),
+            }
+            super::native_runtime::prepare(&dir).map_err(ModelManagerError::new)?;
+        } else {
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| ModelManagerError::new(format!("创建卡片目录失败：{e}")))?;
+        }
         script_runner::materialize_assets(&dir, &assets)?;
 
         // 入口脚本也按固定文件名写进包里，这样包内其它脚本也能互相引用
@@ -453,18 +467,27 @@ impl ScriptsSource {
                 asset_sha256,
                 ..
             } => {
+                validate_remote_assets(assets)?;
                 let mut out = BTreeMap::new();
                 for (path, url) in assets {
                     let expected = asset_sha256
                         .as_ref()
                         .and_then(|h| h.get(path))
                         .map(|s| s.as_str());
+                    let content = script_runner::fetch_script_content(url, expected, policy)?;
                     out.insert(
                         path.clone(),
-                        script_runner::fetch_script_content(url, expected, policy)?,
+                        db::ScriptBlob {
+                            sha256: script_runner::sha256_hex(&content),
+                            content,
+                        },
                     );
                 }
-                Ok(out)
+                super::native_card_compat::apply(&mut out).map_err(ModelManagerError::new)?;
+                Ok(out
+                    .into_iter()
+                    .map(|(path, blob)| (path, blob.content))
+                    .collect())
             }
         }
     }
@@ -772,16 +795,47 @@ impl ModelManager {
     /// 只查 staging 的后果是双向的：外部盘满了却放行，下到一半 ENOSPC；
     /// 或者 staging 盘小、目标盘很空，平白把用户拦住。
     pub fn check_can_download(&self, size_bytes: u64) -> disk::SpaceCheck {
+        self.check_can_download_increment(size_bytes, size_bytes, &self.settings.models_path())
+    }
+
+    /// Resuming a registered candidate needs only its additional allocation.
+    /// Quota growth is separate because retained_bytes already counts its files.
+    fn check_can_download_increment(
+        &self,
+        required_bytes: u64,
+        quota_growth: u64,
+        models: &std::path::Path,
+    ) -> disk::SpaceCheck {
+        let retained = if self.settings.storage_quota_gb.is_some() {
+            super::version_store::retained_bytes().unwrap_or(u64::MAX / 2)
+        } else {
+            0
+        };
+        self.check_can_download_increment_with_retained(
+            required_bytes,
+            quota_growth,
+            models,
+            retained,
+        )
+    }
+
+    fn check_can_download_increment_with_retained(
+        &self,
+        required_bytes: u64,
+        quota_growth: u64,
+        models: &std::path::Path,
+        retained_bytes: u64,
+    ) -> disk::SpaceCheck {
         let staging = self.settings.staging_path();
-        let models = self.settings.models_path();
-        let mut check = disk::check_space(&staging, size_bytes, self.settings.min_free_space_gb);
+        let mut check =
+            disk::check_space(&staging, required_bytes, self.settings.min_free_space_gb);
         // 判据是**路径字符串**：两个路径一模一样才省掉第二次查询，不做任何挂载点
         // 归一化——要判断两个路径是不是同一个文件系统得读 /proc/mounts 再做前缀
         // 匹配，为这点收益不值当。代价只是同盘异路径（默认就是这样：staging 是
         // models 的兄弟目录）会对同一个文件系统多查一次余量，两次拿到的是同一个
         // free_bytes，重复检查无害。
         if check.ok && models != staging {
-            let target = disk::check_space(&models, size_bytes, self.settings.min_free_space_gb);
+            let target = disk::check_space(models, required_bytes, self.settings.min_free_space_gb);
             if !target.ok {
                 check = target;
             }
@@ -790,14 +844,15 @@ impl ModelManager {
             return check;
         }
         if let Some(quota) = self.settings.storage_quota_gb {
-            let used = db::total_managed_bytes().unwrap_or(0).max(0) as u64;
-            let projected = used + size_bytes;
+            let used = (db::total_managed_bytes().unwrap_or(0).max(0) as u64)
+                .saturating_add(retained_bytes);
+            let projected = used.saturating_add(quota_growth);
             let quota_bytes = (quota * 1024.0 * 1024.0 * 1024.0) as u64;
             if projected > quota_bytes {
                 return disk::SpaceCheck {
                     ok: false,
                     free_bytes: check.free_bytes,
-                    required_bytes: size_bytes,
+                    required_bytes,
                     reason: format!(
                         "超出存储配额：当前已用 {}，加上本次下载将达到 {}，配额为 {}GB",
                         disk::format_bytes(used as f64),
@@ -838,6 +893,13 @@ impl ModelManager {
 
     fn env_for_record(&self, rec: &db::StoreModelRecord) -> HashMap<String, String> {
         let mut env = self.common_env();
+        env.insert("LMM_MODEL_SIZE_BYTES".into(), rec.size_bytes.to_string());
+        if let Some(root) = &rec.models_root {
+            env.insert("LMM_MODELS_DIR".into(), root.clone());
+        }
+        if let Some(id) = &rec.runtime_card_id {
+            env.insert("LMM_STORAGE_CARD_ID".into(), id.clone());
+        }
         env.insert("LMM_CARD_ID".into(), rec.card_id.clone());
         env.insert("LMM_MODEL_NAME".into(), rec.model_name.clone());
         env.insert("LMM_ENGINE_NAME".into(), rec.engine_name.clone());
@@ -952,15 +1014,55 @@ impl ModelManager {
         control: script_runner::RunControl,
         mut wait_for_slot: Option<&mut dyn FnMut() -> Result<(), ModelManagerError>>,
     ) -> Result<DownloadResult, ModelManagerError> {
+        let _resources = super::version_store::wait_resource_operation_lock(
+            false,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
         let card = self.store.get_card(card_id)?;
+        validate_remote_assets(&card.assets)?;
+        if let Some(existing) =
+            db::get_store_model(card_id).map_err(|e| ModelManagerError::new(e.to_string()))?
+        {
+            if !self.builtin_store
+                && (existing.running
+                    || existing.status == "deployed"
+                    || existing.active_version_id.is_some())
+            {
+                return Err(ModelManagerError::new(
+                    "该模型已有部署，请通过检查更新或历史版本升级，避免覆盖当前配置。",
+                ));
+            }
+            if !self.builtin_store {
+                let evidence = self.remote_weight_evidence(&existing, &card, Some(&control))?;
+                if !super::card_update::compatibility(&existing, &card, evidence.as_ref())
+                    .can_update
+                {
+                    return Err(ModelManagerError::new(
+                        "已下载版本与新版不同，请先完成旧版部署，再通过历史版本升级；旧权重未被覆盖。",
+                    ));
+                }
+            }
+        }
         let model_name = suggest_model_name(&card);
 
-        let check = self.check_can_download(card.summary.size_bytes);
-        if !check.ok {
-            return Err(ModelManagerError::new(check.reason));
-        }
-
-        let env = self.env_for_card(&card, &model_name);
+        let mut reservation = super::version_store::DownloadReservation::acquire(
+            card_id,
+            &PathBuf::from(&self.settings.models_dir),
+            || control.cancelled(),
+            || on_progress("等待同一卡片下载完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
+        // Cross-card protection parity with isolated staging (review round 7):
+        // reject a download root placed inside another card's registered
+        // legacy resource before any quota row or script output exists.
+        self.ensure_ordinary_download_root_disjoint(&reservation.root, card_id)?;
+        let mut env = self.env_for_card(&card, &model_name);
+        env.insert(
+            "LMM_MODELS_DIR".into(),
+            reservation.root.to_string_lossy().into_owned(),
+        );
 
         // 仅供最后 toast 提示措辞参考，不用来决定要不要跑脚本
         let engine_reused = db::is_engine_installed(
@@ -988,7 +1090,7 @@ impl ModelManager {
         // 真机上就这么炸过——引擎探测完、正准备装 diffusers 时取脚本失败，报
         // 「下载脚本失败：error decoding response body」，前面下的 20GB 白跑。
         on_progress("获取该模型的部署脚本…");
-        let (source, pinned_pkg) = match self.fetch_and_store_scripts(&card) {
+        let (source, pinned_pkg) = match self.fetch_and_store_scripts(&card, None) {
             Ok(pkg) => (
                 ScriptsSource::Local {
                     blobs: pkg.scripts.clone(),
@@ -1008,10 +1110,46 @@ impl ModelManager {
             }
         };
 
+        // Publish under the same short cross-process lock used by version
+        // staging. Admission sees every in-flight ordinary download as well as
+        // retained files. Before the first script stage, a rejected new target
+        // becomes a residual-only root; an existing retry target stays fixed.
+        let quota_lock = super::version_store::wait_quota_reservation_lock(
+            || control.cancelled(),
+            || on_progress("等待其他模型下载登记存储配额，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
+        reservation
+            .publish(card.summary.size_bytes)
+            .map_err(ModelManagerError::new)?;
+        let retained = if self.settings.storage_quota_gb.is_some() {
+            super::version_store::recover_interrupted_for_quota()
+                .map_err(ModelManagerError::new)?;
+            super::version_store::retained_bytes().map_err(ModelManagerError::new)?
+        } else {
+            0
+        };
+        let check = self.check_can_download_increment_with_retained(
+            card.summary.size_bytes,
+            0,
+            &reservation.root,
+            retained,
+        );
+        if !check.ok {
+            return Err(ModelManagerError::new(check.reason));
+        }
+        drop(quota_lock);
+
         on_progress(&format!(
             "检查 {} 引擎是否已安装…",
             card.summary.engine_name
         ));
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消"));
+        }
+        reservation
+            .start_scripts()
+            .map_err(ModelManagerError::new)?;
         // install_engine 需要 root（pkexec，每次都要输管理员密码）。所以先以普通
         // 用户身份跑一个只读探针（install_engine 读到 LMM_PROBE_ONLY=1 时只做
         // "装没装"检查、不发任何安装动作）：命中就跳过 root 步，避免每次下载都为
@@ -1170,39 +1308,53 @@ impl ModelManager {
         on_progress("检查模型权重…");
         self.run_card_script_with_retry(
             &source,
-            "download_model",
             &env,
             &mut |line| on_progress(&format!("[下载模型] {line}")),
-            control,
-            false,
+            control.clone(),
+            reservation.script_lease(),
         )?;
+        // A script can return while a forked downloader still owns its lease.
+        // Refuse success before registering any installed/deployed state.
+        reservation
+            .confirm_stopped()
+            .map_err(ModelManagerError::new)?;
 
         // 已经在库里的话保留原有状态（比如已部署过），不要因为重新走了一遍
         // 下载就把状态退回"仅下载"；只有全新记录才用 "downloaded" 起步。
         let status = existing_status.unwrap_or_else(|| "downloaded".to_string());
-        db::add_store_model(db::AddStoreModelParams {
-            card_id: &card.summary.id,
-            model_name: &model_name,
-            card_name: &card.summary.name,
-            org: card.summary.org.as_deref(),
-            description: card.summary.description.as_deref(),
-            engine_name: &card.summary.engine_name,
-            engine_version: card.summary.engine_version.as_deref(),
-            size_bytes: card.summary.size_bytes as i64,
-            quantization: card.summary.quantization.as_deref(),
-            source_repo_id: card.source_repo_id.as_deref(),
-            source_filename: card.source_filename.as_deref(),
-            scripts: &card.scripts,
-            status: &status,
-            profiles: &card.profiles,
-            deploy_topology: card.summary.deploy_topology,
-            card_source: if self.builtin_store {
-                "builtin"
-            } else {
-                "store"
+        let quota_lock = super::version_store::wait_quota_reservation_lock(
+            || control.cancelled(),
+            || on_progress("等待提交模型下载记录，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
+        db::add_store_model_with_root(
+            db::AddStoreModelParams {
+                card_id: &card.summary.id,
+                model_name: &model_name,
+                card_name: &card.summary.name,
+                org: card.summary.org.as_deref(),
+                description: card.summary.description.as_deref(),
+                engine_name: &card.summary.engine_name,
+                engine_version: card.summary.engine_version.as_deref(),
+                size_bytes: card.summary.size_bytes as i64,
+                quantization: card.summary.quantization.as_deref(),
+                source_repo_id: card.source_repo_id.as_deref(),
+                source_filename: card.source_filename.as_deref(),
+                scripts: &card.scripts,
+                status: &status,
+                profiles: &card.profiles,
+                deploy_topology: card.summary.deploy_topology,
+                card_source: if self.builtin_store {
+                    "builtin"
+                } else {
+                    "store"
+                },
             },
-        })
+            &reservation.root.to_string_lossy(),
+        )
         .map_err(|e| ModelManagerError::new(format!("记录模型下载状态失败：{e}")))?;
+        reservation.complete().map_err(ModelManagerError::new)?;
+        drop(quota_lock);
 
         // 把六类脚本的正文固化到本地：从这一刻起，这个模型的部署/启用/停用/
         // 卸载全部用本地副本执行，不再依赖商店可达——商店重启、上架、改脚本
@@ -1214,7 +1366,7 @@ impl ModelManager {
         // 按 URL 取的兼容路径。
         let pkg = match pinned_pkg {
             Some(pkg) => Some(pkg),
-            None => match self.fetch_and_store_scripts(&card) {
+            None => match self.fetch_and_store_scripts(&card, None) {
                 Ok(pkg) => Some(pkg),
                 Err(e) => {
                     eprintln!("[download] 抓取脚本副本失败（不影响本次下载）：{e}");
@@ -1254,7 +1406,11 @@ impl ModelManager {
         card_id: &str,
         env: &HashMap<String, String>,
     ) -> EngineProbe {
-        let Ok(prepared) = source.prepare(card_id, "install_engine") else {
+        let storage_id = env
+            .get("LMM_STORAGE_CARD_ID")
+            .map(String::as_str)
+            .unwrap_or(card_id);
+        let Ok(prepared) = source.prepare(storage_id, "install_engine") else {
             return EngineProbe::default();
         };
         let mut probe_env = env.clone();
@@ -1348,10 +1504,32 @@ impl ModelManager {
         control: script_runner::RunControl,
         need_root: bool,
     ) -> Result<Vec<String>, ModelManagerError> {
+        self.run_card_script_options(
+            source,
+            script_type,
+            env,
+            on_line,
+            RunScriptOptions {
+                control,
+                need_root,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn run_card_script_options(
+        &self,
+        source: &ScriptsSource,
+        script_type: &str,
+        env: &HashMap<String, String>,
+        on_line: &mut dyn FnMut(&str),
+        options: RunScriptOptions<'_>,
+    ) -> Result<Vec<String>, ModelManagerError> {
         // Local 来源直接落盘本地副本执行，全程不联网；Remote 才会下载+校验哈希。
         // 多文件卡片会把整棵文件树落到卡片目录，并以该目录为工作目录执行。
         let card_id = env
-            .get("LMM_CARD_ID")
+            .get("LMM_STORAGE_CARD_ID")
+            .or_else(|| env.get("LMM_CARD_ID"))
             .map(|s| s.as_str())
             .unwrap_or("unknown");
         let prepared = source.prepare(card_id, script_type)?;
@@ -1366,8 +1544,9 @@ impl ModelManager {
             env,
             RunScriptOptions {
                 on_progress: Some(&mut relay),
-                control,
-                need_root,
+                control: options.control,
+                need_root: options.need_root,
+                download_lease: options.download_lease,
                 label: Some(label),
                 cwd: prepared.cwd,
                 idle_timeout: idle_timeout_for(script_type),
@@ -1433,22 +1612,33 @@ impl ModelManager {
     fn run_card_script_with_retry(
         &self,
         source: &ScriptsSource,
-        script_type: &str,
         env: &HashMap<String, String>,
         on_line: &mut dyn FnMut(&str),
         control: script_runner::RunControl,
-        need_root: bool,
+        download_lease: &mut super::version_store::DownloadLease,
     ) -> Result<Vec<String>, ModelManagerError> {
         let mut attempt = 0u32;
         loop {
-            let result = self.run_card_script(
+            let result = self.run_card_script_options(
                 source,
-                script_type,
+                "download_model",
                 env,
                 on_line,
-                control.clone(),
-                need_root,
+                RunScriptOptions {
+                    control: control.clone(),
+                    download_lease: Some(
+                        download_lease
+                            .script_file()
+                            .map_err(ModelManagerError::new)?,
+                    ),
+                    ..Default::default()
+                },
             );
+            // Even an error can leave a forked writer alive. Prove that the
+            // previous attempt exited before retrying or reporting success.
+            download_lease
+                .confirm_stopped()
+                .map_err(ModelManagerError::new)?;
             let error = match result {
                 Ok(lines) => return Ok(lines),
                 Err(e) => e,
@@ -1518,15 +1708,30 @@ impl ModelManager {
     /// 服务的是部署/启用/停用/卸载，**没有一个走 root**，所以
     /// `may_run_as_root` 判定不到它头上；真要按 root 那档要求哈希，用户手上那
     /// 些老模型会连卸载都卸不掉，几百 GB 从任何界面都回收不了。
-    fn local_scripts_source(&self, rec: &db::StoreModelRecord) -> ScriptsSource {
+    fn local_scripts_source(
+        &self,
+        rec: &db::StoreModelRecord,
+    ) -> Result<ScriptsSource, ModelManagerError> {
         if !rec.scripts_content.is_empty() {
-            return ScriptsSource::Local {
+            // Some legacy local imports captured generated Docker/JIT caches.
+            // Replaying them overwrites live state and can hit root-owned files.
+            // Keep existing caches and the archived recipe untouched on disk.
+            let mut assets = rec
+                .assets_content
+                .iter()
+                .filter(|(path, _)| !super::card_assets::is_runtime_cache(path))
+                .map(|(path, blob)| (path.clone(), blob.clone()))
+                .collect();
+            // Offline rollback must retain the same narrowly audited repair as
+            // newly fetched cards. Keep the archived package itself unchanged.
+            super::native_card_compat::apply(&mut assets).map_err(ModelManagerError::new)?;
+            return Ok(ScriptsSource::Local {
                 blobs: rec.scripts_content.clone(),
-                assets: rec.assets_content.clone(),
+                assets,
                 profiles: rec.profiles.clone(),
-            };
+            });
         }
-        ScriptsSource::Remote {
+        Ok(ScriptsSource::Remote {
             scripts: rec
                 .scripts
                 .iter()
@@ -1537,7 +1742,7 @@ impl ModelManager {
             asset_sha256: None,
             profiles: rec.profiles.clone(),
             local_paths: self.builtin_store,
-        }
+        })
     }
 
     /// 抓取卡片六类脚本的正文并固化到本地。只在两个时刻调用：下载模型成功后、
@@ -1559,7 +1764,7 @@ impl ModelManager {
             };
             // 内置卡的 scripts/assets 值是本地文件路径，fetch 就是读文件，不联网
             let mgr = Self::new_test_store();
-            let Ok(pkg) = mgr.fetch_and_store_scripts(&detail) else {
+            let Ok(pkg) = mgr.fetch_and_store_scripts(&detail, None) else {
                 continue;
             };
             // 只在"确实刷新了"时记一笔；Ok(false)（没变化）和 Err（这张卡刷不动）
@@ -1576,7 +1781,9 @@ impl ModelManager {
     fn fetch_and_store_scripts(
         &self,
         card: &StoreCardDetail,
+        control: Option<&script_runner::RunControl>,
     ) -> Result<CardPackage, ModelManagerError> {
+        validate_remote_assets(&card.assets)?;
         // 来源校验必须在**抓取的这一刻**做：抓完就固化成 Local 副本，之后
         // install_engine 直接跑副本、不再有任何 fetch 可校验。副本里的 sha256
         // 是按内容自算的，证明不了"内容是对的"，只能证明"内容没再变过"。
@@ -1585,6 +1792,9 @@ impl ModelManager {
                      expected: Option<&str>,
                      root_capable: bool|
          -> Result<db::ScriptBlob, ModelManagerError> {
+            if control.is_some_and(|c| c.cancelled()) {
+                return Err(ModelManagerError::new("已取消"));
+            }
             let policy = script_runner::FetchPolicy {
                 may_run_as_root: root_capable,
                 allow_local_path: local_paths,
@@ -1623,103 +1833,86 @@ impl ModelManager {
                 .map(|s| s.as_str());
             assets.insert(path.clone(), fetch(url, expected, assets_may_run_as_root)?);
         }
+        super::native_card_compat::apply(&mut assets).map_err(ModelManagerError::new)?;
         Ok(CardPackage { scripts, assets })
     }
 
-    /// 跟商店同步一次目录状态：哪些卡片是新上架的、哪些已下架、以及**已下载
-    /// 的模型有没有更新的脚本**。
-    ///
-    /// **目前没有任何调用点**（命令未注册、界面上也没有入口），留待后续分期
-    /// 接线。这里原来写的是"在打开应用和打开模型商店时自动调用"——那句话从来
-    /// 没有成立过，而它会让读代码的人以为这个能力已经在跑。
-    ///
-    /// 因此要如实交代当前的实际后果：**远端商店卡片的固化脚本副本永远不会
-    /// 过期刷新**。内置（测试商店）卡片有 `refresh_builtin_cards` 在启动时兜底
-    /// （lib.rs 里的 `run_startup_refresh` 真的调它），远端卡片没有对应物——
-    /// 商店那边修好的脚本只有在用户重新下载这个模型时才会下来。连带地，
-    /// `OutdatedCard`、`StoreSyncResult` 以及 `refresh_card_scripts` 目前都到
-    /// 不了；`needs_redeploy`（service.rs）虽然活着，但对远端卡片实际上恒为
-    /// false，因为它比的那份 `scripts_content` 不会变。
-    ///
-    /// 设计意图保持不变：只读，不改任何本地副本——检测到有更新只是提醒用户，
-    /// 换不换由用户点「检查卡片更新」决定，免得他正用着的部署脚本在背后被悄悄
-    /// 换掉。只发一个请求（列表接口已带 script_sha256），不用为每张卡再查一次
-    /// 详情。
-    pub fn sync_store_catalog(&self) -> Result<StoreSyncResult, ModelManagerError> {
-        let cards = self.store.list_cards()?;
-        let local = db::list_store_models().unwrap_or_default();
-
-        let store_ids: std::collections::HashSet<&str> =
-            cards.iter().map(|c| c.id.as_str()).collect();
-
-        // 已下载但商店里已经没有的卡片：本地仍可正常使用（脚本都固化在本地了），
-        // 只是不能再重新下载，值得让用户知道。
-        let delisted: Vec<String> = local
-            .iter()
-            .filter(|m| !store_ids.contains(m.card_id.as_str()))
-            .map(|m| m.card_name.clone())
-            .collect();
-
-        // 已下载、且商店的脚本哈希跟本地固化副本对不上的 —— 有更新可用
-        let mut outdated = Vec::new();
-        for m in &local {
-            if m.scripts_content.is_empty() {
-                continue; // 老记录还没固化过副本，不参与比对
-            }
-            let Some(card) = cards.iter().find(|c| c.id == m.card_id) else {
-                continue;
-            };
-            if card.script_sha256.is_empty() {
-                continue; // 商店没给哈希（老后台），无从比较
-            }
-            let changed = card
-                .script_sha256
-                .iter()
-                .any(|(t, h)| m.scripts_content.get(t).map(|b| &b.sha256) != Some(h));
-            if changed {
-                outdated.push(OutdatedCard {
-                    card_id: m.card_id.clone(),
-                    card_name: m.card_name.clone(),
-                    // 运行中的模型即使刷新了脚本也不会自动生效——脚本只是文件，
-                    // 已经起来的容器还是按旧参数在跑。提醒文案要说清楚这点。
-                    needs_redeploy: m.status == "deployed" || m.running,
-                    running: m.running,
-                });
-            }
-        }
-
-        Ok(StoreSyncResult {
-            total: cards.len(),
-            delisted,
-            outdated,
-        })
-    }
-
-    /// 用户主动点「检查卡片更新」：去商店比对脚本哈希，有变化就把新脚本固化
-    /// 到本地。返回是否真的更新了。
-    ///
-    /// **目前没有任何调用点**：命令未注册，界面上也没有「检查卡片更新」这个
-    /// 按钮和对应的 i18n 文案，留待后续分期接线。本文件别处（`entry_content`
-    /// 的报错、`local_scripts_source` 的注释）已经在让用户"点一下检查卡片
-    /// 更新"，那句话现在还无处可点——接线时要一起把入口补上。
-    pub fn refresh_card_scripts(&self, card_id: &str) -> Result<bool, ModelManagerError> {
+    /// Read-only check; only a changed weight manifest may be fetched and verified.
+    pub fn check_card_update(&self, card_id: &str) -> Result<serde_json::Value, ModelManagerError> {
         let rec = self.get_record(card_id)?;
         let card = self.store.get_card(card_id)?;
-        let pkg = self.fetch_and_store_scripts(&card)?;
-        let changed =
-            pkg.scripts.len() != rec.scripts_content.len()
-                || pkg.assets.len() != rec.assets_content.len()
-                || pkg.scripts.iter().any(|(k, v)| {
-                    rec.scripts_content.get(k).map(|old| &old.sha256) != Some(&v.sha256)
-                })
-                || pkg.assets.iter().any(|(k, v)| {
-                    rec.assets_content.get(k).map(|old| &old.sha256) != Some(&v.sha256)
-                });
-        if changed {
-            db::set_scripts_content(card_id, &pkg.scripts, &pkg.assets)
-                .map_err(|e| ModelManagerError::new(format!("保存脚本副本失败：{e}")))?;
+        super::card_update::validate_inventory(
+            &card.scripts,
+            card.script_sha256.as_ref().unwrap_or(&BTreeMap::new()),
+            &card.assets,
+            card.asset_sha256.as_ref().unwrap_or(&BTreeMap::new()),
+        )
+        .map_err(ModelManagerError::new)?;
+        let evidence = self.remote_weight_evidence(&rec, &card, None)?;
+        let assessment = super::card_update::compatibility(&rec, &card, evidence.as_ref());
+        let mut preview = super::card_update::preview(&rec, &card);
+        preview["compatibility"] =
+            serde_json::to_value(assessment).map_err(|e| ModelManagerError::new(e.to_string()))?;
+        Ok(preview)
+    }
+
+    /// Download the exact previewed package, verify everything, then commit it
+    /// once. Installation is deferred to the explicit redeploy action.
+    pub fn update_card(
+        &self,
+        card_id: &str,
+        expected_revision: &str,
+        on_progress: &mut ProgressFn<'_>,
+        control: script_runner::RunControl,
+    ) -> Result<serde_json::Value, ModelManagerError> {
+        let _resources = super::version_store::wait_resource_operation_lock(
+            false,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
+        let rec = self.get_record(card_id)?;
+        versions::ensure_not_deleting(&rec)?;
+        if rec.running {
+            return Err(ModelManagerError::new("请先停用模型，再更新卡片。"));
         }
-        Ok(changed)
+        let card = self.store.get_card(card_id)?;
+        super::card_update::validate_inventory(
+            &card.scripts,
+            card.script_sha256.as_ref().unwrap_or(&BTreeMap::new()),
+            &card.assets,
+            card.asset_sha256.as_ref().unwrap_or(&BTreeMap::new()),
+        )
+        .map_err(ModelManagerError::new)?;
+        let manifest = super::card_update::remote_manifest(&card);
+        if super::card_update::revision(&manifest) != expected_revision {
+            return Err(ModelManagerError::new(
+                "线上卡片已再次更新，请重新检查更新后再应用。",
+            ));
+        }
+        if super::card_update::local_manifest(&rec) == manifest {
+            return Ok(serde_json::json!({"changed": false}));
+        }
+        on_progress("正在下载并校验新版卡片；已有模型权重将保留…");
+        let pkg = self.fetch_and_store_scripts(&card, Some(&control))?;
+        if !super::card_update::compatibility(
+            &rec,
+            &card,
+            pkg.assets.get(super::weight_identity::MANIFEST),
+        )
+        .can_update
+        {
+            return Err(ModelManagerError::new(
+                "新旧权重不同或缺少验证依据，请通过历史版本下载新版；现有部署已保留。",
+            ));
+        }
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消"));
+        }
+        db::replace_card_package(&rec, &card, &pkg.scripts, &pkg.assets)
+            .map_err(ModelManagerError::new)?;
+        on_progress("卡片已更新。请重新部署以刷新引擎和运行配置，然后启用模型。");
+        Ok(serde_json::json!({"changed": true, "needs_redeploy": true}))
     }
 
     fn get_record(&self, card_id: &str) -> Result<db::StoreModelRecord, ModelManagerError> {
@@ -1729,7 +1922,7 @@ impl ModelManager {
     }
 
     /// profile_id 不传时：已经部署过就沿用上次用的方案（重新部署/修复场景），
-    /// 从没部署过就用商店给的第一个方案——没有多方案概念的卡片 profiles 是空
+    /// 从没部署过就用部署默认策略——没有多方案概念的卡片 profiles 是空
     /// 列表，解析出来的就是 None，行为跟没有 profile 概念时完全一样。
     pub fn deploy(
         &self,
@@ -1738,17 +1931,20 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<(), ModelManagerError> {
+        let _resources = super::version_store::wait_resource_operation_lock(
+            false,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
         let rec = self.get_record(card_id)?;
-        let source = self.local_scripts_source(&rec);
+        versions::ensure_not_deleting(&rec)?;
+        let source = self.local_scripts_source(&rec)?;
         let profiles = source.profiles();
-        let mut resolved_profile_id = profile_id
-            .map(|s| s.to_string())
-            .or_else(|| rec.active_profile_id.clone());
-        if resolved_profile_id.is_none() {
-            if let Some(first) = profiles.first() {
-                resolved_profile_id = Some(first.id.clone());
-            }
-        }
+        let resolved_profile_id = profile_id.map(|s| s.to_string()).or_else(|| {
+            super::deploy_profiles::selected_id(card_id, profiles, rec.active_profile_id.as_deref())
+                .map(str::to_owned)
+        });
         if let Some(pid) = &resolved_profile_id {
             if !profiles.is_empty() && !profiles.iter().any(|p| &p.id == pid) {
                 return Err(ModelManagerError::new(format!("未知的部署方案：{pid}")));
@@ -1756,10 +1952,28 @@ impl ModelManager {
         }
 
         let mut env = self.env_for_record(&rec);
+        if rec.card_update_pending {
+            if rec.running {
+                return Err(ModelManagerError::new("请先停用模型，再应用新版卡片部署。"));
+            }
+            let probe = self.engine_probe(&source, card_id, &env);
+            on_progress("正在更新引擎及部署包；模型权重保留。需要管理员权限时会弹出授权窗口…");
+            let lines =
+                self.install_engine(&source, &env, on_progress, control.clone(), probe.need_root)?;
+            db::mark_engine_installed(
+                &rec.engine_name,
+                rec.engine_version.as_deref(),
+                extract_marker(&lines, "LMM_ENGINE_IMAGE=").as_deref(),
+                source.script_hash("install_engine").as_deref(),
+            )
+            .map_err(|e| ModelManagerError::new(format!("记录引擎更新失败：{e}")))?;
+        }
         if let Some(pid) = &resolved_profile_id {
             env.insert("LMM_DEPLOY_PROFILE".into(), pid.clone());
         }
 
+        super::version_store::current_measurements::invalidate(card_id)
+            .map_err(ModelManagerError::new)?;
         self.run_card_script(
             &source,
             "deploy",
@@ -1770,11 +1984,12 @@ impl ModelManager {
         )?;
         // 记下这次用的 deploy 脚本版本：以后脚本一更新，界面就能准确判断
         // 「这个模型需要重新部署」，而不是对所有已部署模型都常驻一个按钮。
-        db::update_store_model_status(card_id, "deployed", source.script_hash("deploy").as_deref())
-            .map_err(|e| ModelManagerError::new(format!("记录部署状态失败：{e}")))?;
-        if let Some(pid) = &resolved_profile_id {
-            let _ = db::set_active_profile(card_id, Some(pid));
-        }
+        db::mark_deployed(
+            card_id,
+            source.script_hash("deploy").as_deref(),
+            resolved_profile_id.as_deref(),
+        )
+        .map_err(|e| ModelManagerError::new(format!("记录部署状态和方案失败：{e}")))?;
         Ok(())
     }
 
@@ -1784,12 +1999,24 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<(), ModelManagerError> {
+        let _resources = super::version_store::wait_resource_operation_lock(
+            false,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
         let rec = self.get_record(card_id)?;
+        versions::ensure_not_deleting(&rec)?;
+        if rec.card_update_pending {
+            return Err(ModelManagerError::new(
+                "卡片已更新，请先重新部署，再启用模型。",
+            ));
+        }
         if rec.status != "deployed" {
             return Err(ModelManagerError::new("该模型尚未部署，请先部署再启用"));
         }
         let env = self.env_for_record(&rec);
-        let source = self.local_scripts_source(&rec);
+        let source = self.local_scripts_source(&rec)?;
 
         let output_lines = self.run_card_script(
             &source,
@@ -1853,7 +2080,8 @@ impl ModelManager {
             ));
             endpoint_model = Some(rec.model_name.clone());
         }
-        let _ = db::set_endpoint_info(card_id, endpoint_url.as_deref(), endpoint_model.as_deref());
+        db::set_endpoint_info(card_id, endpoint_url.as_deref(), endpoint_model.as_deref())
+            .map_err(|e| ModelManagerError::new(format!("记录模型接口失败：{e}")))?;
         Ok(())
     }
 
@@ -1865,7 +2093,7 @@ impl ModelManager {
     ) -> Result<(), ModelManagerError> {
         let rec = self.get_record(card_id)?;
         let env = self.env_for_record(&rec);
-        let source = self.local_scripts_source(&rec);
+        let source = self.local_scripts_source(&rec)?;
         self.run_card_script(
             &source,
             "stop",
@@ -1907,20 +2135,63 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<UninstallOutcome, ModelManagerError> {
+        let _resources = super::version_store::wait_resource_operation_lock(
+            purge_weights,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
+        if super::version_store::has_history(card_id).map_err(ModelManagerError::new)? {
+            return Err(ModelManagerError::new(
+                "请先在历史版本中清理保留版本，再卸载或删除当前模型。",
+            ));
+        }
+        if purge_weights {
+            // The DB deletion contract is stricter than display's derived
+            // legacy active ID. Refuse before scripts can destroy its weights;
+            // delete_store_model repeats this guard in the final transaction.
+            db::check_store_model_deletion(card_id)
+                .map_err(|error| ModelManagerError::new(error.to_string()))?;
+        }
         let rec = self.get_record(card_id)?;
         let mut env = self.env_for_record(&rec);
+        // Isolated weights belong to the host's version manager. The card only
+        // removes its service; shared-reference/ownership/process checks must
+        // succeed before the host, rather than the script, deletes any weights.
+        let managed_purge = purge_weights && versions::managed_storage(&rec)?;
+        let script_purge = purge_weights && !managed_purge;
+        if purge_weights {
+            versions::current_purge_preflight(&rec, &self.settings.models_path())?;
+        }
+        if !purge_weights {
+            versions::ensure_not_deleting(&rec)?;
+        }
         env.insert(
             "LMM_PURGE_WEIGHTS".into(),
-            if purge_weights { "1" } else { "0" }.into(),
+            if script_purge { "1" } else { "0" }.into(),
         );
-        let source = self.local_scripts_source(&rec);
+        let source = self.local_scripts_source(&rec)?;
 
+        // Read before scripts or database deletion can commit. These shared
+        // roots remain quota-visible after full deletion, but are disclosure
+        // only: they must not broaden deletion authority or measured savings.
+        let download_roots = if purge_weights {
+            super::version_store::download_paths(card_id).map_err(ModelManagerError::new)?
+        } else {
+            Vec::new()
+        };
         // 先量一次基线。**必须在跑脚本之前量**：脚本一跑完目录就没了，事后再
         // 想知道"刚才那儿有多少字节"已经无处可查，只剩下 card.json 里那个标称
         // 值可以拿来充数——而那正是要杜绝的事。
         let candidates = self.candidate_paths(&rec);
-        let before = total_size(&candidates);
+        let before = if managed_purge {
+            versions::allocated_exclusive_paths(&candidates)?
+        } else {
+            total_size(&candidates)
+        };
 
+        super::version_store::current_measurements::invalidate(card_id)
+            .map_err(ModelManagerError::new)?;
         self.run_card_script(
             &source,
             "uninstall",
@@ -1940,23 +2211,67 @@ impl ModelManager {
         // 盘上几十 GB 权重从此没有任何界面管得到——用户要么手工 rm，要么重下一遍
         // 才能重新接管。那不是"保留"，是把东西弄丢在原地。
         if purge_weights {
-            db::delete_store_model(card_id)
-                .map_err(|e| ModelManagerError::new(format!("删除模型记录失败：{e}")))?;
+            versions::purge_current_storage(&rec, &self.settings.models_path())?;
+            db::delete_store_model(card_id).map_err(|error| match error {
+                db::DeleteStoreModelError::RetainedVersions => {
+                    ModelManagerError::new(error.to_string())
+                }
+                db::DeleteStoreModelError::Database(error) => {
+                    ModelManagerError::new(format!("删除模型记录失败：{error}"))
+                }
+                // 事务内刷新下载根登记测量失败：记录尚未删除（事务中止），
+                // 按配额核算的失败关闭口径如实上报，修复读取问题后重试。
+                db::DeleteStoreModelError::Measurement(error) => ModelManagerError::new(format!(
+                    "刷新下载目录登记大小失败，未删除模型记录：{error}"
+                )),
+            })?;
         } else {
             db::mark_uninstalled(card_id)
                 .map_err(|e| ModelManagerError::new(format!("更新模型状态失败：{e}")))?;
         }
 
-        let after = total_size(&candidates);
-        let freed_bytes = before.saturating_sub(after);
-        let remaining_paths: Vec<String> = candidates
+        let (freed_bytes, measurement_uncertain) = if managed_purge {
+            match versions::allocated_exclusive_paths(&candidates) {
+                Ok(after) => (before.saturating_sub(after), false),
+                // Deletion and its database commit already succeeded. An
+                // unreadable remainder cannot be treated as zero occupancy.
+                Err(error) => {
+                    on_progress(&format!(
+                        "无法确认清理后目录占用，释放量按 0 字节报告：{error}"
+                    ));
+                    (0, true)
+                }
+            }
+        } else {
+            (before.saturating_sub(total_size(&candidates)), false)
+        };
+        let mut remaining_paths: Vec<String> = candidates
             .iter()
-            .filter(|p| p.exists())
+            .filter(|p| {
+                if managed_purge {
+                    residual_path_may_exist(p)
+                } else {
+                    p.exists()
+                }
+            })
             .map(|p| p.to_string_lossy().to_string())
             .collect();
+        let mut shared_download_roots_remain = false;
+        for root in download_roots {
+            if residual_path_may_exist(&root) {
+                shared_download_roots_remain = true;
+                if !remaining_paths
+                    .iter()
+                    .any(|parent| root.starts_with(Path::new(parent)))
+                {
+                    remaining_paths.retain(|child| !Path::new(child).starts_with(&root));
+                    remaining_paths.push(root.to_string_lossy().into_owned());
+                }
+            }
+        }
 
         let freed_text = disk::format_bytes(freed_bytes as f64);
-        let summary = if purge_weights {
+        let mut summary = if purge_weights {
             if remaining_paths.is_empty() {
                 format!(
                     "已卸载「{}」并删除模型权重，实测释放 {}。",
@@ -1990,6 +2305,14 @@ impl ModelManager {
                 freed_text
             )
         };
+        if shared_download_roots_remain {
+            summary.push_str(
+                "下载根目录可能包含缓存或其他模型；请先逐项确认归属，再清理对应文件，不要直接删除整个共享目录。",
+            );
+        }
+        if measurement_uncertain {
+            summary.push_str("清理后的目录占用无法可靠核算，本次释放量保守按 0 字节报告。");
+        }
 
         Ok(UninstallOutcome {
             card_id: rec.card_id,
@@ -2032,28 +2355,39 @@ impl ModelManager {
     /// --------------
     /// 返回值里必须带着残留信息。这条路径没有做任何清理，调用方（以及最终的
     /// 用户）必须知道磁盘上可能还留着几十上百 GB，得自己去删——所以
-    /// `residual_paths` 装的是**此刻确认还在磁盘上**的目录，`warning` 是一句能
+    /// `residual_paths` 装的是仍在或无法确认缺失的登记路径，`warning` 是一句能
     /// 直接贴到界面上的话。绝不能让用户以为点完就干净了。
     ///
     /// 这是破坏性且不可逆的操作（连这张卡的 API Key 一并删掉），调用方必须显式
     /// 走这条方法/这个端点，普通卸载不会拐到这里来。
     pub fn force_remove_record(&self, card_id: &str) -> Result<ForcedRemoval, ModelManagerError> {
         let rec = self.get_record(card_id)?;
-        let residual_paths = self.residual_paths(&rec);
-
-        db::delete_store_model(card_id)
-            .map_err(|e| ModelManagerError::new(format!("删除模型记录失败：{e}")))?;
+        let mut paths = self.candidate_paths(&rec);
+        paths
+            .extend(super::version_store::download_paths(card_id).map_err(ModelManagerError::new)?);
+        for version in super::version_store::list(Some(card_id)).map_err(ModelManagerError::new)? {
+            paths.extend(version.models_root.into_iter().map(PathBuf::from));
+            paths.extend(version.resource_dir.into_iter().map(PathBuf::from));
+            if let Ok(id) = config::safe_path_component(&version.runtime_card_id) {
+                paths.push(config::data_dir().join("cards").join(id));
+            }
+        }
+        let mut residual_paths = Vec::new();
+        for path in paths {
+            if residual_path_may_exist(&path) {
+                let path = path.to_string_lossy().into_owned();
+                if !residual_paths.contains(&path) {
+                    residual_paths.push(path);
+                }
+            }
+        }
+        super::version_store::abandon_card_records(card_id)
+            .map_err(|e| ModelManagerError::new(format!("删除模型及历史记录失败：{e}")))?;
 
         let warning = if residual_paths.is_empty() {
-            "已从模型库移除这条记录。本操作只删记录、没有删除任何文件；\
-             常见位置上没有发现残留目录，但卡片可能把权重放在别处，磁盘空间请自行核实。"
-                .to_string()
+            "force_remove_records_only"
         } else {
-            format!(
-                "已从模型库移除这条记录，但**磁盘上的文件没有被删除**。\
-                 以下目录仍然存在，需要手动清理：{}",
-                residual_paths.join("、")
-            )
+            "force_remove_residual_paths"
         };
         // 留一条 stderr：这是不可逆操作，日志里要能查到是谁、什么时候干的
         eprintln!("[force_remove] 强制移除记录 {card_id}，残留：{residual_paths:?}");
@@ -2074,7 +2408,7 @@ impl ModelManager {
     /// `MODEL_PATH` 写在它自己的 .env 里，LMM 读不到），所以这里只能是"候选"。
     /// 正因为是猜的，才必须用 `exists()` 过滤一遍：报一个根本不存在的路径，用户
     /// 去 `ls` 发现没有，下次就不信这条提示了。反过来，漏报也比误报安全——
-    /// warning 里那句"请自行核实"就是为漏报兜底的。
+    /// `force_remove_records_only` 警告码对应的"请自行核实"文案就是为漏报兜底的。
     fn residual_paths(&self, rec: &db::StoreModelRecord) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for p in self.candidate_paths(rec) {
@@ -2092,8 +2426,34 @@ impl ModelManager {
     /// 前后各量一次算实测释放量。两边必须用**同一份**清单——否则"释放了多少"
     /// 和"还剩什么"会各说各话。
     fn candidate_paths(&self, rec: &db::StoreModelRecord) -> Vec<PathBuf> {
-        let models_dir = self.settings.models_path();
+        if rec.runtime_card_id.is_some() {
+            if let Some(root) = &rec.models_root {
+                let root = PathBuf::from(root);
+                let mut paths = vec![root.clone()];
+                if let Some(id) = rec
+                    .runtime_card_id
+                    .as_deref()
+                    .and_then(|id| config::safe_path_component(id).ok())
+                {
+                    let runtime = config::data_dir().join("cards").join(id);
+                    if !runtime.starts_with(&root) {
+                        paths.retain(|path| !path.starts_with(&runtime));
+                        paths.push(runtime);
+                    }
+                }
+                return paths;
+            }
+        }
+
+        let models_dir = rec
+            .models_root
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.settings.models_path());
         let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(actual) = versions::legacy_resource_dir(rec, &models_dir) {
+            candidates.push(actual);
+        }
         // 权重目录：卡片脚本统一放在 ${LMM_MODELS_DIR}/<HF 仓库名> 下。
         //
         // 末段同样要过 safe_path_component——本函数另外两个分支都过了，这一支漏了。
@@ -2132,7 +2492,8 @@ impl ModelManager {
 
         let mut out: Vec<PathBuf> = Vec::new();
         for p in candidates {
-            if !out.contains(&p) {
+            if !out.iter().any(|parent| p.starts_with(parent)) {
+                out.retain(|child| !child.starts_with(&p));
                 out.push(p);
             }
         }
@@ -2207,6 +2568,14 @@ impl ModelManager {
         engine_name: &str,
         engine_version: Option<&str>,
     ) -> Result<EngineRemoval, ModelManagerError> {
+        if super::version_store::engine_is_retained(engine_name, engine_version)
+            .map_err(ModelManagerError::new)?
+        {
+            return Err(ModelManagerError::new(
+                "此引擎仍被历史版本引用，请先清理相应版本。",
+            ));
+        }
+
         // 必须按「名字 + 版本」定位。同名不同版本是两个不同的镜像，只按名字取
         // 会拿到另一个版本的记录，然后 rmi 掉别的模型正在用的镜像。
         let rec = db::get_installed_engine(engine_name, engine_version)
@@ -2446,6 +2815,19 @@ fn total_size(paths: &[PathBuf]) -> u64 {
     paths.iter().map(|p| disk::dir_size_bytes(p)).sum()
 }
 
+/// Disclosure only: links and permission errors cannot prove absence, and a
+/// reported path never establishes ownership or permission to delete its tree.
+fn residual_path_may_exist(path: &Path) -> bool {
+    let unresolved_ancestor = path
+        .ancestors()
+        .any(|ancestor| match ancestor.symlink_metadata() {
+            Ok(metadata) => metadata.file_type().is_symlink(),
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        });
+    unresolved_ancestor
+        || !matches!(path.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// 从脚本输出里提取 `PREFIX=value` 形式的约定标记行。
 fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
     let mut found = None;
@@ -2480,7 +2862,7 @@ fn extract_marker(output_lines: &[String], prefix: &str) -> Option<String> {
 /// `127.0.0.0/8` 都是（真机上 sglang/vllm 确实有绑到 `127.0.0.2` 的用法，只认
 /// 那一个字面量会把合法卡片一起拒掉）。反过来也别放宽到 RFC1918 私网段——
 /// 那已经是「另一台机器」，对话内容就出本机了。
-fn endpoint_url_is_loopback(url: &str) -> bool {
+pub(super) fn endpoint_url_is_loopback(url: &str) -> bool {
     reqwest::Url::parse(url)
         .ok()
         .and_then(|parsed| parsed.host_str().map(str::to_string))
@@ -2650,6 +3032,10 @@ fn write_temp_script(content: &str) -> Result<PathBuf, ModelManagerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    mod download_leases;
+    mod recovery_admission;
 
     fn make_card(name: &str, quant: Option<&str>) -> StoreCardDetail {
         StoreCardDetail {
@@ -2984,6 +3370,174 @@ exit 0
         ModelManager::new(Some(settings), None)
     }
 
+    #[test]
+    fn mtp_deploy_without_an_explicit_choice_runs_the_256k_profile_and_saves_it() {
+        let temp = setup_temp_db();
+        let id = "qwen38-27b-nvfp4-mtp";
+        add_stuck_record(id, "org/model", 11);
+        let profiles = r#"[{"id":"benchmark","name":"Benchmark"},{"id":"production-sampling","name":"Production"}]"#;
+        db::connect()
+            .unwrap()
+            .execute(
+                "UPDATE store_models SET profiles_json=?1 WHERE card_id=?2",
+                rusqlite::params![profiles, id],
+            )
+            .unwrap();
+        let script = "#!/bin/bash\nmkdir -p \"$LMM_MODELS_DIR\"\nprintf '%s' \"$LMM_DEPLOY_PROFILE\" > \"$LMM_MODELS_DIR/selected\"\n";
+        db::set_scripts_content(
+            id,
+            &BTreeMap::from([(
+                "deploy".into(),
+                db::ScriptBlob {
+                    content: script.into(),
+                    sha256: script_runner::sha256_hex(script),
+                },
+            )]),
+            &Default::default(),
+        )
+        .unwrap();
+        let mgr = manager_with_models_dir(&temp.path().join("models"));
+        mgr.deploy(id, None, &mut |_| {}, Default::default())
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(mgr.settings.models_path().join("selected")).unwrap(),
+            "production-sampling"
+        );
+        assert_eq!(
+            db::get_store_model(id)
+                .unwrap()
+                .unwrap()
+                .active_profile_id
+                .as_deref(),
+            Some("production-sampling")
+        );
+        mgr.deploy(id, Some("benchmark"), &mut |_| {}, Default::default())
+            .unwrap();
+        mgr.deploy(id, None, &mut |_| {}, Default::default())
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(mgr.settings.models_path().join("selected")).unwrap(),
+            "benchmark"
+        );
+        assert!(
+            mgr.deploy(id, Some("unknown"), &mut |_| {}, Default::default())
+                .is_err()
+        );
+    }
+
+    fn profile_deploy_fixture(
+        profiles: &str,
+        selected: Option<&str>,
+    ) -> (config::TempHome, ModelManager) {
+        let temp = setup_temp_db();
+        let id = "saved-profile";
+        add_stuck_record(id, "org/model", 11);
+        db::connect()
+            .unwrap()
+            .execute(
+                "UPDATE store_models SET profiles_json=?1,active_profile_id=?2,
+                 status='downloaded',deployed_at='previous-deployment',
+                 deployed_script_sha256='previous-hash',card_update_pending=1 WHERE card_id=?3",
+                rusqlite::params![profiles, selected, id],
+            )
+            .unwrap();
+        let blob = |content: &str| db::ScriptBlob {
+            content: content.into(),
+            sha256: script_runner::sha256_hex(content),
+        };
+        db::set_scripts_content(
+            id,
+            &BTreeMap::from([
+                ("install_engine".into(), blob("#!/bin/bash\nexit 0\n")),
+                (
+                    "deploy".into(),
+                    blob("#!/bin/bash\nmkdir -p \"$LMM_MODELS_DIR\"\nprintf '%s' \"${LMM_DEPLOY_PROFILE-}\" > \"$LMM_MODELS_DIR/selected\"\n"),
+                ),
+            ]),
+            &Default::default(),
+        )
+        .unwrap();
+        let mgr = manager_with_models_dir(&temp.path().join("models"));
+        (temp, mgr)
+    }
+
+    #[test]
+    fn deployment_profile_write_failure_preserves_all_deployment_fields_and_reports_failure() {
+        let (_temp, mgr) = profile_deploy_fixture(
+            r#"[{"id":"default","name":"Default"},{"id":"custom","name":"Custom"}]"#,
+            Some("default"),
+        );
+        let id = "saved-profile";
+        let before = db::get_store_model(id).unwrap().unwrap();
+        db::connect()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_profile BEFORE UPDATE OF active_profile_id ON store_models
+             BEGIN SELECT RAISE(ABORT,'injected profile write failure'); END;",
+            )
+            .unwrap();
+        let error = mgr
+            .deploy(id, Some("custom"), &mut |_| {}, Default::default())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("记录部署状态和方案失败"),
+            "{error}"
+        );
+        assert_eq!(
+            serde_json::to_value(db::get_store_model(id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+        // The real deployment script already ran; only its database commit is
+        // atomic. Reporting this failure must not claim to undo script effects.
+        assert_eq!(
+            fs::read_to_string(mgr.settings.models_path().join("selected")).unwrap(),
+            "custom"
+        );
+        db::connect()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_profile")
+            .unwrap();
+        mgr.deploy(id, Some("custom"), &mut |_| {}, Default::default())
+            .unwrap();
+        let deployed = db::get_store_model(id).unwrap().unwrap();
+        assert_eq!(deployed.status, "deployed");
+        assert!(!deployed.card_update_pending);
+        assert_ne!(deployed.deployed_at, before.deployed_at);
+        assert_eq!(
+            deployed.deployed_script_sha256.as_deref(),
+            Some(deployed.scripts_content["deploy"].sha256.as_str())
+        );
+        assert_eq!(deployed.active_profile_id.as_deref(), Some("custom"));
+        fs::write(mgr.settings.models_path().join("selected"), "pending").unwrap();
+        mgr.deploy(id, None, &mut |_| {}, Default::default())
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(mgr.settings.models_path().join("selected")).unwrap(),
+            "custom"
+        );
+    }
+
+    #[test]
+    fn deployment_replaces_invalid_saved_profiles_and_clears_them_for_profileless_cards() {
+        for (profiles, expected) in [
+            (
+                r#"[{"id":"default","name":"Default"},{"id":"custom","name":"Custom"}]"#,
+                Some("default"),
+            ),
+            ("[]", None),
+        ] {
+            let (_temp, mgr) = profile_deploy_fixture(profiles, Some("removed"));
+            mgr.deploy("saved-profile", None, &mut |_| {}, Default::default())
+                .unwrap();
+            let deployed = db::get_store_model("saved-profile").unwrap().unwrap();
+            assert_eq!(deployed.active_profile_id.as_deref(), expected);
+            assert_eq!(
+                fs::read_to_string(mgr.settings.models_path().join("selected")).unwrap(),
+                expected.unwrap_or("")
+            );
+        }
+    }
+
     /// 防的是「卸载删到一半被打断，卡片永远赖在模型库里」。
     ///
     /// 真实剧本：uninstall 跑到 `rm -rf ${MODEL_PATH}` 时被杀，config.json 已经
@@ -3018,7 +3572,7 @@ exit 0
             removal.residual_paths
         );
         assert!(
-            removal.warning.contains("没有被删除"),
+            removal.warning == "force_remove_residual_paths",
             "提示必须明说文件还在，不能让用户以为点完就干净了：{}",
             removal.warning
         );
@@ -3050,7 +3604,7 @@ exit 0
             .expect("应当能强制移除");
         assert!(removal.residual_paths.is_empty(), "常见位置本来就没有东西");
         assert!(
-            removal.warning.contains("只删记录") && removal.warning.contains("自行核实"),
+            removal.warning == "force_remove_records_only",
             "扫不到残留时也必须说清楚「没删文件、请自己核实」：{}",
             removal.warning
         );
@@ -3385,6 +3939,619 @@ echo '权重就绪'
         // 卡片里的"URL"是本地文件路径，只有内置测试商店这一位放行它。
         mgr.builtin_store = true;
         mgr
+    }
+
+    #[test]
+    fn full_delete_discloses_quota_retained_download_root_without_inflating_freed_bytes() {
+        let tmp = setup_temp_db();
+        let root = tmp.path().join("models");
+        let scripts = tmp.path().join("scripts");
+        let mut card = local_script_card(&scripts, None);
+        card.summary.size_bytes = 6;
+        let asset = scripts.join("helper.txt");
+        std::fs::write(&asset, "offline package").unwrap();
+        card.assets
+            .insert("helper.txt".into(), asset.to_string_lossy().into_owned());
+        card.asset_sha256 = Some(BTreeMap::from([(
+            "helper.txt".into(),
+            script_runner::sha256_hex("offline package"),
+        )]));
+        for (entry, body) in [
+            ("install_engine", "#!/bin/sh\nexit 0\n"),
+            (
+                "download_model",
+                "#!/bin/sh\nset -eu\nmkdir -p \"$LMM_MODELS_DIR/Ornith-1.5-35B-A3B\" \"$LMM_MODELS_DIR/different-cache\"\nprintf weight > \"$LMM_MODELS_DIR/Ornith-1.5-35B-A3B/model.safetensors\"\nprintf cache > \"$LMM_MODELS_DIR/different-cache/partial\"\n",
+            ),
+            (
+                "uninstall",
+                "#!/bin/sh\nset -eu\n[ \"$LMM_PURGE_WEIGHTS\" = 1 ]\ncase \"$PWD\" in */cards/card-dl) ;; *) exit 1 ;; esac\nrm -rf -- \"$LMM_MODELS_DIR/Ornith-1.5-35B-A3B\"\nrm -rf -- \"$PWD\"\n",
+            ),
+        ] {
+            std::fs::write(scripts.join(format!("{entry}.sh")), body).unwrap();
+            card.script_sha256
+                .as_mut()
+                .unwrap()
+                .insert(entry.into(), script_runner::sha256_hex(body));
+        }
+        let manager = manager_with_card(download_settings(&root), card);
+        manager
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        let record = db::get_store_model("card-dl").unwrap().unwrap();
+        let measured_before = total_size(&manager.candidate_paths(&record));
+        assert!(measured_before >= 6);
+        assert_eq!(super::super::version_store::retained_bytes().unwrap(), 5);
+
+        let outcome = manager
+            .uninstall("card-dl", true, &mut |_| {}, Default::default())
+            .unwrap();
+        assert!(!root.join("Ornith-1.5-35B-A3B").exists());
+        assert!(!config::data_dir().join("cards/card-dl").exists());
+        assert_eq!(
+            std::fs::read(root.join("different-cache/partial")).unwrap(),
+            b"cache"
+        );
+        assert_eq!(db::total_managed_bytes().unwrap(), 0);
+        assert_eq!(super::super::version_store::retained_bytes().unwrap(), 5);
+        assert_eq!(outcome.freed_bytes, measured_before);
+        assert_eq!(
+            outcome.remaining_paths,
+            [root.canonicalize().unwrap().to_string_lossy().into_owned()]
+        );
+        assert!(outcome.summary.contains("仍在磁盘上"));
+        assert!(outcome.summary.contains("其他模型"));
+        assert!(outcome.summary.contains("确认归属"));
+    }
+
+    #[test]
+    fn ordinary_download_does_not_reuse_another_cards_same_basename_for_quota() {
+        for new_contents in ["aaaaaaaaaa", "bbbbbbbbbb"] {
+            let tmp = setup_temp_db();
+            let root = tmp.path().join("models");
+            std::fs::create_dir_all(root.join("A")).unwrap();
+            std::fs::write(root.join("A/model.safetensors"), b"aaaaaaaaaa").unwrap();
+            db::add_store_model_with_root(
+                db::AddStoreModelParams {
+                    card_id: "A",
+                    model_name: "A",
+                    card_name: "A",
+                    org: None,
+                    description: None,
+                    engine_name: "native",
+                    engine_version: None,
+                    size_bytes: 10,
+                    quantization: None,
+                    source_repo_id: None,
+                    source_filename: Some("model.safetensors"),
+                    scripts: &BTreeMap::new(),
+                    status: "downloaded",
+                    profiles: &[],
+                    deploy_topology: DeployTopology::Single,
+                    card_source: "store",
+                },
+                &root.to_string_lossy(),
+            )
+            .unwrap();
+            let scripts = tmp.path().join("scripts");
+            let mut card = local_script_card(&scripts, None);
+            card.summary.size_bytes = 10;
+            card.source_filename = Some("model.safetensors".into());
+            let body = format!(
+                "#!/bin/sh\nmkdir -p \"$LMM_MODELS_DIR/B\"\nprintf '%s' '{new_contents}' > \"$LMM_MODELS_DIR/B/model.safetensors\"\n"
+            );
+            std::fs::write(scripts.join("download_model.sh"), &body).unwrap();
+            card.script_sha256
+                .as_mut()
+                .unwrap()
+                .insert("download_model".into(), script_runner::sha256_hex(&body));
+            let manifest = format!(
+                "{}  model.safetensors\n",
+                script_runner::sha256_hex(new_contents)
+            );
+            let manifest_path = scripts.join("weights.sha256");
+            std::fs::write(&manifest_path, &manifest).unwrap();
+            card.assets.insert(
+                "weights.sha256".into(),
+                manifest_path.to_string_lossy().into_owned(),
+            );
+            card.asset_sha256 = Some(BTreeMap::from([(
+                "weights.sha256".into(),
+                script_runner::sha256_hex(&manifest),
+            )]));
+            let mut settings = download_settings(&root);
+            settings.storage_quota_gb = Some(15.0 / 1073741824.0);
+            let manager = manager_with_card(settings, card);
+            let error = manager
+                .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                .unwrap_err();
+            assert!(error.to_string().contains("超出存储配额"), "{error}");
+            assert_eq!(
+                std::fs::read(root.join("A/model.safetensors")).unwrap(),
+                b"aaaaaaaaaa"
+            );
+            assert!(!root.join("B").exists());
+            assert!(db::get_store_model("card-dl").unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn normal_download_cannot_replace_an_existing_deployment_or_changed_weights() {
+        let tmp = setup_temp_db();
+        let card = local_script_card(&tmp.path().join("scripts"), None);
+        let mgr = ModelManager::new(
+            Some(download_settings(&tmp.path().join("models"))),
+            Some(Box::new(OneCardStore { card })),
+        );
+        add_stuck_record("card-dl", "Org/Ornith-1.5-35B-A3B", 168_000_000_000);
+        let before = db::get_store_model("card-dl").unwrap().unwrap();
+        let error = mgr
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap_err();
+        assert!(error.to_string().contains("已有部署"), "{error}");
+        assert_eq!(
+            serde_json::to_value(db::get_store_model("card-dl").unwrap().unwrap()).unwrap(),
+            serde_json::to_value(&before).unwrap()
+        );
+        db::update_store_model_status("card-dl", "downloaded", None).unwrap();
+        db::set_running("card-dl", false).unwrap();
+        let error = mgr
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap_err();
+        assert!(error.to_string().contains("旧权重未被覆盖"), "{error}");
+        assert!(!tmp.path().join("models/download-ran").exists());
+    }
+
+    #[test]
+    fn offline_native_scripts_receive_a_private_runtime_before_they_execute() {
+        let _tmp = setup_temp_db();
+        add_stuck_record("private-native", "Org/Native", 11);
+        let mut record = db::get_store_model("private-native").unwrap().unwrap();
+        let blob = |content: &str| db::ScriptBlob {
+            content: content.into(),
+            sha256: script_runner::sha256_hex(content),
+        };
+        record.scripts_content.insert(
+            "enable".into(),
+            blob("#!/bin/sh\ntest \"$(stat -c %a .runtime)\" = 700\n"),
+        );
+        record.assets_content.insert(
+            "native_engine_process.py".into(),
+            blob("# test controller\n"),
+        );
+        let mgr = ModelManager::new(None, None);
+        let prepared = mgr
+            .local_scripts_source(&record)
+            .unwrap()
+            .prepare(&record.card_id, "enable")
+            .unwrap();
+        assert!(
+            std::process::Command::new(&prepared.entry)
+                .current_dir(prepared.cwd.unwrap())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[test]
+    fn legacy_cached_runtime_files_are_preserved_while_source_assets_are_prepared() {
+        let _tmp = setup_temp_db();
+        add_stuck_record("legacy-cache", "Org/Old", 11);
+        let mut record = db::get_store_model("legacy-cache").unwrap().unwrap();
+        record.card_source = "local".into();
+        let blob = |content: &str| db::ScriptBlob {
+            content: content.into(),
+            sha256: script_runner::sha256_hex(content),
+        };
+        record
+            .scripts_content
+            .insert("enable".into(), blob("#!/bin/sh\nexit 0\n"));
+        record.assets_content = BTreeMap::from([
+            (
+                "vendor/.cache/flashinfer/jit.log".into(),
+                blob("stale snapshot"),
+            ),
+            (
+                "vendor/__pycache__/generated.pyc".into(),
+                blob("stale bytecode"),
+            ),
+            ("vendor/start.sh".into(), blob("#!/bin/sh\nexit 0\n")),
+            ("vendor/.cache-tools/helper.py".into(), blob("source code")),
+            (".venv/lib/module.py".into(), blob("bundled source")),
+            (".deploy-env".into(), blob("stale deployment config")),
+            (".runtime/engine.json".into(), blob("stale engine identity")),
+        ]);
+        let runtime = config::data_dir().join("cards/legacy-cache");
+        let cache = runtime.join("vendor/.cache/flashinfer/jit.log");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, "current runtime cache").unwrap();
+        let mut permissions = std::fs::metadata(&cache).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&cache, permissions.clone()).unwrap();
+        std::fs::write(runtime.join(".deploy-env"), "current deployment config").unwrap();
+        std::fs::create_dir_all(runtime.join(".runtime")).unwrap();
+        std::fs::write(
+            runtime.join(".runtime/engine.json"),
+            "current engine identity",
+        )
+        .unwrap();
+        let mgr = ModelManager::new(None, None);
+        let source = mgr.local_scripts_source(&record).unwrap();
+        let prepared = source.prepare(&record.card_id, "enable").unwrap();
+        assert!(
+            std::process::Command::new(&prepared.entry)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&cache).unwrap(),
+            "current runtime cache"
+        );
+        assert_eq!(
+            std::fs::metadata(&cache).unwrap().permissions(),
+            permissions
+        );
+        assert!(!runtime.join("vendor/__pycache__/generated.pyc").exists());
+        assert_eq!(
+            std::fs::read_to_string(runtime.join("vendor/.cache-tools/helper.py")).unwrap(),
+            "source code"
+        );
+        assert_eq!(
+            std::fs::read_to_string(runtime.join(".venv/lib/module.py")).unwrap(),
+            "bundled source"
+        );
+        assert_eq!(
+            std::fs::read_to_string(runtime.join(".deploy-env")).unwrap(),
+            "current deployment config"
+        );
+        assert_eq!(
+            std::fs::read_to_string(runtime.join(".runtime/engine.json")).unwrap(),
+            "current engine identity"
+        );
+        assert_eq!(
+            record.assets_content["vendor/.cache/flashinfer/jit.log"].content,
+            "stale snapshot"
+        );
+        // Cache filtering must not hide an unsafe package path.
+        record
+            .assets_content
+            .insert("../.cache/escape".into(), blob("unsafe"));
+        assert!(
+            mgr.local_scripts_source(&record)
+                .unwrap()
+                .prepare(&record.card_id, "enable")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn newly_fetched_cards_reject_generated_cache_assets_before_downloading() {
+        let tmp = setup_temp_db();
+        let mut card = make_card("Bad snapshot", None);
+        card.scripts.clear();
+        card.assets.insert(
+            "vendor/.cache/jit.log".into(),
+            "https://example.test/must-not-fetch".into(),
+        );
+        let mut mgr = ModelManager::new(Some(download_settings(&tmp.path().join("models"))), None);
+        let result = mgr.fetch_and_store_scripts(&card, None);
+        assert!(result.err().unwrap().to_string().contains("运行缓存"));
+        // Exercise both the public lifecycle and its on-demand fallback, without
+        // fetching the deliberately unreachable asset or changing runtime cache.
+        mgr.store = Box::new(OneCardStore { card: card.clone() });
+        let error = mgr
+            .download_from_store(&card.summary.id, &mut |_| {}, Default::default(), None)
+            .unwrap_err();
+        assert!(error.to_string().contains("运行缓存"));
+        let runtime = config::data_dir().join("cards").join(&card.summary.id);
+        std::fs::create_dir_all(runtime.join("vendor/.cache")).unwrap();
+        let cache = runtime.join("vendor/.cache/jit.log");
+        std::fs::write(&cache, b"live runtime cache").unwrap();
+        let error = ScriptsSource::from_card(&card, false)
+            .prepare(&card.summary.id, "enable")
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("运行缓存"));
+        assert_eq!(std::fs::read(cache).unwrap(), b"live runtime cache");
+    }
+
+    #[test]
+    fn offline_recipes_also_enforce_the_audited_native_controller_repair() {
+        let _tmp = setup_temp_db();
+        add_stuck_record("old-native", "Org/Old", 11);
+        let mut record = db::get_store_model("old-native").unwrap().unwrap();
+        record.scripts_content.insert(
+            "enable".into(),
+            db::ScriptBlob {
+                content: "exit 0".into(),
+                sha256: script_runner::sha256_hex("exit 0"),
+            },
+        );
+        record.assets_content.insert(
+            "native_engine_process.py".into(),
+            db::ScriptBlob {
+                content: "tampered-controller".into(),
+                sha256: super::super::native_card_compat::BROKEN.into(),
+            },
+        );
+        let mgr = ModelManager::new(None, None);
+        let error = match mgr.local_scripts_source(&record) {
+            Err(error) => error,
+            Ok(_) => panic!("cached rollback recipes must validate the known repair source"),
+        };
+        assert!(error.to_string().contains("来源指纹不匹配"));
+        assert_eq!(
+            record.assets_content["native_engine_process.py"].content,
+            "tampered-controller"
+        );
+    }
+
+    #[test]
+    fn unstarted_first_download_can_change_roots_after_rejection_or_cancellation() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        for failure in ["space", "quota", "io", "cancel"] {
+            let tmp = setup_temp_db();
+            let first = tmp.path().join("first");
+            std::fs::create_dir_all(&first).unwrap();
+            std::fs::write(first.join("preexisting-cache"), vec![0; 7]).unwrap();
+            let scripts = tmp.path().join("scripts");
+            let mut card = local_script_card(&scripts, None);
+            let install = FAKE_INSTALL_ENGINE.replacen(
+                "#!/bin/sh\n",
+                "#!/bin/sh\nprintf ran >> \"$LMM_MODELS_DIR/script-entered\"\n",
+                1,
+            );
+            std::fs::write(scripts.join("install_engine.sh"), &install).unwrap();
+            card.script_sha256
+                .as_mut()
+                .unwrap()
+                .insert("install_engine".into(), script_runner::sha256_hex(&install));
+            let mut settings = download_settings(&first);
+            let blocked = first.join("unreadable");
+            match failure {
+                "space" => settings.min_free_space_gb = 1_000_000.0,
+                // The preexisting bytes and the complete plan must both be
+                // charged before admission, even on an unstarted new target.
+                "quota" => settings.storage_quota_gb = Some(4102.0 / 1073741824.0),
+                "io" => {
+                    assert_ne!(std::fs::metadata("/proc/self").unwrap().uid(), 0);
+                    settings.storage_quota_gb = Some(1.0);
+                    std::fs::create_dir(&blocked).unwrap();
+                    std::fs::write(blocked.join("cache"), vec![0; 5]).unwrap();
+                    std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000))
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let control = script_runner::RunControl {
+                cancel: Some(Arc::clone(&cancelled)),
+                ..Default::default()
+            };
+            let error = manager_with_card(settings, card.clone())
+                .download_from_store(
+                    "card-dl",
+                    &mut |line| {
+                        // This callback happens after publishing and admission,
+                        // immediately before the first engine probe can run.
+                        if failure == "cancel" && line.starts_with("检查 vllm 引擎") {
+                            cancelled.store(true, Ordering::SeqCst);
+                        }
+                    },
+                    control,
+                    None,
+                )
+                .unwrap_err();
+            let expected = match failure {
+                "space" => "可用空间不足",
+                "quota" => "超出存储配额",
+                "io" => "无法核算版本目录配额",
+                _ => "已取消",
+            };
+            assert!(error.to_string().contains(expected), "{failure}: {error}");
+            if failure == "io" {
+                std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            assert!(db::get_store_model("card-dl").unwrap().is_none());
+            assert!(!first.join("script-entered").exists());
+            assert!(!first.join("download-ran").exists());
+            let retained = if failure == "io" { 12 } else { 7 };
+            assert_eq!(
+                super::super::version_store::retained_bytes().unwrap(),
+                retained
+            );
+            assert_eq!(
+                std::fs::read(first.join("preexisting-cache")).unwrap(),
+                vec![0; 7]
+            );
+
+            let next = tmp.path().join("next");
+            let mut next_settings = download_settings(&next);
+            next_settings.storage_quota_gb = Some(1.0);
+            manager_with_card(next_settings, card)
+                .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                .unwrap();
+            let record = db::get_store_model("card-dl").unwrap().unwrap();
+            assert_eq!(record.models_root.as_deref(), next.to_str(), "{failure}");
+            assert_eq!(ran_times(&next.join("download-ran")), 1);
+            assert!(next.join("script-entered").exists());
+            assert!(!first.join("script-entered").exists());
+            assert_eq!(
+                super::super::version_store::retained_bytes().unwrap(),
+                retained
+            );
+            assert!(
+                super::super::version_store::download_paths("card-dl")
+                    .unwrap()
+                    .contains(&first)
+            );
+        }
+    }
+
+    /// Review round 7: an ordinary download root placed at or inside another
+    /// card's registered legacy resource must be rejected before scripts —
+    /// otherwise `LMM_MODELS_DIR` points into a protected tree and
+    /// `current_purge_preflight` refuses that card's full deletion forever.
+    #[test]
+    fn ordinary_download_rejects_root_inside_other_cards_legacy_resource() {
+        let tmp = setup_temp_db();
+        let shared = tmp.path().join("models");
+        let legacy_root = shared.join("legacy");
+        std::fs::create_dir_all(&legacy_root).unwrap();
+        std::fs::write(legacy_root.join("old.tachyon"), b"old-weights").unwrap();
+        // Card A: legacy deployment whose weights live under the shared root.
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "card-legacy",
+            model_name: "legacy-name",
+            card_name: "Legacy",
+            org: None,
+            description: None,
+            engine_name: "native",
+            engine_version: Some("old"),
+            size_bytes: 11,
+            quantization: None,
+            source_repo_id: Some("org/legacy"),
+            source_filename: Some("old.tachyon"),
+            scripts: &Default::default(),
+            status: "deployed",
+            profiles: &[],
+            deploy_topology: super::super::store_client::DeployTopology::Single,
+            card_source: "store",
+        })
+        .unwrap();
+        let runtime = super::super::config::data_dir().join("cards/card-legacy");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(
+            runtime.join(".deploy-env"),
+            format!("MODEL_DIR=\"{}\"\n", legacy_root.display()),
+        )
+        .unwrap();
+
+        // Card B: fresh ordinary download whose configured root points at (or
+        // inside) card A's protected tree. Admission must fail without
+        // running any script or registering card B.
+        let scripts = tmp.path().join("scripts");
+        let mut card = local_script_card(&scripts, None);
+        for (entry, body) in [
+            ("install_engine", "#!/bin/sh\nexit 0\n"),
+            (
+                "download_model",
+                "#!/bin/sh\nset -eu\nprintf ran > \"$LMM_MODELS_DIR/download-ran\"\n",
+            ),
+        ] {
+            std::fs::write(scripts.join(format!("{entry}.sh")), body).unwrap();
+            card.script_sha256
+                .as_mut()
+                .unwrap()
+                .insert(entry.into(), script_runner::sha256_hex(body));
+        }
+        for target in [legacy_root.clone(), legacy_root.join("nested")] {
+            let manager = manager_with_card(download_settings(&target), card.clone());
+            let error = manager
+                .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("重叠"),
+                "root inside a protected legacy resource must be rejected: {error}"
+            );
+            assert!(db::get_store_model("card-dl").unwrap().is_none());
+            assert!(
+                !target.join("download-ran").exists(),
+                "no script output may land inside the protected tree"
+            );
+            assert!(
+                std::fs::read(legacy_root.join("old.tachyon")).unwrap() == b"old-weights",
+                "the protected tree must stay untouched"
+            );
+        }
+
+        // Control: a disjoint root still downloads normally, and the same
+        // card's own registered root stays exempt from cross-card rejection.
+        let disjoint = tmp.path().join("other");
+        manager_with_card(download_settings(&disjoint), card.clone())
+            .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+            .unwrap();
+        assert!(disjoint.join("download-ran").exists());
+        let record = db::get_store_model("card-dl").unwrap().unwrap();
+        assert_eq!(record.models_root.as_deref(), disjoint.to_str());
+    }
+
+    #[test]
+    fn existing_download_targets_stay_pinned_through_pre_script_rejection() {
+        for existing in ["reservation", "installed", "failed-script"] {
+            let tmp = setup_temp_db();
+            let first = tmp.path().join("first");
+            let scripts = tmp.path().join("scripts");
+            let card = local_script_card(&scripts, None);
+            match existing {
+                "reservation" => {
+                    let reservation = super::super::version_store::DownloadReservation::acquire(
+                        "card-dl",
+                        &first,
+                        || false,
+                        || {},
+                    )
+                    .unwrap();
+                    reservation.publish(card.summary.size_bytes).unwrap();
+                    reservation.start_scripts().unwrap();
+                    std::fs::write(first.join("partial"), b"partial").unwrap();
+                }
+                "installed" => {
+                    manager_with_card(download_settings(&first), card.clone())
+                        .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                        .unwrap();
+                    // Isolate the fixed store_models root from any reservation.
+                    db::connect()
+                        .unwrap()
+                        .execute(
+                            "DELETE FROM model_download_reservations WHERE card_id='card-dl'",
+                            [],
+                        )
+                        .unwrap();
+                }
+                _ => {
+                    let body = "#!/bin/sh\nprintf partial > \"$LMM_MODELS_DIR/partial\"\necho '完整性校验失败' >&2\nexit 1\n";
+                    let mut failing_card = card.clone();
+                    std::fs::write(scripts.join("download_model.sh"), body).unwrap();
+                    failing_card
+                        .script_sha256
+                        .as_mut()
+                        .unwrap()
+                        .insert("download_model".into(), script_runner::sha256_hex(body));
+                    let error = manager_with_card(download_settings(&first), failing_card)
+                        .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                        .unwrap_err();
+                    assert!(error.to_string().contains("完整性校验失败"), "{error}");
+                    assert_eq!(std::fs::read(first.join("partial")).unwrap(), b"partial");
+                    std::fs::write(scripts.join("download_model.sh"), FAKE_DOWNLOAD_MODEL).unwrap();
+                }
+            }
+            let next = tmp.path().join("next");
+            let mut tight = download_settings(&next);
+            tight.min_free_space_gb = 1_000_000.0;
+            let error = manager_with_card(tight, card.clone())
+                .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                .unwrap_err();
+            assert!(error.to_string().contains("可用空间不足"), "{error}");
+            manager_with_card(download_settings(&next), card)
+                .download_from_store("card-dl", &mut |_| {}, Default::default(), None)
+                .unwrap();
+            let record = db::get_store_model("card-dl").unwrap().unwrap();
+            assert_eq!(record.models_root.as_deref(), first.to_str(), "{existing}");
+            assert_eq!(ran_times(&next.join("download-ran")), 0);
+            assert_eq!(
+                ran_times(&first.join("download-ran")),
+                if existing == "installed" { 2 } else { 1 }
+            );
+            if existing != "installed" {
+                assert_eq!(std::fs::read(first.join("partial")).unwrap(), b"partial");
+            }
+        }
     }
 
     /// 防的是「下载中途失败，库里却留下一条说它已经好了的记录」。
@@ -3761,5 +4928,217 @@ echo '权重就绪'
                 "{bad} 不指向本机，落库就等于把用户的对话导去别处"
             );
         }
+    }
+    #[test]
+    fn updated_card_installs_engine_before_deploy_and_stays_pending_on_failure() {
+        let tmp = setup_temp_db();
+        add_stuck_record("update-deploy", "org/model", 1024);
+        let install = "#!/bin/bash\nset -e\nif [ \"${LMM_PROBE_ONLY:-0}\" = 1 ]; then exit 0; fi\necho install >> \"$HOME/update-order\"\n";
+        let deploy = "#!/bin/bash\necho deploy >> \"$HOME/update-order\"\nexit 1\n";
+        let blob = |s: &str| db::ScriptBlob {
+            content: s.into(),
+            sha256: script_runner::sha256_hex(s),
+        };
+        let mut scripts = BTreeMap::from([
+            ("install_engine".into(), blob(install)),
+            ("deploy".into(), blob(deploy)),
+        ]);
+        db::set_scripts_content("update-deploy", &scripts, &Default::default()).unwrap();
+        rusqlite::Connection::open(db::db_path())
+            .unwrap()
+            .execute(
+                "UPDATE store_models SET card_update_pending=1 WHERE card_id='update-deploy'",
+                [],
+            )
+            .unwrap();
+        let mgr = manager_with_models_dir(&tmp.path().join("models"));
+        assert!(
+            mgr.deploy("update-deploy", None, &mut |_| {}, Default::default())
+                .is_err()
+        );
+        assert!(
+            db::get_store_model("update-deploy")
+                .unwrap()
+                .unwrap()
+                .card_update_pending
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("update-order")).unwrap(),
+            "install\ndeploy\n"
+        );
+        scripts.insert(
+            "deploy".into(),
+            blob("#!/bin/bash\necho deploy >> \"$HOME/update-order\"\n"),
+        );
+        db::set_scripts_content("update-deploy", &scripts, &Default::default()).unwrap();
+        mgr.deploy("update-deploy", None, &mut |_| {}, Default::default())
+            .unwrap();
+        let updated = db::get_store_model("update-deploy").unwrap().unwrap();
+        assert!(!updated.card_update_pending);
+        assert_eq!(updated.status, "deployed");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("update-order")).unwrap(),
+            "install\ndeploy\ninstall\ndeploy\n"
+        );
+    }
+    #[test]
+    fn card_update_accepts_legacy_filename_fill_but_rejects_weight_identity_changes() {
+        let tmp = setup_temp_db();
+        let card_id = "legacy-weight-filename";
+        add_stuck_record(card_id, "org/model", 1024);
+        rusqlite::Connection::open(db::db_path())
+            .unwrap()
+            .execute(
+                "UPDATE store_models SET card_source='local', quantization='NVFP4' WHERE card_id=?1",
+                [card_id],
+            )
+            .unwrap();
+        let content = format!("{}  model.tachyon\n", "a".repeat(64));
+        let weights = db::ScriptBlob {
+            sha256: script_runner::sha256_hex(&content),
+            content,
+        };
+        db::set_scripts_content(
+            card_id,
+            &Default::default(),
+            &BTreeMap::from([("weights.sha256".into(), weights.clone())]),
+        )
+        .unwrap();
+        let before = db::get_store_model(card_id).unwrap().unwrap();
+        let mut card = make_card("Updated recipe", Some("NVFP4"));
+        card.summary.id = card_id.into();
+        card.source_repo_id = Some("org/model".into());
+        card.source_filename = Some("model.tachyon".into());
+        for entry in [
+            "install_engine",
+            "download_model",
+            "deploy",
+            "enable",
+            "stop",
+            "uninstall",
+        ] {
+            card.scripts
+                .insert(entry.into(), "https://example.invalid/never-fetch".into());
+        }
+        card.script_sha256 = Some(
+            card.scripts
+                .keys()
+                .map(|k| (k.clone(), "a".repeat(64)))
+                .collect(),
+        );
+        card.assets.insert(
+            "weights.sha256".into(),
+            "https://example.invalid/weights.sha256".into(),
+        );
+        card.asset_sha256 = Some(BTreeMap::from([("weights.sha256".into(), weights.sha256)]));
+
+        for field in ["filename", "topology", "weights"] {
+            let mut incompatible = card.clone();
+            match field {
+                "repo" => incompatible.source_repo_id = Some("other/model".into()),
+                "filename" => incompatible.source_filename = Some("other.tachyon".into()),
+                "quantization" => incompatible.summary.quantization = Some("BF16".into()),
+                "topology" => incompatible.summary.deploy_topology = DeployTopology::Dual,
+                "weights" => {
+                    incompatible
+                        .asset_sha256
+                        .as_mut()
+                        .unwrap()
+                        .insert("weights.sha256".into(), "b".repeat(64));
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                super::super::card_update::validate(&before, &incompatible).is_err(),
+                "{field}"
+            );
+        }
+        let mut named = before.clone();
+        named.source_filename = Some("previous.tachyon".into());
+        assert!(
+            super::super::card_update::validate(&named, &card).is_ok(),
+            "the sole verified artifact takes precedence over stale filename metadata"
+        );
+
+        let mgr = ModelManager::new(
+            Some(download_settings(&tmp.path().join("models"))),
+            Some(Box::new(OneCardStore { card })),
+        );
+        let preview = mgr.check_card_update(card_id).unwrap();
+        assert_eq!(preview["changed"], true);
+        let after = db::get_store_model(card_id).unwrap().unwrap();
+        assert_eq!(
+            super::super::card_update::local_manifest(&before),
+            super::super::card_update::local_manifest(&after)
+        );
+        assert_eq!(before.scripts_fetched_at, after.scripts_fetched_at);
+        assert!(after.source_filename.is_none());
+        assert!(!after.card_update_pending);
+    }
+
+    #[test]
+    fn card_update_rejects_stale_preview_and_cancellation_without_network_or_replacement() {
+        let tmp = setup_temp_db();
+        add_stuck_record("update-preview", "org/model", 1024);
+        rusqlite::Connection::open(db::db_path())
+            .unwrap()
+            .execute(
+                "UPDATE store_models SET card_source='store' WHERE card_id='update-preview'",
+                [],
+            )
+            .unwrap();
+        let before = db::get_store_model("update-preview").unwrap().unwrap();
+        let mut card = make_card("New recipe", None);
+        card.summary.id = "update-preview".into();
+        card.source_repo_id = Some("org/model".into());
+        for entry in [
+            "install_engine",
+            "download_model",
+            "deploy",
+            "enable",
+            "stop",
+            "uninstall",
+        ] {
+            card.scripts
+                .insert(entry.into(), "https://example.invalid/never-fetch".into());
+        }
+        card.script_sha256 = Some(
+            card.scripts
+                .keys()
+                .map(|k| (k.clone(), "a".repeat(64)))
+                .collect(),
+        );
+        let revision =
+            super::super::card_update::revision(&super::super::card_update::remote_manifest(&card));
+        let mgr = ModelManager::new(
+            Some(download_settings(&tmp.path().join("models"))),
+            Some(Box::new(OneCardStore { card })),
+        );
+        let error = mgr
+            .update_card(
+                "update-preview",
+                "stale-revision",
+                &mut |_| {},
+                Default::default(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("再次更新"));
+        let control = script_runner::RunControl {
+            cancel: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                true,
+            ))),
+            prompt: None,
+        };
+        let error = mgr
+            .update_card("update-preview", &revision, &mut |_| {}, control)
+            .unwrap_err();
+        assert!(error.to_string().contains("已取消"));
+        let after = db::get_store_model("update-preview").unwrap().unwrap();
+        assert_eq!(
+            super::super::card_update::local_manifest(&after),
+            super::super::card_update::local_manifest(&before)
+        );
+        assert_eq!(after.scripts_fetched_at, before.scripts_fetched_at);
+        assert!(!after.card_update_pending);
     }
 }

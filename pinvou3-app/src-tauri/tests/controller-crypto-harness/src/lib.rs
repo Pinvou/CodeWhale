@@ -208,10 +208,26 @@ mod features {
                     _outcome: &str,
                 ) {
                 }
+                // 生产 relay_client.rs 现通过 super::controller::relay_runtime::
+                // controlled_monotonic_millis 取单调时钟；垫片按生产 clock.rs
+                // 的同一语义（OnceLock 起点 + Instant 单调毫秒）自包含实现，
+                // 避免把 capabilities 等生产依赖拉进 harness。
+                pub(crate) fn controlled_monotonic_millis() -> u64 {
+                    use std::sync::OnceLock;
+                    use std::time::Instant;
+                    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+                    u64::try_from(
+                        Instant::now()
+                            .saturating_duration_since(*ORIGIN.get_or_init(Instant::now))
+                            .as_millis(),
+                    )
+                    .unwrap_or(u64::MAX)
+                }
             }
             pub(crate) use crate::transfer;
             pub(crate) use crate::{
-                liveness, protocol, relay_transport, resume, shared_transport, test_support,
+                crypto, encrypted_lane, liveness, protocol, relay_transport, resume,
+                shared_transport, test_support,
             };
         }
         pub(crate) use crate::legacy_relay::relay_client;

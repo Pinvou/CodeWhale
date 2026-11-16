@@ -1,0 +1,9 @@
+.adm-restored-shell .adm-repair-relationship{display:grid;gap:8px;margin:16px 0;padding:14px;border:1px solid var(--adm-line);border-radius:10px;background:var(--adm-soft)}
+.adm-restored-shell .adm-repair-relationship h4,.adm-restored-shell .adm-repair-relationship p{margin:0}
+.adm-restored-shell .adm-repair-relationship p,.adm-restored-shell .adm-repair-relationship-intro{color:var(--adm-muted);font-size:13px;line-height:1.6}
+.adm-restored-shell .adm-repair-relationship dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 16px;margin:2px 0}
+.adm-restored-shell .adm-repair-relationship dl>div{min-width:0}
+.adm-restored-shell .adm-repair-relationship dt{color:var(--adm-muted);font-size:12px}
+.adm-restored-shell .adm-repair-relationship dd{margin:4px 0 0;font-size:13px;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-restored-shell .adm-repair-relationship code{white-space:normal;overflow-wrap:inherit}
+@media(max-width:650px){.adm-restored-shell .adm-repair-relationship dl{grid-template-columns:minmax(0,1fr)}}

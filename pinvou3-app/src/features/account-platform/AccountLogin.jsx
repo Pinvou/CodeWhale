@@ -1,4 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
+import { accountAuthCopy } from '../../shared/i18n.js';
+import './account-login.css';
 import { registrationManualReviewReason } from './registration-recovery-state.js';
 import { secureRequestID } from './request-id.js';
 import { PasswordInput } from './PasswordInput.jsx';
@@ -6,7 +8,9 @@ import { ProfileCaptcha } from './ProfileSettings.jsx';
 import { accountPlatformErrorCodes, localizedAccountPlatformError } from './error-localization.js';
 import { profileCaptchaSubmissionOffset } from './profile-captcha-state.js';
 
-export function AccountLogin({ client, copy, onAuthenticated, reauthentication = false, onAuthenticationFailure }) {
+export function AccountLogin({ client, copy, language = 'zh', onAuthenticated, reauthentication = false, onAuthenticationFailure }) {
+  const words = accountAuthCopy[language];
+  const hintID = useId();
   const [mode, setMode] = useState('password');
   const [account, setAccount] = useState('');
   const [mobile, setMobile] = useState('');
@@ -177,18 +181,23 @@ export function AccountLogin({ client, copy, onAuthenticated, reauthentication =
   const changeFacts = setter => event => {
     owner.current++; setPreparation(null); setter(event.target.value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null);
   };
-  return <section className="ap-stack">
-    <h1>{reauthentication ? copy.desktopReauthenticationTitle : copy.title}</h1><p>{reauthentication ? copy.desktopReauthenticationLead : copy.desktopLoginIntro}</p>
-    {!reauthentication && <nav>{[['password', copy.login], ['sms', copy.authModes.sms], ['register', copy.register], ['forgot', copy.authModes.forgot]].map(([value, label]) => <button key={value} type="button" disabled={busy || pending} aria-pressed={mode === value} onClick={() => changeMode(value)}>{label}</button>)}</nav>}
+  const title = mode === 'register' ? words.registerTitle : mode === 'forgot' ? words.resetTitle : words.loginTitle;
+  const lead = mode === 'register' ? words.registerLead : mode === 'forgot' ? words.resetLead : words.loginLead;
+  return <section className="ap-auth-card">
+    <header className="ap-auth-heading"><h1>{reauthentication ? copy.desktopReauthenticationTitle : title}</h1><p>{reauthentication ? copy.desktopReauthenticationLead : lead}</p></header>
+    {!reauthentication && <nav className="ap-auth-modes" aria-label={copy.login}>
+      {['password', 'sms'].includes(mode) ? [['password', copy.authModes.password], ['sms', copy.authModes.sms]].map(([value, label]) => <button key={value} type="button" disabled={busy || pending} aria-pressed={mode === value} onClick={() => changeMode(value)}>{label}</button>) : <button type="button" disabled={busy || pending} onClick={() => changeMode('password')}>{words.backToLogin}</button>}
+    </nav>}
     {error && <div className="ap-alert error" role="alert">{error}</div>}{notice && <div className="ap-alert" role="status">{notice}</div>}
-    {pending ? <div role="status"><p>{manualReviewReason ? copy.registrationManualReview : copy.registrationDoNotRepeat}</p>{manualReviewReason && <p>{manualReviewReason === 'USERNAME_ALREADY_REGISTERED' ? copy.usernameAlreadyRegistered : copy.mobileAlreadyRegistered}</p>}<p>{progress.status}</p><button disabled={busy} onClick={recover}>{copy.retry}</button></div> : <form className="ap-stack" onSubmit={submit}>
-      {(mode === 'password' || mode === 'register') && <label>{mode === 'register' ? copy.registrationUsername : copy.account}<input required value={account} autoComplete="username" disabled={busy} onChange={changeFacts(setAccount)} /></label>}
+    {pending ? <div role="status"><p>{manualReviewReason ? copy.registrationManualReview : copy.registrationDoNotRepeat}</p>{manualReviewReason && <p>{manualReviewReason === 'USERNAME_ALREADY_REGISTERED' ? copy.usernameAlreadyRegistered : copy.mobileAlreadyRegistered}</p>}<p>{progress.status}</p><button disabled={busy} onClick={recover}>{copy.retry}</button></div> : <form className="ap-auth-form" onSubmit={submit}>
+      {(mode === 'password' || mode === 'register') && <label>{mode === 'register' ? copy.username : copy.account}<input required value={account} autoComplete="username" disabled={busy} onChange={changeFacts(setAccount)} />{mode === 'register' && <small>{words.usernameHint}</small>}</label>}
       {mode !== 'password' && <label>{copy.mobile}<input required value={mobile} inputMode="tel" autoComplete="tel-national" disabled={busy || Boolean(challenge)} onChange={changeFacts(setMobile)} /></label>}
-      {mode !== 'sms' && <label>{copy.password}<PasswordInput resetKey={mode} showLabel={copy.showPassword} hideLabel={copy.hidePassword} ariaLabel={copy.password} autoComplete={mode === 'password' ? 'current-password' : 'new-password'} maxLength={128} value={password} disabled={busy || mode === 'register' && Boolean(challenge)} onValueChange={value => { owner.current++; setPreparation(null); setPassword(value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null); }} /></label>}
+      {mode !== 'sms' && <label>{mode === 'forgot' ? words.newPassword : words.password}<PasswordInput resetKey={mode} showLabel={copy.showPassword} hideLabel={copy.hidePassword} ariaLabel={mode === 'forgot' ? words.newPassword : words.password} autoComplete={mode === 'password' ? 'current-password' : 'new-password'} maxLength={128} value={password} disabled={busy || mode === 'register' && Boolean(challenge)} onValueChange={value => { owner.current++; setPreparation(null); setPassword(value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null); }} />{mode !== 'password' && <small>{words.passwordHint}</small>}</label>}
       {(mode === 'register' || mode === 'forgot') && <label>{copy.confirmPassword}<PasswordInput resetKey={mode} showLabel={copy.showPasswordConfirmation} hideLabel={copy.hidePasswordConfirmation} ariaLabel={copy.confirmPassword} autoComplete="new-password" value={confirmation} maxLength={128} disabled={busy || mode === 'register' && Boolean(challenge)} onValueChange={value => { owner.current++; setPreparation(null); setConfirmation(value); setReference(null); setChallenge(''); setCode(''); setCaptcha(null); setRecovery(null); }} /></label>}
-      {mode !== 'password' && <><button type="button" disabled={busy || cooldown > 0 || !mobile.trim()} onClick={openCaptcha}>{cooldown > 0 ? copy.resendCountdown(cooldown) : copy.sendCode}</button><label>{copy.smsCode}<input value={code} required autoComplete="one-time-code" inputMode="numeric" disabled={busy} onChange={event => setCode(event.target.value)} /></label></>}
-      <button disabled={busy || mode !== 'password' && !challenge}>{busy ? copy.signingIn : mode === 'register' ? copy.register : mode === 'forgot' ? copy.resetPassword : copy.login}</button>
+      {mode !== 'password' && <><div className="ap-auth-code"><label>{copy.smsCode}<input value={code} required autoComplete="one-time-code" inputMode="numeric" aria-describedby={challenge ? undefined : hintID} disabled={busy} onChange={event => setCode(event.target.value)} /></label><button type="button" aria-describedby={challenge ? undefined : hintID} disabled={busy || cooldown > 0 || !mobile.trim()} onClick={openCaptcha}>{cooldown > 0 ? copy.resendCountdown(cooldown) : copy.sendCode}</button></div>{!challenge && <p id={hintID} className="ap-auth-hint">{mobile.trim() ? words.smsHint : words.mobileHint}</p>}</>}
+      <button className="ap-auth-submit" disabled={busy || mode !== 'password' && !challenge}>{busy ? copy.signingIn : mode === 'register' ? copy.register : mode === 'forgot' ? copy.resetPassword : copy.login}</button>
     </form>}
+    {!reauthentication && ['password', 'sms'].includes(mode) && <footer className="ap-auth-links"><button type="button" disabled={busy || pending} onClick={() => changeMode('register')}>{copy.register}</button><button type="button" disabled={busy || pending} onClick={() => changeMode('forgot')}>{copy.authModes.forgot}</button></footer>}
     {captcha && <div className="ap-captcha-backdrop" role="dialog" aria-modal="true" aria-label={copy.captchaTitle}><ProfileCaptcha challenge={captcha} offset={offset} busy={busy} error={error} copy={copy} onOffset={setOffset} onConfirm={sendCode} onRefresh={openCaptcha} onClose={() => { if (!busy) setCaptcha(null); }} /></div>}
   </section>;
 }

@@ -7435,7 +7435,9 @@ fn mint_pending_remote_permission(
     authority: &crate::features::remote_control::controller::permission::PermissionAuthority,
     ttl_ms: u64,
 ) -> Result<crate::features::remote_control::controller::permission::PermissionView> {
-    use crate::features::remote_control::controller::permission::PermissionRequest;
+    use crate::features::remote_control::controller::permission::{
+        PermissionDecisionOwner, PermissionRequest,
+    };
     if !remote_request_owned_by(request.remote_owner.as_ref(), owner)
         || request.remote_request_id.as_deref() != Some(callback_id)
     {
@@ -7453,11 +7455,9 @@ fn mint_pending_remote_permission(
     // Approval deadlines belong to the authority's epoch, never the task clock.
     let now_ms = authority.now_ms();
     let view = authority
-        .request_for_task_instance(
+        .request_for_owner(
             &owner.lease,
             &owner.task_id,
-            &owner.session_id,
-            owner.task_sequence,
             PermissionRequest {
                 operation_type: projection.operation_type.clone(),
                 risk_level: projection.risk_level.clone(),
@@ -7466,6 +7466,10 @@ fn mint_pending_remote_permission(
                 expires_at_ms: now_ms.saturating_add(ttl_ms),
             },
             now_ms,
+            &PermissionDecisionOwner {
+                session_id: owner.session_id.clone(),
+                task_sequence: owner.task_sequence,
+            },
         )
         .map_err(|error| anyhow::anyhow!(error.code))?;
     request.remote_approval_id = Some(view.permission_request_id.clone());
@@ -9114,14 +9118,45 @@ mod tests {
             remote_permission_response_key(&pending, &foreign, &view.permission_request_id)
                 .is_none()
         );
+        let receipt_owner =
+            crate::features::remote_control::controller::permission::PermissionDecisionOwner {
+                session_id: owner.session_id.clone(),
+                task_sequence: owner.task_sequence,
+            };
+        for replacement in [
+            crate::features::remote_control::controller::permission::PermissionDecisionOwner {
+                task_sequence: owner.task_sequence + 1,
+                ..receipt_owner.clone()
+            },
+            crate::features::remote_control::controller::permission::PermissionDecisionOwner {
+                session_id: "replacement-session".into(),
+                ..receipt_owner.clone()
+            },
+        ] {
+            assert_eq!(
+                authority
+                    .decide_for_owner(
+                        DecisionAuthority::ControllerA,
+                        &owner.lease,
+                        &owner.task_id,
+                        &view.permission_request_id,
+                        PermissionDecision::Allow,
+                        &replacement,
+                    )
+                    .unwrap_err()
+                    .code,
+                "permission_binding_stale"
+            );
+            assert_eq!(authority.view(&view.permission_request_id).unwrap(), view);
+        }
         authority
-            .decide(
+            .decide_for_owner(
                 DecisionAuthority::ControllerA,
                 &owner.lease,
                 &owner.task_id,
                 &view.permission_request_id,
                 PermissionDecision::Allow,
-                authority.now_ms(),
+                &receipt_owner,
             )
             .unwrap();
         let key =
@@ -10045,13 +10080,13 @@ mod tests {
                 .unwrap()
                 .permission_request_id;
             authority
-                .decide(
+                .decide_for_owner(
                     DecisionAuthority::ControllerA,
                     &lease,
                     task_id,
                     &approval,
                     PermissionDecision::Allow,
-                    1_100,
+                    &crate::features::remote_control::controller::permission::PermissionDecisionOwner { session_id: "sdk-session".into(), task_sequence: 1 },
                 )
                 .unwrap();
 

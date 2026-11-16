@@ -78,6 +78,12 @@ pub(crate) struct RemoteTaskError {
     pub(crate) code: &'static str,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct TaskInterruptionReport {
+    pub(crate) committed: Vec<RemoteTaskRecord>,
+    pub(crate) failed: Vec<(String, RemoteTaskError)>,
+}
+
 impl RemoteTaskError {
     fn new(code: &'static str) -> Self {
         Self { code }
@@ -691,7 +697,7 @@ pub(crate) enum AdmissionOutcome {
 /// released. Installation failures are already terminal in the ledger.
 pub(crate) enum PreparedTaskAdmission {
     Accepted(AdmissionOutcome),
-    InstallationFailed(RemoteTaskRecord, &'static str),
+    InstallationFailed(RemoteTaskRecord, &'static str, bool),
 }
 
 #[derive(Debug)]
@@ -1042,6 +1048,7 @@ impl RemoteTaskLedger {
         now_b: u64,
     ) -> Result<RemoteTaskRecord> {
         self.complete_with_reason(task_id, terminal, None, result_digest, now_b)
+            .map(|(record, _)| record)
     }
 
     fn complete_with_reason(
@@ -1051,7 +1058,7 @@ impl RemoteTaskLedger {
         terminal_reason: Option<String>,
         result_digest: Option<String>,
         now_b: u64,
-    ) -> Result<RemoteTaskRecord> {
+    ) -> Result<(RemoteTaskRecord, bool)> {
         if let Some(digest) = result_digest.as_deref() {
             if digest.len() > MAX_RESULT_DIGEST_CHARS || !is_lower_hex(digest) {
                 return Err(error("task_result_digest_invalid"));
@@ -1062,7 +1069,7 @@ impl RemoteTaskLedger {
         if previous.is_terminal() {
             // Exactly one terminal state: repeated terminal reports are
             // idempotent and never overwrite the committed outcome.
-            return Ok(previous);
+            return Ok((previous, false));
         }
         let mut updated = previous.clone();
         updated.state = terminal.state();
@@ -1077,7 +1084,7 @@ impl RemoteTaskLedger {
         updated.updated_at_ms = now_b;
         let updated = self.commit(&mut inner, updated)?;
         inner.turn_locks.remove(&updated.session_id);
-        Ok(updated)
+        Ok((updated, true))
     }
 
     #[cfg(test)]
@@ -1137,7 +1144,7 @@ impl RemoteTaskLedger {
         generation: &str,
         reason: &str,
         now_b: u64,
-    ) -> Vec<RemoteTaskRecord> {
+    ) -> TaskInterruptionReport {
         self.interrupt_where(
             |record| record.lease.remote_control_generation == generation,
             reason,
@@ -1145,31 +1152,21 @@ impl RemoteTaskLedger {
         )
     }
 
-    pub(crate) fn interrupt_all(&self, reason: &str, now_b: u64) -> Vec<RemoteTaskRecord> {
+    pub(crate) fn interrupt_all(&self, reason: &str, now_b: u64) -> TaskInterruptionReport {
         self.interrupt_where(|_| true, reason, now_b)
     }
 
     /// Called once after a process restart. Every non-terminal record is a task
     /// whose executor is gone, so it must reach a provable terminal state.
-    pub(crate) fn recover_after_restart(&self, now_b: u64) -> Vec<RemoteTaskRecord> {
+    pub(crate) fn recover_after_restart(&self, now_b: u64) -> TaskInterruptionReport {
         let mut inner = self.inner.lock();
         let ids = self.non_terminal_ids(&inner, |_| true);
-        let mut recovered = std::mem::take(&mut inner.pending_recovery);
-        for id in ids {
-            let Some(previous) = inner.tasks.get(&id).cloned() else {
-                continue;
-            };
-            let mut updated = previous.clone();
-            updated.state = RemoteTaskState::Interrupted;
-            updated.terminal_reason = Some("process_restart".to_owned());
-            updated.outcome_unknown = previous.dispatch_committed;
-            updated.updated_at_ms = now_b;
-            if let Ok(updated) = self.commit(&mut inner, updated) {
-                inner.turn_locks.remove(&updated.session_id);
-                recovered.push(updated);
-            }
-        }
-        recovered
+        let mut report = TaskInterruptionReport {
+            committed: std::mem::take(&mut inner.pending_recovery),
+            failed: Vec::new(),
+        };
+        self.interrupt_locked(&mut inner, ids, "process_restart", now_b, &mut report);
+        report
     }
 
     pub(crate) fn record(&self, task_id: &str) -> Result<RemoteTaskRecord> {
@@ -1253,25 +1250,38 @@ impl RemoteTaskLedger {
         predicate: impl Fn(&RemoteTaskRecord) -> bool,
         reason: &str,
         now_b: u64,
-    ) -> Vec<RemoteTaskRecord> {
+    ) -> TaskInterruptionReport {
         let mut inner = self.inner.lock();
         let ids = self.non_terminal_ids(&inner, predicate);
-        let mut interrupted = Vec::new();
+        let mut report = TaskInterruptionReport::default();
+        self.interrupt_locked(&mut inner, ids, reason, now_b, &mut report);
+        report
+    }
+
+    fn interrupt_locked(
+        &self,
+        inner: &mut LedgerInner,
+        ids: Vec<String>,
+        reason: &str,
+        now_b: u64,
+        report: &mut TaskInterruptionReport,
+    ) {
         for id in ids {
-            let Some(previous) = inner.tasks.get(&id).cloned() else {
+            let Some(mut updated) = inner.tasks.get(&id).cloned() else {
                 continue;
             };
-            let mut updated = previous.clone();
             updated.state = RemoteTaskState::Interrupted;
             updated.terminal_reason = Some(bounded_reason(reason));
-            updated.outcome_unknown = previous.dispatch_committed;
+            updated.outcome_unknown = updated.dispatch_committed;
             updated.updated_at_ms = now_b;
-            if let Ok(updated) = self.commit(&mut inner, updated) {
-                inner.turn_locks.remove(&updated.session_id);
-                interrupted.push(updated);
+            match self.commit(inner, updated) {
+                Ok(updated) => {
+                    inner.turn_locks.remove(&updated.session_id);
+                    report.committed.push(updated);
+                }
+                Err(error) => report.failed.push((id, error)),
             }
         }
-        interrupted
     }
 
     fn record_locked(&self, inner: &LedgerInner, task_id: &str) -> Result<RemoteTaskRecord> {
@@ -1966,7 +1976,7 @@ fn extract_skill_ids_from_input(input: &Value) -> std::result::Result<Vec<String
 
 /// Extension surface frozen for DEV-15 (temporary model packages).
 pub(crate) trait RemoteTaskModelScope: Send + Sync {
-    fn release_task_credentials(&self, task_id: &str);
+    fn release_task_credentials(&self, task_id: &str, lease: &TaskLeaseBinding);
 }
 
 /// Extension surface frozen for DEV-16 (A-only approval authority).
@@ -2740,14 +2750,16 @@ impl RemoteTaskService {
             }))
             .unwrap_or(Err("task_resource_installation_failed"));
             if let Err(code) = installed {
-                let failed = self.ledger.complete_with_reason(
+                let (failed, committed) = self.ledger.complete_with_reason(
                     &ticket.record.task_id,
                     RemoteTaskTerminal::Failed,
                     Some(code.to_owned()),
                     None,
                     now_b,
                 )?;
-                return Ok(PreparedTaskAdmission::InstallationFailed(failed, code));
+                return Ok(PreparedTaskAdmission::InstallationFailed(
+                    failed, code, committed,
+                ));
             }
         }
         Ok(PreparedTaskAdmission::Accepted(outcome))
@@ -2768,8 +2780,10 @@ impl RemoteTaskService {
                 }
                 Ok(outcome)
             }
-            PreparedTaskAdmission::InstallationFailed(record, code) => {
-                self.cleanup(&record, code.to_owned());
+            PreparedTaskAdmission::InstallationFailed(record, code, committed) => {
+                if committed {
+                    self.cleanup(&record, code.to_owned());
+                }
                 Err(error(code))
             }
         }
@@ -3404,7 +3418,7 @@ impl RemoteTaskService {
         generation: &str,
         reason: &str,
         now_b: u64,
-    ) -> Vec<RemoteTaskRecord> {
+    ) -> TaskInterruptionReport {
         let records = self.ledger.interrupt_generation(generation, reason, now_b);
         self.finish_interrupted(records)
     }
@@ -3416,7 +3430,7 @@ impl RemoteTaskService {
         generation: &str,
         reason: &str,
         now_b: u64,
-    ) -> Vec<RemoteTaskRecord> {
+    ) -> TaskInterruptionReport {
         let _guard = self.session_open_lock.lock();
         let records = self.ledger.interrupt_generation(generation, reason, now_b);
         self.forget_pending_session_modes(Some(generation));
@@ -3425,12 +3439,12 @@ impl RemoteTaskService {
         self.finish_interrupted(records)
     }
 
-    pub(crate) fn interrupt_all(&self, reason: &str, now_b: u64) -> Vec<RemoteTaskRecord> {
+    pub(crate) fn interrupt_all(&self, reason: &str, now_b: u64) -> TaskInterruptionReport {
         let records = self.ledger.interrupt_all(reason, now_b);
         self.finish_interrupted(records)
     }
 
-    pub(crate) fn recover_after_restart(&self, now_b: u64) -> Vec<RemoteTaskRecord> {
+    pub(crate) fn recover_after_restart(&self, now_b: u64) -> TaskInterruptionReport {
         let recovered = self.ledger.recover_after_restart(now_b);
         self.forget_pending_session_modes(None);
         self.sessions.clear();
@@ -3499,7 +3513,7 @@ impl RemoteTaskService {
         if expected_sequence.is_some_and(|sequence| sequence != captured.sequence) {
             return Err(error("task_binding_stale"));
         }
-        let record = match self
+        let (record, committed) = match self
             .ledger
             .complete_with_reason(task_id, terminal, reason, None, now_b)
         {
@@ -3511,16 +3525,18 @@ impl RemoteTaskService {
                 return Err(error);
             }
         };
-        let cleanup_reason = record
-            .terminal_reason
-            .clone()
-            .unwrap_or_else(|| terminal.reason().to_owned());
-        self.cleanup(&record, cleanup_reason);
+        if committed {
+            let cleanup_reason = record
+                .terminal_reason
+                .clone()
+                .unwrap_or_else(|| terminal.reason().to_owned());
+            self.cleanup(&record, cleanup_reason);
+        }
         Ok(record)
     }
 
-    fn finish_interrupted(&self, records: Vec<RemoteTaskRecord>) -> Vec<RemoteTaskRecord> {
-        for record in &records {
+    fn finish_interrupted(&self, report: TaskInterruptionReport) -> TaskInterruptionReport {
+        for record in &report.committed {
             self.cleanup(
                 record,
                 record
@@ -3529,7 +3545,7 @@ impl RemoteTaskService {
                     .unwrap_or_else(|| RemoteTaskTerminal::Interrupted.reason().to_owned()),
             );
         }
-        records
+        report
     }
 
     fn cleanup(&self, record: &RemoteTaskRecord, reason: String) {
@@ -3559,7 +3575,9 @@ impl RemoteTaskService {
             });
         }
         if let Some(scope) = self.hooks.model.lock().clone() {
-            retry_resource_cleanup(|| scope.release_task_credentials(&record.task_id));
+            retry_resource_cleanup(|| {
+                scope.release_task_credentials(&record.task_id, &record.lease)
+            });
         }
         if let Some(scope) = self.hooks.permission.lock().clone() {
             retry_resource_cleanup(|| {
@@ -3914,7 +3932,11 @@ mod tests {
     }
 
     impl RemoteTaskModelScope for CountingHooks {
-        fn release_task_credentials(&self, _task_id: &str) {
+        fn release_task_credentials(
+            &self,
+            _task_id: &str,
+            _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+        ) {
             self.model.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -4220,7 +4242,11 @@ mod tests {
     async fn dispatch_worker_recovers_cleanup_panic_after_durable_terminal() {
         struct PanicOnce(AtomicUsize);
         impl RemoteTaskModelScope for PanicOnce {
-            fn release_task_credentials(&self, _: &str) {
+            fn release_task_credentials(
+                &self,
+                _: &str,
+                _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+            ) {
                 if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                     panic!("test terminal cleanup panic once");
                 }
@@ -4617,7 +4643,11 @@ mod tests {
     fn cleanup_panic_does_not_skip_other_ports_or_change_committed_terminal() {
         struct PanicModel(AtomicUsize);
         impl RemoteTaskModelScope for PanicModel {
-            fn release_task_credentials(&self, _task_id: &str) {
+            fn release_task_credentials(
+                &self,
+                _task_id: &str,
+                _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+            ) {
                 self.0.fetch_add(1, Ordering::SeqCst);
                 panic!("test cleanup panic");
             }
@@ -5150,7 +5180,9 @@ mod tests {
                 .unwrap();
         }
         ledger.begin_dispatch("task-0001", 1_100).unwrap();
-        let interrupted = ledger.interrupt_generation("generation-0001", "stop", 1_200);
+        let interrupted = ledger
+            .interrupt_generation("generation-0001", "stop", 1_200)
+            .committed;
         assert_eq!(interrupted.len(), 2);
         let dispatched = interrupted
             .iter()
@@ -5203,7 +5235,9 @@ mod tests {
         ledger
             .admit(&second_context, &request(&second_body), 1_000)
             .unwrap();
-        let interrupted = ledger.interrupt_generation("generation-0001", "refresh", 1_100);
+        let interrupted = ledger
+            .interrupt_generation("generation-0001", "refresh", 1_100)
+            .committed;
         assert_eq!(interrupted.len(), 1);
         assert_eq!(
             ledger.record("task-0002").unwrap().state,
@@ -5621,7 +5655,7 @@ mod tests {
                 .map(|record| record.task_id),
             Some("task-0001".to_owned())
         );
-        let recovered = restored.recover_after_restart(2_000);
+        let recovered = restored.recover_after_restart(2_000).committed;
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].state, RemoteTaskState::Interrupted);
         assert_eq!(recovered[0].wire_status(), TASK_STATUS_RESULT_UNKNOWN);
@@ -5651,6 +5685,111 @@ mod tests {
             "task_ledger_persist_failed"
         );
         assert_eq!(ledger.live_task_count(), 0);
+    }
+
+    #[test]
+    fn interrupted_batch_reports_failed_persistence_and_retries_only_uncommitted_tasks() {
+        #[derive(Default)]
+        struct SelectiveStore {
+            fail: AtomicBool,
+        }
+        impl RemoteTaskLedgerStore for SelectiveStore {
+            fn persist(&self, records: &[RemoteTaskRecord]) -> std::result::Result<(), String> {
+                if self.fail.load(Ordering::SeqCst)
+                    && records
+                        .iter()
+                        .any(|record| record.task_id == "task-0001" && record.is_terminal())
+                {
+                    return Err("disk".to_owned());
+                }
+                Ok(())
+            }
+        }
+        for restarting in [false, true] {
+            let store = Arc::new(SelectiveStore::default());
+            let ledger = Arc::new(RemoteTaskLedger::new(store.clone()));
+            let live = context("generation-0001");
+            for (session, task, client) in [
+                ("session-0001", "task-0001", "client-0001"),
+                ("session-0002", "task-0002", "client-0002"),
+            ] {
+                ledger
+                    .admit(
+                        &live,
+                        &request(&payload(session, task, client, &digest(1))),
+                        1_000,
+                    )
+                    .unwrap();
+            }
+            ledger.begin_dispatch("task-0001", 1_050).unwrap();
+            let service = RemoteTaskService::new(ledger.clone());
+            let hooks = Arc::new(CountingHooks::default());
+            service.hooks().set_model_scope(hooks.clone());
+            let close = |now| {
+                if restarting {
+                    service.recover_after_restart(now)
+                } else {
+                    service.interrupt_generation("generation-0001", "remote_control_stopped", now)
+                }
+            };
+            store.fail.store(true, Ordering::SeqCst);
+            let partial = close(1_100);
+            assert_eq!(partial.committed.len(), 1);
+            assert_eq!(partial.committed[0].task_id, "task-0002");
+            assert_eq!(
+                partial.failed,
+                vec![("task-0001".into(), error("task_ledger_persist_failed"))]
+            );
+            assert_eq!(
+                ledger.record("task-0001").unwrap().state,
+                RemoteTaskState::Running
+            );
+            assert!(ledger.active_for_session("session-0001").is_some());
+            assert_eq!(hooks.model.load(Ordering::SeqCst), 1);
+            store.fail.store(false, Ordering::SeqCst);
+            let retry = close(1_200);
+            assert!(retry.failed.is_empty());
+            assert_eq!(retry.committed.len(), 1);
+            assert_eq!(retry.committed[0].task_id, "task-0001");
+            assert!(retry.committed[0].outcome_unknown);
+            assert!(ledger.active_for_session("session-0001").is_none());
+            assert!(close(1_300).committed.is_empty());
+            assert_eq!(hooks.model.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[test]
+    fn duplicate_finish_does_not_repeat_cleanup_or_change_the_durable_reason() {
+        let (service, hooks) = service(RecordingExecutor::ok());
+        let ticket = admitted(
+            &service,
+            &payload("session-0001", "task-0001", "client-0001", &digest(1)),
+            1_000,
+        );
+        let first = service
+            .finish(
+                "task-0001",
+                RemoteTaskTerminal::Failed,
+                Some("task_turn_timeout".into()),
+                1_100,
+                Some(ticket.record.sequence),
+            )
+            .unwrap();
+        let retry = service
+            .finish(
+                "task-0001",
+                RemoteTaskTerminal::Cancelled,
+                None,
+                1_200,
+                Some(ticket.record.sequence),
+            )
+            .unwrap();
+        assert_eq!(first, retry);
+        assert_eq!(first.terminal_reason.as_deref(), Some("task_turn_timeout"));
+        assert_eq!(service.status("task-0001").unwrap(), first);
+        assert_eq!(hooks.model.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.permission.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.transfer.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -5815,7 +5954,10 @@ mod tests {
             .lock()
             .insert("task-reused".into(), new_cancel.clone());
         service.cleanup(&old, "late-old-cleanup".into());
-        service.finish_interrupted(vec![old.clone()]);
+        service.finish_interrupted(TaskInterruptionReport {
+            committed: vec![old.clone()],
+            failed: Vec::new(),
+        });
         service.finish_cancel_outcome(&CancelOutcome::CancellationRequested(old.clone()));
         assert!(!new_cancel.is_cancelled());
         assert!(service.cancel_tokens.lock().contains_key("task-reused"));
@@ -6276,7 +6418,7 @@ mod tests {
         let service = RemoteTaskService::new(ledger);
         let journal = Arc::new(RemoteJournal::new("new-boot"));
         service.hooks().set_journal(journal.clone());
-        let recovered = service.recover_after_restart(300);
+        let recovered = service.recover_after_restart(300).committed;
         assert_eq!(
             recovered.len(),
             2,
@@ -6312,7 +6454,7 @@ mod tests {
                 .iter()
                 .all(|event| event.payload["terminal_reason"] == json!("process_restart"))
         );
-        assert!(service.recover_after_restart(400).is_empty());
+        assert!(service.recover_after_restart(400).committed.is_empty());
         assert_eq!(journal.snapshot_for("session-1").unwrap().events.len(), 1);
         assert_eq!(journal.snapshot_for("session-2").unwrap().events.len(), 1);
         assert_eq!(JsonTaskLedgerStore::load(&path).unwrap(), persisted);
@@ -6320,7 +6462,7 @@ mod tests {
             RemoteTaskLedger::open_recovered(path, 500).unwrap(),
         ));
         assert!(
-            next_boot.recover_after_restart(600).is_empty(),
+            next_boot.recover_after_restart(600).committed.is_empty(),
             "historical terminals are not replayed as fresh recovery"
         );
     }
@@ -6480,7 +6622,7 @@ mod tests {
                 "remote_control_stopped",
                 1_200,
             );
-            assert_eq!(interrupted.len(), 1);
+            assert_eq!(interrupted.committed.len(), 1);
             dispatch.await.unwrap()
         });
 
@@ -7788,7 +7930,11 @@ mod tests {
         }
 
         impl RemoteTaskModelScope for InstallationOrderScope {
-            fn release_task_credentials(&self, _task_id: &str) {
+            fn release_task_credentials(
+                &self,
+                _task_id: &str,
+                _lease: &crate::features::remote_control::controller::task::TaskLeaseBinding,
+            ) {
                 self.cleanup_saw_installed
                     .store(self.installed.load(Ordering::SeqCst), Ordering::SeqCst);
             }
@@ -7849,7 +7995,7 @@ mod tests {
             submit.join().unwrap(),
             Ok(AdmissionOutcome::Admitted(_))
         ));
-        assert_eq!(cleanup.join().unwrap().len(), 1);
+        assert_eq!(cleanup.join().unwrap().committed.len(), 1);
         assert!(scope.cleanup_saw_installed.load(Ordering::SeqCst));
         assert_eq!(
             service.status("task-install-race").unwrap().state,

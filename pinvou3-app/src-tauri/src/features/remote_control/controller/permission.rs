@@ -1,9 +1,10 @@
 //! A-only approval authority and the dispatch race boundary (DEV-16).
 //!
 //! B projects a pending permission to A and can only look at it, stop the task
-//! or disconnect. There is no B-side Allow path: [`PermissionAuthority::decide`]
+//! or disconnect. There is no B-side Allow path: [`PermissionAuthority::decide_for_owner`]
 //! takes an explicit [`DecisionAuthority`] and rejects anything that is not the
-//! authenticated A controller.
+//! authenticated A controller. Remote approvals freeze their task admission
+//! owner when minted, before any decision or terminal cleanup.
 //!
 //! RC-C-014 is enforced by a single compare-and-set boundary: an allow only
 //! becomes an execution once the caller atomically commits the dispatch. If B
@@ -289,6 +290,33 @@ pub(crate) enum DecisionOutcome {
     Expired,
 }
 
+/// Trusted local task identity for reading an already decided operation. It is
+/// never taken from a controller frame and is not part of the wire response.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct PermissionDecisionOwner {
+    pub(crate) session_id: String,
+    pub(crate) task_sequence: u64,
+}
+
+impl PermissionDecisionOwner {
+    fn validate(&self) -> Result<()> {
+        if self.task_sequence == 0
+            || self.session_id.is_empty()
+            || self.session_id.len() > MAX_TASK_ID_CHARS
+        {
+            return Err(error("permission_binding_invalid"));
+        }
+        Ok(())
+    }
+}
+
+struct DecisionContext<'a> {
+    authority: DecisionAuthority,
+    lease: &'a LeaseContext,
+    now_b: u64,
+    owner: Option<&'a PermissionDecisionOwner>,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum DispatchCommit {
     /// The operation may run now.
@@ -307,7 +335,6 @@ pub(crate) enum DispatchResult {
 
 struct PendingPermission {
     binding: PermissionBinding,
-    task_instance: Option<(String, u64)>,
     request: PermissionRequest,
     state: PermissionState,
     decision: Option<PermissionDecision>,
@@ -315,6 +342,8 @@ struct PendingPermission {
     resolved_at_ms: Option<u64>,
     resolved_reason: Option<String>,
     created_at_ms: u64,
+    request_owner: Option<PermissionDecisionOwner>,
+    decision_receipt: Option<(PermissionDecisionOwner, PermissionDecision)>,
 }
 
 impl PendingPermission {
@@ -327,14 +356,20 @@ impl PendingPermission {
         request_id: &str,
     ) -> bool {
         self.binding.matches(lease, task_id, request_id)
-            && self
-                .task_instance
-                .as_ref()
-                .is_some_and(|(session, sequence)| {
-                    session == session_id && *sequence == task_sequence
-                })
+            && self.request_owner.as_ref().is_some_and(|owner| {
+                owner.session_id == session_id && owner.task_sequence == task_sequence
+            })
     }
 
+    fn retain_decision_receipt(
+        &mut self,
+        owner: Option<&PermissionDecisionOwner>,
+        decision: PermissionDecision,
+    ) {
+        if self.decision_receipt.is_none() {
+            self.decision_receipt = owner.map(|owner| (owner.clone(), decision));
+        }
+    }
     fn active(&self) -> bool {
         !self.dispatch_state.committed()
             && matches!(
@@ -445,16 +480,28 @@ impl PermissionAuthority {
         request: PermissionRequest,
         now_b: u64,
     ) -> Result<PermissionView> {
-        self.register_request(lease, task_id, None, request, now_b)
+        self.request_internal(lease, task_id, request, now_b, None)
     }
 
-    fn register_request(
+    pub(crate) fn request_for_owner(
         &self,
         lease: &LeaseContext,
         task_id: &str,
-        task_instance: Option<(String, u64)>,
         request: PermissionRequest,
         now_b: u64,
+        owner: &PermissionDecisionOwner,
+    ) -> Result<PermissionView> {
+        owner.validate()?;
+        self.request_internal(lease, task_id, request, now_b, Some(owner))
+    }
+
+    fn request_internal(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        request: PermissionRequest,
+        now_b: u64,
+        owner: Option<&PermissionDecisionOwner>,
     ) -> Result<PermissionView> {
         request.validate(now_b)?;
         let binding = PermissionBinding::new(lease, task_id, &mint_permission_id()?)?;
@@ -483,7 +530,6 @@ impl PermissionAuthority {
         }
         let inserted = pending.entry(id).insert_entry(PendingPermission {
             binding,
-            task_instance,
             request,
             state: PermissionState::Pending,
             decision: None,
@@ -491,6 +537,8 @@ impl PermissionAuthority {
             resolved_at_ms: None,
             resolved_reason: None,
             created_at_ms: now_b,
+            request_owner: owner.cloned(),
+            decision_receipt: None,
         });
         let view = Self::view_locked(inserted.get());
         drop(pending);
@@ -498,6 +546,7 @@ impl PermissionAuthority {
         Ok(view)
     }
 
+    #[cfg(test)]
     pub(crate) fn request_for_task_instance(
         &self,
         lease: &LeaseContext,
@@ -507,12 +556,15 @@ impl PermissionAuthority {
         request: PermissionRequest,
         now_b: u64,
     ) -> Result<PermissionView> {
-        self.register_request(
+        self.request_for_owner(
             lease,
             task_id,
-            Some((session_id.to_owned(), task_sequence)),
             request,
             now_b,
+            &PermissionDecisionOwner {
+                session_id: session_id.to_owned(),
+                task_sequence,
+            },
         )
     }
 
@@ -558,6 +610,7 @@ impl PermissionAuthority {
 
     /// First effective A decision wins. B and local callers are rejected, and a
     /// conflicting second decision fails closed.
+    #[cfg(test)]
     pub(crate) fn decide(
         &self,
         authority: DecisionAuthority,
@@ -567,6 +620,55 @@ impl PermissionAuthority {
         decision: PermissionDecision,
         now_b: u64,
     ) -> Result<DecisionOutcome> {
+        self.decide_internal(
+            DecisionContext {
+                authority,
+                lease,
+                now_b,
+                owner: None,
+            },
+            task_id,
+            request_id,
+            decision,
+        )
+    }
+
+    pub(crate) fn decide_for_owner(
+        &self,
+        authority: DecisionAuthority,
+        lease: &LeaseContext,
+        task_id: &str,
+        request_id: &str,
+        decision: PermissionDecision,
+        owner: &PermissionDecisionOwner,
+    ) -> Result<DecisionOutcome> {
+        owner.validate()?;
+        self.decide_internal(
+            DecisionContext {
+                authority,
+                lease,
+                now_b: self.now_ms(),
+                owner: Some(owner),
+            },
+            task_id,
+            request_id,
+            decision,
+        )
+    }
+
+    fn decide_internal(
+        &self,
+        context: DecisionContext<'_>,
+        task_id: &str,
+        request_id: &str,
+        decision: PermissionDecision,
+    ) -> Result<DecisionOutcome> {
+        let DecisionContext {
+            authority,
+            lease,
+            now_b,
+            owner,
+        } = context;
         if authority != DecisionAuthority::ControllerA {
             return Err(error("permission_authority_invalid"));
         }
@@ -577,7 +679,21 @@ impl PermissionAuthority {
         if !entry.binding.matches(lease, task_id, request_id) {
             return Err(error("permission_binding_stale"));
         }
+        if owner != entry.request_owner.as_ref() {
+            return Err(error("permission_binding_stale"));
+        }
+        if let (Some(owner), Some((retained_owner, retained_decision))) =
+            (owner, &entry.decision_receipt)
+        {
+            if owner != retained_owner {
+                return Err(error("permission_binding_stale"));
+            }
+            if decision != *retained_decision {
+                return Err(error("permission_already_decided"));
+            }
+        }
         if entry.expire(now_b) {
+            entry.retain_decision_receipt(owner, decision);
             let latency = entry
                 .request
                 .expires_at_ms
@@ -606,16 +722,21 @@ impl PermissionAuthority {
                     decision,
                     dispatch_state: entry.dispatch_state,
                 };
+                entry.retain_decision_receipt(owner, decision);
                 drop(pending);
                 if decision == PermissionDecision::Deny {
                     self.emit_telemetry(PermissionTelemetryTransition::Denied, latency);
                 }
                 return Ok(outcome);
             }
-            PermissionState::Expired => return Ok(DecisionOutcome::Expired),
+            PermissionState::Expired => {
+                entry.retain_decision_receipt(owner, decision);
+                return Ok(DecisionOutcome::Expired);
+            }
             PermissionState::AllowedAwaitingDispatch | PermissionState::Denied => {
                 let existing = entry.decision.unwrap_or(PermissionDecision::Deny);
                 if existing == decision {
+                    entry.retain_decision_receipt(owner, decision);
                     return Ok(DecisionOutcome::Replayed {
                         decision: existing,
                         dispatch_state: entry.dispatch_state,
@@ -626,6 +747,50 @@ impl PermissionAuthority {
         }
     }
 
+    /// Read-only idempotency path. Never decides, expires, dispatches, refreshes
+    /// retention or binds a new owner to an old result.
+    pub(crate) fn decision_receipt(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        request_id: &str,
+        decision: PermissionDecision,
+        owner: &PermissionDecisionOwner,
+    ) -> Result<Option<PermissionView>> {
+        owner.validate()?;
+        let pending = self.pending.lock();
+        let entry = pending
+            .get(request_id)
+            .ok_or_else(|| error("permission_unknown"))?;
+        if !entry.binding.matches(lease, task_id, request_id) {
+            return Err(error("permission_binding_stale"));
+        }
+        if entry.request_owner.as_ref() != Some(owner) {
+            return Err(error("permission_binding_stale"));
+        }
+        let Some((retained_owner, retained_decision)) = &entry.decision_receipt else {
+            return Ok(None);
+        };
+        if retained_owner != owner {
+            return Err(error("permission_binding_stale"));
+        }
+        if *retained_decision != decision {
+            return Err(error("permission_already_decided"));
+        }
+        if entry.dispatch_state.committed()
+            || matches!(
+                entry.state,
+                PermissionState::Denied | PermissionState::Expired
+            )
+        {
+            Ok(Some(Self::view_locked(entry)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Atomic dispatch boundary. `Committed` means the operation may run and
+    /// any later B stop must report executed/result-unknown.
     /// The owner fences are held by the caller. `send` must synchronously
     /// hand the exact response to ACP and must not re-enter the authority.
     /// Return telemetry to publish after the caller releases those fences.
@@ -1019,6 +1184,209 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn committed_receipt_reads_never_renew_expire_or_read_the_clock() {
+        let clock_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = clock_calls.clone();
+        let authority = PermissionAuthority::with_clock(Arc::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            1_000
+        }));
+        let live = lease();
+        let owner = PermissionDecisionOwner {
+            session_id: "session-receipt".into(),
+            task_sequence: 7,
+        };
+        let id = authority
+            .request_for_owner(&live, "task-0001", request(60_000), 1_000, &owner)
+            .unwrap()
+            .permission_request_id;
+        authority
+            .decide_for_owner(
+                DecisionAuthority::ControllerA,
+                &live,
+                "task-0001",
+                &id,
+                PermissionDecision::Allow,
+                &owner,
+            )
+            .unwrap();
+        assert!(
+            authority
+                .decision_receipt(&live, "task-0001", &id, PermissionDecision::Allow, &owner)
+                .unwrap()
+                .is_none(),
+            "an uncommitted allow cannot be a read-only success"
+        );
+        assert_eq!(
+            authority.commit_dispatch(&id, 1_000).unwrap(),
+            DispatchCommit::Committed
+        );
+        let before = {
+            let pending = authority.pending.lock();
+            let entry = &pending[&id];
+            (
+                entry.resolved_at_ms,
+                entry.request.expires_at_ms,
+                entry.resolved_reason.clone(),
+                entry.decision_receipt.clone(),
+                PermissionAuthority::view_locked(entry),
+            )
+        };
+        let calls_before = clock_calls.load(Ordering::SeqCst);
+        for _ in 0..3 {
+            assert_eq!(
+                authority
+                    .decision_receipt(&live, "task-0001", &id, PermissionDecision::Allow, &owner)
+                    .unwrap()
+                    .unwrap(),
+                before.4
+            );
+        }
+        assert_eq!(clock_calls.load(Ordering::SeqCst), calls_before);
+        let pending = authority.pending.lock();
+        let entry = &pending[&id];
+        assert_eq!(
+            (
+                entry.resolved_at_ms,
+                entry.request.expires_at_ms,
+                entry.resolved_reason.clone(),
+                entry.decision_receipt.clone()
+            ),
+            (before.0, before.1, before.2, before.3)
+        );
+        drop(pending);
+        authority.sweep_expired(TERMINAL_RETENTION_MS + 60_001);
+        assert_eq!(
+            authority
+                .decision_receipt(&live, "task-0001", &id, PermissionDecision::Allow, &owner)
+                .unwrap_err()
+                .code,
+            "permission_unknown"
+        );
+    }
+
+    #[test]
+    fn receipt_requires_the_exact_session_task_sequence_lease_and_original_decision() {
+        let authority = PermissionAuthority::with_clock(Arc::new(|| 1_000));
+        let live = lease();
+        let owner = PermissionDecisionOwner {
+            session_id: "session-receipt".into(),
+            task_sequence: 7,
+        };
+        let id = authority
+            .request_for_owner(&live, "task-0001", request(60_000), 1_000, &owner)
+            .unwrap()
+            .permission_request_id;
+        authority
+            .decide_for_owner(
+                DecisionAuthority::ControllerA,
+                &live,
+                "task-0001",
+                &id,
+                PermissionDecision::Deny,
+                &owner,
+            )
+            .unwrap();
+        let before = authority.view(&id).unwrap();
+        for other in [
+            PermissionDecisionOwner {
+                session_id: "other-session".into(),
+                ..owner.clone()
+            },
+            PermissionDecisionOwner {
+                task_sequence: 8,
+                ..owner.clone()
+            },
+        ] {
+            assert_eq!(
+                authority
+                    .decision_receipt(&live, "task-0001", &id, PermissionDecision::Deny, &other)
+                    .unwrap_err()
+                    .code,
+                "permission_binding_stale"
+            );
+        }
+        for index in 0..5 {
+            let mut stale = live.clone();
+            match index {
+                0 => stale.connection_id.push_str("-other"),
+                1 => stale.controller_lease_id.push_str("-other"),
+                2 => stale.lease_epoch = "8".into(),
+                3 => stale.relay_epoch.push_str("-other"),
+                _ => stale.remote_control_generation.push_str("-other"),
+            }
+            assert_eq!(
+                authority
+                    .decision_receipt(&stale, "task-0001", &id, PermissionDecision::Deny, &owner)
+                    .unwrap_err()
+                    .code,
+                "permission_binding_stale"
+            );
+        }
+        assert_eq!(
+            authority
+                .decision_receipt(&live, "other-task", &id, PermissionDecision::Deny, &owner)
+                .unwrap_err()
+                .code,
+            "permission_binding_stale"
+        );
+        assert_eq!(
+            authority
+                .decision_receipt(&live, "task-0001", &id, PermissionDecision::Allow, &owner)
+                .unwrap_err()
+                .code,
+            "permission_already_decided"
+        );
+        assert_eq!(authority.view(&id).unwrap(), before);
+    }
+
+    #[test]
+    fn a_pure_receipt_read_cannot_adopt_an_unowned_terminal_decision() {
+        let authority = PermissionAuthority::with_clock(Arc::new(|| 1_000));
+        let live = lease();
+        let id = authority
+            .request(&live, "task-0001", request(60_000), 1_000)
+            .unwrap()
+            .permission_request_id;
+        authority
+            .decide(
+                DecisionAuthority::ControllerA,
+                &live,
+                "task-0001",
+                &id,
+                PermissionDecision::Deny,
+                1_000,
+            )
+            .unwrap();
+        let owner = PermissionDecisionOwner {
+            session_id: "session-receipt".into(),
+            task_sequence: 1,
+        };
+        assert_eq!(
+            authority
+                .decision_receipt(&live, "task-0001", &id, PermissionDecision::Deny, &owner)
+                .unwrap_err()
+                .code,
+            "permission_binding_stale"
+        );
+        assert_eq!(
+            authority
+                .decide_for_owner(
+                    DecisionAuthority::ControllerA,
+                    &live,
+                    "task-0001",
+                    &id,
+                    PermissionDecision::Deny,
+                    &owner,
+                )
+                .unwrap_err()
+                .code,
+            "permission_binding_stale"
+        );
+        assert!(authority.pending.lock()[&id].decision_receipt.is_none());
+    }
+
+    #[test]
     fn registration_input_rejects_caller_chosen_ids() {
         let input = serde_json::json!({
             "taskId": "task-0001", "operationType": "file_write", "riskLevel": "medium",
@@ -1094,13 +1462,16 @@ mod tests {
             &approval,
         ));
         authority
-            .decide(
+            .decide_for_owner(
                 DecisionAuthority::ControllerA,
                 &lease,
                 "task-0001",
                 &approval,
                 PermissionDecision::Allow,
-                1_100,
+                &PermissionDecisionOwner {
+                    session_id: "session-0001".into(),
+                    task_sequence: 7,
+                },
             )
             .unwrap();
         assert!(!authority.allow_delivery_for_task_instance(
