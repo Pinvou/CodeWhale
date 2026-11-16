@@ -308,6 +308,9 @@ mod tests {
                 .contains("pass through verbatim"),
             "forced issue_context arm must state what passes through verbatim"
         );
+        // Literal pins for the audited artifact thresholds (4k/8k → 32k/64k).
+        assert_eq!(shape::BODY_ARTIFACT_THRESHOLD, 32_000);
+        assert_eq!(shape::DIFF_ARTIFACT_THRESHOLD, 64_000);
     }
 
     #[test]
