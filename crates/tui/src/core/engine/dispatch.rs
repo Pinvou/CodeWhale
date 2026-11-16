@@ -648,14 +648,14 @@ pub(super) fn mcp_tool_is_parallel_safe(name: &str) -> bool {
 }
 
 pub(super) fn mcp_tool_is_read_only(name: &str) -> bool {
-    matches!(
-        name,
-        "list_mcp_resources"
-            | "list_mcp_resource_templates"
-            | "mcp_read_resource"
-            | "read_mcp_resource"
-            | "mcp_get_prompt"
-    )
+    // The turn-loop's Plan gate and the executor approval surface classify
+    // MCP tools through THIS function (prepare_tool_call takes the MCP
+    // branch before any registry spec exists), so it must share one name
+    // table with the registry adapter instead of keeping a private copy
+    // that drifts: the session-reader read names were registry-only, which
+    // left a Plan-pinned aux lane's sole scoped read blocked as
+    // write-capable before dispatch ever ran.
+    crate::tools::registry::is_mcp_read_helper(name)
 }
 
 pub(super) fn mcp_tool_approval_description(name: &str) -> String {

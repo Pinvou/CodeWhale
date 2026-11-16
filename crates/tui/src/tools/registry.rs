@@ -1452,7 +1452,7 @@ struct McpToolAdapter {
     pool: std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpPool>>,
 }
 
-fn is_mcp_read_helper(name: &str) -> bool {
+pub(crate) fn is_mcp_read_helper(name: &str) -> bool {
     matches!(
         name,
         "list_mcp_resources"

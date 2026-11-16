@@ -630,4 +630,35 @@ mod tests {
             vec![ResourceClaim::GlobalExclusive]
         );
     }
+
+    #[test]
+    fn session_reader_reads_classify_read_only_at_the_preparation_layer() {
+        // The Plan gate consumes `read_only` from THIS preparation, and the
+        // MCP branch runs before any registry spec, so the scoped
+        // session-reader surface must classify read-only here — not only in
+        // the registry adapter (#157). Otherwise a Plan-pinned aux lane
+        // whose sole tool is the scoped read is blocked as write-capable
+        // before dispatch.
+        for name in [
+            "mcp_session-reader_read_session",
+            "mcp_session-reader_list_sessions",
+        ] {
+            let prepared = prepare_tool_call(name, json!({}), None, false).expect("prepare");
+            assert!(prepared.call.read_only, "{name} must prepare as read-only");
+            assert_eq!(prepared.call.approval, ApprovalRequirement::Auto);
+        }
+    }
+
+    #[test]
+    fn session_reader_prefix_impostors_stay_approval_required() {
+        let prepared = prepare_tool_call(
+            "mcp_session-reader_read_session_export",
+            json!({}),
+            None,
+            false,
+        )
+        .expect("prepare");
+        assert!(!prepared.call.read_only);
+        assert_eq!(prepared.call.approval, ApprovalRequirement::Suggest);
+    }
 }
