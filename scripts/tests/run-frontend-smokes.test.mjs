@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -54,6 +54,37 @@ test('unconfirmed resource retirement stops without retrying or starting the nex
     run: async current => { calls.push(current.target); throw Object.assign(new Error('owned tree still live'), { cleanupFailed: true }); },
   }), /owned tree still live/);
   assert.deepEqual(calls, ['first']);
+});
+
+test('unconfirmed network isolation fails without retrying in the host network', async () => {
+  const calls = [];
+  await assert.rejects(runSelected([item('node', 'first'), item('node', 'second')], {
+    settleMs: 0,
+    run: async current => { calls.push(current.target); throw Object.assign(new Error('isolation unavailable'), { isolationFailed: true }); },
+  }), /isolation unavailable/);
+  assert.deepEqual(calls, ['first']);
+});
+
+test('the real isolated CLI executes its fixture in a private loopback namespace', {
+  skip: process.platform !== 'linux' || process.env.PINVOU_TEST_NETWORK_ISOLATION !== '1',
+}, async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'smoke-network-cli-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = path.join(dir, 'network.mjs');
+  const network = await readlink('/proc/self/ns/net');
+  await writeFile(script, `import assert from 'node:assert/strict';
+import { readlinkSync } from 'node:fs';
+import { networkInterfaces } from 'node:os';
+assert.notEqual(readlinkSync('/proc/self/ns/net'), ${JSON.stringify(network)});
+assert.deepEqual(Object.keys(networkInterfaces()), ['lo']);
+console.log('isolated-cli-executed');\n`);
+  const result = spawnSync(process.execPath, [runnerCli, '--selected', '--isolate-network'], {
+    input: `node\t${script}\n`, encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: dir },
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /isolated-cli-executed/);
+  assert.match(result.stdout, /\[ci-browser-network\]/);
 });
 
 const runnerCli = path.join(
