@@ -2275,11 +2275,24 @@ mod tests {
         );
 
         // The ceiling comparison itself is pinned at both sides: exactly 12
-        // digits is inside the recognized grammar (verbatim when it fits),
-        // 13 digits is re-bounded as plain text. Mutating `<=` to `<`
-        // (effective ceiling 11) fails the first assert.
-        let twelve = format!("x{}[…truncated 123456789012 chars]", "a".repeat(50));
+        // digits is inside the recognized grammar, 13 digits is re-bounded
+        // as plain text. The 12 side arms the `<=` mutation: a body exactly
+        // at the cap is recognized (body fits → verbatim, marker kept), but
+        // under a mutated `<` ceiling (11) the same clause is unrecognized
+        // plain text of 2031 chars, so it re-bounds and loses the marker —
+        // a different output, which fails this assert.
+        let twelve = format!(
+            "{}[…truncated 123456789012 chars]",
+            "a".repeat(MAX_CLAUSE_TEXT_LEN)
+        );
         assert_eq!(truncate_clause_text(&twelve, MAX_CLAUSE_TEXT_LEN), twelve);
+        // The narrow grammar also holds verbatim for a clause that fits the
+        // cap whole (the documented shape).
+        let twelve_fitting = format!("x{}[…truncated 123456789012 chars]", "a".repeat(50));
+        assert_eq!(
+            truncate_clause_text(&twelve_fitting, MAX_CLAUSE_TEXT_LEN),
+            twelve_fitting
+        );
         let thirteen = format!(
             "x{}[…truncated 1234567890123 chars]",
             "a".repeat(MAX_CLAUSE_TEXT_LEN)
