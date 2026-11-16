@@ -715,28 +715,6 @@ pub(super) fn persist_pending_revocations(ledger: &PendingRevocationLedger) -> R
     persist_pending_revocations_to(&pending_revocations_path(), ledger)
 }
 
-pub(super) fn acknowledge_pending_revocation(pending: &PendingRevocation) -> Result<(), String> {
-    acknowledge_pending_revocation_at(&pending_revocations_path(), pending)
-}
-
-pub(super) fn acknowledge_pending_revocation_at(
-    path: &Path,
-    pending: &PendingRevocation,
-) -> Result<(), String> {
-    let mut ledger = match load_pending_revocations_classified(path) {
-        RevocationLedgerLoad::Ledger(ledger) => ledger,
-        RevocationLedgerLoad::Corrupt(error) => {
-            // 与 queue 同理:吊销回放的确认不能被坏账本卡死;从空账本继续
-            // 意味着确认结果(删除条目)覆盖坏文件。
-            eprintln!("[web-access] pending-revocation ledger is corrupt, starting fresh: {error}");
-            PendingRevocationLedger::default()
-        }
-        RevocationLedgerLoad::Unavailable(error) => return Err(error),
-    };
-    ledger.entries.retain(|entry| entry != pending);
-    persist_pending_revocations_to(path, &ledger)
-}
-
 pub(super) fn eligible_pending_revocations(
     ledger: &PendingRevocationLedger,
     current: Option<&WebAccessConfig>,
