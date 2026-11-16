@@ -868,22 +868,6 @@ impl<'a> PairAdmission<'a> {
                     .props
                     .and_then(|props| props.get(name.as_str())),
             );
-            if std::env::var_os("ZZ_TRACE").is_some() && (name == "payload" || name == "flag") {
-                println!(
-                    "ZZ_TRACE arm3 name={name} clean={:?} root_w={:?} objw={:?} obj_l={:?} obj_r={:?} sub_w={:?} nested={:?} depth={depth} lg={left_group:?} rg={right_group:?}",
-                    self.enclosing_omission_clean,
-                    self.arm3_root_witness_provable(left, left_group, name.as_str()),
-                    self.enclosing_entry_admits_object_witness(name.as_str()),
-                    is_object_branch(left_entry),
-                    is_object_branch(right_entry),
-                    self.witness_provable(
-                        left_entry,
-                        &branch_required_names(left_entry),
-                        &enclosing_entry,
-                    ),
-                    nested_entries_discriminated(left_entry, right_entry, &enclosing_entry),
-                );
-            }
             if depth < 8
                 // The witness is a ROOT-valid object: the containing root
                 // must stay within the bounded keyword model (a
