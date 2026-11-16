@@ -10,6 +10,7 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 use codewhale_command_contract::facets::CommandProjectContext;
 use codewhale_command_contract::handler::{CommandContexts, CommandHandler};
@@ -155,27 +156,50 @@ fn write_temp_html(html: &str) -> Result<tempfile::NamedTempFile, String> {
     Ok(tmp)
 }
 
+/// Total upload budget for `gh gist create`. An HTML session export uploads
+/// well within a minute on any real link; the deadline keeps a hung `gh` or a
+/// dead network from wedging `/share` forever.
+const GIST_UPLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Upload a file as a GitHub Gist using the `gh` CLI.
 async fn upload_gist(path: &Path) -> Result<String, String> {
-    let path_owned = path.to_path_buf();
-    let output = tokio::task::spawn_blocking(move || {
-        let mut cmd = crate::dependencies::Gh::command()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "gh not found"))?;
-        cmd.args([
-            "gist",
-            "create",
-            "--public",
-            path_owned.to_string_lossy().as_ref(),
-            "--filename",
-            "session-export.html",
-            "--desc",
-            "codewhale Session Export",
-        ])
-        .output()
-    })
+    let mut cmd = crate::dependencies::Gh::tokio_command()
+        .ok_or_else(|| "`gh gist create` failed: gh not found".to_string())?;
+    cmd.args([
+        "gist",
+        "create",
+        "--public",
+        path.to_string_lossy().as_ref(),
+        "--filename",
+        "session-export.html",
+        "--desc",
+        "codewhale Session Export",
+    ]);
+    // `Command::output()` runs the child with stdin closed; keep that shape
+    // for the bounded runner, which leaves stdin as configured when no input
+    // is supplied.
+    cmd.stdin(std::process::Stdio::null());
+
+    // The bounded runner spawns `gh` in a private process group and kills
+    // the whole group on budget expiry, so a timed-out upload cannot leave
+    // grandchildren behind the way a child-only kill would.
+    let output = match crate::tools::process::run_bounded_child(
+        &mut cmd,
+        None,
+        GIST_UPLOAD_TIMEOUT,
+        "gh gist create",
+    )
     .await
-    .map_err(|join_err| format!("gh gist create panicked: {join_err}"))?
-    .map_err(|e| format!("Failed to run `gh gist create`: {e}"))?;
+    {
+        Ok(output) => output,
+        Err(crate::tools::spec::ToolError::Timeout { .. }) => {
+            return Err(format!(
+                "`gh gist create` timed out after {}s; the upload was aborted",
+                GIST_UPLOAD_TIMEOUT.as_secs()
+            ));
+        }
+        Err(error) => return Err(format!("Failed to run `gh gist create`: {error}")),
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

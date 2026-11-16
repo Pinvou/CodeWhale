@@ -1161,6 +1161,7 @@
   "VoiceErrNetwork": "音声：文字起こしリクエストに失敗しました",
   "VoiceErrEmptySend": "音声：送信する内容がありません",
   "VoiceErrTooShort": "音声：音声が検出されませんでした。録音が短すぎます",
+  "VoiceErrRecorderStalled": "音声：レコーダーが応答しなくなったため、取得済みの音声は破棄されました。マイクデバイスを確認して再試行してください",
   "VoiceRecording": "🎙 録音中...お話しください",
   "VoiceProcessing": "🎙 文字起こし中...",
   "VoiceTranscribed": "🎙 文字起こし完了",

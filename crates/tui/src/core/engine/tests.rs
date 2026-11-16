@@ -13394,6 +13394,22 @@ async fn registry_discovery_and_start_handlers_exist_in_agent_and_plan_modes() {
 }
 
 #[test]
+fn build_tool_context_attaches_the_session_lsp_manager() {
+    // Review 5926566445: the engine always owns an LSP manager (a disabled
+    // no-op when the feature is off), and the production context must carry
+    // it — otherwise every session LSP call, including the audited 1-64 path
+    // `read_lints` batch, fails before reaching diagnostics.
+    let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    for mode in [AppMode::Agent, AppMode::Plan] {
+        let ctx = engine.build_tool_context(mode, false);
+        assert!(
+            ctx.lsp_manager.is_some(),
+            "{mode:?} tool context must carry the session LSP manager"
+        );
+    }
+}
+
+#[test]
 fn catalog_consistency_self_check_flags_registered_core_tool_missing_from_catalog() {
     let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
     let registry = engine

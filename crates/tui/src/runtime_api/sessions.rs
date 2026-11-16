@@ -505,7 +505,7 @@ pub(super) async fn create_session_from_thread(
     persist_thread_cost(&state, thread_id, &mut session).await?;
 
     manager
-        .save_session(&session)
+        .save_session_edit(&session)
         .map_err(|e| ApiError::internal(format!("Failed to save session: {e}")))?;
 
     // Link the session to the thread so that `ensure_engine_loaded` can
@@ -961,7 +961,7 @@ pub(super) async fn save_current_session(
 
     // Save the session.
     manager
-        .save_session(&session)
+        .save_session_edit(&session)
         .map_err(|e| ApiError::internal(format!("Failed to save session: {e}")))?;
 
     // Link the session to the thread so that `ensure_engine_loaded` can

@@ -1161,6 +1161,7 @@
   "VoiceErrNetwork": "Voz: falha na solicitação de transcrição",
   "VoiceErrEmptySend": "Voz: nada para enviar",
   "VoiceErrTooShort": "Voz: nenhuma fala detectada, gravação muito curta",
+  "VoiceErrRecorderStalled": "Voz: o gravador parou de responder, o áudio capturado foi descartado. Verifique o microfone e tente novamente.",
   "VoiceRecording": "🎙 Gravando... fale agora",
   "VoiceProcessing": "🎙 Transcrevendo...",
   "VoiceTranscribed": "🎙 Transcrito",

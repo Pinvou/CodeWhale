@@ -34,7 +34,7 @@ use super::spec::{optional_u64, required_str};
 #[cfg(unix)]
 const BUFFER_LIMIT: usize = 512 * 1024;
 #[cfg(unix)]
-const OUTPUT_LIMIT: usize = 12 * 1024;
+const OUTPUT_LIMIT: usize = 32 * 1024;
 #[cfg(unix)]
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 #[cfg(unix)]
@@ -452,9 +452,12 @@ fn prune_output(input: &str) -> String {
         .char_indices()
         .find(|(index, _)| *index >= head)
         .map_or(input.len(), |(index, _)| index);
+    // Forward find: the smallest boundary whose suffix fits the tail budget,
+    // i.e. the real start of the kept tail. A reverse scan would match the
+    // last character (every index satisfies `len - index <= tail` near the
+    // end) and preserve only one character of the errors the tail exists for.
     let tail_start = input
         .char_indices()
-        .rev()
         .find(|(index, _)| input.len() - *index <= tail)
         .map_or(0, |(index, _)| index);
     format!(
@@ -804,7 +807,7 @@ pub struct TerminalWaitTool;
 impl ToolSpec for TerminalWaitTool {
     terminal_tool_common!(
         "terminal/wait",
-        "Wait for the current foreground command in a live persistent terminal session and return the output produced since the previous call — at most 12KiB per call; if more was produced the middle is omitted in-band and cannot be re-fetched, so poll promptly for chatty commands. A prior-process shell is reported as stale/lost rather than reattached. The session buffer holds at most 512KiB; older bytes are dropped silently. (Unix only)"
+        "Wait for the current foreground command in a live persistent terminal session and return the output produced since the previous call — at most 32KiB per call; if more was produced the middle is omitted in-band and cannot be re-fetched, so poll promptly for chatty commands. A prior-process shell is reported as stale/lost rather than reattached. The session buffer holds at most 512KiB; older bytes are dropped silently. (Unix only)"
     );
     fn input_schema(&self) -> serde_json::Value {
         json!({"type":"object","properties":{"session":{"type":"string"},"timeout_secs":{"type":"integer","default":120,"minimum":1,"maximum":600}},"required":["session"]})
@@ -1180,5 +1183,27 @@ mod tests {
         let result = run(&session, "yes x | head -n 100000", Duration::from_secs(3));
         assert!(result.content.len() <= OUTPUT_LIMIT + 100);
         assert!(result.content.contains("output truncated"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn prune_output_keeps_a_real_tail_not_just_the_last_character() {
+        // The kept tail is the point of head+tail pruning: failures print at
+        // the end, so a regression that preserves only one character (a
+        // reverse scan finds the final boundary trivially) must fail here.
+        let payload = format!("{}{}", "h".repeat(OUTPUT_LIMIT), "TAIL-MARKER\n".repeat(10));
+        let pruned = prune_output(&payload);
+        assert!(pruned.contains("output truncated"));
+        // A generous suffix of the original survives — not a lone character.
+        let kept_tail = pruned.rsplit("…\n").next().unwrap_or("");
+        assert!(
+            kept_tail.contains("TAIL-MARKER"),
+            "the pruned output must keep actual tail content: {kept_tail:?}"
+        );
+        assert!(
+            kept_tail.len() > OUTPUT_LIMIT / 10,
+            "the kept tail must be a real window (~2/3 of the cap), got {len} bytes",
+            len = kept_tail.len()
+        );
     }
 }

@@ -118,7 +118,7 @@ impl ToolSpec for WriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write content to a file. Creates the file if it does not exist, overwrites it if it does, and creates parent directories automatically. Recommended at most 32KB; hard limit 64KB per call."
+        "Write content to a file. Creates the file if it does not exist, overwrites it if it does, and creates parent directories automatically. Recommended at most 32KB; hard limit 256KB per call."
     }
 
     fn input_schema(&self) -> Value {
@@ -129,7 +129,7 @@ impl ToolSpec for WriteTool {
                     "type": "string",
                     "description": "Path to the file to write (relative or absolute)."
                 },
-                "content": { "type": "string", "description": "Content; aim <=32KB, max 64KB." }
+                "content": { "type": "string", "description": "Content; aim <=32KB, max 256KB." }
             },
             "required": ["path", "content"],
             "additionalProperties": false

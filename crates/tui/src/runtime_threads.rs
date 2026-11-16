@@ -84,7 +84,27 @@ const AGENT_MAIL_OWNER_FILE: &str = "owner.json";
 const TURN_OPERATION_BINDING_SCHEMA_VERSION: u32 = 1;
 const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
 const REDACTED_USER_INPUT_RECEIPT: &str = "User input submitted";
-pub(crate) const MAX_ROUTED_USAGE_RECORDS_PER_TURN: usize = 64;
+pub(crate) const MAX_ROUTED_USAGE_RECORDS_PER_TURN: usize = 2_048;
+/// Routed-usage appends stage in memory for up to this many records before
+/// the staged turn is persisted, so delivering a burst of sub-call usage does
+/// not rewrite + fsync the whole turn file per record — at the 2048-record
+/// cap that would be ~950 MB of O(N²) disk churn per turn. `load_turn` and
+/// the whole-directory turn listings return the staged form, so in-process
+/// readers stay coherent; the turn settlement save persists any residue.
+/// Disclosed trade: up to one batch (`ROUTED_USAGE_FLUSH_BATCH`, ~5 KB) of
+/// billing detail that per-record saves would have written can be lost —
+/// by a process crash, and also on graceful exit when a record arrives via
+/// a still-registered terminal-turn sink after that turn's settlement save
+/// (nothing flushes it, since a terminal turn runs no further saves).
+/// While writes succeed, at most `BATCH - 1` records are staged between
+/// flushes, but the batch flush itself persists the staged form only after
+/// the append that filled it, so a crash mid-flush loses the whole batch.
+/// While writes keep failing, the retrying stage keeps every accepted
+/// append resident (up to the per-turn cap), so a crash in that regime
+/// loses more than one batch, and each retrying append also re-serializes
+/// the whole staged turn before the failing write — O(N²) CPU on top of
+/// the O(N²)-in-batches disk shape of the healthy path.
+const ROUTED_USAGE_FLUSH_BATCH: usize = 16;
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1012,6 +1032,15 @@ fn event_append_is_indeterminate(error: &anyhow::Error) -> bool {
     })
 }
 
+/// A turn record with routed-usage appends staged for a batched write, plus
+/// how many records are staged beyond the persisted form. See
+/// [`ROUTED_USAGE_FLUSH_BATCH`].
+#[derive(Debug)]
+struct StagedRoutedUsage {
+    turn: TurnRecord,
+    pending: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeThreadStore {
     threads_dir: PathBuf,
@@ -1039,6 +1068,13 @@ pub struct RuntimeThreadStore {
     /// Serializes load-modify-save operations on turn records. Like the
     /// thread guard, it is synchronous and never crosses an `.await`.
     turn_mutation: Arc<parking_lot::Mutex<()>>,
+    /// Routed-usage appends staged but not yet persisted, keyed by turn id.
+    /// Shared across store clones (`Arc`) so every handle — the manager, the
+    /// runtime usage sink, and `spawn_blocking` snapshots — sees one coherent
+    /// staged form. `load_turn` returns the staged record and `save_turn`
+    /// supersedes the stage, which keeps read-after-write intact; see
+    /// [`ROUTED_USAGE_FLUSH_BATCH`] for the batching trade-off.
+    routed_usage_staged: Arc<parking_lot::Mutex<HashMap<String, StagedRoutedUsage>>>,
     /// Serializes envelope claim/state transitions. The durable envelope is
     /// the queue; this guard prevents concurrent replay/wake requests from
     /// starting more than one turn for the same message.
@@ -1101,6 +1137,7 @@ impl RuntimeThreadStore {
             _session_dir_claim: session_dir_claim,
             thread_mutation: Arc::new(parking_lot::Mutex::new(())),
             turn_mutation: Arc::new(parking_lot::Mutex::new(())),
+            routed_usage_staged: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             mail_mutation: Arc::new(parking_lot::Mutex::new(())),
             #[cfg(test)]
             turn_dir_files_read: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1441,7 +1478,89 @@ impl RuntimeThreadStore {
 
     pub fn save_turn(&self, turn: &TurnRecord) -> Result<()> {
         validated_record_id(&turn.thread_id, "thread id")?;
-        write_json_atomic(&self.turn_path(&turn.id)?, turn)
+        // Snapshot-style callers must have loaded the record via `load_turn`
+        // (which returns the staged routed-usage form), so the record being
+        // saved already carries any staged appends and persisting it
+        // supersedes the stage. Callers that hold `turn_mutation` serialize
+        // with the staging appends; out-of-band writers (fresh/regenerated
+        // turn ids) cannot collide with a stage entry. The stage clears only
+        // after the write succeeds: on a failed write the staged batch stays
+        // resident and the next flush or settlement save retries it, so a
+        // transient disk error cannot silently drop the already-acknowledged
+        // records the journal never saw. (Writes that succeed are
+        // superseded, and out-of-band writers still invalidate the stage
+        // through this same success path.)
+        write_json_atomic(&self.turn_path(&turn.id)?, turn)?;
+        self.routed_usage_staged.lock().remove(&turn.id);
+        Ok(())
+    }
+
+    /// Persist any routed-usage appends still staged for `turn_id`. The
+    /// batched writer stages accepted records until a batch boundary or a
+    /// settlement save; a sink retiring past that boundary — a detached child
+    /// reporting usage after the parent's final save — has no later flush, so
+    /// the sink's retirement is the durable final-owner boundary. A failed
+    /// write leaves the staged batch resident and the next flush or append
+    /// retries it; the persisted snapshot deduplicates by the records'
+    /// source fingerprints (review 5926566445).
+    pub fn flush_routed_usage_staged(&self, turn_id: &str) -> Result<()> {
+        let _turn_mutation = self.turn_mutation.lock();
+        let turn = {
+            let staged = self.routed_usage_staged.lock();
+            staged.get(turn_id).map(|entry| entry.turn.clone())
+        };
+        let Some(turn) = turn else {
+            return Ok(());
+        };
+        write_json_atomic(&self.turn_path(&turn.id)?, &turn)?;
+        self.routed_usage_staged.lock().remove(turn_id);
+        Ok(())
+    }
+
+    /// Deliver one routed-usage record for `turn_id`. Appends stage in memory
+    /// ([`ROUTED_USAGE_FLUSH_BATCH`]) instead of rewriting the whole turn file
+    /// per record; the batch flush and the turn settlement save persist the
+    /// staged form. Returns `Ok(true)` when the record was newly appended,
+    /// `Ok(false)` when its `source_id` fingerprint was already present (an
+    /// exactly-once re-delivery); the per-turn cap evicts the oldest record
+    /// instead of rejecting.
+    /// Takes `turn_mutation` itself — callers must not already hold it
+    /// (parking_lot guards are not reentrant).
+    /// Takes `turn_mutation` itself — callers must not already hold it
+    /// (parking_lot guards are not reentrant).
+    pub fn append_routed_usage_staged(
+        &self,
+        turn_id: &str,
+        source_id: &str,
+        usage: EffectiveRouteUsage,
+    ) -> Result<bool> {
+        let _turn_mutation = self.turn_mutation.lock();
+        // Fast path: extend the staged turn in place, keeping the staged form
+        // visible to `load_turn` readers for the whole critical section.
+        {
+            let mut staged = self.routed_usage_staged.lock();
+            if let Some(entry) = staged.get_mut(turn_id) {
+                if append_routed_usage_record(&mut entry.turn, source_id, usage) {
+                    entry.pending += 1;
+                    if entry.pending >= ROUTED_USAGE_FLUSH_BATCH {
+                        let turn = entry.turn.clone();
+                        drop(staged);
+                        self.save_turn(&turn)?;
+                    }
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
+        }
+        // Slow path: first append for this turn since the last persist.
+        let mut turn = self.load_turn(turn_id)?;
+        if !append_routed_usage_record(&mut turn, source_id, usage) {
+            return Ok(false);
+        }
+        self.routed_usage_staged
+            .lock()
+            .insert(turn_id.to_string(), StagedRoutedUsage { turn, pending: 1 });
+        Ok(true)
     }
 
     pub fn save_item(&self, item: &TurnItemRecord) -> Result<()> {
@@ -1450,6 +1569,12 @@ impl RuntimeThreadStore {
     }
 
     fn remove_turn(&self, turn_id: &str) -> Result<()> {
+        // Serialize with `append_routed_usage_staged`: its slow path loads the
+        // turn file before inserting a stage entry, so a concurrent remove
+        // could otherwise leave a stage entry for a turn whose file is gone,
+        // and `load_turn` would serve that phantom record until process end.
+        let _turn_mutation = self.turn_mutation.lock();
+        self.routed_usage_staged.lock().remove(turn_id);
         remove_file_if_exists(&self.turn_path(turn_id)?)
     }
 
@@ -1478,6 +1603,12 @@ impl RuntimeThreadStore {
     }
 
     pub fn load_turn(&self, turn_id: &str) -> Result<TurnRecord> {
+        // Staged routed-usage appends are part of the logical record: readers
+        // must observe them even though the disk file lags by up to
+        // [`ROUTED_USAGE_FLUSH_BATCH`] records.
+        if let Some(staged) = self.routed_usage_staged.lock().get(turn_id) {
+            return Ok(staged.turn.clone());
+        }
         let path = self.turn_path(turn_id)?;
         let raw = read_store_file(&path)
             .with_context(|| format!("Failed to read turn {}", path.display()))?;
@@ -1563,7 +1694,7 @@ impl RuntimeThreadStore {
             #[cfg(test)]
             self.turn_dir_files_read
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let turn: TurnRecord = serde_json::from_str(&raw)
+            let mut turn: TurnRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
             if turn.schema_version > CURRENT_RUNTIME_SCHEMA_VERSION {
                 bail!(
@@ -1571,6 +1702,16 @@ impl RuntimeThreadStore {
                     turn.schema_version,
                     CURRENT_RUNTIME_SCHEMA_VERSION
                 );
+            }
+            // Stage-coherent listing, mirroring `load_turn`: a turn with
+            // staged routed-usage appends has a stale on-disk form (disk
+            // trails by up to one batch), and the listing consumers — usage
+            // aggregation, the `/v1/usage` and per-thread cost surfaces, fork
+            // copying — must not under-report the newest spend between batch
+            // flushes. The staged form is the disk record plus appends, so
+            // substituting it is always a strictly fresher view.
+            if let Some(staged) = self.routed_usage_staged.lock().get(&turn.id) {
+                turn = staged.turn.clone();
             }
             out.push(turn);
         }
@@ -6961,38 +7102,6 @@ impl RuntimeThreadManager {
                 "Failed to list turn items after monitor failure for {turn_id}: {err}"
             ),
         }
-        let terminal_turn = {
-            let _turn_mutation = self.store.turn_mutation.lock();
-            match self.store.load_turn(turn_id) {
-                Ok(mut turn) => {
-                    for record in background_usage.records.iter().cloned() {
-                        append_routed_usage_record(&mut turn, &record.source_id, record.usage);
-                    }
-                    turn.routed_usage_dropped_records = turn
-                        .routed_usage_dropped_records
-                        .saturating_add(background_usage.dropped_records);
-                    if turn.status == RuntimeTurnStatus::InProgress {
-                        turn.status = RuntimeTurnStatus::Failed;
-                        turn.ended_at = Some(now);
-                        turn.duration_ms = turn.started_at.map(|start| duration_ms(start, now));
-                        turn.error = Some(reason.to_string());
-                    }
-                    matches!(
-                        turn.status,
-                        RuntimeTurnStatus::Completed
-                            | RuntimeTurnStatus::Failed
-                            | RuntimeTurnStatus::Interrupted
-                            | RuntimeTurnStatus::Canceled
-                    )
-                    .then_some(turn)
-                }
-                Err(err) => {
-                    tracing::error!("Failed to load turn after monitor failure: {err}");
-                    None
-                }
-            }
-        };
-
         for item in terminal_items {
             if let Err(err) = self
                 .emit_event(
@@ -7099,16 +7208,56 @@ impl RuntimeThreadManager {
         // a blocking worker while this projection guard remains held.
         let projection_lock = self.projection_lock(thread_id);
         let _projection = projection_lock.lock().await;
-        let terminal_turn = terminal_turn.and_then(|turn| {
+        let terminal_turn = {
+            // Build the terminal snapshot and save it under one mutation hold,
+            // after the settles above. `load_turn` returns the routed-usage
+            // stage's current form, so a record a still-registered terminal-
+            // turn sink staged while the settles were awaiting rides this
+            // save; a snapshot taken before the settle awaits would be stale
+            // by the time it saved and wipe the staged record while the stage
+            // clears — the same hazard the happy terminal path avoids.
             let _turn_mutation = self.store.turn_mutation.lock();
-            match self.store.save_turn(&turn) {
-                Ok(()) => Some(turn),
+            match self.store.load_turn(turn_id) {
+                Ok(mut turn) => {
+                    for record in background_usage.records.iter().cloned() {
+                        append_routed_usage_record(&mut turn, &record.source_id, record.usage);
+                    }
+                    turn.routed_usage_dropped_records = turn
+                        .routed_usage_dropped_records
+                        .saturating_add(background_usage.dropped_records);
+                    if turn.status == RuntimeTurnStatus::InProgress {
+                        turn.status = RuntimeTurnStatus::Failed;
+                        turn.ended_at = Some(now);
+                        turn.duration_ms = turn.started_at.map(|start| duration_ms(start, now));
+                        turn.error = Some(reason.to_string());
+                    }
+                    let terminal = matches!(
+                        turn.status,
+                        RuntimeTurnStatus::Completed
+                            | RuntimeTurnStatus::Failed
+                            | RuntimeTurnStatus::Interrupted
+                            | RuntimeTurnStatus::Canceled
+                    );
+                    if !terminal {
+                        None
+                    } else {
+                        match self.store.save_turn(&turn) {
+                            Ok(()) => Some(turn),
+                            Err(err) => {
+                                tracing::error!(
+                                    "Failed to persist terminal monitor failure: {err}"
+                                );
+                                None
+                            }
+                        }
+                    }
+                }
                 Err(err) => {
-                    tracing::error!("Failed to persist terminal monitor failure: {err}");
+                    tracing::error!("Failed to load turn after monitor failure: {err}");
                     None
                 }
             }
-        });
+        };
         if let Some(turn) = terminal_turn.as_ref() {
             if user_inputs_settled && dynamic_tools_settled {
                 if let Err(err) = self.emit_turn_completed_if_missing(turn, false).await {
@@ -8726,29 +8875,41 @@ impl RuntimeThreadManager {
         source_id: &str,
         usage: EffectiveRouteUsage,
     ) -> Result<()> {
-        let _turn_mutation = self.store.turn_mutation.lock();
-        let mut turn = self.store.load_turn(turn_id)?;
-        if append_routed_usage_record(&mut turn, source_id, usage) {
-            self.store.save_turn(&turn)?;
-        }
-        Ok(())
+        self.store
+            .append_routed_usage_staged(turn_id, source_id, usage)
+            .map(|_| ())
     }
 
     fn register_runtime_usage_sink(&self, turn_id: &str) {
         let store = self.store.clone();
         let sink_turn_id = turn_id.to_string();
-        crate::cost_status::register_runtime_usage_sink(
+        let retire_store = self.store.clone();
+        let retire_turn_id = turn_id.to_string();
+        crate::cost_status::register_runtime_usage_sink_with_retirement(
             turn_id,
             Arc::new(move |record: RuntimeUsageRecord| {
-                let _turn_mutation = store.turn_mutation.lock();
-                let Ok(mut turn) = store.load_turn(&sink_turn_id) else {
-                    return false;
-                };
-                if !append_routed_usage_record(&mut turn, &record.source_id, record.usage) {
-                    return true;
-                }
-                store.save_turn(&turn).is_ok()
+                store
+                    .append_routed_usage_staged(&sink_turn_id, &record.source_id, record.usage)
+                    .is_ok()
             }),
+            Some(Arc::new(move || {
+                // Retiring this sink is the durable final-owner boundary: a
+                // detached child may still report usage after the parent
+                // turn's final settlement save, and those accepted records
+                // only stage until the last lease drops. Flush the staged
+                // form here, retrying a transient write failure a bounded
+                // number of times (the store keeps the batch resident until
+                // one write succeeds); the persisted snapshot deduplicates
+                // by source fingerprint (review 5926566445).
+                for _ in 0..3 {
+                    if retire_store
+                        .flush_routed_usage_staged(&retire_turn_id)
+                        .is_ok()
+                    {
+                        return;
+                    }
+                }
+            })),
         );
     }
 
@@ -10071,22 +10232,6 @@ impl RuntimeThreadManager {
         let ended_at = Utc::now();
         crate::cost_status::finish_runtime_usage_owner(&turn_id);
         let background_usage = crate::cost_status::take_runtime_usage(&turn_id);
-        let turn = {
-            let _turn_mutation = self.store.turn_mutation.lock();
-            let mut turn = self.store.load_turn(&turn_id)?;
-            turn.status = turn_status;
-            turn.ended_at = Some(ended_at);
-            turn.duration_ms = turn.started_at.map(|start| duration_ms(start, ended_at));
-            turn.usage = turn_usage;
-            for record in background_usage.records {
-                append_routed_usage_record(&mut turn, &record.source_id, record.usage);
-            }
-            turn.routed_usage_dropped_records = turn
-                .routed_usage_dropped_records
-                .saturating_add(background_usage.dropped_records);
-            turn.error = turn_error;
-            turn
-        };
 
         // A terminal turn can no longer answer an outstanding prompt. Commit
         // each cancellation while the request remains snapshot-authoritative,
@@ -10103,10 +10248,28 @@ impl RuntimeThreadManager {
         // active-claim cleanup are ordered.
         let projection_lock = self.projection_lock(&thread_id);
         let _projection = projection_lock.lock().await;
-        {
+        let turn = {
+            // Build the terminal snapshot and save it under one mutation hold.
+            // `load_turn` returns the routed-usage stage's current form, so a
+            // record a still-registered terminal-turn sink staged while the
+            // settles above were awaiting rides this save; snapshot-then-save
+            // across the settle await would wipe it while the stage clears.
             let _turn_mutation = self.store.turn_mutation.lock();
+            let mut turn = self.store.load_turn(&turn_id)?;
+            turn.status = turn_status;
+            turn.ended_at = Some(ended_at);
+            turn.duration_ms = turn.started_at.map(|start| duration_ms(start, ended_at));
+            turn.usage = turn_usage;
+            for record in background_usage.records {
+                append_routed_usage_record(&mut turn, &record.source_id, record.usage);
+            }
+            turn.routed_usage_dropped_records = turn
+                .routed_usage_dropped_records
+                .saturating_add(background_usage.dropped_records);
+            turn.error = turn_error;
             self.store.save_turn(&turn)?;
-        }
+            turn
+        };
         {
             let _thread_mutation = self.store.thread_mutation.lock();
             let mut thread = self.store.load_thread(&thread_id)?;

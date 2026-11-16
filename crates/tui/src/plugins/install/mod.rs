@@ -53,8 +53,7 @@ use thiserror::Error;
 
 use crate::network_policy::NetworkPolicy;
 use crate::skills::install::{
-    self as skill_install, FetchOutcome, InstallSource, InstalledFromMarker, fetch_tarball,
-    sha256_hex, source_spec_string,
+    FetchOutcome, InstallSource, InstalledFromMarker, fetch_tarball, sha256_hex, source_spec_string,
 };
 
 mod place;
@@ -72,9 +71,11 @@ use tarball::stage_tarball;
 /// bundle was placed by `/plugin install`" and enables update/uninstall.
 pub use crate::skills::install::INSTALLED_FROM_MARKER;
 
-/// Default per-bundle size cap. Mirrors the skill installer; the runtime
-/// staging budget in `registry.rs` stays the outer bound.
-pub const DEFAULT_MAX_SIZE_BYTES: u64 = skill_install::DEFAULT_MAX_SIZE_BYTES;
+/// Default per-bundle size cap. Plugins legitimately bundle assets and
+/// binaries, so unlike the skill installer this default is sized to match the
+/// runtime staging budget in `registry.rs` (64 MiB) instead of the skill
+/// tarball cap — review already tolerates more than install accepted.
+pub const DEFAULT_MAX_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Source parsing

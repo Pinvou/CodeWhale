@@ -1685,6 +1685,7 @@
   "VoiceErrNoAuth": "語音：目前供應商未設定 API 金鑰",
   "VoiceErrNoRecorder": "語音：未找到錄音工具，請安裝 sox、arecord 或 rec",
   "VoiceErrTooShort": "語音：未偵測到有效語音，錄製時間過短",
+  "VoiceErrRecorderStalled": "語音：錄音程式停止回應，已擷取的音訊已捨棄，請檢查麥克風裝置後重試",
   "VoiceProcessing": "🎙 正在轉錄...",
   "VoiceRecording": "🎙 正在錄音...請說話",
   "VoiceSendDisabled": "語音自動傳送已關閉",

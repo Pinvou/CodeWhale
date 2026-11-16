@@ -27082,3 +27082,40 @@ fn coordination_lane_precedence_matches_the_isolation_seam() {
         "the manifest leg covers a claim-less worktree child"
     );
 }
+
+/// The evidence clip keeps head AND tail with an explicit elision marker.
+/// Evidence tails carry the outcome (final verdicts, last check results), so
+/// a revert to head-only clipping silently drops exactly the actionable
+/// part; this pins the audited split so that revert fails here.
+#[test]
+fn evidence_clip_keeps_head_and_tail_with_an_elision_marker() {
+    assert_eq!(SUBAGENT_EVIDENCE_HEAD_CHARS, 2_500, "the audited head");
+    assert_eq!(SUBAGENT_EVIDENCE_TAIL_CHARS, 1_500, "the audited tail");
+
+    let head_fill = "H".repeat(SUBAGENT_EVIDENCE_HEAD_CHARS);
+    let elided_middle = format!("{}\n", "x".repeat(80)).repeat(100);
+    let tail_fill = "T".repeat(SUBAGENT_EVIDENCE_TAIL_CHARS);
+    let block =
+        format!("{head_fill}\n{elided_middle}final verdict: ALL CHECKS PASSED\n{tail_fill}");
+
+    let (clipped, was_clipped) = clip_evidence_block(&block);
+    assert!(was_clipped, "an oversized block is clipped");
+    assert!(clipped.starts_with(&head_fill), "the head is kept verbatim");
+    assert!(clipped.ends_with(&tail_fill), "the tail is kept verbatim");
+    assert!(
+        clipped.contains("[Sub-agent evidence truncated: 2500 + 1500 of"),
+        "the elision marker names the audited split"
+    );
+    assert!(
+        !clipped.contains("ALL CHECKS PASSED"),
+        "the elided middle is genuinely omitted, not inlined"
+    );
+    assert!(
+        clipped.chars().count() < SUBAGENT_EVIDENCE_HEAD_CHARS + SUBAGENT_EVIDENCE_TAIL_CHARS + 300,
+        "the clipped form stays within budget plus the marker"
+    );
+
+    let (passthrough, unclipped) = clip_evidence_block("short evidence");
+    assert_eq!(passthrough, "short evidence");
+    assert!(!unclipped, "an in-budget block passes through untouched");
+}

@@ -414,7 +414,10 @@ sandbox_mode = "workspace-write" # read-only | workspace-write | danger-full-acc
 #   sandbox_url = "http://localhost:8080"
 #   sandbox_api_key = "sk-opensandbox-secret"
 #
-# The backend uses a 30-second HTTP timeout. Background, interactive, and
+# The backend uses a 600-second (10-minute) HTTP total timeout. The bound is
+# minutes-scale because build and test commands routed to an external sandbox
+# routinely need several minutes; a seconds-scale timeout would kill any
+# build/test command before it finished. Background, interactive, and
 # TTY modes are not supported with external backends — all commands run
 # synchronously via HTTP.
 # ─────────────────────────────────────────────────────────────────────────────────
@@ -455,7 +458,9 @@ sandbox_mode = "workspace-write" # read-only | workspace-write | danger-full-acc
 #   auto_allow = ["cargo check", "npm run"]
 #
 # auto_allow = []
-max_subagents = 10 # optional (default 64, clamped to 1-128)
+# max_subagents = 10 # optional (default 64, clamped to 1-128)
+# Commented out so new configs pick up the runtime default of 64; uncomment
+# to set an explicit lower or higher limit (values are clamped to 1-128).
 
 # Optional sub-agent tuning. max_concurrent overrides top-level max_subagents.
 # [subagents]

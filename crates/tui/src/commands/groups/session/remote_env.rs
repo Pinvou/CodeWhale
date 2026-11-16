@@ -1,7 +1,8 @@
 //! `/remote-env` opens the hosted Work launcher without taking source custody.
 
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
+use std::time::Duration;
 
 use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::dependencies::{ExternalTool, Git};
@@ -12,6 +13,13 @@ use super::CommandResult;
 
 const HOSTED_WORK_URL: &str = "https://app.codewhale.net/work";
 const MAX_GIT_VALUE_BYTES: usize = 4 * 1024;
+/// Budget for the local git reads (`config`, `symbolic-ref`,
+/// `check-ref-format`). These complete in milliseconds; the deadline exists
+/// so a wedged git (hung config include, PATH shim) reports the command as
+/// unavailable instead of freezing it. The budget covers both the exit wait
+/// and the stdout drain: a grandchild that inherited the pipe write end can
+/// outlive the reaped child, so neither phase may read without a deadline.
+const GIT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "remote-env",
@@ -85,15 +93,11 @@ fn resolve_target(workspace: &Path) -> Option<RemoteEnvTarget> {
 }
 
 fn read_git_value(workspace: &Path, args: &[&str]) -> Option<String> {
-    let mut command = Git::command()?;
-    let output = command.arg("-C").arg(workspace).args(args).output().ok()?;
-    if !output.status.success()
-        || output.stdout.is_empty()
-        || output.stdout.len() > MAX_GIT_VALUE_BYTES
-    {
+    let (status, stdout) = run_git_bounded(Some(workspace), args)?;
+    if !status.success() || stdout.is_empty() || stdout.len() > MAX_GIT_VALUE_BYTES {
         return None;
     }
-    let value = String::from_utf8(output.stdout).ok()?;
+    let value = String::from_utf8(stdout).ok()?;
     let value = value.trim_end_matches(&['\r', '\n'][..]);
     if value.is_empty() {
         None
@@ -106,16 +110,82 @@ fn valid_branch_name(branch: &str) -> bool {
     if branch.is_empty() || branch.len() > MAX_GIT_VALUE_BYTES {
         return false;
     }
-    let Some(mut command) = Git::command() else {
-        return false;
-    };
-    command
-        .args(["check-ref-format", "--branch"])
-        .arg(branch)
-        .stdout(Stdio::null())
+    run_git_bounded(None, &["check-ref-format", "--branch", branch])
+        .is_some_and(|(status, _)| status.success())
+}
+
+/// Run one local git query with a bounded wait and a bounded drain, killing
+/// a wedged child. stderr goes to the null device (no caller reads it), so
+/// only stdout is drained — on a helper thread under the remaining budget,
+/// because a shim's grandchild can hold the pipe write end open past the
+/// reaped child's exit, and an unbounded read there would hang the command
+/// thread. A budget hit (or a reader failure) reports the command as
+/// unavailable — fail closed, the same outcome as any spawn/wait failure.
+fn run_git_bounded(cwd: Option<&Path>, args: &[&str]) -> Option<(ExitStatus, Vec<u8>)> {
+    use std::time::Instant;
+
+    let mut command = Git::command()?;
+    if let Some(dir) = cwd {
+        command.arg("-C").arg(dir);
+    }
+    command.args(args);
+
+    let mut child = command
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + GIT_READ_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
+    };
+
+    let stdout = drain_stdout_bounded(child.stdout.take()?, deadline)?;
+    Some((status?, stdout))
+}
+
+/// Read a child's stdout to the end within `deadline`, capped at
+/// `MAX_GIT_VALUE_BYTES + 1` bytes (callers reject values at or past the
+/// cap). On a deadline expiry the helper thread is abandoned, not joined:
+/// it ends when the pipe finally closes, which a held-open grandchild
+/// controls, so one thread and one pipe fd linger per hung call for the
+/// grandchild's lifetime (bounded by fd exhaustion, ~80 fully wedged calls
+/// on macOS defaults). This is a conscious divergence from the shared tool
+/// runner (`tools/process.rs`), whose grace expiry aborts its async drain
+/// tasks — dropping the read ends, handing the grandchild EPIPE, and
+/// leaking nothing — because these drains are OS threads, which cannot be
+/// aborted; restructuring onto the tokio runner is the follow-up if the
+/// leak ever matters in practice. Reader I/O errors still return whatever
+/// accumulated rather than `None` (downstream gates catch the bad value).
+fn drain_stdout_bounded(
+    pipe: std::process::ChildStdout,
+    deadline: std::time::Instant,
+) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = pipe
+            .take((MAX_GIT_VALUE_BYTES + 1) as u64)
+            .read_to_end(&mut buffer);
+        let _ = sender.send(buffer);
+    });
+    receiver
+        .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        .ok()
 }
 
 fn hosted_work_url(repo: &str, branch: &str) -> String {
@@ -457,5 +527,80 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn drain_returns_captured_output_when_the_pipe_closes_in_time() {
+        use std::process::Stdio;
+        use std::time::Instant;
+
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "printf abcdef"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        let out = drain_stdout_bounded(
+            child.stdout.take().unwrap(),
+            Instant::now() + GIT_READ_TIMEOUT,
+        );
+        assert_eq!(out.as_deref(), Some(&b"abcdef"[..]));
+        let _ = child.wait();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn drain_gives_up_instead_of_hanging_when_a_grandchild_holds_the_pipe() {
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
+
+        // The PATH-shim threat, reproduced: `/bin/sh -c 'sleep 2 & exit 0'`
+        // makes the direct child exit immediately while the orphaned
+        // `sleep` — the shim's grandchild, re-parented to init — inherits the
+        // stdout write end and keeps the pipe open past the drain budget
+        // (it exits on its own shortly after, so no cleanup is needed). The
+        // drain must give up on its own deadline instead of waiting for an
+        // EOF that only the grandchild can deliver.
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 2 & exit 0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sh");
+        let started = Instant::now();
+        let out = drain_stdout_bounded(
+            child.stdout.take().unwrap(),
+            started + Duration::from_millis(500),
+        );
+        assert!(out.is_none(), "a pipe held open must not hang the drain");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "drain must respect its deadline"
+        );
+        // The direct child exits on its own; reap it so it never lingers.
+        let _ = child.wait();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn drain_is_capped_at_the_value_limit() {
+        use std::process::Stdio;
+        use std::time::Instant;
+
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "yes a | head -c 200000"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        let out = drain_stdout_bounded(
+            child.stdout.take().unwrap(),
+            Instant::now() + GIT_READ_TIMEOUT,
+        );
+        assert_eq!(
+            out.as_deref().map(<[u8]>::len),
+            Some(MAX_GIT_VALUE_BYTES + 1),
+            "drain must stop at the cap, not swallow unbounded output"
+        );
+        let _ = child.wait();
     }
 }

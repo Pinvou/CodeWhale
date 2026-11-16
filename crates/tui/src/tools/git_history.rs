@@ -5,18 +5,17 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Output;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use super::git::MAX_OUTPUT_CHARS;
+use super::process::drain_truncated;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_bool, optional_str, optional_u64, required_str,
 };
-use crate::dependencies::ExternalTool;
 
-const MAX_OUTPUT_CHARS: usize = 40_000;
 const DEFAULT_LOG_MAX_COUNT: u64 = 20;
 const MAX_LOG_MAX_COUNT: u64 = 200;
 const DEFAULT_UNIFIED: u64 = 3;
@@ -116,7 +115,7 @@ impl ToolSpec for GitLogTool {
         }
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_command_async(git_ctx.working_dir.clone(), args).await?;
+        let output = super::git::run_git_command(&git_ctx.working_dir, &args).await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(
@@ -132,6 +131,9 @@ impl ToolSpec for GitLogTool {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (content, truncated, omitted_chars) = truncate_with_note(&stdout, MAX_OUTPUT_CHARS);
+        // A drain grace that gave up on a pipe still holding output means the
+        // stdout above is partial; surface that like any other truncation.
+        let truncated = truncated || drain_truncated(&output);
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
             "working_dir": git_ctx.working_dir,
@@ -238,7 +240,7 @@ impl ToolSpec for GitShowTool {
         }
 
         let command_str = format_command(&git_ctx.working_dir, &args);
-        let output = run_git_command_async(git_ctx.working_dir.clone(), args).await?;
+        let output = super::git::run_git_command(&git_ctx.working_dir, &args).await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(
@@ -254,6 +256,7 @@ impl ToolSpec for GitShowTool {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (content, truncated, omitted_chars) = truncate_with_note(&stdout, MAX_OUTPUT_CHARS);
+        let truncated = truncated || drain_truncated(&output);
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
             "working_dir": git_ctx.working_dir,
@@ -372,7 +375,7 @@ impl ToolSpec for GitBlameTool {
         args.push(pathspec.display().to_string());
 
         let command_str = format_command(working_dir, &args);
-        let output = run_git_command_async(working_dir.to_path_buf(), args).await?;
+        let output = super::git::run_git_command(working_dir, &args).await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult::error(format!(
@@ -388,6 +391,7 @@ impl ToolSpec for GitBlameTool {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (content, truncated, omitted_chars) = truncate_with_note(&stdout, MAX_OUTPUT_CHARS);
+        let truncated = truncated || drain_truncated(&output);
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
             "working_dir": working_dir,
@@ -487,33 +491,6 @@ fn pathspec_from(working_dir: &Path, resolved: &Path) -> PathBuf {
     }
 }
 
-fn run_git_command(working_dir: &Path, args: &[String]) -> Result<Output, ToolError> {
-    let Some(mut cmd) = crate::dependencies::Git::command() else {
-        return Err(ToolError::not_available(
-            "git is not installed or not in PATH",
-        ));
-    };
-    cmd.args(args).current_dir(working_dir);
-    cmd.output().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            ToolError::not_available("git is not installed or not in PATH")
-        } else {
-            ToolError::execution_failed(format!("Failed to run git: {e}"))
-        }
-    })
-}
-
-/// Async wrapper that offloads the blocking `git` invocation onto a
-/// blocking-capable thread so the tokio worker is not stalled.
-async fn run_git_command_async(
-    working_dir: PathBuf,
-    args: Vec<String>,
-) -> Result<Output, ToolError> {
-    tokio::task::spawn_blocking(move || run_git_command(&working_dir, &args))
-        .await
-        .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))?
-}
-
 fn format_command(working_dir: &Path, args: &[String]) -> String {
     format!(
         "git -C {} {}",
@@ -556,6 +533,7 @@ fn char_boundary_index(text: &str, max_chars: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dependencies::ExternalTool as _;
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;

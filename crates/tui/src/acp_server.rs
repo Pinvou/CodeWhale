@@ -63,8 +63,10 @@ const ACP_PROTOCOL_VERSION: u64 = 1;
 
 /// Hard cap on LLM <-> tool round-trips within a single `session/prompt`
 /// turn. Guards against a model that never stops calling tools; each round is
-/// one provider stream plus zero or more tool executions.
-const MAX_ACP_TOOL_ROUNDS: usize = 50;
+/// one provider stream plus zero or more tool executions. Aligned with the
+/// interactive turn budget's default of 200 model steps so the ACP lane does
+/// not undercut the same workload run from the TUI.
+const MAX_ACP_TOOL_ROUNDS: usize = 200;
 
 /// Maximum number of concurrent sessions kept in memory. When this limit is
 /// exceeded, the oldest session with no in-flight prompt is evicted.
@@ -2636,6 +2638,18 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+
+    #[test]
+    fn acp_tool_round_cap_stays_aligned_with_the_interactive_turn_budget() {
+        // The "aligned with the interactive default" claim is prose otherwise:
+        // pin both the audited literal (50 → 200) and the alignment itself so
+        // either side drifting alone fails here.
+        assert_eq!(MAX_ACP_TOOL_ROUNDS, 200);
+        assert_eq!(
+            MAX_ACP_TOOL_ROUNDS as u32,
+            crate::core::engine::turn_budget::DEFAULT_MAX_MODEL_STEPS,
+        );
+    }
 
     #[tokio::test]
     async fn tool_update_emits_typed_acp_image_content() {

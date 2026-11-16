@@ -7483,7 +7483,14 @@ impl Engine {
         .with_cancel_token(self.cancel_token.clone())
         .with_shell_policy(self.effective_turn_shell_policy(authority.shell_policy()))
         .with_trusted_external_paths(trusted_external_paths)
-        .with_follow_symlinks(self.config.workspace_follow_symlinks);
+        .with_follow_symlinks(self.config.workspace_follow_symlinks)
+        // The engine always owns an LSP manager (a disabled no-op when the
+        // feature is off), so the session LSP tools must receive it on the
+        // real registry path: leaving `lsp_manager` unset here made every
+        // production `lsp`/`read_lints` call — including the audited 1-64
+        // path batch — fail before reaching diagnostics (review 5926566445).
+        // A disabled manager answers with its own "LSP is disabled" error.
+        .with_lsp_manager(Arc::clone(&self.lsp_manager));
         ctx.persist_services_enabled = self.config.runtime_services.persist_services_enabled;
 
         // Hand the user-memory path to tools so the model-callable
