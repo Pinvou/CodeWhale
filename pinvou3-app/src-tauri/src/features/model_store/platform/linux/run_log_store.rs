@@ -1575,36 +1575,26 @@ mod tests {
     /// 反证腿：PWD/OLDPWD（工作目录回显）不因 `_pwd` 子串被误抹。
     #[test]
     fn db_password_family_and_aws_bare_keys_redact_by_substring() {
-        for line in [
-            "+ export PGPASSWORD=mysecret123",
-            "declare -x AWS_SECRET_ACCESS_KEY=\"wJalrXUtnFEMI/K7MDENG\"",
-            "+ AWS_SESSION_TOKEN=shorttok123",
-            "+ AWS_SECURITY_TOKEN=shorttok456",
-            "+ POSTGRES_PASSWORD=pgpass998877",
-            "+ MYSQL_PWD=mysqlpwd4455",
-            "+ MONGO_PASSWORD=mongopwd6677",
-            "+ REDIS_PASSWORD=redispwd8899",
-            "+ MINIO_SECRET_KEY=miniokey3344",
-            "+ GITHUB_TOKEN=gho_abc123short",
+        // (整行形态, 该行里的机密值)：落盘与导出两道都必须抹掉该行的值。
+        for (line, secret) in [
+            ("+ export PGPASSWORD=mysecret123", "mysecret123"),
+            (
+                "declare -x AWS_SECRET_ACCESS_KEY=\"wJalrXUtnFEMI/K7MDENG\"",
+                "wJalrXUtnFEMI/K7MDENG",
+            ),
+            ("+ AWS_SESSION_TOKEN=shorttok123", "shorttok123"),
+            ("+ AWS_SECURITY_TOKEN=shorttok456", "shorttok456"),
+            ("+ POSTGRES_PASSWORD=pgpass998877", "pgpass998877"),
+            ("+ MYSQL_PWD=mysqlpwd4455", "mysqlpwd4455"),
+            ("+ MONGO_PASSWORD=mongopwd6677", "mongopwd6677"),
+            ("+ REDIS_PASSWORD=redispwd8899", "redispwd8899"),
+            ("+ MINIO_SECRET_KEY=miniokey3344", "miniokey3344"),
+            ("+ GITHUB_TOKEN=gho_abc123short", "gho_abc123short"),
         ] {
             let cleaned = sanitize_for_disk(line);
-            for secret in [
-                "mysecret123",
-                "wJalrXUtnFEMI/K7MDENG",
-                "shorttok123",
-                "shorttok456",
-                "pgpass998877",
-                "mysqlpwd4455",
-                "mongopwd6677",
-                "redispwd8899",
-                "miniokey3344",
-                "gho_abc123short",
-            ] {
-                assert!(!cleaned.contains(secret), "{line} -> {cleaned}");
-            }
+            assert!(!cleaned.contains(secret), "{line} -> {cleaned}");
             let exported = sanitize_for_export(line);
-            assert!(!exported.contains("mysecret123"), "{line} -> {exported}");
-            assert!(!exported.contains("pgpass998877"), "{line} -> {exported}");
+            assert!(!exported.contains(secret), "{line} -> {exported}");
         }
         // 工作目录回显不该被 `_pwd` 误伤（PWD/OLDPWD 无下划线前缀）。
         let kept = sanitize_for_disk("+ PWD=/opt/pinvou-model-store/data + OLDPWD=/root");
