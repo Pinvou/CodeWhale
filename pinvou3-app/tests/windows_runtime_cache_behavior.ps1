@@ -166,9 +166,22 @@ try {
     return @()
   }
   $previousLfsSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
+  # Sample the variable right after the production call and BEFORE this
+  # fixture's own finally restores it: an observation taken after the finally
+  # would pass even if the production restore itself regressed (the fixture
+  # would mask it), so the production-side restore contract needs its own
+  # pre-cleanup observation. Compare with [string] coercion against the value
+  # preset for the call: "unset" presents as $null on Windows but as an empty
+  # string after a .NET restore on Unix, so raw equality would be
+  # platform-fragile; the coercion makes both render as "" while a real
+  # leftover ("1") still differs.
+  $presetSkipSmudge = $null
+  $postCallSkipSmudge = $null
   try {
     $env:GIT_LFS_SKIP_SMUDGE = $null
+    $presetSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
     Update-RuntimeSubmoduleWithoutLfsSmudge
+    $postCallSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
   } finally {
     $env:GIT_LFS_SKIP_SMUDGE = $previousLfsSkipSmudge
     # Restore the production Invoke-Git for the remainder of the test run.
@@ -178,7 +191,8 @@ try {
   $lfsRecorderCall = $script:lfsRecorderCalls[0]
   Assert-True -Condition ($lfsRecorderCall.SkipSmudge -ceq "1") -Message "the submodule update must run under GIT_LFS_SKIP_SMUDGE=1 so pointers are materialized only by the explicit lfs pull"
   Assert-True -Condition (@($lfsRecorderCall.Arguments) -ccontains "submodule" -and @($lfsRecorderCall.Arguments) -ccontains "update") -Message "the submodule update arguments must drive the gitlink checkout"
-  Assert-True -Condition ($null -eq $env:GIT_LFS_SKIP_SMUDGE) -Message "GIT_LFS_SKIP_SMUDGE must be restored after the submodule update"
+  Assert-True -Condition ([string]$postCallSkipSmudge -ceq [string]$presetSkipSmudge) -Message "the production submodule update must restore GIT_LFS_SKIP_SMUDGE itself (fixture cleanup must not be what masks a regression)"
+  Assert-True -Condition ([string]$env:GIT_LFS_SKIP_SMUDGE -ceq [string]$previousLfsSkipSmudge) -Message "GIT_LFS_SKIP_SMUDGE must be restored after the submodule update"
 
   $stagingParent = Join-Path $testRoot "windows-runtime"
   $stagingRoot = Join-Path $stagingParent $stageId

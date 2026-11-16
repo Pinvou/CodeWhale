@@ -397,7 +397,7 @@
              msiexec /x <msi> PINVOU_REMOVE_USER_DATA=1 -->
         <InstallExecuteSequence>
             <Custom Action="RemovePinvouUserData" Before="InstallFinalize">
-                (REMOVE = "ALL") AND NOT UPGRADINGPRODUCTCODE AND PINVOU_REMOVE_USER_DATA
+                (REMOVE = "ALL") AND NOT UPGRADINGPRODUCTCODE AND PINVOU_REMOVE_USER_DATA = "1"
             </Custom>
         </InstallExecuteSequence>
 
