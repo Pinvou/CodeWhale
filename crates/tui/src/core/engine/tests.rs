@@ -36788,7 +36788,10 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
 /// Whether the strict pipeline removed a property anywhere in the schema:
 /// walks both shapes in parallel (skipping literal keyword values, whose
 /// members are values, not schemas) and reports a name present under
-/// `properties` in the authored shape but gone from the shipped one.
+/// `properties` in the authored shape but gone from the shipped one. A
+/// `properties` map the shipped shape lost ENTIRELY also counts as a
+/// removal — a gate regression that deletes the key wholesale must still
+/// trip the removal-note requirement, not slip past the pairing.
 fn strict_census_removed_any_property(
     before: &serde_json::Value,
     after: &serde_json::Value,
@@ -36802,14 +36805,20 @@ fn strict_census_removed_any_property(
         }
         return false;
     };
-    if let (Some(before_properties), Some(after_properties)) = (
-        before_obj.get("properties").and_then(|v| v.as_object()),
-        after_obj.get("properties").and_then(|v| v.as_object()),
-    ) && before_properties
-        .keys()
-        .any(|name| !after_properties.contains_key(name))
-    {
-        return true;
+    if let Some(before_properties) = before_obj.get("properties").and_then(|v| v.as_object()) {
+        match after_obj.get("properties").and_then(|v| v.as_object()) {
+            Some(after_properties) => {
+                if before_properties
+                    .keys()
+                    .any(|name| !after_properties.contains_key(name))
+                {
+                    return true;
+                }
+            }
+            // The shipped shape dropped the whole `properties` key: every
+            // authored property is gone.
+            None => return true,
+        }
     }
     for (key, before_value) in before_obj {
         if matches!(key.as_str(), "enum" | "const" | "default" | "examples") {
