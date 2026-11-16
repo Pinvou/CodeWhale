@@ -1,6 +1,6 @@
 [package]
 name = "pinvou3-tauri"
-version = "0.10.17"
+version = "0.10.18"
 description = "品悟智能助手桌面应用后端"
 authors = ["pinvou"]
 license = "MIT"
@@ -203,7 +203,7 @@ notify = "8"
 # 本地知识底座 L0：全系统元数据索引 + 秒搜 + 去重（docs/本地知识底座-产品形态与架构.md）
 # rusqlite bundled —— 自带 SQLite + FTS5（名/路径秒搜），不依赖系统 libsqlite，
 # 对 .deb 离线分发友好（与 file_ingest 二进制依赖降 recommends 的思路一致）。
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.0", features = ["bundled"] }
 # 全盘遍历：容错(权限不足跳过)、防 symlink 环。L0 扫描器用。
 walkdir = "2"
 
@@ -230,10 +230,17 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 rand = "0.10"
-# Keep 0.22: codewhale-tui, reqwest 0.12, ureq 2.12, oauth2 5,
-# hf-hub, ort-sys and rmcp 3 all still require 0.22 (wry 0.57.1 and
-# hyper-util have moved to 0.23); a solo 0.23 bump would only add a second
-# copy. Revisit once upstreams align.
+# Keep 0.22: codewhale-tui, reqwest (0.12 via hf-hub plus the direct 0.13
+# pin), ureq 2.12 and pinvou-knowledge still require 0.22; the lock graph
+# adds further 0.22 pins via hyper-util, plist, serde_with and termwiz.
+# rmcp 3 declares base64 0.23 only as an optional dependency enabled by
+# its default/request-state/client-side-sse/auth-enterprise-managed/
+# server-side-http features; the sole rmcp declaration (CodeWhale tui)
+# enables just auth + client with default-features = false, so rmcp adds
+# no base64 requirement here (its auth feature does pull oauth2 5, which
+# sits on 0.21.7 along with age 0.11.5). wry 0.57.1 and tauri-codegen
+# already carry a separate 0.23 copy, so a solo 0.23 bump would leave
+# those holdouts on a separate 0.22 copy. Revisit once upstreams align.
 base64 = "0.22"
 tempfile = "3"
 # Maintained 0.11.5 shares the 0.12.1 parser fixes and retains our X25519 backup wire/key format.
@@ -249,8 +256,15 @@ xcap = "0.9.8"
 enigo = "0.6"
 # ACP resource ledger: aggregate RSS + process-tree ownership on Linux/macOS/Windows.
 # Pin 0.36.x for the project's Rust 1.89 toolchain; 0.39 requires Rust 1.95.
-# Disable disk/network/user/component probes because the ledger only samples processes.
-sysinfo = { version = "=0.36.1", default-features = false, features = ["system"] }
+# Default-features off: the ledger (features/codex_acp/resource_ledger.rs) only
+# samples processes, while features/device additionally opts into the
+# component(temperature)/disk/network probes below.
+sysinfo = { version = "=0.36.1", default-features = false, features = [
+    "system",
+    "component",
+    "disk",
+    "network",
+] }
 
 # keyring 不再直接依赖 —— 凭证走底座 codewhale-secrets(它内部按平台引 keyring)。
 # 这条曾有过一处漏网:模型商店的 HF Token 自建 keyring::Entry,与本注释矛盾。

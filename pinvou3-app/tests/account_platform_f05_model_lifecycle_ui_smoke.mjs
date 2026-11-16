@@ -26,13 +26,19 @@ const ownedProfile = path.resolve(profile);
 assert.equal(path.dirname(ownedProfile), path.resolve(os.tmpdir()));
 assert.ok(path.basename(ownedProfile).startsWith('pinvou-f05-lifecycle-'));
 let vite, browser, page, passed = 0, launchAttempted = false, phase = "setup";
+const errors = [];
 try {
   vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], cacheDir: path.join(profile, 'vite-cache'), server: { host: '127.0.0.1', port: 0, watch: null } });
   await vite.listen();
   launchAttempted = true;
   browser = await puppeteer.launch({ executablePath: chrome, headless: 'new', userDataDir: profile, args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] });
   page = await browser.newPage(); await page.setViewport({ width: 1280, height: 960 });
-  const errors = []; page.on('pageerror', error => errors.push(error.name));
+  page.on('pageerror', error => { errors.push(error.name); console.error('[f05][pageerror]', error.name, String(error.stack || error.message).split('\n').slice(0, 4).join(' | ').slice(0, 400)); });
+  page.on('response', response => { if (response.status() >= 400) console.error('[f05][http]', response.status(), response.url().slice(0, 140)); });
+  // CI 引导挂死取证（2026-11-06 双头 TimeoutError，60s/150s 均不 ready）：
+  // 页面报错与失败请求直通 smoke stderr，否则挂死点不可见。
+  page.on('console', message => { if (message.type() === 'error') console.error('[f05][page]', message.text().slice(0, 200)); });
+  page.on('requestfailed', request => console.error('[f05][reqfail]', request.url().slice(0, 140), request.failure()?.errorText || ''));
   await page.evaluateOnNewDocument(existingProducer);
   await page.evaluateOnNewDocument(() => {
     const baseline = window.__TAURI__.core.invoke;
@@ -67,13 +73,13 @@ try {
       }
       if (command === 'load_session' && args.id === 's1') return Promise.resolve(structuredClone(savedSource));
       if (command === 'account_platform_model_catalog') return Promise.resolve({ catalog_version: 1, items: [
-        { model_id: replacementId, display_name: 'Current replacement', context_eligible: true, lifecycle_status: 'PUBLISHED' },
-        { model_id: 'deprecated-future', display_name: 'Deprecated before cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: new Date(now + 3600000).toISOString() },
-        { model_id: 'deprecated-expired', display_name: 'Expired', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: new Date(now - 3600000).toISOString() },
-        { model_id: 'deprecated-invalid', display_name: 'Invalid cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: 'invalid' },
-        { model_id: 'deprecated-missing', display_name: 'Missing cutoff', context_eligible: true, lifecycle_status: 'DEPRECATED' },
+        { model_id: replacementId, display_name: 'Current replacement', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'PUBLISHED' },
+        { model_id: 'deprecated-future', display_name: 'Deprecated before cutoff', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: new Date(now + 3600000).toISOString() },
+        { model_id: 'deprecated-expired', display_name: 'Expired', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: new Date(now - 3600000).toISOString() },
+        { model_id: 'deprecated-invalid', display_name: 'Invalid cutoff', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED', new_session_cutoff_at: 'invalid' },
+        { model_id: 'deprecated-missing', display_name: 'Missing cutoff', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'DEPRECATED' },
         { model_id: 'context-denied', display_name: 'Denied', context_eligible: false, lifecycle_status: 'PUBLISHED' },
-        { model_id: 'removed', display_name: 'Removed', context_eligible: true, lifecycle_status: 'REMOVED' },
+        { model_id: 'removed', display_name: 'Removed', runtime_protocol: 'OPENAI_CHAT_V1', context_eligible: true, lifecycle_status: 'REMOVED' },
       ] });
       if (command === 'account_platform_branch_replacement_session') {
         control.branches++; control.branchInput = structuredClone(args.input);
@@ -88,8 +94,14 @@ try {
   });
   const fresh = async language => {
     errors.length = 0;
-    await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f05-model-lifecycle.html`);
-    await page.waitForFunction(() => window.f05Lifecycle?.ready && document.querySelector('textarea'));
+    // fixture 页经 vite dev 冷变换加载整条 app import 链：CI runner 上首启
+    // 实测 60s 仍不 ready（2026-11-06 PR #1661，双头复现；每次运行 profile
+    // 均为全新 tmpdir，vite 缓存全冷）。放宽到 150s 并打印实际耗时，若仍超
+    // 限则为结构性问题（需预热/拆分 import 面），不再是等待时长问题。
+    const bootStarted = Date.now();
+    await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-f05-model-lifecycle.html`, { timeout: 150_000 });
+    await page.waitForFunction(() => window.f05Lifecycle?.ready && document.querySelector('textarea'), { timeout: 150_000 });
+    console.error(`[f05] ${language} boot ready in ${Date.now() - bootStarted}ms`);
     await page.evaluate(async language => { window.f05Lifecycle.language = language; await window.f05Lifecycle.render(); }, language);
   };
   const shown = () => page.evaluate(() => document.body.textContent.includes(window.f05Lifecycle.copy().uiModelReplacement.title));
@@ -191,6 +203,17 @@ try {
   console.log(`RESULT ${passed} PASS 0 FAIL 0 SKIP`);
 } catch (error) {
   console.error(`FAIL model lifecycle browser at ${phase}: ${error.name} ${error instanceof assert.AssertionError ? error.message : ''}`);
+  try {
+    const state = await page.evaluate(() => ({
+      ready: window.f05Lifecycle?.ready ?? null,
+      readyState: document.readyState,
+      calls: (window.f05Lifecycle?.calls || []).map(c => c.command),
+    }));
+    fs.writeFileSync('/tmp/f05-hang-dump.json', JSON.stringify({ phase, errorName: String(error && error.name), state, pageerrors: errors }, null, 1));
+    console.error('[f05] hang dump written to /tmp/f05-hang-dump.json');
+  } catch (dumpError) {
+    console.error('[f05] hang dump unavailable:', String(dumpError && dumpError.name));
+  }
   process.exitCode = 1;
 } finally {
   let browserStopped = !launchAttempted;

@@ -28,7 +28,10 @@ const testPublicKeyPem = testKeys.publicKey.export({ type: "spki", format: "pem"
 const testPublicKeySha256 = crypto.createHash("sha256")
   .update(testKeys.publicKey.export({ type: "spki", format: "der" })).digest("hex");
 const certificateRoot = await mkdtemp(join(tmpdir(), "pinvou-provider-chain-"));
-const openssl = process.platform === "win32" ? "C:\\Program Files\\Git\\usr\\bin\\openssl.exe" : "openssl";
+// Use the active Git installation, including portable/custom Windows installs.
+const openssl = process.platform === "win32"
+  ? join(execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim(), "..", "..", "bin", "openssl.exe")
+  : "openssl";
 // Explicit extensions: LibreSSL emits no Basic Constraints by default and its
 // x509 subcommand lacks -addext, so the leaf profile comes from an extfile.
 const leafExtensions = join(certificateRoot, "leaf-extensions.cnf");
@@ -82,6 +85,62 @@ function signArtifact(artifact) {
 }
 
 const validationOptions = (extra = {}) => ({ expectedCommit: commit, allowTestAttestation: true, ...extra });
+
+test("digest-only references reject signed aliases independently of order", async () => {
+  for (const select of [
+    (e) => e.journeys[0].trace_sha256,
+    (e) => e.journeys[0].checks[0].artifact_sha256,
+    (e) => e.gates.ui_smoke.artifact_sha256,
+    (e) => e.legacy_relay.runtime_artifact_sha256,
+    (e) => e.attestations[1].provider_attestation_artifact_sha256,
+  ]) {
+    for (const first of [true, false]) {
+      const evidence = await validEvidence();
+      const original = evidence.artifacts.find((entry) => entry.sha256 === select(evidence));
+      const alias = { ...original, path: "aliases/other.json", machine_role: "B" };
+      signArtifact(alias);
+      if (first) evidence.artifacts.unshift(alias); else evidence.artifacts.push(alias);
+      await assert.rejects(validateReleaseEvidence(evidence, validationOptions()), /evidence_artifact_digest_ambiguous/u);
+    }
+  }
+});
+
+test("A/B may share the orchestrator installer at one or two explicit paths", async () => {
+  const evidence = await validEvidence();
+  await validateReleaseEvidence(evidence, validationOptions());
+  const entry = evidence.artifacts.find((entry) => entry.kind === "installer");
+  const copy = { ...entry, path: "binaries/installer-B.exe" };
+  signArtifact(copy); evidence.artifacts.push(copy);
+  evidence.installers[1].artifact_path = copy.path;
+  await validateReleaseEvidence(evidence, validationOptions());
+  copy.machine_role = "B"; signArtifact(copy);
+  await assert.rejects(validateReleaseEvidence(evidence, validationOptions()), /evidence_artifact_reference_missing/u);
+});
+
+test("duplicate paths and reused check references remain rejected", async () => {
+  const evidence = await validEvidence();
+  evidence.artifacts.push({ ...evidence.artifacts[0] });
+  await assert.rejects(validateReleaseEvidence(evidence, validationOptions()), /evidence_artifact_path_duplicate/u);
+  evidence.artifacts.pop();
+  evidence.journeys[1].checks[0].artifact_sha256 = evidence.journeys[0].checks[0].artifact_sha256;
+  await assert.rejects(validateReleaseEvidence(evidence, validationOptions()), /evidence_artifact_reused/u);
+});
+
+test("UI phase digest aliases cannot choose first or last signed path", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-ui-alias-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const evidence = await validEvidence();
+  await materializeEvidence(evidence, root);
+  const original = evidence.artifacts.find((entry) => entry.path === "ui/A-settings.json");
+  const alias = { ...original, path: "ui/alias-settings.json" }; signArtifact(alias);
+  await writeFile(join(root, alias.path), await readFile(join(root, original.path)));
+  for (const first of [true, false]) {
+    if (first) evidence.artifacts.unshift(alias); else evidence.artifacts.push(alias);
+    await assert.rejects(validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root })), /evidence_artifact_digest_ambiguous/u);
+    evidence.artifacts.splice(evidence.artifacts.indexOf(alias), 1);
+  }
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
+});
 
 test("RC-E2E-011 applies the RTT safety formula and rejects a terminal after its candidate deadline", () => {
   const terminal = {

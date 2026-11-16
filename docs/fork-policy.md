@@ -1,18 +1,20 @@
 # Pinvou 对 CodeWhale 底座的 fork 维护策略
 
-> 本评审分支另含 T1 HTTP policy 候选 `55393015d8a4905d47ca1a81ad41aead8c60962f`，基于下述已公开基线；该候选尚未合入公开维护分支，具体范围与待办见 `docs/fork-modifications.md` 的 T1 候选登记。公开维护头与不可变标签门禁不变。
+> 本评审分支保留 T1 HTTP policy 候选 `55393015d8a4905d47ca1a81ad41aead8c60962f`（基于 `11cba403d`），并同步父仓 main `76b15ce5d782045d0b80672cc9f59a33d58d1a8b`。候选与下述公开维护头分叉，尚未满足集成门禁；当前不能合并或发布。具体保留阻断见 `docs/fork-modifications.md` 的“本评审分支同步状态”。
 
-> 最后更新：2026-11-05。公开维护头 11cba403d 已包含 #114/#125 与 #123/#124/#129/#131/#133/#134/#135；父仓 gitlink 与公开维护头对齐。
+> 最后更新：2026-11-15。公开维护头 687358f7e 在 8e8d52fdb 上包含 #157（session-reader 只读读取面分类修复）；main 父仓按严格公开维护头门禁对齐，本评审分支仍受该门禁阻断。
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
 
 已集成的上游回移及历史溯源见[修改清单](fork-modifications.md#web-jsonpath-upstream-backport-integrated-historical-candidate-evidence-756)。公开维护头门禁及第 6 节的明确授权要求继续生效。
 
 ## 0. 当前维护基线与验证边界
 
-- 当前公开维护头与父仓 gitlink：`11cba403dc6bd6ca5c4dca55042785b03449ac8e`（2026-11-05）。#123 已合入为 `e5a8af221`，#124 为 `449edbf0b`，#129 为 `4e560354c`，#131 为 `e2a0e14fd`，#133 为 `4e75c6a07`，#134 为 `8a4719fd4`，#135 为 `11cba403d`；本轮仅更新父仓引用，没有推进维护分支。
-- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 93 个提交，r1 `1fafee7e2` 之上 78 个；91 个带 DCO sign-off。未签名的 squash 为 #107 `f27672935` 与 #116 `e9a7f48da1`，不能继续声称只有一个未签名提交。保留已发布历史，不改写维护分支。
-- 不可变 tag `pinvou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
-- 实测 drift：540 files, +119210/-49666，净增 69544；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
+以下维护头、历史及 drift 数字描述 main 已公开的维护状态，不是本评审分支的实际依赖。此分支实际 gitlink 为上述 `55393015`，在上游 v0.9.12 之上为 94 个提交；main 的七项后续底座提交未纳入本候选。构建与严格公开对齐仍保持阻断。
+
+- main 的公开维护头与其父仓 gitlink：`687358f7efde6abd3592737b8ec48adc74ba5a84`（2026-11-15）。在原 `8e8d52fdb` 之上消费已合入的 #157 `687358f7e`。父仓只消费已公开提交，不推进维护分支、不移动标签。
+- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 100 个提交，r1 `1fafee7e2` 之上 85 个；97 个带 DCO sign-off。未签名的提交为 #107 `f27672935`、#116 `e9a7f48da1` 与 #157 `687358f7e`（CodeWhale 仓 squash 合入未携带签署）。保留已发布历史，不改写维护分支。
+- 不可变 tag `pinjou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
+- 实测 drift：551 files, +121146/-49817，净增 71329；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
 
 
 - 升级前公开回退点是不可变 tag `pinvou-v0.9.5-r13`，head `f853f8f1566c57e6be40d5439a222a932aa79ef5`；同 SHA 的本地 branch `backup/pre-v0.9.12-sync` 只作便利引用。
@@ -64,7 +66,7 @@ Pinvou 的产品工具白名单、UI、工作区选择和业务策略留在 app�
 - 总 drift 软上限：净增 1500 行（净增 = 新增 − 删除行数，与下方基线表述同口径）。
 - 单文件 fork-distinct 改动软上限：200 行。
 - 超过不是自动拒绝，但必须记录保留原因和减量顺序。
-- 当前维护头及 drift 以 `docs/fork-modifications.md` 第 0 节为准，本轮仅消费已合入公开维护分支的 #123/#124/#129/#131/#133/#134/#135，不修改维护分支或固定标签。历史 #107 维护头 `f27672935` 相对上游 v0.9.12 为 `397 files, +53709/-21547`，净增 32162 行；其相对 `480bebf61` 的 `client.rs` +124/-5 保留同模型宿主 route limits 及两条结果式回归，归入既有 T1，不增加主题。
+- 当前维护头及 drift 以 `docs/fork-modifications.md` 第 0 节为准，main 已消费公开维护分支的 #136/#142/#148/#150/#152；本评审分支未纳入这些后续提交，不修改维护分支或固定标签。历史 #107 维护头 `f27672935` 相对上游 v0.9.12 为 `397 files, +53709/-21547`，净增 32162 行；其相对 `480bebf61` 的 `client.rs` +124/-5 保留同模型宿主 route limits 及两条结果式回归，归入既有 T1，不增加主题。
 - v0.9.12 r1 相对上游为 `94 files, +5022/-944`，净增 4078 行；相对 v0.9.5 r13 的 `110 files, +10895/-1195` 已收敛。新增触达文件包含当前 Rust/rustdoc 发布 lint 的等价调整、评审要求的生命周期与评测结果式回归、API 搜索后备链可达性与错误提示修复、无调用上游比较 helper 的删除、精确登记官方 v0.9.12 与 Pinvou r1 模型可见工具契约的预算收口、有界的 macOS 冷启动构建超时和 overdue one-shot 投递，不增加 fork 行为主题。基线仍超总量与个别文件软上限，因为可靠 steer、受限轮最终分发、宿主 prompt/profile/Skills 所有权、Automation 生命周期和对应安全回归必须在 Engine/Task 原子边界内实现。减量顺序是：先上游化通用 steer 与逐轮安全，再上游化 Automation 生命周期，父仓迁移到窄 re-export API 后分批收窄 18 个 `pub mod` 兼容 facade，最后评估 prompt/profile/Skills ownership 是否能由稳定 host API 完全替代。
 
 ### 1.3 主题提交

@@ -11,7 +11,7 @@
 >
 > 文档版本：以本文件所在 Git 提交为准
 >
-> 目标需求：`requirements.md`、`role-system-design.md`
+> 目标需求：`requirements.md`、[role-system-design.md（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/role-system-design.md)
 
 ## 1. 架构结论
 
@@ -24,6 +24,7 @@
 - Token Gateway 是 Token Account、加密凭据、共享/路由策略、版本化协议/安全公式和模型用量请求的事实源；当前已接入的数据面协议仍仅支持 `/v1/chat/completions`。
 - New API 是模型数据面和上游用量证据源，不承载品悟用户、组织或钱包真相。
 - Token Portal 是个人中心和运营后台的 Web BFF，采用 OIDC Authorization Code + PKCE、Redis 服务端会话和 CSRF 防护。 刷新在请求取消或等待租约超时后不再准入；已获准的刷新使用原有 20 秒预算完成 IdP 单次令牌轮换及服务端保存，浏览器断开不取消该收尾。保存仍要求原会话、租约 owner 和注销围栏一致，不能复活已注销或已替换会话；暂时故障不自动重试轮换。
+  普通 API 代理在提交上游状态前验证最多 32 MiB 的完整响应。响应超限返回 `502 UPSTREAM_RESPONSE_TOO_LARGE`，读取失败返回 `502 UPSTREAM_UNAVAILABLE`。Portal 透传命令的原幂等键，响应丢失时不会重放已发送的命令。收到网关错误的命令可能已经在上游执行。审计一次性下载继续流式传输，财务原始凭证继续按专用路径完整校验后交付。
 - 桌面端的内置模型路径使用与登录相同的 OIDC Access Token；旧内置模型运行时路径已移除，并已有本地迁移代码和测试。 模型代理的读错误、交付丢弃、Engine 回收和会话退休仅停止本地交付；只有显式停止当前已登记调用才发送绑定原 usage ID、原操作键和取消键的 TOK-38 命令。异常交付只在当前 incarnation/generation 的既有 4096 总上限内保留原取消身份，同键透明重试接替该身份，显式停止可在重试间隙继续取消原资源；新轮次、回收与退休清理该内存身份，旧 generation 或 incarnation 不得取消新调用；断线不改变 Hold、结算或既有未知用量核对策略。
 
 当前代码尚未实现的关键目标包括账单逐行支付证据归并和完整关单中间态。独立模型目录、稳定模型身份、不可变能力/目录版本、托管路由 Provisioning、组织模型业务策略、资格管线、目录回滚联合依赖校验与运营修复已经在仓库闭环；客户端切换所需的无推理 Readiness、公开兼容范围、签名准入证明、桌面动态目录消费、下架后的会话分支及发布/安装/运行门禁已有仓库实现；N/N-1/N-2 兼容策略库及通知窗口校验已实现，但四服务生产 HTTP wrapper 未装配，统一版本响应头和过期写请求 426 尚未闭环。用户级全局上下文、组成级组织授予、计量/公式/价格快照、目标普通退款领域实现及其默认关闭产品门禁、支付异常统一结案、独立应收/拒付会计链路、每日四方对账、晚到支付人工复核，以及注销资格、静默期、跨域阻断、Identity/资料/Commerce/邀请清理、组织授予隔离与标识墓碑已在仓库闭环。超级管理员安全恢复和客户端准入仍待生产等价演练。
@@ -110,7 +111,7 @@ flowchart LR
 ### 3.1 仓库交付形态
 
 - 仓库同时提供 Docker Compose 和 Helm Chart；它们是可部署模板，不证明任何环境已经部署，也不证明高可用、备份、RPO 或 RTO。
-- `mock-newapi` 和 `payment-simulator` 是 Compose 中的非生产测试支撑组件，不属于产品服务边界或生产逻辑拓扑；其隔离和替换决策见 `adr/ADR-007-payment-simulator.md`。
+- `mock-newapi` 和 `payment-simulator` 是 Compose 中的非生产测试支撑组件，不属于产品服务边界或生产逻辑拓扑；其隔离和替换决策见 [adr/ADR-007-payment-simulator.md（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/adr/ADR-007-payment-simulator.md)。
 - Compose 包含上述测试支撑组件和可选真实 New API profile，供本地开发、合同测试、端到端验证和故障注入；生产 Helm 不部署这些工作负载。
 - 当前真实支付 Adapter 是新华三商城；其代码能力包括支付宝下单、查询/同步、支付回调和人工修复，不包含退款、主动关单或账单。非生产测试 Provider 提供的退款和账单能力不得归入新华三或生产能力。
 - 远程 Compose 把 `payment-simulator`、对应迁移和数据库初始化统一置于 `development-simulator` 显式开关后；Billing 对测试 Provider 只允许 `development/test` 环境，生产 Helm 仅配置正式 Adapter，且不包含 Simulator 工作负载或模拟器命名变量。
@@ -210,6 +211,11 @@ Token 域以 `usage_requests` 保存独立执行、交付、取消和账务状�
 - `usage_requests`、`usage_attempts`、`usage_execution_transitions`：模型请求的稳定用户级键摘要、版本化规范请求指纹、冻结上下文/路由/价格、独立执行/交付/结算状态、上游关联及不可变 CAS 跃迁审计。
 - `usage_dispatch_preparations`、`usage_dispatch_intents`：Hold 前加密冻结的派发材料，以及 Hold 确认后原子提升的唯一派发意图和一次性 Worker 租约；进入上游派发后缺少确定结果且 Adapter 不保证请求级幂等时只转 REVIEW，不重发。
 - `usage_cancel_commands`、`usage_cancellation_evidence`、`usage_delivery_confirmations`：原稳定用户的唯一幂等取消命令、不可变脱敏取消证据和各客户端最后确认事件序号；不保存用户正文或 Provider 凭据。
+  Token 迁移 `900008` 为派发围栏匹配的 `hold-expiry-v1` 和 `CANCEL_REQUESTED` 证据添加部分索引，以减少用量行锁内证据查询的扫描。安装沿用 Token 全表所有权硬化流程，维护窗口须覆盖全部 Token 表的锁等待。索引构建还会阻塞取消证据表的写入。合成查询计划不能替代现场围栏延迟和持锁时间测量。
+
+  回退 `900008` 须按既有数据库回退审批执行。先停止相关 Token 写入并排空访问取消证据表的读事务；普通 `DROP INDEX` 也会等待冲突读取，不能仅停写。确认迁移账本最高版本正是 `900008_hold_expiry_dispatch_evidence_index`，其 checksum 与当前发布包一致，同时保留备份回执。复用现有 `token_migrator` 登录连接，仅该次命令选择 `MIGRATION_ROLE=token_schema_owner`，执行镜像原入口 `/service --dir /migrations/token --direction down`。默认 Up 所选的 `token_gateway` 不拥有索引，直接用它 Down 会返回权限错误且不改变账本。回退成功后核对新索引和该版本账本行均已移除、此前账本和取消证据保留。若最高版本不同，停止并另行确定实际回退范围。
+
+  重新安装使用同一发布包及 `token_migrator` 连接，恢复 `MIGRATION_ROLE=token_gateway`，执行 `/service --dir /migrations/token --direction up`，核对迁移命令的版本校验回执、精确部分索引及硬化后的运行权限。受控 owner 选择只用于获授权的数据库回退，应用继续使用原运行角色。实际运行入口仍受派发围栏保护，索引 Down 只改变查询成本。
 - `usage_reconciliation_commands`、`usage_platform_loss_reviews`：只查询原上游证据的幂等人工核对命令，以及期限后释放 Hold、永久禁止再次向用户扣款的晚到成本/平台交付损失边界。
 - `usage_stream_events`、`usage_replay_results`、`usage_idempotency_tombstones`：先于客户端确认落库的加密规范事件、完整/聚合结果和零正文防重墓碑，普通业务最大保留期分别为24小时、30天和90天。
 - `usage_replay_retention_cases`、`usage_replay_case_payloads`：法律保全或未结案件的独立受限存储及原因、范围、责任人、复核/到期/解除后清除事实；普通在线重放表不借案件名义延长保留。
@@ -417,7 +423,7 @@ Token 仍有本地事件新增。例如，`MarkCommitted` 仍在结算事务中�
 |---|---|---|
 | 部署 | Helm 已具备多故障域调度、PDB、零不可用滚动、外部HA Redis/NATS边界及机器化故障验收；Compose仍是单机 | 未取得真实集群容量、选主及Pod/节点/区域故障证据，不得宣称生产HA或RPO/RTO完成 |
 | 注册 | 唯一值预约、持久恢复、Identity 关联查询、异步钱包任务、SLA、`REPAIR_REQUIRED` 和证明门禁补偿已闭环 | Identity 短期密码材料仍为单副本内存能力；生产运行和故障注入证据待部署补齐 |
-| 权限与审批 | 三类人类权限、角色真值表、对象作用域、独立授权版本、策略驱动审批、短期人类委托与精确工作负载权限以 `role-system-design.md` 为约束；APT-069–APT-082 的全部 CODE 任务已落地三类作用域、入口原子权限、可信恢复、签名委托消费、双主体审计、精确 `internal.*` 路由权限、权限/版本驱动界面及全 HTTP/任务/事件/回调/CLI 自动发布门禁；最后超级管理员保护、完整注销 Saga 和版本化审批聚合已有仓库实现 | 补生产等价安全恢复、撤权传播、工作负载轮换和审批故障演练 |
+| 权限与审批 | 三类人类权限、角色真值表、对象作用域、独立授权版本、策略驱动审批、短期人类委托与精确工作负载权限以 [role-system-design.md（历史原文）](https://github.com/Pinvou/pinvou3/blob/828242031c42911099792ec78c1f746ed8620c49/account-platform/docs/role-system-design.md) 为约束；APT-069–APT-082 的全部 CODE 任务已落地三类作用域、入口原子权限、可信恢复、签名委托消费、双主体审计、精确 `internal.*` 路由权限、权限/版本驱动界面及全 HTTP/任务/事件/回调/CLI 自动发布门禁；最后超级管理员保护、完整注销 Saga 和版本化审批聚合已有仓库实现 | 补生产等价安全恢复、撤权传播、工作负载轮换和审批故障演练 |
 | 模型调用 | 独立目录、稳定身份、不可变能力/目录版本、托管 Provisioning、上下文资格、版本化公式/价格、持久派发/重放/取消，以及用户、组织成员、组织、模型、路由和全局的 Hold 前原子准入均已闭环 | 补更多数据面协议和生产等价并发/故障注入证据 |
 | 权益 | BASE/BONUS 组成、组织购买、精确成员授予、生命周期、确定消费/到期、目标退款与拒付定向撤销、注销隔离/整笔剩余回收和守恒约束已实现；普通退款实现当前保持休眠 | 补普通退款产品级默认关闭门禁和生产等价并发压力证据 |
 | 支付 | 新华三声明下单、查询、支付回调与人工修复并采用查询降级对账；专用短期 Token 授权和回调公网适配层先持久化再异步归并，订单支持多支付流水，回调/查询/修复证据不可变归并，每笔成功流水独立履约或复核；`FAILED` 保守进入复核，当前 H3C 退款入口因 capability 不支持而隐藏 | 补独立于 Provider capability 的退款产品门禁、Provider 账单逐行证据归并和完整关单中间态；在生产等价环境验证真实商城回调突发、并发查询补偿与财务故障恢复 |

@@ -4,6 +4,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { expectedWebBridgeApi } from './bridge_domain_contract.mjs';
+import { desktopSliceFields } from './bridge_slice_fields.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const webBridgeRoot = path.join(root, 'src', 'platform', 'web');
@@ -27,6 +28,7 @@ const documentObject = {
   body: { appendChild() {} },
 };
 let invokeResponse = async () => null;
+const listeners = new Map();
 const windowObject = {
   PinvouPlatform: {
     kind: 'web',
@@ -37,7 +39,7 @@ const windowObject = {
   },
   __TAURI__: {
     core: { invoke: (...args) => invokeResponse(...args) },
-    event: { listen: async () => function () {} },
+    event: { listen: async (name, fn) => { listeners.set(name, fn); return () => listeners.delete(name); } },
     dialog: { open: async () => null },
   },
   location: { search: '', href: 'https://example.test/pinvou3/remote/' },
@@ -106,6 +108,37 @@ for (const method of Object.keys(api.computerUse)) {
     api.computerUse[method](),
     /not supported on the web client/,
     `web computerUse.${method} stub must reject, never fake success`,
+  );
+}
+// Same for the device domain (round-3 review P2): the surface lock above would
+// not catch a device stub turning into a resolve(null) no-op, which the
+// domain-adapter comments call out as the "permanent skeleton" failure mode.
+for (const method of Object.keys(api.device)) {
+  await assert.rejects(
+    api.device[method](),
+    /not supported on the web client|MegaCube/,
+    `web device.${method} stub must reject, never fake success`,
+  );
+}
+// 桌面/双端 device 切片键集交叉锁定（round-5 review P3 → round-6 补严）：
+// 期望值不再手抄，直接解析桌面 bridge.js 的 STATE_SLICE_FIELDS.device——
+// 桌面加第 6 个字段而漏改 web 时切片缺键返回 undefined，此前硬编码数组是
+// 单向锁，恰好看不见这个方向的漂移（round-6 review P2）。
+assert.deepEqual(
+  Object.keys(api.state.get('device')).sort(),
+  desktopSliceFields().device.slice().sort(),
+  'web device slice keys must equal the desktop STATE_SLICE_FIELDS.device contract',
+);
+// seed 字面量亦须逐键有定义（round-36 review P3）：pick() 从共享注册表投影，
+// 上面的断言看不见初始 state——无 structuredClone 的引擎走 JSON 回退克隆时
+// undefined 键整个丢失，seed 漏一键 web 切片就比桌面少一键（externalModelsError
+// 曾漏）。对 bridge.js 源码做形状钉。
+const webBridgeSource = read('bridge.js');
+for (const key of desktopSliceFields().device) {
+  const keySeedPattern = new RegExp(`^ {4}${key}:`, 'm');
+  assert.ok(
+    keySeedPattern.test(webBridgeSource),
+    `web bridge seed must declare device key "${key}" explicitly`,
   );
 }
 assert.equal(api.sendMessage, undefined, 'Web flat command facade must stay private');
@@ -403,6 +436,7 @@ const cyclic = { value: 'cycle' };
 cyclic.self = cyclic;
 invokeResponse = async command => command === 'web_access_ingest_file' ? cyclic : null;
 await assert.rejects(flat.addAttachmentByPath('/tmp/cyclic.txt'), /must not contain cycles/);
+api.attachments.removeAttachment(flat.getState().attachments.at(-1).id);
 
 // probeLocalServerKind 降级契约（PR #218 五审 P2）：web 桥层不得吞错伪造成
 // generic——命令失败（web 白名单不含该命令/老版本桌面）必须 reject，由消费方
@@ -447,5 +481,34 @@ assert.deepEqual(
   { baseUrl: 'http://127.0.0.1:11434/v1', apiKey: 'sk-form-key', modelId: 'model-1' },
   'web probeLocalServerKind must forward apiKey/modelId for authenticated endpoints',
 );
+
+// A route commit on the desktop host must refresh an already-connected Web UI.
+const accessPolicy = JSON.parse(read('access-policy.json'));
+assert.ok(accessPolicy.allowed_events.includes('models:changed'));
+assert.ok(listeners.has('models:changed'));
+let releaseFirstModels;
+let modelLoads = 0;
+const refreshCommands = [];
+invokeResponse = async command => {
+  refreshCommands.push(command);
+  if (command === 'list_models') {
+    modelLoads += 1;
+    if (modelLoads === 1) await new Promise(resolve => { releaseFirstModels = resolve; });
+    return { models: [{ id: 'stable-store-id', model: modelLoads === 1 ? 'old-wire-id' : 'new-wire-id' }], active_model_id: 'stable-store-id' };
+  }
+  if (command === 'get_settings') return { default_model: 'stable-store-id' };
+  if (command === 'get_effective_model_config') return { model: 'new-wire-id' };
+  return null;
+};
+const firstRefresh = listeners.get('models:changed')({ payload: {} });
+const pendingRefresh = listeners.get('models:changed')({ payload: {} });
+releaseFirstModels();
+await Promise.all([firstRefresh, pendingRefresh]);
+assert.equal(modelLoads, 2, 'events during refresh must trigger a final fresh snapshot');
+assert.equal(flat.getState().savedModels[0].model, 'new-wire-id');
+assert.equal(flat.getState().effectiveModelConfig.model, 'new-wire-id');
+assert.ok(refreshCommands.includes('get_settings'));
+assert.ok(!refreshCommands.some(command => /set_active_model|set_session_model|save_model/.test(command)),
+  'host route refresh must preserve user selection');
 
 console.log('web bridge domain contract passed');

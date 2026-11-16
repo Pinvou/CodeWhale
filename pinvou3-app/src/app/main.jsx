@@ -1,6 +1,7 @@
 import { lazy, startTransition as scheduleViewTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
+import { useModelStoreStartupUpdates } from '../features/model-store/useModelStoreStartupUpdates.js';
 import '../styles/base.css';
 import '../styles/tailwind.css';
 import { I, Plus, Edit2, Trash2, ClipboardList, BarChart2, Settings, Monitor, Smartphone, Brain, BrainCircuit, Clock, Sun, Moon, Zap, Package, RefreshCw, RotateCcw, Search, Upload, Lightbulb, Paperclip, Mic, Send, Store, StoreFront, Terminal, ChevronDown, IconGrid, ChevronRight, Copy, CheckCircle2, AlertTriangle, Menu, MoreHorizontal, Check, Filter, Database, Download, FolderPlus, Award, Feather, AppWindow, Radio, Palette, Briefcase, Sparkles, StopCircle, XCircle, Wrench, User, Layers, MessageSquare, X, ArrowLeft, ExternalLink, BookOpen, Code, FileText, Hexagon, Layout, Presentation, Mail, MessageCircle, Navigation, Video, Puzzle, LineChart, Building2, Cpu, Server, Globe, ChevronLeft, XIcon, CloudSun, TrendingUp, TrendingDown, GridIcon, TableIcon, PresentationIcon, ImageIcon, Archive, PetPawIcon, Users } from '../components/icons.jsx';
@@ -21,11 +22,12 @@ const MobileTabBar = lazy(() =>
 const MobileTopBar = lazy(() =>
   import('../components/layout/MobileShell.jsx').then((m) => ({ default: m.MobileTopBar })));
 const ControlledOpenRecovery = lazy(() => import('../features/remote-control/ControlledOpenRecovery.jsx'));
-import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowModelAccessGate } from '../hooks/useBridge.js';
+import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal } from '../hooks/useBridge.js';
 import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewport.js';
 import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
 import { useModalIsolation } from '../hooks/useModalIsolation.js';
-import { refreshModelAccessAfterAuthentication } from '../features/settings/model-access.js';
+const LazyModelAccessController = lazy(() => import('../features/settings/ModelAccessController.jsx').then(m => ({ default: m.ModelAccessController })));
+import { modelAccessAppliesToView } from '../shared/model-access-scope.js';
 import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, readStoredColorScheme, resolveTheme } from '../shared/color-scheme.js';
 import { CHAT_RECOVERY_COPY, DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, ensureLanguageWithZhFallback, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG, zhDict, accountPlatformCopy, organizationCopy } from '../shared/i18n.js';
 import { mountWhenLanguageReady } from '../shared/entry-boot.js';
@@ -47,10 +49,8 @@ const ManageProjectFoldersDialog = lazy(() =>
   import('../features/projects/ManageProjectFoldersDialog.jsx').then(m => ({ default: m.ManageProjectFoldersDialog })));
 const SessionWorkspaceDialog = lazy(() =>
   import('../features/projects/SessionWorkspaceDialog.jsx').then(m => ({ default: m.SessionWorkspaceDialog })));
-import { classifyRebindError, mergeRebindCarryoverIds } from '../features/projects/rebindErrors.js';
 import { filterSessionsByTab, groupSessionsByLocalDate, sessionListComparator } from '../shared/session-list-pipeline.js';
 const LazyAccountPlatformPopover = lazy(() => VIEW_LOADERS.accountPlatformPopover().then(module => ({ default: module.AccountPlatformPopover })));
-import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
 import { walletRechargeTarget } from '../features/conversation/billing-notice.js';
 import { organizationRechargeTargetAllowed, requirePersonalAccount } from '../features/account-platform/personal-contract.js';
 import { can, isWeb } from '../shared/platform.js';
@@ -59,6 +59,7 @@ import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
 import { acquireNativeSurfaceTransitionHide } from '../features/browser/native-surface-coordinator.js';
 import {
   createNativeSurfaceTransitionGate,
+  createNavigationOwnership,
   settleBrowserUiPublicationAfterCommit,
 } from '../features/browser/native-surface-transition.mjs';
 import {
@@ -141,6 +142,9 @@ const LazyBrowserView = lazy(() => VIEW_LOADERS.browser().then(m => ({ default: 
 const LazyKnowledgeView = lazy(() => VIEW_LOADERS.knowledge().then(m => ({ default: m.KnowledgeView })));
 const LazyModelStoreView = lazy(() => VIEW_LOADERS.modelStore().then(m => ({ default: m.ModelStoreView })));
 const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.MonitorView })));
+// MegaCube 设备管理页：内嵌 MonitorView（chunk 间静态依赖，预取 deviceManager
+// 会连带拉下 monitor chunk），仅 megacubeDevice 平台经渲染开关挂载。
+const LazyDeviceManagerView = lazy(() => VIEW_LOADERS.deviceManager().then(m => ({ default: m.DeviceManagerView })));
 const LazySearchView = lazy(() => VIEW_LOADERS.search().then(m => ({ default: m.SearchView })));
 const LazyTeamRelayView = lazy(() => VIEW_LOADERS.teamRelay().then(m => ({ default: m.TeamRelayView })));
 const LazySearchOverlay = lazy(() => VIEW_LOADERS.searchOverlay().then(m => ({ default: m.SearchOverlay })));
@@ -177,7 +181,7 @@ const APP_BRIDGE_STATE_DOMAINS = [
   'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
   'settings', 'models', 'vllm', 'interaction', 'personas',
   'memory', 'remoteControl', 'updater', 'dependencies', 'teamRelay',
-  'projects', 'desktopRemoteControl', 'computerUse',
+  'projects', 'desktopRemoteControl', 'computerUse', 'device',
 ];
 
 function emitPetEvent(ev, name, payload) {
@@ -265,6 +269,7 @@ const NAV_PREFETCH = {
   modelStore: () => prefetchView('modelStore'),
   outputs: () => prefetchView('knowledge'),
   monitor: () => prefetchView('monitor'),
+  deviceManager: () => prefetchView('deviceManager'),
   toolStore: () => prefetchView('toolStore'),
   cardpool: () => prefetchView('cardpool'),
   browser: () => prefetchView('browser'),
@@ -272,6 +277,7 @@ const NAV_PREFETCH = {
 };
 
 const EMPTY_PICKER_ROWS = [];
+
 
     // App root component: aggregates bridge state, routing, and all sidebar/overlay UI. Size and complexity are historical
     // evolution; splitting requires a dedicated refactor task (involving a hundred-plus closure handlers and test contracts);
@@ -371,9 +377,10 @@ const App = () => {
       const [personalAccountOpen, setPersonalAccountOpen] = useState(false);
       const [accountRechargeRequest, setAccountRechargeRequest] = useState(null);
       const accountRechargeSequence = useRef(0);
-      const personalAccountClient = useMemo(() => bridge.available && bridge.accountPlatform
-        ? new AccountPlatformDesktopClient(bridge.accountPlatform) : null, []);
+      const [personalAccountClient, setPersonalAccountClient] = useState(null);
       const [modelAccessLoginOpen, setModelAccessLoginOpen] = useState(false);
+      const [modelAccessGuideDismissed, setModelAccessGuideDismissed] = useState(false);
+      const [modelAccess, setModelAccess] = useState({ accountStatus: 'unknown', refreshStatus: 'idle', resolved: { kind: 'checking' } });
       const modelAccessLayerRef = useRef(null);
       const modelAccessSettingsFocusPendingRef = useRef(false);
       const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
@@ -537,7 +544,17 @@ const App = () => {
         const sessionCommandToken = tracksCommandEcho
           ? browserSessionCommandEchoGuard.begin(
             options.sessionTarget,
-            bsRef.current?.activeSessionId || null,
+            // sessionBaseline override (round-20 review P2): the device doctor
+            // flow materializes its session BEFORE entering the transition, so
+            // the bridge's activeSessionId is already the null draft when the
+            // token begins. With the stale bsRef baseline, a late-flushed draft
+            // render observing `null` matched neither target nor baseline, got
+            // classified external, and superseded the in-flight transition —
+            // the message was delivered but the navigation was silently
+            // skipped while isCurrent() still reported true.
+            Object.prototype.hasOwnProperty.call(options, 'sessionBaseline')
+              ? options.sessionBaseline
+              : (bsRef.current?.activeSessionId || null),
           )
           : null;
         if (tracksSession) browserSessionTransitionPendingRef.current += 1;
@@ -951,6 +968,16 @@ const App = () => {
         }
       }, [browserActive, currentView, setCurrentView]);
       const showMegacubeSite = !!platformCapabilities.showMegacubeSite;
+      // MegaCube 一体机：原「运行状态」入口替换为「设备管理」（渲染开关在
+      // currentView === 'monitor' 处，导航 label 同步条件化）。
+      const megacubeDevice = !!platformCapabilities.megacubeDevice;
+      // 拆离门禁在能力位装载完成前 fail-closed（第二十轮评审 P2）：
+      // megacubeDevice 是异步切片、播种恒 false——boot 窗口里 MegaCube 机器会
+      // 短暂看到「运行状态」入口且可拖拽拆出旧视图；装载失败时保持拆离关闭
+      // （入口 label 短暂回退到旧文案可接受，拆出旧视图不可接受）。
+      const megacubeDetachAllowed = !megacubeDevice
+        && platformCapabilities.loaded === true
+        && can('detachWindows');
       const codexAcpSupported = usePlatformCapability('acpCodeMode') && (isWeb || !!platformCapabilities.codexAcpSupported);
       const teamRelayAvailable = teamRelayEnabled && platformCapabilities.teamRelaySupported === true;
       const teamRelayUnread = teamRelayHasUnread(bs && bs.teamRelay && bs.teamRelay.snapshot);
@@ -1170,6 +1197,7 @@ const App = () => {
       // `model_store_availability`,而这一处漏改——调用抛「命令不存在」、被吞掉、
       // 入口永远不渲染。界面上没有任何异常,只是那个功能凭空消失了,查了一轮才找到。
       const [modelStoreAvailable, setModelStoreAvailable] = useState(false);
+      const { updates: modelStoreUpdates, hasUnread: modelStoreHasUnread, reconcile: reconcileModelStoreUpdates } = useModelStoreStartupUpdates(modelStoreAvailable, currentView === 'modelStore');
       useEffect(() => {
         let alive = true;
         invokeTauri('model_store_availability')
@@ -2997,6 +3025,218 @@ const App = () => {
         return activateRemoteProxy(opened);
       }, [activateRemoteProxy]);
 
+      // MegaCube 设备管理（DeviceManagerView）的 AI 动作入口：安装新模型、
+      // 故障排查快捷卡和自定义提问都落到这里。与用户手点「新对话」完全一致地
+      // 物化一个普通新会话（默认模型、默认工具链），把后端 device_doctor_prompt
+      // 拼好的提示词原样发出后跳到聊天页（发送在前：失败留在本页给 toast）。
+      // materializeSession 立即返回真实会话 id，sendMessage 走已物化路径直达
+      // 发送，不经过 scheduledTaskPendingGuide/restrictTools。transition 选项与
+      // handleNewChat/handleSwitchSession 同款（hideMode/sessionTarget 第四轮
+      // 评审补齐）。失败不打断用户：设备管理页上的按钮各自有 loading 态。
+      // 排查直达发送失败时记住已物化的会话 sid：materializeSession 每次都会
+      // 新建一个空会话并登记进侧栏历史，连续失败会留下 N 个空会话（round-21
+      // review P3）。重试直接补发到同一会话；成功后清空。
+      const lastFailedDoctorSidRef = useRef(null);
+      const openDeviceDoctorChat = useCallback(async (prompt, viewOwnership) => {
+        // 返回值契约（设备管理页依赖）：true=提示词已送达新会话（发送成功后无
+        // 论视图切换是否被更新的会话转换取代，都按已送达计）；false=没发出去
+        // （桥不可用 / 发送前转换已被取代 / 发送失败）。视图据此保留用户输入并
+        // 提示重试，不再静默吞掉失败（评审 P3：失败仅 console、输入被无声清空）。
+        if (!bridge.available || !prompt) return false;
+        if (!bridge.chat?.sendMessageToSession) return false;
+        // 导航归属（三十二轮评审 P2）：真实侧栏/设置导航走 view 通道，同一
+        // sessionId 不会让本动作 session 通道的票据过期——prompt 采样、
+        // materialize、completion 三个等待中的任何一次去设置操作，都必须让
+        // 晚到的完成失去“把用户拽回聊天”的权利（§3.5：不把已离开设备页的
+        // 用户拽进聊天）。消息照常送达并按已送达计（返回 true），只跳过视图
+        // 切换，不诱发重发。
+        //
+        // 票据的拍点（复核 P2，prompt 窗口）：必须在设备页按钮动作里、
+        // buildDoctorPrompt 等待**之前**拍——本函数在 prompt resolve 之后才被
+        // 调用，此处再拍会把用户采样期间切去的设置页新修订号当成当前意图，
+        // 晚到的完成仍把用户拽回聊天。视图经 captureChatOwnership 在动作起点
+        // 拍好并随 prompt 传入；未传票据的调用方按旧契约退回入口现拍（兼容
+        // 兜底，不是产品路径，产品路径由 smoke ⑥-f 钉住）。
+        //
+        // 票据覆盖双通道（三十三轮评审 P2）：侧栏**切会话**走 session 通道
+        // （其 publication 内的 setCurrentView 走直改分支，不动 view 修订号），
+        // prompt 等待窗口里切到会话 B 后，晚到动作自己签发的新 session 票据
+        // isCurrent 恒真、单看 view 尺子也拦不住——所以拍 ['view','session']
+        // 两把尺子，在 self-transition 开始**前**决算（intentIntact，见下）。
+        const ownership = (viewOwnership && typeof viewOwnership.kept === 'function')
+          ? viewOwnership
+          : createNavigationOwnership(browserUiTransitionGateRef.current, ['view', 'session']);
+        let usedSid = null;
+        try {
+          // 复用前先确认失败会话仍存在（round-22 review P2）：用户可能在两次
+          // 重试之间把那个空会话删掉，死 sid 原样复用会让 sendMessageToSession
+          // 永远撞 targetSessionMissing、catch 再原样塞回 ref——此后每次重试
+          // 必失败直到重启，「请重试」成为死路。会话不在当前列表就清空 ref、
+          // 重新物化（回到上一轮修复前的行为，但仅此一次，不会连环堆积）。
+          let reused = lastFailedDoctorSidRef.current;
+          if (reused && !(bsRef.current?.sessions || []).some(
+            (session) => String(session.id) === reused,
+          )) {
+            lastFailedDoctorSidRef.current = null;
+            reused = null;
+          }
+          // prompt 窗口决算紧跟 prompt await（round-37 review）：此刻双通道
+          // 修订号仍与动作起点可比（materialize 尚未启动），hung prompt 窗口
+          // 里的用户切会话/去设置在此拍板。
+          const promptWindowIntact = ownership.kept();
+          // 双车道归属（round-39 review P2，zhuowp）：prompt 决算发现 session
+          // 半边已移位且桥的活动目标是**既有会话 B**（activeSessionId 非空；
+          // 新对话草稿 activeSessionId 为 null，仍走前台车道由 protectUserDraft
+          // 分管）时，晚到的动作不得前台物化——B 非空使 protectUserDraft 拦
+          // 不住，前台物化的 enterDraft 工作集清空 + switchActiveTo 会把活动
+          // 工作集切到新诊断会话并 notify，订阅快照随之携带诊断会话的
+          // chatItems/activeSessionId，纵然后面导航 setter 全不执行，用户当前
+          // 会话的正文仍被顶掉。归属在物化副作用**之前**结算：本车道
+          // 改走 materializeSession({ background })（只创建+登记侧栏历史，不
+          // enterDraft/不切工作集），发送照常钉定 sid，全程不做任何视图/工作
+          // 集切换——不进 runBrowserUiTransition、不 setCodeModeOn/
+          // closeMobileSidebar/setCurrentView/setActiveChat。B 的未发送文字在
+          // 原缓冲原地保留；排查消息照常按已送达计（返回契约不变）。
+          // stayed-on-device-page / 去设置（view 通道）/ 窗口里点了新对话
+          // （session 通道移位但 activeSessionId 为 null）均维持前台车道既有
+          // 口径（⑥-f / ⑥-f4 / round-37 pins 不动）。
+          const backgroundDelivery = !ownership.keptChannel('session')
+            && !!bsRef.current?.activeSessionId;
+          // 前台物化携带草稿内容保护（round-38 review P2）：采样等待窗口里
+          // 用户新建对话并输入未发送文本 / 选了工作目录时，晚到的物化不得让
+          // enterDraft 把这份内容吞掉——materializeSession 见未物化草稿带
+          // 用户内容即返回 null，本动作按既有守卫语义放弃发送（false → 设备
+          // 页保留输入并提示重试），草稿原地保留。空草稿（用户点了新对话但
+          // 未输入）照旧物化，与 ⑥-f2「消息照常送达、只跳过视图切换」的
+          // 既有口径一致。
+          const sid = reused || (await bridge.sessions.materializeSession(
+            backgroundDelivery ? { background: true } : { protectUserDraft: true },
+          ));
+          lastFailedDoctorSidRef.current = null;
+          if (!sid) return false;
+          usedSid = sid;
+          if (backgroundDelivery) {
+            // 后台送达（round-39 review P2）：不进 transition、不申请导航权，
+            // 只把排查提示词钉定投递到后台新建的会话。发送前存在性由
+            // materializeSession 的登记保证（sessionStates buffer + 侧栏列表
+            // 双尺子）；失败口径与前台一致——没发出去就记住 sid 等重试、
+            // 返回 false；已接受发送（含 completion 成功）按已送达计 true。
+            const result = await bridge.chat.sendMessageToSession(sid, prompt);
+            if (!result?.accepted) {
+              lastFailedDoctorSidRef.current = sid;
+              return false;
+            }
+            if (result.completion) {
+              const outcome = await result.completion;
+              if (!outcome?.ok) {
+                lastFailedDoctorSidRef.current = sid;
+                return false;
+              }
+            }
+            return true;
+          }
+          // 导航意图 = prompt 窗口双通道决算 ∧ 视图半边持续到落定（round-37
+          // review 修订三十三轮 P2 的拍点）：session 半边在 materialize 之前
+          // 拍板——彼时修订号仍与动作起点可比，hung prompt 窗口里的用户切会
+          // 话照旧拦下导航；materialize 窗口的用户切会话由
+          // materializeSession 自身守卫接管（token 前移/活动会话移位 → 返回
+          // null → 本动作放弃发送），其机器内部转换不再计入意图尺；视图半
+          // 边（materialize 期间去设置）照旧持续到落定。
+          const intentIntact = promptWindowIntact && ownership.keptChannel('view');
+          const sent = await runBrowserUiTransition(async ({ isCurrent }) => {
+            if (!isCurrent()) return false;
+            // 先发送再跳转：发送失败时用户还留在设备管理页，「请重试」的
+            // toast 才有着落——先跳转的话视图已卸载，失败只剩一条 console
+            // 日志（第四轮评审 P3）。发送成功后进入会话，消息与回复随会话
+            // 历史照常渲染。
+            // 用**会话钉定**的 sendMessageToSession 而不是 sendMessage（第七轮
+            // 评审 P3）：transition 走 serialize 通道排队，同一通道上先入队的
+            // switchToSession 会先把桥的活动会话切走——sendMessage 按"当前活动
+            // 会话"投递，会把排查提示词发进别人的会话，而 UI 却打开这个空的
+            // 新会话。钉定 sid 后投递目标不再随活动会话漂移。
+            const result = await bridge.chat.sendMessageToSession(sid, prompt);
+            if (!result?.accepted) return false;
+            // 排队路径（accepted+queued）已入会话队列照常冲刷；直发路径等
+            // completion 落定——doSendFor 的失败（非 throw 路径）按没发出去
+            // 处理、不跳转（沿用 sendMessage 时代的失败口径）。
+            if (result.completion) {
+              const outcome = await result.completion;
+              if (!outcome?.ok) return false;
+            }
+            // 发送 round-trip 期间用户可能已点侧栏离开设备页：与
+            // handleSwitchSession 同款落定后复查，不把用户从别的页面拽进聊天
+            // （serialize 通道上后入队的 switch 转换会紧接着把视图切走，先跳转
+            // 只剩一次闪跳）（第八轮评审 P3）。此复查只跳过视图切换：消息此时
+            // 已真实送达新会话（侧栏历史可见），返回值必须如实报 true——原实现
+            // 在这里返回 false，设备页会对已存在的消息再弹「没发出去」并保留
+            // 输入（第九轮评审 P1）。isCurrent 之外还有三把尺子（三十三轮评审
+            // P2）：prompt/materialize 窗口的 intentIntact；completion 窗口
+            // 同会话去设置导航不走 session 通道、光看 isCurrent 拦不住的
+            // view 修订号；以及**不经 gate 的直接视图变更**（如更新卡
+            // onShowChangelog 的 setCurrentView——本动作 publication 还开着，
+            // setCurrentView 走直改分支不动修订号），只能读真实视图状态兜底：
+            // 用户只要离开了设备页（currentView !== 'monitor'），归属即退役。
+            if (intentIntact && isCurrent() && ownership.keptChannel('view')
+              && currentViewRef.current === 'monitor') {
+              setCodeModeOn(false);
+              closeMobileSidebar();
+              setCurrentView('chat');
+              setActiveChat(sid);
+            }
+            return true;
+          }, {
+            channel: 'session',
+            hideMode: 'workspace',
+            serialize: true,
+            sessionTarget: sid,
+            // Baseline null (round-22 review P3 wording fix): materializeSession
+            // actually leaves the bridge's ACTIVE session pointing at the new
+            // sid (ensureSession → switchActiveTo). What we must absorb is the
+            // late-flushed DRAFT render from enterDraft observing the null
+            // draft — without the null baseline that observation classifies as
+            // external and supersedes this transition (round-20 review P2).
+            sessionBaseline: null,
+            // guardSession off (round-37 review): the gate's session guard
+            // compares the browser-view session captured at run() against the
+            // live value at publish time, and this transition IS the session
+            // switch — the bridge's active session moved null-draft → sid
+            // inside materializeSession, before the transition began. The
+            // captured snapshot (stale React commit, still null on the device
+            // page) can only ever mismatch by timing: the guarded comparison
+            // read null vs sid and killed the publication before the send
+            // (reproduced deterministically against main #2216's notification
+            // scheduling, which commits the layout effect inside the
+            // hide/serialize window). Real user navigation during the flow is
+            // still guarded by the ownership ticket + intentIntact + live view
+            // check below; the guard here had no legitimate failure mode to
+            // protect.
+            guardSession: false,
+          });
+          if (sent !== true) lastFailedDoctorSidRef.current = sid;
+          return sent === true;
+        } catch (error) {
+          // 发送链路抛错（桥/物化/转换异常）：已物化的会话记住待重试，避免
+          // 下一次重试再物化一个新的空会话。
+          if (usedSid) lastFailedDoctorSidRef.current = usedSid;
+          console.warn('[device-manager] doctor chat failed', error);
+          return false;
+        }
+      }, [closeMobileSidebar, runBrowserUiTransition, setCurrentView]);
+
+      // 设备页在按钮动作起点拍导航归属用（复核 P2，prompt 窗口）：把拍票函数
+      // 传下去，动作在 buildDoctorPrompt 等待之前拍；不把 gate 对象本身暴露给
+      // feature 层。browserUiTransitionGateRef 是稳定 ref，依赖为空即可。
+      const captureDeviceChatOwnership = useCallback(
+        () => createNavigationOwnership(browserUiTransitionGateRef.current, ['view', 'session']),
+        [],
+      );
+
+      // 设备管理页「前往模型商店」：复用模型商店既有的导航路径（与侧栏点击
+      // 同一条 runBrowserUiTransition 通道）。
+      const openModelStoreFromDevice = useCallback(() => {
+        return navigateFromScheduledRun('modelStore');
+      }, [navigateFromScheduledRun]);
+
       async function handleSearchSelect(id) {
         await handleSwitchSession(id);
         setSearchOverlayOpen(false);
@@ -3478,182 +3718,10 @@ const App = () => {
           rebindPickingRef.current = false;
         }
       };
-      const confirmRebindWorkspace = async (confirmExisting) => {
-        if (!bridge.projects || !rebindDraft || projectOpsBusy) return;
-        setProjectOpsBusy(true);
-        // Clear the previous attempt's inline error/busy hint so it does
-        // not stack with this run's result.
-        setRebindDraft(prev => prev && { ...prev, error: null, busySessionIds: null });
-        // Feed the previous report's post-busy ids back (review #463
-        // F-Major): a session an earlier run moved and reported post-busy is
-        // routed by the backend into the same to-lane retry population as a
-        // healthy session, so without the feed-back a busy-refused carryover
-        // session would appear in NO report field and the dialog would close
-        // claiming full success while its old-cwd runtime stays resident.
-        // The backend honors only the intersection with its own retry
-        // population, so this list can never widen the eviction set.
-        const previousPostBusySessionIds = (rebindDraft.partial && rebindDraft.partial.postBusyIds) || [];
-        try {
-          const report = await bridge.projects.rebindWorkspaceRoot(
-            rebindDraft.from, rebindDraft.to, confirmExisting, previousPostBusySessionIds);
-          const rebound = (report && report.rebound_session_ids) ? report.rebound_session_ids.length : 0;
-          const failed = (report && report.failed_session_ids) ? report.failed_session_ids.length : 0;
-          const postBusy = (report && report.post_busy_session_ids) ? report.post_busy_session_ids.length : 0;
-          // The dialog stays open whenever the report still has something the
-          // user must act on — failed sessions to retry, or sessions whose
-          // runtime the idle gate refused (round-8 MAJOR-2: closing on the
-          // post-busy-only case left "retry once when idle" with no entry
-          // point, because the unavailable-root badge disappears once the root
-          // has moved — the badge renders strictly off the `available` wire
-          // field, the backend's per-root is_dir() stat; review #463 round-14
-          // B1 restored it after main #566 dropped it and badged every root).
-          // Rerunning the backend with the same from/to converges
-          // (the snapshot includes unsynced sessions; already-rebound ones are
-          // no-ops). The post-busy ids are kept for the next retry's
-          // feed-back (F-Major).
-          if (failed > 0 || postBusy > 0) {
-            setRebindDraft(prev => prev && {
-              ...prev,
-              // The run proceeded past the fence: the old-root warning is
-              // consumed (review #463 round-14 should-fix 3) — a later
-              // reappearance of the old root must re-arm the strong confirm.
-              warnExisting: false,
-              partial: {
-                rebound,
-                failed,
-                failedIds: (report && report.failed_session_ids) || [],
-                postBusy,
-                postBusyIds: (report && report.post_busy_session_ids) || [],
-              },
-            });
-          } else {
-            setRebindDraft(null);
-            if (rebound > 0) {
-              setSettingsToast(t.uiProjects.rebindSuccess(rebound));
-            } else {
-              // A retry after everything already converged (or a root with
-              // no sessions at all) returns an empty report; "Rebound 0"
-              // would read as a failure (review #463 minor).
-              setSettingsToast(t.uiProjects.rebindUpToDate);
-            }
-          }
-          await refreshCodexSessions().catch((error) => {
-            // Failure is not swallowed: the session list self-heals via the
-            // session:list_changed event, but a silent gap after an explicit
-            // failure must stay visible for troubleshooting
-            // (review #463 minor).
-            console.warn('refresh sessions after rebind failed', error);
-          });
-        } catch (error) {
-          // Typed-marker matching (finding 11 / Minor 7 / round-8 M4): the
-          // backend prefixes every user-reachable outcome with a stable ASCII
-          // marker and we match only that prefix, never human copy. The mapping
-          // lives in a pure helper so both halves of the contract are unit
-          // tested (review #463 round-8 minor 10).
-          const classified = classifyRebindError(error, t);
-          // Carryover honesty (review #463 round-14 should-fix 1): a
-          // roots-commit failure carries this run's moved ids as an error
-          // suffix — the session lanes were already durable at `to`. Feed
-          // them into the retry's post-busy carryover, or a refused eviction
-          // of an already-rebound session is dropped (untouched this run,
-          // carryover empty) and the dialog closes "up to date" with an
-          // old-cwd runtime still resident.
-          // The suffix ids UNION with the previous carryover (review #463
-          // round-15 Major 1): replacing would drop a still-busy carryover
-          // session from a prior run — it can never re-enter
-          // rebound_session_ids (a converged to-lane session routes to
-          // retry_evict_candidates only), so the next retry would close the
-          // dialog "up to date" while its old-cwd runtime stays resident.
-          // The backend honors only the intersection with its own retry
-          // population, so the union cannot widen the eviction set.
-          const carryoverPartial = (classified.reboundIds && classified.reboundIds.length > 0)
-            ? (prev) => {
-                // Full partial shape (the dialog reads failedIds.length
-                // unconditionally): the moved sessions are conservatively
-                // reported as post-busy — their runtime reclaim never ran on
-                // the error path, so "retry when idle" is the honest state.
-                const mergedIds = mergeRebindCarryoverIds(
-                  prev.partial && prev.partial.postBusyIds,
-                  classified.reboundIds,
-                );
-                // Spread first, counts after (review #463 round-17 SF-4): a
-                // trailing spread dragged the PREVIOUS run's rebound/failed
-                // counts into this error state — a mixed-run report where
-                // the same id could appear in two contradicting rows. This
-                // arm's only honest counts are the merged carryover. The
-                // spread tolerates a null partial natively (object spread
-                // ignores null/undefined; round-18 Blocker 1 — the explicit
-                // `|| {}` fallback trips unicorn/no-useless-fallback-in-spread).
-                return {
-                  ...prev.partial,
-                  rebound: 0,
-                  failed: 0,
-                  failedIds: [],
-                  postBusy: mergedIds.length,
-                  postBusyIds: mergedIds,
-                  // Round-18 minor 1: the post-busy recheck never ran on an
-                  // error path, so the "started a new turn during the rebind"
-                  // diagnosis would be fabricated — the dialog renders the
-                  // neutral carryover copy for this shape.
-                  carryover: true,
-                };
-              }
-            : null;
-          if (classified.kind === 'old-root-exists') {
-            setRebindDraft(prev => prev && { ...prev, warnExisting: true, error: null });
-          } else if (classified.kind === 'sessions-busy') {
-            // Busy rejection is the fence's high-frequency happy path
-            // (Minor 7): map it to i18n copy; only session ids follow the
-            // marker, and they are shown verbatim for troubleshooting.
-            // warnExisting is kept as-is out of deliberate conservatism
-            // (round-20 minor 14): both busy emission sites actually fire
-            // AFTER the old-root check, so the flag is already consumed —
-            // keeping it costs ZERO extra confirm round-trips (the comment
-            // previously claimed one; inverted per round-24 minor 18).
-            setRebindDraft(prev => prev && {
-              ...prev,
-              busySessionIds: classified.busySessionIds,
-              error: null,
-              ...(carryoverPartial ? { partial: carryoverPartial(prev) } : {}),
-            });
-          } else if (classified.kind === 'copy') {
-            // Consume the old-root warning ONLY when the run actually
-            // proceeded past the old-root check (round-17 SF-4): IN_PROGRESS
-            // / TO_ROOT / TO_NESTED / TO_UNUSABLE all classify as `copy` and
-            // all fire BEFORE require_confirm_existing, and clearing on them
-            // would let a re-appeared old root ride the stale flag silently.
-            // Clearing on a genuine post-fence failure (review #463 round-14
-            // should-fix 3) still re-arms the strong confirm on a later
-            // reappearance of the old root.
-            setRebindDraft(prev => prev && {
-              ...prev,
-              warnExisting: classified.passedFence ? false : prev.warnExisting,
-              error: classified.message,
-              ...(carryoverPartial ? { partial: carryoverPartial(prev) } : {}),
-            });
-          } else {
-            // Log hygiene (review #463 round-14 should-fix 5): the raw error
-            // chain embeds host paths; it is shown in the dialog verbatim by
-            // design, but stays out of the console. The classified kind is
-            // the path-free diagnostic.
-            console.warn('rebind workspace failed:', classified.kind);
-            // On failure keep the dialog open with the error inline
-            // (review #463 M7): in-place display persists and sits next to
-            // the retry; an unmapped backend error is shown verbatim as a
-            // diagnostic detail rather than guessed at. Its provenance is
-            // unknown (round-17 SF-4), so the strong-confirm flag is kept:
-            // an extra confirm round-trip at worst, never a skipped one.
-            setRebindDraft(prev => prev && {
-              ...prev,
-              warnExisting: prev.warnExisting,
-              error: classified.message,
-              ...(carryoverPartial ? { partial: carryoverPartial(prev) } : {}),
-            });
-          }
-        } finally {
-          setProjectOpsBusy(false);
-        }
-      };
+      const confirmRebindWorkspace = (confirmExisting, runRebindWorkspace) =>
+        runRebindWorkspace(confirmExisting, {
+          bridge, rebindDraft, projectOpsBusy, setProjectOpsBusy, setRebindDraft, setSettingsToast, t, refreshCodexSessions,
+        });
 
       function sessionRowsForIds(ids) {
         const byId = new Map(allSidebarTasks.map(item => [item.id, item]));
@@ -3930,11 +3998,14 @@ const App = () => {
       // 未读红点与侧栏入口同源，避免两套提醒逻辑漂移。
       const scheduledUnread = !!(bs && ((bs.scheduledTasks || []).some(task => task.hasUnreadRuns)
         || (bs.scheduledTaskRecentRuns || []).some(run => run && run.unread)));
+      // MegaCube 一体机把「运行状态」入口换成「设备管理」：视图已是
+      // DeviceManagerView，顶栏标题须与侧栏 label 同用 megacubeDevice 口径，
+      // 否则顶栏仍写「运行状态」与实际视图漂移（第九轮评审 P3）。
       const mobileTitle = currentView === 'chat'
         ? ((((chatHistory || []).find(c => c.id === activeChat)) || {}).title || 'PINVOU')
         : currentView === 'codex'
           ? ((((codexHistory || []).find(c => c.id === activeCodexId)) || {}).title || t.uiCodex.untitledSession)
-        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, modelStore: t.modelStore, settings: t.settings, browser: t.browser }[currentView] || 'PINVOU');
+        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: megacubeDevice ? t.deviceMgr : t.monitor, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, modelStore: t.modelStore, settings: t.settings, browser: t.browser }[currentView] || 'PINVOU');
       const mobileNavigate = (view, beforeNavigate) => {
         setMobileMoreOpen(false);
         navigateFromScheduledRun(view, beforeNavigate);
@@ -4063,21 +4134,21 @@ const App = () => {
         bs?.controlledDevice, bs?.controlledSession, bs?.activeSessionId,
       );
       const isRemoteChatActive = Boolean(remoteProxyForSession(bs?.activeSessionId, bs?.remoteProxyHistory));
-      const modelAccessGateOpen = shouldShowModelAccessGate(
-        bs,
-        currentView,
-        bridge.available,
-        isControlledChatActive || isRemoteChatActive,
-      );
-      const refreshModelAccess = useCallback(async () => {
-        await refreshModelAccessAfterAuthentication(bridge.models);
+      const modelAccessState = { ...modelAccess.resolved, canLogin: personalAccountAvailable && modelAccess.accountStatus === 'guest' };
+      const modelAccessViewActive = can('modelManagement') && modelAccessAppliesToView(bs, currentView, bridge.available, isControlledChatActive || isRemoteChatActive);
+      const modelAccessGateOpen = !modelAccessGuideDismissed && !bs?.activeSessionId && modelAccessViewActive && modelAccessState.kind === 'first_use';
+      const modelAccessLayerOpen = modelAccessGateOpen || modelAccessLoginOpen;
+      const modelAccessNoticeOpen = !modelAccessLayerOpen && !['ready', 'checking'].includes(modelAccessState.kind)
+        && modelAccessViewActive;
+      const openModelAccessSettings = () => {
         setModelAccessLoginOpen(false);
-        // Authentication does not invent a default model. The existing settings
-        // page loads the current catalog and persists an explicit selection.
         modelAccessSettingsFocusPendingRef.current = true;
         openSettingsSection('model');
-      }, [openSettingsSection]);
-      useEffect(() => { if (!modelAccessGateOpen) setModelAccessLoginOpen(false); }, [modelAccessGateOpen]);
+      };
+      const refreshModelAccess = useCallback(async () => {
+        await modelAccess.refresh?.();
+        setModelAccessLoginOpen(false);
+      }, [modelAccess.refresh]);
       useEffect(() => {
         if (currentView !== 'settings' || !modelAccessSettingsFocusPendingRef.current) return undefined;
         const focus = () => { const target = document.querySelector('[data-testid="settings-close"]');
@@ -4095,7 +4166,7 @@ const App = () => {
         savedConfirm ? 'saved-confirm' : '',
         can('webAccessAdmin') && webAccessOpen ? 'web-access' : '',
         can('desktopRemoteControl') && remoteConversationOpen ? 'remote-connection' : '',
-        modelAccessGateOpen ? 'model-access' : '',
+        modelAccessLayerOpen ? 'model-access' : '',
         bs && bs.pinvouModal ? 'pinvou-review' : '',
         isCompactShell && isSidebarOpen ? 'mobile-sidebar' : '',
         isCompactShell && mobileMoreOpen ? 'mobile-more' : '',
@@ -4110,7 +4181,7 @@ const App = () => {
       // Keep the surface hidden while one already-published overlay hands off to
       // another. The replacement itself is still withheld until its own barrier
       // attempt has settled.
-      useModalIsolation(modelAccessGateOpen && browserOverlayPublicationReady, modelAccessLayerRef);
+      useModalIsolation(modelAccessLayerOpen && browserOverlayPublicationReady, modelAccessLayerRef);
       const browserOverlayOpen = !!publishedBrowserOverlayIntent;
       const browserBlockingLayerOpen = !browserPaneAllowed || browserOverlayOpen;
       const browserSurfaceSuspended = browserResizeActive
@@ -4185,7 +4256,7 @@ const App = () => {
           if (!personalAccountAvailable || !target) return;
           const requestId = ++accountRechargeSequence.current;
           if (target.contextType === 'PERSONAL') {
-            setAccountRechargeRequest(null); setPersonalAccountOpen(true); return;
+            setAccountRechargeRequest(target); setPersonalAccountOpen(true); return;
           }
           const client = personalAccountClient, sessionEpoch = client.financeSessionEpoch || 0;
           try {
@@ -4602,14 +4673,19 @@ const App = () => {
                 onPointerEnter={NAV_PREFETCH.knowledge} onFocus={NAV_PREFETCH.knowledge}
                 dragKind={canDetachWindows ? 'outputs' : undefined} dragging={canDetachWindows && !!dragAvatar && dragAvatar.key === 'outputs:'} onPickUp={canDetachWindows ? navPickUpHandlers.outputs : undefined}
               />
+              {/* MegaCube 上该入口换为「设备管理」（渲染仍走 currentView==='monitor'，
+                  见下方渲染开关）；拆离窗口只认 monitor 视图，故 megacubeDevice 时
+                  显式关闭拖拽拆离（dragKind/onPickUp 传 undefined）。悬停预取切换
+                  到 deviceManager loader（其 chunk 静态依赖 monitor，一并拉取）。 */}
               <NavItem
-                icon={NAV_ICON_MONITOR} label={t.monitor}
+                icon={NAV_ICON_MONITOR} label={megacubeDevice ? t.deviceMgr : t.monitor}
                 active={currentView === 'monitor'}
                 theme={activeTheme}
                 isSidebarOpen={isSidebarOpen}
-                onPointerEnter={NAV_PREFETCH.monitor} onFocus={NAV_PREFETCH.monitor}
+                onPointerEnter={megacubeDevice ? NAV_PREFETCH.deviceManager : NAV_PREFETCH.monitor}
+                onFocus={megacubeDevice ? NAV_PREFETCH.deviceManager : NAV_PREFETCH.monitor}
                 onClick={navNavigateHandlers.monitor}
-                dragKind={canDetachWindows ? 'monitor' : undefined} dragging={canDetachWindows && !!dragAvatar && dragAvatar.key === 'monitor:'} onPickUp={canDetachWindows ? navPickUpHandlers.monitor : undefined}
+                dragKind={megacubeDetachAllowed ? 'monitor' : undefined} dragging={megacubeDetachAllowed && !!dragAvatar && dragAvatar.key === 'monitor:'} onPickUp={megacubeDetachAllowed ? navPickUpHandlers.monitor : undefined}
               />
               <NavItem
                 icon={NAV_ICON_TOOL_STORE} label={t.toolStore}
@@ -4645,6 +4721,8 @@ const App = () => {
                 <div data-testid="nav-model-store" style={NAV_TESTID_WRAPPER_STYLE}>
                   <NavItem
                     icon={NAV_ICON_MODEL_STORE} label={t.modelStore}
+                    unread={modelStoreHasUnread} unreadLabel={t.uiModelStore.startupUpdatesFound(modelStoreUpdates.length)} unreadTestId="model-store-update-dot"
+                    unreadTone="danger" unreadText={t.uiModelStore.startupUpdateBadge} unreadTextTestId="model-store-update-label"
                     active={currentView === 'modelStore'}
                     theme={activeTheme}
                     isSidebarOpen={isSidebarOpen}
@@ -4917,7 +4995,7 @@ const App = () => {
                   className={`flex items-center rounded-xl px-2 py-1.5 gap-3 ${isSidebarOpen ? 'w-full' : 'justify-center w-10 h-10'}`}>
                   <User size={18} />{isSidebarOpen && <span>{accountPlatformCopy[language].title}</span>}
                 </button>
-                <Suspense fallback={null}><LazyAccountPlatformPopover open={personalAccountOpen} client={personalAccountClient} rechargeRequest={accountRechargeRequest}
+                <Suspense fallback={null}><LazyAccountPlatformPopover open={personalAccountOpen} client={personalAccountClient} rechargeRequest={accountRechargeRequest} theme={activeTheme}
                   copy={accountPlatformCopy[language]} language={language} onLanguageChange={handleSetLanguage}
                   onClose={() => { accountRechargeSequence.current++; setAccountRechargeRequest(null); setPersonalAccountOpen(false); }} /></Suspense>
               </div>}
@@ -5022,8 +5100,11 @@ const App = () => {
           </div>
 
           {/* ================= Main Content ================= */}
+          {bridge.available && <ViewErrorBoundary t={t}><Suspense fallback={null}><LazyModelAccessController modelsBridge={bridge.models} accountTransport={bridge.accountPlatform} onClient={setPersonalAccountClient} enabled sessionId={bs?.activeSessionId} selectionKey={JSON.stringify(bs?.pendingDraftModelRef || bs?.currentSessionModelRef || bs?.defaultModelRef)} modelState={bs} onChange={setModelAccess} /></Suspense></ViewErrorBoundary>}
           <div className={`flex-1 flex relative min-w-0 overflow-hidden ${activeTheme === 'dark' ? 'bg-[#131314]' : 'bg-white'} ${isCompactShell ? '' : 'rounded-tl-[28px]'}`}>
             <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+            {modelAccessNoticeOpen && <ViewErrorBoundary t={t}><Suspense fallback={null}><LazyModelAccessGate variant="notice" access={modelAccessState} language={language} theme={activeTheme} t={t} busy={modelAccess.refreshStatus === 'checking'} onLogin={() => setModelAccessLoginOpen(true)} onRetry={() => void modelAccess.refresh()} onUseExternalModels={openModelAccessSettings} /></Suspense></ViewErrorBoundary>}
+
 
             {/* Gemini Style Background Glow */}
             {(currentView === 'chat'
@@ -5043,7 +5124,18 @@ const App = () => {
                 复位,其余视图不受一次失败牵连。 */}
             <ViewErrorBoundary t={t} resetKey={currentView}>
               <Suspense fallback={<ViewFallback />}>
-            {currentView === 'monitor' && <LazyMonitorView theme={activeTheme} t={t} bs={bs} />}
+            {/* MegaCube：monitor 视图位渲染设备管理页（内嵌 MonitorView）；
+                其余平台保持原运行状态页，行为零变化。 */}
+            {currentView === 'monitor' && (megacubeDevice ? (
+              <LazyDeviceManagerView
+                theme={activeTheme} t={t} bs={bs}
+                onOpenChat={openDeviceDoctorChat}
+                captureChatOwnership={captureDeviceChatOwnership}
+                onOpenModelStore={openModelStoreFromDevice}
+              />
+            ) : (
+              <LazyMonitorView theme={activeTheme} t={t} bs={bs} />
+            ))}
             {currentView === 'settings' && (
               <ViewErrorBoundary heading={t.uiSettingsDetail.settingsLoadFailed} detail={t.uiSettingsDetail.settingsLoadFailedDetail} t={t}>
                 <LazySettingsView
@@ -5189,7 +5281,7 @@ const App = () => {
             )}
             {currentView === 'outputs' && <LazyKnowledgeView theme={activeTheme} t={t} mode="outputs" />}
             {currentView === 'knowledge' && <LazyKnowledgeView theme={activeTheme} t={t} />}
-            {currentView === 'modelStore' && <LazyModelStoreView theme={activeTheme} t={t} bs={bs} />}
+            {currentView === 'modelStore' && modelStoreAvailable && <LazyModelStoreView theme={activeTheme} t={t} bs={bs} startupUpdates={modelStoreUpdates} onLibrarySnapshot={reconcileModelStoreUpdates} />}
               </Suspense>
             </ViewErrorBoundary>
 
@@ -5255,7 +5347,7 @@ const App = () => {
               </ViewErrorBoundary>
             )}
 
-            {modelAccessGateOpen && browserOverlayPublicationReady && (
+            {modelAccessLayerOpen && browserOverlayPublicationReady && (
               // The opaque shell stays outside the lazy boundary: the chat
               // surface remains fully covered while either the landing page or
               // the in-window account screen loads, and also after a chunk error.
@@ -5266,9 +5358,15 @@ const App = () => {
                 style={{ background: activeTheme === 'dark' ? '#111416' : '#F7FAF9' }}
                 role="dialog"
                 aria-modal="true"
-                aria-label={t.modelAccessTitle}
+                aria-label={modelAccessLoginOpen ? accountPlatformCopy[language].login : t.modelAccessTitle}
                 tabIndex={-1}
-                onKeyDown={(event) => event.stopPropagation()}
+                onKeyDown={(event) => {
+                  event.stopPropagation();
+                  if (event.key !== 'Escape' || event.isComposing || event.target.closest('[role="dialog"], [role="alertdialog"]') !== event.currentTarget) return;
+                  event.preventDefault();
+                  if (modelAccessLoginOpen) setModelAccessLoginOpen(false);
+                  else setModelAccessGuideDismissed(true);
+                }}
               >
                 <ViewErrorBoundary t={t}>
                   <Suspense fallback={<div role="status" className="text-[13px] opacity-60">{t.loading}</div>}>
@@ -5293,12 +5391,11 @@ const App = () => {
                       <LazyModelAccessGate
                         theme={activeTheme}
                         t={t}
+                        language={language}
+                        access={modelAccessState}
                         onLogin={() => setModelAccessLoginOpen(true)}
-                        onUseExternalModels={() => {
-                          setModelAccessLoginOpen(false);
-                          modelAccessSettingsFocusPendingRef.current = true;
-                          openSettingsSection('model');
-                        }}
+                        onDismiss={() => setModelAccessGuideDismissed(true)}
+                        onUseExternalModels={openModelAccessSettings}
                       />
                     )}
                   </Suspense>
@@ -5413,7 +5510,7 @@ const App = () => {
                 onClick: () => mobileNavigate('chat') },
               { key: 'cardpool', label: t.cardPool, icon: <Layers size={18} />,
                 active: currentView === 'cardpool', onClick: () => mobileNavigate('cardpool', () => setPoolMyOnly(false)) },
-              { key: 'monitor', label: t.monitor, icon: <BarChart2 size={18} />,
+              { key: 'monitor', label: megacubeDevice ? t.deviceMgr : t.monitor, icon: <BarChart2 size={18} />,
                 active: currentView === 'monitor',
                 onClick: () => mobileNavigate('monitor', () => {
                   const liveBridge = window.TauriBridge || bridge;
@@ -5443,7 +5540,7 @@ const App = () => {
               { key: 'toolStore', label: t.toolStore, icon: <Puzzle size={18} />,
                 active: currentView === 'toolStore', onClick: () => mobileNavigate('toolStore') },
               ...(modelStoreAvailable ? [{ key: 'modelStore', label: t.modelStore, icon: NAV_ICON_MODEL_STORE,
-                active: currentView === 'modelStore', onClick: () => mobileNavigate('modelStore') }] : []),
+                active: currentView === 'modelStore', dot: modelStoreHasUnread, onClick: () => mobileNavigate('modelStore') }] : []),
               { key: 'settings', label: t.settings, icon: <Settings size={18} />,
                 active: currentView === 'settings', dot: hasUpdate, onClick: () => mobileNavigate('settings') },
             ]} /></Suspense>

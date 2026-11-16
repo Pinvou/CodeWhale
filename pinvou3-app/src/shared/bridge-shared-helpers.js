@@ -71,6 +71,8 @@
     knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedRemoteCollections", "mountedCollectionsRevision"],
     scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
     monitor: ["monitor", "monitorError"],
+    // Registered by the device feature (bridge/device.js, MegaCube 设备管理).
+    device: ["device", "deviceStale", "deviceError", "deviceServices", "deviceServicesError", "externalModels", "externalModelsError"],
     settings: ["settings", "selectedPet", "behaviorTelemetry"],
     models: ["activeModelId", "currentSessionModelId", "currentSessionModelRef", "pendingDraftModelRef", "defaultModelRef", "effectiveModelConfig", "savedModels", "modelsLoaded"],
     vllm: [],
@@ -100,6 +102,41 @@
     teamRelay: ["teamRelay"],
     projects: ["projectsList", "projectsAssignmentDegradedAt"],
   };
+
+  // Config-only refreshes and selection reads share config ordering, while
+  // a later background refresh must not discard a pending selection ID.
+  const modelReadTokens = new WeakMap();
+  function beginModelRead(state, sessionId, includesSelection = false) {
+    let tokens = modelReadTokens.get(state);
+    if (!tokens) {
+      tokens = {};
+      modelReadTokens.set(state, tokens);
+    }
+    const token = {};
+    const sameSession = () => (state.activeSessionId || null) === sessionId;
+    if (sameSession()) {
+      tokens.config = token;
+      if (includesSelection) tokens.selection = token;
+    }
+    return {
+      configIsCurrent: () => sameSession() && tokens.config === token,
+      selectionIsCurrent: () => sameSession() && tokens.selection === token,
+    };
+  }
+
+  // All clusters sharing this state also share settings read ordering. A
+  // successful write or event publication invalidates older reads without
+  // making user writes wait for a slow background get_settings request.
+  const settingsReadTokens = new WeakMap();
+  function beginSettingsRead(state) {
+    const token = {};
+    settingsReadTokens.set(state, token);
+    return () => settingsReadTokens.get(state) === token;
+  }
+  function publishSettings(state, settings) {
+    settingsReadTokens.set(state, {});
+    state.settings = settings;
+  }
 
   // 共享基础工厂：所有 cluster 的函数体只在这里定义一次。
   // deps 解构 = 各 cluster 依赖名的并集（去掉与函数声明同名的名字）。
@@ -2291,8 +2328,11 @@
 
   // web+tauriSettings 共享
   async function loadSettings() {
+    const isCurrent = beginSettingsRead(state);
     try {
-      state.settings = await invoke("get_settings");
+      const settings = await invoke("get_settings");
+      if (!isCurrent()) return;
+      publishSettings(state, settings);
       // The computer_use master switch is persisted via the dedicated command through
       // prefs (not the update_settings patch); at cold start with no session yet, the
       // persisted value lands first (a session-less computer_use_get_status read fills
@@ -2308,9 +2348,10 @@
         state.computerUse = Object.assign({}, state.computerUse, { enabled: persistedEnabled });
       }
     } catch {
+      if (!isCurrent()) return;
       // Backend unreachable = nothing to judge; fall back to following the
       // system for the color scheme (color_scheme: system).
-      state.settings = { theme: "genesis", color_scheme: "system", language: "zh-Hans" };
+      publishSettings(state, { theme: "genesis", color_scheme: "system", language: "zh-Hans" });
     }
     notify();
   }
@@ -3623,7 +3664,19 @@
     const content = String(text || "").trim();
     if (!sid) throw new Error(bt("targetSessionMissing"));
     if (!content) throw new Error(bt("replyContentEmpty"));
-    const exists = state.sessions.some(function (session) { return String(session.id) === sid; });
+    // 存在性校验双尺子（第七轮评审 P3）：常规路径的目标会话来自后端列表（pet
+    // 回复等），列表命中即可；但**本端刚物化**的会话由 switchActiveTo 直接建
+    // buffer，state.sessions 只在 list_sessions 刷新时更新——物化完立刻发送
+    // （设备管理排查直达）会撞上"列表里还没有它"的窗口而误报目标不存在。
+    // 本地 buffer 即物化事实，放行；下游 getBuffer/排队机制本就按
+    // sessionStates 工作，后端拒绝仍由 doSendFor 的 completion 上报。
+    const exists = state.sessions.some(function (session) { return String(session.id) === sid; })
+      // aux 会话就住 sessionStates（后端刻意把它们过滤在 list_sessions 之外），
+      // 第二把尺子若无条件放行就把 aux-chat 赖以成立的隔离不变量打穿了——
+      // 全工具链的普通发送通道会绕过 auxChatSend 的 restrictTools 直进 aux
+      // 会话（第二十轮评审 P2）。今天没有调用方传 aux id，这里把防线钉回去。
+      || (!auxChatIsAuxSession(sid)
+          && Object.prototype.hasOwnProperty.call(sessionStates.value, sid));
     if (!exists) throw new Error(bt("targetSessionMissing"));
 
     await ensureSessionBufferLoaded(sid);
@@ -4319,7 +4372,7 @@
         swapPct: snap.ram && snap.ram.swap_total_kib > 0 ? Math.round(snap.ram.swap_used_kib / snap.ram.swap_total_kib * 100) : 0,
         vllmModel: vllmDisplayModel,
         vllmHealthStatus: healthStatus,
-        vllmOnline: vllm ? (healthStatus === "verified" && (vllm.status === "ready" || vllm.status === "busy")) : false,
+        vllmOnline: vllm ? ((targetKind === "local" || targetKind === "remote") && healthStatus === "verified" && (vllm.status === "ready" || vllm.status === "busy")) : false,
         // 云端(remote)不做健康探测(无 auth 的 /v1/models 必 401)→ 不显示 OFFLINE。
         // 暴露原始 kind 供前端判定(别比本地化 label)。
         vllmIsRemote: targetKind === "remote",
@@ -4360,27 +4413,42 @@
         notify();
       }
     } catch (e) {
-      state.monitorError = e && e.message ? e.message : String(e || "monitor poll failed");
-      console.warn("monitor poll failed", e);
-      notify();
+      const message = e && e.message ? e.message : String(e || "monitor poll failed");
+      // Same-message guard: the monitor channel polls at 1 Hz, so re-writing
+      // state + notify on every failed tick re-renders the whole App tree each
+      // second while the failure persists (console.warn spams likewise). Mirror
+      // the device channel's discipline: identical consecutive failures stay
+      // silent; only the first failure or a changed message notifies.
+      if (state.monitorError !== message) {
+        state.monitorError = message;
+        console.warn("monitor poll failed", e);
+        notify();
+      }
     } finally {
       monitorPollInFlight.value = false;
     }
   }
 
   // web+tauriSettings 共享
+  let modelConfigurationReadSequence = 0;
   async function loadEffectiveModelConfig(sessionId) {
+    const seq = ++modelConfigurationReadSequence;
     const requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
+    const read = beginModelRead(state, requestedSessionId);
     try {
       const config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
-      // When switching sessions quickly, an older request may return after the new one; never let the old session's config overwrite the current overlay state.
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
+      // 双守卫并存（合并保全双方）：main #2495 的读取序号拦住同会话内的
+      // 迟到响应；本 PR 的 beginModelRead 纪元进一步覆盖会话切换与选择
+      // 变化。任一失配都不得覆盖当前覆盖层状态。
+      if (seq !== modelConfigurationReadSequence || !read.configIsCurrent()) return false;
       state.effectiveModelConfig = config;
     } catch {
-      if ((state.activeSessionId || null) !== requestedSessionId) return;
-      state.effectiveModelConfig = null;
+      if (seq !== modelConfigurationReadSequence || !read.configIsCurrent()) return false;
+      // A transport failure does not replace an authoritative config snapshot.
+      return false;
     }
     notify();
+    return true;
   }
 
   // web+tauriInteraction 共享（FE14 残余批：原 tauri interaction.js / web bridge.js
@@ -5688,6 +5756,8 @@
     },
     // FE14 wave 5：双 lane 共享的桥接状态切片字段注册表（见上方注释）。
     STATE_SLICE_FIELDS,
+    beginModelRead,
+    publishSettings,
     // F-FE13-2：assistant_done 时间线记录构建器（无 deps，静态共享）。
     buildAssistantDoneTimelineRecord,
   });
