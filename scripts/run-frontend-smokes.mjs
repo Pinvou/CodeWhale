@@ -49,7 +49,13 @@ export function commandFor({ kind, target }) {
   throw new Error(`unsupported frontend smoke command kind: ${kind}`);
 }
 
-export function runOnce(item) {
+export function fixtureCommand(executable, args, python, isolateNetwork) {
+  return isolateNetwork
+    ? [python, path.join(repoRoot, 'scripts/ci-browser-network.py'), '--', executable, ...args]
+    : [executable, ...args];
+}
+
+export function runOnce(item, { isolateNetwork = false } = {}) {
   const { executable, args } = commandFor(item);
   process.stdout.write(`\n== ${item.kind}:${item.target} ==\n`);
   return new Promise((resolve, reject) => {
@@ -59,7 +65,7 @@ export function runOnce(item) {
     if (fs.lstatSync(evidence).isSymbolicLink()) throw new Error('fixture receipt directory is a symbolic link');
     const receipt = path.join(evidence, `process-${randomUUID()}.json`);
     const python = process.env.PINVOU_CI_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
-    const child = spawn(python, [path.join(repoRoot, 'scripts/ci-fixture-process.py'), '--receipt', receipt, '--', executable, ...args], {
+    const child = spawn(python, [path.join(repoRoot, 'scripts/ci-fixture-process.py'), '--receipt', receipt, '--', ...fixtureCommand(executable, args, python, isolateNetwork)], {
       cwd: appRoot,
       env: process.env,
       stdio: "inherit",
@@ -82,6 +88,14 @@ export function runOnce(item) {
       if (!clean) {
         reject(Object.assign(new Error(`${item.target} resource retirement was not clean; receipt: ${receipt}`), { cleanupFailed: true, exitCode: code }));
         return;
+      }
+      if (isolateNetwork) {
+        let network;
+        try { network = JSON.parse(fs.readFileSync(path.join(evidence, path.basename(receipt, '.json') + '-resources', 'browser-network.txt'), 'utf8')); } catch {}
+        if (network?.mode !== 'loopback' || network.network === network.parent_network || network.capabilities !== 'none') {
+          reject(Object.assign(new Error(`${item.target} browser network isolation was not confirmed`), { isolationFailed: true, exitCode: code }));
+          return;
+        }
       }
       if (signal) {
         reject(new Error(`${item.target} terminated by ${signal}`));
@@ -118,7 +132,7 @@ export async function runSelected(items, {
         await run(item);
         break;
       } catch (error) {
-        if (attempt >= attempts || error?.exitCode === 2 || error?.cleanupFailed) throw error;
+        if (attempt >= attempts || error?.exitCode === 2 || error?.cleanupFailed || error?.isolationFailed) throw error;
         warn(
           `${item.kind}:${item.target} failed on attempt ${attempt}/${attempts}`
             + ` (${error.message}); retrying once to absorb a transient runner flake`,
@@ -181,6 +195,8 @@ export function selectShard(items, coordinate) {
 
 async function main() {
   const args = process.argv.slice(2);
+  const isolateNetwork = args.at(-1) === '--isolate-network';
+  if (isolateNetwork) args.pop();
   if ((args.length === 1 || (args.length === 3 && args[1] === '--shard'))
       && ['--full', '--selected'].includes(args[0])) {
     const items = args[0] === '--full' ? FULL_FRONTEND_SMOKES : parseSelection(await readStdin());
@@ -198,10 +214,10 @@ async function main() {
       console.log(`Frontend smoke shard ${args[2]}: ${selected.length}/${items.length} selected`);
       if (selected.length === 0) console.log('Explicit empty shard of a valid nonempty global selection');
     }
-    await runSelected(selected);
+    await runSelected(selected, { run: item => runOnce(item, { isolateNetwork }) });
     return;
   }
-  console.error("usage: node scripts/run-frontend-smokes.mjs --full | --selected [--shard INDEX/COUNT]");
+  console.error("usage: node scripts/run-frontend-smokes.mjs --full | --selected [--shard INDEX/COUNT] [--isolate-network]");
   process.exitCode = 2;
 }
 
