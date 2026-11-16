@@ -7128,6 +7128,27 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
+    fn kimi_k31_direct_prepared_request_carries_an_explicit_override_cap() {
+        // Review 5927442709: the resolved-route budget for K3.1 ids is the
+        // documented maximum, so an operator override above the 131,072
+        // default (here 262,144, under the 1M direct-route maximum) must
+        // reach the wire as `max_completion_tokens` rather than being
+        // silently clamped to the family default.
+        let mut direct = json!({
+            "temperature": 0.2,
+        });
+        apply_provider_token_limit(
+            &mut direct,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            "kimi-k3.1-pro",
+            262_144,
+        );
+        assert_eq!(direct["max_completion_tokens"], json!(262_144));
+        assert!(direct.get("max_tokens").is_none());
+    }
+
+    #[test]
     fn direct_and_membership_k3_reasoning_dialects_do_not_cross_routes() {
         let mut membership = json!({});
         apply_route_reasoning_controls(

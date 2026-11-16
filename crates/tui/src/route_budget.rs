@@ -426,8 +426,8 @@ mod tests {
         ] {
             assert_eq!(
                 output_ceiling_source(ApiProvider::Moonshot, model),
-                OutputCeilingSource::Documented(131_072),
-                "{model} must inherit the K3-series documented output ceiling"
+                OutputCeilingSource::Documented(1_048_576),
+                "{model} must publish the K3.1 documented output maximum"
             );
             let cap = effective_max_output_tokens_for_route(ApiProvider::Moonshot, model, None);
             assert_ne!(
@@ -435,15 +435,21 @@ mod tests {
                 "{model} must not take the uncatalogued compat clamp"
             );
         }
+        // The K3.1 output rows publish the family's documented maximum
+        // (1,048,576) while the K3 rows keep the conservative default-sized
+        // ceiling. The provenance diverges; automatic default sizing does
+        // not (both route to the ordinary 64K cap), which is exactly the
+        // separation review 5927442709 asks for: default sizing stays a
+        // request-sizing fact, the ceiling is what clamps overrides.
+        assert_ne!(
+            output_ceiling_source(ApiProvider::Moonshot, "k3.1-pro"),
+            output_ceiling_source(ApiProvider::Moonshot, "k3"),
+            "K3.1 carries the documented maximum, not bare k3's default-sized ceiling"
+        );
         assert_eq!(
             effective_max_output_tokens_for_route(ApiProvider::Moonshot, "k3.1-pro", None),
             effective_max_output_tokens_for_route(ApiProvider::Moonshot, "k3", None),
-            "membership K3.1 must budget identically to bare k3"
-        );
-        assert_eq!(
-            effective_max_output_tokens_for_route(ApiProvider::Moonshot, "kimi-k3.1-pro", None),
-            effective_max_output_tokens_for_route(ApiProvider::Moonshot, "kimi-k3", None),
-            "direct K3.1 must budget identically to kimi-k3"
+            "automatic default sizing stays the ordinary 64K cap for both"
         );
         // Context facts transfer too: the direct series column documents 1M;
         // the membership spellings ride the plan-dependent safe baseline.
@@ -454,6 +460,48 @@ mod tests {
         assert_eq!(
             route_context_window_tokens(ApiProvider::Moonshot, "k3.1-pro", None),
             262_144
+        );
+    }
+
+    #[test]
+    fn kimi_k31_explicit_override_survives_the_direct_route_maximum() {
+        let _env_lock = crate::test_support::lock_test_env();
+        // Review 5927442709: the K3.1 catalogue rows must publish the
+        // family's documented maximum, not its 131,072 default — otherwise
+        // an explicit override larger than the default was clamped to the
+        // default even though the direct route correctly records the 1M
+        // maximum. The resolved-route cap here plus the prepared-request pin
+        // in the client tests cover the chain end to end.
+        let _guard = crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "262144");
+        let limits = RouteLimits {
+            context_tokens: Some(1_048_576),
+            output_tokens: Some(1_048_576),
+            ..RouteLimits::default()
+        };
+        for model in ["kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"] {
+            assert_eq!(
+                effective_max_output_tokens_for_route(ApiProvider::Moonshot, model, Some(limits)),
+                262_144,
+                "{model} must keep the explicit override under the 1M direct-route maximum"
+            );
+        }
+        for model in ["k3.1-pro", "k3.1-pro-highspeed"] {
+            assert_eq!(
+                effective_max_output_tokens_for_route(ApiProvider::Moonshot, model, Some(limits)),
+                262_144,
+                "{model} must keep the explicit override under the reported plan maximum"
+            );
+        }
+        drop(_guard);
+        let _removed = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        assert_eq!(
+            effective_max_output_tokens_for_route(
+                ApiProvider::Moonshot,
+                "kimi-k3.1-pro",
+                Some(limits)
+            ),
+            65_536,
+            "automatic K3.1 requests keep the ordinary 64K default sizing"
         );
     }
 
