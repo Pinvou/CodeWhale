@@ -2583,6 +2583,7 @@ fn kimi_code_loose_route_recognition_covers_both_membership_hosts() {
     for lookalike in [
         "https://api.kimi.com/v1",
         "https://api.kimi.ai/v1",
+        "https://api.kimi.cn/coding/v1",
         "https://kimi.com/coding/v1",
         "http://api.kimi.ai/coding/v1",
         "https://api.example.com/coding/v1",

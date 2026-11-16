@@ -6420,6 +6420,7 @@ mod alias_thinking_detection_tests {
                 ("off", "low"),
                 ("none", "low"),
                 ("low", "low"),
+                ("medium", "high"),
                 ("high", "high"),
                 ("max", "max"),
             ] {
@@ -6690,6 +6691,7 @@ mod alias_thinking_detection_tests {
                     ("off", json!({ "type": "enabled", "effort": "low" })),
                     ("none", json!({ "type": "enabled", "effort": "low" })),
                     ("low", json!({ "type": "enabled", "effort": "low" })),
+                    ("medium", json!({ "type": "enabled", "effort": "high" })),
                     ("high", json!({ "type": "enabled", "effort": "high" })),
                     ("max", json!({ "type": "enabled", "effort": "max" })),
                 ] {
@@ -6843,28 +6845,32 @@ mod alias_thinking_detection_tests {
             crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
             crate::config::MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL,
         ] {
-            let mut direct = json!({
-                "max_tokens": 64,
-                "temperature": 0.2,
-                "top_p": 0.9,
-            });
-            apply_provider_token_limit(
-                &mut direct,
-                ApiProvider::Moonshot,
+            // Both direct-platform hosts ride the same exact-route gate.
+            for base_url in [
                 crate::config::DEFAULT_MOONSHOT_BASE_URL,
-                model,
-                64,
-            );
-            apply_direct_moonshot_k3_fixed_sampling(
-                &mut direct,
-                ApiProvider::Moonshot,
-                crate::config::DEFAULT_MOONSHOT_BASE_URL,
-                model,
-            );
-            assert_eq!(direct["max_completion_tokens"], json!(64), "{model}");
-            assert!(direct.get("max_tokens").is_none(), "{model}");
-            assert!(direct.get("temperature").is_none(), "{model}");
-            assert!(direct.get("top_p").is_none(), "{model}");
+                "https://api.moonshot.cn/v1",
+            ] {
+                let mut direct = json!({
+                    "max_tokens": 64,
+                    "temperature": 0.2,
+                    "top_p": 0.9,
+                });
+                apply_provider_token_limit(&mut direct, ApiProvider::Moonshot, base_url, model, 64);
+                apply_direct_moonshot_k3_fixed_sampling(
+                    &mut direct,
+                    ApiProvider::Moonshot,
+                    base_url,
+                    model,
+                );
+                assert_eq!(
+                    direct["max_completion_tokens"],
+                    json!(64),
+                    "{model} {base_url}"
+                );
+                assert!(direct.get("max_tokens").is_none(), "{model} {base_url}");
+                assert!(direct.get("temperature").is_none(), "{model} {base_url}");
+                assert!(direct.get("top_p").is_none(), "{model} {base_url}");
+            }
         }
 
         let mut neighbor = json!({
@@ -6889,6 +6895,32 @@ mod alias_thinking_detection_tests {
         assert!(neighbor.get("max_completion_tokens").is_none());
         assert_eq!(neighbor["temperature"], json!(0.2));
         assert_eq!(neighbor["top_p"], json!(0.9));
+    }
+
+    /// The membership endpoint keeps the legacy `max_tokens` field for the
+    /// K3.1 family: only the exact direct route switches to
+    /// `max_completion_tokens`, so a predicate swap between the two route
+    /// gates would silently rewrite membership requests to a wire field the
+    /// membership API does not document.
+    #[test]
+    fn kimi_k31_membership_keeps_the_legacy_max_tokens_field() {
+        for model in [
+            crate::config::KIMI_CODE_K31_PRO_MODEL,
+            crate::config::KIMI_CODE_K31_PRO_HIGHSPEED_MODEL,
+        ] {
+            for base_url in [
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                "https://api.kimi.ai/coding/v1",
+            ] {
+                let mut body = json!({ "max_tokens": 64 });
+                apply_provider_token_limit(&mut body, ApiProvider::Moonshot, base_url, model, 64);
+                assert_eq!(body["max_tokens"], json!(64), "{model} {base_url}");
+                assert!(
+                    body.get("max_completion_tokens").is_none(),
+                    "{model} {base_url}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -6940,6 +6972,7 @@ mod alias_thinking_detection_tests {
                 ("off", "low"),
                 ("none", "low"),
                 ("low", "low"),
+                ("medium", "high"),
                 ("high", "high"),
                 ("max", "max"),
             ] {

@@ -10253,6 +10253,12 @@ pub(crate) enum SafeConfigDiagnostic {
 const KIMI_CODE_MEMBERSHIP_ROUTE_GUIDANCE: &str =
     "(api.kimi.com/coding/v1 or api.kimi.ai/coding/v1)";
 
+/// The two official Moonshot direct-platform endpoints, named as one fact for
+/// the same reason: the exact direct gate accepts both hosts, and PROVIDERS.md
+/// documents `api.moonshot.cn/v1` as the pairing China-region keys may need,
+/// so a rejection fired from `.cn` must not mislabel the route as `.ai`.
+const MOONSHOT_DIRECT_ROUTE_GUIDANCE: &str = "(api.moonshot.ai/v1 or api.moonshot.cn/v1)";
+
 /// Fail closed on known-bad model/endpoint pairings (#4687).
 ///
 /// Canonical endpoints reject `k3[1m]` and known membership/direct cross-pairings,
@@ -10297,14 +10303,14 @@ pub(crate) fn validate_kimi_code_api_model_id(
         for membership_id in KIMI_CODE_MEMBERSHIP_MODELS {
             if model.eq_ignore_ascii_case(membership_id) {
                 return Err(format!(
-                    "Moonshot direct route (api.moonshot.ai/v1) does not accept model = \"{model}\": it is a Kimi Code membership model id, not a direct-platform catalog model. Kimi Code membership uses base_url = \"https://api.kimi.com/coding/v1\" (or api.kimi.ai/coding/v1) with model = \"{membership_id}\"; direct Moonshot pay-as-you-go K3 uses model = \"kimi-k3\"."
+                    "Moonshot direct route {MOONSHOT_DIRECT_ROUTE_GUIDANCE} does not accept model = \"{model}\": it is a Kimi Code membership model id, not a direct-platform catalog model. Kimi Code membership uses base_url = \"https://api.kimi.com/coding/v1\" (or api.kimi.ai/coding/v1) with model = \"{membership_id}\"; direct Moonshot pay-as-you-go K3 uses model = \"kimi-k3\"."
                 ));
             }
         }
         for membership_id in KIMI_CODE_K31_MODELS {
             if model.eq_ignore_ascii_case(membership_id) {
                 return Err(format!(
-                    "Moonshot direct route (api.moonshot.ai/v1) does not accept model = \"{model}\": it is a Kimi Code membership model id, not a direct-platform catalog model. Kimi Code membership uses base_url = \"https://api.kimi.com/coding/v1\" (or api.kimi.ai/coding/v1) with model = \"{membership_id}\"; direct Moonshot pay-as-you-go K3.1 uses model = \"kimi-k3.1-pro\"."
+                    "Moonshot direct route {MOONSHOT_DIRECT_ROUTE_GUIDANCE} does not accept model = \"{model}\": it is a Kimi Code membership model id, not a direct-platform catalog model. Kimi Code membership uses base_url = \"https://api.kimi.com/coding/v1\" (or api.kimi.ai/coding/v1) with model = \"{membership_id}\"; direct Moonshot pay-as-you-go K3.1 uses model = \"kimi-k3.1-pro\"."
                 ));
             }
         }
@@ -10372,25 +10378,35 @@ mod kimi_code_pairing_tests {
                 // instead, which only the K3.1 arm emits.
                 assert!(err.contains("membership K3.1 model"), "{err}");
                 assert!(err.contains("api.moonshot.ai/v1"), "{err}");
+                // The membership-route guidance names both official hosts —
+                // the constant exists precisely so the alias cannot drift
+                // out of the error text again.
+                assert!(err.contains("api.kimi.com/coding/v1"), "{err}");
+                assert!(err.contains("api.kimi.ai/coding/v1"), "{err}");
             }
         }
     }
 
     /// Same family symmetry in the other direction: the membership K3.1
-    /// spellings fail closed on the direct platform with the membership
-    /// endpoint named in the guidance.
+    /// spellings fail closed on the direct platform — on both official
+    /// direct hosts — with the membership endpoint named in the guidance and
+    /// the trigger route labeled accurately for the host the user is on
+    /// (China-region `.cn` keys must not be told they are on `.ai`).
     #[test]
     fn membership_k31_ids_fail_on_direct_moonshot_endpoint() {
-        for model in [KIMI_CODE_K31_PRO_MODEL, KIMI_CODE_K31_PRO_HIGHSPEED_MODEL] {
-            let err = validate_kimi_code_api_model_id(
-                ApiProvider::Moonshot,
-                DEFAULT_MOONSHOT_BASE_URL,
-                model,
-            )
-            .expect_err("membership K3.1 ids are not direct-platform catalog models");
-            assert!(err.contains(model), "{err}");
-            assert!(err.contains("api.kimi.com/coding/v1"), "{err}");
-            assert!(err.contains("kimi-k3.1-pro"), "{err}");
+        for base_url in [DEFAULT_MOONSHOT_BASE_URL, "https://api.moonshot.cn/v1"] {
+            for model in [KIMI_CODE_K31_PRO_MODEL, KIMI_CODE_K31_PRO_HIGHSPEED_MODEL] {
+                let err = validate_kimi_code_api_model_id(ApiProvider::Moonshot, base_url, model)
+                    .expect_err("membership K3.1 ids are not direct-platform catalog models");
+                assert!(err.contains(model), "{err}");
+                assert!(err.contains("api.kimi.com/coding/v1"), "{err}");
+                assert!(err.contains("api.kimi.ai/coding/v1"), "{err}");
+                assert!(err.contains("kimi-k3.1-pro"), "{err}");
+                // The route label names both official direct hosts instead of
+                // mislabeling a `.cn` rejection as `.ai`.
+                assert!(err.contains("api.moonshot.ai/v1"), "{err}");
+                assert!(err.contains("api.moonshot.cn/v1"), "{err}");
+            }
         }
     }
 
@@ -10438,6 +10454,8 @@ mod kimi_code_pairing_tests {
         for (base_url, model) in [
             (DEFAULT_MOONSHOT_BASE_URL, KIMI_CODE_K31_PRO_MODEL),
             ("https://gateway.example/v1", KIMI_CODE_K31_PRO_MODEL),
+            // A lookalike Kimi host is not the membership endpoint.
+            ("https://api.kimi.cn/coding/v1", KIMI_CODE_K31_PRO_MODEL),
             (DEFAULT_KIMI_CODE_BASE_URL, "k3.1-pro-preview"),
             (DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_K3_MODEL),
         ] {
@@ -10526,8 +10544,14 @@ pub(crate) fn moonshot_k3_route_display_name(base_url: &str, model: &str) -> Opt
     if is_exact_kimi_code_k3_route(ApiProvider::Moonshot, base_url, model) {
         return Some("Kimi Code membership / k3-256k");
     }
+    if is_kimi_code_k31_route(ApiProvider::Moonshot, base_url, model) {
+        return Some("Kimi Code membership / k3.1");
+    }
     if is_exact_direct_moonshot_k3_route(ApiProvider::Moonshot, base_url, model) {
         return Some("Moonshot direct / kimi-k3");
+    }
+    if is_kimi_k31_on_direct_platform_route(ApiProvider::Moonshot, base_url, model) {
+        return Some("Moonshot direct / kimi-k3.1");
     }
     None
 }

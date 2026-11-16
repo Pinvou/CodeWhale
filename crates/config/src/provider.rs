@@ -2239,6 +2239,8 @@ mod tests {
             "http://api.kimi.ai/coding/v1",
             "https://api.kimi.ai:443/coding/v1",
             "https://api.kimi.ai/coding/v1?preview=1",
+            "https://api.kimi.ai/coding/v1//",
+            "https://api.kimi.cn/coding/v1",
             "https://api.kimi.com/CODING/v1",
             "https://api.kimi.com/coding/V1",
             "http://api.kimi.com/coding/v1",
@@ -2251,6 +2253,31 @@ mod tests {
                 !is_exact_kimi_code_route(ProviderKind::Moonshot, neighboring_route),
                 "{neighboring_route} must not inherit Kimi Code membership semantics"
             );
+        }
+    }
+
+    /// The membership credential guidance on the overseas alias must name
+    /// the alias endpoint, mirroring the primary host's guidance — the
+    /// route scoping and the console referral cannot disagree by host.
+    #[test]
+    fn kimi_code_credential_guidance_covers_both_membership_hosts() {
+        for base_url in [
+            "https://api.kimi.com/coding/v1",
+            "https://api.kimi.ai/coding/v1",
+        ] {
+            let help = credential_help_for_route(ProviderKind::Moonshot, base_url);
+            let guidance = help.guidance;
+            assert_eq!(help.acquisition, CredentialAcquisition::ApiKey);
+            assert_eq!(
+                help.credential_url,
+                Some(KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL)
+            );
+            assert!(
+                guidance.contains(base_url.trim_start_matches("https://")),
+                "{guidance}"
+            );
+            assert!(guidance.contains("api.kimi.com/coding/v1"), "{guidance}");
+            assert!(guidance.contains("api.kimi.ai/coding/v1"), "{guidance}");
         }
     }
 

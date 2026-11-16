@@ -671,15 +671,9 @@ fn plan_limit_overrides(
     // The membership-plan routes: Kimi Code's bare `k3` and the K3.1 family
     // spellings on the exact membership endpoint — plan-tier products, not
     // aliases for Moonshot's public `kimi-k3` catalog entry.
-    let is_membership_plan_route = is_exact_kimi_code_bare_k3_route(
-        provider,
-        &resolved.endpoint().base_url,
-        resolved.wire_model_id().as_str(),
-    ) || is_kimi_code_k31_route(
-        provider,
-        &resolved.endpoint().base_url,
-        resolved.wire_model_id().as_str(),
-    );
+    let is_membership_plan_route =
+        is_exact_kimi_code_bare_k3_route(provider, &resolved.endpoint().base_url, wire_model)
+            || is_kimi_code_k31_route(provider, &resolved.endpoint().base_url, wire_model);
     let now = Utc::now();
     if is_membership_plan_route
         && provider_reported_context.is_some_and(|reported| {
@@ -1673,6 +1667,16 @@ mod tests {
         assert_eq!(
             moonshot_k3_route_display_name(DEFAULT_MOONSHOT_BASE_URL, "kimi-k3"),
             Some("Moonshot direct / kimi-k3")
+        );
+        // The K3.1 family gets its own family labels instead of falling off
+        // the route-header display entirely.
+        assert_eq!(
+            moonshot_k3_route_display_name(DEFAULT_KIMI_CODE_BASE_URL, "k3.1-pro"),
+            Some("Kimi Code membership / k3.1")
+        );
+        assert_eq!(
+            moonshot_k3_route_display_name("https://api.moonshot.cn/v1", "kimi-k3.1-pro"),
+            Some("Moonshot direct / kimi-k3.1")
         );
     }
 
