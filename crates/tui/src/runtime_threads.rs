@@ -7068,38 +7068,6 @@ impl RuntimeThreadManager {
                 "Failed to list turn items after monitor failure for {turn_id}: {err}"
             ),
         }
-        let terminal_turn = {
-            let _turn_mutation = self.store.turn_mutation.lock();
-            match self.store.load_turn(turn_id) {
-                Ok(mut turn) => {
-                    for record in background_usage.records.iter().cloned() {
-                        append_routed_usage_record(&mut turn, &record.source_id, record.usage);
-                    }
-                    turn.routed_usage_dropped_records = turn
-                        .routed_usage_dropped_records
-                        .saturating_add(background_usage.dropped_records);
-                    if turn.status == RuntimeTurnStatus::InProgress {
-                        turn.status = RuntimeTurnStatus::Failed;
-                        turn.ended_at = Some(now);
-                        turn.duration_ms = turn.started_at.map(|start| duration_ms(start, now));
-                        turn.error = Some(reason.to_string());
-                    }
-                    matches!(
-                        turn.status,
-                        RuntimeTurnStatus::Completed
-                            | RuntimeTurnStatus::Failed
-                            | RuntimeTurnStatus::Interrupted
-                            | RuntimeTurnStatus::Canceled
-                    )
-                    .then_some(turn)
-                }
-                Err(err) => {
-                    tracing::error!("Failed to load turn after monitor failure: {err}");
-                    None
-                }
-            }
-        };
-
         for item in terminal_items {
             if let Err(err) = self
                 .emit_event(
@@ -7206,16 +7174,56 @@ impl RuntimeThreadManager {
         // a blocking worker while this projection guard remains held.
         let projection_lock = self.projection_lock(thread_id);
         let _projection = projection_lock.lock().await;
-        let terminal_turn = terminal_turn.and_then(|turn| {
+        let terminal_turn = {
+            // Build the terminal snapshot and save it under one mutation hold,
+            // after the settles above. `load_turn` returns the routed-usage
+            // stage's current form, so a record a still-registered terminal-
+            // turn sink staged while the settles were awaiting rides this
+            // save; a snapshot taken before the settle awaits would be stale
+            // by the time it saved and wipe the staged record while the stage
+            // clears — the same hazard the happy terminal path avoids.
             let _turn_mutation = self.store.turn_mutation.lock();
-            match self.store.save_turn(&turn) {
-                Ok(()) => Some(turn),
+            match self.store.load_turn(turn_id) {
+                Ok(mut turn) => {
+                    for record in background_usage.records.iter().cloned() {
+                        append_routed_usage_record(&mut turn, &record.source_id, record.usage);
+                    }
+                    turn.routed_usage_dropped_records = turn
+                        .routed_usage_dropped_records
+                        .saturating_add(background_usage.dropped_records);
+                    if turn.status == RuntimeTurnStatus::InProgress {
+                        turn.status = RuntimeTurnStatus::Failed;
+                        turn.ended_at = Some(now);
+                        turn.duration_ms = turn.started_at.map(|start| duration_ms(start, now));
+                        turn.error = Some(reason.to_string());
+                    }
+                    let terminal = matches!(
+                        turn.status,
+                        RuntimeTurnStatus::Completed
+                            | RuntimeTurnStatus::Failed
+                            | RuntimeTurnStatus::Interrupted
+                            | RuntimeTurnStatus::Canceled
+                    );
+                    if !terminal {
+                        None
+                    } else {
+                        match self.store.save_turn(&turn) {
+                            Ok(()) => Some(turn),
+                            Err(err) => {
+                                tracing::error!(
+                                    "Failed to persist terminal monitor failure: {err}"
+                                );
+                                None
+                            }
+                        }
+                    }
+                }
                 Err(err) => {
-                    tracing::error!("Failed to persist terminal monitor failure: {err}");
+                    tracing::error!("Failed to load turn after monitor failure: {err}");
                     None
                 }
             }
-        });
+        };
         if let Some(turn) = terminal_turn.as_ref() {
             if user_inputs_settled && dynamic_tools_settled {
                 if let Err(err) = self.emit_turn_completed_if_missing(turn, false).await {
