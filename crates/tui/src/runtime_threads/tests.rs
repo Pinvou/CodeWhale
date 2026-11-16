@@ -3699,6 +3699,125 @@ fn settlement_snapshot_built_after_the_settles_keeps_records_staged_in_the_gap()
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[tokio::test]
+async fn monitor_failure_settlement_carries_records_staged_while_the_settles_await() {
+    let dir = test_runtime_dir();
+    let manager = std::sync::Arc::new(test_manager(dir.clone()).expect("open manager"));
+
+    let mut turn = sample_turn("thr_mf_gap", "turn_mf_gap", RuntimeTurnStatus::InProgress);
+    let item = sample_item(
+        "turn_mf_gap",
+        "item_mf_gap",
+        TurnItemLifecycleStatus::Queued,
+    );
+    turn.item_ids = vec![item.id.clone()];
+    manager.store.save_turn(&turn).expect("persist base turn");
+    manager.store.save_item(&item).expect("persist queued item");
+    manager.register_runtime_usage_sink(&turn.id);
+    // A detached child's lease keeps the sink registered past the settle's
+    // `finish_runtime_usage_owner` (which only retires lease-less sinks) —
+    // that still-registered sink is exactly the mid-gap delivery path under
+    // test. Without a lease the sink would be gone before the settles and
+    // the record would fall back to the journal instead.
+    let _lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("runtime usage lease for the detached child");
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+
+    // Park the settlement inside its first terminal `emit_event` by holding
+    // the event-emit lock: the queued item is terminalized on disk by then,
+    // and the terminal snapshot does not exist yet — the settlement builds it
+    // after the settles, under the same hold that saves. (The ordering this
+    // replaces snapshotted before the item-failure emissions, so a record
+    // staged at this point was wiped by the stale snapshot's save while the
+    // stage cleared.)
+    let emit_gate = manager.event_emit.lock().await;
+    let settler = {
+        let manager = std::sync::Arc::clone(&manager);
+        let thread_id = turn.thread_id.clone();
+        let turn_id = turn.id.clone();
+        tokio::spawn(async move {
+            manager
+                .settle_claimed_turn_failure(&thread_id, &turn_id, "monitor died")
+                .await;
+        })
+    };
+    for _ in 0..200 {
+        assert!(
+            !settler.is_finished(),
+            "the settlement finished without parking on the emit gate"
+        );
+        let terminalized = manager
+            .store
+            .load_item(&item.id)
+            .map(|stored| stored.status == TurnItemLifecycleStatus::Failed)
+            .unwrap_or(false);
+        if terminalized {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !settler.is_finished(),
+        "the settlement must be parked inside the item-failure emit"
+    );
+
+    // A still-registered sink delivers in exactly this gap — through the
+    // production delivery path, as a detached child reporting after the
+    // monitor died would.
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "sink:mid-settle",
+        &route,
+        &Usage {
+            input_tokens: 11,
+            ..Usage::default()
+        },
+    );
+    drop(emit_gate);
+    settler.await.expect("settlement task joins");
+
+    let persisted = manager
+        .store
+        .load_turn(&turn.id)
+        .expect("reload terminal turn");
+    assert_eq!(persisted.status, RuntimeTurnStatus::Failed);
+    assert_eq!(persisted.error.as_deref(), Some("monitor died"));
+    assert_eq!(
+        persisted.routed_usage.len(),
+        1,
+        "a record staged while the settles awaited must ride the terminal save \
+         instead of being wiped by a stale snapshot plus the stage clear"
+    );
+    assert_eq!(persisted.routed_usage[0].usage.input_tokens, 11);
+    assert_eq!(
+        persisted.routed_usage_source_ids,
+        vec![crate::cost_status::usage_source_fingerprint(
+            "sink:mid-settle"
+        )],
+        "the staged record's (fingerprinted) source id must survive the terminal save"
+    );
+    assert!(
+        manager.store.routed_usage_staged.lock().is_empty(),
+        "the stage clears only once the record is durably carried"
+    );
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the sink acknowledged the record, so no journal fallback may exist"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn routed_usage_staging_batches_disk_writes_and_stays_read_coherent() {
     // Raising the routed-usage cap to 2048 with per-record turn-file rewrites
