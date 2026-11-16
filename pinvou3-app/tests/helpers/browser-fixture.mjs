@@ -28,8 +28,9 @@ export async function launchBrowser(launchNative, options = {}, { scope = fixtur
     const nativeClose = browser.close.bind(browser);
     const child = browser.process();
     if (!child) throw new Error('fixture browser process handle is unavailable');
-    // Every owned handle needs an observed close. Exit codes cannot prove
-    // stdio retirement, and an unobserved historical close fails closed.
+    // Every owned handle needs an observed close, even after exit.
+    // exitCode/nativeClose cannot prove stdio retirement; a missed
+    // acknowledgement or unobserved historical close fails closed.
     stop = confirmedChildStopper(child, nativeClose);
     browser.close = release;
     return browser;
