@@ -7,8 +7,9 @@ name: PR Check
 #   compliance linkage + actionlint + Python determinism tests.
 # - merge-authored-audit: complete historical merge-resolution disclosure, independently bounded.
 # - changes:检测本 PR 有没有 Rust 代码、发布契约、L1 harness 或前端改动,给后续 job 做 paths filter。
-# - frontend-test:Draft 跑 lint/build/逻辑测试；Ready PR 与 Merge Queue 按实际
-#   base/head diff 选择浏览器 smoke；未知或共享路径保守执行全部 smoke。
+# - frontend-test:Draft/Ready lint、build、逻辑测试。
+# - frontend-browser-test:Ready PR 与 Merge Queue 按实际 base/head diff 选择
+#   smoke，四个独立 runner job 并行；未知或共享路径保守执行全部 smoke。
 # - account-platform-test: path-aware tests/vet for all Go modules at every stage;
 #   isolated Token financial PostgreSQL contracts are mandatory; real external
 #   issuer/provider/NATS integration remains explicit opt-in.
@@ -316,6 +317,8 @@ jobs:
               - 'scripts/tests/test_account_ci_postgres.py'
               - 'scripts/account-financial-test-durations.json'
               - 'scripts/test-financial-parallel.py'
+              - 'scripts/check-account-financial-ci.py'
+              - 'scripts/tests/test_account_financial_ci.py'
               - 'scripts/tests/test_financial_parallel.py'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
@@ -1180,18 +1183,8 @@ jobs:
   frontend-test:
     name: frontend-test
     needs: changes
-    # 合并原 diff-viewer-test + pet-frontend-test:两者各自 npm ci + build:ui 纯重复,
-    # pet 跑 npm test(链尾含 test:diff-parser)与 diff-viewer 的 test:diff-parser 也重复,
-    # 且 pet 缺 lint:ui。统一为一个 job 后:依赖/build 各装一次、lint 全覆盖。
-    # Draft runs lint/build/logic tests. Ready PRs and merge groups select browser
-    # smokes from their actual base/head diff. Shared, unknown, test-infrastructure,
-    # and empty diffs fail closed to the complete smoke set. Each selected smoke is
-    # retried once to absorb transient hosted-runner flakes. The full selection
-    # can outlast 35 minutes without any retry since the account-platform suite
-    # joined the complete set (measured 2026-11-05: ~19 min setup + ~34 min smoke,
-    # killed at the 45-minute budget before retirement); leave time for setup, a
-    # complete pass and one largest-smoke retry while retaining a bounded job
-    # lifetime.
+    # Draft/Ready quality, builds and logic. Ready/queue browser smokes run
+    # independently below, without waiting for this job's ~17-minute logic suite.
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
@@ -1313,6 +1306,96 @@ jobs:
           grep -Fxq '# fail 0' "$report"
           grep -Fxq '# skipped 0' "$report"
 
+      - name: Confirm test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        run: python3 ../scripts/ci-resource-ledger.py --recover
+
+      - name: Test resource lifecycle receipts
+        id: frontend_receipts_upload
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        # Diagnostic transport must not stall always-run cleanup or change test results.
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-resource-lifecycle-${{ github.run_attempt }}
+          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when frontend diagnostic delivery fails
+        if: ${{ always() && steps.frontend_receipts_upload.outcome == 'failure' }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original receipts remain on the runner. Tests and resource retirement remain mandatory.'
+
+  frontend-browser-test:
+    name: frontend-browser-test (${{ matrix.shard }})
+    needs: changes
+    # Each shard installs/builds its own tested tree and owns its fixtures.
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [1, 2, 3, 4]
+    defaults:
+      run:
+        working-directory: pinvou3-app
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Set up zram and swap
+        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
+        # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+
+      - name: Initialize owned test resource ledger
+        run: python3 ../scripts/ci-resource-ledger.py --init
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-path: |
+            pinvou3-app/package-lock.json
+            remote-control-relay/package-lock.json
+            account-platform/package-lock.json
+
+      - name: 安装前端依赖
+        run: npm ci --prefer-offline --no-audit
+
+      # The Node probe imports AP schema tooling before any browser skip.
+      - name: Install Account Platform probe dependencies
+        run: npm --prefix ../account-platform ci --ignore-scripts --prefer-offline --no-audit
+
+      # test:webui smoke (本 job 末尾) 会 spawn remote-control-relay/server.js,
+      # 其顶层 require('ws') 解析自 remote-control-relay/node_modules,故必须装 relay 依赖。
+      - name: 安装 Remote relay 依赖 (供 test:webui smoke)
+        if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
+        run: npm --prefix ../remote-control-relay ci --prefer-offline --no-audit
+
+      - name: Vite build
+        run: npm run build:ui
+
+      - name: Verify embedded Account Portal assets are current
+        run: |
+          npm run build:account-portal
+          git diff --exit-code -- ../account-platform/internal/portal/static
+          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
+
+      - name: Vite web build (remote relay)
+        run: npm run build:web
+
+      - name: 准备浏览器
+        if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
+        run: |
+          chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          test -n "$chrome"
+          echo "CHROME=$chrome" >> "$GITHUB_ENV"
+
       # The runner retries each selected smoke once so a transient runner
       # flake (headless Chrome missing its 30 s DevTools-endpoint launch
       # window) cannot evict a healthy PR from the merge queue; it fails
@@ -1339,7 +1422,7 @@ jobs:
           test -z "$extra"
           git diff --name-only "$base" "$TESTED_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
-            | node ../scripts/run-frontend-smokes.mjs --selected
+            | node ../scripts/run-frontend-smokes.mjs --selected --shard "${{ matrix.shard }}/4"
 
       - name: Merge Queue diff-selected browser smoke
         if: ${{ github.event_name == 'merge_group' }}
@@ -1349,29 +1432,30 @@ jobs:
           # Same dist reuse as the PR smoke step above.
           PINVOU_WEBUI_SKIP_BUILD: "1"
         run: |
+          set -euo pipefail
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
-            | node ../scripts/run-frontend-smokes.mjs --selected
+            | node ../scripts/run-frontend-smokes.mjs --selected --shard "${{ matrix.shard }}/4"
 
       - name: Confirm test resource retirement
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         run: python3 ../scripts/ci-resource-ledger.py --recover
 
-      - name: Test resource lifecycle receipts
-        id: frontend_receipts_upload
+      - name: Browser shard resource lifecycle receipts
+        id: browser_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         # Diagnostic transport must not stall always-run cleanup or change test results.
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: frontend-resource-lifecycle-${{ github.run_attempt }}
+          name: frontend-browser-${{ matrix.shard }}-resource-lifecycle-${{ github.run_attempt }}
           path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
           if-no-files-found: error
           retention-days: 7
 
-      - name: Warn when frontend diagnostic delivery fails
-        if: ${{ always() && steps.frontend_receipts_upload.outcome == 'failure' }}
+      - name: Warn when browser shard diagnostic delivery fails
+        if: ${{ always() && steps.browser_receipts_upload.outcome == 'failure' }}
         run: echo '::warning::Diagnostic upload failed or timed out; original receipts remain on the runner. Tests and resource retirement remain mandatory.'
 
   relay-test:
@@ -1427,6 +1511,133 @@ jobs:
           bash -n scripts/deploy-remote-relay-test.sh
           npm --prefix remote-control-relay test
 
+  account-financial-test:
+    name: account-financial-test (${{ matrix.group }})
+    needs: changes
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'account-financial-test')) }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        group: [owners, token, billing-0, billing-1, billing-2, billing-3]
+    services:
+      financial-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize owned test resource ledger
+        run: python3 scripts/ci-resource-ledger.py --init --docker
+
+      - name: Set up zram and swap
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
+
+      - name: Go toolchain
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: account-platform/go.mod
+          cache-dependency-path: account-platform/**/go.sum
+          cache: ${{ runner.environment == 'github-hosted' }}
+
+      - name: Verify complete financial CI group selection
+        run: |
+          set -euo pipefail
+          python3 scripts/check-account-financial-ci.py
+
+      - name: Node.js for financial contract consumers
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
+
+      - name: Install financial contract dependencies
+        working-directory: account-platform
+        run: npm ci --ignore-scripts --prefer-offline --no-audit
+
+      - name: Verify financial contract Node consumers
+        working-directory: account-platform
+        run: node --input-type=module -e "await import('./test/fixtures/approval-recovery-validator.mjs'); await import('./test/fixtures/financial-event-validator.mjs')"
+
+      - name: Install PostgreSQL client
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          command -v psql
+
+      - name: Verify account CI PostgreSQL service isolation
+        id: account-pg
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: |
+          set -euo pipefail
+          python3 scripts/account-ci-postgres.py --profile financial
+
+      - name: Run isolated financial group
+        shell: bash
+        env:
+          ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}
+          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP"
+
+      - name: Stop owned temporary PostgreSQL services
+        if: ${{ always() }}
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: |
+          python3 scripts/account-ci-postgres.py --profile financial --stop-owned-services
+
+      - name: Confirm Account test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-resource-ledger.py --recover --directory "$PINVOU_CI_RESOURCE_LEDGER"
+
+      - name: Financial group lifecycle receipts
+        id: financial_receipts_upload
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}
+          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when Account diagnostic delivery fails
+        if: ${{ always() && steps.financial_receipts_upload.outcome == 'failure' }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original logs and receipts remain on the runner. Tests and resource retirement remain mandatory.'
+
   account-platform-test:
     name: account-platform-test
     needs: changes
@@ -1434,8 +1645,7 @@ jobs:
     # backflow exemption may suppress this independently deployable module.
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'account-platform-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    # Six independent financial workers can use the heavy runner's CPU.
-    # Preserve every worker's original limits and the finite overall budget.
+    # Nonfinancial contracts retain their original tools and isolated services.
     timeout-minutes: 180
     services:
       audit-export-postgres:
@@ -1463,114 +1673,6 @@ jobs:
           - "127.0.0.1::5432"
         options: >-
           --rm
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      financial-postgres:
-        # Same immutable PostgreSQL image already used by team-relay-hub-test.
-        # Disposable runner only; trust is never a deployment configuration.
-        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_DB: postgres
-        ports:
-          - "127.0.0.1::5432"
-        options: >-
-          --rm
-          --cpus 2
-          --memory 1g
-          --memory-swap 1g
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      financial-token-postgres:
-        # Same immutable PostgreSQL image already used by team-relay-hub-test.
-        # Disposable runner only; trust is never a deployment configuration.
-        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_DB: postgres
-        ports:
-          - "127.0.0.1::5432"
-        options: >-
-          --rm
-          --cpus 2
-          --memory 1g
-          --memory-swap 1g
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      financial-billing-0-postgres:
-        # Same immutable PostgreSQL image already used by team-relay-hub-test.
-        # Disposable runner only; trust is never a deployment configuration.
-        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_DB: postgres
-        ports:
-          - "127.0.0.1::5432"
-        options: >-
-          --rm
-          --cpus 2
-          --memory 1g
-          --memory-swap 1g
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      financial-billing-1-postgres:
-        # Same immutable PostgreSQL image already used by team-relay-hub-test.
-        # Disposable runner only; trust is never a deployment configuration.
-        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_DB: postgres
-        ports:
-          - "127.0.0.1::5432"
-        options: >-
-          --rm
-          --cpus 2
-          --memory 1g
-          --memory-swap 1g
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      financial-billing-2-postgres:
-        # Same immutable PostgreSQL image already used by team-relay-hub-test.
-        # Disposable runner only; trust is never a deployment configuration.
-        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_DB: postgres
-        ports:
-          - "127.0.0.1::5432"
-        options: >-
-          --rm
-          --cpus 2
-          --memory 1g
-          --memory-swap 1g
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      financial-billing-3-postgres:
-        # Same immutable PostgreSQL image already used by team-relay-hub-test.
-        # Disposable runner only; trust is never a deployment configuration.
-        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_DB: postgres
-        ports:
-          - "127.0.0.1::5432"
-        options: >-
-          --rm
-          --cpus 2
-          --memory 1g
-          --memory-swap 1g
           --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
@@ -1778,7 +1880,7 @@ jobs:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
           python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py
-          python3 scripts/account-ci-postgres.py
+          python3 scripts/account-ci-postgres.py --profile core
 
       - name: Test and vet all Account Platform Go modules
         shell: bash
@@ -1878,37 +1980,29 @@ jobs:
                   cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
                   assert cases == {"retained-link-refuses-down-without-fact-or-schema-loss", "forward-upgrade-replays-original-and-accepts-next-command"}, "retained invitation rollback cases did not execute"
           PY
-      - name: Token financial contracts on isolated PostgreSQL
+      - name: Python for financial runner policy regressions
+        id: financial-policy-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          update-environment: false
+
+      - name: Financial runner policy regressions
         shell: bash
-        env:
-          ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
           python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
-          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-financial-parallel.py
-
-
-      - name: Financial parallel diagnostics
-        id: financial_diagnostics_upload
-        if: ${{ always() }}
-        timeout-minutes: 3
-        # Diagnostic transport must not invalidate the completed test verdict.
-        # The preceding contract/test steps and required-gate remain strict.
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
-        with:
-          name: account-financial-parallel-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/financial-parallel-*/
-          if-no-files-found: ignore
-          retention-days: 7
+          policy_python="${{ steps.financial-policy-python.outputs.python-path }}"
+          policy_library="$(dirname "$(dirname "$policy_python")")/lib"
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-policy-process.json" -- env "LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$policy_python" -m unittest discover -s scripts/tests -p test_account_financial_ci.py
 
       - name: Stop owned temporary PostgreSQL services
         if: ${{ always() }}
         env:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
-          python3 scripts/account-ci-postgres.py --stop-owned-services
+          python3 scripts/account-ci-postgres.py --profile core --stop-owned-services
 
       - name: Confirm Account test resource retirement
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -1936,7 +2030,7 @@ jobs:
           retention-days: 7
 
       - name: Warn when Account diagnostic delivery fails
-        if: ${{ always() && (steps.financial_diagnostics_upload.outcome == 'failure' || steps.account_receipts_upload.outcome == 'failure') }}
+        if: ${{ always() && steps.account_receipts_upload.outcome == 'failure' }}
         run: echo '::warning::Diagnostic upload failed or timed out; original logs and receipts remain on the runner. Tests and resource retirement remain mandatory.'
 
   account-closure-test:
@@ -5134,8 +5228,10 @@ jobs:
       - fast-gate
       - merge-authored-audit
       - frontend-test
+      - frontend-browser-test
       - relay-test
       - account-platform-test
+      - account-financial-test
       - account-closure-test
       - windows-relay-dacl
       - windows-relay-tools-test
@@ -5178,8 +5274,12 @@ jobs:
           CI_REUSE_VERIFIED: ${{ needs.changes.outputs.reuse_verified }}
           CI_REUSE_IDS: ${{ join(fromJSON(needs.changes.outputs.reused_jobs || '[]'), ',') }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
+          FRONTEND_BROWSER_RESULT: ${{ needs.frontend-browser-test.result }}
+          FRONTEND_REQUIRED: ${{ needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}
+          FRONTEND_BROWSER_REQUIRED: ${{ needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') && (github.event_name == 'merge_group' || github.event.pull_request.draft == false) }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
           ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
+          ACCOUNT_FINANCIAL_RESULT: ${{ needs.account-financial-test.result }}
           CLOSURE_REUSE_VERIFIED: ${{ github.event_name == 'merge_group' && fromJSON(toJSON(needs.changes.outputs)).reuse_verified == 'true' && contains(fromJSON(fromJSON(toJSON(needs.changes.outputs)).reused_jobs || '[]'), 'account-closure-test') }}
           ACCOUNT_CLOSURE_RESULT: ${{ needs.account-closure-test.result }}
           ACCOUNT_PLATFORM_REQUIRED: ${{ needs.changes.outputs.account_platform }}
@@ -5215,8 +5315,10 @@ jobs:
             for binding in \
               "version-consistency:VERSION_CONSISTENCY_RESULT" \
               "frontend-test:FRONTEND_RESULT" \
+              "frontend-browser-test:FRONTEND_BROWSER_RESULT" \
               "relay-test:RELAY_RESULT" \
               "account-platform-test:ACCOUNT_PLATFORM_RESULT" \
+              "account-financial-test:ACCOUNT_FINANCIAL_RESULT" \
               "windows-relay-dacl:WINDOWS_RELAY_DACL_RESULT" \
               "windows-relay-tools-test:WINDOWS_RELAY_RESULT" \
               "team-relay-hub-test:TEAM_RELAY_HUB_RESULT" \
@@ -5263,8 +5365,22 @@ jobs:
             exit 1
           fi
 
+          if [[ "$FRONTEND_REQUIRED" == true && "$FRONTEND_RESULT" != success ]]; then
+            echo "Applicable frontend quality/logic checks did not pass: $FRONTEND_RESULT" >&2
+            exit 1
+          fi
+          if [[ "$FRONTEND_BROWSER_REQUIRED" == true && "$FRONTEND_BROWSER_RESULT" != success ]]; then
+            echo "Applicable frontend browser shards did not all pass: $FRONTEND_BROWSER_RESULT" >&2
+            exit 1
+          fi
+
           if [[ "$ACCOUNT_PLATFORM_REQUIRED" == "true" && "$ACCOUNT_PLATFORM_RESULT" != success ]]; then
             echo "Required Account Platform Go/closure gates did not pass: account=$ACCOUNT_PLATFORM_RESULT closure=$ACCOUNT_CLOSURE_RESULT" >&2
+            exit 1
+          fi
+
+          if [[ "$ACCOUNT_PLATFORM_REQUIRED" == "true" && "$ACCOUNT_FINANCIAL_RESULT" != success ]]; then
+            echo "Required financial CI groups did not all pass: $ACCOUNT_FINANCIAL_RESULT" >&2
             exit 1
           fi
 
@@ -5292,8 +5408,10 @@ jobs:
           for item in \
             "backflow-portability:$BACKFLOW_PORTABILITY_RESULT" \
             "frontend-test:$FRONTEND_RESULT" \
+            "frontend-browser-test:$FRONTEND_BROWSER_RESULT" \
             "relay-test:$RELAY_RESULT" \
             "account-platform-test:$ACCOUNT_PLATFORM_RESULT" \
+            "account-financial-test:$ACCOUNT_FINANCIAL_RESULT" \
             "account-closure-test:$ACCOUNT_CLOSURE_RESULT" \
             "windows-relay-dacl:$WINDOWS_RELAY_DACL_RESULT" \
             "windows-relay-tools-test:$WINDOWS_RELAY_RESULT" \

@@ -258,7 +258,6 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
     backendOnline: null, // null=checking, true, false
     platformCapabilities: {
       loaded: false,
-      os: "unknown",
       desktopRemoteControl: false,
       showMegacubeSite: false,
       showSuperPermissionSettings: false,
@@ -2875,6 +2874,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       attachmentBegin: desktopRemoteControlFeature.attachmentBegin,
       attachmentChunk: desktopRemoteControlFeature.attachmentChunk,
       attachmentAbort: desktopRemoteControlFeature.attachmentAbort,
+      attachmentAbortConfirmed: desktopRemoteControlFeature.attachmentAbortConfirmed,
       artifactIndex: desktopRemoteControlFeature.artifactIndex,
       artifactPreview: desktopRemoteControlFeature.artifactPreview,
       artifactDownloadBegin: desktopRemoteControlFeature.artifactDownloadBegin,
