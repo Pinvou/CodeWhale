@@ -247,6 +247,7 @@ func protectedMigrationDomain(version int64, name, checksum string) string {
 		version        int64
 		name, checksum string
 	}{
+		{"billing", 17, "approval_execution", "f4d6ad26e66ab16e8c030adf5b3f22246459c2d4d844116fe50e57d537631b11"},
 		{"token", 31, "token_command_governance_activation", "d957f8cac9de3566b1e30ab286458f80e78acd2cc9d61917e3367a0c8280ee16"},
 		{"account", 32, "audit_export_protection", "d60a688ed9ee49014725543dbe458ac4386940033f09549877491f8f835be5ad"},
 		{"account", 900001, "first_delivery_permission_metadata", "b14cb9c2e538d20ec869458940d60867090549c027f439ed199d703ef3e7f45d"},
