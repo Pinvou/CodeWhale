@@ -1168,10 +1168,20 @@ class CiGatePolicyTests(unittest.TestCase):
             self.assertIn('node-version: "24"', job)
             if job_name == "frontend-test":
                 self.assertIn("working-directory: pinvou3-app", job)
-                install = _step_named(job, "安装前端依赖")
+                # Setup 工件化(2026-11-16 调查:setup ×5 重复 → ×1):依赖安装
+                # 在 frontend-setup 一次完成,frontend-test 经 needs 消费其工件。
+                # 双向钉住防解线:消费方必须 needs frontend-setup,安装步必须
+                # 无条件存在于 frontend-setup(原「安装先于 npm test」的次序
+                # 契约由 needs 边结构性保证)。
+                self.assertRegex(job, r"(?m)^    needs: \[changes, frontend-setup\]$")
+                setup_job = _without_inline_comments(
+                    _extract_job_block(self.pr_workflow, "frontend-setup")
+                )
+                self.assertIn("working-directory: pinvou3-app", setup_job)
+                install = _step_named(setup_job, "安装前端依赖")
                 self.assertIn("run: npm ci --prefer-offline --no-audit", install)
                 self.assertNotRegex(install, r"(?m)^        (?:if|continue-on-error):")
-                self.assertLess(job.index(install), job.index(step))
+                self.assertLess(setup_job.index(install), setup_job.index("npm run build:ui"))
                 for name in ("personal", "models", "invocation"):
                     source = f"account-platform/deploy/production/compose.{name}.yaml"
                     self.assertIn(source, entries)
@@ -1481,7 +1491,7 @@ python3() { fixture_mock python3 "$@"; }
         )
         self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/admin.html", paths))
         self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/assets/admin.js", paths))
-        frontend = self.pr_workflow.split("\n  frontend-test:", maxsplit=1)[1].split(
+        frontend = self.pr_workflow.split("\n  frontend-setup:", maxsplit=1)[1].split(
             "\n  relay-test:", maxsplit=1
         )[0]
         gate = frontend.split("      - name: Verify embedded Account Portal assets are current", maxsplit=1)[1].split(

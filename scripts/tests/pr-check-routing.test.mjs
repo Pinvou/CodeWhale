@@ -1198,14 +1198,21 @@ test("required-gate rejects skipped applicable Go checks and permits unrelated s
 
 test('frontend shards are independently scheduled only on applicable Ready and queue trees', () => {
   const browser = jobBlock('frontend-browser-test');
-  assert.match(browser, /^    needs: changes$/m);
+  // Setup 工件化:分片经 needs 消费 frontend-setup 的单次构建,仍必须挂在
+  // changes 路由上(否则无前端改动的 PR 会拉起浏览器腿)。
+  assert.match(browser, /^    needs: \[changes, frontend-setup\]$/m);
+  assert.match(jobBlock('frontend-setup'), /^    needs: changes$/m);
   assert.match(browser, /^      fail-fast: false$/m);
   assert.match(browser, /^      max-parallel: 4$/m);
   assert.match(browser, /^        shard: \[1, 2, 3, 4\]$/m);
   assert.doesNotMatch(browser, /--receipt.*frontend-logic|-- npm test/);
   assert.doesNotMatch(jobBlock('frontend-test'), /run-frontend-smokes\.mjs/);
-  for (const name of ['Vite build', 'Vite web build (remote relay)', 'Verify embedded Account Portal assets are current',
-    'Initialize owned test resource ledger', 'Confirm test resource retirement']) namedStep(browser, name);
+  // 构建/安装步只允许出现在 frontend-setup(setup ×5 → ×1),分片内不得回流。
+  for (const name of ['Vite build', 'Vite web build (remote relay)', 'Verify embedded Account Portal assets are current']) {
+    namedStep(jobBlock('frontend-setup'), name);
+    assert.throws(() => namedStep(browser, name));
+  }
+  for (const name of ['Initialize owned test resource ledger', 'Confirm test resource retirement']) namedStep(browser, name);
   for (const name of ['Ready PR 定向浏览器 smoke', 'Merge Queue diff-selected browser smoke']) {
     const run = stepRun(browser, name);
     assert.match(run, /^set -euo pipefail$/m);
@@ -1317,7 +1324,7 @@ test("MCP checks are selected by their inputs and fail closed on unknown routing
     ".github/workflows/pr-check.yml",
   ]) assert.ok(paths.includes(input), `MCP input ${input} must select its tests`);
 
-  const job = workflow.split("\n  fast-gate:")[1].split("\n  frontend-test:")[0];
+  const job = workflow.split("\n  fast-gate:")[1].split("\n  frontend-setup:")[0];
   assert.doesNotMatch(job, /\n    needs: changes\s*\n/);
   const condition = "steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000))";
   for (const name of [
@@ -1522,17 +1529,23 @@ const frontendProbeInstallStep = "Install Account Platform probe dependencies";
 const frontendLogicStep = "前端逻辑测试 (pet 全套 + diff parser + markdown)";
 
 function assertFrontendProbeDependencies(text) {
-  const job = jobBlock("frontend-test", text).replaceAll("\r\n", "\n");
+  // Setup 工件化:AP probe 依赖安装与三次构建在 frontend-setup 一次完成;
+  // frontend-test 经 needs 消费其工件,原「安装先于 npm test」契约由 needs
+  // 边结构性保证,这里钉住安装步无条件存在 + 消费方 needs 解线。
+  const job = jobBlock("frontend-setup", text).replaceAll("\r\n", "\n");
   assert.match(job, /^ {8}working-directory: pinvou3-app$/m);
   const install = namedStep(job, frontendProbeInstallStep);
   assert.match(install, /^ {8}run: npm --prefix \.\.\/account-platform ci --ignore-scripts --prefer-offline --no-audit$/m);
   assert.doesNotMatch(install, /^ {8}(?:if|continue-on-error|working-directory):/m,
     "The logic test loads AP dependencies on Draft too, in the inherited app cwd");
-  assert.ok(job.indexOf(install) < job.indexOf(namedStep(job, frontendLogicStep)),
-    "AP tools must be installed before npm test module discovery");
+  assert.ok(job.indexOf(install) < job.indexOf("- name: Vite build"),
+    "AP tools must be installed before the bundle is packed");
   const setup = job.match(/^ {6}- uses: actions\/setup-node@\S+\n[\s\S]*?(?=^ {6}- |$(?![\s\S]))/m);
   assert.ok(setup, "frontend setup-node block not found");
   assert.match(setup[0], /^ {12}account-platform\/package-lock\.json$/m);
+  const consumer = jobBlock("frontend-test", text).replaceAll("\r\n", "\n");
+  assert.match(consumer, /^ {4}needs: \[changes, frontend-setup\]$/m);
+  namedStep(consumer, frontendLogicStep);
   const paths = filterPaths(text, "frontend");
   for (const path of frontendProbeDependencyPaths) {
     assert.ok(paths.includes(path), `${path} must route the frontend module-loading gate`);
@@ -1544,7 +1557,8 @@ test("frontend probe tool dependencies are installed before logic tests on Draft
 });
 
 test("frontend probe dependency guard rejects incomplete or conditional installation and missing imports", () => {
-  const job = jobBlock("frontend-test");
+  // Setup 工件化:安装步已随三次 build 迁入 frontend-setup,变异面同步迁移。
+  const job = jobBlock("frontend-setup");
   const install = namedStep(job, frontendProbeInstallStep);
   const variants = [
     job.replace(install, ""),
@@ -1589,7 +1603,9 @@ function assertAccountPlatformInputChecks(text) {
   assert.deepEqual(stepRun(account, generatedInputsStep).trim().split(/\r?\n/), [
     "set -euo pipefail", `node ${handoffGenerator} --check`, `node ${documentBaselineChecker}`,
   ]);
-  const frontend = jobBlock("frontend-test", text);
+  // Setup 工件化:Portal build 与 handoff 部署边界检查随构建迁入 frontend-setup
+  // (build:account-portal 只跑一次,检查紧随其后);次序契约保持不变。
+  const frontend = jobBlock("frontend-setup", text);
   const deployment = namedStep(frontend, handoffDeploymentStep);
   assert.match(deployment, /^ {8}shell: bash$/m);
   assert.doesNotMatch(deployment, /^ {8}(?:if|continue-on-error|working-directory|env):/m);
@@ -1619,7 +1635,8 @@ test("Account Platform generator/checker inputs reach exact applicable CI legs",
 test("Account Platform generator/checker CI guard rejects old routes and bypassed checks", () => {
   assertAccountPlatformInputChecks(workflow);
   const account = jobBlock("account-platform-test");
-  const frontend = jobBlock("frontend-test");
+  // Setup 工件化:变异面与 assertAccountPlatformInputChecks 同步迁到 frontend-setup。
+  const frontend = jobBlock("frontend-setup");
   const generated = namedStep(account, generatedInputsStep);
   const deployment = namedStep(frontend, handoffDeploymentStep);
   const portalBuild = namedStep(frontend, "Verify embedded Account Portal assets are current");
@@ -1680,10 +1697,10 @@ test("Account Platform generator/checker steps run real inputs and propagate fai
     put("account-platform/docs/requirements.md", "售价为 10 元\n");
     const catalog = execute("account-platform-test", generatedInputsStep);
     assert.equal(catalog.status, 1); assert.match(catalog.stderr, /baseline contains runtime catalog facts/);
-    const cleanDeployment = execute("frontend-test", handoffDeploymentStep, join(directory, "pinvou3-app"));
+    const cleanDeployment = execute("frontend-setup", handoffDeploymentStep, join(directory, "pinvou3-app"));
     assert.equal(cleanDeployment.status, 0, cleanDeployment.stderr);
     put("account-platform/internal/portal/static/unsafe.js", "navigator.serviceWorker.register('/controlled-worker.js');\n");
-    const worker = execute("frontend-test", handoffDeploymentStep, join(directory, "pinvou3-app"));
+    const worker = execute("frontend-setup", handoffDeploymentStep, join(directory, "pinvou3-app"));
     assert.equal(worker.status, 1); assert.match(worker.stderr, /Service Worker registration may cover/);
   } finally {
     assert.ok(directory.startsWith(join(tmpdir(), "pinvou-generated-ci-")));
