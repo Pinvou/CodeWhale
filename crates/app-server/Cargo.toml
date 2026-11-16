@@ -12,7 +12,6 @@ autobins = false
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
-clap.workspace = true
 codewhale-agent = { path = "../agent", version = "0.9.1" }
 codewhale-config = { path = "../config", version = "0.9.1" }
 codewhale-core = { path = "../core", version = "0.9.1" }
