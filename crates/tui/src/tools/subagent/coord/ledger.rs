@@ -119,14 +119,9 @@ impl WriteScopeClaim {
                 return true;
             }
         }
-        if self
-            .contracts
+        self.contracts
             .iter()
             .any(|contract| other.contracts.iter().any(|other| other == contract))
-        {
-            return true;
-        }
-        false
     }
 
     #[must_use]
