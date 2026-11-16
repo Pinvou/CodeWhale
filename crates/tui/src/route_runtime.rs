@@ -13,6 +13,7 @@ use crate::config::{
     ProviderIdentity, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_bare_k3_route,
     validate_kimi_code_api_model_id,
 };
+use crate::error_taxonomy::ErrorEnvelope;
 use crate::models::DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS;
 
 /// Why a route is using its effective context-window value.  Keep this
@@ -248,12 +249,25 @@ impl ResolvedRuntimeRoute {
         Ok(self)
     }
 
-    pub(crate) fn validate(mut self) -> Result<ValidatedRuntimeRoute, String> {
+    pub(crate) fn validate(self) -> Result<ValidatedRuntimeRoute, String> {
+        self.validate_with_error_envelope()
+            .map_err(|error| error.message)
+    }
+
+    pub(crate) fn validate_with_error_envelope(
+        mut self,
+    ) -> Result<ValidatedRuntimeRoute, ErrorEnvelope> {
         let client = match self.preflighted_client.take() {
             Some(client) => client,
             None => {
                 DeepSeekClient::from_candidate(&self.config, &self.candidate).map_err(|err| {
-                    format_provider_route_preflight_error(&self.identity.key, &self.model, &err)
+                    let mut envelope = ErrorEnvelope::from_client_setup_error(&err);
+                    envelope.message = format_provider_route_preflight_error(
+                        &self.identity.key,
+                        &self.model,
+                        &err,
+                    );
+                    envelope
                 })?
             }
         };

@@ -254,6 +254,11 @@ pub struct DeepSeekClient {
     /// stream-header fallback when H2 stalls. Same auth and headers.
     pub(super) http1_client: reqwest::Client,
     request_idempotency_header: Option<HeaderName>,
+    // Configured route metadata for matching vision calls. Transport policies
+    // remain on each client's own builder and are never borrowed from here.
+    matching_vision_headers: HeaderMap,
+    // Host capability travels with cloned/rebound clients to child registries.
+    vision_http_policy: Option<Arc<dyn crate::config::ModelHttpPolicy>>,
     operation_id: Option<uuid::Uuid>,
     // In-memory only: includes frozen auth/context headers without exposing
     // their values in receipts, logs, prompts, or persisted session state.
@@ -590,6 +595,8 @@ impl Clone for DeepSeekClient {
             http_client: self.http_client.clone(),
             http1_client: self.http1_client.clone(),
             request_idempotency_header: self.request_idempotency_header.clone(),
+            matching_vision_headers: self.matching_vision_headers.clone(),
+            vision_http_policy: self.vision_http_policy.clone(),
             operation_id: self.operation_id,
             operation_route_identity: self.operation_route_identity.clone(),
             api_key: self.api_key.clone(),
@@ -1096,7 +1103,7 @@ fn build_speech_synthesis_body(
 
 /// Returns true when CODEWHALE_FORCE_HTTP1 (legacy alias: DEEPSEEK_FORCE_HTTP1)
 /// is set to a truthy value (`1`, `true`, `yes`, `on`, case-insensitive). Used
-/// by `build_http_client` to opt out of HTTP/2 entirely when a provider's edge
+/// by `DeepSeekClient` construction to opt out of HTTP/2 when a provider's edge
 /// mishandles long-lived H2 streams (#103). Anything else (unset, `0`,
 /// `false`, ...) leaves HTTP/2 on.
 pub(crate) fn force_http1_from_env() -> bool {
@@ -1126,27 +1133,65 @@ fn add_extra_root_certs(
         }
     };
 
-    if let Ok(certs) = reqwest::Certificate::from_pem_bundle(&bytes) {
-        let added = certs.len();
-        for cert in certs {
-            builder = builder.add_root_certificate(cert);
-        }
-        logging::info(format!(
-            "SSL_CERT_FILE={cert_path} loaded ({added} cert(s))"
-        ));
-        return builder;
-    }
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
 
-    match reqwest::Certificate::from_der(&bytes) {
-        Ok(cert) => {
-            builder = builder.add_root_certificate(cert);
-            logging::info(format!("SSL_CERT_FILE={cert_path} loaded (1 DER cert)"));
+    // No PEM sections is a successful empty parse, not evidence of PEM input.
+    // Validate all trust anchors before touching the builder: reqwest's rustls
+    // Certificate::from_der stores bytes lazily and does not validate them.
+    let certs =
+        match CertificateDer::pem_slice_iter(&bytes).collect::<std::result::Result<Vec<_>, _>>() {
+            Ok(certs) if !certs.is_empty() => certs,
+            _ => vec![CertificateDer::from(bytes.as_slice())],
+        };
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in &certs {
+        if let Err(err) = roots.add(cert.clone()) {
+            logging::warn(format!(
+                "SSL_CERT_FILE={cert_path} could not be parsed as PEM bundle or DER: {err}"
+            ));
+            return builder;
         }
+    }
+    let certs = match certs
+        .iter()
+        .map(|cert| reqwest::Certificate::from_der(cert.as_ref()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+    {
+        Ok(certs) => certs,
         Err(err) => {
             logging::warn(format!(
                 "SSL_CERT_FILE={cert_path} could not be parsed as PEM bundle or DER: {err}"
             ));
+            return builder;
         }
+    };
+    let added = certs.len();
+    for cert in certs {
+        builder = builder.add_root_certificate(cert);
+    }
+    logging::info(format!(
+        "SSL_CERT_FILE={cert_path} loaded ({added} cert(s))"
+    ));
+    builder
+}
+
+/// Apply process-level model transport defaults before a trusted host policy.
+/// Vision clients use the same trust-source and HTTP/1 controls as text clients.
+pub(crate) fn with_model_transport_environment(
+    mut builder: reqwest::ClientBuilder,
+    force_http1: bool,
+) -> reqwest::ClientBuilder {
+    let from_env = force_http1_from_env();
+    if force_http1 || from_env {
+        if from_env && !force_http1 {
+            logging::info("CODEWHALE_FORCE_HTTP1=1 — pinning HTTP client to HTTP/1.1");
+        }
+        builder = builder.http1_only();
+    }
+    if let Ok(cert_path) = std::env::var("SSL_CERT_FILE")
+        && !cert_path.is_empty()
+    {
+        builder = add_extra_root_certs(builder, &cert_path);
     }
     builder
 }
@@ -1353,32 +1398,56 @@ impl DeepSeekClient {
             ));
         }
 
-        let http_client = Self::build_http_client_with_auth_mode(
-            &api_key,
-            &http_headers,
-            api_provider,
-            &base_url,
-            wire_format,
-            auth_disabled,
-            false,
-        )?;
+        let build_client = |force_http1| -> Result<reqwest::Client> {
+            let builder = Self::build_http_builder_with_auth_mode(
+                &api_key,
+                &http_headers,
+                api_provider,
+                &base_url,
+                wire_format,
+                auth_disabled,
+                force_http1,
+            )?;
+            let builder = match config.model_http_policy.as_ref() {
+                Some(policy) => policy.configure(builder, &base_url).map_err(|_| {
+                    crate::error_taxonomy::ErrorEnvelope::model_transport_setup("host_policy")
+                })?,
+                None => builder,
+            };
+            builder.build().map_err(|err| {
+                if config.model_http_policy.is_some() {
+                    crate::error_taxonomy::ErrorEnvelope::model_transport_setup("client_builder")
+                        .into()
+                } else {
+                    err.into()
+                }
+            })
+        };
+        let http_client = build_client(false)?;
         // Always keep an HTTP/1.1 twin for automatic stream-header fallback
         // when H2 stalls. When CODEWHALE_FORCE_HTTP1 is set, both clients are
         // HTTP/1.1 and the fallback is a no-op retry path.
-        let http1_client = Self::build_http_client_with_auth_mode(
+        let http1_client = build_client(true)?;
+
+        let mut matching_vision_headers = build_default_headers(
             &api_key,
             &http_headers,
             api_provider,
             &base_url,
             wire_format,
             auth_disabled,
-            true,
         )?;
+        // The vision adapter already supplies its own request authentication
+        // and framing. Only exact route matches may inherit the other metadata.
+        matching_vision_headers.remove(AUTHORIZATION);
+        matching_vision_headers.remove(CONTENT_TYPE);
 
         Ok(Self {
             http_client,
             http1_client,
             request_idempotency_header,
+            matching_vision_headers,
+            vision_http_policy: config.vision_http_policy(),
             operation_id: None,
             operation_route_identity,
             api_key,
@@ -1657,7 +1726,7 @@ impl DeepSeekClient {
         api_provider: ApiProvider,
         base_url: &str,
     ) -> Result<reqwest::Client> {
-        Self::build_http_client_with_auth_mode(
+        Self::build_http_builder_with_auth_mode(
             api_key,
             extra_headers,
             api_provider,
@@ -1665,10 +1734,12 @@ impl DeepSeekClient {
             provider_default_wire_format(api_provider),
             false,
             false,
-        )
+        )?
+        .build()
+        .map_err(Into::into)
     }
 
-    fn build_http_client_with_auth_mode(
+    fn build_http_builder_with_auth_mode(
         api_key: &str,
         extra_headers: &HashMap<String, String>,
         api_provider: ApiProvider,
@@ -1676,7 +1747,7 @@ impl DeepSeekClient {
         wire_format: WireFormat,
         auth_disabled: bool,
         force_http1: bool,
-    ) -> Result<reqwest::Client> {
+    ) -> Result<reqwest::ClientBuilder> {
         let headers = build_default_headers(
             api_key,
             extra_headers,
@@ -1685,7 +1756,7 @@ impl DeepSeekClient {
             wire_format,
             auth_disabled,
         )?;
-        let mut builder = crate::tls::reqwest_client_builder()
+        let builder = crate::tls::reqwest_client_builder()
             .default_headers(headers)
             .user_agent(client_user_agent(api_provider))
             .connect_timeout(Duration::from_secs(30))
@@ -1693,19 +1764,7 @@ impl DeepSeekClient {
             .http2_keep_alive_interval(Some(Duration::from_secs(15)))
             .http2_keep_alive_timeout(Duration::from_secs(20))
             .min_tls_version(reqwest::tls::Version::TLS_1_2);
-        let pin_http1 = force_http1 || force_http1_from_env();
-        if pin_http1 {
-            if force_http1_from_env() && !force_http1 {
-                logging::info("CODEWHALE_FORCE_HTTP1=1 — pinning HTTP client to HTTP/1.1");
-            }
-            builder = builder.http1_only();
-        }
-        if let Ok(cert_path) = std::env::var("SSL_CERT_FILE")
-            && !cert_path.is_empty()
-        {
-            builder = add_extra_root_certs(builder, &cert_path);
-        }
-        builder.build().map_err(Into::into)
+        Ok(with_model_transport_environment(builder, force_http1))
     }
 
     /// HTTP/1.1 client for automatic stream-header fallback.
@@ -3375,6 +3434,26 @@ impl DeepSeekClient {
             None => builder,
         }
     }
+
+    pub(crate) fn vision_http_policy(&self) -> Option<Arc<dyn crate::config::ModelHttpPolicy>> {
+        self.vision_http_policy.clone()
+    }
+
+    /// Preserve matching-route defaults before the vision host policy runs.
+    /// The caller must first verify `idempotency_matches_route`.
+    pub(crate) fn with_matching_vision_route_defaults(
+        &self,
+        builder: reqwest::ClientBuilder,
+    ) -> reqwest::ClientBuilder {
+        builder
+            .default_headers(self.matching_vision_headers.clone())
+            .user_agent(client_user_agent(self.api_provider))
+            .connect_timeout(Duration::from_secs(30))
+            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .http2_keep_alive_interval(Some(Duration::from_secs(15)))
+            .http2_keep_alive_timeout(Duration::from_secs(20))
+    }
+
     pub(crate) fn idempotency_matches_route(&self, base_url: &str, api_key: &str) -> bool {
         self.request_idempotency_header.is_some()
             && self.wire_format == WireFormat::ChatCompletions
@@ -4441,6 +4520,9 @@ mod provider_native_search;
 mod responses;
 mod role_placement;
 mod stream_entry;
+#[cfg(test)]
+#[path = "client/transport_policy_tests.rs"]
+mod transport_policy_tests;
 mod wire;
 
 // Retain the crate-visible accounting helpers at the existing client seam.

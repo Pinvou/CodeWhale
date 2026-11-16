@@ -1199,7 +1199,7 @@ pub struct Engine {
     /// remains the I/O authority while typed routes still validate receipts,
     /// endpoint metadata, and budgets.
     model_client_injected: bool,
-    deepseek_client_error: Option<String>,
+    deepseek_client_error: Option<ErrorEnvelope>,
     api_key_env_only_recovery: Option<String>,
     session: Session,
     /// One lazy, session-scoped working kernel for inline `repl` blocks.
@@ -1897,6 +1897,20 @@ impl Engine {
         self.config.model.clone_from(&self.session.model);
     }
 
+    /// Ancillary controls need the concrete HTTP client even when turn I/O
+    /// uses an injected model. Preserve its safe host-setup receipt while
+    /// retaining the legacy generic diagnostic for other unavailable clients.
+    fn concrete_client_unavailable_error(&self, action: &str) -> ErrorEnvelope {
+        let mut error = self
+            .deepseek_client_error
+            .as_ref()
+            .filter(|error| error.code == "model_transport_setup")
+            .cloned()
+            .unwrap_or_else(|| ErrorEnvelope::fatal_auth("API client not configured"));
+        error.message = format!("{action}: {}", error.message);
+        error
+    }
+
     /// Activate a structurally resolved route at the engine boundary. Normal
     /// engines construct the concrete client before any turn state changes.
     /// Embedders/tests that explicitly injected a provider-neutral client keep
@@ -1905,9 +1919,9 @@ impl Engine {
     fn install_resolved_runtime_route(
         &mut self,
         mut route: ResolvedRuntimeRoute,
-    ) -> Result<(), String> {
+    ) -> Result<(), ErrorEnvelope> {
         if !self.model_client_injected {
-            self.install_validated_runtime_route(route.validate()?);
+            self.install_validated_runtime_route(route.validate_with_error_envelope()?);
             return Ok(());
         }
 
@@ -1943,7 +1957,7 @@ impl Engine {
             }
             Err(err) => {
                 self.deepseek_client = None;
-                self.deepseek_client_error = Some(err.to_string());
+                self.deepseek_client_error = Some(ErrorEnvelope::from_client_setup_error(&err));
             }
         }
         self.session.model = model;
@@ -2275,7 +2289,7 @@ impl Engine {
         // Create clients for both providers
         let (deepseek_client, deepseek_client_error) = match DeepSeekClient::new(api_config) {
             Ok(client) => (Some(client), None),
-            Err(err) => (None, Some(err.to_string())),
+            Err(err) => (None, Some(ErrorEnvelope::from_client_setup_error(&err))),
         };
         let model_client = deepseek_client
             .as_ref()
@@ -2593,7 +2607,8 @@ impl Engine {
         let (mut engine, mut handle) = Self::new(config, api_config);
         engine.model_client = Some(client);
         engine.model_client_injected = true;
-        engine.deepseek_client_error = None;
+        // The injected model is the turn I/O authority. Keep the concrete
+        // client's setup receipt for ancillary compaction/purge diagnostics.
         handle.client_preflight_required = false;
         (engine, handle)
     }
@@ -5890,20 +5905,21 @@ impl Engine {
         let dispatched_base_url = route.candidate.endpoint().base_url.clone();
         let dispatched_product =
             crate::route_billing::capture_product(&route.config, effective_provider);
-        if let Err(err) = self.install_resolved_runtime_route(route) {
+        if let Err(mut err) = self.install_resolved_runtime_route(route) {
             self.sync_unstarted_goal_for_terminal_projection(
                 goal_objective.as_deref(),
                 goal_token_budget,
                 goal_status,
             );
-            self.reject_unstarted_submission(
-                submission_id,
-                ErrorEnvelope::fatal_auth(format!(
-                    "Cannot start the turn because its provider route is not ready: {err}"
-                )),
-            )
-            .await;
-            let outcome = SendMessageOutcome::NotStarted { error: Some(err) };
+            err.message = format!(
+                "Cannot start the turn because its provider route is not ready: {}",
+                err.message
+            );
+            self.reject_unstarted_submission(submission_id, err.clone())
+                .await;
+            let outcome = SendMessageOutcome::NotStarted {
+                error: Some(err.message),
+            };
             self.reconcile_non_completed_goal_turn(&outcome).await;
             return outcome;
         }
@@ -6125,15 +6141,13 @@ impl Engine {
         let snapshot_prompt_post = content.clone();
 
         if self.model_client.is_none() {
-            let message = self
+            let mut error = self
                 .deepseek_client_error
-                .as_deref()
-                .map(|err| format!("Failed to send message: {err}"))
-                .unwrap_or_else(|| "Failed to send message: API client not configured".to_string());
-            let _ = self
-                .tx_event
-                .send(Event::error(ErrorEnvelope::fatal_auth(message.clone())))
-                .await;
+                .clone()
+                .unwrap_or_else(|| ErrorEnvelope::fatal_auth("API client not configured"));
+            error.message = format!("Failed to send message: {}", error.message);
+            let message = error.message.clone();
+            let _ = self.tx_event.send(Event::error(error)).await;
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
@@ -6641,16 +6655,16 @@ impl Engine {
                 .await;
             return;
         };
-        if let Err(err) = self.install_resolved_runtime_route(route) {
-            let message =
-                format!("Cannot compact context because its provider route is not ready: {err}");
+        if let Err(mut err) = self.install_resolved_runtime_route(route) {
+            err.message = format!(
+                "Cannot compact context because its provider route is not ready: {}",
+                err.message
+            );
+            let message = err.message.clone();
             self.finish_compaction(&id);
             self.emit_compaction_failed(id, false, message.clone())
                 .await;
-            let _ = self
-                .tx_event
-                .send(Event::error(ErrorEnvelope::fatal_auth(message.clone())))
-                .await;
+            let _ = self.tx_event.send(Event::error(err)).await;
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
@@ -6679,14 +6693,12 @@ impl Engine {
             ..Usage::default()
         };
         let Some(client) = self.deepseek_client.clone() else {
-            let message = "Manual compaction unavailable: API client not configured".to_string();
+            let error = self.concrete_client_unavailable_error("Manual compaction unavailable");
+            let message = error.message.clone();
             self.finish_compaction(&id);
             self.emit_compaction_failed(id, false, message.clone())
                 .await;
-            let _ = self
-                .tx_event
-                .send(Event::error(ErrorEnvelope::fatal_auth(message.clone())))
-                .await;
+            let _ = self.tx_event.send(Event::error(error)).await;
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
@@ -6873,12 +6885,10 @@ impl Engine {
             ..Usage::default()
         };
         let Some(client) = self.deepseek_client.clone() else {
-            let message = "Purge unavailable: API client not configured".to_string();
+            let error = self.concrete_client_unavailable_error("Purge unavailable");
+            let message = error.message.clone();
             emit_purge_failed(&self.tx_event, message.clone()).await;
-            let _ = self
-                .tx_event
-                .send(Event::error(ErrorEnvelope::fatal_auth(message.clone())))
-                .await;
+            let _ = self.tx_event.send(Event::error(error)).await;
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {

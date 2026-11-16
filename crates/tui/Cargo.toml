@@ -118,6 +118,8 @@ mimalloc.workspace = true
 codewhale-build-support = { path = "../build-support", version = "0.9.12" }
 
 [dev-dependencies]
+# Generate ephemeral loopback TLS fixtures without checking private keys into Git.
+rcgen = "0.14.9"
 cucumber = "0.23.0"
 jsonschema.workspace = true
 wiremock = "0.6"

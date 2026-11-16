@@ -125,6 +125,29 @@ impl ErrorEnvelope {
         )
     }
 
+    /// Host transport configuration can be corrected without credential
+    /// recovery or automatic provider/network fallback. Never retain callback
+    /// error text: hosts can record their private details inside the callback.
+    pub(crate) fn model_transport_setup(stage: &'static str) -> Self {
+        Self::new(
+            ErrorCategory::State,
+            ErrorSeverity::Error,
+            true,
+            "model_transport_setup",
+            format!(
+                "Host model HTTP transport setup failed ({stage}); update the host transport configuration and retry."
+            ),
+        )
+    }
+
+    /// Keep safe typed setup identity across legacy authentication boundaries.
+    pub(crate) fn from_client_setup_error(error: &anyhow::Error) -> Self {
+        error
+            .downcast_ref::<Self>()
+            .cloned()
+            .unwrap_or_else(|| Self::fatal_auth(error.to_string()))
+    }
+
     /// Authentication failure — fatal and blocks the session.
     #[must_use]
     pub fn fatal_auth(message: impl Into<String>) -> Self {

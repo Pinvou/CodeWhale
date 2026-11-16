@@ -2961,6 +2961,28 @@ impl TranscriptConfig {
     }
 }
 
+/// Host-owned constraints for the primary model, HTTP/1 fallback and standalone
+/// vision client builders wired through this configuration. Never loaded from
+/// TOML. Speech synthesis uses the model client and inherits this hook; voice
+/// transcription, prompt suggestions, credential probes and separate Fleet
+/// worker processes do not. Runtime API reloads retain installed policies;
+/// CLI/TUI config reloads require the embedding host to install them again.
+///
+/// Primary builders install their default authentication and headers before
+/// this hook, so trusted policies can overwrite matching default header keys.
+/// Matching vision route metadata is installed before its hook; vision retains
+/// its request-level authentication after client construction.
+/// This is a trusted in-process capability, not a sandbox: the host can change
+/// transport security settings, including disabling TLS certificate validation.
+/// Only install policy implementations supplied by the embedding host.
+pub trait ModelHttpPolicy: std::fmt::Debug + Send + Sync {
+    fn configure(
+        &self,
+        builder: reqwest::ClientBuilder,
+        base_url: &str,
+    ) -> Result<reqwest::ClientBuilder>;
+}
+
 /// Resolved CLI configuration, including defaults and environment overrides.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
@@ -2986,6 +3008,17 @@ pub struct Config {
     /// a static Idempotency-Key conflicts with this opt-in and is rejected.
     #[serde(skip)]
     pub request_idempotency_header: Option<String>,
+    /// Trusted host capability, shared by clone and with explicit override
+    /// precedence in configuration merges. Not serializable configuration.
+    /// Runtime API disk reloads/provider switches retain the server's installed
+    /// capability; starting a new runtime uses the new host-supplied value.
+    #[serde(skip)]
+    pub model_http_policy: Option<std::sync::Arc<dyn ModelHttpPolicy>>,
+    /// Host-only vision transport override. If absent, vision inherits
+    /// `model_http_policy`. Kept outside the public three-field vision config
+    /// so existing host struct literals remain source compatible.
+    #[serde(skip)]
+    pub vision_model_http_policy: Option<std::sync::Arc<dyn ModelHttpPolicy>>,
     /// Optional user-facing tab/window title shown as `[title] …` in front of
     /// the terminal window title (the `Codewhale` / `reasoning…` / `done.`
     /// states). This is the default for every session in this config scope;
@@ -7340,6 +7373,15 @@ impl Config {
             })
     }
 
+    /// Effective host capability for vision, independent of whether its route
+    /// is currently enabled. This is never read from serialized config.
+    #[must_use]
+    pub fn vision_http_policy(&self) -> Option<std::sync::Arc<dyn ModelHttpPolicy>> {
+        self.vision_model_http_policy
+            .clone()
+            .or_else(|| self.model_http_policy.clone())
+    }
+
     /// Return the configured vision model config, inheriting api_key from main config.
     #[must_use]
     pub fn vision_model_config(&self) -> Option<VisionModelConfig> {
@@ -10545,6 +10587,10 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         request_idempotency_header: override_cfg
             .request_idempotency_header
             .or(base.request_idempotency_header),
+        model_http_policy: override_cfg.model_http_policy.or(base.model_http_policy),
+        vision_model_http_policy: override_cfg
+            .vision_model_http_policy
+            .or(base.vision_model_http_policy),
         default_text_model: override_cfg.default_text_model.or(base.default_text_model),
         auth_mode: override_cfg.auth_mode.or(base.auth_mode),
         reasoning_effort: override_cfg.reasoning_effort.or(base.reasoning_effort),
