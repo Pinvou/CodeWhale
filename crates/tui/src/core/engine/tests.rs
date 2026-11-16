@@ -6167,7 +6167,10 @@ async fn turn_owned_children_receive_exactly_one_coordination_pass_even_at_step_
             "{coordination_text}"
         );
         assert!(coordination_text.contains("detached=true"));
-        assert!(coordination_text.contains("resume_from=\"<agent_id>\""));
+        assert!(
+            coordination_text
+                .contains("agent(action=\"followup\", agent_id=\"<agent_id>\", message=\"")
+        );
         assert_eq!(
             turn.step, 1,
             "the ceiling grace must reuse the already-advanced provider slot"

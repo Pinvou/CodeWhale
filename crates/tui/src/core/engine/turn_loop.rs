@@ -6854,14 +6854,14 @@ fn turn_owned_child_guard_runtime_text(agent_ids: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "<codewhale:runtime_event kind=\"turn_owned_children_active\" visibility=\"internal\">\nThis is an internal runtime event, not user input. {} turn-owned sub-agent(s) are still running. Before ending, wait for these exact owned agents: {targeted_waits}. Do not use an unscoped wait-all call, because deliberately detached work must not hold this turn open. Use detached=true only when starting future work that must outlive its parent turn. If you end again while these children remain active, the runtime will park them as Interrupted work and provide an agent(action=\"start\", resume_from=\"<agent_id>\") recovery path.\n</codewhale:runtime_event>",
+        "<codewhale:runtime_event kind=\"turn_owned_children_active\" visibility=\"internal\">\nThis is an internal runtime event, not user input. {} turn-owned sub-agent(s) are still running. Before ending, wait for these exact owned agents: {targeted_waits}. Do not use an unscoped wait-all call, because deliberately detached work must not hold this turn open. Use detached=true only when starting future work that must outlive its parent turn. If you end again while these children remain active, the runtime will park them as Interrupted work and provide an agent(action=\"followup\", agent_id=\"<agent_id>\", message=\"Continue the parked assignment.\") recovery path.\n</codewhale:runtime_event>",
         agent_ids.len()
     )
 }
 
 fn turn_owned_child_parking_runtime_text(running: usize) -> String {
     format!(
-        "<codewhale:runtime_event kind=\"turn_owned_children_parking\" visibility=\"internal\">\nThis is an internal runtime event, not user input. The parent ended after one settlement reminder while {running} turn-owned sub-agent(s) remained active. The runtime is parking them as Interrupted with continuable checkpoints instead of discarding their work. Their completion handoffs name the source agent_id to use with agent(action=\"start\", resume_from=\"<agent_id>\").\n</codewhale:runtime_event>"
+        "<codewhale:runtime_event kind=\"turn_owned_children_parking\" visibility=\"internal\">\nThis is an internal runtime event, not user input. The parent ended after one settlement reminder while {running} turn-owned sub-agent(s) remained active. The runtime is parking them as Interrupted with continuable checkpoints instead of discarding their work. Their completion handoffs name the source agent_id to use with agent(action=\"followup\", agent_id=\"<agent_id>\", message=\"Continue the parked assignment.\").\n</codewhale:runtime_event>"
     )
 }
 
@@ -8256,12 +8256,12 @@ mod tests {
         );
         assert!(guard.contains("Do not use an unscoped wait-all call"));
         assert!(guard.contains("detached=true"));
-        assert!(guard.contains("resume_from=\"<agent_id>\""));
+        assert!(guard.contains("agent(action=\"followup\", agent_id=\"<agent_id>\", message=\""));
 
         let parking = turn_owned_child_parking_runtime_text(2);
         assert!(parking.contains("Interrupted"));
         assert!(parking.contains("continuable checkpoints"));
-        assert!(parking.contains("resume_from=\"<agent_id>\""));
+        assert!(parking.contains("agent(action=\"followup\", agent_id=\"<agent_id>\", message=\""));
 
         assert_eq!(turn_detached_child_count(2, 1), 1);
         assert_eq!(turn_detached_child_count(1, 2), 0);

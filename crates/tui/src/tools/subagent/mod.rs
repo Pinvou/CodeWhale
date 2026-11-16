@@ -7840,6 +7840,21 @@ impl SubAgentManager {
             };
         agent.owner_session_id = runtime.context.state_namespace.clone();
         agent.terminal_delivery = Some(SubAgentTerminalDeliveryContext::from_runtime(&runtime));
+        // Input can be accepted before the task first polls. Give even the
+        // first incarnation a recovery route before exposing its live inbox.
+        agent.checkpoint = Some(build_subagent_checkpoint(
+            &agent_id,
+            "spawn_admitted",
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: prompt.clone(),
+                    cache_control: None,
+                }],
+            }],
+            0,
+            true,
+        ));
         self.register_worker_for_session(worker_spec, &runtime.context.state_namespace);
         if let Some(scope) = budget_scope {
             self.attach_budget_scope(&agent_id, scope);
@@ -12819,12 +12834,12 @@ fn subagent_cancellation_projection(
         turn_end_parking.is_some_and(|signal| signal.load(std::sync::atomic::Ordering::Acquire));
     if parking_requested {
         let reason = format!(
-            "Parent turn ended before this turn-owned child settled. Work was parked instead of discarded; resume with agent(action=\"start\", prompt=\"Continue the parked assignment.\", resume_from=\"{agent_id}\")."
+            "Parent turn ended before this turn-owned child settled. Work was parked instead of discarded; resume with agent(action=\"followup\", agent_id=\"{agent_id}\", message=\"Continue the parked assignment.\")."
         );
         let checkpoint = build_subagent_checkpoint(agent_id, &reason, messages, steps, true);
         let needs_input = SubAgentNeedsInput {
             question: format!(
-                "Resume this parked child with agent(action=\"start\", prompt=\"Continue the parked assignment.\", resume_from=\"{agent_id}\")."
+                "Resume this parked child with agent(action=\"followup\", agent_id=\"{agent_id}\", message=\"Continue the parked assignment.\")."
             ),
         };
         return (

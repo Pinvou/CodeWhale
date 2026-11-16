@@ -502,6 +502,12 @@ looks like an issued id, pass that source's actual receipt id in `resume_from`.
 The `name` field on `action=start` names the new child, not the continuation
 source. A missing issued id never falls back to a same-named source.
 
+`action=start` with `resume_from` creates an independent history fork; it does
+not consume the source child's parked parent mail. To continue an interrupted
+assignment together with its accepted mail, use `action=followup` with the source
+`agent_id` and a `message`. A newly admitted child already has a checkpoint of
+its initial prompt, so this handoff also works before its worker first polls.
+
 Records hydrated from an older boot remain history for name resolution: they
 never outrank the current boot's live child. Two live holders of one name are
 ambiguous; use the exact `agent_id` rather than guessing a holder.

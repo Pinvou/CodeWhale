@@ -970,4 +970,28 @@ mod tests {
             "contention must not latch the gate closed"
         );
     }
+
+    #[tokio::test]
+    async fn forkguard_idle_shutdown_subagent_lock_contention_retries_after_release() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut engine, _handle) = fixture(home.path());
+        let agents = Arc::clone(&engine.subagent_manager);
+        let held = agents.write().await;
+        let refused = !engine.can_retire_without_losing_work();
+        drop(held);
+        assert!(refused, "unknown child work must refuse retirement");
+        assert!(engine.can_retire_without_losing_work());
+    }
+
+    #[tokio::test]
+    async fn forkguard_idle_shutdown_shell_lock_contention_retries_after_release() {
+        let home = tempfile::tempdir().unwrap();
+        let (mut engine, _handle) = fixture(home.path());
+        let shells = Arc::clone(&engine.shell_manager);
+        let held = shells.lock().unwrap();
+        let refused = !engine.can_retire_without_losing_work();
+        drop(held);
+        assert!(refused, "unknown shell work must refuse retirement");
+        assert!(engine.can_retire_without_losing_work());
+    }
 }

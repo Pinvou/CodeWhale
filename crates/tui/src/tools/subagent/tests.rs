@@ -14363,6 +14363,135 @@ async fn forkguard_parent_mail_failed_resume_keeps_fifo_for_the_next_attempt() {
     assert_eq!(guard.queued_mail_depth(&child), None);
 }
 
+#[tokio::test]
+async fn forkguard_parent_mail_first_spawn_can_be_interrupted_before_its_first_poll() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut runtime = stub_runtime();
+    runtime.manager = manager.clone();
+    runtime.context = ToolContext::new(tmp.path());
+    // Keep the actual worker behind the manager lock through the handoff.
+    let mut guard = manager.write().await;
+    let child = guard
+        .spawn_background_with_assignment_options(
+            manager.clone(),
+            runtime.clone(),
+            FleetRole::Scout,
+            "INITIAL-ASSIGNMENT".into(),
+            make_assignment(),
+            Some(vec!["read_file".into()]),
+            SubAgentSpawnOptions::default(),
+        )
+        .unwrap();
+    for text in ["FIRST-ONE", "FIRST-TWO"] {
+        guard.followup_child(&child.agent_id, text.into()).unwrap();
+    }
+    assert_eq!(guard.queued_follow_up_counts()[&child.agent_id], 2);
+    guard
+        .interrupt_child(&child.agent_id, None, "before first poll".into())
+        .unwrap();
+    assert_eq!(
+        guard.queued_mail.get(&child.agent_id).map(|mail| mail
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>()),
+        Some(vec!["FIRST-ONE", "FIRST-TWO"]),
+        "accepted first-generation mail must retain its recovery route"
+    );
+    assert!(guard.has_live_work_for_session("workspace"));
+    let resumed = guard
+        .resume_from_checkpoint_for_session(
+            "workspace",
+            manager.clone(),
+            runtime.clone(),
+            &child.agent_id,
+            "FIRST-LATEST",
+        )
+        .unwrap();
+    assert!(!guard.queued_mail.contains_key(&child.agent_id));
+    let first_prompt = &guard.agents[&resumed.agent_id].prompt;
+    for text in [
+        "INITIAL-ASSIGNMENT",
+        "FIRST-ONE",
+        "FIRST-TWO",
+        "FIRST-LATEST",
+    ] {
+        assert_eq!(first_prompt.matches(text).count(), 1, "{text}");
+    }
+    assert!(first_prompt.find("FIRST-ONE").unwrap() < first_prompt.find("FIRST-TWO").unwrap());
+    assert!(first_prompt.find("FIRST-TWO").unwrap() < first_prompt.find("FIRST-LATEST").unwrap());
+    guard
+        .interrupt_child(&resumed.agent_id, None, "before resumed first poll".into())
+        .unwrap();
+    let next = guard
+        .resume_from_checkpoint_for_session(
+            "workspace",
+            manager.clone(),
+            runtime,
+            &resumed.agent_id,
+            "FIRST-NEXT",
+        )
+        .unwrap();
+    let next_prompt = &guard.agents[&next.agent_id].prompt;
+    for text in [
+        "INITIAL-ASSIGNMENT",
+        "FIRST-ONE",
+        "FIRST-TWO",
+        "FIRST-LATEST",
+        "FIRST-NEXT",
+    ] {
+        assert_eq!(next_prompt.matches(text).count(), 1, "{text}");
+    }
+    assert!(next_prompt.find("FIRST-LATEST").unwrap() < next_prompt.find("FIRST-NEXT").unwrap());
+    guard
+        .interrupt_child(&next.agent_id, None, "fixture complete".into())
+        .unwrap();
+    assert!(guard.queued_follow_up_counts().is_empty());
+    assert!(!guard.has_live_work_for_session("workspace"));
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_inbox_contention_retries_after_release() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut guard = manager.write().await;
+    let (child, _) =
+        guard.insert_test_interrupted_continuable_agent("inbox-lock", tmp.path(), vec![]);
+    assert!(guard.agent_id_is_owned_by_session(&child, "workspace"));
+    let inbox = guard.pending_follow_ups.entry(child).or_default().clone();
+    let held = inbox.lock().unwrap();
+    let refused = guard.has_live_work_for_session("workspace");
+    drop(held);
+    assert!(refused, "an unreadable owned inbox must refuse retirement");
+    assert!(!guard.has_live_work_for_session("workspace"));
+}
+
+#[tokio::test]
+async fn forkguard_parent_mail_unfinished_terminal_task_retries_after_reap() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().into(), 4);
+    let mut guard = manager.write().await;
+    let (child, _) =
+        guard.insert_test_interrupted_continuable_agent("unfinished", tmp.path(), vec![]);
+    assert!(guard.agent_id_is_owned_by_session(&child, "workspace"));
+    assert!(!guard.has_live_work_for_session("workspace"));
+    guard.agents.get_mut(&child).unwrap().task_handle =
+        Some(tokio::spawn(std::future::pending::<()>()));
+    let refused = guard.has_live_work_for_session("workspace");
+    let task = guard
+        .agents
+        .get_mut(&child)
+        .unwrap()
+        .task_handle
+        .take()
+        .unwrap();
+    task.abort();
+    let completion = task.await;
+    assert!(refused, "a terminal label does not prove its task stopped");
+    assert!(completion.unwrap_err().is_cancelled());
+    assert!(!guard.has_live_work_for_session("workspace"));
+}
+
 /// The resume path is the same scenario from the other side: `followup` on
 /// an interrupted child re-dispatches its checkpoint under a NEW id and
 /// restores the old claim for that id. With the predecessor counted live,
@@ -15960,10 +16089,8 @@ async fn turn_end_parking_preserves_a_step_zero_resumable_checkpoint() {
     let SubAgentStatus::Interrupted(reason) = &result.status else {
         panic!("turn-end parking must interrupt resumably: {result:?}");
     };
-    assert!(
-        reason.contains(&format!("resume_from=\"{agent_id}\"")),
-        "{reason}"
-    );
+    let recovery_call = format!("agent(action=\"followup\", agent_id=\"{agent_id}\", message=\"");
+    assert!(reason.contains(&recovery_call), "{reason}");
     assert_eq!(result.steps_taken, 0);
     let checkpoint = result
         .checkpoint
@@ -15981,9 +16108,7 @@ async fn turn_end_parking_preserves_a_step_zero_resumable_checkpoint() {
         .as_ref()
         .expect("parked work must carry an actionable recovery instruction");
     assert!(
-        recovery
-            .question
-            .contains(&format!("resume_from=\"{agent_id}\"")),
+        recovery.question.contains(&recovery_call),
         "{}",
         recovery.question
     );
@@ -15993,7 +16118,7 @@ async fn turn_end_parking_preserves_a_step_zero_resumable_checkpoint() {
             agent_id: ref delivered_agent_id,
             reason: ref delivered_reason,
         } if delivered_agent_id == agent_id
-            && delivered_reason.contains(&format!("resume_from=\"{agent_id}\""))
+            && delivered_reason.contains(&recovery_call)
     ));
 
     let (explicit_status, _, _, explicit_needs_input, explicit_worker_status, _) =
@@ -18984,7 +19109,7 @@ async fn queued_turn_owned_child_parks_without_a_false_start_transition() {
             message,
             MailboxMessage::Interrupted { agent_id, reason }
                 if agent_id == "agent_queued_turn_end_park"
-                    && reason.contains("resume_from=\"agent_queued_turn_end_park\"")
+                    && reason.contains("agent(action=\"followup\", agent_id=\"agent_queued_turn_end_park\", message=\"")
         )),
         "parking must publish an actionable interrupted receipt: {messages:?}"
     );
