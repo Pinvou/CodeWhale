@@ -1395,6 +1395,11 @@ jobs:
       - name: Unpack frontend setup bundle
         run: |
           tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
+          # tar 保留 frontend-setup 构建时点的旧 mtime;消费方 checkout 的 src
+          # 更新,会误触 ui_test_server 的 assertFreshBuild「UI build is stale」
+          # 守卫(它按 mtime 判断陈旧)。工件化流程中新鲜度由构造保证(prepare
+          # 从同一 tested tree 构建),touch 对齐 mtime 恢复守卫本意。
+          find dist ../remote-control-relay/web/dist -exec touch {} +
           # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。注意本 job
           # 的 run 默认工作目录是 pinvou3-app,校验路径须相对它解析。
           test -f dist/index.html
@@ -1560,6 +1565,11 @@ jobs:
       - name: Unpack frontend setup bundle
         run: |
           tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
+          # tar 保留 frontend-setup 构建时点的旧 mtime;消费方 checkout 的 src
+          # 更新,会误触 ui_test_server 的 assertFreshBuild「UI build is stale」
+          # 守卫(它按 mtime 判断陈旧)。工件化流程中新鲜度由构造保证(prepare
+          # 从同一 tested tree 构建),touch 对齐 mtime 恢复守卫本意。
+          find dist ../remote-control-relay/web/dist -exec touch {} +
           # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。注意本 job
           # 的 run 默认工作目录是 pinvou3-app,校验路径须相对它解析。
           test -f dist/index.html
