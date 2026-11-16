@@ -80,6 +80,28 @@ try {
       await page.waitForFunction(label => document.querySelector('#probe-status')?.textContent === `${label} (<svg onload=alert(1)>)`, {}, expected[language].unknown);
       assert.equal(await page.$('#probe-status svg'), null);
     });
+    await run(`${language}: operation priorities, evidence kinds and delivery status retain their own semantics`, async page => {
+      await navigateFixture(page, `${origin}/tests/fixtures/account-status-labels-ui.html?language=${language}&operations=1&operations_tab=reconciliation`, signal => page.waitForFunction(() => document.querySelectorAll('#operations-probe tbody tr').length === 3, { signal }));
+      const labels = await page.evaluate(() => window.statusLabelsProbe.operationsCopy().enumLabels);
+      assert.deepEqual(await page.$$eval('#operations-probe tbody tr td:nth-child(3)', cells => cells.map(cell => cell.textContent)), ['P0', 'P1', 'P2'].map(code => labels[code]));
+      const select = await page.evaluateHandle(() => [...document.querySelectorAll('#operations-probe select')].find(node => [...node.options].some(option => option.value === 'P0')));
+      await select.asElement().select('P1');
+      await page.click('#operations-probe form button[type=submit]');
+      await page.waitForFunction(() => window.statusLabelsProbe.operationsCalls.some(query => query.severity === 'P1') && document.querySelectorAll('#operations-probe tbody tr').length === 1);
+      await page.click('#operations-probe tbody tr button');
+      await page.waitForFunction(() => document.querySelectorAll('#operations-probe .adm-evidence-list article').length === 2);
+      assert.deepEqual(await page.$$eval('#operations-probe .adm-evidence-list article .adm-status', nodes => nodes.map(node => node.textContent)), ['CANCELLATION', 'CONVERGENCE'].map(code => labels[code]));
+      for (const code of ['NOT_STARTED', 'DELIVERING', 'DISCONNECTED', 'DELIVERED', 'USER_STOPPED']) {
+        await page.evaluate(value => { window.statusLabelsProbe.delivery = value; [...document.querySelectorAll('#operations-probe header button')].find(button => button.textContent === window.statusLabelsProbe.operationsCopy().refreshSource).click(); }, code);
+        const expectedLabel = { zh: { NOT_STARTED: '尚未开始交付', DELIVERING: '交付中', DISCONNECTED: '交付连接已断开', DELIVERED: '已交付' }, en: { NOT_STARTED: 'Delivery not started', DELIVERING: 'Delivering', DISCONNECTED: 'Delivery disconnected', DELIVERED: 'Delivered' }, ja: { NOT_STARTED: '配信未開始', DELIVERING: '配信中', DISCONNECTED: '配信接続が切断', DELIVERED: '配信済み' } }[language][code] || labels[code];
+        await page.waitForFunction(label => [...document.querySelectorAll('#operations-probe .adm-operation-facts dd')].some(node => node.textContent === label), {}, expectedLabel);
+      }
+      for (const code of ['STARTED', 'STREAMING', 'SUCCEEDED', 'FAILED', 'CANCELLED', null]) {
+        await page.evaluate(value => { window.statusLabelsProbe.attempt = value; [...document.querySelectorAll('#operations-probe header button')].find(button => button.textContent === window.statusLabelsProbe.operationsCopy().refreshSource).click(); }, code);
+        const expectedLabel = code === null ? '—' : code === 'STARTED' ? { zh: '已开始', en: 'Started', ja: '開始済み' }[language] : labels[code];
+        await page.waitForFunction(label => [...document.querySelectorAll('#operations-probe .adm-operation-facts > div')].find(node => node.querySelector('dt')?.textContent === window.statusLabelsProbe.operationsCopy().attemptStatus)?.querySelector('dd')?.textContent === label, {}, expectedLabel);
+      }
+    });
     await run(`${language}: real reconciliation list, detail and filter retain locale and raw query values`, async page => {
       const review = { zh: '复核中', en: 'Under review', ja: '確認中' };
       await navigateFixture(page, `${origin}/tests/fixtures/account-status-labels-ui.html?language=${language}&reconciliation=1`, signal => page.waitForFunction(() => window.statusLabelsProbe && document.querySelector('section nav button:nth-child(2)'), { signal }));
@@ -92,8 +114,9 @@ try {
       assert.equal(options[1].label, review[language]);
       await page.evaluate(() => { const select = [...document.querySelectorAll('select')].find(node => [...node.options].some(option => option.value === 'IN_REVIEW')); select.value = 'IN_REVIEW'; select.dispatchEvent(new Event('change', { bubbles: true })); });
       await page.waitForFunction(() => window.statusLabelsProbe.reconciliationCalls.some(call => call.kind === 'cases' && call.status === 'IN_REVIEW'));
-      await page.click('tbody tr button');
-      assert.ok((await page.$eval('.adm-reconciliation-workspace > section.adm-panel h3', node => node.nextElementSibling.textContent)).includes(review[language]));
+      await page.waitForSelector('.adm-reconciliation-workspace tbody tr button', { visible: true });
+      await page.click('.adm-reconciliation-workspace tbody tr button');
+      await page.waitForFunction(label => document.querySelector('.adm-reconciliation-workspace > section.adm-panel h3')?.nextElementSibling.textContent.includes(label), {}, review[language]);
       const nextLanguage = language === 'ja' ? 'zh' : 'ja';
       await page.select('#probe-language', nextLanguage);
       await page.waitForFunction(label => document.querySelector('tbody tr td:nth-child(2)')?.textContent === label && document.querySelector('.adm-reconciliation-workspace > section.adm-panel h3')?.nextElementSibling.textContent.includes(label), {}, review[nextLanguage]);

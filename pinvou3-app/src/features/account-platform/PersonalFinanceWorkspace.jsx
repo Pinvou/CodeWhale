@@ -1,6 +1,6 @@
 import { statusLabel } from './status-label.js';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { accountDesktopCopy, accountLayoutCopy, financeCopy } from '../../shared/i18n.js';
+import { accountCenterCopy, accountDesktopCopy, accountLayoutCopy, financeCopy } from '../../shared/i18n.js';
 import { hasPermission } from './authorization-ui.js';
 import { formatBalance } from './balance-view.js';
 import { formatFen, requireFinanceCollection, requireFinanceID, requirePaymentOrder, integerMoney } from './finance-contract.js';
@@ -17,6 +17,7 @@ import { PersonalFinancePortalSections } from './PersonalFinancePortalSections.j
 
 export function PersonalFinanceWorkspace({ client, me, language, onPaid, presentationTargets, rechargeOnly = false }) {
   const copy = financeCopy[language];
+  const orderStatus = value => statusLabel(value, language, { ...accountLayoutCopy[language].statuses, ...accountCenterCopy[language].orderStatuses });
   const [data, setData] = useState(null);
   const [productID, setProductID] = useState('');
   const [channel, setChannel] = useState('');
@@ -353,16 +354,16 @@ export function PersonalFinanceWorkspace({ client, me, language, onPaid, present
       {(!rechargeOnly || hasPending) && <section aria-label={copy.pendingOrders}><h3>{rechargeOnly ? accountDesktopCopy[language].pendingRecharge : copy.pendingOrders}</h3>
         {!hasPending && <p>{copy.empty}</p>}
         <ul className="ap-pending-payments">{paymentOrderHistory(data.orders).filter(item => isPayablePaymentOrder(item, now)).map(item => <li key={item.order_id}>
-          <span>{localizedProductDisplayName(item, language, 'product_id')} · {formatFen(item.amount_fen, language)} · {rechargeOnly ? accountLayoutCopy[language].statuses[orderSummaryStatus(item)] || copy.processing : orderSummaryStatus(item)} · {copy.countdown(Math.max(0, Math.ceil((new Date(item.expires_at).getTime() - now) / 1000)))}</span>
+          <span>{localizedProductDisplayName(item, language, 'product_id')} · {formatFen(item.amount_fen, language)} · {orderStatus(orderSummaryStatus(item))} · {copy.countdown(Math.max(0, Math.ceil((new Date(item.expires_at).getTime() - now) / 1000)))}</span>
           <button disabled={busy || unknown || recoveryBlocked} onClick={() => void selectOrder(requireFinanceID(item.order_id), true)}>{copy.continuePayment}</button>
         </li>)}</ul>
       </section>}
       {!rechargeOnly && <><h3>{copy.orders}</h3>
       {data.orders.length === 0 && <p>{copy.empty}</p>}
       <table><thead><tr><th>{copy.product}</th><th>{copy.amount}</th><th>{copy.status}</th><th>{copy.paidAt}</th><th>{copy.history}</th></tr></thead><tbody>{paymentOrderHistory(data.orders).map(item => <tr key={item.order_id}>
-        <td>{localizedProductDisplayName(item, language, 'product_id')}</td><td>{formatFen(item.amount_fen, language)}</td><td>{orderSummaryStatus(item)}</td><td>{orderHistoryTimestamp(item) || '—'}</td><td><button disabled={busy} onClick={() => void selectOrder(requireFinanceID(item.order_id))}>{copy.details}</button></td>
+        <td>{localizedProductDisplayName(item, language, 'product_id')}</td><td>{formatFen(item.amount_fen, language)}</td><td>{orderStatus(orderSummaryStatus(item))}</td><td>{orderHistoryTimestamp(item) || '—'}</td><td><button disabled={busy} onClick={() => void selectOrder(requireFinanceID(item.order_id))}>{copy.details}</button></td>
       </tr>)}</tbody></table>
-      {order && <article><h3>{copy.history}</h3><dl><dt>{copy.orderID}</dt><dd>{order.order_id}</dd><dt>{copy.amount}</dt><dd>{formatFen(order.amount_fen, language)}</dd><dt>{copy.status}</dt><dd>{orderSummaryStatus(order)}</dd><dt>{copy.expires}</dt><dd>{order.expires_at}</dd>{duration !== null && <><dt>{copy.validityDays}</dt><dd>{copy.durationDays(duration)}</dd></>}</dl>
+      {order && <article><h3>{copy.history}</h3><dl><dt>{copy.orderID}</dt><dd>{order.order_id}</dd><dt>{copy.amount}</dt><dd>{formatFen(order.amount_fen, language)}</dd><dt>{copy.status}</dt><dd>{orderStatus(orderSummaryStatus(order))}</dd><dt>{copy.expires}</dt><dd>{order.expires_at}</dd>{duration !== null && <><dt>{copy.validityDays}</dt><dd>{copy.durationDays(duration)}</dd></>}</dl>
         <button disabled={busy} onClick={() => void query()}>{copy.query}</button>
         {payable && canManage && <button disabled={busy || unknown || recoveryBlocked} onClick={close}>{copy.close}</button>}
         {['MANUAL_REVIEW', 'CLOSED', 'FAILED'].includes(order.status) && <form onSubmit={event => { event.preventDefault(); void claim(); }}><label>{copy.statement}<textarea value={statement} maxLength={2000} onChange={event => setStatement(event.target.value)} /></label><button disabled={busy || !statement.trim()}>{copy.claim}</button></form>}

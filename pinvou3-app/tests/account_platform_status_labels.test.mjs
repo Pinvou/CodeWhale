@@ -89,6 +89,39 @@ test('token status vocabulary excludes mixed owner and priority labels while ret
   }
 });
 
+test('operation priorities and evidence kinds keep their explicit contextual labels without becoming statuses', () => {
+  for (const language of languages) {
+    const labels = tokenManagementCopy[language].modelToken.enumLabels;
+    for (const code of ['P0', 'P1', 'P2', 'CANCELLATION', 'CONVERGENCE']) {
+      assert.equal(statusLabel(code, language, labels, true), labels[code]);
+      assert.ok(labels[code] && labels[code] !== code);
+      assert.ok(tokenStatusLabel(code, language).startsWith(accountStatusCopy[language].unknown));
+    }
+  }
+});
+
+test('published delivery states and precheck and registration progress have explicit three-language labels', () => {
+  const deliverySQL = sql('token/000014_usage_execution_replay.up.sql');
+  const states = values(deliverySQL.match(/CHECK \(delivery_status IN \(([^)]+)\)/)[1]);
+  assert.deepEqual(states, ['NOT_STARTED', 'DELIVERING', 'DISCONNECTED', 'DELIVERED', 'USER_STOPPED']);
+  for (const language of languages) {
+    for (const code of [...states, 'DRAFTABLE', 'RECOVERY_UNAVAILABLE']) {
+      const label = tokenStatusLabel(code, language);
+      assert.ok(label && label !== code && !label.startsWith(accountStatusCopy[language].unknown), `${language}/${code}`);
+    }
+  }
+});
+
+test('published upstream attempt states shown in the admin detail all have three-language labels', () => {
+  const attemptSQL = sql('token/000002_token_domain.up.sql');
+  const states = values(attemptSQL.match(/CREATE TABLE usage_attempts[\s\S]*?CHECK \(status IN \(([^)]+)\)/)[1]);
+  assert.deepEqual(states, ['STARTED', 'STREAMING', 'SUCCEEDED', 'FAILED', 'CANCELLED']);
+  for (const language of languages) for (const code of states) {
+    const label = tokenStatusLabel(code, language);
+    assert.ok(label && label !== code && !label.startsWith(accountStatusCopy[language].unknown), `${language}/${code}`);
+  }
+});
+
 test('unknown previews bound Unicode code points and expose direction/control marks', () => {
   const label = statusLabel('💡'.repeat(10000), 'en');
   assert.equal(label, `Unknown status (${'💡'.repeat(120)}…)`);

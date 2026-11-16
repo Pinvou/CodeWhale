@@ -505,7 +505,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
         <label>{copy.audit.action}<input aria-label={copy.audit.actionFilter} placeholder={copy.audit.actionFilter} value={filters.action} onChange={event => setFilters(current => ({ ...current, action: event.target.value }))} /></label>
         <label>{copy.audit.resource}<input aria-label={copy.audit.resourceFilter} placeholder={copy.audit.resourceFilter} value={filters.resource} onChange={event => setFilters(current => ({ ...current, resource: event.target.value }))} /></label>
         <label>{copy.audit.result}<select aria-label={copy.audit.result} value={filters.result} onChange={event => setFilters(current => ({ ...current, result: event.target.value }))}>
-          <option value="">{copy.audit.allResults}</option><option>SUCCEEDED</option><option>DENIED</option><option>FAILED</option>
+          <option value="">{copy.audit.allResults}</option>{['SUCCEEDED', 'DENIED', 'FAILED'].map(value => <option key={value} value={value}>{statusLabel(value, copy.statusLanguage)}</option>)}
         </select></label>
         <label className="adm-filter-date">
           <span>{copy.audit.from}</span>
