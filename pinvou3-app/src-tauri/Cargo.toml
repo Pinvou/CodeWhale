@@ -230,10 +230,17 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 rand = "0.10"
-# Keep 0.22: codewhale-tui, reqwest 0.12, ureq 2.12, oauth2 5,
-# hf-hub, ort-sys and rmcp 3 all still require 0.22 (wry 0.57.1 and
-# hyper-util have moved to 0.23); a solo 0.23 bump would only add a second
-# copy. Revisit once upstreams align.
+# Keep 0.22: codewhale-tui, reqwest (0.12 via hf-hub plus the direct 0.13
+# pin), ureq 2.12 and pinvou-knowledge still require 0.22; the lock graph
+# adds further 0.22 pins via hyper-util, plist, serde_with and termwiz.
+# rmcp 3 declares base64 0.23 only as an optional dependency enabled by
+# its default/request-state/client-side-sse/auth-enterprise-managed/
+# server-side-http features; the sole rmcp declaration (CodeWhale tui)
+# enables just auth + client with default-features = false, so rmcp adds
+# no base64 requirement here (its auth feature does pull oauth2 5, which
+# sits on 0.21.7 along with age 0.11.5). wry 0.57.1 and tauri-codegen
+# already carry a separate 0.23 copy, so a solo 0.23 bump would leave
+# those holdouts on a separate 0.22 copy. Revisit once upstreams align.
 base64 = "0.22"
 tempfile = "3"
 # Maintained 0.11.5 shares the 0.12.1 parser fixes and retains our X25519 backup wire/key format.
