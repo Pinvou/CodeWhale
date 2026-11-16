@@ -271,14 +271,28 @@ test("official desktop releases enable Windows and Linux and keep macOS disabled
   // to be pinned above, and every pinned job has to actually compile, so the
   // two sets must stay equal; the evidence gate is inventoried separately by
   // its controller-release-gate.mjs invocation.
-  const isDesktopCompileStep = (step) => {
+  // 评审 round-2 P2：识别面不止 run 内三种子串——(1) npx/cargo/yarn 等非 npm
+  // 标记的构建命令；(2) step/job env 注入的命令文本；(3) 经 uses 委托本地可
+  // 复用工作流的影子构建/门禁。识别不到的新 job 由下方全量登记兜底 fail-closed。
+  const desktopCompileMarkers = [
+    "scripts/tauri/build.js build",
+    "npm run build",
+    "yarn build",
+    "tauri build",
+    "scripts/ci-build-linux-loongarch64.sh",
+  ];
+  const isDesktopCompileStep = (step, jobEnv = {}) => {
     const run = typeof step.run === "string" ? step.run : "";
-    return run.includes("scripts/tauri/build.js build")
-      || run.includes("npm run build")
-      || run.includes("scripts/ci-build-linux-loongarch64.sh");
+    const uses = typeof step.uses === "string" ? step.uses : "";
+    const envText = [
+      ...Object.values(step.env ?? {}),
+      ...Object.values(jobEnv ?? {}),
+    ].map((value) => String(value)).join("\n");
+    return desktopCompileMarkers.some((marker) => run.includes(marker) || envText.includes(marker))
+      || /\.ya?ml$/u.test(uses);
   };
   const compileJobNames = Object.keys(jobs)
-    .filter((name) => (jobs[name]?.steps ?? []).some(isDesktopCompileStep))
+    .filter((name) => (jobs[name]?.steps ?? []).some((step) => isDesktopCompileStep(step, jobs[name].env)))
     .sort();
   assert.deepEqual(
     compileJobNames,
@@ -292,6 +306,36 @@ test("official desktop releases enable Windows and Linux and keep macOS disabled
       typeof step.run === "string" && step.run.includes("remote-control-relay/scripts/controller-release-gate.mjs")
     )));
   assert.deepEqual(gateJobNames, [gateJobName], "controller-release-gate.mjs may only run inside the pinned gate job");
+  // Fail-closed 全量登记：release-packages.yml 的每一个 job 都必须在册
+  // （编译 job 见 pinnedCompileJobs，门禁 job 见 gateJobName，其余为下表
+  // 辅助 job）。任何新增 job 未登记即转红——包括 run 内无标记的包装脚本
+  // 形态（评审 round-2 变异实证 1）。
+  const registeredAuxJobs = [
+    "check-version-bump",
+    "validate-windows-runtime-pr",
+  ];
+  const registeredJobNames = [
+    gateJobName,
+    ...registeredAuxJobs,
+    ...Object.keys(pinnedCompileJobs),
+  ].sort();
+  assert.deepEqual(
+    Object.keys(jobs).sort(),
+    registeredJobNames,
+    "every job in release-packages.yml must be registered in this inventory "
+      + "(compile jobs in pinnedCompileJobs, the evidence gate by name, the rest "
+      + "in registeredAuxJobs); unknown jobs fail closed so wrapper-script or "
+      + "reusable-workflow shapes cannot silently escape the platform policy",
+  );
+  // 可复用工作流委托禁令：影子 gate/构建工作流在 uses 上即可见，直接禁止
+  // （评审 round-2 变异实证 3）；外部 action（owner/action@版本）不受影响。
+  const localReusableWorkflowUsers = Object.entries(jobs)
+    .flatMap(([name, job]) => (job.steps ?? [])
+      .filter((step) => typeof step.uses === "string" && /\.ya?ml$/u.test(step.uses))
+      .map((step) => `${name}: ${step.uses}`));
+  assert.deepEqual(localReusableWorkflowUsers, [],
+    "release-packages.yml must not delegate build or gate logic to local reusable "
+      + "workflows; inline steps keep the compile/gate inventory exhaustive");
 });
 
 test("release platform and compiled capability contracts also run when Windows jobs are disabled", async () => {
