@@ -317,9 +317,15 @@ fn auth_side_secret_name(lowered: &str) -> bool {
         // `_pwd` 刻意带下划线：裸 `pwd` 会误伤 PWD/OLDPWD（工作目录回显）。
         // `token` 子串会波及 TOKENIZERS_PARALLELISM/MAX_TOKENS 一类非机密键，
         // 属 fail-closed 取舍：多抹一行日志比漏一把密码便宜。
+        // r39 P2-2：`cookie` 入族——Set-Cookie/Cookie 头的会话凭据（SID= 等）
+        // 落盘+导出双漏（AGENTS.md 明令 Cookie 不得入日志），子串收口同时覆盖
+        // cookie/session 专名形态。
         || ["password", "passwd", "_pwd", "secret", "token", "api_key", "apikey", "access_key"]
             .iter()
             .any(|frag| lowered.contains(*frag))
+        // r39 P2-2：Cookie 族（Set-Cookie/Cookie 头的 SID= 等会话凭据）落盘+
+        // 导出双漏（AGENTS.md 明令 Cookie 不得入日志）——子串收口等价并入。
+        || lowered.contains("cookie")
 }
 
 /// r31 P1-1：Authorization 族头名。
@@ -1590,16 +1596,26 @@ mod tests {
             ("+ REDIS_PASSWORD=redispwd8899", "redispwd8899"),
             ("+ MINIO_SECRET_KEY=miniokey3344", "miniokey3344"),
             ("+ GITHUB_TOKEN=gho_abc123short", "gho_abc123short"),
+            // r39 P2-2：Cookie 族——`> Set-Cookie:`（curl -v 回显）与裸
+            // `cookie:`（服务器 dump）两种形态的会话凭据都得抹。
+            (
+                "> Set-Cookie: SID=abc123def456ghi; HttpOnly",
+                "abc123def456ghi",
+            ),
+            ("cookie: session=sess789xyzshort", "sess789xyzshort"),
         ] {
             let cleaned = sanitize_for_disk(line);
             assert!(!cleaned.contains(secret), "{line} -> {cleaned}");
             let exported = sanitize_for_export(line);
             assert!(!exported.contains(secret), "{line} -> {exported}");
         }
-        // 工作目录回显不该被 `_pwd` 误伤（PWD/OLDPWD 无下划线前缀）。
-        let kept = sanitize_for_disk("+ PWD=/opt/pinvou-model-store/data + OLDPWD=/root");
-        assert!(kept.contains("/opt/pinvou-model-store/data"), "{kept}");
+        // r39 修：原反证腿前提错误——「pwd」整名自 r18 起就在 SECRET_QUERY_KEYS，
+        // PWD=（工作目录回显）被有意脱敏（Linux CI 实证），非本批子串族误伤。
+        // 钉行为改用不受任何名单命中的形态：OLDPWD（非整名、无 _pwd 子串）与
+        // 中性路径键 WORKDIR 的值必须原样保留——证明子串族没有波及路径回显面。
+        let kept = sanitize_for_disk("+ OLDPWD=/root + WORKDIR=/opt/pinvou-model-store/data");
         assert!(kept.contains("/root"), "{kept}");
+        assert!(kept.contains("/opt/pinvou-model-store/data"), "{kept}");
     }
 
     /// 落盘时**不能**上全量启发式。
