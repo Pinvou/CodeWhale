@@ -337,8 +337,12 @@ def _hf_endpoint():
 
 
 def _valid_name(value):
-    """卡片/文件名白名单：只允许 [A-Za-z0-9._-]，且不允许 .. 与点开头（防路径穿越）。"""
-    if not value or not _NAME_RE.match(value):
+    """卡片/文件名白名单：只允许 [A-Za-z0-9._-]，且不允许 .. 与点开头（防路径穿越）。
+
+    fullmatch 而非 match+$：正则的 $ 在结尾换行前命中，"abc\\n" 这类值会
+    混进请求行造成注入（与空格/CRLF 同类），必须整串匹配。
+    """
+    if not value or not _NAME_RE.fullmatch(value):
         return False
     return ".." not in value and not value.startswith(".")
 
@@ -2242,9 +2246,9 @@ def _tool_capacity():
 
 def _tool_logs(args):
     card = (args.get("card") or "").strip()
-    if not card:
+    if not _valid_name(card):
         return {
-            "summary": "缺少参数 card（卡片名，如 ornith15-35b-a3b-nvfp4）。",
+            "summary": "缺少或非法参数 card（卡片名，如 ornith15-35b-a3b-nvfp4）。",
             "data": None,
             "next": "先调 cube_list_models 拿卡片名列表。",
         }
@@ -2315,8 +2319,8 @@ def _selected_model_inventory(data):
 def _tool_plan_switch(args):
     """换胎计划书（只读，不执行）：停谁启谁、中断窗口、内存预算（换胎口径）。"""
     card = (args.get("card") or "").strip()
-    if not card:
-        return {"summary": "缺少参数 card（目标卡片名）。", "data": None, "next": "先调 cube_list_models 拿卡片名。"}
+    if not _valid_name(card):
+        return {"summary": "缺少或非法参数 card（目标卡片名）。", "data": None, "next": "先调 cube_list_models 拿卡片名。"}
     status = _api("/v1/status")
     models = _api("/v1/models")
     if status is None or models is None:
@@ -2510,6 +2514,11 @@ def _tool_task(args):
             "data": {"tasks": recent, **observation},
             "next": "挑中要处理的任务，带它的 id 再调 cube_get_task 看事件流与错误细节。",
         }
+    # 任务 id 会拼进 /v1/tasks/<id> 请求行；store:/fetch- 前缀分支在上面已
+    # 各自处理，走到这里的裸 id 与 _tool_cancel_task 同口径过白名单。
+    if not _valid_name(task_id):
+        return {"summary": "参数 task_id 非法。", "data": None,
+                "next": "用长操作返回的 task_id 原值。"}
     data = _api("/v1/tasks/%s" % task_id)
     # Bounded server-side waiting avoids a tight LLM/tool loop or a guessed
     # minute-long sleep after a fast model has already become ready.
@@ -2968,7 +2977,7 @@ def _tool_cancel_task(args):
     if not task_id:
         return {"summary": "缺少参数 task_id。", "data": None,
                 "next": "任务 id 由 cube_install_model / 启用停用等长操作返回。"}
-    if not _NAME_RE.match(task_id):
+    if not _NAME_RE.fullmatch(task_id):
         return {"summary": "参数 task_id 非法。", "data": None,
                 "next": "用长操作返回的 task_id 原值。"}
     return _task_reply(

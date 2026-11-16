@@ -894,6 +894,19 @@ def main():
         check("B3 注入型 repo_id 被白名单拒绝", "非法" in r["summary"], r["summary"])
         r = client.tool("cube_check_model_repo", {"repo_id": "evil/名字"})
         check("B3 unicode repo_id 被白名单拒绝", "非法" in r["summary"], r["summary"])
+        # r3 评审 P2-1：请求行插值入口与文件其余路径同口径过 _valid_name。
+        # 尾部换行类输入由入口 .strip() 归一（安全），此处只钉内部注入位。
+        for tool, arg, value in (
+            ("cube_get_logs", "card", "evil card"),
+            ("cube_get_logs", "card", "card\r\nX-Injected: 1"),
+            ("cube_plan_switch", "card", "evil card"),
+            ("cube_plan_switch", "card", "card\r\nX: 1"),
+            ("cube_get_task", "task_id", "evil id"),
+            ("cube_get_task", "task_id", "task\r\nGET /v1/status HTTP/1.1"),
+        ):
+            r = client.tool(tool, {arg: value})
+            check("B3 %s 注入型 %s 被白名单拒绝" % (tool, arg),
+                  "非法" in r["summary"], r["summary"])
 
         # ===================================================================
         # C 组（MCP 侧）：通用渲染卡安装下发 + 物化布局
