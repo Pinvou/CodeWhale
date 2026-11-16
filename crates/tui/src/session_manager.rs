@@ -1204,14 +1204,19 @@ impl SessionManager {
         Ok(path)
     }
 
-    /// Persist a lifecycle edit (archive/rename/title/branch/import/PATCH)
-    /// without triggering the retention scan. These paths fire per user
-    /// action — usually on a fresh [`SessionManager`] whose throttle has not
-    /// armed (`janitor_due(0, _)` is always true), so routing them through
-    /// [`Self::save_session`] would run the full O(records) scan
-    /// synchronously on the caller's thread every time. Retention stays
-    /// enforced by the per-turn autosave actor (throttled), the boot janitor,
-    /// `codewhale exec`'s one-shot persist, and explicit `/sessions prune`.
+    /// Persist a lifecycle edit (archive/rename/title/branch/import/fork and
+    /// the HTTP PATCH/POST/PUT session routes) without triggering the
+    /// retention scan. These paths fire per user action — usually on a fresh
+    /// [`SessionManager`] whose throttle has not armed (`janitor_due(0, _)`
+    /// is always true), so routing them through [`Self::save_session`] would
+    /// run the full O(records) scan synchronously on the caller's thread
+    /// every time. Retention stays enforced by the per-turn autosave actor
+    /// (throttled), the boot janitor, `codewhale exec`'s one-shot persist,
+    /// and explicit `/sessions prune`.
+    ///
+    /// This split is the load-bearing guard of the retention design: any
+    /// recurring save that constructs a fresh [`SessionManager`] per call
+    /// MUST use this method, or it reintroduces a full scan per save.
     pub fn save_session_edit(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
         self.persist_session(session)
     }
@@ -1914,7 +1919,9 @@ impl SessionManager {
     /// inside the window is a no-op. A failed compare-and-swap means a
     /// concurrent save already claimed this run — skip. Explicit
     /// [`SessionManager::cleanup_old_sessions`] calls bypass the throttle so
-    /// command surfaces and tests keep their exact semantics.
+    /// tests keep their exact semantics; production retention runs only
+    /// through this throttled path, the boot janitor, `codewhale exec`'s
+    /// one-shot persist, and `/sessions prune`.
     fn run_janitor_throttled(&self) -> std::io::Result<()> {
         use std::sync::atomic::Ordering;
 
