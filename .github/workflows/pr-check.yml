@@ -1357,9 +1357,40 @@ jobs:
 
       # Setup 工件化:恢复 frontend-setup 的单次构建产物(node_modules ×3 +
       # dist + web/dist),替代本 job 原先重复的 npm ci ×3 + 三次 vite build;
-      # 测试行为零变化。key 精确到本 run 的 tested tree;restore 优先于全部
-      # lint/test 步骤,cache 服务在本池由 rust-cache/loong64 缓存长期实证可用。
+      # 测试行为零变化。key 精确到本 run 的 tested tree。cache 服务对同 run
+      # 跨 job 的 save 有分钟级传播延迟(GitHub 最终一致,非即时可见):restore
+      # 最多尝试 3 次,末尾终验步以 60s 间隔轮询 ~10 分钟;仍 miss 即显式红,
+      # 禁止静默回落本机 npm ci + 重建。
       - name: Restore frontend setup bundle (cache)
+        id: restore1
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            pinvou3-app/node_modules
+            pinvou3-app/dist
+            remote-control-relay/web/dist
+            remote-control-relay/node_modules
+            account-platform/node_modules
+          key: frontend-setup-v1-${{ github.sha }}
+
+      - name: Restore frontend setup bundle (cache, attempt 2)
+        id: restore2
+        if: ${{ steps.restore1.outputs.cache-hit != 'true' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            pinvou3-app/node_modules
+            pinvou3-app/dist
+            remote-control-relay/web/dist
+            remote-control-relay/node_modules
+            account-platform/node_modules
+          key: frontend-setup-v1-${{ github.sha }}
+
+      # restore2 被跳过(restore1 已命中)时 outcome 为 skipped,须显式排除,
+      # 否则空 outputs 会让 restore3 在命中路径上做无谓的重复解包。
+      - name: Restore frontend setup bundle (cache, attempt 3)
+        id: restore3
+        if: ${{ steps.restore2.outcome == 'success' && steps.restore2.outputs.cache-hit != 'true' }}
         uses: actions/cache/restore@v6
         with:
           path: |
@@ -1371,15 +1402,23 @@ jobs:
           key: frontend-setup-v1-${{ github.sha }}
 
       - name: Verify frontend setup bundle restored
-        # 显式失败:缓存未命中(被驱逐/服务故障)时禁止静默回落本机 npm ci
-        # 重付全部构建 CPU(共置宿主摊薄正是本 PR 要缓解的)——重跑 frontend-setup
-        # 或重新触发本 run 即可恢复。
         run: |
           set -euo pipefail
-          if [[ ! -d pinvou3-app/node_modules || ! -d pinvou3-app/dist || ! -d remote-control-relay/web/dist ]]; then
-            echo "::error::frontend setup 缓存未命中(键 frontend-setup-v1-${{ github.sha }})。重跑 frontend-setup job 或重新触发本 run;禁止静默回落到本机 npm ci + 重建。"
-            exit 1
+          bundle_ok() {
+            [[ -d pinvou3-app/node_modules && -d pinvou3-app/dist && -d remote-control-relay/web/dist ]]
+          }
+          if bundle_ok; then
+            exit 0
           fi
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            echo "frontend setup 缓存尚未传播可见(cache 服务最终一致),60s 后重检"
+            sleep 60
+            if bundle_ok; then
+              exit 0
+            fi
+          done
+          echo "::error::frontend setup 缓存未命中(键 frontend-setup-v1-${{ github.sha }})。重跑 frontend-setup job 或重新触发本 run;禁止静默回落到本机 npm ci + 重建。"
+          exit 1
 
       - name: ESLint (含 pet 缺失项,现已全覆盖)
         # Official 的存量 warning 仍可由本地 lint 完整查看；CI 只打印会阻断的
@@ -1494,8 +1533,38 @@ jobs:
       # Setup 工件化:恢复 frontend-setup 的单次构建产物,替代每分片重复的
       # npm ci ×3 + 三次 vite build(共置宿主算力摊薄,见 frontend-setup 注释)。
       # 各分片恢复独立副本,分片间无可变共享状态;dist/CHROME/工作目录与原
-      # setup 一致。未命中时显式失败,不静默回落本机构建。
+      # setup 一致。cache 同 run 跨 job 传播有分钟级延迟,restore 至多 3 次 +
+      # 终验步轮询 ~10 分钟;仍 miss 即显式红,不静默回落本机构建。
       - name: Restore frontend setup bundle (cache)
+        id: restore1
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            pinvou3-app/node_modules
+            pinvou3-app/dist
+            remote-control-relay/web/dist
+            remote-control-relay/node_modules
+            account-platform/node_modules
+          key: frontend-setup-v1-${{ github.sha }}
+
+      - name: Restore frontend setup bundle (cache, attempt 2)
+        id: restore2
+        if: ${{ steps.restore1.outputs.cache-hit != 'true' }}
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            pinvou3-app/node_modules
+            pinvou3-app/dist
+            remote-control-relay/web/dist
+            remote-control-relay/node_modules
+            account-platform/node_modules
+          key: frontend-setup-v1-${{ github.sha }}
+
+      # restore2 被跳过(restore1 已命中)时 outcome 为 skipped,须显式排除,
+      # 否则空 outputs 会让 restore3 在命中路径上做无谓的重复解包。
+      - name: Restore frontend setup bundle (cache, attempt 3)
+        id: restore3
+        if: ${{ steps.restore2.outcome == 'success' && steps.restore2.outputs.cache-hit != 'true' }}
         uses: actions/cache/restore@v6
         with:
           path: |
@@ -1509,10 +1578,21 @@ jobs:
       - name: Verify frontend setup bundle restored
         run: |
           set -euo pipefail
-          if [[ ! -d pinvou3-app/node_modules || ! -d pinvou3-app/dist || ! -d remote-control-relay/web/dist ]]; then
-            echo "::error::frontend setup 缓存未命中(键 frontend-setup-v1-${{ github.sha }})。重跑 frontend-setup job 或重新触发本 run;禁止静默回落到本机 npm ci + 重建。"
-            exit 1
+          bundle_ok() {
+            [[ -d pinvou3-app/node_modules && -d pinvou3-app/dist && -d remote-control-relay/web/dist ]]
+          }
+          if bundle_ok; then
+            exit 0
           fi
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            echo "frontend setup 缓存尚未传播可见(cache 服务最终一致),60s 后重检"
+            sleep 60
+            if bundle_ok; then
+              exit 0
+            fi
+          done
+          echo "::error::frontend setup 缓存未命中(键 frontend-setup-v1-${{ github.sha }})。重跑 frontend-setup job 或重新触发本 run;禁止静默回落到本机 npm ci + 重建。"
+          exit 1
 
       - name: 准备浏览器
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
