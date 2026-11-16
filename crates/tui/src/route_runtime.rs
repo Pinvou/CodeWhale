@@ -923,6 +923,7 @@ fn root_base_url_belongs_to_non_deepseek_provider(base_url: &str) -> bool {
         "siliconflow",
         "arcee.ai",
         "moonshot.ai",
+        "moonshot.cn",
         "api.kimi.com",
         "api.kimi.ai",
     ]
@@ -938,7 +939,9 @@ mod tests {
     /// The DeepSeek identity switch clears a foreign Kimi Code root
     /// `base_url` on both membership hosts, so a saved Kimi Code route cannot
     /// survive a Deepseek/DeepseekCN identity change as a stale root.
-    /// Non-vendor and own-vendor roots stay untouched.
+    /// Moonshot's China-region direct host is covered by the same rule —
+    /// it belongs to the same non-DeepSeek vendor as the `.ai` host — and
+    /// non-vendor and own-vendor roots stay untouched.
     #[test]
     fn deepseek_identity_clears_kimi_code_roots_on_both_membership_hosts() {
         for host in ["api.kimi.com", "api.kimi.ai"] {
@@ -949,6 +952,9 @@ mod tests {
                 "https://{host}/coding/v1 belongs to a non-DeepSeek vendor and must be cleared"
             );
         }
+        assert!(root_base_url_belongs_to_non_deepseek_provider(
+            "https://api.moonshot.cn/v1"
+        ));
         assert!(!root_base_url_belongs_to_non_deepseek_provider(
             "https://api.deepseek.com/v1"
         ));
