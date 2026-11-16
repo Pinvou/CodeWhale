@@ -8058,10 +8058,9 @@ impl SubAgentManager {
         if let Some(caller) = caller_agent_id
             .map(str::trim)
             .filter(|caller| !caller.is_empty() && *caller != "root")
+            && !self.agent_id_is_owned_by_session(caller, active_session_id)
         {
-            if !self.agent_id_is_owned_by_session(caller, active_session_id) {
-                return Err(anyhow!("Agent not found in the active session"));
-            }
+            return Err(anyhow!("Agent not found in the active session"));
         }
         self.ensure_caller_controls_descendant_by_id(&agent_id, caller_agent_id, action)
     }

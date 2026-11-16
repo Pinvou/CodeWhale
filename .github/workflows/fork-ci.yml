@@ -43,13 +43,18 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint workspace
+        # Gate strength aligned with upstream ci.yml: --all-targets was
+        # missing here even though the v0.9.10 release incident came from
+        # unlinted test targets, and -A clippy::collapsible_if is gone now
+        # that its last two sites were rewritten as let-chains (upstream
+        # policy: "no longer allowed"). assertions_on_constants stays the
+        # single deliberate fork allowance; it has no active triggers.
         run: >-
-          cargo clippy --workspace --all-features --locked --
+          cargo clippy --workspace --all-targets --all-features --locked --
           -D warnings
           -A clippy::uninlined_format_args
           -A clippy::too_many_arguments
           -A clippy::unnecessary_map_or
-          -A clippy::collapsible_if
           -A clippy::assertions_on_constants
       - uses: taiki-e/install-action@nextest
       - name: Test workspace
