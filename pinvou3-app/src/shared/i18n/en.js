@@ -1254,6 +1254,7 @@ desktopHint:'Install Obsidian on the desktop and create a vault first, then chec
   connectedBannerIma:'Tencent ima connected · tool switches are off by default; enable it in the composer tools list',
   connectedTool:name=>`${name} connected`, disconnectedTool:name=>`${name} disconnected`,
   connectedQuoted:name=>`${name} connected`, installedQuoted:name=>`${name} installed`, uninstalledQuoted:name=>`${name} uninstalled`,
+  validatedToolsDiscovered:tools=>`Validated — tools discovered: ${tools.join(', ')}`,
   uploadedSkill:'User-uploaded skill',
   oauthBrowserTimeout:'No browser authorization callback received. Confirm whether authorization finished, or try again later.',
   stoppingAuth:'Stopping the browser authorization wait…', authWaitCancelled:'Stopped waiting for browser authorization; you can authorize again later.', cancelFailed:'Cancel failed—retry available; the authorization wait is still running.',

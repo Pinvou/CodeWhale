@@ -1251,6 +1251,7 @@ desktopHint:'先にデスクトップで Obsidian をインストールして保
   connectedBannerIma:'Tencent ima に接続済み · ツールスイッチはデフォルトでオフです。入力欄のツールリストでオンにできます',
   connectedTool:name=>`${name} に接続しました`, disconnectedTool:name=>`${name} から切断しました`,
   connectedQuoted:name=>`「${name}」に接続しました`, installedQuoted:name=>`「${name}」をインストールしました`, uninstalledQuoted:name=>`「${name}」をアンインストールしました`,
+  validatedToolsDiscovered:tools=>`検証済み — 検出されたツール: ${tools.join('、')}`,
   uploadedSkill:'ユーザーがアップロードしたスキル',
   oauthBrowserTimeout:'ブラウザーからの認証コールバックを受信できませんでした。認証が完了したか確認するか、後で再度お試しください。',
   stoppingAuth:'ブラウザー認証の待機を停止しています…', authWaitCancelled:'ブラウザー認証の待機をキャンセルしました。後で再度認証できます。', cancelFailed:'キャンセルに失敗しました。再試行できます。認証の待機は継続中です。',
