@@ -197,6 +197,13 @@ const UPDATER_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// `/update` long past [`UPDATER_TOTAL_TIMEOUT`].
 const UPDATER_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Capture ceiling per drained stream, mirroring the shared bounded runner
+/// (`tools/process.rs`): a chatty or stuck error-printing updater must not
+/// grow the drain buffers without bound across a multi-minute run. Output
+/// past the cap is dropped with an explicit note appended to the transcript
+/// snapshot, so the truncation stays observable.
+const UPDATER_DRAIN_CAPTURE_CAP: usize = 16 * 1024 * 1024;
+
 fn run_updater(updater: &Path, mode: UpdateMode) -> CommandResult {
     #[cfg(unix)]
     use std::os::unix::process::CommandExt as _;
@@ -313,12 +320,23 @@ fn spawn_drain<R: std::io::Read + Send + 'static>(
     std::thread::spawn(move || {
         if let Some(mut pipe) = pipe {
             let mut chunk = [0u8; 8192];
+            let mut capped = false;
             loop {
                 match pipe.read(&mut chunk) {
                     Ok(0) => break,
                     Ok(n) => {
                         let Ok(mut guard) = buffer.lock() else { break };
-                        guard.extend_from_slice(&chunk[..n]);
+                        if guard.len() < UPDATER_DRAIN_CAPTURE_CAP {
+                            let room = UPDATER_DRAIN_CAPTURE_CAP - guard.len();
+                            guard.extend_from_slice(&chunk[..n.min(room)]);
+                        } else if !capped {
+                            // Cap reached: note the truncation once, drop the
+                            // rest. The transcript renderer quotes at most a
+                            // few KB, so the note survives to the user.
+                            const CAP_NOTE: &str = "\n…[output truncated at the capture limit]";
+                            guard.extend_from_slice(CAP_NOTE.as_bytes());
+                            capped = true;
+                        }
                     }
                     Err(_) => break,
                 }
