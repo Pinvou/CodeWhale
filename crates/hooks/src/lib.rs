@@ -381,11 +381,16 @@ impl HookDispatcher {
 
     /// Broadcast an event to every registered sink.
     ///
-    /// Errors from individual sinks are silently discarded so that one failing
-    /// sink does not block the others.
+    /// Errors from individual sinks are discarded so that one failing sink
+    /// does not block the others. Best-effort stays the contract (no retry,
+    /// no propagation), but the discard is now observable: a sink that fails
+    /// or times out on every event leaves a debug-level trace instead of
+    /// losing events with no signal at all.
     pub async fn emit(&self, event: HookEvent) {
         for sink in &self.sinks {
-            let _ = sink.emit(&event).await;
+            if let Err(error) = sink.emit(&event).await {
+                tracing::debug!("hook sink failed to receive event: {error}");
+            }
         }
     }
 }
