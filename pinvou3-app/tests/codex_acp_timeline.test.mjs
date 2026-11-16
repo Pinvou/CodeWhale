@@ -614,6 +614,13 @@ try {
   assert.ok(navigationComponents.includes('group flex h-11 items-center')
     && navigationComponents.includes('flex h-5 w-5 shrink-0 items-center justify-center'),
   'all recent-session rows and their icon canvases must keep a consistent size');
+  // 窄屏没有 hover 可把按钮组换回去,日期槽若被 max-sm:hidden 隐藏,普通会话的时间
+  // 信息在触屏上就不可见。槽位保持常显,在宽度上限内截断让位,桌面的
+  // hover 换按钮行为不变。
+  assert.ok(navigationComponents.includes('text-[11px] mr-4 min-w-0 max-w-[45%] truncate opacity-60')
+    && !navigationComponents.includes('whitespace-nowrap group-hover:hidden group-focus-within:hidden max-sm:hidden')
+    && navigationComponents.includes('group-hover:hidden group-focus-within:hidden'),
+  'the date slot must stay visible on narrow viewports, truncate under a width cap, and keep the hover swap');
   assert.ok(!main.includes("w-[280px] bg-[#1E1F20]")
     && main.includes("activeTheme === 'light'")
     && main.includes("? 'bg-[#F0F4F9]'")
