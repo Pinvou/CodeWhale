@@ -144,15 +144,14 @@ async fn search_files_async(
     timeout: Duration,
     follow_symlinks: bool,
 ) -> Result<Vec<FileSearchMatch>, ToolError> {
-    let worker_cancel_token = cancel_token.clone();
-    run_blocking_file_search(timeout, cancel_token, move || {
+    run_blocking_file_search(timeout, cancel_token, move |walk_cancel| {
         search_files(
             &query,
             &base_path,
             extensions,
             exclude_patterns,
             limit,
-            worker_cancel_token.as_ref(),
+            walk_cancel,
             follow_symlinks,
         )
     })
@@ -165,7 +164,9 @@ async fn run_blocking_file_search<F>(
     search: F,
 ) -> Result<Vec<FileSearchMatch>, ToolError>
 where
-    F: FnOnce() -> Result<Vec<FileSearchMatch>, ToolError> + Send + 'static,
+    F: FnOnce(Option<&CancellationToken>) -> Result<Vec<FileSearchMatch>, ToolError>
+        + Send
+        + 'static,
 {
     if cancel_token
         .as_ref()
@@ -174,12 +175,24 @@ where
         return Err(file_search_cancelled());
     }
 
-    let task = tokio::task::spawn_blocking(search);
+    // The closure gets a walk-local child of the caller's token: cancelled
+    // when the caller's token is cancelled (an external stop) or when the
+    // timeout fires, but cancelling it never touches the caller's token — a
+    // search timeout must surface as a tool error the turn can react to,
+    // never as a turn-wide stop (the per-turn token belongs to the engine).
+    let walk_token = cancel_token.as_ref().map(|token| token.child_token());
+    let task_token = walk_token.clone();
+    let task = tokio::task::spawn_blocking(move || search(task_token.as_ref()));
     let result = match &cancel_token {
         Some(token) => {
             tokio::select! {
                 biased;
-                () = token.cancelled() => return Err(file_search_cancelled()),
+                () = token.cancelled() => {
+                    if let Some(walk) = walk_token.as_ref() {
+                        walk.cancel();
+                    }
+                    return Err(file_search_cancelled());
+                },
                 result = tokio::time::timeout(timeout, task) => result,
             }
         }
@@ -189,10 +202,11 @@ where
     let joined = result.map_err(|_| {
         // The timeout drops the JoinHandle, detaching the walk: it would keep
         // consuming a blocking worker and file IO for its natural lifetime.
-        // The closure shares this token and checks it per entry, so cancelling
-        // here stops the detached walk promptly.
-        if let Some(token) = cancel_token.as_ref() {
-            token.cancel();
+        // The closure checks the walk-local child per entry, so cancelling it
+        // stops the detached walk promptly without cancelling the caller's
+        // per-turn token.
+        if let Some(walk) = walk_token.as_ref() {
+            walk.cancel();
         }
         file_search_timeout(timeout)
     })?;
@@ -596,7 +610,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_search_blocking_wrapper_reports_timeout() {
-        let err = run_blocking_file_search(Duration::from_millis(1), None, || {
+        let err = run_blocking_file_search(Duration::from_millis(1), None, |_walk_cancel| {
             std::thread::sleep(Duration::from_millis(50));
             Ok(Vec::new())
         })
@@ -609,34 +623,73 @@ mod tests {
         );
     }
 
-    /// A timed-out walk is detached when its JoinHandle is dropped. The shared
-    /// cancel token must be signalled in the timeout path so the detached walk
-    /// stops promptly instead of consuming a blocking worker and file IO for
-    /// its natural lifetime.
+    /// A timed-out walk is detached when its JoinHandle is dropped. The
+    /// walk-local child token must be signalled in the timeout path so the
+    /// detached walk stops promptly instead of consuming a blocking worker
+    /// and file IO for its natural lifetime — and the caller's own token must
+    /// stay untouched: cancelling it would abort the whole turn and misreport
+    /// the timeout as a user stop.
     #[tokio::test]
     async fn test_file_search_timeout_cancels_the_detached_walk() {
-        let token = CancellationToken::new();
-        let walk_token = token.clone();
-        let err =
-            run_blocking_file_search(Duration::from_millis(20), Some(token.clone()), move || {
+        let caller_token = CancellationToken::new();
+        let err = run_blocking_file_search(
+            Duration::from_millis(20),
+            Some(caller_token.clone()),
+            move |walk_cancel| {
                 // Stand in for a long walk that only ends early when cancelled.
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                while !walk_token.is_cancelled() && std::time::Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(5));
+                if let Some(walk_token) = walk_cancel {
+                    while !walk_token.is_cancelled() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
                 }
                 Ok(Vec::new())
-            })
-            .await
-            .expect_err("a walk past the timeout must surface the timeout error");
+            },
+        )
+        .await
+        .expect_err("a walk past the timeout must surface the timeout error");
 
         assert!(
             matches!(err, ToolError::Timeout { .. }),
             "unexpected error: {err:?}"
         );
         assert!(
-            token.is_cancelled(),
-            "timeout must cancel the walk token so the detached walk stops"
+            !caller_token.is_cancelled(),
+            "the timeout is walk-local: cancelling the caller's per-turn token would abort the turn"
         );
+    }
+
+    /// An external stop (caller token cancelled) still reaches the walk
+    /// through the child token and surfaces as the cancelled error.
+    #[tokio::test]
+    async fn test_file_search_external_stop_cancels_the_walk_via_the_child_token() {
+        let caller_token = CancellationToken::new();
+        let stop_token = caller_token.clone();
+        let stopper = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            stop_token.cancel();
+        });
+        let err = run_blocking_file_search(
+            Duration::from_secs(30),
+            Some(caller_token.clone()),
+            move |walk_cancel| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                if let Some(walk_token) = walk_cancel {
+                    while !walk_token.is_cancelled() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+                Ok(Vec::new())
+            },
+        )
+        .await
+        .expect_err("an external stop must surface the cancelled error");
+
+        assert!(
+            matches!(err, ToolError::Cancelled { .. }),
+            "unexpected error: {err:?}"
+        );
+        stopper.await.expect("stopper task");
     }
 
     #[tokio::test]
