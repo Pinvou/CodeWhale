@@ -3,6 +3,7 @@ package billing
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -27,7 +28,12 @@ func stageFinancialJSONPackage(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), "900042_") {
+		if e.IsDir() {
+			continue
+		}
+		versionText, _, valid := strings.Cut(e.Name(), "_")
+		version, parseErr := strconv.ParseInt(versionText, 10, 64)
+		if !valid || parseErr != nil || version >= 900042 {
 			continue
 		}
 		body, x := os.ReadFile(filepath.Join(source, e.Name()))

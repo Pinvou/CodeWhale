@@ -60,6 +60,8 @@ func TestBillingFinancialJSONObjectsPostgres(t *testing.T) {
 			source, dir := "", ""
 			if scenario != "fresh-current-producer" {
 				source, dir = stageFinancialJSONPackage(t)
+			} else {
+				source, dir = stageBillingMigrationContract(t, 900042)
 			}
 			r, ctx := retainedFinanceRepository(t)
 			config := r.pool.Config().ConnConfig.Copy()
@@ -156,6 +158,12 @@ func TestBillingFinancialJSONObjectsPostgres(t *testing.T) {
 			if err = operator.QueryRow(ctx, `SELECT current_user`).Scan(&actualRole); err != nil || actualRole != "billing_service" {
 				t.Fatal("migration role leaked", actualRole, err)
 			}
+			// Up and refused Down each acquire a reentrant session lock.
+			// Retire this exact owned connection before using another migration actor.
+			if err := operator.Close(ctx); err != nil {
+				t.Fatal(err)
+			}
+			completeBillingMigrationContract(t, ctx, r, source, dir, "")
 		})
 	}
 }

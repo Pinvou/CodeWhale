@@ -16,7 +16,7 @@ SPEC.loader.exec_module(RUNNER)
 
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
-EXPECTED_RETAINED_ROOT_COUNT = 79
+EXPECTED_RETAINED_ROOT_COUNT = 80
 
 
 CHECKPOINT_LEAF_ROOTS = {
