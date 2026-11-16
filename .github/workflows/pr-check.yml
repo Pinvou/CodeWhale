@@ -7,6 +7,8 @@ name: PR Check
 #   compliance linkage + actionlint + Python determinism tests.
 # - merge-authored-audit: complete historical merge-resolution disclosure, independently bounded.
 # - changes:检测本 PR 有没有 Rust 代码、发布契约、L1 harness 或前端改动,给后续 job 做 paths filter。
+# - runner-pool-guard:显式校验 6 个自建池 vars 齐全,缺失即红并阻断 required-gate,
+#   消灭重任务静默回落 2 核托管机的降级路径。
 # - frontend-test:Draft/Ready lint、build、逻辑测试。
 # - frontend-browser-test:Ready PR 与 Merge Queue 按实际 base/head diff 选择
 #   smoke，四个独立 runner job 并行；未知或共享路径保守执行全部 smoke。
@@ -212,6 +214,53 @@ jobs:
 
       - name: 校验 VERSION 与各版本文件一致
         run: node scripts/sync-version.mjs --check
+
+  # 2026-11-16 调查(g1 池普查)结论:所有重 job 的 runs-on 都是
+  # `vars.<池> || vars.<fallback> || '["ubuntu-22.04"]'` 回落链,六个池 vars
+  # 意外清空时 heavy/medium 任务会静默落到 2 核托管机跑(真实降级路径)。
+  # 本 job 把缺失变成 1 分钟内的显式红并阻断 required-gate,回落链保留为
+  # 防御纵深。runs-on 用托管 ubuntu-22.04 元门禁层:被检查对象正是这些 vars,
+  # 不能依赖它们(与 DCO/secret-scan 同层)。
+  runner-pool-guard:
+    name: runner-pool-guard
+    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: 校验自建 runner 池 vars 必须齐全
+        env:
+          PINVOU_LINUX_LIGHT_RUNNER: ${{ vars.PINVOU_LINUX_LIGHT_RUNNER }}
+          PINVOU_LINUX_MEDIUM_RUNNER: ${{ vars.PINVOU_LINUX_MEDIUM_RUNNER }}
+          PINVOU_LINUX_HEAVY_RUNNER: ${{ vars.PINVOU_LINUX_HEAVY_RUNNER }}
+          PINVOU_WINDOWS_LIGHT_RUNNER: ${{ vars.PINVOU_WINDOWS_LIGHT_RUNNER }}
+          PINVOU_WINDOWS_MEDIUM_RUNNER: ${{ vars.PINVOU_WINDOWS_MEDIUM_RUNNER }}
+          PINVOU_WINDOWS_HEAVY_RUNNER: ${{ vars.PINVOU_WINDOWS_HEAVY_RUNNER }}
+          PINVOU_LINUX_RUNNER: ${{ vars.PINVOU_LINUX_RUNNER }}
+          PINVOU_WINDOWS_RUNNER: ${{ vars.PINVOU_WINDOWS_RUNNER }}
+        run: |
+          missing=0
+          for name in \
+            PINVOU_LINUX_LIGHT_RUNNER \
+            PINVOU_LINUX_MEDIUM_RUNNER \
+            PINVOU_LINUX_HEAVY_RUNNER \
+            PINVOU_WINDOWS_LIGHT_RUNNER \
+            PINVOU_WINDOWS_MEDIUM_RUNNER \
+            PINVOU_WINDOWS_HEAVY_RUNNER; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "缺失仓库 vars: $name"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "::error::runner 池 vars 缺失。这是显式失败:禁止静默回落到 2 核托管机跑重任务;请补齐上述 6 个 vars 后重跑。"
+            exit 1
+          fi
+          for name in PINVOU_LINUX_RUNNER PINVOU_WINDOWS_RUNNER; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::notice::fallback 中间层 $name 未设置(允许,但六个主层池 vars 必须齐全)"
+            fi
+          done
+          echo "6 个池 vars 齐全;fallback 中间层 linux=${PINVOU_LINUX_RUNNER:+已设置} windows=${PINVOU_WINDOWS_RUNNER:+已设置}"
 
   # PR、Merge Queue 与 main push 均按实际改动路径选择检查。
   # paths-filter v4 在 merge_group 上使用事件 base/head SHA 比较队列组合提交。
@@ -5222,6 +5271,7 @@ jobs:
       - backflow-portability
       - fast-gate
       - merge-authored-audit
+      - runner-pool-guard
       - frontend-test
       - frontend-browser-test
       - relay-test
@@ -5266,6 +5316,7 @@ jobs:
           BACKFLOW_PORTABILITY_RESULT: ${{ needs.backflow-portability.result }}
           FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
           MERGE_AUTHORED_AUDIT_RESULT: ${{ needs.merge-authored-audit.result }}
+          RUNNER_POOL_GUARD_RESULT: ${{ needs.runner-pool-guard.result }}
           CI_REUSE_VERIFIED: ${{ needs.changes.outputs.reuse_verified }}
           CI_REUSE_IDS: ${{ join(fromJSON(needs.changes.outputs.reused_jobs || '[]'), ',') }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
@@ -5401,6 +5452,7 @@ jobs:
 
           failed=0
           for item in \
+            "runner-pool-guard:$RUNNER_POOL_GUARD_RESULT" \
             "backflow-portability:$BACKFLOW_PORTABILITY_RESULT" \
             "frontend-test:$FRONTEND_RESULT" \
             "frontend-browser-test:$FRONTEND_BROWSER_RESULT" \

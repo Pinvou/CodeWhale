@@ -4378,6 +4378,11 @@ python3() { fixture_mock python3 "$@"; }
         self.assertGreaterEqual(len(linux_jobs), 10)
         for job in linux_jobs:
             job_name = job.strip().split(":", maxsplit=1)[0]
+            # runner-pool-guard 是唯一故意跑在托管 ubuntu-22.04 的元门禁:它
+            # 校验的对象正是池 vars,不能依赖它们(2026-11-16 调查的显式失败
+            # 化改造);纯 env 检查无重任务,无需 zram,按名豁免。
+            if job_name == "runner-pool-guard":
+                continue
             # Round-11 review: judge the contract on EXECUTABLE lines only —
             # a commented-out step otherwise satisfies every assertIn below
             # while the job actually runs on stock memory.
