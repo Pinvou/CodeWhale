@@ -18,7 +18,7 @@ import { pathBasename } from '../../shared/path-utils.js';
 import qwenIcon from '../../brand-icons/qwen.svg';
 import {
   MODEL_PRESET_DEFS, PROVIDER_KIND_CODING_PLAN, PROVIDER_KIND_OFFICIAL_API, PROVIDER_KIND_CUSTOM,
-  MODEL_CATALOG_SECTIONS, MODEL_CATALOG, CLOUD_MODEL_PROVIDERS,
+  MODEL_CATALOG, CLOUD_MODEL_PROVIDERS,
   BRAND_ICON_BY_PRESET, BRAND_ICON_BY_VENDOR,
   presetOptionsI18n, presetProviderLabel,
   normalizedProviderBaseUrl, findCloudProviderForModel, providerLabelForModel, isCodingPlanModel, catalogItemMatchesModel,
@@ -957,7 +957,7 @@ const formatMemoryTime = (item, copy) => {
                     >
                       <span className="min-w-0 flex-1">
                         <span className={`block text-[14px] leading-5 truncate ${active ? ('text-[#007AFF] dark:text-[#64B5F6]') : ('text-[#1C1C1E] dark:text-[#F2F2F7]')}`}>{item.custom ? ((activeProvider && settingsCopy.customModelTitles[activeProvider.key]) || settingsCopy.customModelTitle(selectedProvider)) : (item.title || item.model || `${settingsCopy.customModel} ID`)}</span>
-                        {item.desc && <span className={`block mt-0.5 text-[12px] leading-[16px] truncate text-[#8A8A8E] dark:text-[#8E8E93]`}>{item.custom
+                        {(item.desc || item.custom) && <span className={`block mt-0.5 text-[12px] leading-[16px] truncate text-[#8A8A8E] dark:text-[#8E8E93]`}>{item.custom
                           ? customModelDescFor(activeProvider, settingsCopy)
                           : (settingsCopy.modelDescriptions[item.desc] || item.desc)}</span>}
                       </span>
@@ -1015,7 +1015,7 @@ const formatMemoryTime = (item, copy) => {
       const renderCloudProviderPicker = () => {
         const bySection = ['coding_plan', 'official_api', 'aggregator', 'custom'].map(section => ({
           section,
-          title: settingsCopy.catalogSections[section] || MODEL_CATALOG_SECTIONS[section],
+          title: settingsCopy.catalogSections[section],
           groups: catalogGroups.filter(group => (group.section || 'official_api') === section),
         })).filter(item => item.groups.length > 0);
         return (
