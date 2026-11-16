@@ -158,9 +158,17 @@ fn run_git_bounded(cwd: Option<&Path>, args: &[&str]) -> Option<(ExitStatus, Vec
 
 /// Read a child's stdout to the end within `deadline`, capped at
 /// `MAX_GIT_VALUE_BYTES + 1` bytes (callers reject values at or past the
-/// cap). Returns `None` when the deadline expires or the reader fails. On a
-/// deadline expiry the helper thread is abandoned, not joined: it ends when
-/// the pipe finally closes, which a held-open grandchild controls.
+/// cap). On a deadline expiry the helper thread is abandoned, not joined:
+/// it ends when the pipe finally closes, which a held-open grandchild
+/// controls, so one thread and one pipe fd linger per hung call for the
+/// grandchild's lifetime (bounded by fd exhaustion, ~80 fully wedged calls
+/// on macOS defaults). This is a conscious divergence from the shared tool
+/// runner (`tools/process.rs`), whose grace expiry aborts its async drain
+/// tasks — dropping the read ends, handing the grandchild EPIPE, and
+/// leaking nothing — because these drains are OS threads, which cannot be
+/// aborted; restructuring onto the tokio runner is the follow-up if the
+/// leak ever matters in practice. Reader I/O errors still return whatever
+/// accumulated rather than `None` (downstream gates catch the bad value).
 fn drain_stdout_bounded(
     pipe: std::process::ChildStdout,
     deadline: std::time::Instant,
@@ -546,10 +554,15 @@ mod tests {
         use std::process::Stdio;
         use std::time::{Duration, Instant};
 
-        // The child exits quickly; a detached `sleep` inherits the stdout
-        // write end and keeps the pipe open far past the drain budget.
+        // The PATH-shim threat, reproduced: `/bin/sh -c 'sleep 2 & exit 0'`
+        // makes the direct child exit immediately while the orphaned
+        // `sleep` — the shim's grandchild, re-parented to init — inherits the
+        // stdout write end and keeps the pipe open past the drain budget
+        // (it exits on its own shortly after, so no cleanup is needed). The
+        // drain must give up on its own deadline instead of waiting for an
+        // EOF that only the grandchild can deliver.
         let mut child = Command::new("/bin/sh")
-            .args(["-c", "exit 0 & sleep 30"])
+            .args(["-c", "sleep 2 & exit 0"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -564,7 +577,7 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "drain must respect its deadline"
         );
-        let _ = child.kill();
+        // The direct child exits on its own; reap it so it never lingers.
         let _ = child.wait();
     }
 
