@@ -45,13 +45,6 @@
 #      pr-check.yml's rust-loongarch64-check leg (main push only); the
 #      release job restores the same keys read-only.
 #
-#   F. frontend-setup-v1-* 每个作用域只保留最新 1 份
-#      (new in 2026-11: the frontend setup bundle cache keys on the tested
-#      tree sha, written by pr-check.yml's frontend-setup leg on every PR
-#      run. Consumers restore the exact same-run key — never a prefix
-#      fallback — so every older generation on an open PR's scope is pure
-#      quota weight; closed PRs are already reclaimed by rule A.)
-#
 # Note: rules B/C/D must group by cache scope (ref). Scopes are invisible to
 # each other; keeping only the newest across refs would swap a main-usable
 # cache for a PR-scoped one main cannot read — effectively a wrong delete.
@@ -77,7 +70,6 @@ STAT_C_NODE=0
 STAT_D_RUST_GEN=0
 STAT_A3_FAT=0
 STAT_E_LOONG64=0
-STAT_F_FRONTEND_SETUP=0
 DELETED_BYTES=0
 # Entries already deleted (or counted) by an earlier rule this run, so a
 # later rule over the same enumeration snapshot never re-attempts them
@@ -105,7 +97,6 @@ delete_cache() { # $1=id $2=key $3=size_bytes $4=rule
     D_rust_gen)   STAT_D_RUST_GEN=$(( STAT_D_RUST_GEN + 1 )) ;;
     A3_fat_save)  STAT_A3_FAT=$(( STAT_A3_FAT + 1 )) ;;
     E_loong64)    STAT_E_LOONG64=$(( STAT_E_LOONG64 + 1 )) ;;
-    F_frontend_setup) STAT_F_FRONTEND_SETUP=$(( STAT_F_FRONTEND_SETUP + 1 )) ;;
   esac
   DELETED_BYTES=$(( DELETED_BYTES + size ))
   DELETED_IDS="$DELETED_IDS $id"
@@ -300,31 +291,6 @@ for group, items in groups.items():
     for c in items[1:]: print(f\"{c['id']}\t{c['sizeInBytes']}\t{c['key']}\")
 ")
 
-# ---------- Rule F: keep only the newest frontend-setup bundle per scope ----------
-echo "== Rule F: frontend-setup-v1-* generation dedup =="
-while IFS=$'\t' read -r id size key; do
-  delete_cache "$id" "$key" "$size" "F_frontend_setup"
-done < <(python3 -c "
-import json, os
-closed = set(os.environ.get('CLOSED_REFS','').split())
-entries = [c for c in json.load(open('/tmp/cache-janitor-list.json')) if c['key'].startswith('frontend-setup-v1-') and c['ref'] not in closed]
-groups = {}
-for c in entries:
-    # Same guard as rule D: entries without createdAt cannot be ordered and
-    # would raise TypeError inside the sort, silently killing the rule.
-    if not c.get('createdAt'):
-        continue
-    # Keys look like frontend-setup-v1-<sha> (the tested tree). Consumers
-    # restore the exact same-run key, never a prefix fallback, so each
-    # older sha generation on an open PR's scope is pure quota weight.
-    # Group by (series, scope) for the same cross-ref reason as rules B/C/D/E.
-    series = 'frontend-setup-v1'
-    groups.setdefault((series, c['ref']), []).append(c)
-for group, items in groups.items():
-    items.sort(key=lambda c: c['createdAt'], reverse=True)
-    for c in items[1:]: print(f\"{c['id']}\t{c['sizeInBytes']}\t{c['key']}\")
-")
-
 # ---------- Rule A3: over-threshold macos-rust-check-v2 snapshots ----------
 # The macOS cache key rotated on 2026-10-15 together with a prune step that
 # drops the release dirs from the saved entry (pr-check.yml); A3 insures
@@ -379,5 +345,5 @@ echo "== 汇总 =="
 if [ "$STAT_A3_FAT" -gt 0 ] && [ "${GITHUB_ACTIONS:-}" = "true" ]; then
   echo "::warning::rule A3 deleted $STAT_A3_FAT over-threshold macos-rust-check-v2 snapshot(s); recurring on consecutive runs means the pruned dev footprint has drifted past FAT_SAVE_BYTES — recalibrate the threshold"
 fi
-echo "A_closed_pr=$STAT_A_CLOSED_PR A2_queue=$STAT_A2_QUEUE B_codeql=$STAT_B_CODEQL C_node=$STAT_C_NODE D_rust_gen=$STAT_D_RUST_GEN E_loong64=$STAT_E_LOONG64 F_frontend_setup=$STAT_F_FRONTEND_SETUP A3_fat_save=$STAT_A3_FAT"
+echo "A_closed_pr=$STAT_A_CLOSED_PR A2_queue=$STAT_A2_QUEUE B_codeql=$STAT_B_CODEQL C_node=$STAT_C_NODE D_rust_gen=$STAT_D_RUST_GEN E_loong64=$STAT_E_LOONG64 A3_fat_save=$STAT_A3_FAT"
 echo "释放空间约 $(( DELETED_BYTES / 1048576 ))MB(dry-run=$DRY_RUN)"

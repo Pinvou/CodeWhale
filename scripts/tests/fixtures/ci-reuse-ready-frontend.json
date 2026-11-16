@@ -26,11 +26,11 @@
       "conclusion": "success"
     },
     {
-      "name": "Restore frontend setup bundle (cache)",
+      "name": "Download frontend setup bundle (REST)",
       "conclusion": "success"
     },
     {
-      "name": "Verify frontend setup bundle restored",
+      "name": "Unpack frontend setup bundle",
       "conclusion": "success"
     },
     {
