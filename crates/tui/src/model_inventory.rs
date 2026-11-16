@@ -149,13 +149,14 @@ impl ModelInventory {
                         capability.max_output = Some(max_output);
                     }
                     // Do not promote bare `k3` into the global capability
-                    // catalog. Its thinking trace contract belongs only to
-                    // Kimi Code's exact membership-plan route.
-                    if crate::config::is_exact_kimi_code_k3_route(
-                        provider,
-                        &route.candidate.endpoint().base_url,
-                        route.candidate.wire_model_id().as_str(),
-                    ) {
+                    // catalog. Its thinking trace contract — shared by the
+                    // K3.1 family spellings — belongs only to Kimi Code's
+                    // exact membership-plan route.
+                    let base_url = &route.candidate.endpoint().base_url;
+                    let wire_model = route.candidate.wire_model_id().as_str();
+                    if crate::config::is_exact_kimi_code_k3_route(provider, base_url, wire_model)
+                        || crate::config::is_kimi_code_k31_route(provider, base_url, wire_model)
+                    {
                         capability.thinking_supported = true;
                     }
                 }
@@ -673,6 +674,40 @@ mod tests {
         assert!(candidate.thinking_supported);
         assert!(candidate.tags.contains(&"thinking"));
         assert!(!candidate.tags.contains(&"long_context"));
+    }
+
+    /// The K3.1 family shares the K3 thinking-trace contract on the exact
+    /// membership route. The K3-era catalog has no K3.1 row and the bare
+    /// spellings carry no `kimi-` prefix, so without the family arm the
+    /// inventory would report the route as non-thinking and drop the tag
+    /// from the router payload.
+    #[test]
+    fn inventory_uses_kimi_code_k31_route_context_not_generic_fallback() {
+        let config = Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                moonshot: crate::config::ProviderConfig {
+                    api_key: Some("test-kimi-key".to_string()),
+                    base_url: Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string()),
+                    model: Some(crate::config::KIMI_CODE_K31_PRO_MODEL.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let inventory = ModelInventory::from_config(&config);
+        let candidate = inventory
+            .candidate(
+                ApiProvider::Moonshot,
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            )
+            .expect("configured Kimi Code K3.1 route");
+
+        assert_eq!(candidate.context_window, 262_144);
+        assert!(candidate.thinking_supported);
+        assert!(candidate.tags.contains(&"thinking"));
     }
 
     /// #5441: the auto-router inventory carries a `_Nk` name-suffix window

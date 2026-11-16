@@ -7212,14 +7212,17 @@ fn provider_capability_report(config: &Config) -> serde_json::Value {
         .as_ref()
         .and_then(|profile| profile.max_output)
         .or(cap.max_output);
-    let is_exact_kimi_code_k3 = route.as_ref().is_some_and(|route| {
-        crate::config::is_exact_kimi_code_k3_route(
-            provider,
-            &route.candidate.endpoint().base_url,
-            route.candidate.wire_model_id().as_str(),
-        )
+    // The K3 family (bare K3 ids and the K3.1 spellings) is always-thinking
+    // on the exact membership endpoint; the K3-era catalog has no K3.1 rows,
+    // so without this force the doctor would report `thinking_supported:
+    // false` for a route that rejects disabled thinking with HTTP 400.
+    let is_kimi_code_k3_family = route.as_ref().is_some_and(|route| {
+        let base_url = &route.candidate.endpoint().base_url;
+        let wire_model = route.candidate.wire_model_id().as_str();
+        crate::config::is_exact_kimi_code_k3_route(provider, base_url, wire_model)
+            || crate::config::is_kimi_code_k31_route(provider, base_url, wire_model)
     });
-    let thinking_supported = is_exact_kimi_code_k3
+    let thinking_supported = is_kimi_code_k3_family
         || route_profile
             .as_ref()
             .map_or(cap.thinking_supported, |profile| {

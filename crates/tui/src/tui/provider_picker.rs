@@ -997,9 +997,13 @@ impl ProviderReasoningSummary {
 
         // The bare `k3` ID is deliberately not listed as a generic Moonshot
         // model. Kimi Code owns this reasoning contract only at its exact
-        // membership-plan endpoint, so surface the capability before key
-        // entry without attributing it to neighboring Moonshot routes.
-        if crate::config::is_exact_kimi_code_k3_route(provider, base_url, &route.wire_model) {
+        // membership-plan endpoint (including the K3.1 family spellings,
+        // which inherit the K3 contracts there), so surface the capability
+        // before key entry without attributing it to neighboring Moonshot
+        // routes.
+        if crate::config::is_exact_kimi_code_k3_route(provider, base_url, &route.wire_model)
+            || crate::config::is_kimi_code_k31_route(provider, base_url, &route.wire_model)
+        {
             return Self {
                 support: ProviderReasoningSupport::Supported,
                 controls: vec!["low".to_string(), "high".to_string(), "max".to_string()],
@@ -3197,7 +3201,7 @@ impl ProviderPickerView {
                     )),
                     Line::from(Span::styled(
                         self.tr(MessageId::KimiCodePlanRouteHint)
-                            .replace("{route}", crate::config::DEFAULT_KIMI_CODE_BASE_URL),
+                            .replace("{route}", "api.kimi.com/coding/v1 or api.kimi.ai/coding/v1"),
                         Style::default().fg(palette::TEXT_MUTED),
                     )),
                     Line::from(Span::styled(
