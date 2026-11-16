@@ -3201,7 +3201,7 @@ impl ProviderPickerView {
                     )),
                     Line::from(Span::styled(
                         self.tr(MessageId::KimiCodePlanRouteHint)
-                            .replace("{route}", "api.kimi.com/coding/v1 or api.kimi.ai/coding/v1"),
+                            .replace("{route}", "api.kimi.com/coding/v1 | api.kimi.ai/coding/v1"),
                         Style::default().fg(palette::TEXT_MUTED),
                     )),
                     Line::from(Span::styled(
@@ -5357,7 +5357,10 @@ mod tests {
         let rendered = render_text(&picker, 120, 24);
 
         assert!(rendered.contains("https://www.kimi.com/code/console"));
-        assert!(rendered.contains("api.kimi.com/coding/v1"));
+        // Both membership hosts are listed with the locale-neutral `|`
+        // separator (review 4585599290): the `{route}` replacement must not
+        // embed a hard-coded English connector into translated hints.
+        assert!(rendered.contains("api.kimi.com/coding/v1 | api.kimi.ai/coding/v1"));
         assert!(rendered.contains("does not import Kimi CLI credentials"));
         assert!(!rendered.contains("https://platform.kimi.ai/console/api-keys"));
         assert!(!rendered.contains("OAuth"));
