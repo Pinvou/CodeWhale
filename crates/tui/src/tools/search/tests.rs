@@ -36,24 +36,31 @@ fn grep_max_results_pins_the_audited_literal() {
     );
 }
 
-/// A timed-out walk is detached when its JoinHandle is dropped. The shared
-/// cancel token must be signalled in the timeout path so the detached walk
-/// stops promptly instead of consuming a blocking worker and file IO for its
-/// natural lifetime (up to the 120s grep budget).
+/// A timed-out walk is detached when its JoinHandle is dropped. The
+/// walk-local child token must be signalled in the timeout path so the
+/// detached walk stops promptly instead of consuming a blocking worker and
+/// file IO for its natural lifetime (up to the 120s grep budget) — and the
+/// caller's own token must stay untouched: cancelling it would abort the
+/// whole turn and misreport the timeout as a user stop.
 #[tokio::test]
 async fn grep_timeout_cancels_the_detached_walk() {
-    let token = CancellationToken::new();
-    let walk_token = token.clone();
+    let caller_token = CancellationToken::new();
     let err = super::run_blocking_grep(
         std::time::Duration::from_millis(20),
-        Some(token.clone()),
-        move || {
+        Some(caller_token.clone()),
+        move |walk_cancel| {
             // Stand in for a long walk that only ends early when cancelled.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while !walk_token.is_cancelled() && std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            Ok(json!({"stopped": walk_token.is_cancelled()}))
+            let stopped = match walk_cancel {
+                Some(walk_token) => {
+                    while !walk_token.is_cancelled() && std::time::Instant::now() < deadline {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    walk_token.is_cancelled()
+                }
+                None => false,
+            };
+            Ok(json!({"stopped": stopped}))
         },
     )
     .await
@@ -64,9 +71,42 @@ async fn grep_timeout_cancels_the_detached_walk() {
         "unexpected error: {err:?}"
     );
     assert!(
-        token.is_cancelled(),
-        "timeout must cancel the walk token so the detached walk stops"
+        !caller_token.is_cancelled(),
+        "the timeout is walk-local: cancelling the caller's per-turn token would abort the turn"
     );
+}
+
+/// An external stop (caller token cancelled) still reaches the walk through
+/// the child token and surfaces as the cancelled error.
+#[tokio::test]
+async fn grep_external_stop_cancels_the_walk_via_the_child_token() {
+    let caller_token = CancellationToken::new();
+    let stop_token = caller_token.clone();
+    let stopper = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        stop_token.cancel();
+    });
+    let err = super::run_blocking_grep(
+        std::time::Duration::from_secs(30),
+        Some(caller_token.clone()),
+        move |walk_cancel| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            if let Some(walk_token) = walk_cancel {
+                while !walk_token.is_cancelled() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            Ok(json!({}))
+        },
+    )
+    .await
+    .expect_err("an external stop must surface the cancelled error");
+
+    assert!(
+        matches!(err, ToolError::Cancelled { .. }),
+        "unexpected error: {err:?}"
+    );
+    stopper.await.expect("stopper task");
 }
 
 #[test]
