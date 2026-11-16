@@ -71,7 +71,7 @@ const FEATURE_COMMANDS = new Map([
   ["model-store", [command("npm", "test:model-store-versions-ui")]],
   ["pet", [command("node", "tests/pet_selector_ui_smoke.js")]],
   ["scheduled", [command("node", "tests/scheduled_tasks_smoke.js")]],
-  ["settings", [command("npm", "test:settings-ui"), command("npm", "test:model-store-versions-ui"), command("npm", "test:composer-tools-smoke"), command("npm", "test:composer-pending-enable-smoke"), command("npm", "test:failure-diagnostics-ui")]],
+  ["settings", [command("npm", "test:settings-ui"), command("npm", "test:acp-providers-ui"), command("npm", "test:model-store-versions-ui"), command("npm", "test:composer-tools-smoke"), command("npm", "test:composer-pending-enable-smoke"), command("npm", "test:failure-diagnostics-ui")]],
   ["failure-diagnostics", [command("npm", "test:failure-diagnostics-ui")]],
   ["device-manager", [command("npm", "test:device-manager-ui")]],
   ["team-relay", [command("npm", "test:team-relay-ui")]],
@@ -101,6 +101,7 @@ const FULL_PREFIXES = [
   "pinvou3-app/vite.config.mjs",
   "scripts/mcp-server-contract-smoke.py",
   "scripts/run-frontend-smokes.mjs",
+  "scripts/ci-browser-network.py",
   "scripts/run-user-journey-tests.sh",
   "scripts/select-frontend-smokes.mjs",
 ];

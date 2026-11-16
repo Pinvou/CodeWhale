@@ -19,6 +19,9 @@ for key in ("financial_token", *(f"financial_billing_{index}" for index in range
     original = SERVICES["financial"]
     SERVICES[key] = (key.replace("_", "-") + "-postgres", *original[1:])
 CLOSURE_SERVICES = {'financial': SERVICES['financial']}
+CORE_SERVICES = {key: SERVICES[key] for key in ('audit', 'broker')}
+SERVICE_PROFILES = {'full': SERVICES, 'closure': CLOSURE_SERVICES,
+                    'core': CORE_SERVICES, 'financial': CLOSURE_SERVICES}
 
 IDENTITY_SQL = "SELECT system_identifier::text,current_setting('data_directory'),current_setting('port'),session_user,current_user,current_database(),(SELECT rolsuper FROM pg_roles WHERE rolname=session_user),current_setting('server_version_num') FROM pg_control_system()"
 
@@ -156,6 +159,8 @@ def identity_matches(value, directory, major):
 def main(*, services=None):
     services = SERVICES if services is None else services
     metadata = json.loads(os.environ['ACCOUNT_CI_SERVICES'])
+    if not isinstance(metadata, dict) or set(metadata) != {item[0] for item in services.values()}:
+        raise ValueError('job service set does not match the selected PostgreSQL profile')
     ids, ports, volumes, systems = set(), set(), set(), set()
     outputs = []
     financial = {}
@@ -187,9 +192,9 @@ def main(*, services=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--stop-owned-services', action='store_true')
-    parser.add_argument('--profile', choices=('full', 'closure'), default='full')
+    parser.add_argument('--profile', choices=tuple(SERVICE_PROFILES), default='full')
     args = parser.parse_args()
-    services = CLOSURE_SERVICES if args.profile == 'closure' else SERVICES
+    services = SERVICE_PROFILES[args.profile]
     if args.stop_owned_services:
         ledger = os.environ.get('PINVOU_CI_RESOURCE_LEDGER')
         stop_owned_services(json.loads(os.environ['ACCOUNT_CI_SERVICES']), Path(ledger) / 'postgres-services.json' if ledger else None, services=services)
