@@ -1192,6 +1192,13 @@ impl SessionManager {
     }
 
     /// Save a session to disk using atomic write (temp file + fsync + rename).
+    ///
+    /// This save also runs the throttled retention janitor (it can return a
+    /// retention error after the session itself persisted), so it is the
+    /// path for recurring/per-turn saves only. Lifecycle edits (archive,
+    /// rename, title, branch, import, fork, HTTP PATCH/POST/PUT) MUST use
+    /// [`Self::save_session_edit`], which skips retention entirely — see
+    /// its doc comment for the full caller list and the fresh-manager rule.
     pub fn save_session(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
         let path = self.persist_session(session)?;
 
