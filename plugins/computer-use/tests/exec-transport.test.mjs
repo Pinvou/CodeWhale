@@ -61,6 +61,33 @@ test("run does not mark truncation when output fits or exactly fills maxBuffer",
   }
 });
 
+test("spawn errors surface with their own line, outside the capture cap", async () => {
+  // The 'error' diagnostic is carried outside the capped stderr storage so it
+  // can never be cut away by the cap (an error arriving after an over-cap
+  // stderr would otherwise leave only the truncation marker). A spawn failure
+  // is the deterministically reproducible error event; the prefix pins the
+  // dedicated-channel mechanism.
+  const r = await run("definitely-not-a-real-tool-xyz", ["--version"], { maxBuffer: 10 });
+  assert.equal(r.code, -1);
+  assert.match(r.stderr, /^spawn error: /);
+  assert.match(r.stderr, /ENOENT/);
+});
+
+test("multi-byte sequence split across pipe chunks decodes without fabrication", async () => {
+  // One 3-byte char written as 2 bytes + 1 byte across separate pipe chunks
+  // (child-side delay forces distinct data events): concat-then-decode-once
+  // must yield the character; per-chunk decodes would fabricate a replacement
+  // character at the internal join and at the trailing partial sequence.
+  const r = await run(
+    "node",
+    ["-e", "process.stdout.write(Buffer.from([0xe4,0xb8])); setTimeout(() => process.stdout.write(Buffer.from([0xad])), 40)"],
+    { maxBuffer: 100 },
+  );
+  assert.equal(r.code, 0);
+  assert.equal(r.stdout, "\u4e2d");
+  assert.ok(!r.stdout.includes("\uFFFD"), "no replacement character may be fabricated at a chunk join");
+});
+
 test("have() detects real and missing tools", async () => {
   assert.equal(await have("node"), true);
   assert.equal(await have("definitely-not-a-real-tool-xyz"), false);

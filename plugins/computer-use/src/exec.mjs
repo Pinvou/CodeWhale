@@ -31,6 +31,11 @@ export function run(cmd, args = [], opts = {}) {
     let stderrTruncated = false;
     let timedOut = false;
     let settled = false;
+    // Diagnostics from the 'error' event are kept outside the capture cap:
+    // appended into the chunks after an over-cap stderr they would sit past
+    // the cap cut and be lost, leaving the truncation marker as the only
+    // trace of a failed spawn/kill.
+    let spawnError = null;
     const timer = setTimeout(() => {
       timedOut = true;
       try { child.kill("SIGTERM"); } catch {}
@@ -79,10 +84,11 @@ export function run(cmd, args = [], opts = {}) {
       let stderr = err.toString("utf8");
       if (stdoutTruncated) stdout += `\n…[stdout truncated at ${maxBuffer} byte capture limit]`;
       if (stderrTruncated) stderr += `\n…[stderr truncated at ${maxBuffer} byte capture limit]`;
+      if (spawnError) stderr += `${stderr ? "\n" : ""}spawn error: ${spawnError}`;
       resolve({ code, stdout, stderr, timedOut, signal });
     };
     child.on("error", (err) => {
-      stderrChunks.push(Buffer.from(String(err?.message ?? err), "utf8"));
+      spawnError = String(err?.message ?? err);
       finish(-1, null);
     });
     child.on("close", (code, signal) => finish(code, signal));
