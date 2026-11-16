@@ -1079,7 +1079,10 @@ pub fn format_job(job: &CloudJob) -> String {
     if let Some(summary) = job.agent_summary.as_deref() {
         lines.push(format!("Agent: {}", one_line(summary, 200)));
     }
-    lines.push(format!("Prompt: {}", job.prompt));
+    // Flattened and bounded like every other field in this card: with the
+    // 64k prompt cap this line could otherwise dump ~64k chars (~192 KB for
+    // CJK) into `/dispatch show`.
+    lines.push(format!("Prompt: {}", one_line(&job.prompt, 2_000)));
     lines.push(format!("Note: {}", job.note));
     if let Some(refusal) = job.refusal.as_ref() {
         lines.push(format!("Refusal: {refusal}"));
