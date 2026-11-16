@@ -2256,6 +2256,16 @@
         "sha256": "458f58680bc1ff48ceb59ec274329e429d5806a07000e0aae3c9551136eaaa70"
       },
       {
+        "file": "900040_reconciliation_orphan_query_indexes.down.sql",
+        "version": 900040,
+        "sha256": "64a459880954c0cdbea57fd219ef67624e55311d0512ee3c5b0325223bbf049b"
+      },
+      {
+        "file": "900040_reconciliation_orphan_query_indexes.up.sql",
+        "version": 900040,
+        "sha256": "5f4dcd01b045c5135ae90d698ced87e86d8e93c1dce1adc2c39066dce1e72b50"
+      },
+      {
         "file": "900045_provider_health_recent.down.sql",
         "version": 900045,
         "sha256": "07fe0346755f15f629f927ca3ac040e1b07e59b9fa248c3e932ce8197dd1d3ef"

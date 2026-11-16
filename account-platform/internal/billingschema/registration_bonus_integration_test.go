@@ -185,11 +185,10 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 'ledger_postings',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM ledger_postings f))::text`)
 		}
 		financialBefore := bonusFinancialFacts()
-		// The inherited 900022 batch guard is now highest. This remains a
-		// full-chain refusal/no-effects check, not execution of the old bonus Down.
-		if err = migrations.DownOne(ctx, bc, ordered); err == nil {
-			t.Fatal("forward-only billing public down unexpectedly succeeded")
-		}
+		// Check the batch refusal in its real historical installation, while
+		// the current business database retains its full replay/facts contract.
+		assertHistoricalBillingRollback(t, ctx, f.database(t, ctx, "billing", "billing_schema_owner"), ordered, 900022, "55000", "member quota batch facts are forward-only; preserve original retry identities")
+		assertBillingCurrentReplay(t, ctx, bc, bill)
 		if stageValue(t, ctx, bc, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) != before {
 			t.Fatal("failed billing Down changed ledger")
 		}
