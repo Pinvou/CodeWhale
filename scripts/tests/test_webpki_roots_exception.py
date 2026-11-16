@@ -205,13 +205,10 @@ def cargo_deny_commands(workflow):
     # Account Platform uses the official Go toolchain action and the Node-based
     # artifact client. Uploading existing diagnostic logs does not compile Rust
     # or add another cargo-deny consumer. Review exact versions, not all tags.
-    # download-artifact 同属工件传输族(前端 setup 工件化,与 upload 对偶),
-    # 不引入 cargo-deny 消费者。
     reviewed_pinned_actions = {'actions/setup-go@v6', 'actions/upload-artifact@v7'}
     reviewed_actions = {'actions/checkout', 'actions/setup-node', 'actions/setup-python',
                         'actions/cache/restore', 'actions/cache/save', 'dorny/paths-filter',
-                        'dtolnay/rust-toolchain', 'Swatinem/rust-cache', 'taiki-e/install-action',
-                        'actions/download-artifact'}
+                        'dtolnay/rust-toolchain', 'Swatinem/rust-cache', 'taiki-e/install-action'}
     for index, line in enumerate(lines):
         if index in scalar_lines or line.lstrip().startswith('#'):
             continue
@@ -332,10 +329,8 @@ class WebpkiCiContractTests(unittest.TestCase):
         # Explicitly review each diagnostic-only entry. More uploads do not add
         # a Rust policy consumer, but neither an unknown entry nor a new action
         # version may silently inherit this review.
-        # 例外:frontend-setup 的工件上传(2026-11-16 setup 工件化)是功能性
-        # 传输——4 个消费分片依赖它,上传失败必须让 job 显式红,因此它不属于
-        # diagnostic 通道(retention 1 天同 run 内消费;无 continue-on-error)。
-        functional = [('frontend-setup', 'Upload frontend setup bundle')]
+        # (前端 setup 分发不走 artifact:2026-11-16 自建池实测 blob 下载 hang,
+        # 已改为 actions/cache —— cache/save+restore 在 reviewed_actions 白名单内。)
         reviewed = [('required-gate', 'PR test success proof transport'),
                     ('frontend-test', 'Test resource lifecycle receipts'),
                     ('frontend-browser-test', 'Browser shard resource lifecycle receipts'),
@@ -344,14 +339,7 @@ class WebpkiCiContractTests(unittest.TestCase):
                     ('account-closure-test', 'Account closure resource lifecycle receipts'),
                     ('windows-codex-runtime-test', 'Preserve browser fixture exit receipts'),
                     ('windows-codex-runtime-test', 'Preserve ACP fixture exit receipt')]
-        self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed) + len(functional))
-        for job, name in functional:
-            steps = job_block(workflow, job).split('\n      - ')
-            entries = [step for step in steps if step.startswith(f'name: {name}\n')]
-            self.assertEqual(len(entries), 1)
-            self.assertIn('uses: actions/upload-artifact@v7\n', entries[0])
-            self.assertIn('retention-days: 1\n', entries[0])
-            self.assertNotIn('continue-on-error', entries[0])
+        self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed))
         for job, name in reviewed:
             steps = job_block(workflow, job).split('\n      - ')
             entries = [step for step in steps if step.startswith(f'name: {name}\n')]

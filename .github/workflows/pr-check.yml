@@ -1233,20 +1233,24 @@ jobs:
 
   # Setup 工件化(2026-11-16 调查结论:3 台宿主共置算力摊薄是失败主机理,#2641
   # 后 frontend-test + 4 个 browser 分片各自重复 npm ci ×3 + 三次 vite build,
-  # 单片构建期 6-8min 满核高峰)。本 job 一次完成全部安装与构建,打成单个 tar
-  # 工件(retention 1 天,仅同 run 内消费);消费方下载解包直接用,前端腿构建
-  # CPU 需求降 ~4/5,直接缓解共置宿主摊薄。
+  # 单片构建期 6-8min 满核高峰)。本 job 一次完成全部安装与构建,经 actions/cache
+  # 分发给 4 个消费 job,前端腿构建 CPU 需求降 ~4/5,直接缓解共置宿主摊薄。
+  # 传输选 actions/cache 而非 upload/download-artifact:首版工件化在自建池实测
+  # (run 43866247852)上传 ~1MB/s 可完成、但全部 5 个消费 job 下载同一 blob
+  # hang 60min 至 75min 超时——artifact blob 服务在该池网络不可用;而 cache
+  # 服务(与 rust-cache/loong64 工具链缓存同端点)在同池每日稳定读写,故改用。
+  # 键按 github.sha 精确命中:needs 保证消费方在 save 之后启动,同 run 必命中;
+  # 未命中(驱逐/服务故障)在消费方显式红,禁止静默回落本机 npm ci。开放 PR
+  # 的每 push 代际由 cache-janitor 规则 F 去重,关闭 PR 由规则 A 回收。
   # 测试行为零变化:vite 产物、CHROME 探针、工作目录与环境变量与原 setup 完全
-  # 一致;node_modules 用 tar 保留 .bin 符号链接与可执行位;各分片解包独立
-  # 副本,分片间无可变共享状态。路由与 frontend-test 同门禁(draft 也运行,
-  # 因为 Draft 逻辑测试消费同一 node_modules);仅当两个消费分片都被 CI 复用
-  # 跳过时才跳过。
+  # 一致;cache 以 tar+zstd 保存,node_modules 的 npm .bin 符号链接与可执行位
+  # 原样保留;各消费 job 恢复独立副本,分片间无可变共享状态。
   frontend-setup:
     name: frontend-setup
     needs: changes
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test') && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    # npm ci ×3 + 三次 vite build 的实测峰值 ~8min;30min 含冷缓存与慢 registry 余量。
+    # npm ci ×3 + 三次 vite build 实测全程 5min(首次工件化 run);30min 含冷缓存与慢 registry 余量。
     timeout-minutes: 30
     defaults:
       run:
@@ -1277,9 +1281,10 @@ jobs:
         run: npm --prefix ../account-platform ci --ignore-scripts --prefer-offline --no-audit
 
       # test:webui smoke 会 spawn remote-control-relay/server.js,
-      # 其顶层 require('ws') 解析自 remote-control-relay/node_modules,故必须装 relay 依赖。
+      # 其顶层 require('ws') 解析自 remote-control-relay/node_modules,故必须装
+      # relay 依赖。无条件安装(消费方才按 Ready/queue 条件使用):cache 的
+      # save paths 必须全部存在,且一次安装成本已由 5→1 摊薄。
       - name: 安装 Remote relay 依赖 (供 test:webui smoke)
-        if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
         run: npm --prefix ../remote-control-relay ci --prefer-offline --no-audit
 
       - name: Vite build
@@ -1304,29 +1309,22 @@ jobs:
       - name: Vite web build (remote relay)
         run: npm run build:web
 
-      # 打包一次构建、四处复用的工件:node_modules 必须 tar 以保留 npm .bin
-      # 符号链接与可执行位(upload-artifact 直接传目录会解引用 symlink)。
-      # dist 与 web/dist 是 gitignore 产物,checkout 不会带,必须随工件下发;
-      # account-platform/internal/portal/static 是 git 跟踪目录,消费方 checkout
-      # 自带,不重复打包。relay/node_modules 仅 Ready/queue 安装,按存在与否入包。
-      - name: Pack frontend setup bundle
-        run: |
-          set -euo pipefail
-          paths=(pinvou3-app/node_modules pinvou3-app/dist remote-control-relay/web/dist account-platform/node_modules)
-          if [[ -d remote-control-relay/node_modules ]]; then
-            paths+=(remote-control-relay/node_modules)
-          fi
-          tar -czf "$RUNNER_TEMP/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE" "${paths[@]}"
-          du -h "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
-
-      - name: Upload frontend setup bundle
-        uses: actions/upload-artifact@v7
+      # 分发一次构建、四处复用的产物。缓存键按 tested tree 的 sha 精确生成:
+      # 同一 run 的消费 job 用同一键 restore(needs 保证此刻 save 已完成,不会
+      # 撞上未保存窗口)。node_modules 的 .bin 符号链接与可执行位由 cache 的
+      # tar+zstd 管道原样保留。dist 与 web/dist 是 gitignore 产物,checkout 不
+      # 会带,必须随缓存分发;account-platform/internal/portal/static 是 git
+      # 跟踪目录,消费方 checkout 自带,不进缓存。实测体积 ~151MB(压缩)。
+      - name: Save frontend setup bundle (cache)
+        uses: actions/cache/save@v6
         with:
-          name: frontend-setup-bundle
-          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
-          if-no-files-found: error
-          # 同 run 内消费,最小保留。
-          retention-days: 1
+          path: |
+            pinvou3-app/node_modules
+            pinvou3-app/dist
+            remote-control-relay/web/dist
+            remote-control-relay/node_modules
+            account-platform/node_modules
+          key: frontend-setup-v1-${{ github.sha }}
 
   frontend-test:
     name: frontend-test
@@ -1357,17 +1355,31 @@ jobs:
         with:
           node-version: "24"
 
-      # Setup 工件化:下载 frontend-setup 的单次构建产物(node_modules ×3 +
-      # dist + web/dist 的 tar),替代本 job 原先重复的 npm ci ×3 + 三次 vite
-      # build;test 行为零变化。tar 解包保留 npm .bin 符号链接。
-      - name: Download frontend setup bundle
-        uses: actions/download-artifact@v8
+      # Setup 工件化:恢复 frontend-setup 的单次构建产物(node_modules ×3 +
+      # dist + web/dist),替代本 job 原先重复的 npm ci ×3 + 三次 vite build;
+      # 测试行为零变化。key 精确到本 run 的 tested tree;restore 优先于全部
+      # lint/test 步骤,cache 服务在本池由 rust-cache/loong64 缓存长期实证可用。
+      - name: Restore frontend setup bundle (cache)
+        uses: actions/cache/restore@v6
         with:
-          name: frontend-setup-bundle
-          path: ${{ runner.temp }}
+          path: |
+            pinvou3-app/node_modules
+            pinvou3-app/dist
+            remote-control-relay/web/dist
+            remote-control-relay/node_modules
+            account-platform/node_modules
+          key: frontend-setup-v1-${{ github.sha }}
 
-      - name: Unpack frontend setup bundle
-        run: tar -xzf "$RUNNER_TEMP/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
+      - name: Verify frontend setup bundle restored
+        # 显式失败:缓存未命中(被驱逐/服务故障)时禁止静默回落本机 npm ci
+        # 重付全部构建 CPU(共置宿主摊薄正是本 PR 要缓解的)——重跑 frontend-setup
+        # 或重新触发本 run 即可恢复。
+        run: |
+          set -euo pipefail
+          if [[ ! -d pinvou3-app/node_modules || ! -d pinvou3-app/dist || ! -d remote-control-relay/web/dist ]]; then
+            echo "::error::frontend setup 缓存未命中(键 frontend-setup-v1-${{ github.sha }})。重跑 frontend-setup job 或重新触发本 run;禁止静默回落到本机 npm ci + 重建。"
+            exit 1
+          fi
 
       - name: ESLint (含 pet 缺失项,现已全覆盖)
         # Official 的存量 warning 仍可由本地 lint 完整查看；CI 只打印会阻断的
@@ -1479,17 +1491,28 @@ jobs:
         with:
           node-version: "24"
 
-      # Setup 工件化:下载 frontend-setup 的单次构建产物,替代每分片重复的
+      # Setup 工件化:恢复 frontend-setup 的单次构建产物,替代每分片重复的
       # npm ci ×3 + 三次 vite build(共置宿主算力摊薄,见 frontend-setup 注释)。
-      # tar 解包保留 npm .bin 符号链接;dist/CHROME/工作目录与原 setup 一致。
-      - name: Download frontend setup bundle
-        uses: actions/download-artifact@v8
+      # 各分片恢复独立副本,分片间无可变共享状态;dist/CHROME/工作目录与原
+      # setup 一致。未命中时显式失败,不静默回落本机构建。
+      - name: Restore frontend setup bundle (cache)
+        uses: actions/cache/restore@v6
         with:
-          name: frontend-setup-bundle
-          path: ${{ runner.temp }}
+          path: |
+            pinvou3-app/node_modules
+            pinvou3-app/dist
+            remote-control-relay/web/dist
+            remote-control-relay/node_modules
+            account-platform/node_modules
+          key: frontend-setup-v1-${{ github.sha }}
 
-      - name: Unpack frontend setup bundle
-        run: tar -xzf "$RUNNER_TEMP/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
+      - name: Verify frontend setup bundle restored
+        run: |
+          set -euo pipefail
+          if [[ ! -d pinvou3-app/node_modules || ! -d pinvou3-app/dist || ! -d remote-control-relay/web/dist ]]; then
+            echo "::error::frontend setup 缓存未命中(键 frontend-setup-v1-${{ github.sha }})。重跑 frontend-setup job 或重新触发本 run;禁止静默回落到本机 npm ci + 重建。"
+            exit 1
+          fi
 
       - name: 准备浏览器
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
