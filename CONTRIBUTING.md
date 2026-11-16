@@ -109,6 +109,19 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   loopback ports; Vite optimizer output and browser profiles are private. Await
   close acknowledgement before deleting directories. Legacy explicit exits use
   `fixture-exit.cjs` so cleanup completes without replacing the original failure.
+  When `PINVOU_CI_RESOURCE_LEDGER` is set, the shared browser adapter also keeps
+  bounded console/page errors, failed requests and HTTP errors under
+  `browser-diagnostics/` in that job's existing resource artifact. Before close,
+  it captures the last DOM and viewport screenshot of loopback fixture pages;
+  this is a last-state snapshot, not proof of the exact assertion-time state.
+  Remote page DOM, headers, cookies, storage, URL queries and form values are
+  excluded. Common token forms and explicitly private DOM regions are masked;
+  fixtures must still use synthetic data, since redaction cannot identify every
+  possible secret. The first 32 browsers per ledger reserve up to 768 KiB each
+  (24 MiB total), 128 events and the first three pages. Capture adds at most
+  1.5 seconds per close, reports omissions, and never changes assertion timeouts,
+  native cleanup acknowledgements or the original test result. Native crashes
+  and forcibly killed processes may leave only already-written events.
 - Run one-shot commands through `scripts/ci-fixture-process.py`. Its Linux
   subreaper / Windows child Job Object contains detached descendants and assigns
   a private temporary directory. A killed Linux controller can be recovered only
