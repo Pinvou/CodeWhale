@@ -13,12 +13,18 @@ the original F06 review, quota-batch and expiry roots and the two Account
 registration-eligibility roots. Their case contracts now also require complete
 Go JSON lifecycles. Other original financial selections remain unchanged.
 
-After that runner's `owners` group restores its fixtures,
-`scripts/test-financial-parallel.py` must run
-`scripts/test-account-financial-families-postgres.py` on the same admitted
-service. The four existing workers and separate service identities remain;
-the owners worker cannot succeed if either entry fails. The workflow contains
-the complete process tree with `ci-fixture-process.py` and retains its receipt.
+CI runs six independent matrix jobs, each with its own admitted PostgreSQL
+service. After the `owners` group's original runner restores its fixtures,
+the same strict workflow step runs
+`scripts/test-account-financial-families-postgres.py` on that group's verified
+service. Neither entry may fail or skip its required contracts. Each complete
+process tree has a distinct `ci-fixture-process.py` receipt. The legacy local
+parallel runner retains the same owners-then-families sequence.
+
+Per-group console logs and the owners family's phase evidence remain under
+`financial-parallel-*`. The existing bounded, always-run lifecycle artifact
+transports both those diagnostics and resource receipts, with a distinct matrix
+group name. Upload failure cannot suppress test or retirement failures.
 
 The additional entry has ten sequential phases:
 
