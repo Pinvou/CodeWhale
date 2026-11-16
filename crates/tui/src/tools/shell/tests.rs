@@ -1460,6 +1460,17 @@ fn note_mode000_fixture_skipped_under_root() {
     eprintln!("skipped: the mode-000 fixture is invisible to a root runner");
 }
 
+/// The skip note for the non-UTF-8 byte-path fixture: the same shared-helper
+/// shape as [`note_mode000_fixture_skipped_under_root`] — one targeted
+/// `clippy::print_stderr` exemption, identical wording at its skip site.
+#[cfg(unix)]
+#[allow(clippy::print_stderr)]
+fn note_non_utf8_fixture_skipped_on_this_filesystem() {
+    eprintln!(
+        "skipped: this filesystem rejects non-UTF-8 directory names (the byte-path pin needs one)"
+    );
+}
+
 /// A minimal on-disk git directory git itself accepts — HEAD plus the
 /// objects/ and refs/ directories — enough for the enumeration's
 /// `git ls-files --stage` to report an empty index without a real
@@ -10797,6 +10808,16 @@ fn readonly_git_commondir_follows_the_nul_truncated_value_git_resolves() {
 fn readonly_git_commondir_resolves_non_utf8_byte_paths_like_git() {
     use std::os::unix::ffi::OsStrExt as _;
     let root = tempdir().expect("root");
+    // The fixture needs a directory whose name carries a raw non-UTF-8
+    // byte. Some host filesystems reject such names outright (macOS APFS
+    // volumes fail the creation with EILSEQ), so the byte-faithful pointer
+    // mirror cannot be exercised there — skip loudly instead of red; the
+    // pin still runs on Linux CI and on any byte-safe volume.
+    let capability_probe = root.path().join(std::ffi::OsStr::from_bytes(b"probe-\xE9"));
+    if std::fs::create_dir(&capability_probe).is_err() {
+        note_non_utf8_fixture_skipped_on_this_filesystem();
+        return;
+    }
     let mut shared_bytes = b"shared".to_vec();
     shared_bytes[2] = 0xE9; // a raw non-UTF-8 byte in the directory name
     let shared = root.path().join(std::ffi::OsStr::from_bytes(&shared_bytes));
@@ -11736,6 +11757,14 @@ async fn readonly_shell_lane_git_stage_glob_judges_the_shell_expansion_base() {
     git(&["add", "."], &repo);
     git(&["commit", "-q", "-m", "seed"], &repo);
     std::fs::write(repo.join("seed.txt"), "two\n").expect("dirty seed");
+    // A visible workspace entry so the wildcard always has a match on every
+    // host shell: zsh aborts a zero-match expansion (`no matches found`)
+    // where bash/sh hand git the literal `*`, and the benign legs below need
+    // the command to RUN. `seed.txt` keeps the pathspec non-vacuous — it
+    // resolves to the tracked dirty file inside `.r`, so the hostile
+    // control still proves the driver converts real content and the benign
+    // legs prove the splice suppresses it.
+    std::fs::write(workspace.path().join("seed.txt"), "visible").expect("visible entry");
     // The bait at the shell's cwd, matched by the wildcard the gate judged
     // only against `.r/`.
     std::fs::write(workspace.path().join("--textconv"), "planted").expect("bait");
