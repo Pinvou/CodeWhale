@@ -121,7 +121,6 @@ function assertAccountFailurePolicy(job) {
   // complete named blocks before applying the original job-wide failure ban;
   // a test, cleanup, unnamed sibling or job-level exception remains forbidden.
   for (const [name, id] of [
-    ["Financial parallel diagnostics", "financial_diagnostics_upload"],
     ["Account test resource lifecycle receipts", "account_receipts_upload"],
   ]) {
     const diagnostic = namedStep(job, name);
@@ -176,34 +175,34 @@ function pgIdentityEnvironment(service) {
 
 function assertFinancialDiagnosticExemption(job) {
   const text = job.replaceAll("\r\n", "\n");
-  const diagnostic = namedStep(text, "Financial parallel diagnostics");
+  const diagnostic = namedStep(text, "Financial group lifecycle receipts");
   const withoutComments = diagnostic.replace(/^ *#.*\n/gm, "").trimEnd();
   assert.equal(withoutComments, [
-    "      - name: Financial parallel diagnostics",
-    "        id: financial_diagnostics_upload",
-    "        if: ${{ always() }}",
+    "      - name: Financial group lifecycle receipts",
+    "        id: financial_receipts_upload",
+    "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
     "        timeout-minutes: 3",
     "        continue-on-error: true",
     "        uses: actions/upload-artifact@v7",
     "        with:",
-    "          name: account-financial-parallel-${{ github.run_attempt }}",
-    "          path: ${{ runner.temp }}/financial-parallel-*/",
-    "          if-no-files-found: ignore",
+    "          name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}",
+    "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+    "          if-no-files-found: error",
     "          retention-days: 7",
   ].join("\n"));
   assert.doesNotMatch(text, /secrets\./);
-  assert.doesNotMatch(text.replace(diagnostic, "").replace(namedStep(text, "Account test resource lifecycle receipts"), ""), /continue-on-error:/,
+  assert.doesNotMatch(text.replace(diagnostic, ""), /continue-on-error:/,
     "only the exact diagnostic upload step may be advisory");
 }
 
 test("financial diagnostic exception rejects business and job exemptions", () => {
-  const job = jobBlock("account-platform-test");
+  const job = jobBlock("account-financial-test");
   assertFinancialDiagnosticExemption(job);
-  const diagnostic = namedStep(job, "Financial parallel diagnostics");
+  const diagnostic = namedStep(job, "Financial group lifecycle receipts");
   const withoutExemption = job.replace(diagnostic,
     diagnostic.replace("        continue-on-error: true\n", ""));
   const mutants = [
-    job.replace("  account-platform-test:\n", "  account-platform-test:\n    continue-on-error: true\n"),
+    job.replace("  account-financial-test:\n", "  account-financial-test:\n    continue-on-error: true\n"),
     job.replace("uses: actions/upload-artifact@v7", "run: exit 37"),
     job.replace("uses: actions/upload-artifact@v7", "uses: actions/upload-artifact@v6"),
     job + "      - run: exit 37\n        continue-on-error: true\n",
@@ -228,9 +227,9 @@ test("financial diagnostic exception rejects business and job exemptions", () =>
 // validation cannot detect a job/step exception added to a different leg.
 function assertWorkflowFailurePolicy(workflowText) {
   const text = workflowText.replaceAll("\r\n", "\n").replace(/^ *#.*\n/gm, "");
-  const financialJob = jobBlock("account-platform-test", text);
+  const financialJob = jobBlock("account-financial-test", text);
   assertFinancialDiagnosticExemption(financialJob);
-  const financial = namedStep(financialJob, "Financial parallel diagnostics");
+  const financial = namedStep(financialJob, "Financial group lifecycle receipts");
   const windows = namedStep(jobBlock("windows-rust-test", text), "Windows 测试二进制导入诊断");
   assert.equal(windows.trimEnd(), [
     "      - name: Windows 测试二进制导入诊断",
@@ -420,7 +419,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
 
 function assertFiniteAuditPGSetup(job) {
   const text = job.replaceAll("\r\n", "\n");
-  // These are exactly eight approved ephemeral services, not permission for arbitrary
+  // These are exactly two approved ephemeral services, not permission for arbitrary
   // services, production credentials, public ports or persistent volumes.
   const service = text.match(/^ {4}services:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(service, "isolated audit PostgreSQL service not found");
@@ -455,26 +454,6 @@ function assertFiniteAuditPGSetup(job) {
     "          --health-interval 5s",
     "          --health-timeout 5s",
     "          --health-retries 12",
-    ...["financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres", "financial-billing-2-postgres", "financial-billing-3-postgres"].flatMap(name => [
-      `      ${name}:`,
-    "        # Same immutable PostgreSQL image already used by team-relay-hub-test.",
-    "        # Disposable runner only; trust is never a deployment configuration.",
-    "        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
-    "        env:",
-    "          POSTGRES_HOST_AUTH_METHOD: trust",
-    "          POSTGRES_DB: postgres",
-    "        ports:",
-    '          - "127.0.0.1::5432"',
-    "        options: >-",
-    "          --rm",
-    "          --cpus 2",
-    "          --memory 1g",
-    "          --memory-swap 1g",
-    "          --health-cmd \"pg_isready -U postgres -d postgres\"",
-    "          --health-interval 5s",
-    "          --health-timeout 5s",
-    "          --health-retries 12",
-    ]),
   ].join("\n"));
   assertAccountFailurePolicy(job);
   // Admit only read-only verification of this job's actual service metadata.
@@ -487,10 +466,9 @@ function assertFiniteAuditPGSetup(job) {
     "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}",
     "        run: |",
     "          python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py",
-    "          python3 scripts/account-ci-postgres.py",
+    "          python3 scripts/account-ci-postgres.py --profile core",
   ].join("\n"));
-  for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName,
-    "Token financial contracts on isolated PostgreSQL"]) {
+  for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName]) {
     assert.ok(text.indexOf(preflight) < text.indexOf(namedStep(text, name)),
       `service identity verification must precede ${name}`);
   }
@@ -515,10 +493,9 @@ function assertFiniteAuditPGSetup(job) {
     "        if: ${{ always() }}", "        env:",
     "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}",
     "        run: |",
-    "          python3 scripts/account-ci-postgres.py --stop-owned-services",
+    "          python3 scripts/account-ci-postgres.py --profile core --stop-owned-services",
   ].join("\n"));
-  for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName,
-    "Token financial contracts on isolated PostgreSQL"]) {
+  for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName]) {
     assert.ok(text.indexOf(namedStep(text, name)) < text.indexOf(stop), "stop must follow database consumers");
   }
   let outsidePGSteps = text.replace(pg, "").replace(preflight, "").replace(stop, "");
@@ -561,20 +538,7 @@ function assertFiniteAuditPGSetup(job) {
   assert.ok(text.indexOf(existingBroker) < text.indexOf(tokenOutbox),
     "Token outbox must follow the pinned NATS executable verification");
   outsidePGSteps = outsidePGSteps.replace(tokenOutbox, "");
-  for (const [name, environment, commands] of [
-    ["Token financial contracts on isolated PostgreSQL", [
-      "ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}",
-    ], ["set -euo pipefail", "python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py", "python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py", 'python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-financial-parallel.py']],
 
-  ]) {
-    const step = namedStep(text, name);
-    assert.equal(step.trimEnd(), [
-      `      - name: ${name}`, "        shell: bash", "        env:",
-      ...environment.map(value => `          ${value}`), "        run: |",
-      ...commands.map(value => `          ${value}`),
-    ].join("\n"));
-    outsidePGSteps = outsidePGSteps.replace(step, "");
-  }
   assert.doesNotMatch(outsidePGSteps, /DATABASE_URL|DATABASE_PROFILE|F17_TEST_|PINVOU_ACCOUNT_CI_PG_|ACCOUNT_CI_SERVICES|ACCOUNT_FINANCIAL_SERVICES/);
   const defaultStep = namedStep(job, goStepName);
   const jobEnv = text.match(/^ {4}env:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
@@ -588,8 +552,108 @@ function assertFiniteAuditPGSetup(job) {
   assert.equal([...pgRun.matchAll(/go test -race -json .*?-parallel=1 /g)].length, 2);
 }
 
+function assertFiniteFinancialPGSetup(job) {
+  const text = job.replaceAll("\r\n", "\n");
+  assertFinancialDiagnosticExemption(job);
+  assert.match(text, /^    needs: changes$/m);
+  assert.match(text, /^    timeout-minutes: 180$/m);
+  assert.match(text, /^      GOTOOLCHAIN: local$/m);
+  assert.match(text, /^      CGO_ENABLED: "1"$/m);
+  assert.match(text, /^      fail-fast: false$/m);
+  assert.match(text, /^      max-parallel: 6$/m);
+  assert.match(text, /^        group: \[owners, token, billing-0, billing-1, billing-2, billing-3\]$/m);
+  const services = text.match(/^    services:\n[\s\S]*?(?=^    \S|$(?![\s\S]))/m);
+  assert.ok(services, "isolated financial PostgreSQL service not found");
+  assert.equal(services[0].trimEnd(), [
+    "    services:", "      financial-postgres:",
+    "        # Same immutable PostgreSQL image already used by team-relay-hub-test.",
+    "        # Disposable runner only; trust is never a deployment configuration.",
+    "        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
+    "        env:", "          POSTGRES_HOST_AUTH_METHOD: trust", "          POSTGRES_DB: postgres",
+    "        ports:", '          - "127.0.0.1::5432"', "        options: >-",
+    "          --rm", "          --cpus 2", "          --memory 1g", "          --memory-swap 1g",
+    "          --health-cmd \"pg_isready -U postgres -d postgres\"",
+    "          --health-interval 5s", "          --health-timeout 5s", "          --health-retries 12",
+  ].join("\n"));
+  const guard = namedStep(text, "Verify complete financial CI group selection");
+  assert.deepEqual(stepRun(text, "Verify complete financial CI group selection").trim().split("\n"),
+    ["set -euo pipefail", "python3 scripts/check-account-financial-ci.py"]);
+  assert.doesNotMatch(guard, /^        (?:if|continue-on-error):/m);
+  const preflight = namedStep(text, pgPreflightStepName);
+  assert.equal(preflight.trimEnd(), [
+    `      - name: ${pgPreflightStepName}`, "        id: account-pg", "        env:",
+    "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "        run: |",
+    "          set -euo pipefail", "          python3 scripts/account-ci-postgres.py --profile financial",
+  ].join("\n"));
+  const execute = namedStep(text, "Run isolated financial group");
+  assert.equal(execute.trimEnd(), [
+    "      - name: Run isolated financial group", "        shell: bash", "        env:",
+    "          ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}",
+    "          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
+    ...pgIdentityEnvironment("financial").map(value => `          ${value}`),
+    "        run: |", "          set -euo pipefail",
+    '          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP"',
+  ].join("\n"));
+  const stop = namedStep(text, pgStopStepName);
+  assert.equal(stop.trimEnd(), [
+    `      - name: ${pgStopStepName}`, "        if: ${{ always() }}", "        env:",
+    "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "        run: |",
+    "          python3 scripts/account-ci-postgres.py --profile financial --stop-owned-services",
+  ].join("\n"));
+  const retirement = namedStep(text, "Confirm Account test resource retirement");
+  assert.deepEqual([...retirement.matchAll(/^        if: (.+)$/gm)].map(match => match[1]),
+    ["${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}"]);
+  assert.deepEqual(stepRun(text, "Confirm Account test resource retirement").trim().split("\n"),
+    ["set -euo pipefail", 'python3 scripts/ci-resource-ledger.py --recover --directory "$PINVOU_CI_RESOURCE_LEDGER"']);
+  assert.doesNotMatch(retirement, /continue-on-error/);
+  const ordered = [guard, preflight, execute, stop, retirement];
+  for (let index = 1; index < ordered.length; index += 1) {
+    assert.ok(text.indexOf(ordered[index - 1]) < text.indexOf(ordered[index]), "financial guard, execution and retirement order must be retained");
+  }
+  const outside = ordered.reduce((remaining, step) => remaining.replace(step, ""), text);
+  assert.doesNotMatch(outside, /DATABASE_URL|PINVOU_ACCOUNT_CI_PG_|ACCOUNT_CI_SERVICES|ACCOUNT_FINANCIAL_SERVICES/);
+}
+
+
 const bash = process.platform === "win32" && existsSync("C:/Program Files/Git/bin/bash.exe")
   ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+
+test("independent financial services reject identity, profile and retirement mutations", () => {
+  const job = jobBlock("account-financial-test");
+  assertFiniteFinancialPGSetup(job);
+  for (const [before, after] of [
+    ['"127.0.0.1::5432"', '"5432:5432"'],
+    ["          --rm\n", ""], ["          --cpus 2", "          --cpus 4"],
+    ["--profile financial", "--profile core"],
+    ['ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}', 'ACCOUNT_CI_SERVICES: ${{ toJSON(needs.other.outputs.services) }}'],
+    ['ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}', 'ACCOUNT_FINANCIAL_GROUP: all'],
+    ['outputs.financial_url', 'outputs.unrelated_url'],
+    ['outputs.financial_port', 'outputs.unrelated_port'],
+    ['outputs.financial_system', 'outputs.unrelated_system'],
+    ['outputs.financial_directory', 'outputs.unrelated_directory'],
+    ['-- python3 scripts/test-token-financial-postgres.py', '-- python3 scripts/test-token-financial-postgres.py || true'],
+    ['python3 scripts/account-ci-postgres.py --profile financial --stop-owned-services', 'true'],
+    ['python3 scripts/ci-resource-ledger.py --recover', 'true'],
+    ["      CGO_ENABLED: \"1\"", "      CGO_ENABLED: \"0\""],
+  ]) {
+    assert.ok(job.includes(before), `financial mutation must hit ${before}`);
+    const mutant = job.replace(before, () => after);
+    assert.notEqual(mutant, job);
+    assert.throws(() => assertFiniteFinancialPGSetup(mutant));
+  }
+  for (const name of ["Verify complete financial CI group selection", pgPreflightStepName,
+    "Run isolated financial group", pgStopStepName, "Confirm Account test resource retirement"]) {
+    const step = namedStep(job, name);
+    assert.throws(() => assertFiniteFinancialPGSetup(job.replace(step, "")));
+    assert.throws(() => assertFiniteFinancialPGSetup(job.replace(step,
+      () => step.replace("        run:", "        if: ${{ false }}\n        run:"))));
+  }
+  for (const exit of [0, 7]) {
+    const result = spawnSync(bash, ["-e", "-c", `python3() { return ${exit}; };\n` + stepRun(job, pgStopStepName)],
+      { encoding: "utf8", timeout: 30_000, windowsHide: true });
+    assert.equal(result.status, exit);
+  }
+});
 
 test("container CI uses immutable official cache images without losing either build or runtime gates", () => {
   const relay = jobBlock("team-relay-hub-test");
@@ -982,13 +1046,10 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     ["F17_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}", "F17_TEST_DATABASE_URL: postgres://postgres@remote.invalid:5432/postgres?sslmode=disable"],
     ["PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}", "PINVOU_TEST_SCHEMA_DATABASE_URL: postgres://postgres@remote.invalid:5434/postgres?sslmode=disable"],
     ["npm --prefix account-platform run test:existing-broker", "npm --prefix account-platform run test:existing-broker || true"],
-    ["ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}", "ACCOUNT_FINANCIAL_SERVICES: ${{ toJSON(needs.other.outputs.services) }}"],
     ["ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "ACCOUNT_CI_SERVICES: ${{ toJSON(needs.other.outputs.services) }}"],
     ["        id: account-pg", "        id: unrelated-pg"],
     ["python3 scripts/account-ci-postgres.py", "python3 scripts/account-ci-postgres.py || true"],
     ["python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py", "true"],
-    ["python3 scripts/test-financial-parallel.py", "python3 scripts/test-financial-parallel.py || true"],
-    ['python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- ', ""],
     ["      GOTOOLCHAIN: local", "      F17_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres\n      GOTOOLCHAIN: local"],
     ["        shell: bash", "        env:\n          F17_TEST_DATABASE_PROFILE: github-actions-service\n        shell: bash"],
     ["          POSTGRES_HOST_AUTH_METHOD: trust", "          POSTGRES_PASSWORD: ${{ secrets.DB_PASSWORD }}"],
@@ -1012,8 +1073,7 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     // original suffix), which would make rejection pass for duplicated steps.
     const mutated = job.replace(step, () => changed);
     assert.equal(namedStep(mutated, name), changed, "mutation must preserve the literal step payload");
-    for (const required of [pgPreflightStepName, auditPGStepName, existingBrokerStepName, tokenOutboxStepName,
-      "Token financial contracts on isolated PostgreSQL"]) {
+    for (const required of [pgPreflightStepName, auditPGStepName, existingBrokerStepName, tokenOutboxStepName]) {
       namedStep(mutated, required); // Missing/duplicate steps cannot satisfy a negative control.
     }
     assert.throws(() => assertFiniteAuditPGSetup(mutated), expected);
@@ -1047,14 +1107,6 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
   const existingBroker = namedStep(job, existingBrokerStepName);
   const earlyTokenOutbox = job.replace(tokenOutbox, "").replace(existingBroker, () => tokenOutbox + existingBroker);
   assert.throws(() => assertFiniteAuditPGSetup(earlyTokenOutbox), /Token outbox must follow/);
-  const financial = namedStep(job, "Token financial contracts on isolated PostgreSQL");
-  for (const replacement of ["", "ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.unrelated }}"]) {
-    rejectStepMutation("Token financial contracts on isolated PostgreSQL", financial,
-      financial.replace("          ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}\n",
-        () => replacement ? `          ${replacement}\n` : ""));
-  }
-  rejectStepMutation("Token financial contracts on isolated PostgreSQL", financial,
-    financial.replace("        run:", () => "        if: ${{ false }}\n        run:"));
   const preflight = namedStep(job, pgPreflightStepName);
   assert.throws(() => assertFiniteAuditPGSetup(job.replace(preflight, "")));
   rejectStepMutation(pgPreflightStepName, preflight,
@@ -1125,25 +1177,22 @@ test("Keycloak contract gate invokes the existing suite and propagates failure",
 
 test("Token financial PostgreSQL gate is required and cannot swallow a failed runner", () => {
   const paths = filterPaths(workflow, "account_platform");
-  assert.ok(paths.includes("scripts/test-token-financial-postgres.py"));
-  assert.ok(paths.includes("scripts/test-financial-parallel.py"));
-  assert.ok(paths.includes("scripts/tests/test_financial_parallel.py"));
-  assert.ok(paths.includes("scripts/tests/test_token_financial_postgres.py"));
-  const job = jobBlock("account-platform-test");
-  assert.match(job, /image: mirror\.gcr\.io\/library\/postgres@sha256:[a-f0-9]{64}/);
-  const services = job.match(/^    services:\r?\n([\s\S]*?)^    env:/m)?.[1];
-  assert.ok(services, "the disposable PostgreSQL service must exist");
-  assert.deepEqual([...services.matchAll(/^ {6}([a-z][a-z0-9-]*):\r?$/gm)].map(match => match[1]), ["audit-export-postgres", "existing-broker-postgres", "financial-postgres", "financial-token-postgres", "financial-billing-0-postgres", "financial-billing-1-postgres", "financial-billing-2-postgres", "financial-billing-3-postgres"]);
-  assert.deepEqual([...services.matchAll(/^ {10}- (.+)\r?$/gm)].map(match => match[1]), Array(8).fill('"127.0.0.1::5432"'));
-  assertFiniteAuditPGSetup(job);
-  const run = stepRun(job, "Token financial contracts on isolated PostgreSQL");
+  for (const path of ["scripts/test-token-financial-postgres.py", "scripts/test-financial-parallel.py",
+    "scripts/tests/test_financial_parallel.py", "scripts/tests/test_token_financial_postgres.py",
+    "scripts/check-account-financial-ci.py", "scripts/tests/test_account_financial_ci.py"]) {
+    assert.ok(paths.includes(path));
+  }
+  const job = jobBlock("account-financial-test");
+  assertFiniteFinancialPGSetup(job);
+  const run = ["Verify complete financial CI group selection", pgPreflightStepName, "Run isolated financial group"]
+    .map(name => stepRun(job, name)).join("\n");
   const directory = mkdtempSync(join(tmpdir(), "pinvou-financial-gate-"));
   try {
-    for (const failedPhase of ["none", "guard", "postgres"]) {
-      const mock = `python3() { case "$*" in *unittest*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *) ${failedPhase === "postgres" ? "return 7" : "return 0"};; esac; }; export -f python3;\n`;
-      const result = spawnSync(bash, ["-c", mock + run], {
+    for (const failedPhase of ["none", "guard", "postgres", "group"]) {
+      const mock = `python3() { case "$*" in *check-account-financial-ci.py*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *account-ci-postgres.py*) ${failedPhase === "postgres" ? "return 7" : "return 0"};; *ci-fixture-process.py*) ${failedPhase === "group" ? "return 7" : "return 0"};; *) return 99;; esac; }; export -f python3;\n`;
+      const result = spawnSync(bash, ["-e", "-c", mock + run], {
         encoding: "utf8", timeout: 30_000, windowsHide: true,
-        env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: directory },
+        env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: directory, ACCOUNT_FINANCIAL_GROUP: "token" },
       });
       assert.equal(result.status, failedPhase === "none" ? 0 : 7,
         `${failedPhase} must preserve the selected gate result: ${result.stderr}`);
@@ -1258,7 +1307,7 @@ test("queue reuse normalizes only verified skips and never failed executions", (
   assert.match(lookup, /if: \$\{\{ github.event_name == 'merge_group' \}\}/);
   assert.match(lookup, /timeout-minutes: 2/);
   assert.match(lookup, /python3 scripts\/ci-test-reuse.py lookup/);
-  const productJobs = ["version-consistency", "account-platform-test", "frontend-test", "frontend-browser-test", "relay-test",
+  const productJobs = ["version-consistency", "account-platform-test", "account-financial-test", "frontend-test", "frontend-browser-test", "relay-test",
     "windows-relay-dacl", "windows-relay-tools-test", "team-relay-hub-test", "update-release-console-test",
     "release-contract-test", "knowledge-rust", "rust-lint", "rust-test", "cli-test", "cli-lint",
     "windows-static-updater-contract", "windows-rust-test", "windows-rustup-repair-test", "macos-rust-check",
