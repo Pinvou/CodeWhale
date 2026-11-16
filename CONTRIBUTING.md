@@ -109,6 +109,42 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   loopback ports; Vite optimizer output and browser profiles are private. Await
   close acknowledgement before deleting directories. Legacy explicit exits use
   `fixture-exit.cjs` so cleanup completes without replacing the original failure.
+  When `PINVOU_CI_RESOURCE_LEDGER` is set, the shared browser adapter also keeps
+  bounded console/page errors, failed requests and HTTP errors under
+  `browser-diagnostics/` in that job's existing resource artifact. Before close,
+  it captures the last DOM and viewport screenshot of loopback fixture pages;
+  this is a last-state snapshot, not proof of the exact assertion-time state.
+  Remote page DOM, headers, cookies, storage, URL queries and form values are
+  excluded. Common token forms and explicitly private DOM regions are masked;
+  fixtures must still use synthetic data, since redaction cannot identify every
+  possible secret. The first 32 browsers per ledger reserve up to 768 KiB each
+  (24 MiB total), 128 events and the first three pages. Capture adds at most
+  1.5 seconds per close, reports omissions, and never changes assertion timeouts,
+  native cleanup acknowledgements or the original test result. Native crashes
+  and forcibly killed processes may leave only already-written events.
+  Rejected navigation/selector/function waits also emit bounded, redacted
+  `[browser-fixture-diagnostic]` stderr records with pending requests, recent
+  network events, script/resource timing and page readiness. These records
+  survive artifact-upload failures. A separate bounded error ring retains
+  failed imports even when successful requests fill the ordinary timeline;
+  the failure record includes up to eight errors for that page, even if DOM
+  capture stalls. Up to three read-only failure snapshots
+  per browser are allowed even after the first three page numbers; they do not
+  mask the live page or change the original exception, wait arguments or budget.
+- Linux CI browser shards pass `--isolate-network` to the shared smoke runner.
+  The frontend logic suite (including browser diagnostics regression tests) and
+  credential-origin real-browser matrix also run their complete fixture trees
+  through `scripts/ci-browser-network.py` inside the existing process supervisor.
+  After dependency installation and builds, each smoke's driver, mock servers,
+  Vite and Chrome share a private user/network namespace with loopback only.
+  This prevents other jobs' Docker interface changes from canceling local module
+  requests. The original UID/GID and resource cgroup are retained, setup
+  capabilities are dropped before tests execute, and the outer process
+  supervisor still owns detached descendants and cancellation. A missing
+  `unshare`, denied namespace, or unconfirmed isolation fails the job without
+  retrying in the host network. No fixture in this stage may depend on external
+  downloads/services; prepare those dependencies before isolation. Local runs
+  can request the same flag; other platforms keep their existing behavior.
 - Run one-shot commands through `scripts/ci-fixture-process.py`. Its Linux
   subreaper / Windows child Job Object contains detached descendants and assigns
   a private temporary directory. A killed Linux controller can be recovered only
