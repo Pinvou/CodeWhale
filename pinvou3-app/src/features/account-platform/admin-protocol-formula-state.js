@@ -25,11 +25,13 @@ export function protocolDraftCommand({ protocolCode, requestSchema, expectedHead
   if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') return { error: 'invalidSchema' };
   if (!String(protocolCode || '').trim()) return { error: 'protocolCodeRequired' };
   if (String(reason || '').trim().length < 10) return { error: 'reasonTooShort' };
+  const headVersion = expectedVersion(expectedHeadVersion, 0);
+  if (headVersion === null) return { error: 'invalidVersion' };
   return {
     value: {
       protocol_code: String(protocolCode).trim().toUpperCase(),
       request_schema: parsed,
-      expected_protocol_head_version: Math.max(0, Number(expectedHeadVersion || 0)),
+      expected_protocol_head_version: headVersion,
       reason: String(reason).trim(),
     },
   };
@@ -45,15 +47,30 @@ export function formulaDraftCommand({ rows, expectedProtocolVersion, expectedFor
   if (new Set(normalized.map((row) => row.unitCode)).size !== normalized.length) return { error: 'duplicateUnitCode' };
   if (new Set(normalized.map((row) => row.unitDefinitionID.toLowerCase())).size !== normalized.length) return { error: 'invalidFormulaRows' };
   if (String(reason || '').trim().length < 10) return { error: 'reasonTooShort' };
+  const protocolVersion = expectedVersion(expectedProtocolVersion, 1);
+  const formulaHeadVersion = expectedVersion(expectedFormulaHeadVersion, 0);
+  if (protocolVersion === null || formulaHeadVersion === null) return { error: 'invalidVersion' };
   return {
     value: {
       required_unit_versions: Object.fromEntries(normalized.map((row) => [row.unitCode, row.unitDefinitionID])),
       expression: Object.fromEntries(normalized.map((row) => [row.unitCode, row.input])),
-      expected_protocol_version: Number(expectedProtocolVersion),
-      expected_formula_head_version: Math.max(0, Number(expectedFormulaHeadVersion || 0)),
+      expected_protocol_version: protocolVersion,
+      expected_formula_head_version: formulaHeadVersion,
       reason: String(reason).trim(),
     },
   };
+}
+
+function expectedVersion(value, minimum) {
+  if (value === undefined && minimum === 0) return 0;
+  if (typeof value === 'string') {
+    value = value.trim();
+    if (!/^[+-]?\d+$/.test(value)) return null;
+  } else if (typeof value !== 'number') {
+    return null;
+  }
+  const version = Number(value);
+  return Number.isSafeInteger(version) && version >= minimum ? (version === 0 ? 0 : version) : null;
 }
 
 export function safeProtocolFormulaFailure(error) {
