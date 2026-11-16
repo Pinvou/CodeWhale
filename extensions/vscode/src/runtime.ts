@@ -122,6 +122,9 @@ export async function listThreadSummaries(
   return readThreadSummaries(response.body);
 }
 
+// Note: the snapshots endpoint hard-rejects limits outside 1..=100 with a
+// 400 (unlike /v1/threads/summary, which clamps to 1..=500) — keep this
+// default at or below 100.
 export async function listSnapshots(config: RuntimeConfig, limit = 50): Promise<SnapshotEntry[]> {
   const baseUrl = runtimeBaseUrl(config);
   const response = await requestJson(
