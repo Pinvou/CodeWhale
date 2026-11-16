@@ -2274,6 +2274,16 @@
         "file": "900042_financial_json_object_contracts.up.sql",
         "version": 900042,
         "sha256": "a25714955d96b06f5cfec08a412618bc4e9dc16ed7b91dabdfc51a3ee0cb7d10"
+      },
+      {
+        "file": "900045_provider_health_recent.down.sql",
+        "version": 900045,
+        "sha256": "07fe0346755f15f629f927ca3ac040e1b07e59b9fa248c3e932ce8197dd1d3ef"
+      },
+      {
+        "file": "900045_provider_health_recent.up.sql",
+        "version": 900045,
+        "sha256": "0d1b5cc17cce2342540c4c75d15c783f53f37177412247ca5eefcd24d942d961"
       }
     ],
     "payment-simulator": [

@@ -79,6 +79,9 @@ func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []migration
 	if err := validateFinancialJSONObjects(loaded); err != nil {
 		return migrations.Verification{}, err
 	}
+	if err := validateProviderHealthRecent(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
 	if err := validateUsageWaivers(loaded); err != nil {
 		return migrations.Verification{}, err
 	}
