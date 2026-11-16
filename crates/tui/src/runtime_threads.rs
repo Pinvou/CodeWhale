@@ -1540,6 +1540,11 @@ impl RuntimeThreadStore {
     }
 
     fn remove_turn(&self, turn_id: &str) -> Result<()> {
+        // Serialize with `append_routed_usage_staged`: its slow path loads the
+        // turn file before inserting a stage entry, so a concurrent remove
+        // could otherwise leave a stage entry for a turn whose file is gone,
+        // and `load_turn` would serve that phantom record until process end.
+        let _turn_mutation = self.turn_mutation.lock();
         self.routed_usage_staged.lock().remove(turn_id);
         remove_file_if_exists(&self.turn_path(turn_id)?)
     }
