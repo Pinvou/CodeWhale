@@ -101,8 +101,9 @@ pub(crate) const MAX_ROUTED_USAGE_RECORDS_PER_TURN: usize = 2_048;
 /// the append that filled it, so a crash mid-flush loses the whole batch.
 /// While writes keep failing, the retrying stage keeps every accepted
 /// append resident (up to the per-turn cap), so a crash in that regime
-/// loses more than one batch — the durability note in the PR covers the
-/// healthy path, not this one.
+/// loses more than one batch, and each retrying append also re-serializes
+/// the whole staged turn before the failing write — O(N²) CPU on top of
+/// the O(N²)-in-batches disk shape of the healthy path.
 const ROUTED_USAGE_FLUSH_BATCH: usize = 16;
 
 #[cfg(test)]
@@ -1497,8 +1498,14 @@ impl RuntimeThreadStore {
     /// Deliver one routed-usage record for `turn_id`. Appends stage in memory
     /// ([`ROUTED_USAGE_FLUSH_BATCH`]) instead of rewriting the whole turn file
     /// per record; the batch flush and the turn settlement save persist the
-    /// staged form. Takes `turn_mutation` itself — callers must not already
-    /// hold it (parking_lot guards are not reentrant).
+    /// staged form. Returns `Ok(true)` when the record was newly appended,
+    /// `Ok(false)` when its `source_id` fingerprint was already present (an
+    /// exactly-once re-delivery); the per-turn cap evicts the oldest record
+    /// instead of rejecting.
+    /// Takes `turn_mutation` itself — callers must not already hold it
+    /// (parking_lot guards are not reentrant).
+    /// Takes `turn_mutation` itself — callers must not already hold it
+    /// (parking_lot guards are not reentrant).
     pub fn append_routed_usage_staged(
         &self,
         turn_id: &str,

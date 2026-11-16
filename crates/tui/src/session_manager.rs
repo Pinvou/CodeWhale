@@ -35,10 +35,12 @@ const MAX_SESSIONS: usize = 1_000;
 /// [`SessionManager::save_session`]. The janitor's scan reads every record
 /// file, and the archived set (exempt from [`MAX_SESSIONS`]) grows that set
 /// without bound over the life of the install, so an unthrottled per-save
-/// scan would tax every save — including the picker's synchronous rename and
-/// archive actions — with a cost that only grows. Sixty seconds keeps
-/// retention prompt (it is best-effort pruning, not a correctness bound)
-/// while making the per-save cost `O(1)` in save frequency.
+/// scan would tax the recurring autosave path with a cost that only grows.
+/// Lifecycle edits are protected by routing instead: they go through
+/// [`SessionManager::save_session_edit`] and never reach this janitor at
+/// all. Sixty seconds keeps retention prompt (it is best-effort pruning,
+/// not a correctness bound) while making the per-save cost `O(1)` in save
+/// frequency.
 const JANITOR_MIN_INTERVAL_SECS: i64 = 60;
 /// Maximum session title length, in `char`s. Matches the bound the session
 /// picker's rename prompt has always enforced.
@@ -1195,10 +1197,13 @@ impl SessionManager {
     ///
     /// This save also runs the throttled retention janitor (it can return a
     /// retention error after the session itself persisted), so it is the
-    /// path for recurring/per-turn saves only. Lifecycle edits (archive,
-    /// rename, title, branch, import, fork, HTTP PATCH/POST/PUT) MUST use
-    /// [`Self::save_session_edit`], which skips retention entirely — see
-    /// its doc comment for the full caller list and the fresh-manager rule.
+    /// path for recurring/per-turn saves and the deliberate one-shot
+    /// retention points (`codewhale exec`'s persist; the first run on a
+    /// fresh manager is also what boot/exec retention rides). Lifecycle
+    /// edits (archive, rename, title, branch, import, fork, HTTP
+    /// PATCH/POST/PUT) MUST use [`Self::save_session_edit`], which skips
+    /// retention entirely — see its doc comment for the full caller list
+    /// and the fresh-manager rule.
     pub fn save_session(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
         let path = self.persist_session(session)?;
 
