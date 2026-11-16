@@ -1367,7 +1367,16 @@ fn sanitize_kimi_parameters_candidate(
     // an equivalent (pattern, format, $schema, prefixItems, nested allOf,
     // exclusive bounds) is left for the validator to fail closed.
     strip_mfjs_advisory_keywords(parameters);
-    strip_mfjs_unsupported_enum_values(parameters);
+    // Unsupported `enum` values are NOT stripped: an enum carrying boolean,
+    // null, object, array, or mixed-kind literals is a real constraint the
+    // engine never re-enforces (the supported plugin path forwards input
+    // without revalidating the original schema), so removing the keyword
+    // would silently widen the advertised contract — the exact widening the
+    // boolean-enum fix (review 5910671961) already refuses for fixed pins.
+    // The keyword stays and the validator rejects the whole tool
+    // (review 5914018939): the validator mirrors the MFJS-supported literal
+    // set exactly, so every enum this strip would have removed fails closed
+    // there instead.
 
     // JSON Schema reads an empty `items` schema as "items are unconstrained",
     // which is exactly the MFJS-legal shape with the keyword absent. MFJS
@@ -1466,73 +1475,6 @@ fn strip_mfjs_advisory_keywords(value: &mut Value) {
     }
     for keyword in ADVISORY_KEYWORDS {
         obj.shift_remove(keyword);
-    }
-}
-
-/// Remove every `enum` whose values the MFJS specification does not support.
-///
-/// "枚举值我们只支持基础类型中的 float, int 和 str，其它基础类型以及 object
-/// 和 array 暂不支持，并且不支持混合类型 (List 中的每个枚举值的类型必须相同，
-/// 如不可以 str + int)" (<https://github.com/MoonshotAI/walle/blob/main/docs/
-/// mfjs-spec.zh.md>, fetched 2026-11-05). An enum carrying boolean, null,
-/// object, or array values, or mixing value kinds, is replaced by no
-/// constraint at all — a node without `enum` accepts any value of its type,
-/// so removal only loses the enumeration guidance and the tool stays
-/// shippable instead of being degraded wholesale. Homogeneous
-/// float/int/str enums pass through untouched, and an empty or non-array
-/// `enum` is left for the validator to fail closed (a malformed keyword is a
-/// schema bug, not a simplification opportunity).
-fn strip_mfjs_unsupported_enum_values(value: &mut Value) {
-    let Some(obj) = value.as_object_mut() else {
-        return;
-    };
-    if let Some(properties) = obj.get_mut("properties").and_then(Value::as_object_mut) {
-        for child in properties.values_mut() {
-            strip_mfjs_unsupported_enum_values(child);
-        }
-    }
-    if let Some(definitions) = obj.get_mut("$defs").and_then(Value::as_object_mut) {
-        for child in definitions.values_mut() {
-            strip_mfjs_unsupported_enum_values(child);
-        }
-    }
-    if let Some(branches) = obj.get_mut("anyOf").and_then(Value::as_array_mut) {
-        for branch in branches.iter_mut() {
-            strip_mfjs_unsupported_enum_values(branch);
-        }
-    }
-    if let Some(additional) = obj.get_mut("additionalProperties")
-        && additional.is_object()
-    {
-        strip_mfjs_unsupported_enum_values(additional);
-    }
-    if let Some(items) = obj.get_mut("items") {
-        strip_mfjs_unsupported_enum_values(items);
-    }
-    if let Some(values) = obj.get("enum").and_then(Value::as_array) {
-        // A boolean or null literal is a FIXED-argument pin, not a soft
-        // constraint: stripping the keyword here would leave the bare
-        // declared type behind — `{"type": "boolean", "enum": [true]}`
-        // shipping as "any boolean" — and the engine never re-enforces the
-        // original schema before execution, the exact reasoning that fails
-        // bool/null `const`s closed. MFJS cannot represent the literal, so
-        // the enum stays and the validator rejects the whole tool
-        // (review 5910671961).
-        let has_unrepresentable_pin = values
-            .iter()
-            .any(|value| value.is_boolean() || value.is_null());
-        // `None` kinds (non-scalars) or differing kinds make the enum
-        // unsupported; an empty array stays for the validator to fail
-        // closed, per the doc comment above. The all() below is vacuously
-        // true for an empty array — `kinds[0]` is never evaluated — so an
-        // empty enum is kept and the validator's non-empty check rejects
-        // the whole tool instead of this strip silently widening an
-        // unsatisfiable constraint into "anything goes".
-        let kinds: Option<Vec<MfjsLiteralKind>> = values.iter().map(mfjs_literal_kind).collect();
-        let homogeneous = kinds.is_some_and(|kinds| kinds.iter().all(|kind| kind == &kinds[0]));
-        if !homogeneous && !has_unrepresentable_pin {
-            obj.shift_remove("enum");
-        }
     }
 }
 
@@ -3497,41 +3439,66 @@ mod kimi_tests {
     }
 
     #[test]
-    fn unsupported_enum_values_are_stripped_and_tool_survives() {
+    fn unsupported_enum_values_fail_closed_and_the_tool_is_dropped() {
         // The MFJS specification supports enum values only as float/int/str
         // scalars of one single type ("枚举值我们只支持基础类型中的 float,
         // int 和 str……不支持混合类型 (List 中的每个枚举值的类型必须相同)").
-        // An enum carrying anything else loses the keyword — an
-        // unconstrained node stays shippable — instead of dropping the tool.
-        // Boolean/null literal pins are the exception: they fail closed
-        // instead of widening (see the test below), so they are absent
-        // here (review 5910671961).
+        // The enum is never stripped: the keyword is a real constraint the
+        // engine never re-enforces (the supported plugin path forwards input
+        // without revalidating the original schema), so removing it would
+        // silently widen the advertised contract — a singleton object enum
+        // shipping as "any object with a string mode", a fixed array shape
+        // shipping as "any string array" (review 5914018939). The keyword
+        // stays and the validator rejects the whole tool — the same
+        // fail-closed shape as the boolean/null pins (review 5910671961).
+        for (name, property) in [
+            (
+                "mixed_scalar_kinds",
+                json!({"type": "string", "enum": ["fast", 1]}),
+            ),
+            (
+                "object_values",
+                json!({"type": "object", "enum": [{"nested": true}]}),
+            ),
+            ("array_values", json!({"type": "array", "enum": [["a"]]})),
+        ] {
+            let mut schema = json!({
+                "type": "object",
+                "properties": { name: property }
+            });
+            let error = sanitize_for_kimi_parameters(&mut schema)
+                .expect_err("an unsupported enum must fail closed, not lose the keyword and widen");
+            assert!(
+                matches!(error, KimiParameterSchemaError::InvalidKeywordValue),
+                "{name}: the kept enum drops via the validator: {error:?}"
+            );
+        }
+
+        // The review's concrete construction: a required typed object
+        // property pinned to a single value keeps its pin and fails closed —
+        // the widened schema never reaches the wire.
         let mut schema = json!({
             "type": "object",
             "properties": {
-                "mixed_kinds": {"type": "string", "enum": ["fast", 1]},
-                "object_values": {"type": "object", "enum": [{"nested": true}]},
-                "array_values": {"type": "array", "enum": [["a"]]}
-            }
+                "mode": {
+                    "type": "object",
+                    "properties": {"kind": {"type": "string"}},
+                    "required": ["kind"],
+                    "additionalProperties": false,
+                    "enum": [{"kind": "compact"}]
+                }
+            },
+            "required": ["mode"]
         });
-
-        sanitize_for_kimi_parameters(&mut schema)
-            .expect("unsupported enum values must strip, not drop the tool");
-
-        for name in ["mixed_kinds", "object_values", "array_values"] {
-            assert!(
-                schema["properties"][name].get("enum").is_none(),
-                "{name} must lose its unsupported enum: {schema}"
-            );
-        }
-        assert_eq!(schema["properties"]["mixed_kinds"]["type"], "string");
-        assert_eq!(schema["properties"]["object_values"]["type"], "object");
-        assert_eq!(schema["properties"]["array_values"]["type"], "array");
-        validate_mfjs_parameters(&schema).unwrap();
+        let error = sanitize_for_kimi_parameters(&mut schema)
+            .expect_err("the fixed object pin must fail closed, not advertise any mode object");
+        assert!(
+            matches!(error, KimiParameterSchemaError::InvalidKeywordValue),
+            "{error:?}"
+        );
 
         // A node whose only keyword is an unsupported `enum` has no type to
-        // fall back to: the strip leaves an empty schema node, which fails
-        // closed with MissingType exactly as the baseline did — the strip
+        // fall back to: it fails closed with MissingType — the sanitizer
         // never invents a type the schema author did not declare.
         let mut untyped = json!({
             "type": "object",
@@ -3544,8 +3511,8 @@ mod kimi_tests {
             "{error:?}"
         );
 
-        // Homogeneous scalar enums stay: str-only, int-only, and float-only
-        // are exactly the document's supported shapes.
+        // Homogeneous scalar enums stay shippable: str-only, int-only, and
+        // float-only are exactly the document's supported shapes.
         let mut schema = json!({
             "type": "object",
             "properties": {

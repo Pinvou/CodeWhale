@@ -7555,9 +7555,48 @@ fn resolve_tool_definition<'a>(
         .iter()
         .find(|def| def.name.as_str() == tool_name.as_str());
 
+    // Moonshot digit-led wire recovery: the Moonshot request path prefixes a
+    // digit-led registry name with `_` to satisfy Kimi's documented `name`
+    // pattern, and the response decoder deliberately leaves that prefix in
+    // place — a bare underscore strip here would corrupt genuinely
+    // underscore-led names. This recovery runs BEFORE the fuzzy alias
+    // resolution below: a `_<digit>` spelling is this request's own minted
+    // identity, so it must restore to the exact unprefixed name rather than
+    // alias onto a case-variant or suffix-variant sibling through the
+    // resolver's equivalence chain (with catalog `3d_render` + `_3D_render`,
+    // the wire spelling `_3d_render` must dispatch `3d_render`, not
+    // case-fold onto the sibling's handler — review 5914018939). A registry
+    // that really contains both spellings still resolves exactly: the exact
+    // catalog lookup above answers for a genuine `_3d_render` before this
+    // branch is reached. The recovery is Moonshot-gated (review 4539829148):
+    // only the Moonshot request path mints `_<digit>` spellings, so the same
+    // shape from any other provider can only be a hallucinated name, which
+    // must fail dispatch rather than resolve onto a digit-led registry tool
+    // it never saw advertised.
+    if moonshot_wire
+        && tool_def.is_none()
+        && tool_name.len() > 1
+        && tool_name.starts_with('_')
+        && tool_name.as_bytes()[1].is_ascii_digit()
+    {
+        let unprefixed = tool_name[1..].to_string();
+        if let Some(def) = tool_catalog
+            .iter()
+            .find(|def| def.name.as_str() == unprefixed)
+        {
+            tool_def = Some(def);
+            *tool_name = unprefixed;
+        } else if tool_registry.is_some_and(|registry| registry.get(&unprefixed).is_some()) {
+            *tool_name = unprefixed;
+        }
+    }
+
     // Resolve hallucinated tool names before policy gates run. Hidden legacy
     // handlers keep their executable name, while policy uses the canonical
-    // model-facing family definition.
+    // model-facing family definition. Minted `_<digit>` spellings only reach
+    // this alias chain when the unprefixed name exists nowhere — the mint's
+    // own tool is gone — so treating the spelling as a hallucinated alias is
+    // the same semantics every other unrecognized name gets.
     if tool_def.is_none()
         && let Some(registry) = tool_registry
         && let Some(canonical) = registry.resolve(tool_name.as_str())
@@ -7580,37 +7619,6 @@ fn resolve_tool_definition<'a>(
         tool_def = tool_catalog.iter().find(|d| d.name == catalog_name);
         if tool_def.is_some() && !exact_hidden_handler {
             *tool_name = catalog_name.to_string();
-        }
-    }
-
-    // Moonshot digit-led wire recovery: the Moonshot request path prefixes a
-    // digit-led registry name with `_` to satisfy Kimi's documented `name`
-    // pattern, and the response decoder deliberately leaves that prefix in
-    // place — a bare underscore strip here would corrupt genuinely
-    // underscore-led names. Only when every exact and alias lookup above
-    // missed and the wire spelling carries the exact `_<digit>` shape the
-    // prefix produces does dispatch fall back to the unprefixed name, so a
-    // registry that really contains both spellings still resolves exactly.
-    // The recovery is Moonshot-gated (review 4539829148): only the Moonshot
-    // request path mints `_<digit>` spellings, so the same shape from any
-    // other provider can only be a hallucinated name, which must fail
-    // dispatch rather than resolve onto a digit-led registry tool it never
-    // saw advertised.
-    if moonshot_wire
-        && tool_def.is_none()
-        && tool_name.len() > 1
-        && tool_name.starts_with('_')
-        && tool_name.as_bytes()[1].is_ascii_digit()
-    {
-        let unprefixed = tool_name[1..].to_string();
-        if let Some(def) = tool_catalog
-            .iter()
-            .find(|def| def.name.as_str() == unprefixed)
-        {
-            tool_def = Some(def);
-            *tool_name = unprefixed;
-        } else if tool_registry.is_some_and(|registry| registry.get(&unprefixed).is_some()) {
-            *tool_name = unprefixed;
         }
     }
 
@@ -8800,6 +8808,47 @@ mod tests {
             resolve_tool_definition(&mut name, &projected, Some(&registry), true).is_none(),
             "a hallucinated call for the dropped tool must fail dispatch"
         );
+    }
+
+    #[test]
+    fn moonshot_minted_wire_name_never_aliases_a_case_variant_sibling() {
+        // Review 5914018939: with a digit-led tool `3d_render` and a genuine
+        // case-variant sibling `_3D_render` both active in the catalog, the
+        // wire spelling `_3d_render` (the mint of `3d_render`) previously
+        // missed every exact lookup and fell through to the fuzzy resolver,
+        // whose ASCII case-insensitive step selected `_3D_render` and
+        // rewrote the execution name onto the sibling's handler. The minted
+        // identity must restore exactly: the unprefixed lookup runs before
+        // the alias chain, so the call dispatches `3d_render`.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let context = crate::tools::spec::ToolContext::new(tmp.path().to_path_buf());
+        let mut registry = crate::tools::ToolRegistry::new(context);
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "3d_render" }));
+        registry.register(std::sync::Arc::new(NamedProbeTool { name: "_3D_render" }));
+        let catalog = registry.to_api_tools();
+
+        let mut name = "_3d_render".to_string();
+        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true);
+        assert!(
+            tool_def.is_some(),
+            "the minted wire spelling must dispatch to its own tool"
+        );
+        assert_eq!(
+            name, "3d_render",
+            "the minted identity must restore the exact unprefixed name, not case-fold onto '_3D_render'"
+        );
+        assert_eq!(
+            tool_def.expect("resolved").name,
+            "3d_render",
+            "the call must reach the digit-led tool, never the case-variant sibling"
+        );
+
+        // The sibling's own wire spelling still resolves exactly to itself.
+        let mut name = "_3D_render".to_string();
+        let tool_def = resolve_tool_definition(&mut name, &catalog, Some(&registry), true);
+        assert!(tool_def.is_some());
+        assert_eq!(name, "_3D_render");
+        assert_eq!(tool_def.expect("resolved").name, "_3D_render");
     }
 
     #[tokio::test]
