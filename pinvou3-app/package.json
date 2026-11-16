@@ -7,7 +7,6 @@
     "test:account-platform-recharge-ui": "node --test tests/account_platform_recharge_polling_server_lifecycle.test.mjs && node tests/account_platform_recharge_payment_ui_smoke.mjs",
     "tauri": "node scripts/tauri/build.js",
     "dev": "node scripts/tauri/build.js dev",
-    "dev:ui": "node scripts/tauri/build.js dev",
     "serve:src": "vite",
     "build:ui": "vite build",
     "build:web": "vite build --mode web",
