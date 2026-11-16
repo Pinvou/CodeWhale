@@ -868,7 +868,35 @@ impl<'a> PairAdmission<'a> {
                     .props
                     .and_then(|props| props.get(name.as_str())),
             );
+            if std::env::var_os("ZZ_TRACE").is_some() && (name == "payload" || name == "flag") {
+                println!(
+                    "ZZ_TRACE arm3 name={name} clean={:?} root_w={:?} objw={:?} obj_l={:?} obj_r={:?} sub_w={:?} nested={:?} depth={depth} lg={left_group:?} rg={right_group:?}",
+                    self.enclosing_omission_clean,
+                    self.arm3_root_witness_provable(left, left_group, name.as_str()),
+                    self.enclosing_entry_admits_object_witness(name.as_str()),
+                    is_object_branch(left_entry),
+                    is_object_branch(right_entry),
+                    self.witness_provable(
+                        left_entry,
+                        &branch_required_names(left_entry),
+                        &enclosing_entry,
+                    ),
+                    nested_entries_discriminated(left_entry, right_entry, &enclosing_entry),
+                );
+            }
             if depth < 8
+                // The witness is a ROOT-valid object: the containing root
+                // must stay within the bounded keyword model (a
+                // `maxProperties` floor can forbid carrying the nested
+                // witness beside the branch's required names, and a closed
+                // root can forbid the branch-only field entirely — review
+                // 5928255936), and the whole containing object — the
+                // branch's own required names plus everything the root
+                // requires, with the nested witness as the field's value —
+                // must be constructible against the root's own entries the
+                // same way the group arms prove their root-level witnesses.
+                && self.enclosing_omission_clean
+                && self.arm3_root_witness_provable(left, left_group, name.as_str())
                 && self.enclosing_entry_admits_object_witness(name.as_str())
                 && is_object_branch(left_entry)
                 && is_object_branch(right_entry)
@@ -1063,6 +1091,43 @@ impl<'a> PairAdmission<'a> {
             && obj
                 .keys()
                 .all(|key| matches!(key.as_str(), "type" | "properties" | "required"))
+    }
+
+    /// Whether a ROOT-valid containing object exists for the Arm 3 nested
+    /// witness: the branch's own required names plus everything the root
+    /// requires, carried once, with the containing field's value being the
+    /// sub-instance the nested proof already constructs. Fields other than
+    /// the containing one go through the scalar common-value grammar; the
+    /// containing field itself is covered by
+    /// [`Self::enclosing_entry_admits_object_witness`] plus the nested
+    /// proof, and the root's keyword boundedness is the
+    /// `enclosing_omission_clean` gate (a `maxProperties` floor or a closed
+    /// root can otherwise forbid carrying the witness at all — review
+    /// 5928255936).
+    fn arm3_root_witness_provable(&self, left: &Value, left_group: &[&str], name: &str) -> bool {
+        if !shape_is_structural(left) || !self.enclosing.structural {
+            return false;
+        }
+        if schema_carries_unproven_composition(left) {
+            return false;
+        }
+        let left_props = left.get("properties").and_then(Value::as_object);
+        left_group
+            .iter()
+            .copied()
+            .chain(self.enclosing.required.iter().copied())
+            .filter(|field| *field != name)
+            .all(|field| {
+                let left_entry = left_props.and_then(|props| props.get(field));
+                let enclosing_entry = self.enclosing.props.and_then(|props| props.get(field));
+                match (left_entry, enclosing_entry) {
+                    (None, None) => true,
+                    (Some(entry), None) | (None, Some(entry)) => entry_is_value_permissive(entry),
+                    (Some(left_entry), Some(enclosing_entry)) => {
+                        entries_admit_common_value(left_entry, enclosing_entry)
+                    }
+                }
+            })
     }
 }
 
@@ -4593,6 +4658,249 @@ mod tests {
         assert!(
             schema.get("oneOf").is_none(),
             "an unknown mixed-number comparison must not prove disjointness: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_declines_the_nested_witness_when_the_root_forbids_the_containing_object() {
+        // Review 5928255936 (P2): Arm3 proved the nested a/b omission witness
+        // for `payload` without checking that any ROOT-valid object can carry
+        // it. With the root requiring `flag` under `maxProperties: 1`, no
+        // root-valid instance can hold `payload` beside `flag`, so every
+        // root-valid object matches both projected branches (payload omitted)
+        // and the preserved oneOf accepts nothing. The flattened fallback
+        // keeps the flag-only arguments usable. The branches declare their
+        // required names locally, which is what routes the pair into Arm3 at
+        // all.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"flag": {"type": "string"}},
+            "required": ["flag"],
+            "maxProperties": 1,
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "flag": {"type": "string"},
+                        "payload": {
+                            "type": "object",
+                            "properties": {"a": {"type": "string"}},
+                            "required": ["a"]
+                        }
+                    },
+                    "required": ["flag"],
+                    "dependentRequired": {"flag": ["payload"]}
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "flag": {"type": "string"},
+                        "payload": {
+                            "type": "object",
+                            "properties": {"b": {"type": "string"}},
+                            "required": ["b"]
+                        }
+                    },
+                    "required": ["flag"],
+                    "dependentRequired": {"flag": ["payload"]}
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "a nested witness no root-valid object can carry must not keep the union: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"flag": "on"})),
+            "the flag-only argument must stay valid under the fallback: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_declines_the_nested_witness_when_a_carried_field_has_disjoint_types() {
+        // Review 5928255936 (P2, carried-field form): the root-level witness
+        // object carries the branch's required names too. When the branch
+        // and the root declare one of those names with disjoint types, no
+        // concrete value satisfies both entries, so the containing object
+        // cannot be constructed and the nested proof must not fire.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "flag": {"type": "string"},
+                "extra": {"type": "string"}
+            },
+            "required": ["flag", "extra"],
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "flag": {"type": "string"},
+                        "extra": {"type": "number"},
+                        "payload": {
+                            "type": "object",
+                            "properties": {"a": {"type": "string"}},
+                            "required": ["a"]
+                        }
+                    },
+                    "required": ["flag", "extra"],
+                    "dependentRequired": {"flag": ["payload"]}
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "flag": {"type": "string"},
+                        "extra": {"type": "number"},
+                        "payload": {
+                            "type": "object",
+                            "properties": {"b": {"type": "string"}},
+                            "required": ["b"]
+                        }
+                    },
+                    "required": ["flag", "extra"],
+                    "dependentRequired": {"flag": ["payload"]}
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "disjoint carried-field types must not keep the union: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"flag": "on", "extra": "s"})),
+            "the root-valid argument must stay valid under the fallback: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_declines_the_nested_witness_when_the_root_anyof_forbids_the_field() {
+        // Review 5928255936 (P2, root-composition form): the root's own
+        // `anyOf` can forbid the containing field outright, so the bounded
+        // keyword gate must treat a root carrying `anyOf` as outside the
+        // witness model even though the field-entry checks alone would admit
+        // the object. Every root-valid instance here is flag-only, which
+        // matches both projected branches.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"flag": {"type": "string"}},
+            "required": ["flag"],
+            "anyOf": [
+                {"not": {"required": ["payload"]}},
+                {"not": {"required": ["payload"], "properties": {"flag": {"type": "string"}}}}
+            ],
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "flag": {"type": "string"},
+                        "payload": {
+                            "type": "object",
+                            "properties": {"a": {"type": "string"}},
+                            "required": ["a"]
+                        }
+                    },
+                    "required": ["flag"],
+                    "dependentRequired": {"flag": ["payload"]}
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "flag": {"type": "string"},
+                        "payload": {
+                            "type": "object",
+                            "properties": {"b": {"type": "string"}},
+                            "required": ["b"]
+                        }
+                    },
+                    "required": ["flag"],
+                    "dependentRequired": {"flag": ["payload"]}
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "a root anyOf forbidding the containing field must not keep the union: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"flag": "on"})),
+            "the flag-only argument must stay valid under the fallback: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_declines_the_nested_witness_under_a_closed_root() {
+        // Review 5928255936 (P2, closed-root form): with the root forbidding
+        // undeclared properties, the branch-only `payload` field cannot exist
+        // in any root-valid instance; the hypothetical payload object is not
+        // a witness and the projected oneOf keeps no usable argument.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"flag": {"type": "string"}},
+            "required": ["flag"],
+            "additionalProperties": false,
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "flag": {"type": "string"},
+                        "payload": {
+                            "type": "object",
+                            "properties": {"a": {"type": "string"}},
+                            "required": ["a"]
+                        }
+                    },
+                    "required": ["flag"],
+                    "dependentRequired": {"flag": ["payload"]}
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "flag": {"type": "string"},
+                        "payload": {
+                            "type": "object",
+                            "properties": {"b": {"type": "string"}},
+                            "required": ["b"]
+                        }
+                    },
+                    "required": ["flag"],
+                    "dependentRequired": {"flag": ["payload"]}
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "a closed root must not keep a union whose witness is branch-only: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"flag": "on"})),
+            "the flag-only argument must stay valid under the fallback: {schema}"
         );
     }
 
