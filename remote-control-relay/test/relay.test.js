@@ -18,7 +18,9 @@ import {
 } from "../protocol-controller.js";
 import { smokeControllerRoute } from "../scripts/controller-route-smoke.mjs";
 import { main as migrationCli } from "../scripts/enrollment-migrate.js";
-import { protectWindowsPath } from "../relay-state-store.js";
+import { protectWindowsPath, RelayStateStore } from "../relay-state-store.js";
+import { EnrollmentRegistry, loadEnrollmentRegistryConfig } from "../enrollment-registry.js";
+import { createEnrollmentGateway } from "../enrollment-gateway.js";
 
 const X25519_SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
 
@@ -2746,4 +2748,63 @@ test("client-supplied web_rejoining does not survive forwarding", async (t) => {
   assert.equal("web_rejoining" in received, false,
     `a client-supplied web_rejoining must be stripped, got ${JSON.stringify(received)}`);
   assert.equal(received.id, "rejoin-smuggle");
+});
+
+
+test("credential transport: real Legacy role entries retain UTF16 boundaries and old text domain", async (t) => {
+  for (const [index, credential] of ["a", "\ud800", "a".repeat(1024), "中".repeat(1024), "😀".repeat(512)].entries()) {
+    const endpointId = `credential-legacy-${index}`;
+    const desktop = await registerDesktop(endpointId, credential, credential);
+    t.after(() => desktop.ws.terminate());
+    const web = await joinWeb(endpointId, credential);
+    t.after(() => web.ws.terminate());
+    assert.equal(web.joined.endpoint_id, endpointId);
+  }
+  for (const [index, credential] of ["a".repeat(1025), "中".repeat(1025), "😀".repeat(513)].entries()) {
+    for (const field of ["access_token", "desktop_secret"]) {
+      const socket = await openSocket();
+      t.after(() => socket.terminate());
+      const rejected = nextMessage(socket, "error");
+      socket.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: `credential-overflow-${index}-${field}`,
+        access_token: "a".repeat(32), desktop_secret: "d".repeat(32), [field]: credential }));
+      assert.equal((await rejected).code, "bad_desktop_endpoint_register");
+    }
+    const socket = await openSocket();
+    t.after(() => socket.terminate());
+    const rejected = nextMessage(socket, "error");
+    socket.send(JSON.stringify({ v: 2, type: "web_client_join", endpoint_id: "credential-legacy-0", access_token: credential }));
+    assert.equal((await rejected).code, "bad_web_client_join");
+  }
+});
+
+test("credential transport: fresh Enrollment roles pass real Gateway and Legacy Relay entries", { timeout: 120_000 }, async (t) => {
+  const env = controllerEnvironment("credential-transport", { PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU: "0" });
+  const credentials = ["a".repeat(1024), "中".repeat(1024), "😀".repeat(512)];
+  // Use the registry suite's security seam for this transport-domain fixture.
+  // Registry role writes, authorization, Gateway and Legacy Relay are real;
+  // this does not qualify native Windows DACLs or TOFU provisioning latency.
+  const store = await RelayStateStore.open({ statePath: env.PINVOU_REMOTE_CONTROLLER_STATE_PATH,
+    legacyStatePath: env.PINVOU_REMOTE_STATE_PATH, processIdentity: async (pid) => `test-process:${pid}`,
+    ...(process.platform === "win32" ? { protectPath: async () => {}, verifyPath: async () => {},
+      verifyAncestors: async () => {} } : {}) });
+  let gateway;
+  t.after(async () => { if (gateway) await gateway.close(); await store.close(); });
+  const registry = EnrollmentRegistry.open({ stateStore: store, config: loadEnrollmentRegistryConfig(env) });
+  await registry.applyAtomicBatch({ expectedNamespaceRevision: registry.exportSnapshot().namespace_revision,
+    operations: credentials.map((credential, index) => ({ operation: "claim_roles",
+      endpoint_id: `credential-enrollment-${index}`, credential, desktop_credential: credential })) });
+  const before = registry.exportSnapshot();
+  gateway = createEnrollmentGateway({ registry, upstreamUrl: wsUrl });
+  const address = await gateway.listen({ host: "127.0.0.1", port: 0 });
+  const gatewayUrl = `ws://127.0.0.1:${address.port}/pinvou3/remote/ws`;
+  for (const [index, credential] of credentials.entries()) {
+    const endpointId = `credential-enrollment-${index}`;
+    const desktop = await registerDesktop(endpointId, credential, credential, gatewayUrl);
+    t.after(() => desktop.ws.terminate());
+    const web = await joinWeb(endpointId, credential, {}, gatewayUrl);
+    t.after(() => web.ws.terminate());
+    assert.equal(web.joined.endpoint_id, endpointId);
+  }
+  assert.equal(registry.exportSnapshot().registry.entries.length, 3);
+  assert.deepEqual(registry.exportSnapshot(), before, "live registration preserves freshly provisioned roles");
 });

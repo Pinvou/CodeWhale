@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { CREDENTIAL_TRANSPORT_MAX_UTF16_UNITS } from "./credential-transport-contract.js";
 import { isExampleHmacKey } from "./hmac-key-config.js";
 import { isControllerIdentifier, isEnrollmentEndpointIdentifier, isMigrationRequestIdentifier } from "./identifier-contract.js";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -19,7 +20,6 @@ const REVISION = /^(?:0|[1-9][0-9]{0,19})$/u;
 const U64_MAX = 18_446_744_073_709_551_615n;
 const CREDENTIAL_MIN_BYTES = 32;
 const CREDENTIAL_MAX_BYTES = 4096;
-const NEW_CREDENTIAL_MAX_UTF16_UNITS = 1024;
 const CREDENTIAL_TRANSPORT_ERROR = "enrollment_credential_transport_invalid";
 const MAX_ENTRIES = 100_000;
 const MAX_MIGRATION_REQUESTS = 100_000;
@@ -73,7 +73,7 @@ function validateCredential(credential, label = "enrollment_credential") {
 // Only newly written role material must also fit the Legacy transport limit.
 function validateNewCredential(credential, label = "enrollment_credential") {
   validateCredential(credential, label);
-  if (credential.length > NEW_CREDENTIAL_MAX_UTF16_UNITS) fail(CREDENTIAL_TRANSPORT_ERROR);
+  if (credential.length > CREDENTIAL_TRANSPORT_MAX_UTF16_UNITS) fail(CREDENTIAL_TRANSPORT_ERROR);
 }
 
 function validateRevision(value, label) {

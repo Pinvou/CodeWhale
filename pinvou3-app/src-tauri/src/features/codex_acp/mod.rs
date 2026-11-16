@@ -7278,13 +7278,6 @@ fn cancel_remote_owned_elicitations(
     })
 }
 
-fn cancel_session_elicitations(
-    pending: &mut HashMap<String, PendingElicitation>,
-    session_id: &str,
-) -> Vec<String> {
-    cancel_elicitations_matching(pending, |request| request.view.session_id == session_id)
-}
-
 fn cancel_elicitations_matching(
     pending: &mut HashMap<String, PendingElicitation>,
     mut should_cancel: impl FnMut(&PendingElicitation) -> bool,
@@ -9143,20 +9136,8 @@ mod tests {
         assert!(local_rx.try_recv().is_err());
         assert_eq!(pending.len(), 2);
 
-        // Session cancellation/disconnect is broader than owner release: all
-        // remaining prompts for that B-local session must be unblocked.
-        let mut cancelled = cancel_session_elicitations(&mut pending, "session-remote");
-        cancelled.sort();
-        assert_eq!(cancelled, vec!["foreign", "local"]);
-        assert_eq!(
-            serde_json::to_value(foreign_rx.await.unwrap()).unwrap()["action"],
-            "cancel"
-        );
-        assert_eq!(
-            serde_json::to_value(local_rx.await.unwrap()).unwrap()["action"],
-            "cancel"
-        );
-        assert!(pending.is_empty());
+        assert!(pending.contains_key("foreign"));
+        assert!(pending.contains_key("local"));
     }
 
     #[test]

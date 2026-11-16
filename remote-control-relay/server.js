@@ -1,4 +1,5 @@
 import http from "node:http";
+import { CREDENTIAL_TRANSPORT_MAX_UTF16_UNITS } from "./credential-transport-contract.js";
 import crypto from "node:crypto";
 import { isExampleHmacKey } from "./hmac-key-config.js";
 import { isIP } from "node:net";
@@ -687,7 +688,7 @@ function tokenHashMatches(token, expectedHash) {
 }
 
 function boundedCredential(value) {
-  return typeof value === "string" && value.length > 0 && value.length <= 1024
+  return typeof value === "string" && value.length > 0 && value.length <= CREDENTIAL_TRANSPORT_MAX_UTF16_UNITS
     ? value
     : null;
 }

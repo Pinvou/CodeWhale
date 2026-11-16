@@ -720,7 +720,8 @@ default or set the same nonempty path for every process. The generator
 requires HTTPS public entrypoints even where runtime preflight permits HTTP
 localhost probes; it is an offline production perimeter contract, not a change
 to the runtime preflight's accepted URLs.
-The generated WS location explicitly uses 75-second read and send timeouts,
+The generated WS location explicitly uses 75-second read and send timeouts
+(`ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS` in `enrollment-nginx-config.js`),
 preserving the checked-in sample's idle proxy budget. The offline checker
 rejects missing or changed timeout directives as configuration drift. This
 does not add gateway heartbeat behavior or change authentication deadlines;
