@@ -336,6 +336,11 @@ helpers, `mcp_session-reader_read_session` and
 same way (auto-approved, admitted in Plan mode when policy permits). That
 server's write tools remain approval-gated.
 
+The `session-reader` server key is reserved for this first-party server:
+a workspace `.codewhale/mcp.json` cannot define (or override) it, and
+runtime registration rejects it, so a same-name impostor cannot inherit
+the approval-free classification.
+
 ## Minimal Example
 
 ```json

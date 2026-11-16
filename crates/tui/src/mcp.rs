@@ -1126,10 +1126,15 @@ pub struct McpTool {
 /// read-only postures and `ApprovalMode::Never`) and is admitted to Plan
 /// mode, so a name added here is granted approval-free execution on all of
 /// those surfaces and entries must stay first-party and read-only by
-/// contract. (The standalone auto-review policy still tiers MCP names by
-/// its own prefix heuristic in `tui::approval::policy::get_tool_category`
-/// and may consult its reviewer for non-`list_/read_/get_mcp_*` shapes;
-/// unifying that classifier with this list is a planned follow-up.)
+/// contract. That contract is enforced, not just documented:
+/// [`FIRST_PARTY_MCP_SERVER_KEYS`] reserves the server keys that own these
+/// names, and the workspace-config merge plus runtime registration refuse
+/// other servers under those keys, so a same-name impostor cannot inherit
+/// the approval-free classification. (The standalone auto-review policy
+/// still tiers MCP names by its own prefix heuristic in
+/// `tui::approval::policy::get_tool_category` and may consult its reviewer
+/// for non-`list_/read_/get_mcp_*` shapes; unifying that classifier with
+/// this list is a planned follow-up.)
 pub(crate) const MCP_READ_HELPER_TOOLS: &[&str] = &[
     "list_mcp_resources",
     "list_mcp_resource_templates",
@@ -1154,6 +1159,28 @@ pub(crate) const MCP_READ_HELPER_TOOLS: &[&str] = &[
 /// Whether `name` is a read-only MCP helper (see [`MCP_READ_HELPER_TOOLS`]).
 pub(crate) fn is_mcp_read_helper(name: &str) -> bool {
     MCP_READ_HELPER_TOOLS.contains(&name)
+}
+
+/// Server keys that own a model-facing tool name in
+/// [`MCP_READ_HELPER_TOOLS`]. The approval-free classification is bound to
+/// the first-party owner of the key, not to the name alone: model-facing
+/// names are `mcp_{server}_{tool}`, so any server configured under the same
+/// key would otherwise inherit read-only/`Auto` admission in every posture
+/// (including Plan mode) and skip the worker authority's mutating-MCP
+/// rejection without executing a single line of first-party code. Untrusted
+/// config sources therefore cannot define these keys: the workspace
+/// `.codewhale/mcp.json` merge refuses them (workspace trust grants
+/// execution, not first-party naming — the #417 doctrine), and runtime
+/// registration rejects them. The pool-internal read helpers
+/// (`list_mcp_resources`, `mcp_read_resource`, `mcp_get_prompt`, ...) are
+/// not listed here: [`McpPool::call_tool`] answers them before any server
+/// route is consulted, so no configured key can reach their names.
+pub(crate) const FIRST_PARTY_MCP_SERVER_KEYS: &[&str] = &["session-reader"];
+
+/// Whether `server_key` names a first-party server whose tool names appear
+/// in [`MCP_READ_HELPER_TOOLS`] (see the key list's contract).
+pub(crate) fn is_first_party_mcp_server_key(server_key: &str) -> bool {
+    FIRST_PARTY_MCP_SERVER_KEYS.contains(&server_key)
 }
 
 const MCP_TOOL_DESCRIPTION_MAX_CHARS: usize = 80;
@@ -4463,6 +4490,12 @@ impl McpPool {
         name: String,
         config: McpServerConfig,
     ) -> Result<(), String> {
+        if is_first_party_mcp_server_key(&name) {
+            return Err(format!(
+                "MCP server name '{name}' is reserved for a first-party server and cannot be \
+                 registered at runtime"
+            ));
+        }
         if self.config.servers.contains_key(&name) {
             return Err(format!(
                 "MCP server '{}' already exists in the config file. \
@@ -4832,6 +4865,23 @@ pub fn load_config_with_workspace_and_plugins(
     }
 
     let mut project = load_config(&project_path)?;
+    // Reserved first-party server keys stay user-owned. Workspace trust
+    // grants execution, not first-party naming: a project config may not
+    // define (or override) a key whose model-facing tool names carry the
+    // approval-free read-helper classification, or a repository could
+    // re-key an arbitrary command into that class.
+    project.servers.retain(|server_name, _| {
+        if is_first_party_mcp_server_key(server_name) {
+            tracing::warn!(
+                target: "mcp",
+                server = %server_name,
+                "workspace mcp.json defines a reserved first-party server key; refusing it"
+            );
+            false
+        } else {
+            true
+        }
+    });
     for server in project.servers.values_mut() {
         if server.command.is_some() && server.url.is_none() {
             server.cwd = Some(resolve_project_mcp_cwd(&workspace, server.cwd.as_deref())?);
