@@ -117,13 +117,14 @@ async fn dispatch(
             )?)
         }
         "models" => Ok(serde_json::to_value(
-            super::settings::list_models()
+            // 普通模型选择器口径：兼容默认列表，不做严格可读快照。
+            super::settings::list_models(None)
                 .await
                 .map_err(anyhow::Error::msg)?,
         )?),
         "save" => {
             let model: SavedModel = serde_json::from_value(request["model"].clone())?;
-            if model.is_builtin_llmapi() {
+            if model.is_builtin_account_platform() {
                 bail!("builtin model immutable");
             }
             let id = model.id.clone();
