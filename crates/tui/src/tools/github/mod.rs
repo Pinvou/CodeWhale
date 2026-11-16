@@ -314,6 +314,23 @@ mod tests {
     }
 
     #[test]
+    fn pr_diff_within_the_artifact_threshold_ships_inline_verbatim() {
+        // Review 5926566445: the artifact writer skips diffs at or below the
+        // 64,000-byte threshold, so that whole band must ship inline — a
+        // 901-byte to 64,000-byte diff with only the 900-char summary would
+        // have no full copy in the product at all.
+        let boundary = "x".repeat(shape::DIFF_ARTIFACT_THRESHOLD);
+        assert_eq!(
+            shape::pr_diff_shaping(&boundary),
+            shape::PrDiffShaping::Inline
+        );
+        assert_eq!(
+            shape::pr_diff_shaping(&(boundary + "x")),
+            shape::PrDiffShaping::Condensed
+        );
+    }
+
+    #[test]
     fn missing_close_evidence_refuses() {
         let input = json!({
             "number": 1,

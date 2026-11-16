@@ -45,6 +45,29 @@ pub(super) fn shape_large_text(
     Ok(value)
 }
 
+/// How a fetched PR diff is delivered to the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PrDiffShaping {
+    /// The full diff ships inline verbatim: it fits within
+    /// [`DIFF_ARTIFACT_THRESHOLD`], and the artifact writer skips this band
+    /// by contract, so a summary-only response would leave these diffs with
+    /// no full copy in the product at all (review 5926566445).
+    Inline,
+    /// Condensed to a 900-char summary; the full text routes to a task
+    /// artifact when a durable task is active.
+    Condensed,
+}
+
+/// The delivery decision for one fetched PR diff.
+#[must_use]
+pub(super) fn pr_diff_shaping(diff: &str) -> PrDiffShaping {
+    if diff.len() > DIFF_ARTIFACT_THRESHOLD {
+        PrDiffShaping::Condensed
+    } else {
+        PrDiffShaping::Inline
+    }
+}
+
 pub(super) fn write_artifact_if_needed(
     context: &ToolContext,
     label: &str,

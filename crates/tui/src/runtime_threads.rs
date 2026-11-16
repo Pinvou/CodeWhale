@@ -1495,6 +1495,28 @@ impl RuntimeThreadStore {
         Ok(())
     }
 
+    /// Persist any routed-usage appends still staged for `turn_id`. The
+    /// batched writer stages accepted records until a batch boundary or a
+    /// settlement save; a sink retiring past that boundary — a detached child
+    /// reporting usage after the parent's final save — has no later flush, so
+    /// the sink's retirement is the durable final-owner boundary. A failed
+    /// write leaves the staged batch resident and the next flush or append
+    /// retries it; the persisted snapshot deduplicates by the records'
+    /// source fingerprints (review 5926566445).
+    pub fn flush_routed_usage_staged(&self, turn_id: &str) -> Result<()> {
+        let _turn_mutation = self.turn_mutation.lock();
+        let turn = {
+            let staged = self.routed_usage_staged.lock();
+            staged.get(turn_id).map(|entry| entry.turn.clone())
+        };
+        let Some(turn) = turn else {
+            return Ok(());
+        };
+        write_json_atomic(&self.turn_path(&turn.id)?, &turn)?;
+        self.routed_usage_staged.lock().remove(turn_id);
+        Ok(())
+    }
+
     /// Deliver one routed-usage record for `turn_id`. Appends stage in memory
     /// ([`ROUTED_USAGE_FLUSH_BATCH`]) instead of rewriting the whole turn file
     /// per record; the batch flush and the turn settlement save persist the
@@ -8861,13 +8883,33 @@ impl RuntimeThreadManager {
     fn register_runtime_usage_sink(&self, turn_id: &str) {
         let store = self.store.clone();
         let sink_turn_id = turn_id.to_string();
-        crate::cost_status::register_runtime_usage_sink(
+        let retire_store = self.store.clone();
+        let retire_turn_id = turn_id.to_string();
+        crate::cost_status::register_runtime_usage_sink_with_retirement(
             turn_id,
             Arc::new(move |record: RuntimeUsageRecord| {
                 store
                     .append_routed_usage_staged(&sink_turn_id, &record.source_id, record.usage)
                     .is_ok()
             }),
+            Some(Arc::new(move || {
+                // Retiring this sink is the durable final-owner boundary: a
+                // detached child may still report usage after the parent
+                // turn's final settlement save, and those accepted records
+                // only stage until the last lease drops. Flush the staged
+                // form here, retrying a transient write failure a bounded
+                // number of times (the store keeps the batch resident until
+                // one write succeeds); the persisted snapshot deduplicates
+                // by source fingerprint (review 5926566445).
+                for _ in 0..3 {
+                    if retire_store
+                        .flush_routed_usage_staged(&retire_turn_id)
+                        .is_ok()
+                    {
+                        return;
+                    }
+                }
+            })),
         );
     }
 

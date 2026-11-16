@@ -3450,6 +3450,71 @@ async fn aggregate_usage_marks_bounded_journal_truncation_incomplete() -> Result
 }
 
 #[test]
+fn runtime_usage_after_the_final_save_persists_at_sink_retirement() -> Result<()> {
+    // Review 5926566445: a detached child can hold its lease past the
+    // parent's final settlement save. Reports the sink accepted after that
+    // save only stage until the last lease drops, so retirement itself must
+    // flush the staged form — no later settlement save exists on this path.
+    // The pre-fix behavior needed the explicit settlement save below, which
+    // the reviewer called out as not covering this boundary.
+    let _cost_scope = crate::cost_status::test_scope();
+    let data_dir = test_runtime_dir();
+    let manager = test_manager(data_dir.clone())?;
+    let thread = sample_thread("thr_sink_retire_flush");
+    manager.store.save_thread(&thread)?;
+    let turn = sample_turn(
+        &thread.id,
+        "turn_sink_retire_flush",
+        RuntimeTurnStatus::InProgress,
+    );
+    manager.store.save_turn(&turn)?;
+    manager.register_runtime_usage_sink(&turn.id);
+    let lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("active runtime owner lease");
+    crate::cost_status::finish_runtime_usage_owner(&turn.id);
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-detached",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "detached:response:test",
+        &route,
+        &Usage {
+            input_tokens: 9,
+            output_tokens: 4,
+            ..Usage::default()
+        },
+    );
+    // No settlement save here: retirement must be the durable boundary.
+    drop(lease);
+    drop(manager);
+
+    let reopened = test_manager(data_dir)?;
+    let persisted = reopened.store.load_turn(&turn.id)?;
+    assert_eq!(
+        persisted.routed_usage.len(),
+        1,
+        "post-settlement usage must survive restart via the retirement flush"
+    );
+    assert_eq!(persisted.routed_usage[0].usage.input_tokens, 9);
+    assert_eq!(persisted.routed_usage[0].usage.output_tokens, 4);
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "the retirement flush must not duplicate the record into the fallback journal"
+    );
+    Ok(())
+}
+
+#[test]
 fn runtime_usage_sink_survives_parent_terminal_and_restart_exactly_once() -> Result<()> {
     let _cost_scope = crate::cost_status::test_scope();
     let data_dir = test_runtime_dir();
