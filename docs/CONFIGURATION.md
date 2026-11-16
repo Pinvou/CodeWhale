@@ -1769,9 +1769,13 @@ reasoning contract, and all four membership ids omit generic sampling fields.
 The same endpoint is also served at the exact overseas alias
 `https://api.kimi.ai/coding/v1`, recognized identically, and it additionally
 accepts the K3.1 spellings `k3.1-pro` and `k3.1-pro-highspeed` with the same
-nested-effort and sampling-strip contract; the direct-platform spellings
-`kimi-k3.1-pro` and `kimi-k3.1-pro-highspeed` belong on the exact Moonshot
-direct route, and every cross-endpoint pairing fails closed with guidance.
+nested-effort and sampling-strip contract and bare `k3`'s budget treatment
+(262,144 safe baseline; 1M through the entitlement report or an explicit
+`context_window`); the direct-platform spellings `kimi-k3.1-pro` and
+`kimi-k3.1-pro-highspeed` belong on the exact Moonshot direct route with
+`kimi-k3`'s budget facts (1,048,576 context, 131,072 default ceiling, and the
+documented 1,048,576 route output maximum), and every K3 and K3.1
+cross-endpoint pairing fails closed with guidance.
 
 ### Core keys (used by the TUI/engine)
 
