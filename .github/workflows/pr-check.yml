@@ -1232,20 +1232,22 @@ jobs:
         run: python3 scripts/mcp-server-contract-smoke.py
 
   # Setup 工件化(2026-11-16 调查结论:3 台宿主共置算力摊薄是失败主机理,#2641
-  # 后 frontend-test + 4 个 browser 分片各自重复 npm ci ×3 + 三次 vite build,
-  # 单片构建期 6-8min 满核高峰)。本 job 一次完成全部安装与构建,打包成单个
-  # tar.gz 工件(retention 1 天,仅同 run 内消费),前端腿构建 CPU 需求降 ~4/5,
-  # 直接缓解共置宿主摊薄。消费方走 REST zip 通道下载——通道选型两轮实测证据
-  # 见消费步骤注释与 PR #2681 评论。relay 依赖无条件安装(包完整性;消费方仍
-  # 按 Ready/queue 条件才使用)。测试行为零变化:vite 产物、CHROME 探针、工作
-  # 目录与环境变量与原 setup 完全一致;tar 保留 npm .bin 符号链接与可执行位;
-  # 各消费 job 解包独立副本,分片间无可变共享状态。
+  # 后 frontend-test + 4 个 browser 分片各自重复三次 vite build,构建期满核
+  # 高峰 ×5)。分工:本 job 只做「构建产物」——三次 vite build 一次完成,只把
+  # 体积仅数十 MB 的 dist 输出打成工件;npm ci 保留在各消费 job(网络绑定、
+  # CPU 占用低)。这样避开 2026-11-16 实测的自建机↔GitHub 存储上行瓶颈:
+  # 156MB 的 node_modules bundle 上传两次 stall 至死(run 43890217142),而
+  # 产物小件不受影响。vite build 才是 CPU 大头,去重它即达成摊薄目标。
+  # build:account-portal 的一致性检查与 credential handoff 部署边界检查随
+  # 构建留在本 job(产物 = git 跟踪的 static 目录,消费方 checkout 自带,
+  # 无需传输)。测试行为零变化:vite 产物、CHROME 探针、工作目录与环境变量
+  # 与原 setup 完全一致;各消费 job 下载解包独立副本,分片间无可变共享状态。
   frontend-setup:
     name: frontend-setup
     needs: changes
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test') && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    # npm ci ×3 + 三次 vite build + 打包上传实测全程 8-9min;30min 含冷缓存与慢 registry 余量。
+    # npm ci(app) + 三次 vite build + 小件打包上传;30min 含冷缓存与慢 registry 余量。
     timeout-minutes: 30
     defaults:
       run:
@@ -1270,18 +1272,6 @@ jobs:
       - name: 安装前端依赖
         run: npm ci --prefer-offline --no-audit
 
-      # The Node probe imports AP schema tooling before any browser skip.
-      # Draft logic tests need the same locked dependencies as Ready tests.
-      - name: Install Account Platform probe dependencies
-        run: npm --prefix ../account-platform ci --ignore-scripts --prefer-offline --no-audit
-
-      # test:webui smoke 会 spawn remote-control-relay/server.js,
-      # 其顶层 require('ws') 解析自 remote-control-relay/node_modules,故必须装
-      # relay 依赖。无条件安装(消费方才按 Ready/queue 条件使用):cache 的
-      # save paths 必须全部存在,且一次安装成本已由 5→1 摊薄。
-      - name: 安装 Remote relay 依赖 (供 test:webui smoke)
-        run: npm --prefix ../remote-control-relay ci --prefer-offline --no-audit
-
       - name: Vite build
         run: npm run build:ui
 
@@ -1304,16 +1294,16 @@ jobs:
       - name: Vite web build (remote relay)
         run: npm run build:web
 
-      # 打包一次构建、四处复用的产物:node_modules 必须 tar 以保留 npm .bin
-      # 符号链接与可执行位(artifact 直传目录会解引用 symlink)。dist 与
-      # web/dist 是 gitignore 产物,checkout 不会带,必须随包下发;
-      # account-platform/internal/portal/static 是 git 跟踪目录,消费方
-      # checkout 自带,不重复打包。实测 ~151MB(tar.gz)。
+      # 只打包构建产物(本地实测 ui dist 15MB + web dist 14MB,tar.gz 共 19MB):
+      # 156MB 的 node_modules bundle 在自建机上行实测两次 stall 至死
+      # (run 43890217142),产物小件才是该链路扛得动的体积。dist 与 web/dist
+      # 是 gitignore 产物,checkout 不会带,必须随包下发;build:account-portal
+      # 产物是 git 跟踪的 static 目录,消费方 checkout 自带,不进包。
       - name: Pack frontend setup bundle
         run: |
           set -euo pipefail
-          paths=(pinvou3-app/node_modules pinvou3-app/dist remote-control-relay/web/dist remote-control-relay/node_modules account-platform/node_modules)
-          tar -czf "$RUNNER_TEMP/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE" "${paths[@]}"
+          tar -czf "$RUNNER_TEMP/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE" \
+            pinvou3-app/dist remote-control-relay/web/dist
           du -h "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
 
       - name: Upload frontend setup bundle
@@ -1353,15 +1343,33 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-path: |
+            pinvou3-app/package-lock.json
+            remote-control-relay/package-lock.json
+            account-platform/package-lock.json
 
-      # Setup 工件化:下载 frontend-setup 的单次构建产物(node_modules ×3 +
-      # dist + web/dist 的 tar.gz)并解包,替代本 job 原先重复的 npm ci ×3 +
-      # 三次 vite build;测试行为零变化。传输通道两轮实测证据(见 PR #2681
-      # 评论):download-artifact@v8 的 results blob 通道在本池 hang(0 字节
-      # 60min),actions/cache 同 run 跨 job 传播 >14min 不可见;而 REST
-      # /artifacts/{id}/zip 经典通道与 upload-artifact@v7 互通,且本仓自建池
-      # 有生产先例(changes job 的 ci-test-reuse.py 每次队列评估都从同批宿主
-      # REST 下载工件成功),故走 REST 并带重试。
+      - name: 安装前端依赖
+        # npm ci 保留在各消费 job(网络绑定、CPU 占用低,~1-2min);被去重的
+        # 是 CPU 大头——三次 vite build ×5 → ×1(见 frontend-setup 注释)。
+        run: npm ci --prefer-offline --no-audit
+
+      # The Node probe imports AP schema tooling before any browser skip.
+      # Draft logic tests need the same locked dependencies as Ready tests.
+      - name: Install Account Platform probe dependencies
+        run: npm --prefix ../account-platform ci --ignore-scripts --prefer-offline --no-audit
+
+      # test:webui smoke (本 job 末尾) 会 spawn remote-control-relay/server.js,
+      # 其顶层 require('ws') 解析自 remote-control-relay/node_modules,故必须装 relay 依赖。
+      - name: 安装 Remote relay 依赖 (供 test:webui smoke)
+        if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
+        run: npm --prefix ../remote-control-relay ci --prefer-offline --no-audit
+
+      # Setup 工件化:下载 frontend-setup 的单次构建产物(ui dist + web dist,
+      # 实测 tar.gz 19MB),跳过本 job 原先重复的三次 vite build;测试行为零
+      # 变化。走 REST zip 通道(download-artifact@v8 的 results blob 通道在本
+      # 池实测 hang,见 frontend-setup 注释),小件上传/下载均实测可行。
       - name: Download frontend setup bundle (REST)
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -1385,7 +1393,11 @@ jobs:
           test -f "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz"
 
       - name: Unpack frontend setup bundle
-        run: tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
+        run: |
+          tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
+          # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。
+          test -f pinvou3-app/dist/index.html
+          test -f remote-control-relay/web/dist/index.html
 
       - name: ESLint (含 pet 缺失项,现已全覆盖)
         # Official 的存量 warning 仍可由本地 lint 完整查看；CI 只打印会阻断的
@@ -1496,11 +1508,32 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-path: |
+            pinvou3-app/package-lock.json
+            remote-control-relay/package-lock.json
+            account-platform/package-lock.json
 
-      # Setup 工件化:下载 frontend-setup 的单次构建产物并解包,替代每分片
-      # 重复的 npm ci ×3 + 三次 vite build(共置宿主算力摊薄,见 frontend-setup
-      # 注释)。各分片解包独立副本,分片间无可变共享状态;dist/CHROME/工作目录
-      # 与原 setup 一致。走 REST zip 通道(通道实测证据见 frontend-setup 注释)。
+      - name: 安装前端依赖
+        # npm ci 保留在各分片(网络绑定、CPU 占用低);去重的是三次 vite
+        # build ×5 → ×1(CPU 大头,见 frontend-setup 注释)。
+        run: npm ci --prefer-offline --no-audit
+
+      # The Node probe imports AP schema tooling before any browser skip.
+      - name: Install Account Platform probe dependencies
+        run: npm --prefix ../account-platform ci --ignore-scripts --prefer-offline --no-audit
+
+      # test:webui smoke (本 job 末尾) 会 spawn remote-control-relay/server.js,
+      # 其顶层 require('ws') 解析自 remote-control-relay/node_modules,故必须装 relay 依赖。
+      - name: 安装 Remote relay 依赖 (供 test:webui smoke)
+        if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
+        run: npm --prefix ../remote-control-relay ci --prefer-offline --no-audit
+
+      # Setup 工件化:下载 frontend-setup 的单次构建产物(实测 tar.gz 19MB),
+      # 跳过每分片重复的三次 vite build;各分片解包独立副本,分片间无可变共享
+      # 状态;dist/CHROME/工作目录与原 setup 一致。走 REST zip 通道(通道实测
+      # 证据见 frontend-setup 注释)。
       - name: Download frontend setup bundle (REST)
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -1524,7 +1557,11 @@ jobs:
           test -f "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz"
 
       - name: Unpack frontend setup bundle
-        run: tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
+        run: |
+          tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
+          # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。
+          test -f pinvou3-app/dist/index.html
+          test -f remote-control-relay/web/dist/index.html
 
       - name: 准备浏览器
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}

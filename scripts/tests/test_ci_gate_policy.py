@@ -1168,20 +1168,24 @@ class CiGatePolicyTests(unittest.TestCase):
             self.assertIn('node-version: "24"', job)
             if job_name == "frontend-test":
                 self.assertIn("working-directory: pinvou3-app", job)
-                # Setup 工件化(2026-11-16 调查:setup ×5 重复 → ×1):依赖安装
-                # 在 frontend-setup 一次完成,frontend-test 经 needs 消费其工件。
-                # 双向钉住防解线:消费方必须 needs frontend-setup,安装步必须
-                # 无条件存在于 frontend-setup(原「安装先于 npm test」的次序
-                # 契约由 needs 边结构性保证)。
+                # Setup 工件化(2026-11-16 调查:三次 vite build ×5 → ×1):
+                # 构建产物在 frontend-setup 一次完成,frontend-test 经 needs
+                # 消费产物工件;npm ci 保留在本 job(网络绑定、CPU 占用低,
+                # 156MB node_modules 包在自建机上行实测 stall 至死,产物小件
+                # 才是链路扛得动的体积)。双向钉住防解线:消费方必须 needs
+                # frontend-setup、本 job 安装先于 npm test,setup 安装先于 build。
                 self.assertRegex(job, r"(?m)^    needs: \[changes, frontend-setup\]$")
+                install = _step_named(job, "安装前端依赖")
+                self.assertIn("run: npm ci --prefer-offline --no-audit", install)
+                self.assertNotRegex(install, r"(?m)^        (?:if|continue-on-error):")
+                self.assertLess(job.index(install), job.index(step))
                 setup_job = _without_inline_comments(
                     _extract_job_block(self.pr_workflow, "frontend-setup")
                 )
                 self.assertIn("working-directory: pinvou3-app", setup_job)
-                install = _step_named(setup_job, "安装前端依赖")
-                self.assertIn("run: npm ci --prefer-offline --no-audit", install)
-                self.assertNotRegex(install, r"(?m)^        (?:if|continue-on-error):")
-                self.assertLess(setup_job.index(install), setup_job.index("npm run build:ui"))
+                setup_install = _step_named(setup_job, "安装前端依赖")
+                self.assertIn("run: npm ci --prefer-offline --no-audit", setup_install)
+                self.assertLess(setup_job.index(setup_install), setup_job.index("npm run build:ui"))
                 for name in ("personal", "models", "invocation"):
                     source = f"account-platform/deploy/production/compose.{name}.yaml"
                     self.assertIn(source, entries)

@@ -26,6 +26,18 @@
       "conclusion": "success"
     },
     {
+      "name": "安装前端依赖",
+      "conclusion": "success"
+    },
+    {
+      "name": "Install Account Platform probe dependencies",
+      "conclusion": "success"
+    },
+    {
+      "name": "安装 Remote relay 依赖 (供 test:webui smoke)",
+      "conclusion": "success"
+    },
+    {
       "name": "Download frontend setup bundle (REST)",
       "conclusion": "success"
     },

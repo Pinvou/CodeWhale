@@ -1529,23 +1529,21 @@ const frontendProbeInstallStep = "Install Account Platform probe dependencies";
 const frontendLogicStep = "前端逻辑测试 (pet 全套 + diff parser + markdown)";
 
 function assertFrontendProbeDependencies(text) {
-  // Setup 工件化:AP probe 依赖安装与三次构建在 frontend-setup 一次完成;
-  // frontend-test 经 needs 消费其工件,原「安装先于 npm test」契约由 needs
-  // 边结构性保证,这里钉住安装步无条件存在 + 消费方 needs 解线。
-  const job = jobBlock("frontend-setup", text).replaceAll("\r\n", "\n");
+  // Setup 工件化:三次 vite build 在 frontend-setup 一次完成,npm ci 保留在
+  // 消费方(网络绑定、CPU 低)。AP probe 依赖安装在 frontend-test,原「安装
+  // 先于 npm test」次序契约保持;另钉住消费方 needs 解线。
+  const job = jobBlock("frontend-test", text).replaceAll("\r\n", "\n");
   assert.match(job, /^ {8}working-directory: pinvou3-app$/m);
   const install = namedStep(job, frontendProbeInstallStep);
   assert.match(install, /^ {8}run: npm --prefix \.\.\/account-platform ci --ignore-scripts --prefer-offline --no-audit$/m);
   assert.doesNotMatch(install, /^ {8}(?:if|continue-on-error|working-directory):/m,
     "The logic test loads AP dependencies on Draft too, in the inherited app cwd");
-  assert.ok(job.indexOf(install) < job.indexOf("- name: Vite build"),
-    "AP tools must be installed before the bundle is packed");
+  assert.ok(job.indexOf(install) < job.indexOf(namedStep(job, frontendLogicStep)),
+    "AP tools must be installed before npm test module discovery");
+  assert.match(job, /^ {4}needs: \[changes, frontend-setup\]$/m);
   const setup = job.match(/^ {6}- uses: actions\/setup-node@\S+\n[\s\S]*?(?=^ {6}- |$(?![\s\S]))/m);
   assert.ok(setup, "frontend setup-node block not found");
   assert.match(setup[0], /^ {12}account-platform\/package-lock\.json$/m);
-  const consumer = jobBlock("frontend-test", text).replaceAll("\r\n", "\n");
-  assert.match(consumer, /^ {4}needs: \[changes, frontend-setup\]$/m);
-  namedStep(consumer, frontendLogicStep);
   const paths = filterPaths(text, "frontend");
   for (const path of frontendProbeDependencyPaths) {
     assert.ok(paths.includes(path), `${path} must route the frontend module-loading gate`);
@@ -1557,8 +1555,8 @@ test("frontend probe tool dependencies are installed before logic tests on Draft
 });
 
 test("frontend probe dependency guard rejects incomplete or conditional installation and missing imports", () => {
-  // Setup 工件化:安装步已随三次 build 迁入 frontend-setup,变异面同步迁移。
-  const job = jobBlock("frontend-setup");
+  // Setup 工件化:三次 build 在 frontend-setup,AP probe 安装保留在 frontend-test。
+  const job = jobBlock("frontend-test");
   const install = namedStep(job, frontendProbeInstallStep);
   const variants = [
     job.replace(install, ""),
