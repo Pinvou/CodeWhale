@@ -243,6 +243,13 @@ Codewhale 同时读取 `servers` 和 `mcpServers`，因此设置页生成的片�
 - `mcp_read_resource` / `read_mcp_resource`（别名）
 - `mcp_get_prompt`
 
+宿主自带的 `session-reader` 服务器还提供两个只读辅助工具
+`mcp_session-reader_read_session` 与 `mcp_session-reader_list_sessions`，
+按同样方式归类为只读（在策略允许时自动批准，Plan 模式可用）。该服务器的写工具仍需审批。
+
+`session-reader` 服务器键为此首方服务器保留：工作区 `.codewhale/mcp.json`
+不能定义（或覆盖）该键，运行时注册也会拒绝，同名冒充服务器无法继承免审批分类。
+
 ## 最小示例
 
 ```json

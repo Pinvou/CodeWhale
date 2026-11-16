@@ -330,6 +330,17 @@ The CLI also exposes helper tools when MCP is enabled:
 - `mcp_read_resource` / `read_mcp_resource` (aliases)
 - `mcp_get_prompt`
 
+The host's bundled `session-reader` server contributes two more read
+helpers, `mcp_session-reader_read_session` and
+`mcp_session-reader_list_sessions`, which are classified as read-only the
+same way (auto-approved, admitted in Plan mode when policy permits). That
+server's write tools remain approval-gated.
+
+The `session-reader` server key is reserved for this first-party server:
+a workspace `.codewhale/mcp.json` cannot define (or override) it, and
+runtime registration rejects it, so a same-name impostor cannot inherit
+the approval-free classification.
+
 ## Minimal Example
 
 ```json

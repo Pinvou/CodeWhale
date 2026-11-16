@@ -1108,6 +1108,95 @@ pub struct McpTool {
     pub input_schema: serde_json::Value,
 }
 
+/// MCP tool names classified as read-only helpers instead of the
+/// conservative `[Network, RequiresApproval]` default.
+///
+/// Single source of truth: the registry adapter (`tools::registry`), the
+/// engine preparation path (`core::engine::dispatch::mcp_tool_is_read_only`),
+/// and the parallel-batch gate all consume this one list, so the engine turn
+/// loop and the fleet/subagent registries cannot drift apart (the drift that
+/// left the session-reader reads approval-gated on the engine path after the
+/// first half of the #157 fix landed only in the registry adapter). Tests
+/// enumerate the current names literally, so a removal from this list
+/// cannot pass unnoticed; the domain pin additionally keeps every entry
+/// inside the engine's `McpPool::is_mcp_tool` gate.
+///
+/// Classification is exact-name and applies globally across lanes: a helper
+/// runs with `ApprovalRequirement::Auto` in every posture (including
+/// read-only postures and `ApprovalMode::Never`) and is admitted to Plan
+/// mode, so a name added here is granted approval-free execution on all of
+/// those surfaces and entries must stay first-party and read-only by
+/// contract. That contract is enforced, not just documented:
+/// [`FIRST_PARTY_MCP_SERVER_KEYS`] reserves the server keys that own these
+/// names, and the workspace-config merge plus runtime registration refuse
+/// other servers under those keys, so a same-name impostor cannot inherit
+/// the approval-free classification. (The standalone auto-review policy
+/// still tiers MCP names by its own prefix heuristic in
+/// `tui::approval::policy::get_tool_category` and may consult its reviewer
+/// for non-`list_/read_/get_mcp_*` shapes; unifying that classifier with
+/// this list is a planned follow-up.)
+pub(crate) const MCP_READ_HELPER_TOOLS: &[&str] = &[
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "mcp_read_resource",
+    "read_mcp_resource",
+    "mcp_get_prompt",
+    // The host's first-party session-reader read surface (server key
+    // "session-reader"): cursor-paginated transcript reads plus a
+    // limit-capped listing, best-effort completed-turns-only with per-item
+    // truncation (the server labels the turn alignment approximate),
+    // isolated session-id prefixes (`sched-`/`eval_`/`aux-`/`agentic_`)
+    // refused on read calls and excluded from unscoped listings, and an
+    // optional scoped `--only-session` mode. The server also exposes write
+    // tools (`mcp_session-reader_send_message_to_session` and
+    // `mcp_session-reader_create_session`, the latter introduced by parent
+    // PR Pinvou/pinvou-agent#657); only these exact read names qualify, and
+    // the write names must stay off this list.
+    "mcp_session-reader_read_session",
+    "mcp_session-reader_list_sessions",
+];
+
+/// Whether `name` is a read-only MCP helper (see [`MCP_READ_HELPER_TOOLS`]).
+pub(crate) fn is_mcp_read_helper(name: &str) -> bool {
+    MCP_READ_HELPER_TOOLS.contains(&name)
+}
+
+/// Server keys that own a model-facing tool name in
+/// [`MCP_READ_HELPER_TOOLS`]. The approval-free classification is bound to
+/// the first-party owner of the key, not to the name alone: model-facing
+/// names are `mcp_{server}_{tool}`, so any server configured under the same
+/// key would otherwise inherit read-only/`Auto` admission in every posture
+/// (including Plan mode) and skip the worker authority's mutating-MCP
+/// rejection without executing a single line of first-party code. Untrusted
+/// config sources therefore cannot define these keys: the workspace
+/// `.codewhale/mcp.json` merge refuses them (workspace trust grants
+/// execution, not first-party naming — the #417 doctrine), and runtime
+/// registration rejects them. The pool-internal read helpers
+/// (`list_mcp_resources`, `mcp_read_resource`, `mcp_get_prompt`, ...) are
+/// not listed here: [`McpPool::call_tool`] answers them before any server
+/// route is consulted, so no configured key can reach their names.
+pub(crate) const FIRST_PARTY_MCP_SERVER_KEYS: &[&str] = &["session-reader"];
+
+/// Whether `server_key` names a first-party server whose tool names appear
+/// in [`MCP_READ_HELPER_TOOLS`] (see the key list's contract).
+pub(crate) fn is_first_party_mcp_server_key(server_key: &str) -> bool {
+    FIRST_PARTY_MCP_SERVER_KEYS.contains(&server_key)
+}
+
+/// Whether a `(server, tool)` pair resolves to a model-facing name whose
+/// approval-free privileges are reserved for the first-party server. Model
+/// names splice with a single separator — `mcp_{server}_{tool}` — so several
+/// server keys can reproduce the same identity (`session-reader_read` +
+/// `session` yields exactly `mcp_session-reader_read_session`). The
+/// reservation guards the OWNER of the identity, not one spelling of it, so
+/// any non-reserved producer of a protected name is refused at the source
+/// (catalog advertising and tool routing) instead of inheriting the
+/// approval-free class through the exact-name match (review 5919898663).
+fn protected_name_produced_by_unreserved_server(server: &str, tool: &str) -> bool {
+    is_mcp_read_helper(&McpPool::mcp_model_tool_name(server, tool))
+        && !is_first_party_mcp_server_key(server)
+}
+
 const MCP_TOOL_DESCRIPTION_MAX_CHARS: usize = 80;
 
 /// Format an optional MCP tool description for terminal list surfaces.
@@ -3704,11 +3793,19 @@ impl McpPool {
     /// executes.
     #[must_use]
     pub fn resolved_tool_servers(&self) -> std::collections::BTreeMap<String, String> {
+        // Same protected-name policy as [`Self::all_tools`]: an alternate
+        // owner of a reserved identity must not be attributed it in the
+        // inspection projection either — the map feeds tool inspection, and
+        // attributing `mcp_session-reader_read_session` to a workspace key
+        // would mislabel the owner even though advertising and routing
+        // refuse it (review 5919898663, the P3 companion).
         Self::resolve_tool_server_map(self.connections.iter().flat_map(|(server, conn)| {
             let authorized = conn.catalog_authorized();
             conn.tools().iter().filter_map(move |tool| {
-                (authorized && conn.config().is_tool_enabled(&tool.name))
-                    .then_some((server.as_str(), tool.name.as_str()))
+                (authorized
+                    && conn.config().is_tool_enabled(&tool.name)
+                    && !protected_name_produced_by_unreserved_server(server, &tool.name))
+                .then_some((server.as_str(), tool.name.as_str()))
             })
         }))
     }
@@ -3726,6 +3823,16 @@ impl McpPool {
                     continue;
                 }
                 let name = Self::mcp_model_tool_name(server, &tool.name);
+                if protected_name_produced_by_unreserved_server(server, &tool.name) {
+                    tracing::warn!(
+                        target: "mcp",
+                        server = %server,
+                        tool = %tool.name,
+                        model_tool = %name,
+                        "hiding MCP tool whose model name is reserved for the first-party server"
+                    );
+                    continue;
+                }
                 match by_name.entry(name.clone()) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
                         entry.insert(Some(tool));
@@ -4022,6 +4129,13 @@ impl McpPool {
     }
 
     fn capture_tool_route(&self, server_name: String, tool_name: String) -> Result<McpToolRoute> {
+        if protected_name_produced_by_unreserved_server(&server_name, &tool_name) {
+            anyhow::bail!(
+                "MCP tool '{}' is reserved for the first-party server; refusing the alternate owner '{}'",
+                Self::mcp_model_tool_name(&server_name, &tool_name),
+                server_name
+            );
+        }
         let connection = self
             .connections
             .get(&server_name)
@@ -4415,6 +4529,12 @@ impl McpPool {
         name: String,
         config: McpServerConfig,
     ) -> Result<(), String> {
+        if is_first_party_mcp_server_key(&name) {
+            return Err(format!(
+                "MCP server name '{name}' is reserved for a first-party server and cannot be \
+                 registered at runtime"
+            ));
+        }
         if self.config.servers.contains_key(&name) {
             return Err(format!(
                 "MCP server '{}' already exists in the config file. \
@@ -4517,6 +4637,12 @@ impl McpPool {
     }
 
     /// Check if a tool name is an MCP tool
+    ///
+    /// The three bare names are unprefixed read helpers that predate the
+    /// `mcp_` naming scheme; keep them in tandem with
+    /// `MCP_READ_HELPER_TOOLS` — a bare helper on one list must be on both
+    /// (the const's entries are domain-pinned to this check in
+    /// `mcp::tests::mcp_read_helper_tools_stay_in_engine_classification_domain`).
     pub fn is_mcp_tool(name: &str) -> bool {
         name.starts_with("mcp_")
             || matches!(
@@ -4778,6 +4904,23 @@ pub fn load_config_with_workspace_and_plugins(
     }
 
     let mut project = load_config(&project_path)?;
+    // Reserved first-party server keys stay user-owned. Workspace trust
+    // grants execution, not first-party naming: a project config may not
+    // define (or override) a key whose model-facing tool names carry the
+    // approval-free read-helper classification, or a repository could
+    // re-key an arbitrary command into that class.
+    project.servers.retain(|server_name, _| {
+        if is_first_party_mcp_server_key(server_name) {
+            tracing::warn!(
+                target: "mcp",
+                server = %server_name,
+                "workspace mcp.json defines a reserved first-party server key; refusing it"
+            );
+            false
+        } else {
+            true
+        }
+    });
     for server in project.servers.values_mut() {
         if server.command.is_some() && server.url.is_none() {
             server.cwd = Some(resolve_project_mcp_cwd(&workspace, server.cwd.as_deref())?);

@@ -454,6 +454,56 @@ mod tests {
     }
 
     #[test]
+    fn mcp_read_helper_classification_reaches_preparation() {
+        // The engine turn loop's Plan gate and approval tier consume
+        // `prepared.call.read_only` from this path, so the session-reader
+        // read surface must classify read-only HERE — the registry adapter
+        // classification alone never reaches engine sessions.
+        for name in [
+            "mcp_session-reader_read_session",
+            "mcp_session-reader_list_sessions",
+        ] {
+            let prepared = prepare_tool_call(name, json!({}), None, false)
+                .unwrap_or_else(|error| panic!("prepare {name}: {error}"));
+            assert!(prepared.call.read_only, "{name} must classify read-only");
+            assert_eq!(
+                prepared.call.approval,
+                ApprovalRequirement::Auto,
+                "{name} must not require approval"
+            );
+            assert!(
+                prepared.call.supports_parallel,
+                "{name} must be parallel-safe"
+            );
+        }
+        // The same server's write siblings keep the conservative engine
+        // classification: not read-only, Suggest approval, never parallel.
+        // (`create_session` arrived with the session-creation server of
+        // parent PR Pinvou/pinvou-agent#657 — pinned here so it can never
+        // silently join the read-helper list.)
+        for name in [
+            "mcp_session-reader_send_message_to_session",
+            "mcp_session-reader_create_session",
+        ] {
+            let prepared = prepare_tool_call(name, json!({}), None, false)
+                .unwrap_or_else(|error| panic!("prepare {name}: {error}"));
+            assert!(
+                !prepared.call.read_only,
+                "{name} must not classify read-only"
+            );
+            assert_eq!(
+                prepared.call.approval,
+                ApprovalRequirement::Suggest,
+                "{name} must keep Suggest approval"
+            );
+            assert!(
+                !prepared.call.supports_parallel,
+                "{name} must not be parallel-safe"
+            );
+        }
+    }
+
+    #[test]
     fn mcp_write_preparation_respects_session_auto_approval() {
         let prepared = prepare_tool_call("mcp_filesystem_write", json!({}), None, true)
             .expect("prepare MCP write tool with session auto-approval");

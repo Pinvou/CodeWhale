@@ -7103,6 +7103,48 @@ mod pre_tool_snapshot_gate_tests {
             false
         ));
     }
+
+    #[test]
+    fn plan_gate_admits_prepared_mcp_read_helpers() {
+        // Chain pin: the read_only value the turn loop feeds into the Plan
+        // gate comes from `prepare_tool_call`, not from a parameter a test
+        // can hardcode. The host's aux lane is an engine session pinned to
+        // Plan whose sole allowed tool is the scoped session-reader read, so
+        // the prepared classification must admit it here — this is exactly
+        // the wiring the parameterized gate test above cannot see.
+        for name in [
+            "mcp_session-reader_read_session",
+            "mcp_session-reader_list_sessions",
+        ] {
+            let prepared = prepare_tool_call(name, json!({}), None, false)
+                .unwrap_or_else(|error| panic!("prepare {name}: {error}"));
+            assert!(
+                !mode_blocks_write_capable_tool(
+                    AppMode::Plan,
+                    name,
+                    &json!({}),
+                    prepared.call.read_only
+                ),
+                "{name} must be admitted in Plan mode with its prepared classification"
+            );
+        }
+        // The same server's write siblings stay blocked under their prepared
+        // classification (`create_session` arrived with the
+        // session-creation server of parent PR Pinvou/pinvou-agent#657).
+        for name in [
+            "mcp_session-reader_send_message_to_session",
+            "mcp_session-reader_create_session",
+        ] {
+            let prepared = prepare_tool_call(name, json!({}), None, false)
+                .unwrap_or_else(|error| panic!("prepare {name}: {error}"));
+            assert!(mode_blocks_write_capable_tool(
+                AppMode::Plan,
+                name,
+                &json!({}),
+                prepared.call.read_only
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

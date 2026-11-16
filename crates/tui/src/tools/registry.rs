@@ -1453,27 +1453,9 @@ struct McpToolAdapter {
 }
 
 fn is_mcp_read_helper(name: &str) -> bool {
-    matches!(
-        name,
-        "list_mcp_resources"
-            | "list_mcp_resource_templates"
-            | "mcp_read_resource"
-            | "read_mcp_resource"
-            | "mcp_get_prompt"
-            // The host's first-party session-reader surface (a bundled
-            // read-only MCP server, key "session-reader"): L0 transcript
-            // reads with a server-side contract — cursor-paginated,
-            // completed-turns-only, per-item truncation, isolated
-            // session-id prefixes refused — so it is genuinely read-only
-            // and misclassifying it as an approval-required network tool
-            // dead-ends every read-only posture (e.g. a Plan-pinned aux
-            // lane whose sole tool is the scoped read) before execution.
-            // Exact-name matching keeps prefixed impostors
-            // ("mcp_session-reader_read_session_export") on the
-            // approval-required side.
-            | "mcp_session-reader_read_session"
-            | "mcp_session-reader_list_sessions"
-    )
+    // Shared with the engine preparation path so both lanes classify
+    // identically; see `MCP_READ_HELPER_TOOLS` for the contract.
+    crate::mcp::is_mcp_read_helper(name)
 }
 
 #[async_trait::async_trait]
@@ -1494,7 +1476,7 @@ impl ToolSpec for McpToolAdapter {
 
     fn capabilities(&self) -> Vec<ToolCapability> {
         // Conservatively treat MCP tools as requiring approval and
-        // network access unless they're known discovery helpers.
+        // network access unless they're known read-only helpers.
         if is_mcp_read_helper(&self.name) {
             vec![ToolCapability::ReadOnly]
         } else {
@@ -1511,7 +1493,7 @@ impl ToolSpec for McpToolAdapter {
     }
 
     fn defer_loading(&self) -> bool {
-        // Discovery helpers stay loaded; everything else is deferred.
+        // Read-only helpers stay loaded; everything else is deferred.
         !is_mcp_read_helper(&self.name)
     }
 
