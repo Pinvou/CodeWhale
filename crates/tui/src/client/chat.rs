@@ -1532,11 +1532,17 @@ pub(crate) fn build_chat_wire_body(
     };
     mirror_minimax_reasoning_details_for_body(&mut body, provider);
 
-    // The ownership map is exactly the minted spelling the post-filtered
-    // request carries: minted_names was built after schema projection and
-    // the collision/length drops, so its keys are the tools whose minted
-    // wire spellings are live on THIS body (review 5915692444).
-    let moonshot_mint_owners = moonshot_minted_names.clone();
+    // The ownership map is the minted spelling the post-filtered request
+    // carries, DECODED through the same codec the response decoder applies
+    // (from_api_tool_name): dispatch receives response names AFTER that
+    // decode, so the map must speak the decoded identity or its reverse
+    // lookup misses every name the codec changed — `_3d--render` on the
+    // wire decodes to `_3d-render` before dispatch ever sees it
+    // (review 5916467676).
+    let moonshot_mint_owners = moonshot_minted_names
+        .iter()
+        .map(|(registry, minted)| (from_api_tool_name(registry), from_api_tool_name(minted)))
+        .collect();
 
     Ok(ChatWireBody {
         body,
@@ -6985,6 +6991,47 @@ mod alias_thinking_detection_tests {
         )
         .expect("OpenAI wire body");
         assert!(body.moonshot_mint_owners.is_empty());
+    }
+
+    #[test]
+    fn moonshot_mint_owners_survive_the_response_codec_for_hyphenated_names() {
+        // Review 5916467676: the wire mint rides on the ENCODED name —
+        // registry `3d-render` encodes to `3d--render` and mints to
+        // `_3d--render` — but dispatch receives response names AFTER
+        // from_api_tool_name turns `_3d--render` back into `_3d-render`.
+        // The ownership map must therefore store the DECODED minted
+        // identity, or its reverse lookup misses exactly the names the
+        // codec changed.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        request.tools = Some(vec![digit_led_name_probe_tool("3d-render")]);
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+
+        // The wire body carries the encoded+minted spelling...
+        assert_eq!(
+            body.body["tools"][0]["function"]["name"],
+            json!("_3d--render"),
+            "a hyphenated digit-led name encodes before the mint"
+        );
+        // ...while the ownership map carries the DECODED identity the
+        // response decoder will hand dispatch.
+        assert_eq!(
+            body.moonshot_mint_owners
+                .get("3d-render")
+                .map(String::as_str),
+            Some("_3d-render"),
+            "the map must store the post-codec minted identity"
+        );
+        assert_eq!(
+            crate::client::from_api_tool_name("_3d--render"),
+            "_3d-render",
+            "codec premise: the wire spelling decodes past the raw map value"
+        );
     }
 
     #[test]
