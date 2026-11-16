@@ -8,13 +8,20 @@ MiniMax/Zai successful JSON envelopes are inspected before model parsing. Reads 
 
 The fork additionally owns shared effective-credential/account admission, stable logical-operation budgets, suspendable leases, persisted server reset times, and root/owned-child interruption. A long server reset remains persisted advice for later continuation; it is not shortened to the upstream transport's temporary pause cap. Local token-bucket waits and ordinary network backoff count toward active-work deadlines; provider-directed backoff and shared quota waits use the existing recovery clock.
 
-The cumulative Engine turn budget also excludes its actual provider recovery
-sleeps. Normal request/generation time, response-body reads, local admission,
+The cumulative Engine turn budget (`[tui].turn_wall_clock_secs`) measures active
+work, excluding its actual provider recovery sleeps. Normal request/generation
+time, response-body reads, local admission,
 ordinary network backoff and active tool execution remain charged. During
 parallel tools, the turn counts time while any owned work remains active; only
 intervals when all owned work is blocked on provider recovery are excluded.
-Tool-specific deadlines and the Fleet worker's separate task-wide deadline stay
-unchanged. Independent child engines have separate clocks and cannot pause an
+The child model's `step_api_timeout` excludes eligible provider-recovery waits
+and resets on each inner transport attempt; it is not a cumulative bound on
+the entire outer model call. Ordinary generation remains charged, and the
+independent operation, turn and task bounds still apply.
+Typed rate-limit failures stop that child with an interrupted
+checkpoint rather than resetting the transport budget through an outer retry.
+Child tool timeouts and the Fleet worker's task-wide deadline remain separate
+bounds. Independent child engines have separate clocks and cannot pause an
 active parent. Each Engine turn owns a fresh
 wait clock, and dropping a cancelled sleep closes its interval synchronously.
 This changes the turn's active-work accounting, not its configured finite budget,
@@ -22,4 +29,74 @@ step limit, terminal statuses or automatic-continuation policy.
 
 A transport error does not prove a checkpoint was saved. Checkpoint preservation and continued execution belong to the existing Engine and child lifecycle. No new scheduler, tool replay, credential resolver, or task UI protocol is introduced by these fixes. The older fork does not have the newer upstream HTTP-attempt transmission ledger or quota/account-guidance types, so those APIs are not imported independently.
 
-The branch still requires integration against its current target and applicable CI. Local loopback tests do not establish live-provider behavior, full host restart behavior, or non-Windows execution.
+## Configuration
+
+The following TOML table configures HTTP 429 recovery independently of the
+ordinary `[retry]` transport settings:
+
+```toml
+[retry.rate_limit]
+max_attempts = 20
+recovery_budget_secs = 600
+initial_delay_secs = 5
+max_delay_secs = 60
+```
+
+`max_attempts` includes the first attempt and accepts 1 through 1000.
+`recovery_budget_secs` accepts 1 through 86400. Delay settings must satisfy
+`1 <= initial_delay_secs <= max_delay_secs <= 86400`. The maximum local delay
+does not cap a provider's minimum. A minimum outside the remaining recovery
+budget stops automatic retry; it is still retained for later admission.
+`retry.enabled = false` disables automatic transport retries, not known quota
+classification or the shared admission pause.
+
+Reset receipts live in `rate-limit-recovery/` under the resolved Codewhale
+home: `$CODEWHALE_HOME` when explicitly configured, otherwise `~/.codewhale`.
+An embedding host or trusted config can override this with the root-level
+`rate_limit_recovery_dir` path; put that key before any TOML table, not inside
+`[retry.rate_limit]`. The directory must be private and writable by its owner.
+Each `<opaque-scope-key>.json` contains one JSON UTC timestamp, not a credential
+or a conversation. The key distinguishes effective endpoint and credential
+scopes; treat it and its directory as private metadata.
+
+## Inspecting and repairing saved state
+
+A long deadline is deliberately preserved across later calls and restarts.
+It can outlive one turn's recovery budget. Restarting alone does not clear it.
+Values beyond the timestamp representation are conservatively represented by
+the maximum UTC timestamp, not treated as permission to retry immediately.
+An unreadable, oversized or invalid receipt blocks that scope until its local
+storage is repaired; the client does not silently ignore it or erase a reset.
+
+When a storage error asks for repair, inspect the effective directory above
+privately. Confirm the provider's reset/account status and the scope that is
+affected before changing any deadline. Do not copy credentials, scope keys or
+private absolute paths into public reports. A valid future reset should be
+waited out, even if it exceeds the automatic recovery budget.
+
+If the provider confirms a reset has cleared, or the local receipt is known to
+be invalid, an operator can recover deliberately:
+
+1. Stop all Codewhale clients and embedding hosts using that recovery directory.
+   Editing a receipt while a client is running does not clear its in-memory
+   pause and can race a later save.
+2. Preserve a private backup of the specific affected receipt. Correct storage
+   permissions or availability first. Replace invalid content with the verified
+   provider reset time as a JSON UTC timestamp; only remove the specific receipt
+   when deliberately discarding that saved minimum is justified. Removing it
+   permits the next call to learn quota state again and can cause an early 429.
+   Do not delete all scopes or guess a provider reset time.
+3. Restart those clients and make a new manual call. Loading can be retried after
+   a failed read; a successful previous load is cached in the current client.
+
+Saving writes a unique temporary receipt, checks the asynchronous write,
+synchronizes the file, closes it and renames it over the saved receipt. A save
+failure keeps the in-memory pause and reports an error; it does not promise
+that the new minimum survived a restart. Cancellation or interruption can leave
+an orphan `<opaque-scope-key>.<unique-id>.tmp`; such files are not loaded as
+receipts. Inspect them only after stopping the owning clients. File sync before
+rename improves file-data persistence, but there is no directory sync or claim
+of complete power-loss durability on every filesystem.
+
+Local loopback and storage tests do not establish live-provider behavior,
+real operating-system restart or power-loss recovery, or non-Windows execution.

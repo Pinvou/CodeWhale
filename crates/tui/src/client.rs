@@ -536,15 +536,15 @@ impl SharedQuota {
             let file = match tokio::fs::File::open(&path).await {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(_) => return Err("Cannot read saved provider recovery deadline; repair local recovery storage before continuing".into()),
+                Err(_) => return Err("Cannot read saved provider recovery deadline; repair local recovery storage before continuing; see docs/rate-limit-recovery.md".into()),
             };
             let mut limited = tokio::io::AsyncReadExt::take(file, 4097);
             let mut bytes = Vec::new();
             tokio::io::AsyncReadExt::read_to_end(&mut limited, &mut bytes).await
-                .map_err(|_| "Cannot read saved provider recovery deadline; repair local recovery storage before continuing".to_owned())?;
-            if bytes.len() > 4096 { return Err("Saved provider recovery deadline is invalid; repair local recovery storage before continuing".into()); }
+                .map_err(|_| "Cannot read saved provider recovery deadline; repair local recovery storage before continuing; see docs/rate-limit-recovery.md".to_owned())?;
+            if bytes.len() > 4096 { return Err("Saved provider recovery deadline is invalid; repair local recovery storage before continuing; see docs/rate-limit-recovery.md".into()); }
             let reset: chrono::DateTime<chrono::Utc> = serde_json::from_slice(&bytes)
-                .map_err(|_| "Saved provider recovery deadline is invalid; repair local recovery storage before continuing".to_owned())?;
+                .map_err(|_| "Saved provider recovery deadline is invalid; repair local recovery storage before continuing; see docs/rate-limit-recovery.md".to_owned())?;
             if let Ok(delay) = (reset - chrono::Utc::now()).to_std() { self.pause(delay); }
             Ok(())
         }).await.map(|_| ()).map_err(anyhow::Error::msg)
@@ -573,7 +573,11 @@ impl SharedQuota {
         let result = async {
             tokio::fs::create_dir_all(&dir).await?;
             let path = dir.join(format!("{}.json", self.key));
-            tokio::fs::write(&temporary, serde_json::to_vec(&reset)?).await?;
+            let mut file = tokio::fs::File::create(&temporary).await?;
+            tokio::io::AsyncWriteExt::write_all(&mut file, &serde_json::to_vec(&reset)?).await?;
+            tokio::io::AsyncWriteExt::flush(&mut file).await?;
+            file.sync_all().await?;
+            drop(file);
             tokio::fs::rename(&temporary, &path).await?;
             Ok::<_, anyhow::Error>(())
         }
@@ -583,7 +587,7 @@ impl SharedQuota {
             logging::warn(
                 "Could not persist provider recovery deadline; in-memory pause remains active",
             );
-            return Err("Provider recovery deadline could not be saved; repair local recovery storage before continuing".into());
+            return Err("Provider recovery deadline could not be saved; repair local recovery storage before continuing; see docs/rate-limit-recovery.md".into());
         }
         Ok(())
     }

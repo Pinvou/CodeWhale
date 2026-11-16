@@ -8,7 +8,7 @@
 //! four bounds R1 makes finite:
 //!
 //! 1. `max_steps` — model steps in one turn.
-//! 2. The cumulative per-turn wall clock.
+//! 2. The cumulative per-turn active-work clock (excluding eligible waits).
 //! 3. `exec --max-turns` — the same step ceiling for headless runs.
 //! 4. The per-step stream caps (content bytes, stream duration).
 //!
@@ -141,7 +141,7 @@ pub fn resolve_stream_max_duration_secs(raw: Option<u64>) -> u64 {
     }
 }
 
-/// Cumulative wall-clock budget for one turn.
+/// Cumulative active-work budget for one turn.
 ///
 /// Started once at the top of `Engine::run_turn` and checked at the
 /// provider-request boundary, so a turn that trips the budget stops before
@@ -153,6 +153,9 @@ pub fn resolve_stream_max_duration_secs(raw: Option<u64>) -> u64 {
 /// Without that exclusion an approval prompt left open overnight would fail
 /// the turn — and discard the work the user just approved — the moment they
 /// came back.
+/// Actual provider-recovery waits are also excluded while all participating
+/// work is blocked. Ordinary request, generation and active tool time remains
+/// charged; an active parallel sibling prevents recovery-wait credit.
 #[derive(Debug)]
 pub(crate) struct TurnWallClock {
     budget: Duration,

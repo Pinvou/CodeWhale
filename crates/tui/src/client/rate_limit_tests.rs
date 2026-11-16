@@ -490,6 +490,37 @@ async fn forkguard_rate_limit_restores_default_capacity_and_durable_deadlines() 
     assert!(blocked.remaining().unwrap() > Duration::from_secs(3595));
 }
 
+#[tokio::test]
+async fn forkguard_rate_limit_keeps_extreme_deadline_across_storage_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let key = uuid::Uuid::new_v4().to_string();
+    let quota = shared_quota(key.clone(), None, Some(directory.path().to_owned())).unwrap();
+    quota.initialize().await.unwrap();
+    quota.pause(Duration::from_secs(u64::MAX));
+    quota.persist().await.unwrap();
+    let saved: chrono::DateTime<chrono::Utc> = serde_json::from_slice(
+        &tokio::fs::read(directory.path().join(format!("{key}.json")))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved, chrono::DateTime::<chrono::Utc>::MAX_UTC);
+    drop(quota);
+    forget_quota_process_state_for_restart(&key);
+
+    let restored = shared_quota(key.clone(), None, Some(directory.path().to_owned())).unwrap();
+    restored.initialize().await.unwrap();
+    let restored_deadline = *restored.pause.lock().unwrap();
+    let near_maximum = chrono::DateTime::<chrono::Utc>::MAX_UTC - chrono::Duration::seconds(5);
+    assert!(
+        restored_deadline.is_some_and(|deadline| deadline >= near_maximum),
+        "restored extreme minimum must remain within five seconds of MAX_UTC"
+    );
+    assert!(restored.remaining().unwrap() > Duration::from_secs(86400));
+    drop(restored);
+    forget_quota_process_state_for_restart(&key);
+}
+
 async fn hold_http_response(
     reply: &'static [u8],
 ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {

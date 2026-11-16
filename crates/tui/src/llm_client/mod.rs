@@ -1605,14 +1605,19 @@ mod tests {
         assert_eq!(parse_retry_after("nan"), None);
         assert_eq!(parse_retry_after("inf"), None);
         assert_eq!(parse_retry_after("-inf"), None);
-        // Absurdly large values clamp to the ceiling rather than overflowing
-        // or wedging the turn for a day.
+        // Invalid/unrepresentable floats are rejected. Valid integer minima
+        // are preserved; the recovery budget stops automatic retry rather
+        // than shortening the provider's reset window.
         assert_eq!(parse_retry_after("1e300"), None);
         assert_eq!(parse_retry_after("86400"), Some(Duration::from_secs(86400)));
         assert_eq!(
             parse_retry_after("999999999999"),
             Some(Duration::from_secs(999999999999)),
             "valid long minima are preserved"
+        );
+        assert_eq!(
+            parse_retry_after(&u64::MAX.to_string()),
+            Some(Duration::from_secs(u64::MAX))
         );
         // A normal value still passes through untouched.
         assert_eq!(parse_retry_after("30"), Some(Duration::from_secs(30)));
