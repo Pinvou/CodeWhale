@@ -7060,10 +7060,11 @@ impl Config {
                     credential_help_for_provider_route(provider, &self.deepseek_base_url());
                 if moonshot_base_url_is_exact_kimi_code(&self.deepseek_base_url()) {
                     anyhow::bail!(
-                        "Kimi Code membership-plan API key not found. Get a plan key: {}. This route uses an official Kimi Code coding endpoint (api.kimi.com/coding/v1 or api.kimi.ai/coding/v1) and does not import Kimi CLI credentials. Run 'codewhale auth set --provider moonshot', set {}, or add [{}] api_key.",
+                        "Kimi Code membership-plan API key not found. Get a plan key: {}. This route uses an official Kimi Code coding endpoint {} and does not import Kimi CLI credentials. Run 'codewhale auth set --provider moonshot', set {}, or add [{}] api_key.",
                         credential_help
                             .credential_url
                             .unwrap_or(KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL),
+                        KIMI_CODE_MEMBERSHIP_ROUTE_GUIDANCE,
                         provider.env_vars_label(),
                         provider_config_table_name(provider)?
                     );
@@ -10026,16 +10027,18 @@ pub(crate) fn is_exact_kimi_code_bare_k3_route(
 
 /// Whether `model` is one of the K3.1 family spellings across the Kimi Code
 /// and direct-platform routes, case-insensitive with insignificant padding.
-/// The family inherits the K3 parameter constraints verbatim (models-overview
-/// lists all three ids in the same K3-series column), so every family-gated
-/// wire contract shares this single spelling list.
+/// The family inherits the K3 parameter constraints verbatim — the two
+/// direct-platform spellings sit in models-overview's K3-series column, and
+/// the two bare membership spellings inherit the family contract through the
+/// Kimi Code model documentation — so every family-gated wire contract
+/// shares this single spelling list.
 #[must_use]
 pub(crate) fn is_kimi_k31_model_spelling(model: &str) -> bool {
     let model = model.trim();
-    model.eq_ignore_ascii_case(MOONSHOT_KIMI_K31_PRO_MODEL)
-        || model.eq_ignore_ascii_case(MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL)
-        || model.eq_ignore_ascii_case(KIMI_CODE_K31_PRO_MODEL)
-        || model.eq_ignore_ascii_case(KIMI_CODE_K31_PRO_HIGHSPEED_MODEL)
+    KIMI_CODE_K31_MODELS
+        .iter()
+        .chain(MOONSHOT_KIMI_K31_MODELS.iter())
+        .any(|id| model.eq_ignore_ascii_case(id))
 }
 
 /// Whether a route is the exact Kimi Code membership endpoint carrying any
@@ -10047,6 +10050,22 @@ pub(crate) fn is_kimi_k31_model_spelling(model: &str) -> bool {
 pub(crate) fn is_kimi_code_k31_route(provider: ApiProvider, base_url: &str, model: &str) -> bool {
     provider == ApiProvider::Moonshot
         && moonshot_base_url_is_exact_kimi_code(base_url)
+        && is_kimi_k31_model_spelling(model)
+}
+
+/// The direct-platform counterpart of [`is_kimi_code_k31_route`]: the exact
+/// Moonshot direct platform carrying any K3.1 family spelling. Centralized
+/// beside its mirror (both were request-shaping-only once; the documented
+/// direct output maximum now consumes this one too) so the family's gates
+/// evaluate one predicate instead of restating the conjunction.
+#[must_use]
+pub(crate) fn is_kimi_k31_on_direct_platform_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    provider == ApiProvider::Moonshot
+        && moonshot_base_url_is_exact_direct_platform(base_url)
         && is_kimi_k31_model_spelling(model)
 }
 
@@ -10228,6 +10247,12 @@ pub(crate) enum SafeConfigDiagnostic {
     KimiCodeClaudeAlias,
 }
 
+/// The two official Kimi Code membership endpoints, named as one fact so the
+/// pairing guidance cannot drift toward naming only one host (the alias host
+/// was added to every site by hand once already).
+const KIMI_CODE_MEMBERSHIP_ROUTE_GUIDANCE: &str =
+    "(api.kimi.com/coding/v1 or api.kimi.ai/coding/v1)";
+
 /// Fail closed on known-bad model/endpoint pairings (#4687).
 ///
 /// Canonical endpoints reject `k3[1m]` and known membership/direct cross-pairings,
@@ -10254,17 +10279,14 @@ pub(crate) fn validate_kimi_code_api_model_id(
         for direct_id in MOONSHOT_DIRECT_PLATFORM_MODELS {
             if model.eq_ignore_ascii_case(direct_id) {
                 return Err(format!(
-                    "Kimi Code membership route (api.kimi.com/coding/v1 or api.kimi.ai/coding/v1) does not accept model = \"{model}\": it is a direct Moonshot platform id. Use a Kimi Code membership model (\"k3\", \"k3-256k\", \"kimi-for-coding\", or \"kimi-for-coding-highspeed\") for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"{direct_id}\"."
+                    "Kimi Code membership route {KIMI_CODE_MEMBERSHIP_ROUTE_GUIDANCE} does not accept model = \"{model}\": it is a direct Moonshot platform id. Use a Kimi Code membership model (\"k3\", \"k3-256k\", \"kimi-for-coding\", or \"kimi-for-coding-highspeed\") for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"{direct_id}\"."
                 ));
             }
         }
-        for direct_id in [
-            MOONSHOT_KIMI_K31_PRO_MODEL,
-            MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL,
-        ] {
+        for direct_id in MOONSHOT_KIMI_K31_MODELS {
             if model.eq_ignore_ascii_case(direct_id) {
                 return Err(format!(
-                    "Kimi Code membership route (api.kimi.com/coding/v1 or api.kimi.ai/coding/v1) does not accept model = \"{model}\": it is a direct Moonshot platform id. Use a Kimi Code membership K3.1 model (\"k3.1-pro\" or \"k3.1-pro-highspeed\") for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"{direct_id}\"."
+                    "Kimi Code membership route {KIMI_CODE_MEMBERSHIP_ROUTE_GUIDANCE} does not accept model = \"{model}\": it is a direct Moonshot platform id. Use a Kimi Code membership K3.1 model (\"k3.1-pro\" or \"k3.1-pro-highspeed\") for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"{direct_id}\"."
                 ));
             }
         }
@@ -10279,7 +10301,7 @@ pub(crate) fn validate_kimi_code_api_model_id(
                 ));
             }
         }
-        for membership_id in [KIMI_CODE_K31_PRO_MODEL, KIMI_CODE_K31_PRO_HIGHSPEED_MODEL] {
+        for membership_id in KIMI_CODE_K31_MODELS {
             if model.eq_ignore_ascii_case(membership_id) {
                 return Err(format!(
                     "Moonshot direct route (api.moonshot.ai/v1) does not accept model = \"{model}\": it is a Kimi Code membership model id, not a direct-platform catalog model. Kimi Code membership uses base_url = \"https://api.kimi.com/coding/v1\" (or api.kimi.ai/coding/v1) with model = \"{membership_id}\"; direct Moonshot pay-as-you-go K3.1 uses model = \"kimi-k3.1-pro\"."
@@ -10345,7 +10367,10 @@ mod kimi_code_pairing_tests {
                 let err = validate_kimi_code_api_model_id(ApiProvider::Moonshot, base_url, model)
                     .expect_err("direct-platform K3.1 ids are not Kimi Code membership models");
                 assert!(err.contains(model), "{err}");
-                assert!(err.contains("k3.1-pro"), "{err}");
+                // Not `contains("k3.1-pro")` — that substring is implied by
+                // the echoed model id. Pin the K3.1-specific guidance clause
+                // instead, which only the K3.1 arm emits.
+                assert!(err.contains("membership K3.1 model"), "{err}");
                 assert!(err.contains("api.moonshot.ai/v1"), "{err}");
             }
         }

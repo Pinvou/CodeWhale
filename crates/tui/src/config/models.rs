@@ -130,6 +130,17 @@ pub const MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL: &str = "kimi-k3.1-pro-highspeed
 /// of the same always-reasoning K3.1 family.
 pub const KIMI_CODE_K31_PRO_MODEL: &str = "k3.1-pro";
 pub const KIMI_CODE_K31_PRO_HIGHSPEED_MODEL: &str = "k3.1-pro-highspeed";
+/// The K3.1 membership spellings as one fact, beside the K3-era
+/// `KIMI_CODE_MEMBERSHIP_MODELS` roster: cross-pairing validation and the
+/// shared spelling matcher iterate these instead of restating the ids.
+pub const KIMI_CODE_K31_MODELS: [&str; 2] =
+    [KIMI_CODE_K31_PRO_MODEL, KIMI_CODE_K31_PRO_HIGHSPEED_MODEL];
+/// The K3.1 direct-platform spellings as one fact, beside the K3-era
+/// `MOONSHOT_DIRECT_PLATFORM_MODELS` roster (same consumers).
+pub const MOONSHOT_KIMI_K31_MODELS: [&str; 2] = [
+    MOONSHOT_KIMI_K31_PRO_MODEL,
+    MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL,
+];
 /// Kimi Code membership high-speed wire model id. Membership route only, not
 /// a direct Moonshot platform catalog model.
 pub const KIMI_CODE_HIGHSPEED_MODEL: &str = "kimi-for-coding-highspeed";
