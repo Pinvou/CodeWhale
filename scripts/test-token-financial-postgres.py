@@ -252,6 +252,7 @@ RETAINED_REQUIRED = {
     *REFUND_REQUIRED,
     "TestLedgerRepairClaimActivationReadErrorsPostgres",
     "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry",
+    "TestProviderHealthGlobalWindowIndexPostgres",
     "TestMemberQuotaBatchPersistedFactsAndFinancialReplay",
     "TestMemberHoldIdentityMutationBoundaries",
     "TestPersonalUsageHoldBoundaries",
@@ -310,6 +311,7 @@ EXACT_REQUIRED_CHILDREN = {
     },
 
     "TestRegistrationOutboxAggregateLookupPostgres": {"fresh-install", "retained-upgrade"},
+    "TestProviderHealthGlobalWindowIndexPostgres": {"fresh-install", "retained-upgrade"},
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)
