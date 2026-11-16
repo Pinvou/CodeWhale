@@ -1148,9 +1148,9 @@ pub(crate) const MCP_READ_HELPER_TOOLS: &[&str] = &[
     // isolated session-id prefixes (`sched-`/`eval_`/`aux-`/`agentic_`)
     // refused on read calls and excluded from unscoped listings, and an
     // optional scoped `--only-session` mode. The server also exposes write
-    // tools (`mcp_session-reader_send_message_to_session`, plus a
-    // `mcp_session-reader_create_session` sibling planned under parent PR
-    // Pinvou/pinvou-agent#657); only these exact read names qualify, and
+    // tools (`mcp_session-reader_send_message_to_session` and
+    // `mcp_session-reader_create_session`, the latter introduced by parent
+    // PR Pinvou/pinvou-agent#657); only these exact read names qualify, and
     // the write names must stay off this list.
     "mcp_session-reader_read_session",
     "mcp_session-reader_list_sessions",
@@ -1181,6 +1181,20 @@ pub(crate) const FIRST_PARTY_MCP_SERVER_KEYS: &[&str] = &["session-reader"];
 /// in [`MCP_READ_HELPER_TOOLS`] (see the key list's contract).
 pub(crate) fn is_first_party_mcp_server_key(server_key: &str) -> bool {
     FIRST_PARTY_MCP_SERVER_KEYS.contains(&server_key)
+}
+
+/// Whether a `(server, tool)` pair resolves to a model-facing name whose
+/// approval-free privileges are reserved for the first-party server. Model
+/// names splice with a single separator — `mcp_{server}_{tool}` — so several
+/// server keys can reproduce the same identity (`session-reader_read` +
+/// `session` yields exactly `mcp_session-reader_read_session`). The
+/// reservation guards the OWNER of the identity, not one spelling of it, so
+/// any non-reserved producer of a protected name is refused at the source
+/// (catalog advertising and tool routing) instead of inheriting the
+/// approval-free class through the exact-name match (review 5919898663).
+fn protected_name_produced_by_unreserved_server(server: &str, tool: &str) -> bool {
+    is_mcp_read_helper(&McpPool::mcp_model_tool_name(server, tool))
+        && !is_first_party_mcp_server_key(server)
 }
 
 const MCP_TOOL_DESCRIPTION_MAX_CHARS: usize = 80;
@@ -3801,6 +3815,16 @@ impl McpPool {
                     continue;
                 }
                 let name = Self::mcp_model_tool_name(server, &tool.name);
+                if protected_name_produced_by_unreserved_server(server, &tool.name) {
+                    tracing::warn!(
+                        target: "mcp",
+                        server = %server,
+                        tool = %tool.name,
+                        model_tool = %name,
+                        "hiding MCP tool whose model name is reserved for the first-party server"
+                    );
+                    continue;
+                }
                 match by_name.entry(name.clone()) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
                         entry.insert(Some(tool));
@@ -4097,6 +4121,13 @@ impl McpPool {
     }
 
     fn capture_tool_route(&self, server_name: String, tool_name: String) -> Result<McpToolRoute> {
+        if protected_name_produced_by_unreserved_server(&server_name, &tool_name) {
+            anyhow::bail!(
+                "MCP tool '{}' is reserved for the first-party server; refusing the alternate owner '{}'",
+                Self::mcp_model_tool_name(&server_name, &tool_name),
+                server_name
+            );
+        }
         let connection = self
             .connections
             .get(&server_name)
