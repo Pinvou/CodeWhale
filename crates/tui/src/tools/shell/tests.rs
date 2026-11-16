@@ -1471,6 +1471,24 @@ fn note_non_utf8_fixture_skipped_on_this_filesystem() {
     );
 }
 
+/// Whether a capability-probe failure means THIS filesystem refuses the
+/// non-UTF-8 name itself — the only condition that may retire the byte-path
+/// pin. Classified by the raw errno (macOS APFS answers EILSEQ; some
+/// filesystems EINVAL), with the stable `ErrorKind` mapping as the fallback
+/// for constructed errors that carry no raw code. Permission, storage, and
+/// every other failure is a fixture-setup problem that must fail loudly
+/// instead of silently skipping a security regression (review 5915921197).
+#[cfg(unix)]
+fn non_utf8_name_refused_by_filesystem(error: &std::io::Error) -> bool {
+    match error.raw_os_error() {
+        Some(code) => code == libc::EILSEQ || code == libc::EINVAL,
+        None => matches!(
+            error.kind(),
+            std::io::ErrorKind::InvalidFilename | std::io::ErrorKind::InvalidInput
+        ),
+    }
+}
+
 /// A minimal on-disk git directory git itself accepts — HEAD plus the
 /// objects/ and refs/ directories — enough for the enumeration's
 /// `git ls-files --stage` to report an empty index without a real
@@ -10814,9 +10832,15 @@ fn readonly_git_commondir_resolves_non_utf8_byte_paths_like_git() {
     // mirror cannot be exercised there — skip loudly instead of red; the
     // pin still runs on Linux CI and on any byte-safe volume.
     let capability_probe = root.path().join(std::ffi::OsStr::from_bytes(b"probe-\xE9"));
-    if std::fs::create_dir(&capability_probe).is_err() {
-        note_non_utf8_fixture_skipped_on_this_filesystem();
-        return;
+    match std::fs::create_dir(&capability_probe) {
+        Ok(()) => {}
+        Err(error) if non_utf8_name_refused_by_filesystem(&error) => {
+            note_non_utf8_fixture_skipped_on_this_filesystem();
+            return;
+        }
+        Err(error) => panic!(
+            "non-UTF-8 capability probe failed for a reason other than name support: {error}"
+        ),
     }
     let mut shared_bytes = b"shared".to_vec();
     shared_bytes[2] = 0xE9; // a raw non-UTF-8 byte in the directory name
@@ -10837,6 +10861,36 @@ fn readonly_git_commondir_resolves_non_utf8_byte_paths_like_git() {
         readonly_gitdir_common_dir(&linked_gitdir),
         Some(shared.join(".git").canonicalize().expect("shared resolves"))
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn capability_probe_skip_classifies_only_name_refusals() {
+    // The skip may fire ONLY for a filesystem that refuses the non-UTF-8
+    // name itself; every other probe failure is a fixture-setup problem
+    // that must fail loudly rather than silently retire the byte-path
+    // regression pin (review 5915921197).
+    let refused = std::io::Error::from_raw_os_error(libc::EILSEQ);
+    assert!(
+        non_utf8_name_refused_by_filesystem(&refused),
+        "EILSEQ is a name-support refusal and may skip"
+    );
+    for (label, error) in [
+        (
+            "permission",
+            std::io::Error::from_raw_os_error(libc::EACCES),
+        ),
+        ("quota", std::io::Error::from_raw_os_error(libc::ENOSPC)),
+        (
+            "generic-permission",
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "sandboxed"),
+        ),
+    ] {
+        assert!(
+            !non_utf8_name_refused_by_filesystem(&error),
+            "{label} failure must NOT be classified as a name refusal"
+        );
+    }
 }
 
 /// End to end: a workspace-scoped writer plants `proj/.git` as a SYMLINK to
