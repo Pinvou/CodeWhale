@@ -3602,6 +3602,103 @@ fn routed_usage_append_is_bounded_and_idempotent_for_every_delivery_path() {
     );
 }
 
+/// The terminal settlement must not lose records a still-registered
+/// terminal-turn sink stages while the settle awaits are running. Building
+/// the terminal snapshot before those awaits and saving it afterwards wipes
+/// exactly those records (`save_turn` clears the stage), while the
+/// settlement shape — re-`load_turn` under the same mutation hold that saves,
+/// after the settles — folds the staged form into the terminal save. Pins
+/// both: the destructive snapshot shape, and the settlement shape that
+/// survives it.
+#[test]
+fn settlement_snapshot_built_after_the_settles_keeps_records_staged_in_the_gap() {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+    let turn = sample_turn("thr_gap", "turn_gap", RuntimeTurnStatus::InProgress);
+    store.save_turn(&turn).expect("persist base turn");
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    let record = crate::cost_status::EffectiveRouteUsage {
+        route,
+        usage: Usage {
+            input_tokens: 11,
+            ..Usage::default()
+        },
+    };
+
+    // The snapshot-across-await shape: a snapshot loaded BEFORE the in-gap
+    // append, saved after it, wipes the staged record from disk (the stage
+    // clears with the save). This is the hazard the settlement ordering must
+    // avoid.
+    let stale_snapshot = store.load_turn(&turn.id).expect("snapshot before the gap");
+    assert!(
+        store
+            .append_routed_usage_staged(&turn.id, "sink:in-gap", record.clone())
+            .expect("in-gap staged append"),
+        "the terminal-turn sink is still registered in the gap"
+    );
+    let wiped = {
+        let _turn_mutation = store.turn_mutation.lock();
+        let mut wiped = stale_snapshot.clone();
+        wiped.status = RuntimeTurnStatus::Completed;
+        store.save_turn(&wiped).expect("save stale snapshot");
+        wiped
+    };
+    assert_eq!(
+        wiped.routed_usage.len(),
+        0,
+        "the stale snapshot was loaded before the in-gap append (base has none)"
+    );
+    assert_eq!(
+        store
+            .load_turn(&turn.id)
+            .expect("reload")
+            .routed_usage
+            .len(),
+        0,
+        "saving the stale snapshot destroys the staged record — this is why \
+         the settlement must rebuild its snapshot after the settles"
+    );
+
+    // Now the settlement shape on that destroyed base: re-stage the in-gap
+    // record and rebuild the snapshot under the same mutation hold that
+    // saves, so the staged form rides the terminal save and the stage ends
+    // empty.
+    store
+        .append_routed_usage_staged(&turn.id, "sink:in-gap-2", record)
+        .expect("re-stage for the settlement shape");
+    let settled = {
+        let _turn_mutation = store.turn_mutation.lock();
+        let mut settled = store.load_turn(&turn.id).expect("settlement load");
+        assert_eq!(
+            settled.routed_usage.len(),
+            1,
+            "load_turn returns the staged form for the rebuild"
+        );
+        settled.status = RuntimeTurnStatus::Completed;
+        store.save_turn(&settled).expect("settlement save");
+        settled
+    };
+    assert_eq!(
+        settled.routed_usage.len(),
+        1,
+        "the settlement save must carry the record staged during the settles"
+    );
+    assert_eq!(settled.routed_usage[0].usage.input_tokens, 11);
+    assert!(
+        store.routed_usage_staged.lock().is_empty(),
+        "the stage clears only after the record is durably carried"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn routed_usage_staging_batches_disk_writes_and_stays_read_coherent() {
     // Raising the routed-usage cap to 2048 with per-record turn-file rewrites

@@ -96,9 +96,13 @@ pub(crate) const MAX_ROUTED_USAGE_RECORDS_PER_TURN: usize = 2_048;
 /// by a process crash, and also on graceful exit when a record arrives via
 /// a still-registered terminal-turn sink after that turn's settlement save
 /// (nothing flushes it, since a terminal turn runs no further saves).
-/// Between flushes at most `BATCH - 1` records are staged, but the batch
-/// flush itself persists the staged form only after the append that filled
-/// it, so a crash mid-flush loses the whole batch.
+/// While writes succeed, at most `BATCH - 1` records are staged between
+/// flushes, but the batch flush itself persists the staged form only after
+/// the append that filled it, so a crash mid-flush loses the whole batch.
+/// While writes keep failing, the retrying stage keeps every accepted
+/// append resident (up to the per-turn cap), so a crash in that regime
+/// loses more than one batch — the durability note in the PR covers the
+/// healthy path, not this one.
 const ROUTED_USAGE_FLUSH_BATCH: usize = 16;
 
 #[cfg(test)]
@@ -10166,22 +10170,6 @@ impl RuntimeThreadManager {
         let ended_at = Utc::now();
         crate::cost_status::finish_runtime_usage_owner(&turn_id);
         let background_usage = crate::cost_status::take_runtime_usage(&turn_id);
-        let turn = {
-            let _turn_mutation = self.store.turn_mutation.lock();
-            let mut turn = self.store.load_turn(&turn_id)?;
-            turn.status = turn_status;
-            turn.ended_at = Some(ended_at);
-            turn.duration_ms = turn.started_at.map(|start| duration_ms(start, ended_at));
-            turn.usage = turn_usage;
-            for record in background_usage.records {
-                append_routed_usage_record(&mut turn, &record.source_id, record.usage);
-            }
-            turn.routed_usage_dropped_records = turn
-                .routed_usage_dropped_records
-                .saturating_add(background_usage.dropped_records);
-            turn.error = turn_error;
-            turn
-        };
 
         // A terminal turn can no longer answer an outstanding prompt. Commit
         // each cancellation while the request remains snapshot-authoritative,
@@ -10198,10 +10186,28 @@ impl RuntimeThreadManager {
         // active-claim cleanup are ordered.
         let projection_lock = self.projection_lock(&thread_id);
         let _projection = projection_lock.lock().await;
-        {
+        let turn = {
+            // Build the terminal snapshot and save it under one mutation hold.
+            // `load_turn` returns the routed-usage stage's current form, so a
+            // record a still-registered terminal-turn sink staged while the
+            // settles above were awaiting rides this save; snapshot-then-save
+            // across the settle await would wipe it while the stage clears.
             let _turn_mutation = self.store.turn_mutation.lock();
+            let mut turn = self.store.load_turn(&turn_id)?;
+            turn.status = turn_status;
+            turn.ended_at = Some(ended_at);
+            turn.duration_ms = turn.started_at.map(|start| duration_ms(start, ended_at));
+            turn.usage = turn_usage;
+            for record in background_usage.records {
+                append_routed_usage_record(&mut turn, &record.source_id, record.usage);
+            }
+            turn.routed_usage_dropped_records = turn
+                .routed_usage_dropped_records
+                .saturating_add(background_usage.dropped_records);
+            turn.error = turn_error;
             self.store.save_turn(&turn)?;
-        }
+            turn
+        };
         {
             let _thread_mutation = self.store.thread_mutation.lock();
             let mut thread = self.store.load_thread(&thread_id)?;
