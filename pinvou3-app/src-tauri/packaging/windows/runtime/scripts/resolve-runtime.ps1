@@ -277,7 +277,11 @@ function Assert-ChildPath {
   # both sides through the identical extend-canonicalize-strip chain (plain
   # inputs keep their historical plain form, so default behavior is
   # unchanged); Get-PlainPath strips the prefix by shape and keeps UNC valid.
-  $rootFull = Get-PlainPath ([System.IO.Path]::GetFullPath((Get-ExtendedPath ($Root.Replace('/', '\'))))).TrimEnd('\') + '\'
+  # Evaluate the command result before appending the separator: in command
+  # parsing mode the trailing "+ '\'" after a bare command call would be bound
+  # as additional arguments (silently absorbed into $args by a simple
+  # function), leaving $rootFull without its trailing separator.
+  $rootFull = (Get-PlainPath ([System.IO.Path]::GetFullPath((Get-ExtendedPath ($Root.Replace('/', '\')))))).TrimEnd('\') + '\'
   # Canonicalize through the \\?\ namespace: GetFullPath on an unprefixed
   # child past MAX_PATH throws instead of comparing, and device paths skip
   # normalization, so strip the pass-through prefix by shape (Get-PlainPath
@@ -294,7 +298,11 @@ function Get-RelativeStagePath {
   # Same namespace unification as Assert-ChildPath: both sides must share one
   # canonical form before containment and substring, or an explicitly
   # extended root/path pair mis-rejects or emits a prefixed relative key.
-  $rootFull = Get-PlainPath ([System.IO.Path]::GetFullPath((Get-ExtendedPath ($Root.Replace('/', '\'))))).TrimEnd('\') + '\'
+  # Same eval-before-concat parenthesization as Assert-ChildPath: a bare
+  # command call would bind the trailing "+ '\'" as extra arguments, so the
+  # returned relative key gains a leading separator and the Node descriptor
+  # consumer rejects it as an absolute path.
+  $rootFull = (Get-PlainPath ([System.IO.Path]::GetFullPath((Get-ExtendedPath ($Root.Replace('/', '\')))))).TrimEnd('\') + '\'
   $pathFull = Get-PlainPath ([System.IO.Path]::GetFullPath((Get-ExtendedPath ($Path.Replace('/', '\')))))
   if (-not $pathFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Path is outside the Windows runtime staging root: $Path"

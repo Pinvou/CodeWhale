@@ -201,6 +201,7 @@ module.exports = {
   WINDOWS_ONNX_DEV_DESCRIPTOR_PATH,
   cleanupLegacyWindowsNodeStaging,
   describeWindowsRuntime,
+  resolveDescriptorPath,
   stageWindowsOnnxRuntime,
   stageWindowsRuntime,
 };

@@ -7,6 +7,7 @@ const path = require("node:path");
 
 const { windowsBundleTargets } = require("../scripts/tauri/build.js");
 const { stageWindowsInstaller } = require("../scripts/tauri/windows-installer.js");
+const { resolveDescriptorPath } = require("../scripts/tauri/windows-runtime.js");
 
 const appRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(appRoot, "..");
@@ -359,6 +360,27 @@ assert.match(runtimeScript, /Get-VerifiedOnnxManifest/);
 assert.match(runtimeScript, /Stage-OnnxRuntime/);
 assert.match(onnxRuntimeSmoke, /LoadLibraryEx/);
 assert.match(onnxRuntimeSmoke, /OrtGetApiBase/);
+// The ONNX dev descriptor key produced by resolve-runtime.ps1's
+// Get-RelativeStagePath must flow through the real Node descriptor consumer:
+// the exact slash-joined production shape resolves under src-tauri, while the
+// leading-slash shape a swallowed string concatenation in the PowerShell root
+// normalization used to emit must be rejected as an absolute path (the
+// stageWindowsOnnxRuntime consumer would otherwise fail dev startup before
+// any staged file is touched).
+{
+  const descriptorKey =
+    "target/windows-runtime/dcde8f01abcd-0123456789ab-onnx-dev/onnxruntime/onnxruntime.dll";
+  assert.equal(
+    resolveDescriptorPath(descriptorKey, "onnxRuntimeDylib"),
+    path.resolve(appRoot, "src-tauri", descriptorKey),
+    "the production ONNX dev descriptor key must resolve under src-tauri",
+  );
+  assert.throws(
+    () => resolveDescriptorPath(`/${descriptorKey}`, "onnxRuntimeDylib"),
+    /必须是相对路径/u,
+    "a leading-slash descriptor key must be rejected as an absolute path",
+  );
+}
 assert.match(installerAdapter, /bundleTargets\.includes\("nsis"\)/);
 assert.equal(
   windowsConfig.bundle.windows.nsis.installerHooks,

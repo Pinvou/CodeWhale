@@ -432,6 +432,29 @@ try {
   Assert-True -Condition $nsRejectThrew -Message "an extended RuntimeRoot must still reject a path outside it"
   Assert-True -Condition ((Get-RelativeStagePath -Root $nsExtendedRoot -Path $nsExtendedChild) -eq (Get-RelativeStagePath -Root $nsRoot -Path $nsChild)) -Message "extended and plain root/path pairs must yield the same relative staging path"
 
+  # The staging descriptor key must be the exact slash-joined path: the root
+  # normalization appends the trailing separator through expression
+  # evaluation, because in command parsing mode a bare command call binds the
+  # trailing "+ '\'" as additional arguments (silently absorbed by a simple
+  # function) and the returned key used to gain a leading slash that the Node
+  # descriptor consumer rejects as an absolute path. Pin the production key
+  # shape (Get-RelativeStagePath consumers hand it straight to
+  # scripts/tauri/windows-runtime.js), and pin Assert-ChildPath's containment
+  # boundary, whose root also carries the appended separator: without it the
+  # containment check degrades to a plain prefix match.
+  $relativeRoot = Join-Path $testRoot "relative-key\src-tauri"
+  $relativeChild = Join-Path $relativeRoot "target\windows-runtime\dcde8f01abcd-0123456789ab-onnx-dev\onnxruntime\onnxruntime.dll"
+  Write-TestFile -Path $relativeChild -Content "dylib"
+  $relativeKey = Get-RelativeStagePath -Root $relativeRoot -Path $relativeChild
+  Assert-True -Condition ($relativeKey -eq "target/windows-runtime/dcde8f01abcd-0123456789ab-onnx-dev/onnxruntime/onnxruntime.dll") -Message "the relative staging key must be the exact slash-joined production shape without a leading separator: $relativeKey"
+  $boundaryRoot = Join-Path $testRoot "containment-bound"
+  New-Item -ItemType Directory -Path (Join-Path $boundaryRoot "inner") -Force | Out-Null
+  $boundarySibling = Join-Path (Join-Path $testRoot "containment-boundary") "sibling.txt"
+  Write-TestFile -Path $boundarySibling -Content "sibling"
+  $boundaryThrew = $false
+  try { Assert-ChildPath -Root $boundaryRoot -Path $boundarySibling } catch { $boundaryThrew = $_.Exception.Message -match "outside the expected root" }
+  Assert-True -Condition $boundaryThrew -Message "a sibling directory sharing the root name as a prefix must not pass the containment check"
+
   # Write-Utf8Atomically keeps shared-visibility descriptors continuously
   # present for the unlocked readers in scripts/tauri/windows-runtime.js:
   # replacement must swap the file in atomically, a failed replacement must
