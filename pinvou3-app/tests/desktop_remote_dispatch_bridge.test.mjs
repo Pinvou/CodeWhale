@@ -14,17 +14,25 @@ const remoteTaskCommandSource = fs.readFileSync(
   'utf8',
 );
 
-function installFeature(onInvoke, timers = { setTimeout, clearTimeout }) {
+function installFeature(onInvoke, withUploadLimit = true, timers = { setTimeout, clearTimeout }) {
+  // Union of two test-helper extensions: this branch passes `false` to skip the
+  // shared upload-limit sandbox, while main's capability-retry tests pass the
+  // timers object positionally.
+  if (withUploadLimit && typeof withUploadLimit === 'object') {
+    timers = withUploadLimit;
+    withUploadLimit = true;
+  }
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
   const sandbox = { window: root, TextEncoder, Date: timers.Date || Date,
     setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout };
   vm.createContext(sandbox);
   vm.runInContext(read('features/remote-control/remote-control-state.js'), sandbox);
+  if (withUploadLimit) vm.runInContext(read('shared/chunked-file-upload.js'), sandbox);
   vm.runInContext(read('platform/tauri/bridge/desktop-remote-control.js'), sandbox);
   const calls = [];
   const listeners = new Map();
   const state = { desktopRemoteControl: root.__PINVOU_REMOTE_CONTROL_STATE__.createState() };
-  const feature = root.__PINVOU_TAURI_BRIDGE_FEATURES__['desktop-remote-control']({
+  const context = {
     state,
     notify() {},
     can: () => true,
@@ -41,9 +49,111 @@ function installFeature(onInvoke, timers = { setTimeout, clearTimeout }) {
       if (command === 'desktop_remote_controller_status') return Promise.resolve({ status: 'idle' });
       return Promise.resolve({ state: 'queued' });
     },
-  });
-  return { feature, calls, state, listeners, logic: root.__PINVOU_REMOTE_CONTROL_STATE__ };
+  };
+  const create = () => root.__PINVOU_TAURI_BRIDGE_FEATURES__['desktop-remote-control'](context);
+  const feature = create();
+  return { feature, calls, state, listeners, logic: root.__PINVOU_REMOTE_CONTROL_STATE__, rebuild: create };
 }
+
+test('128 unresolved actions fail closed before send and survive bridge stop and rebuild', async () => {
+  let succeed = false;
+  const { feature, calls, rebuild } = installFeature(command => command === 'desktop_remote_action_a'
+    // eslint-disable-next-line prefer-promise-reject-errors -- Tauri IPC preserves string rejection payloads.
+    ? (succeed ? Promise.resolve({ transfer_id: 'download-1', chunk_bytes: 5, total_bytes: 5 }) : Promise.reject('result_unknown')) : undefined);
+  for (let i = 0; i < 128; i++) {
+    await assert.rejects(feature.artifactDownloadBegin('local', 'remote', 'task-' + i, 'artifact'), { code: 'result_unknown' });
+  }
+  const actions = () => calls.filter(call => call.command === 'desktop_remote_action_a');
+  assert.equal(actions().length, 256);
+  const original = actions()[0].args.requestId;
+  await assert.rejects(feature.artifactDownloadBegin('local', 'remote', 'overflow', 'artifact'), { code: 'remote_action_capacity' });
+  assert.equal(actions().length, 256);
+  feature.stop();
+  const rebuilt = rebuild();
+  await assert.rejects(rebuilt.artifactDownloadBegin('local', 'remote', 'overflow', 'artifact'), { code: 'remote_action_capacity' });
+  assert.equal(actions().length, 256);
+  succeed = true;
+  assert.equal((await rebuilt.artifactDownloadBegin('local', 'remote', 'task-0', 'artifact')).transferId, 'download-1');
+  assert.equal(actions().at(-1).args.requestId, original);
+  assert.equal((await rebuilt.artifactDownloadBegin('local', 'remote', 'overflow', 'artifact')).transferId, 'download-1');
+  assert.notEqual(actions().at(-1).args.requestId, original);
+});
+
+test('concurrent duplicate actions share one flight and preserve unknown identity across local failure', async () => {
+  const pending = Promise.withResolvers();
+  let mode = 'pending';
+  const { feature, calls } = installFeature(command => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    if (mode === 'pending') return pending.promise;
+    // eslint-disable-next-line prefer-promise-reject-errors -- Exercise the native IPC string error contract.
+    if (mode === 'local') return Promise.reject('remote_action_capacity');
+    // eslint-disable-next-line prefer-promise-reject-errors -- Exercise the native IPC structured error contract.
+    if (mode === 'terminal') return Promise.reject({ code: 'permission_denied', authoritative: true });
+    return Promise.resolve({ transfer_id: 'fresh', chunk_bytes: 1, total_bytes: 1 });
+  });
+  const begin = () => feature.artifactDownloadBegin('local', 'remote', 'task', 'artifact');
+  const first = begin(); const second = begin();
+  const actions = () => calls.filter(call => call.command === 'desktop_remote_action_a');
+  assert.equal(actions().length, 1);
+  const original = actions()[0].args.requestId;
+  pending.reject('result_unknown');
+  await Promise.all([assert.rejects(first, { code: 'result_unknown' }), assert.rejects(second, { code: 'result_unknown' })]);
+  assert.equal(actions().length, 2); // one shared automatic retry
+  mode = 'local';
+  await assert.rejects(begin(), { code: 'remote_action_capacity' });
+  assert.equal(actions().at(-1).args.requestId, original);
+  mode = 'terminal';
+  await assert.rejects(begin(), { code: 'permission_denied' });
+  assert.equal(actions().at(-1).args.requestId, original);
+  mode = 'success';
+  assert.equal((await begin()).transferId, 'fresh');
+  assert.notEqual(actions().at(-1).args.requestId, original);
+});
+
+test('late unknown generic action never retries into the next lease', async () => {
+  const old = Promise.withResolvers();
+  let first = true;
+  const { feature, calls, state } = installFeature(command => command === 'desktop_remote_action_a'
+    ? (first ? (first = false, old.promise) : Promise.resolve({ transfer_id: 'new', chunk_bytes: 1, total_bytes: 1 })) : undefined);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const lease = generation => ({ connectionId: 'connection', controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation });
+  state.desktopRemoteControl.controllerConnection = lease('old');
+  const pending = feature.artifactDownloadBegin('local', 'remote', 'task', 'artifact');
+  state.desktopRemoteControl.controllerConnection = lease('new');
+  assert.equal((await feature.artifactDownloadBegin('local', 'remote', 'task', 'artifact')).transferId, 'new');
+  old.reject('result_unknown');
+  await assert.rejects(pending, { code: 'result_unknown' });
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 2);
+});
+
+test('native canonical request identity survives a fresh renderer candidate', async () => {
+  const { feature, calls } = installFeature((command, args) => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    // eslint-disable-next-line prefer-promise-reject-errors -- Keep native request identity on the actual IPC payload shape.
+    if (args.requestId !== 'native-original') return Promise.reject({ code: 'result_unknown', requestId: 'native-original', authoritative: false });
+    return Promise.resolve({ transfer_id: 'download', chunk_bytes: 1, total_bytes: 1 });
+  });
+  assert.equal((await feature.artifactDownloadBegin('local', 'remote', 'task', 'artifact')).transferId, 'download');
+  const actions = calls.filter(call => call.command === 'desktop_remote_action_a');
+  assert.equal(actions.length, 2);
+  assert.notEqual(actions[0].args.requestId, 'native-original');
+  assert.equal(actions[1].args.requestId, 'native-original');
+});
+
+test('attachment bridge uses the shared boundary and fails closed without it', async () => {
+  const onInvoke = command => command === 'desktop_remote_action_a'
+    ? Promise.resolve({ transfer_id: 't', chunk_bytes: 1, total_bytes: 20 * 1024 * 1024 }) : undefined;
+  const { feature, calls } = installFeature(onInvoke);
+  const args = ['remote-1', 'ref-1', 'task-1', 'a.bin', 'application/octet-stream'];
+  const digest = 'a'.repeat(64);
+  await feature.attachmentBegin(...args, 20 * 1024 * 1024, digest);
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
+  await assert.rejects(feature.attachmentBegin(...args, 32 * 1024 * 1024, digest), { code: 'remote_attachment_size_invalid' });
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
+  const missing = installFeature(onInvoke, false);
+  await assert.rejects(missing.feature.attachmentBegin(...args, 1, digest), { code: 'remote_attachment_size_invalid' });
+  assert.equal(missing.calls.filter(call => call.command === 'desktop_remote_action_a').length, 0);
+});
 
 function bindProxy(logic, state, remoteRef, sessionId) {
   const live = state.controllerConnection;
@@ -254,6 +364,265 @@ test('a failed refresh releases only its own navigation intent and mirrors the t
   assert.equal(state.desktopRemoteControl.controlledDevice.status, 'connected');
   assert.equal(state.controlledNavigationIntent, intent);
   assert.equal(state.controlledNavigationPending, false);
+});
+
+test('B registration task failure settles the refreshed generation and permits the next start', async () => {
+  // These projections are checked against real manager output in Rust.
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  const refresh = Promise.withResolvers();
+  const { feature, state, listeners, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controlled_refresh') return refresh.promise;
+    if (command === 'desktop_remote_controlled_start') return Promise.resolve(fixture.next);
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+  const pending = feature.controlledRefresh();
+  const publish = payload => listeners.get('desktop-remote-controlled-status')({ payload });
+  publish(fixture.retiring);
+  publish(fixture.registering);
+  publish(fixture.failed);
+  refresh.reject('pairing_registration_failed');
+  await assert.rejects(pending, { code: 'pairing_registration_failed' });
+  assert.equal(state.desktopRemoteControl.controlledDevice.status, 'error');
+  assert.equal(state.desktopRemoteControl.controlledDevice.generation, fixture.failed.generation);
+  assert.equal(state.desktopRemoteControl.controlledDevice.lastError, 'pairing_registration_failed');
+  assert.equal(state.controlledNavigationPending, false);
+  await feature.controlledStart('B', []);
+  assert.equal(state.desktopRemoteControl.controlledDevice.generation, fixture.next.generation);
+  publish(fixture.failed);
+  assert.equal(state.desktopRemoteControl.controlledDevice.status, 'waiting_for_pairing');
+  assert.equal(state.desktopRemoteControl.controlledDevice.generation, fixture.next.generation);
+});
+
+test('B failed open reads its terminal binding without a registering event', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  for (const mode of ['first', 'refresh', 'restart', 'bound']) {
+    const failed = { ...fixture.failed, statusIntent: mode === 'first' ? '1' : fixture.failed.statusIntent };
+    const open = Promise.withResolvers();
+    let starts = 0;
+    const { feature, state, listeners, logic } = installFeature(command => {
+      if (command === 'desktop_remote_controlled_refresh') return open.promise;
+      if (command === 'desktop_remote_controlled_start') return ++starts === 1 && mode !== 'refresh' && mode !== 'bound'
+        ? open.promise : Promise.resolve(fixture.next);
+      if (command === 'desktop_remote_controlled_status') return Promise.resolve(failed);
+      return undefined;
+    });
+    if (mode !== 'first') {
+      state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+      if (mode === 'restart') state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl,
+        { ...fixture.old, status: 'error', errorCode: 'endpoint_offline' });
+    }
+    const pending = mode === 'refresh' || mode === 'bound' ? feature.controlledRefresh() : feature.controlledStart('B', []);
+    const rejected = assert.rejects(pending, { code: 'pairing_registration_failed' });
+    const emit = payload => listeners.get('desktop-remote-controlled-status')({ payload });
+    if (mode === 'refresh' || mode === 'bound') emit(fixture.retiring);
+    if (mode === 'bound') emit(fixture.registering);
+    if (mode !== 'bound' && mode !== 'first') {
+      emit(failed);
+      if (mode !== 'first') assert.notEqual(state.controlledDevice.generation, failed.generation,
+        'an ordinary cross-generation Error cannot bind the replacement');
+    }
+    open.reject('pairing_registration_failed');
+    await rejected;
+    assert.equal(state.controlledDevice.status, 'error', mode);
+    assert.equal(state.controlledDevice.generation, failed.generation, mode);
+    assert.equal(state.controlledDevice.lastError, 'pairing_registration_failed', mode);
+    assert.equal(state.controlledNavigationPending, false, mode);
+    await feature.controlledStart('B', []);
+    assert.equal(state.controlledDevice.status, 'waiting_for_pairing', mode);
+    assert.equal(state.controlledDevice.generation, fixture.next.generation, mode);
+    emit(failed);
+    assert.equal(state.controlledDevice.generation, fixture.next.generation, mode);
+    feature.stop();
+  }
+});
+
+test('B failed open reconciles after an old terminal interrupted its pending intent', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  const open = Promise.withResolvers();
+  const { feature, state, listeners, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controlled_start') return open.promise;
+    if (command === 'desktop_remote_controlled_status') return Promise.resolve(fixture.failed);
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+  const rejected = assert.rejects(feature.controlledStart('B', []), { code: 'pairing_registration_failed' });
+  listeners.get('desktop-remote-controlled-status')({ payload: { ...fixture.old, status: 'error' } });
+  assert.equal(state.desktopRemoteControl.controlledTerminatedOpenIntent, state.controlledNavigationIntent);
+  open.reject('pairing_registration_failed');
+  await rejected;
+  assert.equal(state.controlledDevice.generation, fixture.failed.generation);
+  assert.equal(state.controlledDevice.lastError, 'pairing_registration_failed');
+  feature.stop();
+});
+
+test('B held failure status cannot overwrite a stop or successor command', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  for (const replacement of ['stop', 'start']) {
+    const read = Promise.withResolvers();
+    const entered = Promise.withResolvers();
+    let starts = 0;
+    const { feature, state } = installFeature(command => {
+      if (command === 'desktop_remote_controlled_start') return ++starts === 1
+        ? Promise.reject(new Error('pairing_registration_failed')) : Promise.resolve(fixture.next);
+      if (command === 'desktop_remote_controlled_status') { entered.resolve(); return read.promise; }
+      if (command === 'desktop_remote_controlled_stop') return Promise.resolve({
+        ...fixture.failed, status: 'stopped', statusIntent: '4', errorCode: null,
+      });
+      return undefined;
+    });
+    const rejected = assert.rejects(feature.controlledStart('B', []), { code: 'pairing_registration_failed' });
+    await entered.promise;
+    if (replacement === 'stop') await feature.controlledStop();
+    else await feature.controlledStart('B', []);
+    const snapshot = state.desktopRemoteControl;
+    read.resolve(fixture.failed);
+    await rejected;
+    assert.equal(state.desktopRemoteControl, snapshot, replacement);
+    assert.equal(state.controlledDevice.status, replacement === 'stop' ? 'stopped' : 'waiting_for_pairing');
+    feature.stop();
+  }
+});
+
+test('B failed status read retains the failure owner for later panel synchronization', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  let reads = 0;
+  const { feature, state, listeners, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controlled_refresh') return Promise.reject(new Error('pairing_registration_failed'));
+    if (command === 'desktop_remote_controlled_status') return ++reads === 1
+      ? Promise.reject(new Error('status_unavailable')) : Promise.resolve(fixture.failed);
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+  const rejected = assert.rejects(feature.controlledRefresh(), { code: 'pairing_registration_failed' });
+  listeners.get('desktop-remote-controlled-status')({ payload: fixture.retiring });
+  await rejected;
+  assert.equal(state.controlledDevice.status, 'retiring_generation', 'no invented terminal on unavailable status');
+  assert.equal(state.controlledNavigationPending, false);
+  await feature.controlledSync();
+  assert.equal(state.controlledDevice.status, 'error');
+  assert.equal(state.controlledDevice.generation, fixture.failed.generation);
+  feature.stop();
+});
+
+test('B registration recovery keeps ordinary event, native sequence and retired identity fences', () => {
+  const { logic } = installFeature();
+  let state = logic.applyControlledStatus(logic.createState(), {
+    status: 'retiring_generation', generation: 'old', statusIntent: '5',
+  });
+  state = logic.beginControlledIntent(state, true);
+  const intent = state.intents.controlled;
+  const failed = { status: 'error', generation: 'new', statusIntent: '6', errorCode: 'pairing_registration_failed' };
+  assert.equal(logic.applyControlledStatus(state, failed), state);
+  for (const payload of [
+    { ...failed, statusIntent: '4' }, { ...failed, statusIntent: '5' },
+    { ...failed, statusIntent: 'not-an-integer' }, { ...failed, errorCode: 'endpoint_offline' },
+    { ...failed, generation: null }, { ...failed, status: 'registering' },
+  ]) assert.equal(logic.reconcileControlledRegistrationFailure(state, intent, payload), state);
+  assert.equal(logic.reconcileControlledRegistrationFailure(state, intent - 1, failed), state);
+  const retired = { ...state, retiredControlledGenerations: ['new'] };
+  assert.equal(logic.reconcileControlledRegistrationFailure(retired, intent, failed), retired);
+  const next = logic.reconcileControlledRegistrationFailure(state, intent, failed);
+  assert.equal(next.controlledDevice.generation, 'new');
+  assert.deepEqual([...next.retiredControlledGenerations], ['old', 'new']);
+  assert.equal(logic.reconcileControlledRegistrationFailure(next, intent, failed), next);
+});
+
+test('B terminal events or bridge disposal invalidate an in-flight failure read', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  for (const interrupt of ['terminal', 'dispose']) {
+    const read = Promise.withResolvers();
+    const entered = Promise.withResolvers();
+    const { feature, state, listeners, logic } = installFeature(command => {
+      if (command === 'desktop_remote_controlled_refresh') return Promise.reject(new Error('pairing_registration_failed'));
+      if (command === 'desktop_remote_controlled_status') { entered.resolve(); return read.promise; }
+      return undefined;
+    });
+    state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+    const rejected = assert.rejects(feature.controlledRefresh(), { code: 'pairing_registration_failed' });
+    await entered.promise;
+    if (interrupt === 'terminal') listeners.get('desktop-remote-controlled-status')({ payload: { ...fixture.old, status: 'error' } });
+    else feature.stop();
+    const generation = state.controlledDevice.generation;
+    read.resolve(fixture.failed);
+    await rejected;
+    assert.equal(state.controlledDevice.generation, generation, interrupt);
+    feature.stop();
+  }
+});
+
+test('B disposal before a failed open result cannot create a recovery owner', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  for (const method of ['controlledStart', 'controlledRefresh']) {
+    const open = Promise.withResolvers();
+    let reads = 0;
+    const { feature, state, logic } = installFeature(command => {
+      if (command === 'desktop_remote_controlled_start' || command === 'desktop_remote_controlled_refresh') return open.promise;
+      if (command === 'desktop_remote_controlled_status') { reads += 1; return Promise.resolve(fixture.failed); }
+      return undefined;
+    });
+    if (method === 'controlledRefresh') state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+    const rejected = assert.rejects(feature[method](), { code: 'pairing_registration_failed' });
+    feature.stop();
+    const device = state.controlledDevice;
+    open.reject('pairing_registration_failed');
+    await rejected;
+    assert.equal(reads, 0, method);
+    assert.equal(state.controlledDevice, device, 'disposed recovery cannot replace the visible binding');
+    assert.equal(state.controlledNavigationPending, false, 'existing current-intent settlement remains intact');
+  }
+});
+
+test('independent A status cannot discard the current B failure read', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  const read = Promise.withResolvers();
+  const entered = Promise.withResolvers();
+  const { feature, state, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controlled_refresh') return Promise.reject(new Error('pairing_registration_failed'));
+    if (command === 'desktop_remote_controlled_status') { entered.resolve(); return read.promise; }
+    if (command === 'desktop_remote_controller_connect') return Promise.resolve({
+      status: 'connecting', claimRequestId: 'claim_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', lease: null,
+    });
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+  const rejected = assert.rejects(feature.controlledRefresh(), { code: 'pairing_registration_failed' });
+  await entered.promise;
+  const revision = state.desktopRemoteControl.revision;
+  await feature.controllerConnect('2345678');
+  assert.ok(state.desktopRemoteControl.revision > revision);
+  read.resolve(fixture.failed);
+  await rejected;
+  assert.equal(state.controlledDevice.status, 'error');
+  assert.equal(state.controlledDevice.generation, fixture.failed.generation);
+  feature.stop();
+});
+
+test('B synchronized recovery cannot fall through after its bridge owner is disposed', async () => {
+  const fixture = JSON.parse(fs.readFileSync(new URL('./fixtures/controller_registration_exit.json', import.meta.url), 'utf8'));
+  const read = Promise.withResolvers();
+  const entered = Promise.withResolvers();
+  let reads = 0;
+  const { feature, state, listeners, logic } = installFeature(command => {
+    if (command === 'desktop_remote_controlled_refresh') return Promise.reject(new Error('pairing_registration_failed'));
+    if (command === 'desktop_remote_controlled_status') {
+      if (++reads === 1) return Promise.reject(new Error('status_unavailable'));
+      entered.resolve(); return read.promise;
+    }
+    return undefined;
+  });
+  state.desktopRemoteControl = logic.applyControlledStatus(state.desktopRemoteControl, fixture.old);
+  const rejected = assert.rejects(feature.controlledRefresh(), { code: 'pairing_registration_failed' });
+  const emit = payload => listeners.get('desktop-remote-controlled-status')({ payload });
+  emit(fixture.retiring); emit(fixture.registering);
+  await rejected;
+  const pending = feature.controlledSync();
+  await entered.promise;
+  const snapshot = state.desktopRemoteControl;
+  feature.stop();
+  read.resolve(fixture.failed);
+  await pending;
+  assert.equal(state.desktopRemoteControl, snapshot);
 });
 
 test('a stale control completion cannot release the newer navigation intent', async () => {
@@ -763,6 +1132,139 @@ test('remote attachment, permission and artifact facades use only desktop_remote
   assert.equal(artifacts[0].artifactId, 'artifact-1');
   assert.deepEqual([...new Set(calls.slice(-3).map(call => call.command))], ['desktop_remote_action_a']);
   assert.equal(JSON.stringify(calls).includes('connectionId'), false);
+});
+
+test('physical cleanup uses its own RPC and a legacy-peer timeout still permits local abandon', async () => {
+  const { feature, calls } = installFeature((command, args) => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    if (args.intent.operation === 'attachment_abort_confirmed') return Promise.reject(new Error('result_unknown'));
+    return Promise.resolve({ aborted: true });
+  });
+  await assert.rejects(feature.attachmentAbortConfirmed('local-1', 'ref-1', 'task-1', 'transfer-1'), { code: 'result_unknown' });
+  await feature.abandonRemoteTask('local-1', 'request-1', 'task-1');
+  await feature.attachmentAbort('local-1', 'ref-1', 'task-1', 'transfer-1');
+  const relevant = calls.filter(call => ['desktop_remote_action_a', 'desktop_remote_task_abandon_prepared_a'].includes(call.command));
+  assert.deepEqual(relevant.map(call => call.args.intent?.operation || call.command),
+    ['attachment_abort_confirmed', 'desktop_remote_task_abandon_prepared_a', 'attachment_abort']);
+  assert.deepEqual(JSON.parse(JSON.stringify(relevant[0].args.intent)), {
+    operation: 'attachment_abort_confirmed', taskId: 'task-1', transferId: 'transfer-1',
+  });
+  assert.notEqual(relevant[0].args.requestId, relevant[2].args.requestId);
+});
+
+test('unknown attachment actions are fenced rather than replayed as new uploads', async () => {
+  const { feature, calls } = installFeature(command => {
+    if (command === 'desktop_remote_action_a') return Promise.reject(new Error('result_unknown'));
+    return undefined;
+  });
+  const digest = 'a'.repeat(64);
+  const actions = [
+    () => feature.attachmentBegin('remote-1', 'ref-1', 'task-1', 'a.txt', 'text/plain', 1, digest),
+    () => feature.attachmentChunk('remote-1', 'ref-1', 'task-1', 'transfer-1', 0, 'YQ==', 1),
+    () => feature.attachmentAbort('remote-1', 'ref-1', 'task-1', 'transfer-1'),
+  ];
+  for (const [index, action] of actions.entries()) {
+    const before = calls.filter(call => call.command === 'desktop_remote_action_a').length;
+    await assert.rejects(action(), { code: 'result_unknown' });
+    await assert.rejects(action(), { code: 'result_unknown' });
+    assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, before + (index === 2 ? 2 : 1));
+  }
+  const before = calls.length;
+  await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-2', 'big.bin', 'application/octet-stream', 20 * 1024 * 1024 + 1, digest), { code: 'remote_attachment_size_invalid' });
+  assert.equal(calls.length, before);
+});
+
+test('explicit unknown attachment cleanup retries its original id after bridge rebuild', async () => {
+  let first = true;
+  const { feature, calls, rebuild } = installFeature(command => command === 'desktop_remote_action_a'
+    // eslint-disable-next-line prefer-promise-reject-errors -- A native unknown-result string must retain the original abort identity.
+    ? (first ? (first = false, Promise.reject('result_unknown')) : Promise.resolve({ aborted: false, already_absent: true })) : undefined);
+  const abort = api => api.attachmentAbort('local', 'remote', 'task', 'transfer');
+  await assert.rejects(abort(feature), { code: 'result_unknown' });
+  const actions = () => calls.filter(call => call.command === 'desktop_remote_action_a');
+  assert.equal(actions().length, 1); // no automatic cleanup retry
+  const original = actions()[0].args.requestId;
+  feature.stop();
+  assert.equal((await abort(rebuild())).already_absent, true);
+  assert.equal(actions().length, 2);
+  assert.equal(actions()[1].args.requestId, original);
+});
+
+test('unconfirmed begin IPC result fences the upload batch across task identities', async () => {
+  const { uploadRemoteFiles } = await import('../src/features/remote-control/remote-file-transfer.mjs');
+  const { feature, calls, state } = installFeature(command => {
+    // Tauri IPC rejects with strings; keep that error-normalization contract covered.
+    // eslint-disable-next-line prefer-promise-reject-errors
+    if (command === 'desktop_remote_action_a') return Promise.reject('result_unknown');
+    return undefined;
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  state.desktopRemoteControl.controllerConnection = { connectionId: 'ipc-begin', controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: 'generation' };
+  const bytes = new TextEncoder().encode('x');
+  const file = { name: 'a.txt', type: 'text/plain', size: 1, arrayBuffer: async () => bytes.buffer.slice(0) };
+  const binding = { localSessionId: 'ipc-local', remoteRef: 'ipc-ref' };
+  const options = { ownerIdentity: 'owner', leaseIdentity: 'ipc-begin-lease', isCurrent: () => true };
+  await assert.rejects(uploadRemoteFiles(feature, binding, 'task-1', [file], () => {}, options), { code: 'result_unknown' });
+  await assert.rejects(uploadRemoteFiles(feature, binding, 'task-2', [file], () => {}, options), { code: 'remote_attachment_fenced' });
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
+});
+
+test('attachment action saturation blocks the same lease and resets on a new lease', async () => {
+  let succeed = false;
+  const { feature, calls, state } = installFeature(command => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    return succeed ? Promise.resolve({ transfer_id: 'fresh', chunk_bytes: 1, total_bytes: 1 }) : Promise.reject(new Error('result_unknown'));
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const lease = id => ({ connectionId: id, controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: id });
+  state.desktopRemoteControl.controllerConnection = lease('saturated-old');
+  for (let i = 0; i < 130; i += 1) {
+    await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-' + i, 'a.txt', 'text/plain', 1, 'a'.repeat(64)), { code: i < 128 ? 'result_unknown' : 'remote_action_capacity' });
+  }
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 128);
+  state.desktopRemoteControl.controllerConnection = lease('saturated-new');
+  succeed = true;
+  assert.equal((await feature.attachmentBegin('remote-1', 'ref-1', 'new-task', 'a.txt', 'text/plain', 1, 'a'.repeat(64))).transferId, 'fresh');
+});
+
+test('attachment uncertainty is retired only when the actual lease changes', async () => {
+  let succeed = false;
+  const { feature, calls, state } = installFeature(command => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    return succeed ? Promise.resolve({ transfer_id: 'new-transfer', chunk_bytes: 1, total_bytes: 1 }) : Promise.reject(new Error('result_unknown'));
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const lease = id => ({ connectionId: id, controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: id });
+  state.desktopRemoteControl.controllerConnection = lease('old-connection');
+  const begin = () => feature.attachmentBegin('remote-1', 'ref-1', 'task-1', 'a.txt', 'text/plain', 1, 'a'.repeat(64));
+  await assert.rejects(begin(), { code: 'result_unknown' });
+  assert.equal(state.desktopRemoteControl.controllerConnection.connectionId, 'old-connection');
+  await assert.rejects(begin(), { code: 'result_unknown' });
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
+  state.desktopRemoteControl.controllerConnection = lease('new-connection');
+  succeed = true;
+  assert.equal((await begin()).transferId, 'new-transfer');
+  assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 2);
+});
+
+test('a late unknown reply from a retired lease cannot fence the new lease', async () => {
+  const old = Promise.withResolvers();
+  let first = true;
+  const { feature, state } = installFeature(command => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    if (first) { first = false; return old.promise; }
+    return Promise.resolve({ transfer_id: 'new-transfer', chunk_bytes: 1, total_bytes: 1 });
+  });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const lease = id => ({ connectionId: id, controllerLeaseId: 'lease', leaseEpoch: '1', relayEpoch: 'relay', generation: id });
+  state.desktopRemoteControl.controllerConnection = lease('old-connection');
+  const begin = () => feature.attachmentBegin('remote-1', 'ref-1', 'task-1', 'a.txt', 'text/plain', 1, 'a'.repeat(64));
+  const pending = begin();
+  state.desktopRemoteControl.controllerConnection = lease('new-connection');
+  assert.equal((await begin()).transferId, 'new-transfer');
+  old.reject('result_unknown');
+  await assert.rejects(pending, { code: 'result_unknown' });
+  assert.equal((await begin()).transferId, 'new-transfer');
 });
 
 test('remote actions reuse one request id across uncertain retry and later reconciliation', async () => {

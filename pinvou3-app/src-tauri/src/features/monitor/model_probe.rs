@@ -135,11 +135,13 @@ pub struct MonitorDiagnostic {
     pub message: String,
     /// Status code when the failure is an HTTP error.
     pub http_status: Option<u16>,
-    /// Transport class when the failure is a transport error. Same vocabulary
-    /// as `core::model_endpoint::model_probe_transport_code` (`timeout` /
-    /// `dns_failed` / `connection_refused` / `network_error`), but decided
-    /// from reqwest's structured flags: a real reqwest error's `Display`
-    /// omits the source chain, so that helper's string arms are dead for it.
+    /// Transport class when the failure is a transport error. Same ladder and
+    /// vocabulary as `core::model_endpoint::model_probe_transport_code` —
+    /// both delegate to `transport_code_for` (`timeout` / `tls_error` /
+    /// `dns_failed` / `connection_refused` / `network_error`) — but this
+    /// surface derives the structured flags itself: a real reqwest error's
+    /// `Display` omits the source chain, so the ladder's keyword arms stay
+    /// dead here and only the flag-driven arms fire on real errors.
     pub transport: Option<&'static str>,
     /// The `scheme://host:port` subset of the target — the credential-safe
     /// part of the URL.
@@ -148,10 +150,11 @@ pub struct MonitorDiagnostic {
 
 impl VllmSnapshot {
     /// 后端在线判定(live dot / CLI `monitor status` 的 `vllm_online` 共用):
-    /// 健康态 `verified` 且进程 Ready/Busy。原先该谓词在 GUI command 与
+    /// 有效 local/remote 目标、健康态 `verified` 且进程 Ready/Busy。原先该谓词在 GUI command 与
     /// CLI status_payload 各自手写一遍字面量匹配,单点收口避免字符串漂移。
     pub fn is_online(&self) -> bool {
-        self.health_status == HealthStatus::Verified
+        matches!(self.target_kind.as_str(), "local" | "remote")
+            && self.health_status == HealthStatus::Verified
             && matches!(self.status, VllmStatus::Ready | VllmStatus::Busy)
     }
 
@@ -304,28 +307,88 @@ async fn snapshot_for_model_config(
     let client = TEST_PROBE_CLIENT
         .try_with(Clone::clone)
         .unwrap_or_else(|_| client.clone());
-    let target_kind = if preset == ModelPreset::LocalVllm {
-        "local"
-    } else {
-        vllm_target_kind(upstream)
+    #[cfg(test)]
+    let client = &client;
+    snapshot_for_model_config_with_client(
+        client,
+        upstream,
+        configured_model,
+        preset,
+        model_id,
+        provider,
+        api_key,
+        configured_context,
+    )
+    .await
+}
+
+async fn snapshot_for_model_config_with_client(
+    client: &reqwest::Client,
+    upstream: &str,
+    configured_model: Option<String>,
+    preset: ModelPreset,
+    model_id: Option<String>,
+    provider: String,
+    api_key: Option<&str>,
+    configured_context: Option<u32>,
+) -> Option<VllmSnapshot> {
+    // A local preset controls valid endpoint behavior, not URL validity.
+    let target_kind = match vllm_target_kind(upstream) {
+        "invalid" => "invalid",
+        _ if preset == ModelPreset::LocalVllm => "local",
+        kind => kind,
     };
     let metrics_applicable = target_kind == "local";
 
+    // The early-exit snapshots below carry no probe result, but the context
+    // window is configuration, not a runtime fact: the declared window (or
+    // the inference fallback — the same unified precedence the happy path
+    // applies with probed=None) must keep filling the monitor card and the
+    // progress-bar denominator while the engine is unreachable. Only these
+    // early returns dropped the declaration (reported: local vLLM down →
+    // "Context Length" stuck at "—" although the model form declares the
+    // window).
+    // Scope: the two offline arms are `target_kind == "local"`-gated, so
+    // keyless remote targets fall through to the happy path and already
+    // kept the declaration; the auth_failed arm has no target_kind gate —
+    // any probed target (a remote one with a rejected key included) took
+    // it too, which is why the window is computed before the probe and
+    // applied at all three returns.
+    let (early_exit_window, early_exit_window_inferred) = probeless_display_window(
+        configured_context,
+        target_kind,
+        preset,
+        configured_model.as_deref(),
+    );
+    // The honesty notice rides along when the inference fallback (not a
+    // declaration) fills the window — the same entry the happy path pushes
+    // into `metric_diagnostics`.
+    let early_exit_inferred_notice = || MonitorDiagnostic {
+        code: "context_window_inferred".to_string(),
+        message: "上下文长度由模型名/供应商预设推断，远端模型接口未直接提供".to_string(),
+        http_status: None,
+        transport: None,
+        endpoint: None,
+    };
+
     // 1) /models 健康
-    let models_url = models_probe_url(upstream);
-    let mut request = client.get(models_url).timeout(Duration::from_secs(3));
-    if let Some(key) = api_key.map(str::trim).filter(|key| !key.is_empty()) {
-        if is_anthropic_endpoint(upstream) {
-            request = crate::core::model_endpoint::apply_anthropic_auth_headers(request, key);
-        } else {
-            request = request.bearer_auth(key);
-        }
-    }
-    let request =
-        crate::core::model_endpoint::with_opencode_session_header(request, upstream, "model-probe");
-    let should_probe_models =
-        target_kind == "local" || api_key.map(str::trim).is_some_and(|key| !key.is_empty());
+    let should_probe_models = target_kind != "invalid"
+        && (target_kind == "local" || api_key.map(str::trim).is_some_and(|key| !key.is_empty()));
     let models_resp = if should_probe_models {
+        let models_url = models_probe_url(upstream);
+        let mut request = client.get(models_url).timeout(Duration::from_secs(3));
+        if let Some(key) = api_key.map(str::trim).filter(|key| !key.is_empty()) {
+            if is_anthropic_endpoint(upstream) {
+                request = crate::core::model_endpoint::apply_anthropic_auth_headers(request, key);
+            } else {
+                request = request.bearer_auth(key);
+            }
+        }
+        let request = crate::core::model_endpoint::with_opencode_session_header(
+            request,
+            upstream,
+            "model-probe",
+        );
         Some(request.send().await)
     } else {
         None
@@ -336,7 +399,7 @@ async fn snapshot_for_model_config(
             if r.status() == reqwest::StatusCode::UNAUTHORIZED
                 || r.status() == reqwest::StatusCode::FORBIDDEN =>
         {
-            return Some(VllmSnapshot::with_base(
+            let mut snapshot = VllmSnapshot::with_base(
                 VllmStatus::Offline,
                 model_id,
                 provider,
@@ -352,11 +415,18 @@ async fn snapshot_for_model_config(
                     transport: None,
                     endpoint: endpoint_root(Some(r.url())),
                 }),
-            ));
+            );
+            snapshot.max_model_len = early_exit_window;
+            if early_exit_window_inferred {
+                snapshot
+                    .metric_diagnostics
+                    .push(early_exit_inferred_notice());
+            }
+            return Some(snapshot);
         }
         Some(Ok(r)) => {
             if target_kind == "local" {
-                return Some(VllmSnapshot::with_base(
+                let mut snapshot = VllmSnapshot::with_base(
                     VllmStatus::Offline,
                     model_id,
                     provider,
@@ -372,7 +442,14 @@ async fn snapshot_for_model_config(
                         transport: None,
                         endpoint: endpoint_root(Some(r.url())),
                     }),
-                ));
+                );
+                snapshot.max_model_len = early_exit_window;
+                if early_exit_window_inferred {
+                    snapshot
+                        .metric_diagnostics
+                        .push(early_exit_inferred_notice());
+                }
+                return Some(snapshot);
             }
             None
         }
@@ -387,7 +464,7 @@ async fn snapshot_for_model_config(
                 // no error text ever enters the snapshot.
                 let transport = transport_class(&err);
                 let endpoint = endpoint_root(err.url());
-                return Some(VllmSnapshot::with_base(
+                let mut snapshot = VllmSnapshot::with_base(
                     VllmStatus::Offline,
                     model_id,
                     provider,
@@ -406,13 +483,19 @@ async fn snapshot_for_model_config(
                         transport: Some(transport),
                         endpoint,
                     }),
-                ));
+                );
+                snapshot.max_model_len = early_exit_window;
+                if early_exit_window_inferred {
+                    snapshot
+                        .metric_diagnostics
+                        .push(early_exit_inferred_notice());
+                }
+                return Some(snapshot);
             }
             None
         }
-        // `None` only happens for remote/invalid targets with no API key (the
-        // probe is skipped for them); local targets always probe above, so no
-        // local arm is needed here.
+        // Invalid targets never probe; a valid remote target without an API
+        // key also skips the request. Valid local targets always probe.
         None => None,
     };
 
@@ -543,9 +626,10 @@ async fn snapshot_for_model_config(
         });
     }
 
-    let mut status = match (running, waiting) {
-        (Some(r), _) if r > 0.0 => VllmStatus::Busy,
-        (_, Some(w)) if w > 0.0 => VllmStatus::Busy,
+    let mut status = match (target_kind, running, waiting) {
+        ("invalid", _, _) => VllmStatus::Offline,
+        (_, Some(r), _) if r > 0.0 => VllmStatus::Busy,
+        (_, _, Some(w)) if w > 0.0 => VllmStatus::Busy,
         _ => VllmStatus::Ready,
     };
     // 如果用户配置了模型名，但和 vLLM 实际返回的不一致，降级为 Mismatch。
@@ -559,10 +643,9 @@ async fn snapshot_for_model_config(
     }
     let health_status = match status {
         VllmStatus::Mismatch => HealthStatus::Mismatch,
-        // No `Offline` arm: `status` is only ever Ready/Busy here (built from
-        // the queue gauges, then possibly downgraded to Mismatch); every
-        // Offline snapshot exits through the early returns above, which carry
-        // the offline refinement diagnostic themselves.
+        _ if target_kind == "invalid" => HealthStatus::Unverified,
+        // Valid-target offline snapshots exit through the early returns
+        // above, which carry the transport/HTTP refinement themselves.
         _ if target_kind == "remote"
             && api_key
                 .map(str::trim)
@@ -578,6 +661,13 @@ async fn snapshot_for_model_config(
         HealthStatus::MissingApiKey => Some(MonitorDiagnostic {
             code: "missing_api_key".to_string(),
             message: "远端模型未配置 API Key，跳过在线探测".to_string(),
+            http_status: None,
+            transport: None,
+            endpoint: None,
+        }),
+        HealthStatus::Unverified if target_kind == "invalid" => Some(MonitorDiagnostic {
+            code: "invalid_target".to_string(),
+            message: "模型接口地址无效，仅支持 HTTP(S) 地址".to_string(),
             http_status: None,
             transport: None,
             endpoint: None,
@@ -832,6 +922,27 @@ fn display_context_window(
     crate::core::model_context::resolve_context_window(configured, probed, inferred)
 }
 
+/// The probe-less display window for the early-exit snapshots (offline /
+/// auth_failed): the happy path's unified precedence with `probed = None`,
+/// because no listing was parsed. The inference input is the configured name
+/// only — the early exits never have a served name (the listing is exactly
+/// what failed), so this matches the happy path's configured arm. The second
+/// return value flags "the inferred fallback was actually adopted", feeding
+/// the same `context_window_inferred` notice the happy path pushes.
+fn probeless_display_window(
+    configured: Option<u32>,
+    target_kind: &str,
+    preset: ModelPreset,
+    configured_model: Option<&str>,
+) -> (Option<u32>, bool) {
+    display_context_window(
+        configured,
+        target_kind,
+        None,
+        infer_context_window(preset, configured_model),
+    )
+}
+
 /// Downgrade to `Mismatch` when the configured model name differs from the
 /// actual served name (only local-deployment callers enable it, see
 /// `snapshot_for_model_config`). Extracted as a pure function so unit tests can
@@ -968,57 +1079,60 @@ fn endpoint_root(url: Option<&reqwest::Url>) -> Option<String> {
     })
 }
 
-/// Transport class of a failed request, from reqwest's structured flags
-/// rather than its `Display` text (a real reqwest error's Display omits the
-/// source chain, so `model_probe_transport_code`'s string arms are dead for
-/// it). Vocabulary kept in step with that helper.
+/// Transport class of a failed request — the same ladder as
+/// `model_probe_transport_code` by construction (both delegate to the
+/// shared `transport_code_for`, so the vocabularies cannot drift).
 ///
-/// This repo's reqwest (0.13) has no `is_dns()`, so the Connect class is
-/// refined by walking the source chain to the innermost `std::io::Error` and
-/// deciding on its `ErrorKind`: hyper-util files resolver failures under its
+/// This repo's reqwest (0.13) has no `is_dns()`, so the structured flags the
+/// ladder consumes are derived here by walking the source chain to the
+/// innermost `std::io::Error`: hyper-util files resolver failures under its
 /// Connect kind too, and the DNS check must therefore precede the refused
-/// classification in intent — a resolver failure is the one Connect io error
-/// that is neither refused nor timed out, recognized by the OS resolver's io
-/// text (`failed to lookup address information` on the getaddrinfo platforms,
-/// `No such host is known` on Windows; the only remaining string decision,
-/// pinned by the DNS test below). Connect failures that are neither refused
-/// nor resolver failures read as `network_error`, never as a specific claim.
+/// classification — a resolver failure is the one Connect io error that is
+/// neither refused nor timed out, recognized by the OS resolver's io text
+/// (`failed to lookup address information` on the getaddrinfo platforms,
+/// `No such host is known` on Windows; pinned by the DNS test below). The
+/// ladder's keyword arms stay dead for real errors (reqwest's Display omits
+/// the source chain) and only serve the text-only settings/CLI contract.
 fn transport_class(err: &reqwest::Error) -> &'static str {
-    if err.is_timeout() {
-        "timeout"
-    } else if err.is_connect() {
+    let mut is_dns = false;
+    let mut is_refused = false;
+    let mut is_io_timeout = false;
+    if err.is_connect() {
         // Walk to the innermost io error (deeper matches overwrite shallower
-        // ones) and classify by its kind; the resolver failure is recognized
-        // by the io text the OS resolver produces.
+        // ones); the resolver failure is recognized by the io text the OS
+        // resolver produces.
         let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(err);
-        let mut class = "network_error";
         while let Some(current) = cause {
             if let Some(io_err) = current.downcast_ref::<std::io::Error>() {
-                class = match io_err.kind() {
-                    std::io::ErrorKind::ConnectionRefused => "connection_refused",
-                    std::io::ErrorKind::TimedOut => "timeout",
+                match io_err.kind() {
+                    std::io::ErrorKind::ConnectionRefused => is_refused = true,
+                    std::io::ErrorKind::TimedOut => is_io_timeout = true,
                     _ if io_err
                         .to_string()
                         .contains("failed to lookup address information")
                         || io_err.to_string().contains("No such host is known") =>
                     {
-                        "dns_failed"
+                        is_dns = true
                     }
-                    _ => "network_error",
-                };
+                    _ => {}
+                }
             }
             cause = current.source();
         }
-        class
-    } else {
-        "network_error"
     }
+    crate::core::model_endpoint::transport_code_for(
+        err.is_timeout() || is_io_timeout,
+        is_dns,
+        is_refused,
+        &err.to_string(),
+    )
 }
 
 /// Classify the backend kind by the base_url host: loopback/private IP
 /// ranges (including docker host aliases) = local inference engine
 /// (`local`, self-hosted vLLM with Prometheus metrics); public domain/IP =
-/// cloud API (`remote`); empty/unparseable = invalid config (`invalid`).
+/// cloud API (`remote`); missing-host, non-HTTP(S), or unparseable URL = invalid
+/// config (`invalid`).
 /// Drives the monitor card's local/remote/invalid label, metric
 /// applicability, and the native-window alert. The local/private decision
 /// shares core's `base_url_uses_local_or_private` with engine routing (one
@@ -1027,22 +1141,10 @@ fn transport_class(err: &reqwest::Error) -> &'static str {
 /// and trailing-dot local hosts classify as local instead of cloud.
 fn vllm_target_kind(upstream: &str) -> &'static str {
     let s = upstream.trim();
-    if s.is_empty() {
-        return "invalid";
-    }
-    let Some(rest) = s
-        .strip_prefix("http://")
-        .or_else(|| s.strip_prefix("https://"))
-    else {
+    let Ok(url) = reqwest::Url::parse(s) else {
         return "invalid";
     };
-    let Some(host_port) = rest.split('/').next() else {
-        return "invalid";
-    };
-    // 去端口 + ipv6 括号
-    let host = host_port.rsplit_once(':').map_or(host_port, |(h, _)| h);
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    if host.is_empty() {
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return "invalid";
     }
     if crate::core::model_endpoint::base_url_uses_local_or_private(s) {
@@ -1165,11 +1267,377 @@ mod tests {
         );
         // 云端 API:公网域名 / 公网 IP
         assert_eq!(vllm_target_kind("https://api.deepseek.com/v1"), "remote");
+        assert_eq!(vllm_target_kind("HTTPS://MODEL.EXAMPLE/v1"), "remote");
+        assert_eq!(vllm_target_kind("http://[::1]:8000/v1"), "local");
+        assert_eq!(vllm_target_kind("http://[2001:db8::1]:8000/v1"), "remote");
+        assert_eq!(
+            vllm_target_kind("https://user:password@model.example:8443/v1"),
+            "remote"
+        );
         assert_eq!(vllm_target_kind("http://8.8.8.8:8000/v1"), "remote");
         assert_eq!(vllm_target_kind("http://172.32.0.1:8000/v1"), "remote"); // 172.32 不在私有段
         // 配置异常:空 / 非 URL
         assert_eq!(vllm_target_kind(""), "invalid");
         assert_eq!(vllm_target_kind("not-a-url"), "invalid");
+        for upstream in [
+            "ftp://model.example/v1",
+            "file:///tmp/model",
+            "mailto:model@example.com",
+            "https://",
+            "http://[::1",
+            "http://model.example:invalid/v1",
+            "http://model.example:65536/v1",
+        ] {
+            assert_eq!(vllm_target_kind(upstream), "invalid", "{upstream}");
+        }
+    }
+
+    /// Cross-pin: the monitor snapshot's `transport_class` and core's
+    /// `model_probe_transport_code` must stay ONE classifier. Both delegate
+    /// to the shared `transport_code_for`, so the table below pins each
+    /// code's trigger exactly as the ladder arms read it (the keyword texts
+    /// mirror core's arms; arm order matters — a text matching two arms
+    /// must land in the earlier one), and the only reqwest::Error
+    /// constructible offline (a builder error from an unparseable URL,
+    /// surfaced by build() before any network I/O) asserts both real
+    /// front-ends return the same code for the same error. Per-class
+    /// real-error samples for dns/tls/refused cannot be constructed:
+    /// reqwest::Error has no public constructor, and its Display omits the
+    /// source chain, so a live dial would classify via the structured flags
+    /// here but fall through to `network_error` in core — the shared
+    /// ladder, not per-error equality, is the convergence.
+    #[test]
+    fn transport_class_and_model_probe_transport_code_share_one_ladder() {
+        use crate::core::model_endpoint::transport_code_for;
+
+        // (is_timeout, is_dns, is_connect, display text) → code.
+        let cases = [
+            (
+                true,
+                false,
+                false,
+                "error sending request for url (http://x/)",
+                "timeout",
+            ),
+            (
+                false,
+                false,
+                false,
+                "error trying to connect: invalid peer certificate: UnknownIssuer",
+                "tls_error",
+            ),
+            (
+                false,
+                false,
+                false,
+                "error trying to connect: tls handshake eof",
+                "tls_error",
+            ),
+            (
+                false,
+                false,
+                false,
+                "error trying to connect: ssl protocol error",
+                "tls_error",
+            ),
+            (
+                false,
+                true,
+                false,
+                "error sending request for url (http://x/)",
+                "dns_failed",
+            ),
+            (
+                false,
+                false,
+                false,
+                "error sending request for url (http://x/): failed to lookup address information: Name or service not known",
+                "dns_failed",
+            ),
+            (
+                false,
+                false,
+                true,
+                "error sending request for url (http://x/)",
+                "connection_refused",
+            ),
+            // Review 5875009923 P3: the structured flags answer before the
+            // keyword arms — a refused request whose URL embeds "tls" must
+            // stay connection_refused, not inherit the tls keyword from the
+            // URL text.
+            (
+                false,
+                false,
+                true,
+                "error sending request for url (http://127.0.0.1/tls): tcp connect error: Connection refused (os error 111)",
+                "connection_refused",
+            ),
+            (
+                false,
+                false,
+                false,
+                "error sending request for url (http://x/): tcp connect error: Connection refused (os error 111)",
+                "connection_refused",
+            ),
+            (
+                false,
+                false,
+                false,
+                "error sending request for url (http://x/): actively refused",
+                "connection_refused",
+            ),
+            // Each keyword alternative pinned in isolation (round-1 review
+            // M1): deleting any single alternative must turn a row red.
+            (
+                false,
+                false,
+                false,
+                "error sending request for url (http://dns-backed-host/)",
+                "dns_failed",
+            ),
+            (
+                false,
+                false,
+                false,
+                "error sending request for url (http://x/): tcp connect error: os error 10061",
+                "connection_refused",
+            ),
+            (
+                false,
+                false,
+                false,
+                "error sending request for url (http://x/): Name or service not known",
+                "dns_failed",
+            ),
+            // Arm ORDER pinned: a text matching two arms lands in the
+            // earlier one.
+            (
+                false,
+                false,
+                false,
+                "error sending request for url (https://ssl.example.com/): failed to lookup address information",
+                "tls_error",
+            ),
+            (
+                false,
+                false,
+                false,
+                "error sending request for url (http://dns-backed-host/): connection refused",
+                "dns_failed",
+            ),
+            // Review 5875813001 P1/P2: the structured flags answer before
+            // the keyword arms (DNS over connect, per core's contract), so
+            // a URL embedding a TLS word no longer biases a real
+            // connect/dns-class error into tls_error.
+            (
+                false,
+                false,
+                true,
+                "error sending request for url (https://ssl.example.com/)",
+                "connection_refused",
+            ),
+            (
+                false,
+                true,
+                false,
+                "error sending request for url (https://ssl.example.com/)",
+                "dns_failed",
+            ),
+            // Timeout outranks everything, keyword text included.
+            (
+                true,
+                false,
+                true,
+                "error sending request for url (https://ssl.example.com/): certificate unknown",
+                "timeout",
+            ),
+            (false, false, false, "builder error", "network_error"),
+        ];
+        for (is_timeout, is_dns, is_connect, text, expected) in cases {
+            assert_eq!(
+                transport_code_for(is_timeout, is_dns, is_connect, text),
+                expected,
+                "ladder drifted for {text:?}"
+            );
+        }
+
+        let err = reqwest::Client::new()
+            .get("not a url")
+            .build()
+            .expect_err("an unparseable URL must fail before any network I/O");
+        assert_eq!(
+            transport_class(&err),
+            crate::core::model_endpoint::model_probe_transport_code(&err).0
+        );
+        assert_eq!(transport_class(&err), "network_error");
+    }
+
+    #[test]
+    fn online_verdict_requires_a_valid_target_kind() {
+        for kind in ["invalid", "", "unknown", "local", "remote"] {
+            for status in [VllmStatus::Offline, VllmStatus::Ready, VllmStatus::Busy] {
+                for health in [HealthStatus::Verified, HealthStatus::Unverified] {
+                    let snapshot = VllmSnapshot {
+                        target_kind: kind.to_string(),
+                        status,
+                        health_status: health,
+                        ..VllmSnapshot::default()
+                    };
+                    assert_eq!(
+                        snapshot.is_online(),
+                        matches!(kind, "local" | "remote")
+                            && status != VllmStatus::Offline
+                            && health == HealthStatus::Verified,
+                        "kind={kind} status={status:?} health={health:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_targets_never_probe_or_report_online_even_with_a_local_preset_or_key() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct CountDns(Arc<AtomicUsize>);
+        impl reqwest::dns::Resolve for CountDns {
+            fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(std::future::ready(Err(std::io::Error::other(
+                    "unexpected invalid-target DNS lookup",
+                )
+                .into())))
+            }
+        }
+
+        let resolutions = Arc::new(AtomicUsize::new(0));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(CountDns(Arc::clone(&resolutions))))
+            .build()
+            .unwrap();
+        for upstream in [
+            "",
+            "not-a-url",
+            "ftp://user:private-marker@model.invalid/v1?token=private-marker",
+            "file:///tmp/private-marker",
+            "https://",
+            "http://[::1",
+            "https://user:private-marker@model.invalid:bad/v1?token=private-marker",
+            "http://model.invalid:65536/v1",
+        ] {
+            for preset in [ModelPreset::LocalVllm, ModelPreset::Deepseek] {
+                for key in [None, Some("private-api-key-marker")] {
+                    let snapshot = snapshot_for_model_config_with_client(
+                        &client,
+                        upstream,
+                        Some("configured-model".to_string()),
+                        preset,
+                        Some("model-id".to_string()),
+                        "provider".to_string(),
+                        key,
+                        Some(262_144),
+                    )
+                    .await
+                    .expect("invalid configuration remains an explicit snapshot");
+                    assert_eq!(snapshot.target_kind, "invalid");
+                    assert_eq!(snapshot.status, VllmStatus::Offline);
+                    assert_eq!(snapshot.health_status, HealthStatus::Unverified);
+                    assert!(!snapshot.is_online());
+                    assert!(!snapshot.metrics_applicable);
+                    assert_eq!(snapshot.max_model_len, Some(262_144));
+                    assert_eq!(
+                        snapshot.configured_model.as_deref(),
+                        Some("configured-model")
+                    );
+                    let diagnostic = snapshot.diagnostic.as_ref().expect("invalid diagnostic");
+                    assert_eq!(diagnostic.code, "invalid_target");
+                    assert!(diagnostic.http_status.is_none());
+                    assert!(diagnostic.transport.is_none());
+                    assert!(diagnostic.endpoint.is_none());
+                    let serialized = serde_json::to_string(&snapshot).unwrap();
+                    assert!(!serialized.contains("private-marker"));
+                    assert!(!serialized.contains("private-api-key-marker"));
+                }
+            }
+        }
+        assert_eq!(resolutions.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn valid_targets_preserve_remote_auth_and_local_preset_behavior() {
+        use crate::core::model_endpoint::models_mock;
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let mock = models_mock::spawn(&[
+            (
+                "/v1/models",
+                200,
+                r#"{"data":[{"id":"m","max_model_len":32768}]}"#.into(),
+            ),
+            ("/metrics", 200, "vllm:num_requests_running 1\n".into()),
+        ]);
+        let address = reqwest::Url::parse(&mock.base_url)
+            .unwrap()
+            .socket_addrs(|| None)
+            .unwrap()[0];
+        let upstream = format!("http://monitor.example:{}/v1", address.port());
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve("monitor.example", address)
+            .build()
+            .unwrap();
+        for (preset, key, kind, health, status, model_hits) in [
+            (
+                ModelPreset::Deepseek,
+                None,
+                "remote",
+                HealthStatus::MissingApiKey,
+                VllmStatus::Ready,
+                0,
+            ),
+            (
+                ModelPreset::Deepseek,
+                Some("configured-test-key"),
+                "remote",
+                HealthStatus::Verified,
+                VllmStatus::Ready,
+                1,
+            ),
+            (
+                ModelPreset::LocalVllm,
+                None,
+                "local",
+                HealthStatus::Verified,
+                VllmStatus::Busy,
+                2,
+            ),
+        ] {
+            let snapshot = snapshot_for_model_config_with_client(
+                &client,
+                &upstream,
+                Some("m".to_string()),
+                preset,
+                None,
+                "provider".to_string(),
+                key,
+                None,
+            )
+            .await
+            .expect("valid target snapshot");
+            assert_eq!(snapshot.target_kind, kind);
+            assert_eq!(snapshot.health_status, health);
+            assert_eq!(snapshot.status, status);
+            assert_eq!(snapshot.is_online(), health == HealthStatus::Verified);
+            assert_eq!(mock.hits_for("/v1/models"), model_hits);
+            assert_eq!(mock.hits_for("/metrics"), usize::from(kind == "local"));
+            if let Some(key) = key {
+                assert_eq!(mock.auth_for("/v1/models"), Some(format!("Bearer {key}")));
+            }
+        }
     }
 
     #[test]
@@ -1495,11 +1963,10 @@ mod tests {
         );
     }
 
-    /// A hostname that cannot resolve classifies as `dns_failed`, not
-    /// `connection_refused`: hyper-util wraps resolver failures in its
-    /// Connect kind, so `is_connect()` alone mislabels them. Inject failures
-    /// through reqwest's resolver: system DNS/proxies can answer even for
-    /// `.invalid`, which would exercise an HTTP response instead.
+    /// Exercise the real reqwest DNS error chain without relying on system
+    /// DNS or proxies: a proxy can answer even for a reserved `.invalid`
+    /// hostname. The resolver injects the getaddrinfo-style io error consumed
+    /// by the classifier; this does not test the operating system's resolver.
     #[tokio::test]
     async fn snapshot_classifies_dns_failures_as_dns_failed() {
         use std::sync::Arc;
@@ -1523,6 +1990,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         for message in [
+            "failed to lookup address information: controlled resolver failure",
             "failed to lookup address information: fixture DNS failure",
             "No such host is known: fixture DNS failure",
         ] {
@@ -1556,7 +2024,7 @@ mod tests {
             let diagnostic = snap.diagnostic.expect("offline carries a diagnostic");
             assert_eq!(diagnostic.code, "models_unreachable");
             assert_eq!(diagnostic.transport, Some("dns_failed"));
-            assert!(diagnostic.http_status.is_none());
+            assert_eq!(diagnostic.http_status, None);
             assert_eq!(
                 diagnostic.endpoint.as_deref(),
                 Some("http://pinvou-monitor-probe.invalid:1")
@@ -1635,6 +2103,24 @@ mod tests {
         assert_eq!(http_diag.code, "models_http_error");
         assert_eq!(http_diag.http_status, Some(500));
         assert!(http_diag.transport.is_none());
+        // This exit keeps the context window too: undeclared here, the
+        // preset fallback fills it and carries the honesty notice
+        // (LocalVllm's 262,144 for names the resolution chain does not
+        // know) — the same unified precedence as the other two early
+        // exits.
+        assert_eq!(
+            http_err.max_model_len,
+            Some(262_144),
+            "the fallback window must survive the models_http_error early-exit"
+        );
+        assert!(
+            http_err
+                .metric_diagnostics
+                .iter()
+                .any(|d| d.code == "context_window_inferred"),
+            "an inferred window must carry the honesty notice: {:?}",
+            http_err.metric_diagnostics
+        );
 
         // 401 with a key → auth_failed; the verdict is the answer, and the
         // diagnostic carries the HTTP status without transport detail.
@@ -1706,6 +2192,164 @@ mod tests {
             .expect("mismatch carries its note in this repo's shape");
         assert_eq!(mismatch_diag.code, "model_mismatch");
         assert!(mismatch_diag.transport.is_none() && mismatch_diag.endpoint.is_none());
+    }
+
+    /// Early-exit snapshots keep the context window: the window is
+    /// configuration, not a runtime fact, so an unreachable local engine
+    /// (connection refused — the monitor's normal idle state) must still
+    /// display the user-declared window instead of blanking the context card
+    /// (reported: "Context Length" stuck at "—" whenever the local vLLM was
+    /// down).
+    /// The auth_failed verdict must not drop it either, and neither may a
+    /// plain local HTTP error from the engine (503 while it restarts).
+    /// Without a declaration
+    /// the inference/preset fallback fills the window and carries the
+    /// `context_window_inferred` notice, same as the happy path.
+    #[tokio::test]
+    async fn snapshot_early_exits_keep_the_context_window() {
+        use crate::core::model_endpoint::models_mock;
+        let _lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        // Transport-refused local target with the user-declared window: the
+        // declaration survives the offline early-exit verbatim (and is not
+        // flagged as inferred — a declaration is configuration).
+        let refused = snapshot_for_model_config(
+            "http://127.0.0.1:1",
+            Some("qwen36_35b_256k".to_string()),
+            ModelPreset::LocalVllm,
+            None,
+            "vllm".to_string(),
+            None,
+            Some(262_144),
+        )
+        .await
+        .expect("a local target yields a snapshot even when unreachable");
+        assert_eq!(refused.health_status, HealthStatus::Offline);
+        assert_eq!(
+            refused.max_model_len,
+            Some(262_144),
+            "the declared window must survive the offline early-exit"
+        );
+        assert!(
+            refused
+                .metric_diagnostics
+                .iter()
+                .all(|d| d.code != "context_window_inferred"),
+            "a declared window is not inferred: {:?}",
+            refused.metric_diagnostics
+        );
+
+        // auth_failed (401 with a key): the same declaration survives.
+        let mock = models_mock::spawn(&[("/models", 401, "{}".into())]);
+        let auth = snapshot_for_model_config(
+            &mock.base_url,
+            Some("m".to_string()),
+            ModelPreset::LocalVllm,
+            None,
+            "vllm".to_string(),
+            Some("secret"),
+            Some(262_144),
+        )
+        .await
+        .expect("snapshot");
+        assert_eq!(auth.health_status, HealthStatus::AuthFailed);
+        assert_eq!(
+            auth.max_model_len,
+            Some(262_144),
+            "the declared window must survive the auth_failed early-exit"
+        );
+
+        // auth_failed without a declaration: the preset fallback fills the
+        // window at that exit too and the honesty notice rides along — the
+        // same construction as the offline legs. (The declared 401 case
+        // above carries an empty metric_diagnostics vec because a
+        // declaration is not flagged inferred, so only this leg pins the
+        // auth_failed notices.)
+        let mock = models_mock::spawn(&[("/models", 401, "{}".into())]);
+        let auth_inferred = snapshot_for_model_config(
+            &mock.base_url,
+            Some("m".to_string()),
+            ModelPreset::LocalVllm,
+            None,
+            "vllm".to_string(),
+            Some("secret"),
+            None,
+        )
+        .await
+        .expect("snapshot");
+        assert_eq!(auth_inferred.health_status, HealthStatus::AuthFailed);
+        assert_eq!(
+            auth_inferred.max_model_len,
+            Some(262_144),
+            "the fallback window must survive the auth_failed early-exit"
+        );
+        assert!(
+            auth_inferred
+                .metric_diagnostics
+                .iter()
+                .any(|d| d.code == "context_window_inferred"),
+            "an inferred window must carry the honesty notice at the auth_failed exit: {:?}",
+            auth_inferred.metric_diagnostics
+        );
+
+        // models_http_error (a local target served a non-401/403 HTTP
+        // status, e.g. 503 while the engine restarts): the same declaration
+        // survives the third early-exit verbatim, still not flagged
+        // inferred.
+        let mock = models_mock::spawn(&[("/models", 503, "unavailable".into())]);
+        let http_err = snapshot_for_model_config(
+            &mock.base_url,
+            Some("m".to_string()),
+            ModelPreset::LocalVllm,
+            None,
+            "vllm".to_string(),
+            None,
+            Some(262_144),
+        )
+        .await
+        .expect("snapshot");
+        assert_eq!(http_err.health_status, HealthStatus::Offline);
+        assert_eq!(
+            http_err.max_model_len,
+            Some(262_144),
+            "the declared window must survive the models_http_error early-exit"
+        );
+        assert!(
+            http_err
+                .metric_diagnostics
+                .iter()
+                .all(|d| d.code != "context_window_inferred"),
+            "a declared window is not inferred: {:?}",
+            http_err.metric_diagnostics
+        );
+
+        // Without a declaration the preset fallback fills the window and the
+        // honesty notice rides along (LocalVllm's fallback is 262,144 for
+        // names the resolution chain does not know), exactly like the happy
+        // path's inferred-window notice.
+        let offline = snapshot_for_model_config(
+            "http://127.0.0.1:1",
+            Some("totally-unknown-name".to_string()),
+            ModelPreset::LocalVllm,
+            None,
+            "vllm".to_string(),
+            None,
+            None,
+        )
+        .await
+        .expect("a local target yields a snapshot even when unreachable");
+        assert_eq!(offline.health_status, HealthStatus::Offline);
+        assert_eq!(offline.max_model_len, Some(262_144));
+        assert!(
+            offline
+                .metric_diagnostics
+                .iter()
+                .any(|d| d.code == "context_window_inferred"),
+            "an inferred window must carry the honesty notice: {:?}",
+            offline.metric_diagnostics
+        );
     }
 
     /// The inferred-window notice fires for local targets too (a listing
@@ -2613,6 +3257,14 @@ vllm:request_time_per_output_token_seconds_sum{engine=\"0\",model_name=\"qwen36_
             (ModelPreset::Kimi, "kimi-k2.7-code", 262_144),
             (ModelPreset::Kimi, "kimi-k2.7-code-highspeed", 262_144),
             (ModelPreset::Kimi, "kimi-k2.6", 262_144),
+            // The K3.1 flagship rows (2026-11-03 refresh): officially 1M
+            // ("K3 系列模型均支持 1,048,576 tokens 上下文窗口",
+            // platform.kimi.com pricing); carried by the PINVOU_KNOWN
+            // supplemental rows — listed here so the settings-page rows stay covered
+            // by this charter (2026-11-05 review; table attribution fixed in
+            // the round-8 review).
+            (ModelPreset::Kimi, "kimi-k3.1-pro", 1_048_576),
+            (ModelPreset::Kimi, "kimi-k3.1-pro-highspeed", 1_048_576),
             // The Kimi Coding Plan rides the openai_compatible preset. Bare
             // kimi-for-coding serves K2.8 Preview since 2026-09 (officially
             // 1M on every plan tier), corrected by the PINVOU_OVERRIDES entry;
@@ -2646,6 +3298,11 @@ vllm:request_time_per_output_token_seconds_sum{engine=\"0\",model_name=\"qwen36_
                 "MiniMax-M3.1-Flash-Preview",
                 1_000_000,
             ),
+            // The GA spelling (2026-10-19 rename; the Preview id survives as
+            // a legacyAlias) resolves through the same suffix-tolerant row —
+            // listed here so the settings-page row stays covered by this
+            // charter (2026-11-05 review).
+            (ModelPreset::Minimax, "MiniMax-M3.1-Flash", 1_000_000),
             (ModelPreset::Minimax, "MiniMax-M2.7", 204_800),
             (ModelPreset::Minimax, "MiniMax-M2.7-highspeed", 204_800),
             (ModelPreset::Minimax, "MiniMax-M2.5", 204_800),
@@ -2696,6 +3353,19 @@ vllm:request_time_per_output_token_seconds_sum{engine=\"0\",model_name=\"qwen36_
             // settings-page row is covered by this charter too, same as the
             // opus-5-5 precedent below).
             (ModelPreset::Qwen, "qwen3.5-plus", 1_000_000),
+            // The 2026-11-03 Token Plan / Coding Plan additions: the 1017
+            // flash snapshot rides the base v4 heuristic (1M); hy4 /
+            // hy4-preview carry no official per-model context figures, and
+            // kimi-k2.5 has no base row — all three fall to the preset
+            // fallback like the auto row (2026-11-05 review pins).
+            (ModelPreset::Qwen, "deepseek-v4.1-flash-1017", 1_000_000),
+            // hy4 / hy4-preview are tencent_token_plan rows whose group
+            // preset is openai_compatible (the Qwen attribution in the
+            // 2026-11-05 pins was a mislabel; the pinned value matches both
+            // presets' fallback, fixed round-8 review).
+            (ModelPreset::OpenaiCompatible, "hy4", 131_072),
+            (ModelPreset::OpenaiCompatible, "hy4-preview", 131_072),
+            (ModelPreset::Qwen, "kimi-k2.5", 131_072),
             // Doubao: evolving is already 1M; the 2-1 -260628 generation and
             // the 2-0 snapshots are officially 256k, while the -260915
             // snapshots moved to 1024k (volcengine 1330310, re-checked
@@ -2754,6 +3424,15 @@ vllm:request_time_per_output_token_seconds_sum{engine=\"0\",model_name=\"qwen36_
                 1_000_000,
             ),
             (ModelPreset::OpenaiCompatible, "ark-code-latest", 131_072),
+            // deepseek-v4.1-flash-economy (2026-11-03 plan addition, on the
+            // live 1M list): rides the base v4 heuristic like its sibling
+            // above — listed here so the settings-page row stays covered by
+            // this charter (2026-11-05 review).
+            (
+                ModelPreset::OpenaiCompatible,
+                "deepseek-v4.1-flash-economy",
+                1_000_000,
+            ),
             // OpenAI 兼容示例：gpt-5.6 全系 1.05M
             (ModelPreset::OpenaiCompatible, "gpt-5.6-terra", 1_050_000),
             (ModelPreset::OpenaiCompatible, "gpt-5.6-luna", 1_050_000),
@@ -2774,6 +3453,16 @@ vllm:request_time_per_output_token_seconds_sum{engine=\"0\",model_name=\"qwen36_
             // table correcting it to 1M, otherwise the engine falls to 128K
             // and diverges from the monitor page's prefs substring fallback.
             (ModelPreset::Xai, "grok-4.20-reasoning", 1_000_000),
+            // grok-4.20-multi-agent-0309 (2026-11-03 refresh, 1M per the
+            // model detail page): the base 2M row above cannot suffix-match
+            // this id; the anchor lives in the core::model_context
+            // PINVOU_KNOWN table (round-9 placement — the base chain has no
+            // row for the id at all). The settings-page row was deferred in
+            // the round-9 review (the official multi-agent guide excludes
+            // the Chat Completions wire this app rides — see the xai group
+            // comment); the charter entry stays for stored/custom configs
+            // that still carry the id.
+            (ModelPreset::Xai, "grok-4.20-multi-agent-0309", 1_000_000),
             // The base known table only has bare "grok-build" → 512K, which
             // misses the -0.1 wire id; the core::model_context override table
             // corrects it to the official docs.x.ai 256K (matching the catalog desc).
@@ -2787,6 +3476,16 @@ vllm:request_time_per_output_token_seconds_sum{engine=\"0\",model_name=\"qwen36_
             // base gpt-6 row); official 1,050,000 per their model pages.
             (ModelPreset::Openai, "gpt-6-sol", 1_050_000),
             (ModelPreset::Openai, "gpt-6-luna", 1_050_000),
+            // The 6.1 generation (2026-11-03 refresh; sol is the preset
+            // default since the 2026-11-05 resync): same family 1,050,000 /
+            // 128,000 anchors (Azure Foundry capability table, updated
+            // 2026-10-29) carried by the core::model_context anchor rows
+            // (sol in PINVOU_OVERRIDES, terra in PINVOU_KNOWN per the
+            // round-9 placement; both outputs in
+            // PINVOU_DOCUMENTED_OUTPUT) — listed here so the
+            // settings-page rows stay covered by this charter.
+            (ModelPreset::Openai, "gpt-6.1-sol", 1_050_000),
+            (ModelPreset::Openai, "gpt-6.1-terra", 1_050_000),
             (ModelPreset::Gemini, "gemini-3.8-flash", 1_048_576),
             // The 2026-10-13 GA flagship joins the catalog: the base gemini
             // exact rows stop at 3.7/3.1 (no gemini-4 row), so the
@@ -2795,6 +3494,65 @@ vllm:request_time_per_output_token_seconds_sum{engine=\"0\",model_name=\"qwen36_
             // checked 2026-10-14); listed here so the settings-page row is
             // covered by this charter too.
             (ModelPreset::Gemini, "gemini-4-argon", 1_048_576),
+            // The Kimi Code K3.1 spellings (2026-11-03 refresh; the Kimi
+            // Coding Plan rides the openai_compatible preset) resolve 1M via
+            // the PINVOU_KNOWN supplemental rows, and their `[1m]` composites
+            // via the 1M
+            // hint — listed here so the settings-page/ACP-datalist rows
+            // stay covered by this charter (2026-11-05 review). The two
+            // bare preset rows were deferred from the catalog on
+            // 2026-11-05 until the pinned child carries the bare-K3.1
+            // replay repair (upstream #137), but the ids stay reachable
+            // through the ACP kimi-code preset and the custom entry, so
+            // the resolution anchors keep their charter coverage.
+            (ModelPreset::OpenaiCompatible, "k3.1-pro", 1_048_576),
+            (
+                ModelPreset::OpenaiCompatible,
+                "k3.1-pro-highspeed",
+                1_048_576,
+            ),
+            (ModelPreset::OpenaiCompatible, "k3.1-pro[1m]", 1_048_576),
+            (
+                ModelPreset::OpenaiCompatible,
+                "kimi-k3.1-pro[1m]",
+                1_048_576,
+            ),
+            // Meta Model API rows (2026-11-03 refresh): muse-spark-1.1/1.2
+            // ride the base rows (1M); muse-spark-1.3 / muse-wonder-1.0 have
+            // no base rows and ride the PINVOU_KNOWN supplemental entries
+            // (1,048,576 per models.dev/live docs) — listed here so the
+            // settings-page rows stay covered by this charter
+            // (2026-11-05 review; table name corrected 2026-11-06).
+            (ModelPreset::OpenaiCompatible, "muse-spark-1.1", 1_000_000),
+            (ModelPreset::OpenaiCompatible, "muse-spark-1.2", 1_000_000),
+            (ModelPreset::OpenaiCompatible, "muse-spark-1.3", 1_048_576),
+            (ModelPreset::OpenaiCompatible, "muse-wonder-1.0", 1_048_576),
+            // Mistral / new-group rows (2026-11-03 refresh): the base
+            // registry resolves the -latest rows (262,144) and codestral
+            // (256,000) — listed here so the settings-page rows stay
+            // covered by this charter (2026-11-05 review).
+            (
+                ModelPreset::OpenaiCompatible,
+                "mistral-medium-latest",
+                262_144,
+            ),
+            (
+                ModelPreset::OpenaiCompatible,
+                "mistral-small-latest",
+                262_144,
+            ),
+            (
+                ModelPreset::OpenaiCompatible,
+                "mistral-large-latest",
+                262_144,
+            ),
+            // codestral-latest: the charter mirrors what the engine actually
+            // resolves (models.dev 256K). Note the catalog's mistral comment
+            // records the official codestral page documenting Context 128k
+            // and calls the models.dev figure stale 25.01-era — the pin is
+            // the engine-resolution truth, not an endorsement of that figure;
+            // both sides carry re-verify flags for the next refresh.
+            (ModelPreset::OpenaiCompatible, "codestral-latest", 256_000),
             // Anthropic models covered by the base catalog (haiku 200K) and the
             // PINVOU_OVERRIDES entries (opus-5 / fable-5-1 both 1M) go through
             // resolved_context_window; preset fallbacks are covered by the prefs

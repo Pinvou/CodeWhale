@@ -107,13 +107,33 @@ func (metrics *relayMetrics) record(stats events.OutboxStats) {
 	metrics.oldestMillis.Store(stats.OldestPendingAge.Milliseconds())
 }
 
-func (metrics *relayMetrics) server(address string, ready func(context.Context) error) *http.Server {
-	return metrics.serverWithApproval(address, ready, nil)
+type approvalMonitor struct {
+	scope   string
+	replica string
 }
 
-func (metrics *relayMetrics) serverWithApproval(address string, ready, approvalReady func(context.Context) error) *http.Server {
+func (metrics *relayMetrics) server(address string, ready func(context.Context) error) *http.Server {
+	return metrics.serverWithApproval(address, ready, nil, approvalMonitor{})
+}
+
+func (metrics *relayMetrics) serverWithApproval(address string, ready, approvalReady func(context.Context) error, monitor approvalMonitor) *http.Server {
 	router := httpserver.NewRouter()
-	router.GET("/metrics", httpserver.Adapt(promhttp.HandlerFor(metrics.registry, promhttp.HandlerOpts{EnableOpenMetrics: true})))
+	var gatherer prometheus.Gatherer = metrics.registry
+	if approvalReady != nil && monitor.scope != "" && monitor.replica != "" {
+		approvalRegistry := prometheus.NewRegistry()
+		approvalRegistry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name:        "pinvou_authorization_relay_ready",
+			Help:        "Whether the dedicated Account authorization readiness check passes at scrape time.",
+			ConstLabels: prometheus.Labels{"source": "account", "approval_scope": monitor.scope, "approval_replica": monitor.replica},
+		}, func() float64 {
+			if checkRelayReady(context.Background(), approvalReady) {
+				return 1
+			}
+			return 0
+		}))
+		gatherer = prometheus.Gatherers{metrics.registry, approvalRegistry}
+	}
+	router.GET("/metrics", httpserver.Adapt(promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{EnableOpenMetrics: true})))
 	router.GET("/health/live", httpserver.AdaptFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNoContent)
@@ -131,10 +151,8 @@ func (metrics *relayMetrics) serverWithApproval(address string, ready, approvalR
 	}))
 	if approvalReady != nil {
 		router.GET("/health/ready/approval-authorization", httpserver.AdaptFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-			defer cancel()
 			w.Header().Set("Cache-Control", "no-store")
-			if approvalReady(ctx) != nil {
+			if !checkRelayReady(r.Context(), approvalReady) {
 				http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
 				return
 			}
@@ -143,6 +161,12 @@ func (metrics *relayMetrics) serverWithApproval(address string, ready, approvalR
 		}))
 	}
 	return &http.Server{Addr: address, Handler: httpserver.CorrelationHandler(router), ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second}
+}
+
+func checkRelayReady(ctx context.Context, ready func(context.Context) error) bool {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return ready(ctx) == nil
 }
 
 func shutdownServer(server *http.Server) {

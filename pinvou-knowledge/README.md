@@ -26,7 +26,7 @@ cargo run --manifest-path pinvou-knowledge/Cargo.toml --release -- \
 
 模型目录必须包含：
 
-- `model.onnx`（或 `onnx/model_int8.onnx`）
+- `model.onnx`（或 `onnx/model_int8.onnx`、`onnx/model.onnx`）
 - `tokenizer.json`
 - `config.json`
 - `special_tokens_map.json`

@@ -881,9 +881,73 @@ pub async fn web_access_create_session_and_chat(
     store: State<'_, SessionStore>,
     app: AppHandle,
 ) -> Result<WebSessionMetadata, String> {
+    web_access_first_turn(
+        message,
+        attachment_handles,
+        restrict_tools,
+        None,
+        &manager,
+        &pool,
+        &store,
+        &app,
+    )
+    .await
+}
+
+/// The separate command advertises saved-model support through capability
+/// negotiation. Older hosts cannot silently ignore the selected model.
+#[tauri::command]
+pub async fn web_access_create_session_and_chat_with_model(
+    message: String,
+    attachment_handles: Option<Vec<String>>,
+    restrict_tools: Option<bool>,
+    model_id: String,
+    manager: State<'_, RemoteControlManager>,
+    pool: State<'_, EnginePool>,
+    store: State<'_, SessionStore>,
+    app: AppHandle,
+) -> Result<WebSessionMetadata, String> {
+    web_access_first_turn(
+        message,
+        attachment_handles,
+        restrict_tools,
+        Some(&model_id),
+        &manager,
+        &pool,
+        &store,
+        &app,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn web_access_first_turn(
+    message: String,
+    attachment_handles: Option<Vec<String>>,
+    restrict_tools: Option<bool>,
+    local_model_id: Option<&str>,
+    manager: &RemoteControlManager,
+    pool: &EnginePool,
+    store: &SessionStore,
+    app: &AppHandle,
+) -> Result<WebSessionMetadata, String> {
     let transcript_revision = crate::features::sessions::transcript_revision(&[])
         .map_err(|error| format!("create empty transcript revision: {error:#}"))?;
-    let metadata = super::sessions::create_session_record(false, &store, &pool, None)?;
+    let metadata = if let Some(id) = local_model_id {
+        let prefs = UserPrefs::load();
+        let model = super::settings::require_local_model_selection(prefs.model_by_id(id), id)?;
+        // The explicit binding is persisted before the session is discoverable.
+        store
+            .create_new(
+                model.model.clone(),
+                Some(model.id.clone()),
+                pool.bridge.workspace.clone(),
+            )
+            .map_err(|error| format!("create session with selected model: {error:#}"))?
+            .metadata
+    } else {
+        super::sessions::create_session_record(false, store, pool, None)?
+    };
     let session_id = metadata.id.clone();
 
     if let Err(error) = web_access_chat_for_session(
@@ -891,13 +955,24 @@ pub async fn web_access_create_session_and_chat(
         attachment_handles,
         session_id.clone(),
         restrict_tools,
-        &manager,
-        &pool,
-        &store,
-        &app,
+        manager,
+        pool,
+        store,
+        app,
     )
     .await
     {
+        if local_model_id.is_some() {
+            // The bound record may have been discovered by another client
+            // through a concurrent history read. Keep it on admission failure.
+            super::sessions::emit_session_event(
+                app,
+                "session:list_changed",
+                &session_id,
+                "created",
+            );
+            return Err(error);
+        }
         // Roll back through the gated, aux-aware pool delete (the same path
         // delete_session uses): a bare store.delete would leave an aux engine
         // bound to this session running as a handle-less orphan, and would
@@ -916,7 +991,7 @@ pub async fn web_access_create_session_and_chat(
         };
     }
 
-    super::sessions::emit_session_event(&app, "session:list_changed", &session_id, "created");
+    super::sessions::emit_session_event(app, "session:list_changed", &session_id, "created");
     Ok(WebSessionMetadata::project(metadata, transcript_revision))
 }
 

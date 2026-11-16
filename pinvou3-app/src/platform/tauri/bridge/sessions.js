@@ -473,7 +473,57 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
 
   // 团队接力等显式工作入口需要立即获得稳定 session id 以建立本机关联；
   // 这类用户动作已经确认要开始工作，不适用侧边栏空草稿的 lazy 语义。
-  async function materializeSession() {
+  // 前台物化的草稿内容保护（round-38 review P2，诊断直达）：protectUserDraft
+  // 供「等待窗口之后才晚到」的物化调用方（设备页排查动作在 prompt 采样
+  // resolve 后才物化）使用——窗口里用户新建对话并输入未发送文本 / 选了工作
+  // 目录时，下面 enterDraft 的工作集清空会把这份内容原地吞掉。此刻活动目标
+  // 仍是未物化草稿（activeSessionId 为空）且草稿带用户内容（输入文本或目录
+  // 绑定）时直接返回 null，调用方按守卫语义放弃发送、内容原地保留；无参
+  // 调用保持原语义（点击即时的显式工作入口，如团队接力，仍按「用户已确认
+  // 开始工作」覆盖旧草稿）。
+  //
+  // 后台物化（round-39 review P2，zhuowp：切到既有会话后不得前台物化）：
+  // prompt 窗口决算发现用户已切到既有会话 B 时，晚到的物化调用方改走
+  // background——B 非空使 protectUserDraft 拦不住，前台路径 enterDraft 的工作
+  // 集清空 + switchActiveTo 会把活动工作集切到新会话并 notify，订阅快照随之
+  // 携带诊断会话的 chatItems/activeSessionId，B 的正文在 ChatView 被顶掉。
+  // 本路径只做创建与登记：后端 create_session（无目录绑定的普通新会话，与
+  // 前台空草稿物化同参）+ 空 buffer 登记 sessionStates（sendMessageToSession
+  // 的存在性第二把尺子，与 ensureSession 导航中止分支同款）+
+  // refreshHistoryList 入侧栏历史（其 notify 只刷列表，不动
+  // activeSessionId/chatItems）；不 enterDraft、不切工作集、不抢活动会话，
+  // 返回真实 sid 供调用方后台发送。创建失败静默返回 null（addSystemItem 会
+  // 把报错卡写进用户当前会话的正文，后台路径不得污染），由调用方按发送失败
+  // 契约处理；materializeSession 无 background 选项的调用方不受影响。
+  async function createBackgroundSession() {
+    try {
+      const meta = await invoke("create_session", {
+        workspacePath: null,
+        workspaceRoots: null,
+        projectId: null,
+        // 后台诊断会话不得抢占后端活动会话（review P2，zhuowp）：前端工作集
+        // 已保持停在 B，但 create_session 的 set_active 后端缺省
+        // unwrap_or(true)，缺省调用会静默把 SessionStore.active 切到诊断会话
+        // ——按活动会话键控的后端操作（定时记忆压缩等）随之改道。显式
+        // setActive:false 与 Web 宿主 web_access_create_session（Some(false)）
+        // 契约对齐；前台物化路径保持缺省激活不变。
+        setActive: false,
+      });
+      sessionStates[meta.id] = freshBuffer();
+      sessionStates[meta.id].loadedFromDisk = true;
+      await refreshHistoryList();
+      return meta.id;
+    } catch (e) {
+      console.warn("background create_session failed", e);
+      return null;
+    }
+  }
+  async function materializeSession(options) {
+    if (options && options.protectUserDraft && !state.activeSessionId
+      && (String(state.composerDraft || "").length > 0 || state.draftWorkspacePath)) {
+      return null;
+    }
+    if (options && options.background) return createBackgroundSession();
     if (!enterDraft()) return null;
     return ensureSession();
   }
@@ -656,27 +706,10 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
           draftOutcome.createdSessionId = meta.id;
           return null;
         }
-        // 草稿期开的多智能体开关此刻才落后端（开关本身不物化会话）。先取后
-        // 清：switchActiveTo 会把寄存意图当作已消费。
-        var pendingMultiAgent = state.pendingDraftMultiAgent === true;
+        // Keep this session unpublished until its explicit model is confirmed.
+        // Otherwise a second send can bypass ensureSession and use the default
+        // model while selection is pending, then lose its session on rollback.
         var pendingModelRef = state.pendingDraftModelRef;
-        state.pendingDraftModelRef = null;
-        state.pendingDraftMultiAgent = false;
-        // The bound draft's staged explicit mode is read-then-cleared the
-        // same way (an explicit switch during the await is user intent too).
-        const stagedDraftMode = state.pendingDraftMode;
-        state.pendingDraftMode = null;
-        // Materialization committed: clear the draft directory; on
-        // create_session failure (outer catch) it is kept for retry.
-        state.draftWorkspacePath = null;
-        state.draftWorkspaceRoots = [];
-        state.draftProjectId = null;
-        switchActiveTo(meta.id, { fresh: true });
-        draftOutcome.createdSessionId = meta.id;
-        // 草稿态因首条消息/加卡等实质操作物化为 session 时，输入草稿也要
-        // 跟随迁移；这不是用户主动切换到另一个已有会话。
-        state.composerDraft = composerDraft;
-        sessionStates[meta.id].composerDraft = composerDraft;
         if (pendingModelRef) {
           try {
             if (pendingModelRef.source === "ACCOUNT_PLATFORM") {
@@ -691,37 +724,62 @@ async function createNewSession() { return pinvouSharedtauriSessions().createNew
             } else {
               throw new Error("unsupported model selection source");
             }
-            if (state.activeSessionId === meta.id && draftOutcome.navToken === sessionSwitchRequestToken) {
-              state.currentSessionModelRef = pendingModelRef;
-            }
           } catch (modelError) {
+            if (!state.activeSessionId && draftOutcome.navToken === sessionSwitchRequestToken) {
+              draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
+            }
+            // A newer navigation or model choice owns its own state. In
+            // particular, never delete a session adopted by a newer navigation.
+            if (state.activeSessionId || draftOutcome.navToken !== sessionSwitchRequestToken
+              || state.pendingDraftModelRef !== pendingModelRef) return null;
             try {
               await invoke("delete_session", { id: meta.id });
             } catch (cleanupError) {
               // 空会话残留可手动删除，不掩盖模型选择失败。
             }
             draftOutcome.createdSessionId = null;
-            if (state.activeSessionId !== meta.id || draftOutcome.navToken !== sessionSwitchRequestToken) return null;
-            var rollbackComposerDraft = state.composerDraft || "";
-            enterDraft();
-            state.composerDraft = rollbackComposerDraft;
-            state.pendingDraftModelRef = pendingModelRef;
-            state.pendingDraftMultiAgent = pendingMultiAgent;
+            if (state.activeSessionId || draftOutcome.navToken !== sessionSwitchRequestToken
+              || state.pendingDraftModelRef !== pendingModelRef) return null;
+            // Nothing was consumed or published: keep the current draft and
+            // retry ownership rather than resetting its epoch or newer edits.
             draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
-            state.draftWorkspacePath = boundWorkspace;
-            state.draftWorkspaceRoots = boundRoots;
-            state.draftProjectId = boundProjectId;
-            state.pendingDraftMode = stagedDraftMode || null;
-            state.modeState = {
-              mode: stagedDraftMode || currentDraftModeState().mode,
-              multiAgent: pendingMultiAgent,
-            };
             addSystemItem(bt("newChatFailed"));
             await refreshHistoryList();
             notify();
             return null;
           }
         }
+        const currentBinding = captureDraftWorkspaceBinding();
+        const workspaceChanged = pendingModelRef && (
+          currentBinding.boundWorkspace !== boundWorkspace
+          || currentBinding.boundProjectId !== boundProjectId
+          || JSON.stringify(currentBinding.boundRoots) !== JSON.stringify(boundRoots));
+        if (state.activeSessionId || draftOutcome.navToken !== sessionSwitchRequestToken
+          || state.pendingDraftModelRef !== pendingModelRef || workspaceChanged) {
+          if (!sessionStates[meta.id]) {
+            sessionStates[meta.id] = freshBuffer();
+            sessionStates[meta.id].loadedFromDisk = true;
+          }
+          // A navigation may recover its original message in the background
+          // session. A newer model choice in the same draft keeps that draft.
+          if (draftOutcome.navToken !== sessionSwitchRequestToken) draftOutcome.createdSessionId = meta.id;
+          else if (!state.activeSessionId) draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
+          return null;
+        }
+        var pendingMultiAgent = state.pendingDraftMultiAgent === true;
+        const stagedDraftMode = state.pendingDraftMode;
+        state.pendingDraftMode = null;
+        state.draftWorkspacePath = null;
+        state.draftWorkspaceRoots = [];
+        state.draftProjectId = null;
+        // Read after model confirmation: edits during the await belong to this
+        // draft and must follow it, not the pre-confirmation composer snapshot.
+        composerDraft = state.composerDraft || "";
+        switchActiveTo(meta.id, { fresh: true });
+        draftOutcome.createdSessionId = meta.id;
+        state.composerDraft = composerDraft;
+        sessionStates[meta.id].composerDraft = composerDraft;
+        if (pendingModelRef) state.currentSessionModelRef = pendingModelRef;
         if (state.activeSessionId !== meta.id || draftOutcome.navToken !== sessionSwitchRequestToken) return null;
         if (pendingMultiAgent) {
           try {

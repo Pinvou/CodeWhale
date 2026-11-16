@@ -38,6 +38,7 @@ func (worker *UsageHistoryProjectionWorker) Run(ctx context.Context) {
 		processed, complete, err := worker.repository.BackfillUsageHistoryProjection(ctx, worker.batchSize)
 		switch {
 		case err != nil:
+			reportTokenWorkerFailure(ctx, "usage history projection failed", "backfill", err)
 			delay = 5 * time.Second
 		case complete:
 			delay = time.Minute

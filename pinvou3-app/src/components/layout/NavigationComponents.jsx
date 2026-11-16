@@ -10,7 +10,7 @@ import { PROJECT_SESSION_DRAG_TYPE } from '../../features/projects/projectGroupi
 // notify (including background streaming tokens); when the props are
 // reference stable (see NAV_ICON_*/NAV_PREFETCH/navNavigateHandlers in
 // main.jsx) the whole nav item can skip the re-render.
-const NavItem = memo(function NavItem({ icon, label, active, unread = false, unreadLabel, unreadTestId = 'scheduled-nav-unread', unreadTone = 'default', theme, isSidebarOpen = true, onClick, dragKind, dragging, onPickUp, nativeButton = false, t, onPointerEnter, onFocus }) {
+const NavItem = memo(function NavItem({ icon, label, active, unread = false, unreadLabel, unreadTestId = 'scheduled-nav-unread', unreadTone = 'default', unreadText, unreadTextTestId, theme, isSidebarOpen = true, onClick, dragKind, dragging, onPickUp, nativeButton = false, t, onPointerEnter, onFocus }) {
       const drag = useLongPressDrag(dragKind, onPickUp);
       const dragProps = dragKind ? drag.handlers : {};
       const clickH = dragKind ? drag.guardClick(onClick) : onClick;
@@ -33,12 +33,13 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
         >
           <div className={`relative ${isSidebarOpen ? 'mr-3' : ''} shrink-0 ${active ? 'text-[#0B57D0] dark:text-[#041E49]' : ''}`}>
             {icon}
-            {unread && (
+            {unread && (!isSidebarOpen || !unreadText) && (
               <span data-testid={unreadTestId} aria-label={unreadLabel || t?.uiScheduled?.navUnreadAria}
                 className={"absolute -right-1.5 -top-1 w-2.5 h-2.5 rounded-full border-2 " + (unreadTone === 'danger' ? 'bg-[#DF3F4F] ' : 'bg-[#0B57D0] ') + (active ? 'border-[#D3E3FD] dark:border-[#A8C7FA]' : 'border-[#F0F4F9] dark:border-[#1E1F20]')} />
             )}
           </div>
           {isSidebarOpen && <span className="whitespace-nowrap">{label}</span>}
+          {isSidebarOpen && unread && unreadText ? <span data-testid={unreadTextTestId || `${unreadTestId}-text`} className={`ml-auto whitespace-nowrap pl-3 text-[12px] font-semibold ${unreadTone === 'danger' ? 'text-[#C5221F] dark:text-[#FF8A80]' : 'text-[#0B57D0] dark:text-[#A8C7FA]'}`}>{unreadText}</span> : null}
         </Root>
       );
     });
@@ -224,9 +225,11 @@ const NavItem = memo(function NavItem({ icon, label, active, unread = false, unr
           ) : (
             <>
               {/* 默认: 显示日期(辨识每条会话什么时候发生);hover/active 时换成置顶/更多按钮,重命名/收纳/删除在更多菜单里。
-                  窄屏无 hover：按钮组常显、日期让位，保证触屏可达。 */}
+                  窄屏无 hover：按钮组常显；日期同样常显并以 max-w+truncate 让位——
+                  旧实现对日期槽加了 max-sm:hidden,会话时间因此在触屏上不可见;
+                  恢复信息可见,拥挤由截断控制(标题仍有 min-w-0 flex-1 与 truncate 兜底)。 */}
               {chat.date && (
-                <span className="text-[11px] mr-4 shrink-0 opacity-60 whitespace-nowrap group-hover:hidden group-focus-within:hidden max-sm:hidden text-[#5F6368] dark:text-[#9AA0A6]">
+                <span className="text-[11px] mr-4 min-w-0 max-w-[45%] truncate opacity-60 group-hover:hidden group-focus-within:hidden text-[#5F6368] dark:text-[#9AA0A6]">
                   {chat.date}
                 </span>
               )}

@@ -53,12 +53,34 @@
 
 普通 `/health/ready` 只反映普通循环依赖，不把授权依赖故障升级为整个实例驱逐。Account 另提供 `/health/ready/approval-authorization`；发布门禁必须显式检查该路径，不得只看容器普通健康状态。
 
+- **Compose**。使用 `compose.model-token.yaml` 或正式 `compose.finance.yaml` 的同源镜像时，Account Relay 容器的 `/healthcheck` 必须同时通过普通和专项探针。普通配置和 Billing Relay 继续使用普通探针。现场从已选中的 Compose 项目核对 Account Relay 的容器健康状态，`APPROVAL_RELAY_READINESS_CHECK_*` 表示专项失败。自管 Compose 配置使用相同的固定 loopback 探针和独立项目监控范围。容器运行与 Docker 健康状态分别记录。
+- **Helm**。需要授权投递的站点 values 设置 `approvalRelay.requireReady: true`。普通 Pod 探针和 Service 保持原样。滚动部署后、启用授权流量前，由既有发布身份运行以下门禁。它核对当前 ReplicaSet 和所有期望副本，执行容器内固定专项探针，并在结束前核对 Pod、容器和 Deployment 身份未换代。使用已有的部署读取和容器执行授权。
+
+  ```sh
+  node scripts/account-platform-approval-relay-gate.mjs "$KUBE_CONTEXT" "$RELEASE_NAMESPACE" "$ACCOUNT_RELAY_DEPLOYMENT"
+  ```
+
+在受控发布窗口紧接激活前运行门禁。记录检查和激活时间；检查后发生部署、配置变更、容器重启或发布中断时重验。门禁读数是现场观察，不替代后续授权探针监控或 broker 撤权证据。
+
+使用 `observability.prometheusRulesEnabled: true` 的 Helm 站点会渲染授权 Relay 的专项告警。Prometheus 逐副本抓取 `/metrics`，在当前集群内评估规则。Helm 的监控范围 `approval_scope` 是 `namespace/release`，model-token Compose 使用项目名。正式 finance Compose 默认使用 `pinvou-personal`，同一监控系统存在多个站点时，各站点用 `APPROVAL_RELAY_COMPOSE_MONITOR_SCOPE` 设置唯一范围，不更改 Compose 项目名。缺副本规则按副本身份去重，Helm 使用 Pod 名，Compose 使用各副本的唯一容器主机名。
+
+Compose 从仓库根目录安装锁定的 Account Platform Node 依赖，使用 Helm 3.16.4 离线生成现有 Prometheus 可读取的规则文件。生成器的范围名取 Account Relay 最终 `APPROVAL_RELAY_MONITOR_SCOPE`，期望副本数取核对后的站点配置。
+
+```sh
+npm --prefix account-platform ci --ignore-scripts
+node account-platform/deploy/compose/render-approval-relay-alerts.mjs "$APPROVAL_SCOPE" "$EXPECTED_ACCOUNT_RELAY_REPLICAS" > approval-relay-rules.yaml
+promtool check rules approval-relay-rules.yaml
+```
+
+把生成的规则文件加入现有 Prometheus 的 `rule_files`，核对专项就绪、缺副本、积压且无发布进展、过期租约和未分类死信。首次启用前，在受控环境用真实身份、工件和接收端确认带 `approval_scope` 的告警送达及恢复，同时记录普通探针仍成功。
+
 专项就绪每次重新读取公开制品，核验独立可信摘要及 v2/previous-v1 绑定；仍配置 previous 且重叠截止已到时返回 503。完成 broker 撤权验证后，成对移除 previous 配置并重建实例，current-v2 保留历史截止字段不阻止恢复就绪。此检查验证的是本地受信发布制品及期限，不证明 broker 已应用对应 ACL，也不会自动撤销旧 key；不能通过提前移除 previous 配置替代第 5 步的实际撤权证据。
 
 专用 NATS 客户端是仅发布客户端，不取得 stream INFO/创建/消费权限；其 Ping 只验证连接，不证明资源规格正确。固定资源仍须由独立受控 operator 校验，不能为了让专用客户端自查而额外授予管理或元数据 API 权限。
 
 普通 `pinvou_outbox_*` 指标不包含授权分区。授权分区分别查看：
 
+- `pinvou_authorization_relay_ready`：显式配置监控范围时，每次抓取复用专项就绪检查，成功为 1，失败为 0。无样本表示观测缺失。
 - `pinvou_authorization_outbox_pending_events`：未终结授权事件。
 - `pinvou_authorization_outbox_active_claims`：租约有效的 claim。
 - `pinvou_authorization_outbox_reclaimable_claims`：租约已过期但仍待恢复的 claim。
@@ -66,6 +88,8 @@
 - `pinvou_authorization_relay_active_handlers`：本实例当前正在执行主 subject 或自动 DLQ Broker.Publish 的数量；成功、确定失败、结果未知或取消返回后均归零，不包含仅领取但尚未调用 Broker 的任务。
 
 指标值必须与探针和采集时间一起判断，采集失败时不能把旧值或零值当作无积压证明。
+
+受控演练分别移除工件、使用不匹配摘要以及拒绝专属数据库或 NATS 身份，记录固定错误类别和失败探针。启动日志的 `APPROVAL_AUTHORIZATION_RELAY_UNAVAILABLE` 附固定阶段 `artifact`、`database` 或 `broker`。恢复原可信配置后受控重启，验证专项探针通过且告警解除。原凭据、路径内容和上游错误留在既有受控诊断边界。
 
 FENCE/停流后的排空检查必须逐个 Relay 副本确认进程内 `active_handlers=0`，并同时核对数据库 active/reclaimable claim 为零，不能用其中一项替代另一项。handler 指标只是当前进程观测值，进程重启即重置；它不是持久安全依据，不能替代数据库锁、epoch、租约或撤权证明。正常发布中的非零计数不单独导致专项就绪返回 503。
 

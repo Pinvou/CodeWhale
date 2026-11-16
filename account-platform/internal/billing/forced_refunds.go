@@ -191,6 +191,10 @@ func (r *PostgresRepository) applyReviewedForcedRefund(ctx context.Context, case
 	return item, tx.Commit(ctx)
 }
 
+func lockForcedRefundApplication(ctx context.Context, tx pgx.Tx, caseID uuid.UUID) error {
+	return lockTransactionKey(ctx, tx, "forced-refund.apply", caseID.String())
+}
+
 // applyReviewedForcedRefundInTx keeps the financial writer in the caller's
 // transaction. The escalation completion caller must hold its anomaly/manual
 // review locks until both the financial facts and terminal receipt are committed.
@@ -198,7 +202,7 @@ func (r *PostgresRepository) applyReviewedForcedRefundInTx(ctx context.Context, 
 	if caseID == uuid.Nil {
 		return ForcedRefundCase{}, ErrConflict
 	}
-	if err := lockTransactionKey(ctx, tx, "forced-refund.apply", caseID.String()); err != nil {
+	if err := lockForcedRefundApplication(ctx, tx, caseID); err != nil {
 		return ForcedRefundCase{}, err
 	}
 	var source, packageID, orderID, walletID uuid.UUID

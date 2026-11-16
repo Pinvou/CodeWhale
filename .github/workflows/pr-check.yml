@@ -7,8 +7,9 @@ name: PR Check
 #   compliance linkage + actionlint + Python determinism tests.
 # - merge-authored-audit: complete historical merge-resolution disclosure, independently bounded.
 # - changes:检测本 PR 有没有 Rust 代码、发布契约、L1 harness 或前端改动,给后续 job 做 paths filter。
-# - frontend-test:Draft 跑 lint/build/逻辑测试；Ready PR 与 Merge Queue 按实际
-#   base/head diff 选择浏览器 smoke；未知或共享路径保守执行全部 smoke。
+# - frontend-test:Draft/Ready lint、build、逻辑测试。
+# - frontend-browser-test:Ready PR 与 Merge Queue 按实际 base/head diff 选择
+#   smoke，四个独立 runner job 并行；未知或共享路径保守执行全部 smoke。
 # - account-platform-test: path-aware tests/vet for all Go modules at every stage;
 #   isolated Token financial PostgreSQL contracts are mandatory; real external
 #   issuer/provider/NATS integration remains explicit opt-in.
@@ -90,6 +91,7 @@ on:
     branches: [main]   # 暖 cache:见上方 Cache 策略
 
 permissions:
+  actions: read        # Read same-repository successful-run proofs; no check/status writes.
   contents: read
   pull-requests: read   # dorny/paths-filter 调 API 读 PR 改了哪些文件
 
@@ -177,7 +179,8 @@ jobs:
 
   version-consistency:
     name: version-consistency
-    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' || github.event_name == 'push' }}
+    needs: changes
+    if: ${{ ((github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' || github.event_name == 'push') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'version-consistency')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 5
     steps:
@@ -242,6 +245,9 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       relay: ${{ steps.filter.outputs.relay }}
       account_platform: ${{ steps.filter.outputs.account_platform }}
+      reused_jobs: ${{ steps.reuse.outputs.reused_jobs || '[]' }}
+      reuse_verified: ${{ steps.reuse.outputs.reuse_verified || 'false' }}
+      reuse_source: ${{ steps.reuse.outputs.reuse_source }}
       team_relay_hub: ${{ steps.filter.outputs.team_relay_hub }}
       update_release_console: ${{ steps.filter.outputs.update_release_console }}
       acp_runtime: ${{ steps.filter.outputs.acp_runtime }}
@@ -281,8 +287,17 @@ jobs:
         with:
           predicate-quantifier: some-with-excludes
           filters: |
+            # Desktop-only behavior notes and generated Portal assets are
+            # covered by their frontend checks, not the Go/PostgreSQL suite.
+            # All other platform paths stay included, including new ones.
             account_platform:
+              - 'scripts/ci-test-reuse.py'
+              - 'scripts/ci-reuse-policy.py'
+              - 'scripts/tests/test_ci_reuse_policy.py'
+              - 'scripts/tests/test_ci_test_reuse.py'
               - 'account-platform/**'
+              - '!account-platform/docs/draft-model-confirmation.md'
+              - '!account-platform/internal/portal/static/**'
               - 'pinvou3-app/src/features/account-platform/**'
               - 'pinvou3-app/src/app/account-main.jsx'
               - 'pinvou3-app/src/app/admin-main.jsx'
@@ -300,7 +315,10 @@ jobs:
               - 'scripts/check-recharge-product-document-baseline.mjs'
               - 'scripts/account-ci-postgres.py'
               - 'scripts/tests/test_account_ci_postgres.py'
+              - 'scripts/account-financial-test-durations.json'
               - 'scripts/test-financial-parallel.py'
+              - 'scripts/check-account-financial-ci.py'
+              - 'scripts/tests/test_account_financial_ci.py'
               - 'scripts/tests/test_financial_parallel.py'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
@@ -518,6 +536,7 @@ jobs:
               - 'scripts/release-macos.sh'
               - 'scripts/build-windows-ota.ps1'
               - 'scripts/tests/sync-version.test.mjs'
+              - 'remote-control-relay/test/windows-release-exit-code.test.js'
               - 'scripts/tests/test_ci_gate_policy.py'
               - 'scripts/tests/test_release_arm64_policy.py'
               - 'scripts/tests/test_release_cache_policy.py'
@@ -539,6 +558,16 @@ jobs:
               - 'remote-control-relay/test/github-workflow-run-identity.test.js'
               - 'remote-control-relay/test/installer-spdx.test.js'
               - 'remote-control-relay/test/release-path-policy.test.js'
+              - 'pinvou3-app/scripts/codex-bridge-runtime/package.json'
+              - 'pinvou3-app/scripts/codex-bridge-runtime/package-lock.json'
+              - 'pinvou3-app/src-tauri/src/features/assistant/runtime_model.rs'
+              - 'pinvou3-app/src-tauri/src/core/panic_scope.rs'
+              - 'pinvou3-app/src-tauri/src/core/panic_hooks.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/image_capability.rs'
+              - 'pinvou3-app/src-tauri/src/platform/prefs/model.rs'
+              - 'pinvou3-app/src-tauri/src/platform/credential_store.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/turn_shell_tasks.rs'
+              - 'pinvou3-app/src-tauri/Cargo.lock'
               - 'remote-control-relay/test/windows-e2e-*.test.js'
               - 'remote-control-relay/docs/schemas/**'
               - 'pinvou3-app/tests/nsis_resource_staging_contract.test.js'
@@ -561,6 +590,88 @@ jobs:
               - 'pinvou3-app/src-tauri/src/app/commands/desktop_remote_*.rs'
               - 'pinvou3-app/src-tauri/src/app/commands/**'
               - 'pinvou3-app/src-tauri/src/app/desktop_remote_composition.rs'
+              - 'pinvou3-app/src-tauri/src/lib.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/application/dispatch_remote.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/application/project_remote.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/application/ports.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/application/submit_controlled.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/remote_turn.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/runtime.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/operation_gate.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/remote_ownership.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/remote_turn.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/events.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/lifecycle.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/install.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/engine_pool.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/engine.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/skill_materialization.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/forwarder.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/stall.rs'
+              - 'pinvou3-app/src-tauri/src/platform/prefs/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/validators.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/store.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/mode_state.rs'
+              - 'pinvou3-app/src-tauri/src/core/mode_state.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/retention.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_core.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/attachment_upload.rs'
+              - 'pinvou3-app/src-tauri/src/features/codex_acp/attachments.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/attachments.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/published_attachment.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/limits.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/platform/model_reference.rs'
+              - 'pinvou3-app/src-tauri/src/platform/filesystem.rs'
+              - 'pinvou3-app/src-tauri/src/platform/filesystem/linux_publication.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_deps.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/platform/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/platform/office_stream.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/platform/office_stream.py'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_diagnostics.rs'
+              - 'pinvou3-app/src-tauri/src/core/model_wire.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_office.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_email.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_archive.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/platform/archive_entry.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/visual_preview.rs'
+              - 'pinvou3-app/src/index.html'
+              - 'pinvou3-app/vite.config.mjs'
+              - 'pinvou3-app/src/platform/tauri/bridge/sessions.js'
+              - 'pinvou3-app/src/platform/tauri/bridge/chat-events.js'
+              - 'pinvou3-app/src/shared/bridge-shared-helpers.js'
+              - 'pinvou3-app/src/platform/tauri/bridge/chat.js'
+              - 'pinvou3-app/src/platform/tauri/bridge/interaction.js'
+              - 'pinvou3-app/src-tauri/src/platform/paths.rs'
+              - 'pinvou3-app/src-tauri/src/platform/process.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/text_decode.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/windows/windows_path.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/windows/windows_system.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/posix.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/linux/linux_system.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/spreadsheet_structure.rs'
+              - 'pinvou3-app/scripts/vite-runtime-assets.mjs'
+              - 'pinvou3-app/src-tauri/src/main.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/ingest_pdf.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/file_ingest.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/linux/linux_path.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/interface/system.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/interface/path.rs'
+              - 'pinvou3-app/src/shared/chunked-file-upload.js'
+              - 'pinvou3-app/src-tauri/src/platform/os/mod.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/interface/mod.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/linux/mod.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/windows/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/platform/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/sessions/application/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/assistant/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/files/mod.rs'
+              - 'pinvou3-app/src-tauri/src/app/mod.rs'
+              - 'pinvou3-app/src-tauri/src/platform/mod.rs'
+              - 'pinvou3-app/src-tauri/src/core/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/mod.rs'
               - 'pinvou3-app/src-tauri/src/app/remote_projection_adapter.rs'
               - 'pinvou3-app/src-tauri/src/app/commands/remote_control.rs'
               - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
@@ -655,6 +766,10 @@ jobs:
               - 'pinvou3-app/eslint.config.mjs'
               - '.github/workflows/pr-check.yml'
             frontend:
+              - 'scripts/ci-test-reuse.py'
+              - 'scripts/ci-reuse-policy.py'
+              - 'scripts/tests/test_ci_reuse_policy.py'
+              - 'scripts/tests/test_ci_test_reuse.py'
               - 'scripts/tests/account-platform-invocation-environment.test.mjs'
               - 'account-platform/deploy/production/compose.personal.yaml'
               - 'account-platform/deploy/production/compose.models.yaml'
@@ -726,6 +841,7 @@ jobs:
               - 'scripts/deploy-remote-relay.sh'
               - 'scripts/run-user-journey-tests.sh'
               - 'scripts/run-frontend-smokes.mjs'
+              - 'scripts/ci-browser-network.py'
               - 'scripts/select-frontend-smokes.mjs'
               - 'scripts/mcp-server-contract-smoke.py'
               - 'pinvou3-app/package.json'
@@ -785,6 +901,8 @@ jobs:
               - 'pinvou3-app/package-lock.json'
               - '.github/workflows/pr-check.yml'
             windows_codex:
+              - 'scripts/test-windows-acp-runtime.py'
+              - 'scripts/tests/test_windows_acp_runtime_scope.py'
               - '.gitmodules'
               - 'private-runtimes/windows'
               - 'pinvou3-app/scripts/codex-bridge-runtime/**'
@@ -864,9 +982,23 @@ jobs:
               - 'pinvou3-app/vite.config.mjs'
               - '.github/workflows/pr-check.yml'
 
+      - name: Verify identical-input PR success proofs
+        id: reuse
+        if: ${{ github.event_name == 'merge_group' }}
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TESTED_SHA: ${{ github.sha }}
+          CI_REUSE_CONFIGURATION: ${{ toJSON(vars) }}
+          CI_REUSE_ROUTING_FILTERS: ${{ toJSON(steps.filter.outputs) }}
+          CI_REUSE_ROUTING_POLICY: ${{ toJSON(steps.queue-rust-policy.outputs) }}
+        run: python3 scripts/ci-test-reuse.py lookup
+
+
   # 回流可以在 Windows、macOS 或 Linux 上创建和处理。本 job 不替代实际处理
   # 平台的本地 preflight，而是在 PR current head 与 Merge Queue 组合提交上都用
   # 三平台执行一致的无依赖门禁。main push 不重复，重型产品测试仍按路径路由。
+
   backflow-portability:
     name: backflow-portability (${{ matrix.os }})
     needs: changes
@@ -876,7 +1008,10 @@ jobs:
       # Windows/macOS 腿由独立的平台开关控制(matrix 上下文
       # 不可用于 job 级 if,故在矩阵生成处过滤)。
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"},{"os":"macos-15"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"macos-15"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
-    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || matrix.os }}
+    # Windows pool overrides are limited to same-repository PR metadata (name + ID).
+    # Fork/missing metadata or undeclared events use hosted Windows.
+    # PR-editable YAML is not a runner ACL; other declared events keep their pools.
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') || matrix.os }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -1049,18 +1184,11 @@ jobs:
   frontend-test:
     name: frontend-test
     needs: changes
-    # 合并原 diff-viewer-test + pet-frontend-test:两者各自 npm ci + build:ui 纯重复,
-    # pet 跑 npm test(链尾含 test:diff-parser)与 diff-viewer 的 test:diff-parser 也重复,
-    # 且 pet 缺 lint:ui。统一为一个 job 后:依赖/build 各装一次、lint 全覆盖。
-    # Draft runs lint/build/logic tests. Ready PRs and merge groups select browser
-    # smokes from their actual base/head diff. Shared, unknown, test-infrastructure,
-    # and empty diffs fail closed to the complete smoke set. Each selected smoke is
-    # retried once to absorb transient hosted-runner flakes. The full selection
-    # can outlast 25 minutes without any retry; leave time for setup, a complete
-    # pass and one largest-smoke retry while retaining a bounded job lifetime.
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}
+    # Draft/Ready quality, builds and logic. Ready/queue browser smokes run
+    # independently below, without waiting for this job's ~17-minute logic suite.
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    timeout-minutes: 45
+    timeout-minutes: 75
     defaults:
       run:
         working-directory: pinvou3-app
@@ -1075,6 +1203,11 @@ jobs:
 
       - name: Initialize owned test resource ledger
         run: python3 ../scripts/ci-resource-ledger.py --init
+
+      - name: Verify browser loopback isolation and retirement
+        env:
+          PINVOU_TEST_NETWORK_ISOLATION: "1"
+        run: timeout --kill-after=15 60 python3 -m unittest discover -s ../scripts/tests -p test_ci_browser_network.py -v
 
       - uses: actions/setup-node@v7
         with:
@@ -1153,7 +1286,7 @@ jobs:
         run: npm run audit:compat
 
       - name: 前端逻辑测试 (pet 全套 + diff parser + markdown)
-        run: python3 ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/frontend-logic.json" -- npm test
+        run: python3 ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/frontend-logic.json" -- python3 ../scripts/ci-browser-network.py -- npm test
 
       - name: Verify Account invocation environment contracts
         run: node --test ../scripts/tests/account-platform-invocation-environment.test.mjs
@@ -1174,40 +1307,10 @@ jobs:
           set -euo pipefail
           test -x "${CHROME:?browser preparation must provide CHROME}"
           report="$RUNNER_TEMP/credential-origin-scope.tap"
-          python3 ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/credential-origin.json" -- node --test --test-reporter=tap tests/credential_origin_scope_probe.test.mjs | tee "$report"
+          python3 ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/credential-origin.json" -- python3 ../scripts/ci-browser-network.py -- node --test --test-reporter=tap tests/credential_origin_scope_probe.test.mjs | tee "$report"
           grep -Eq '^# pass [1-9][0-9]*$' "$report"
           grep -Fxq '# fail 0' "$report"
           grep -Fxq '# skipped 0' "$report"
-
-      # The runner retries each selected smoke once so a transient runner
-      # flake (headless Chrome missing its 30 s DevTools-endpoint launch
-      # window) cannot evict a healthy PR from the merge queue; it fails
-      # closed on an empty selection, which also covers a masked upstream
-      # pipeline failure (select-frontend-smokes never emits an empty set).
-      - name: Ready PR 定向浏览器 smoke
-        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == false }}
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          # dist was already built unconditionally above; skip the identical
-          # in-smoke rebuild (see scripts/run-webui-smoke.mjs).
-          PINVOU_WEBUI_SKIP_BUILD: "1"
-        run: |
-          git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
-            | node ../scripts/select-frontend-smokes.mjs \
-            | node ../scripts/run-frontend-smokes.mjs --selected
-
-      - name: Merge Queue diff-selected browser smoke
-        if: ${{ github.event_name == 'merge_group' }}
-        env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha }}
-          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
-          # Same dist reuse as the PR smoke step above.
-          PINVOU_WEBUI_SKIP_BUILD: "1"
-        run: |
-          git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
-            | node ../scripts/select-frontend-smokes.mjs \
-            | node ../scripts/run-frontend-smokes.mjs --selected
 
       - name: Confirm test resource retirement
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -1230,10 +1333,146 @@ jobs:
         if: ${{ always() && steps.frontend_receipts_upload.outcome == 'failure' }}
         run: echo '::warning::Diagnostic upload failed or timed out; original receipts remain on the runner. Tests and resource retirement remain mandatory.'
 
+  frontend-browser-test:
+    name: frontend-browser-test (${{ matrix.shard }})
+    needs: changes
+    # Each shard installs/builds its own tested tree and owns its fixtures.
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [1, 2, 3, 4]
+    defaults:
+      run:
+        working-directory: pinvou3-app
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Set up zram and swap
+        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
+        # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+
+      - name: Initialize owned test resource ledger
+        run: python3 ../scripts/ci-resource-ledger.py --init
+
+      - name: Verify browser loopback isolation and retirement
+        env:
+          PINVOU_TEST_NETWORK_ISOLATION: "1"
+        run: timeout --kill-after=15 60 python3 -m unittest discover -s ../scripts/tests -p test_ci_browser_network.py -v
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-path: |
+            pinvou3-app/package-lock.json
+            remote-control-relay/package-lock.json
+            account-platform/package-lock.json
+
+      - name: 安装前端依赖
+        run: npm ci --prefer-offline --no-audit
+
+      # The Node probe imports AP schema tooling before any browser skip.
+      - name: Install Account Platform probe dependencies
+        run: npm --prefix ../account-platform ci --ignore-scripts --prefer-offline --no-audit
+
+      # test:webui smoke (本 job 末尾) 会 spawn remote-control-relay/server.js,
+      # 其顶层 require('ws') 解析自 remote-control-relay/node_modules,故必须装 relay 依赖。
+      - name: 安装 Remote relay 依赖 (供 test:webui smoke)
+        if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
+        run: npm --prefix ../remote-control-relay ci --prefer-offline --no-audit
+
+      - name: Vite build
+        run: npm run build:ui
+
+      - name: Verify embedded Account Portal assets are current
+        run: |
+          npm run build:account-portal
+          git diff --exit-code -- ../account-platform/internal/portal/static
+          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
+
+      - name: Vite web build (remote relay)
+        run: npm run build:web
+
+      - name: 准备浏览器
+        if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
+        run: |
+          chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          test -n "$chrome"
+          echo "CHROME=$chrome" >> "$GITHUB_ENV"
+
+      # The runner retries each selected smoke once so a transient runner
+      # flake (headless Chrome missing its 30 s DevTools-endpoint launch
+      # window) cannot evict a healthy PR from the merge queue; it fails
+      # closed on an empty selection, which also covers a masked upstream
+      # pipeline failure (select-frontend-smokes never emits an empty set).
+      - name: Ready PR 定向浏览器 smoke
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == false }}
+        env:
+          TESTED_SHA: ${{ github.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # dist was already built unconditionally above; skip the identical
+          # in-smoke rebuild (see scripts/run-webui-smoke.mjs).
+          PINVOU_WEBUI_SKIP_BUILD: "1"
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TESTED_SHA"
+          # Match the queue's diff over the actual tested merge, including
+          # main-side renames. Mutable PR event base/head diffs can select a
+          # different smoke set despite an identical tested product tree.
+          read -r tested base head extra < <(git rev-list --parents -n 1 "$TESTED_SHA")
+          test "$tested" = "$TESTED_SHA"
+          test -n "$base"
+          test "$head" = "$PR_HEAD_SHA"
+          test -z "$extra"
+          git diff --name-only "$base" "$TESTED_SHA" \
+            | node ../scripts/select-frontend-smokes.mjs \
+            | node ../scripts/run-frontend-smokes.mjs --selected --shard "${{ matrix.shard }}/4" --isolate-network
+
+      - name: Merge Queue diff-selected browser smoke
+        if: ${{ github.event_name == 'merge_group' }}
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          # Same dist reuse as the PR smoke step above.
+          PINVOU_WEBUI_SKIP_BUILD: "1"
+        run: |
+          set -euo pipefail
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
+            | node ../scripts/select-frontend-smokes.mjs \
+            | node ../scripts/run-frontend-smokes.mjs --selected --shard "${{ matrix.shard }}/4" --isolate-network
+
+      - name: Confirm test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        run: python3 ../scripts/ci-resource-ledger.py --recover
+
+      - name: Browser shard resource lifecycle receipts
+        id: browser_receipts_upload
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        # Diagnostic transport must not stall always-run cleanup or change test results.
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-browser-${{ matrix.shard }}-resource-lifecycle-${{ github.run_attempt }}
+          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when browser shard diagnostic delivery fails
+        if: ${{ always() && steps.browser_receipts_upload.outcome == 'failure' }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original receipts remain on the runner. Tests and resource retirement remain mandatory.'
+
   relay-test:
     name: relay-test
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    if: ${{ (!cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'relay-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     steps:
@@ -1261,7 +1500,21 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends iproute2
           fi
-          ss -H -ltn >/dev/null
+          node --input-type=module <<'NODE'
+          import { inspectLegacyListeners } from "./remote-control-relay/enrollment-gateway.js";
+          try {
+            await inspectLegacyListeners(new URL("ws://127.0.0.1:1"));
+            console.log("Relay listener inspection ready");
+          } catch (error) {
+            const allowed = ["ENOENT", "EACCES", "EPERM", "ETIMEDOUT", "ENOBUFS",
+              "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"];
+            const code = allowed.includes(error.code) ? error.code : "command_failed";
+            const status = Number.isInteger(error.code) ? error.code : null;
+            console.error(JSON.stringify({ stage: "relay_listener_preflight", code, status,
+              killed: error.killed === true }));
+            process.exitCode = 1;
+          }
+          NODE
 
       - name: Relay 与部署脚本回归
         run: |
@@ -1269,15 +1522,141 @@ jobs:
           bash -n scripts/deploy-remote-relay-test.sh
           npm --prefix remote-control-relay test
 
+  account-financial-test:
+    name: account-financial-test (${{ matrix.group }})
+    needs: changes
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'account-financial-test')) }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        group: [owners, token, billing-0, billing-1, billing-2, billing-3]
+    services:
+      financial-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize owned test resource ledger
+        run: python3 scripts/ci-resource-ledger.py --init --docker
+
+      - name: Set up zram and swap
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
+
+      - name: Go toolchain
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: account-platform/go.mod
+          cache-dependency-path: account-platform/**/go.sum
+          cache: ${{ runner.environment == 'github-hosted' }}
+
+      - name: Verify complete financial CI group selection
+        run: |
+          set -euo pipefail
+          python3 scripts/check-account-financial-ci.py
+
+      - name: Node.js for financial contract consumers
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
+
+      - name: Install financial contract dependencies
+        working-directory: account-platform
+        run: npm ci --ignore-scripts --prefer-offline --no-audit
+
+      - name: Verify financial contract Node consumers
+        working-directory: account-platform
+        run: node --input-type=module -e "await import('./test/fixtures/approval-recovery-validator.mjs'); await import('./test/fixtures/financial-event-validator.mjs')"
+
+      - name: Install PostgreSQL client
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client
+          command -v psql
+
+      - name: Verify account CI PostgreSQL service isolation
+        id: account-pg
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: |
+          set -euo pipefail
+          python3 scripts/account-ci-postgres.py --profile financial
+
+      - name: Run isolated financial group
+        shell: bash
+        env:
+          ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}
+          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP"
+
+      - name: Stop owned temporary PostgreSQL services
+        if: ${{ always() }}
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: |
+          python3 scripts/account-ci-postgres.py --profile financial --stop-owned-services
+
+      - name: Confirm Account test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-resource-ledger.py --recover --directory "$PINVOU_CI_RESOURCE_LEDGER"
+
+      - name: Financial group lifecycle receipts
+        id: financial_receipts_upload
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}
+          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when Account diagnostic delivery fails
+        if: ${{ always() && steps.financial_receipts_upload.outcome == 'failure' }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original logs and receipts remain on the runner. Tests and resource retirement remain mandatory.'
+
   account-platform-test:
     name: account-platform-test
     needs: changes
     # Draft, Ready and the Merge Queue validate the same Go contracts. No
     # backflow exemption may suppress this independently deployable module.
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'account-platform-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    # Four independent financial workers can use the heavy runner's CPU.
-    # Preserve every worker's original limits and the finite overall budget.
+    # Nonfinancial contracts retain their original tools and isolated services.
     timeout-minutes: 180
     services:
       audit-export-postgres:
@@ -1305,78 +1684,6 @@ jobs:
           - "127.0.0.1::5432"
         options: >-
           --rm
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      financial-postgres:
-        # Same immutable PostgreSQL image already used by team-relay-hub-test.
-        # Disposable runner only; trust is never a deployment configuration.
-        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_DB: postgres
-        ports:
-          - "127.0.0.1::5432"
-        options: >-
-          --rm
-          --cpus 2
-          --memory 1g
-          --memory-swap 1g
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      financial-token-postgres:
-        # Same immutable PostgreSQL image already used by team-relay-hub-test.
-        # Disposable runner only; trust is never a deployment configuration.
-        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_DB: postgres
-        ports:
-          - "127.0.0.1::5432"
-        options: >-
-          --rm
-          --cpus 2
-          --memory 1g
-          --memory-swap 1g
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      financial-billing-0-postgres:
-        # Same immutable PostgreSQL image already used by team-relay-hub-test.
-        # Disposable runner only; trust is never a deployment configuration.
-        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_DB: postgres
-        ports:
-          - "127.0.0.1::5432"
-        options: >-
-          --rm
-          --cpus 2
-          --memory 1g
-          --memory-swap 1g
-          --health-cmd "pg_isready -U postgres -d postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      financial-billing-1-postgres:
-        # Same immutable PostgreSQL image already used by team-relay-hub-test.
-        # Disposable runner only; trust is never a deployment configuration.
-        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
-        env:
-          POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_DB: postgres
-        ports:
-          - "127.0.0.1::5432"
-        options: >-
-          --rm
-          --cpus 2
-          --memory 1g
-          --memory-swap 1g
           --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
@@ -1519,7 +1826,8 @@ jobs:
           chart="$GITHUB_WORKSPACE/account-platform/deploy/helm/account-platform"
           "$PINVOU_TEST_KMS_HELM_BINARY" template prometheus-ci "$chart" \
             -f "$chart/values-model-token-test.yaml" \
-            --set observability.prometheusRulesEnabled=true --set availability.enabled=true > "$fixture/rendered.yaml"
+            --set observability.prometheusRulesEnabled=true --set availability.enabled=true \
+            --set approvalRelay.requireReady=true --set replicas.eventRelay=2 > "$fixture/rendered.yaml"
           npm --prefix account-platform run test:prometheus-rules -- \
             --rendered "$fixture/rendered.yaml" --output "$fixture/cases" --promtool "$PINVOU_TEST_PROMTOOL_BINARY"
 
@@ -1583,7 +1891,7 @@ jobs:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
           python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py
-          python3 scripts/account-ci-postgres.py
+          python3 scripts/account-ci-postgres.py --profile core
 
       - name: Test and vet all Account Platform Go modules
         shell: bash
@@ -1649,12 +1957,12 @@ jobs:
           set -euo pipefail
           # Fixed actor names are exclusive to this ephemeral service. Keep
           # package execution serial and run only the bounded audit fixtures.
-          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/accountschema -run '^TestAuditExport(RollbackRoleStorageGuard|PublicDownRetainsOriginalHistory|GuardedRollbackTransactions)$' | tee "$RUNNER_TEMP/f17-audit-schema.jsonl"
+          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/accountschema -run '^Test(AuditExport(RollbackRoleStorageGuard|PublicDownRetainsOriginalHistory|GuardedRollbackTransactions)|Account039RollbackInventoryPostgres|MembershipInvitationLegacyRollbackPublicPostgres)$' | tee "$RUNNER_TEMP/f17-audit-schema.jsonl"
           go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/account -run '^TestAuditExportPersistedBoundaries$' | tee "$RUNNER_TEMP/f17-audit-account.jsonl"
           python3 - "$RUNNER_TEMP/f17-audit-schema.jsonl" "$RUNNER_TEMP/f17-audit-account.jsonl" <<'PY'
           import json, pathlib, sys
           expected = [
-              {"TestAuditExportRollbackRoleStorageGuard", "TestAuditExportPublicDownRetainsOriginalHistory", "TestAuditExportGuardedRollbackTransactions"},
+              {"TestAuditExportRollbackRoleStorageGuard", "TestAuditExportPublicDownRetainsOriginalHistory", "TestAuditExportGuardedRollbackTransactions", "TestAccount039RollbackInventoryPostgres", "TestMembershipInvitationLegacyRollbackPublicPostgres"},
               {"TestAuditExportPersistedBoundaries"},
           ]
           for filename, required in zip(sys.argv[1:], expected, strict=True):
@@ -1664,50 +1972,48 @@ jobs:
               assert all(event["Action"] == "pass" for event in terminal), "finite PostgreSQL tests failed or skipped"
               roots = {event["Test"] for event in terminal if "/" not in event["Test"]}
               assert roots == required, "required finite PostgreSQL test selection did not execute"
+              audit = "TestAuditExportPersistedBoundaries"
+              if audit in required:
+                  prefix = audit + "/generation_renews_and_recovers/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"renew_live_attempt", "cancel_expired_attempt_and_recover", "ordinary_error_stops_inflight_renewal"}, "audit generation lease cases did not execute"
+                  prefix = audit + "/bounded_retry_policy/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"transient_database_errors_stop_at_three", "expired_third_attempt_is_terminal", "permanent_generation_error_is_not_retried", "pending_without_worker_retains_quota"}, "audit bounded retry cases did not execute"
+              inventory = "TestAccount039RollbackInventoryPostgres"
+              if inventory in required:
+                  prefix = inventory + "/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"empty-ledger", "before-approval-schema", "installed-039", "higher-version", "retained-v2-reference", "wrong-database", "missing-approval-column-grant"}, "039 inventory cases did not execute"
+              invitation = "TestMembershipInvitationLegacyRollbackPublicPostgres"
+              if invitation in required:
+                  prefix = invitation + "/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"retained-link-refuses-down-without-fact-or-schema-loss", "forward-upgrade-replays-original-and-accepts-next-command"}, "retained invitation rollback cases did not execute"
           PY
-      - name: Token financial contracts on isolated PostgreSQL
+      - name: Python for financial runner policy regressions
+        id: financial-policy-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          update-environment: false
+
+      - name: Financial runner policy regressions
         shell: bash
-        env:
-          ACCOUNT_FINANCIAL_SERVICES: ${{ steps.account-pg.outputs.financial_services }}
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
           python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
-          python3 scripts/test-financial-parallel.py
-
-      - name: Account closure contracts on isolated PostgreSQL
-        shell: bash
-        env:
-          PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
-          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
-          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
-          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
-          PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/account-closure-postgres
-        run: |
-          set -euo pipefail
-          python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py
-          python3 scripts/test-account-closure-postgres.py
-
-      - name: Financial parallel diagnostics
-        id: financial_diagnostics_upload
-        if: ${{ always() }}
-        timeout-minutes: 3
-        # Diagnostic transport must not invalidate the completed test verdict.
-        # The preceding contract/test steps and required-gate remain strict.
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
-        with:
-          name: account-financial-parallel-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/financial-parallel-*/
-          if-no-files-found: ignore
-          retention-days: 7
+          policy_python="${{ steps.financial-policy-python.outputs.python-path }}"
+          policy_library="$(dirname "$(dirname "$policy_python")")/lib"
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-policy-process.json" -- env "LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$policy_python" -m unittest discover -s scripts/tests -p test_account_financial_ci.py
 
       - name: Stop owned temporary PostgreSQL services
         if: ${{ always() }}
         env:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
-          python3 scripts/account-ci-postgres.py --stop-owned-services
+          python3 scripts/account-ci-postgres.py --profile core --stop-owned-services
 
       - name: Confirm Account test resource retirement
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -1735,14 +2041,112 @@ jobs:
           retention-days: 7
 
       - name: Warn when Account diagnostic delivery fails
-        if: ${{ always() && (steps.financial_diagnostics_upload.outcome == 'failure' || steps.account_receipts_upload.outcome == 'failure') }}
+        if: ${{ always() && steps.account_receipts_upload.outcome == 'failure' }}
+        run: echo '::warning::Diagnostic upload failed or timed out; original logs and receipts remain on the runner. Tests and resource retirement remain mandatory.'
+
+  account-closure-test:
+    name: account-closure-test
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' && !(github.event_name == 'merge_group' && fromJSON(toJSON(needs.changes.outputs)).reuse_verified == 'true' && contains(fromJSON(fromJSON(toJSON(needs.changes.outputs)).reused_jobs || '[]'), 'account-closure-test')) }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    timeout-minutes: 45
+    services:
+      financial-postgres:
+        # Same immutable PostgreSQL image already used by team-relay-hub-test.
+        # Disposable runner only; trust is never a deployment configuration.
+        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 2
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Initialize owned test resource ledger
+        run: python3 scripts/ci-resource-ledger.py --init --docker
+
+      - name: Set up zram and swap
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
+
+      - name: Go toolchain
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: account-platform/go.mod
+          cache-dependency-path: account-platform/**/go.sum
+          cache: ${{ runner.environment == 'github-hosted' }}
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Verify account CI PostgreSQL service isolation
+        id: account-pg
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: python3 scripts/account-ci-postgres.py --profile closure
+
+      - name: Account closure contracts on isolated PostgreSQL
+        shell: bash
+        env:
+          PINVOU_ACCOUNT_CLOSURE_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
+          PINVOU_ACCOUNT_CLOSURE_TEST_ARTIFACT_DIR: ${{ runner.temp }}/account-closure-postgres
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_account_closure_postgres.py
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/closure-process.json" -- python3 scripts/test-account-closure-postgres.py
+
+      - name: Stop owned temporary PostgreSQL services
+        if: ${{ always() }}
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: |
+          python3 scripts/account-ci-postgres.py --profile closure --stop-owned-services
+
+      - name: Confirm Account test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-resource-ledger.py --recover --directory "$PINVOU_CI_RESOURCE_LEDGER"
+
+      - name: Account closure resource lifecycle receipts
+        id: account_receipts_upload
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: account-closure-resource-lifecycle-${{ github.run_attempt }}
+          path: |
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when Account diagnostic delivery fails
+        if: ${{ always() && (steps.account_receipts_upload.outcome == 'failure') }}
         run: echo '::warning::Diagnostic upload failed or timed out; original logs and receipts remain on the runner. Tests and resource retirement remain mandatory.'
 
   windows-relay-dacl:
     name: windows-relay-dacl
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    if: ${{ (!cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-relay-dacl')) }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -1760,8 +2164,8 @@ jobs:
   windows-relay-tools-test:
     name: windows-relay-tools-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request')  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-relay-tools-test')) }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -1779,7 +2183,7 @@ jobs:
   team-relay-hub-test:
     name: team-relay-hub-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.team_relay_hub == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.team_relay_hub == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'team-relay-hub-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     services:
@@ -1825,7 +2229,7 @@ jobs:
   update-release-console-test:
     name: update-release-console-test (Node ${{ matrix.node-version }})
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.update_release_console == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'update-release-console-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 10
     strategy:
@@ -1874,11 +2278,11 @@ jobs:
     needs: changes
     # Ready PR/Queue/main 仅在发布链路相关路径变化时验证版本同步、
     # Tauri overlay 与各平台打包契约，不生成 deb/dmg/nsis。
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.release_contract == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.release_contract == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'release-contract-test')) }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
-    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON(vars.PINVOU_WINDOWS_MEDIUM_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_MEDIUM_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') || matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -1916,14 +2320,21 @@ jobs:
           npm --prefix pinvou3-app run test:knowledge-host-packaging
           npm --prefix pinvou3-app run test:linux-asr-runtime
 
+      - name: Windows 原生命令退出码回归
+        if: ${{ runner.os == 'Windows' }}
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test remote-control-relay/test/windows-release-exit-code.test.js
+
       - name: Windows 远控发布与安全契约
         if: ${{ runner.os == 'Windows' }}
         env:
           PINVOU_DESKTOP_CONTROLLER_ENABLED: '0'
         run: |
           npm --prefix remote-control-relay run release:gate
-          node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/release-evidence-artifacts.test.js remote-control-relay/test/controller-release-source-binding.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   # pinvou-knowledge 是可单独部署的 crate，必须直接验证自己的默认 feature 图、
   # 测试与部署入口，而不只依赖 Tauri 作为 client-only path dependency 的间接编译。
@@ -1940,24 +2351,21 @@ jobs:
     # keeps Official's existing paths shape for pull_request (drafts included,
     # same as before this change).
     if: >-
-      ${{
-        !cancelled() &&
+      ${{ (!cancelled() &&
         github.event.action != 'closed' &&
         needs.changes.outputs.pure_release_backflow != 'true' &&
         (
           github.event_name == 'push' ||
           needs.changes.outputs.knowledge_rust == 'true' ||
           needs.changes.outputs.knowledge_dependencies == 'true'
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'knowledge-rust'))
       }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
-    # 冷跑时长未实测(~/.cargo 存档命中的运行 3–6min;cache-targets: false,
-    # 编译每轮全冷)。工具链滚动触发冷跑且逼近 30m 时 job 被超时判败,
-    # cache-on-failure 的 post 步会保存 ~/.cargo(registry/git 等,不含
-    # target 编译产物),失败与手动取消都会触发(post-if =
-    # success() || cache-on-failure;取消时 runner 仍执行 post 步),
-    # namespace 不会全冷。冷跑实测逼近上限时再上调。
-    timeout-minutes: 30
+    # cache-targets: false 不缓存 target 编译产物。2026-10-30 的 run 41065378772
+    # 中首轮 Clippy 用时 18m53s，测试已成功，但最后的 cargo-deny 尚未完成
+    # 就触及 30m 总上限。为冷编译及完整安全审计保留有界的 60m 预算；
+    # 所有检查继续执行，cache-on-failure 与仅 main 保存 ~/.cargo 的策略保持。
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -2083,15 +2491,14 @@ jobs:
     # stays paths-driven, and drafts keep the fmt + bounded-regression fast
     # pass via RUN_HEAVY_RUST_CHECKS below.
     if: >-
-      ${{
-        !cancelled() &&
+      ${{ (!cancelled() &&
         github.event.action != 'closed' &&
         needs.changes.outputs.pure_release_backflow != 'true' &&
         (
           github.event_name == 'push' ||
           needs.changes.outputs.rust_code == 'true' ||
           needs.changes.outputs.rust_dependencies == 'true'
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'rust-lint'))
       }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 30m 上限在缓存冷启动下不够:Cargo cache 是 save-if main-only(PR 永不保存)。
@@ -2317,8 +2724,7 @@ jobs:
     # cache(防 concurrency pending 替换盲区),但只编译不执行测试(见下方 --no-run)。
     # Trusted same-repository Community backflows use their dedicated portability gate.
     if: >-
-      ${{
-        !cancelled() &&
+      ${{ (!cancelled() &&
         github.event.action != 'closed' &&
         (
           github.event_name == 'push' ||
@@ -2342,7 +2748,7 @@ jobs:
               )
             )
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'rust-test'))
       }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # Tauri + fastembed + aws-lc-sys 全冷编译耗时长;设上限避免卡死 runner 占用。
@@ -2711,8 +3117,7 @@ jobs:
     name: cli-test
     needs: changes
     if: >-
-      ${{
-        !cancelled() &&
+      ${{ (!cancelled() &&
         github.event.action != 'closed' &&
         (
           github.event_name == 'push' ||
@@ -2731,7 +3136,7 @@ jobs:
               needs.changes.outputs.rust_full == 'true'
             )
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'cli-test'))
       }}
     # 镜像按全仓单一镜像公约钉到发布基线(守卫:
     # test_ci_gate_policy.test_all_linux_jobs_pin_the_release_runner_image)。
@@ -2898,8 +3303,8 @@ jobs:
   windows-static-updater-contract:
     name: windows-static-updater-contract
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_static_updater == 'true'  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_static_updater == 'true' && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-static-updater-contract')) }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -2948,8 +3353,7 @@ jobs:
     # matching Merge Queue combined tree, and main push (cumulative
     # verification independent of a single push's paths-filter).
     if: >-
-      ${{
-        !cancelled() &&
+      ${{ (!cancelled() &&
         github.event.action != 'closed' &&
         (
           github.event_name == 'push' ||
@@ -2968,7 +3372,7 @@ jobs:
               needs.changes.outputs.rust_full == 'true'
             )
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'cli-lint'))
       }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 90
@@ -3139,7 +3543,7 @@ jobs:
     # It only runs on the queue when policy/API/diff resolution fails and mode=full,
     # so skipped cannot mask uncertainty.
     if: >-
-      ${{
+      ${{ (
         vars.PINVOU_WINDOWS_ENABLED != 'false' &&
         !cancelled() &&
         (
@@ -3167,7 +3571,7 @@ jobs:
             github.event_name == 'merge_group' &&
             needs.changes.outputs.backflow_mode == 'full'
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-rust-test'))
       }}
     # `cargo check --all-targets --features dev-tools` produces a metadata-only graph,
     # while `cargo test --lib --no-run` must codegen/link the default-feature test
@@ -3179,7 +3583,7 @@ jobs:
       max-parallel: 2
       matrix:
         phase: [all-targets-check, regression]
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     # 状态机回归使用 Bash 循环；job 级固定 shell 也覆盖 merge ref 从 base
     # 带入该步骤的场景。本 job 其余 run 命令均兼容 Bash。
     defaults:
@@ -3683,6 +4087,9 @@ jobs:
             'features::remote_control::controller::controlling_service::inbound_tests::' \
             'features::remote_control::controller::transfer::staging::tests::' \
             'features::remote_control::controller::relay_transport::tests::' \
+            'features::remote_control::controller::relay_transport::availability_tests::' \
+            'features::remote_control::controller::protocol::parsed_message_tests::' \
+            'features::remote_control::controller::controlling_service::tests::actual_adapter_' \
             'features::remote_control::controller::controlling_service::tests::connect_attempt_' \
             'features::computer_use::platform::windows::tests::' \
             'failed_probe_never_deletes_an_existing_store_windows' \
@@ -3766,8 +4173,8 @@ jobs:
   windows-rustup-repair-test:
     name: windows-rustup-repair-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-rustup-repair-test')) }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_HEAVY_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     # smoke 保留引擎生产环境的 1500s 修复预算;"所有下载源都僵死"的病态情形
     # 必须在引擎自身的诊断输出之后再截断,而不是提前,因此上限要盖过
     # checkout + setup + 工具链拷贝、该预算及其文档化的超冲:最后一次预算
@@ -3853,7 +4260,7 @@ jobs:
     # The independent deployment regression below needs only Node itself
     # and does not extend this job's applicability.
     if: >-
-      ${{
+      ${{ (
         vars.PINVOU_MACOS_ENABLED != 'false' &&
         !cancelled() &&
         (
@@ -3870,7 +4277,7 @@ jobs:
               )
             )
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'macos-rust-check'))
       }}
     runs-on: macos-15
     # A cold check build is slow (macOS runners slower still); same rationale
@@ -4361,8 +4768,8 @@ jobs:
   windows-codex-runtime-test:
     name: windows-codex-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-codex-runtime-test')) }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -4380,6 +4787,9 @@ jobs:
             pinvou3-app/package-lock.json
             remote-control-relay/package-lock.json
 
+      - name: Python for owned browser fixture supervision
+        run: python --version
+
       # Ubuntu npm tests skip these suites outside win32. They use only Node
       # built-ins and fake MCP/host fixtures to exercise the real wrapper
       # subprocess, protocol, heartbeat, tombstone, and commit-unknown paths.
@@ -4388,12 +4798,25 @@ jobs:
       - name: Windows browser wrapper lifecycle regression
         env:
           PINVOU3_TEST_BROWSER_NO_HOST: "1"
-        run: node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
 
       - name: Windows browser wrapper lazy regression
         env:
           PINVOU3_TEST_BROWSER_NO_HOST: "1"
-        run: node pinvou3-app/tests/browser_wrapper_lazy.test.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lazy-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node pinvou3-app/tests/browser_wrapper_lazy.test.mjs
+
+      - name: Preserve browser fixture exit receipts
+        if: always()
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/windows-browser-*-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json
 
       - name: 安装构建依赖
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
@@ -4408,13 +4831,26 @@ jobs:
         run: npm --prefix pinvou3-app run test:windows-runtime
 
       - name: Windows ACP bridge runtime smoke
-        run: npm --prefix pinvou3-app run test:codex-acp-windows-runtime
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-acp-${{ github.run_id }}-${{ github.run_attempt }}.json" -- python scripts/test-windows-acp-runtime.py
+
+      - name: Preserve ACP fixture exit receipt
+        if: always()
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-acp-exit-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/windows-acp-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/windows-acp-${{ github.run_id }}-${{ github.run_attempt }}-resources/*.json
 
   windows-runtime-test:
     name: windows-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_WINDOWS_ENABLED != 'false' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_WINDOWS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'windows-runtime-test')) }}
+    runs-on: ${{ fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -4426,7 +4862,7 @@ jobs:
   macos-codex-runtime-test:
     name: macos-codex-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.acp_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)  && vars.PINVOU_MACOS_ENABLED != 'false' }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.acp_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && vars.PINVOU_MACOS_ENABLED != 'false') && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'macos-codex-runtime-test')) }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -4474,7 +4910,7 @@ jobs:
     name: macos-cli-check
     needs: changes
     if: >-
-      ${{
+      ${{ (
         vars.PINVOU_MACOS_ENABLED != 'false' &&
         !cancelled() &&
         github.event.action != 'closed' &&
@@ -4495,7 +4931,7 @@ jobs:
               needs.changes.outputs.rust_full == 'true'
             )
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'macos-cli-check'))
       }}
     runs-on: macos-15
     # A cold run compiles the whole workspace (the app crate path-dep included)
@@ -4574,8 +5010,7 @@ jobs:
     needs: changes
     # Temporary operational switch; unset/true restores the existing routing.
     if: >-
-      ${{
-        vars.PINVOU_LOONGARCH64_CHECK_ENABLED != 'false' &&
+      ${{ (vars.PINVOU_LOONGARCH64_CHECK_ENABLED != 'false' &&
         !cancelled() &&
         github.event.action != 'closed' &&
         (
@@ -4597,7 +5032,7 @@ jobs:
               needs.changes.outputs.knowledge_rust == 'true'
             )
           )
-        )
+        )) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'rust-loongarch64-check'))
       }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # 冷缓存要交叉编译三个 workspace(含 700+ crate 的 src-tauri)加下载
@@ -4799,8 +5234,11 @@ jobs:
       - fast-gate
       - merge-authored-audit
       - frontend-test
+      - frontend-browser-test
       - relay-test
       - account-platform-test
+      - account-financial-test
+      - account-closure-test
       - windows-relay-dacl
       - windows-relay-tools-test
       - team-relay-hub-test
@@ -4839,9 +5277,17 @@ jobs:
           BACKFLOW_PORTABILITY_RESULT: ${{ needs.backflow-portability.result }}
           FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
           MERGE_AUTHORED_AUDIT_RESULT: ${{ needs.merge-authored-audit.result }}
+          CI_REUSE_VERIFIED: ${{ needs.changes.outputs.reuse_verified }}
+          CI_REUSE_IDS: ${{ join(fromJSON(needs.changes.outputs.reused_jobs || '[]'), ',') }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
+          FRONTEND_BROWSER_RESULT: ${{ needs.frontend-browser-test.result }}
+          FRONTEND_REQUIRED: ${{ needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}
+          FRONTEND_BROWSER_REQUIRED: ${{ needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') && (github.event_name == 'merge_group' || github.event.pull_request.draft == false) }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
           ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
+          ACCOUNT_FINANCIAL_RESULT: ${{ needs.account-financial-test.result }}
+          CLOSURE_REUSE_VERIFIED: ${{ github.event_name == 'merge_group' && fromJSON(toJSON(needs.changes.outputs)).reuse_verified == 'true' && contains(fromJSON(fromJSON(toJSON(needs.changes.outputs)).reused_jobs || '[]'), 'account-closure-test') }}
+          ACCOUNT_CLOSURE_RESULT: ${{ needs.account-closure-test.result }}
           ACCOUNT_PLATFORM_REQUIRED: ${{ needs.changes.outputs.account_platform }}
           WINDOWS_RELAY_DACL_RESULT: ${{ needs.windows-relay-dacl.result }}
           WINDOWS_RELAY_RESULT: ${{ needs.windows-relay-tools-test.result }}
@@ -4869,6 +5315,42 @@ jobs:
           BACKFLOW_MODE: ${{ needs.changes.outputs.backflow_mode }}
           WINDOWS_RUST_REQUIRED_BY_POLICY: ${{ vars.PINVOU_WINDOWS_ENABLED != 'false' && ((github.event_name == 'merge_group' && needs.changes.outputs.backflow_mode == 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (needs.changes.outputs.backflow_mode == 'full' || needs.changes.outputs.backflow_mode == 'windows_full'))) }}
         run: |
+          # A verified source covers every required queue step/matrix leg.
+          # Only skipped executions are normalized; failures remain failures.
+          if [[ "$GITHUB_EVENT_NAME" == merge_group && "${CI_REUSE_VERIFIED:-false}" == true ]]; then
+            for binding in \
+              "version-consistency:VERSION_CONSISTENCY_RESULT" \
+              "frontend-test:FRONTEND_RESULT" \
+              "frontend-browser-test:FRONTEND_BROWSER_RESULT" \
+              "relay-test:RELAY_RESULT" \
+              "account-platform-test:ACCOUNT_PLATFORM_RESULT" \
+              "account-financial-test:ACCOUNT_FINANCIAL_RESULT" \
+              "windows-relay-dacl:WINDOWS_RELAY_DACL_RESULT" \
+              "windows-relay-tools-test:WINDOWS_RELAY_RESULT" \
+              "team-relay-hub-test:TEAM_RELAY_HUB_RESULT" \
+              "update-release-console-test:UPDATE_RELEASE_CONSOLE_RESULT" \
+              "release-contract-test:RELEASE_CONTRACT_RESULT" \
+              "knowledge-rust:KNOWLEDGE_RUST_RESULT" \
+              "rust-lint:RUST_LINT_RESULT" \
+              "rust-test:RUST_RESULT" \
+              "cli-test:CLI_TEST_RESULT" \
+              "cli-lint:CLI_LINT_RESULT" \
+              "windows-rust-test:WINDOWS_RUST_RESULT" \
+              "macos-rust-check:MACOS_RUST_CHECK_RESULT" \
+              "windows-static-updater-contract:WINDOWS_STATIC_UPDATER_RESULT" \
+              "macos-codex-runtime-test:MACOS_CODEX_RESULT" \
+              "macos-cli-check:MACOS_CLI_RESULT" \
+              "rust-loongarch64-check:RUST_LOONGARCH64_CHECK_RESULT" \
+              "windows-codex-runtime-test:WINDOWS_CODEX_RESULT" \
+              "windows-runtime-test:WINDOWS_RUNTIME_RESULT" \
+              "windows-rustup-repair-test:WINDOWS_RUSTUP_REPAIR_RESULT"; do
+              reused_job="${binding%%:*}"
+              result_variable="${binding#*:}"
+              if [[ "${!result_variable}" == skipped && ",${CI_REUSE_IDS:-}," == *",$reused_job,"* ]]; then
+                printf -v "$result_variable" '%s' success
+              fi
+            done
+          fi
           if [[ "${LOONGARCH64_CHECK_ENABLED:-true}" == false ]]; then
             echo "::notice::LoongArch64 cross check temporarily disabled by PINVOU_LOONGARCH64_CHECK_ENABLED=false"
           fi
@@ -4889,8 +5371,27 @@ jobs:
             exit 1
           fi
 
+          if [[ "$FRONTEND_REQUIRED" == true && "$FRONTEND_RESULT" != success ]]; then
+            echo "Applicable frontend quality/logic checks did not pass: $FRONTEND_RESULT" >&2
+            exit 1
+          fi
+          if [[ "$FRONTEND_BROWSER_REQUIRED" == true && "$FRONTEND_BROWSER_RESULT" != success ]]; then
+            echo "Applicable frontend browser shards did not all pass: $FRONTEND_BROWSER_RESULT" >&2
+            exit 1
+          fi
+
           if [[ "$ACCOUNT_PLATFORM_REQUIRED" == "true" && "$ACCOUNT_PLATFORM_RESULT" != success ]]; then
-            echo "Required Account Platform Go gate did not pass: $ACCOUNT_PLATFORM_RESULT" >&2
+            echo "Required Account Platform Go/closure gates did not pass: account=$ACCOUNT_PLATFORM_RESULT closure=$ACCOUNT_CLOSURE_RESULT" >&2
+            exit 1
+          fi
+
+          if [[ "$ACCOUNT_PLATFORM_REQUIRED" == "true" && "$ACCOUNT_FINANCIAL_RESULT" != success ]]; then
+            echo "Required financial CI groups did not all pass: $ACCOUNT_FINANCIAL_RESULT" >&2
+            exit 1
+          fi
+
+          if [[ "$ACCOUNT_PLATFORM_REQUIRED" == "true" && "$ACCOUNT_CLOSURE_RESULT" != success && !( "$ACCOUNT_CLOSURE_RESULT" == skipped && "${CLOSURE_REUSE_VERIFIED:-false}" == true ) ]]; then
+            echo "Required Account closure gate did not pass: $ACCOUNT_CLOSURE_RESULT" >&2
             exit 1
           fi
 
@@ -4913,8 +5414,11 @@ jobs:
           for item in \
             "backflow-portability:$BACKFLOW_PORTABILITY_RESULT" \
             "frontend-test:$FRONTEND_RESULT" \
+            "frontend-browser-test:$FRONTEND_BROWSER_RESULT" \
             "relay-test:$RELAY_RESULT" \
             "account-platform-test:$ACCOUNT_PLATFORM_RESULT" \
+            "account-financial-test:$ACCOUNT_FINANCIAL_RESULT" \
+            "account-closure-test:$ACCOUNT_CLOSURE_RESULT" \
             "windows-relay-dacl:$WINDOWS_RELAY_DACL_RESULT" \
             "windows-relay-tools-test:$WINDOWS_RELAY_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
@@ -4949,3 +5453,24 @@ jobs:
             esac
           done
           [[ "$failed" -eq 0 ]]
+
+      - name: Record successful PR test inputs
+        id: success_proof
+        if: ${{ success() && github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository }}
+        timeout-minutes: 2
+        env:
+          TESTED_SHA: ${{ github.sha }}
+          CI_REUSE_CONFIGURATION: ${{ toJSON(vars) }}
+          CI_REUSE_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci-test-reuse.py record
+
+      - name: PR test success proof transport
+        if: ${{ success() && steps.success_proof.outputs.directory != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-success-proof-${{ github.run_attempt }}
+          path: ${{ steps.success_proof.outputs.directory }}/proof.json
+          if-no-files-found: error
+          retention-days: 2

@@ -31,6 +31,7 @@ let delayedPolicyReadStarted = false;
 let nextAuthorizationReadDelayMs = 0;
 let delayNextSaveAuthorizationRead = false;
 let delayedSaveAuthorizationStarted = false;
+let recoveryAuthorizationBarrier = null;
 let delayNextPolicyWrite = false;
 let delayedPolicyWriteStarted = false;
 const reauthenticationRequests = [];
@@ -97,6 +98,12 @@ const server = createServer(async (request, response) => {
     if (request.headers['x-csrf-token'] !== csrfToken) return json(response, { code: 'CSRF_REJECTED' }, 403);
     const requestedUserID = currentUserID;
     const requestedPermissions = [...permissions];
+    if (recoveryAuthorizationBarrier) {
+      const barrier = recoveryAuthorizationBarrier;
+      recoveryAuthorizationBarrier = null;
+      barrier.started();
+      await barrier.released;
+    }
     if (delayNextSaveAuthorizationRead) {
       delayNextSaveAuthorizationRead = false;
       delayedSaveAuthorizationStarted = true;
@@ -248,10 +255,44 @@ try {
           await Promise.all([page.waitForNavigation({ waitUntil: 'networkidle0' }), page.click('[data-testid="registration-bonus-policy"] [role="alert"] button')]);
           await page.waitForSelector('[data-testid="registration-bonus-policy"] [role="alert"] button');
         }
-        await page.click('[data-testid="registration-bonus-policy"] [role="alert"] button');
+        const originalKey = writes[0].idempotencyKey;
+        const recoveryKey = `pinvou.admin.registration-bonus.pending.${currentUserID}`;
+        const pendingProof = await page.evaluate(key => document.defaultView.sessionStorage.getItem(key), recoveryKey);
+        assert.ok(pendingProof, 'the original command remains pending before explicit retry');
+        let release, started, deadline;
+        const entered = new Promise((resolve, reject) => {
+          started = () => { clearTimeout(deadline); resolve(); };
+          deadline = setTimeout(() => reject(new Error('Recovery authorization barrier was not reached')), 10000);
+        });
+        recoveryAuthorizationBarrier = { started, released: new Promise(resolve => { release = resolve; }) };
+        const receipt = page.waitForResponse(response => response.request().method() === 'PUT'
+          && new URL(response.url()).pathname === '/api/admin/billing/admin/v1/registration-bonus-policy'
+          && response.request().headers()['idempotency-key'] === originalKey && response.status() === 200);
+        try {
+          await page.click('[data-testid="registration-bonus-policy"] [role="alert"] button');
+          await entered;
+          // The old completion predicate is already true while authorization
+          // still holds the actual retry. It cannot witness command completion.
+          const readRevision = String(policy.revision);
+          await page.waitForFunction(expected => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === expected
+            && !document.querySelector('[data-testid="registration-bonus-policy"] [role="alert"]'), {}, readRevision);
+          assert.equal(writes.length, 1, 'authorization has not released a second command');
+          assert.equal(await page.$eval('[data-testid="registration-bonus-policy"] button[type="submit"]', node => node.disabled), true);
+          assert.equal(await page.evaluate(key => document.defaultView.sessionStorage.getItem(key), recoveryKey), pendingProof);
+          const readsBeforeReplay = policyReads;
+          const refreshed = page.waitForResponse(response => response.request().method() === 'GET'
+            && new URL(response.url()).pathname === '/api/admin/billing/admin/v1/registration-bonus-policy' && response.status() === 200);
+          release();
+          await Promise.all([receipt, refreshed]);
+          assert.equal(policyReads, readsBeforeReplay + 1, 'confirmed original receipt triggers one current-policy read');
+        } finally {
+          clearTimeout(deadline); release(); recoveryAuthorizationBarrier = null;
+        }
       }
       const nextRevision = (BigInt(revision) + (lostAck === 'http-reauth' ? 2n : 1n)).toString();
       await page.waitForFunction(expected => document.querySelector('[data-testid="registration-bonus-policy"] .adm-registration-bonus-summary dd')?.textContent.trim() === expected && !document.querySelector('[data-testid="registration-bonus-policy"] [role="alert"]'), {}, nextRevision);
+      await page.waitForFunction(key => document.defaultView.sessionStorage.getItem(key) === null, {}, `pinvou.admin.registration-bonus.pending.${currentUserID}`);
+      await page.waitForFunction(() => document.querySelector('[data-testid="registration-bonus-policy"] textarea')?.disabled === false);
       assert.equal(writes.length, lostAck ? 2 : 1);
       assert.equal(mutations, 1, 'lost acknowledgement must not create another mutation');
       if (lostAck) assert.equal(writes[0].idempotencyKey, writes[1].idempotencyKey);

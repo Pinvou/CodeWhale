@@ -7,7 +7,7 @@
 - **数据库策略元数据先行**：Account `approval_command_policies` 登记 `policy_version=1 / snapshot_schema_version=1 / APPROVAL_REQUIRED`，请求权限 `platform.billing.repairs.request`、审批权限 `platform.billing.repairs.approve`、风险类 `FINANCIAL_FACT_CHANGE`、一名非申请人审批、critical 字段 `target_id/resource_version/financial_snapshot/policy_version`、24 小时申请有效期、5 分钟执行窗口、执行身份 `billing-command-executor`（`migrations/account/000018_approval_commands.up.sql`）。Go `internal/platform/approvalpolicy/registry.go` 的可执行注册属于当前 F11 交付，不能算作设计冻结时已完成。
 - **静态不可执行**：不在 `executableApprovalCommands` 内，create/update/submit/APPROVE/Begin 均在领域调用前失败关闭。
 - **Billing 侧只有未激活行**：`('RECEIVABLE_WRITE_OFF',1,1,'INACTIVE',1)`（`migrations/billing/000054_approval_command_activations.up.sql`）；没有该命令的 handler、proof、executor、consumer durable 或恢复分类。
-- **当前交付与历史基线的区别**：当前合同位于 `contracts/openapi/receivable-write-off.json`；`internal/platform/approvalpolicy/registry.go` 与 `internal/account/approval_command_manifest.go` 注册本命令；Billing 投影及 `internal/platform/billinggovernance/client.go` 仅允许本命令 v1/s1 为 ACTIVE，其余尚未交付命令继续失败关闭。新增迁移仍默认 INACTIVE，代码具备能力不等于已生产激活。
+- **当前交付与历史基线的区别**：当前合同位于[应收核销 OpenAPI](../contracts/openapi/receivable-write-off.json)；[策略注册表](../internal/platform/approvalpolicy/registry.go)定义本命令，[闭合政策集校验](../internal/platform/approvalpolicy/manifest.go)绑定 Account 数据库政策，[Account 预检](../internal/account/approval_precheck.go)校验资源类型及 v1/s1 命令证明；Billing 投影及 `internal/platform/billinggovernance/client.go` 仅允许本命令 v1/s1 为 ACTIVE，其余尚未交付命令继续失败关闭。新增迁移仍默认 INACTIVE，代码具备能力不等于已生产激活。
 
 ## 2. 应收现状与不变量（事实）
 
@@ -82,7 +82,7 @@
 - 应收三元组：写入后仍满足 `settled+outstanding=original`；`outstanding=0` 时 `status='WRITTEN_OFF'`（本命令路径）并有 `settled_at`；否则 `status='PARTIALLY_SETTLED'`。不新增列、不替换既有 CHECK，避免第二份真相。
 - 钱包投影一致：`wallets.receivable_microcredits` 必须等于该钱包所有 `outstanding_microcredits>0` 应收之和（本命令只按 A 等量回落）；`financial_status`/`financial_freeze_reason` 与清零状态一致。
 - 分配与账本一致：`sum(receivable_allocations.amount_microcredits)=settled_microcredits`；每条 allocation 的 `journal_entry_id` 指向的 journal 必须平衡且 `sum(ledger_postings.delta)=0`。
-- 实际并发边界：Billing 在 Serializable 事务内读取应收与钱包事实并核对冻结版本/摘要，再写 journal/posting、allocation，并使用带版本/金额条件的 UPDATE 推进应收与钱包，最后更新 `attention_summary`。本命令没有 `SELECT ... FOR UPDATE`；条件更新冲突或序列化失败会回滚整笔事务，不得把文档中的锁描述当作已实现的保证。
+- 实际并发边界：Billing 在 Serializable 事务内先读取已提交的原审批结果。新执行固定 activation 后，按充值路径的顺序先锁钱包，再核对应收与钱包的冻结版本和摘要。账本、核销分配和两项投影在同一事务中写入。若 PostgreSQL 在锁钱包时因旧快照中止事务，本次已授权执行用原审批和幂等键在新事务中重验一次。后续写入或提交故障沿现有结果恢复流程处理。
 - 并发 CAS 与序列化约束：相同冻结版本的同一应收两次并发核销至多一次成功（第二次 `version`/`outstanding` 校验失败或 allocation 唯一冲突）；钱包并发入账抵扣与核销都不得使 `receivable_microcredits` 与应收事实偏离。
 
 ## 7. 幂等、result-first 与未知结果

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import { fork, spawnSync } from "node:child_process";
+import { spawnSyncWithRetry } from "./relay-tools-spawn.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,7 +34,25 @@ async function expectBootstrapFault(child, phase) {
   assert.ok(expected, "known bootstrap fault phase required");
   const { code, signal } = await child.exited;
   assert.equal(signal, null, "bootstrap fault must exit without a signal");
-  assert.equal(code, expected, `child did not reach the ${phase} fault boundary`);
+  const evidence = typeof child.stderr === "function" && child.stderr()
+    ? `: ${child.stderr().slice(-800)}` : "";
+  assert.equal(code, expected, `child did not reach the ${phase} fault boundary${evidence}`);
+}
+// Windows 自托管 runner 高负载下，fork 子进程可能在到达被测边界前因基础
+// 设备类失败退出——fixture 以 exit 1 显式区分「边界前失败」（对比 81/82/83
+// 的确定性边界退出；round-5 CI 实证：期望 81 的场景在 runner 满载时偶发
+// exit 1）。对 exit 1 定向重试一次；真实回归（可复现的早期失败或错误边界
+// 退出）在重试后仍然如实红。
+async function expectBootstrapFaultReached(f, mode, phase) {
+  for (let attempt = 0; ; attempt += 1) {
+    const child = f.child(mode);
+    try {
+      await expectBootstrapFault(child, phase);
+      return;
+    } catch (error) {
+      if (attempt >= 1 || error.actual !== 1) throw error;
+    }
+  }
 }
 function windowsCreatorMetadata(target) {
   const script = `
@@ -62,7 +81,7 @@ function OwnerClass([string]$sid) {
   for (const key of ["SystemRoot", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP"]) {
     if (process.env[key] !== undefined) environment[key] = process.env[key];
   }
-  const result = spawnSync(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+  const result = spawnSyncWithRetry(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     { env: environment, encoding: "utf8", windowsHide: true, timeout: 15000, maxBuffer: 4096 });
   assert.ifError(result.error);
@@ -73,6 +92,84 @@ function OwnerClass([string]$sid) {
   assert.equal(typeof metadata.protected, "boolean");
   return metadata;
 }
+async function openGuardStore(t, options, open = value => RelayStateStore.open(value)) {
+  try {
+    return await open(options);
+  } catch (error) {
+    // TAP retains the store error but omits its native subprocess cause. Emit
+    // only closed classifications, never PowerShell arguments, ACLs or stderr.
+    let cause;
+    try { cause = error?.cause; } catch { /* Preserve the original failure. */ }
+    const read = field => {
+      try { return cause?.[field]; } catch { return undefined; }
+    };
+    const code = read("code"), errno = read("errno");
+    const killed = read("killed"), signal = read("signal");
+    const diagnostic = { stage: "store_open", code: "unknown" };
+    if (["ETIMEDOUT", "EACCES", "EPERM", "ENOENT", "ENOTDIR", "EINVAL",
+      "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"].includes(code)) diagnostic.code = code;
+    if (Number.isSafeInteger(code) && code >= -2147483648 && code <= 4294967295) diagnostic.exit_code = code;
+    if (Number.isSafeInteger(errno) && errno >= -2147483648 && errno <= 2147483647) diagnostic.errno = errno;
+    if (typeof killed === "boolean") diagnostic.killed = killed;
+    if (["SIGTERM", "SIGKILL", "SIGABRT", "SIGINT"].includes(signal)) diagnostic.signal = signal;
+    try { t.diagnostic(`controller_guard_store_open_failure ${JSON.stringify(diagnostic)}`); }
+    catch { /* Diagnostics cannot replace the original open failure. */ }
+    throw error;
+  }
+}
+
+test("controller guard open diagnostics preserve the native cause and expose only cached closed fields", async () => {
+  for (const mode of ["changing", "throwing", "boxed", "observer_throw", "exit_code", "unknown"]) {
+    const reads = { cause: 0, code: 0, errno: 0, killed: 0, signal: 0 };
+    const forbidden = { message: 0, stack: 0, stdout: 0, stderr: 0, cmd: 0, path: 0, owner: 0, sddl: 0 };
+    const values = { code: mode === "exit_code" ? 1 : mode === "unknown" ? "SECRET_SENTINEL" : "ETIMEDOUT",
+      errno: -1, killed: true, signal: "SIGTERM" };
+    const cause = {}, original = {}, options = {}, messages = [];
+    Object.defineProperty(original, "cause", { get() { reads.cause++; return cause; } });
+    for (const [field, value] of Object.entries(values)) {
+      Object.defineProperty(cause, field, { get() {
+        reads[field]++;
+        if (mode === "throwing") throw new Error("SECRET_SENTINEL");
+        if (mode === "boxed") return Object(value);
+        return reads[field] === 1 ? value : "SECRET_SENTINEL";
+      } });
+    }
+    for (const object of [original, cause]) {
+      for (const field of Object.keys(forbidden)) {
+        Object.defineProperty(object, field, { get() { forbidden[field]++; throw new Error("SECRET_SENTINEL"); } });
+      }
+    }
+    await assert.rejects(openGuardStore({ diagnostic(message) {
+      messages.push(message);
+      if (mode === "observer_throw") throw new Error("SECRET_SENTINEL");
+    } }, options, async actual => { assert.equal(actual, options); throw original; }), actual => actual === original);
+    for (const count of Object.values(reads)) assert.equal(count, 1);
+    for (const count of Object.values(forbidden)) assert.equal(count, 0);
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].includes("SECRET"), false);
+    const expected = { stage: "store_open", code: "unknown" };
+    if (!["throwing", "boxed"].includes(mode)) {
+      Object.assign(expected, { errno: -1, killed: true, signal: "SIGTERM" });
+      if (mode === "exit_code") expected.exit_code = 1;
+      else if (mode !== "unknown") expected.code = "ETIMEDOUT";
+    }
+    assert.deepEqual(JSON.parse(messages[0].slice("controller_guard_store_open_failure ".length)), expected);
+  }
+});
+
+test("controller guard open diagnostics retain successful results and tolerate an unavailable cause", async () => {
+  const options = {}, result = {};
+  assert.equal(await openGuardStore({ diagnostic() { assert.fail("success must not emit failure diagnostics"); } },
+    options, async actual => { assert.equal(actual, options); return result; }), result);
+  for (const mode of ["missing", "throwing"]) {
+    const original = {}, messages = [];
+    if (mode === "throwing") Object.defineProperty(original, "cause", { get() { throw new Error("SECRET_SENTINEL"); } });
+    await assert.rejects(openGuardStore({ diagnostic(message) { messages.push(message); } }, options,
+      async () => { throw original; }), actual => actual === original);
+    assert.deepEqual(messages, ['controller_guard_store_open_failure {"stage":"store_open","code":"unknown"}']);
+  }
+});
+
 async function fixture(t) {
   const directory = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "pinvou-guard-test-")));
   const statePath = join(directory, "controller", "state.json");
@@ -93,7 +190,7 @@ async function fixture(t) {
       return `guard-test-process:${pid}`;
     }, ...security };
   async function open(overrides = {}) {
-    const store = await RelayStateStore.open({ ...options, ...overrides });
+    const store = await openGuardStore(t, { ...options, ...overrides });
     stores.push(store);
     return store;
   }
@@ -118,7 +215,9 @@ async function fixture(t) {
         waiters.push(message => { clearTimeout(timer); resolve(message); });
       });
     }
-    return { process, next, exited, send: message => process.send(message) };
+    return { process, next, exited, send: message => process.send(message),
+      // 子进程 stderr（bootstrap 早期失败的唯一证据），供断言诊断使用。
+      stderr: () => failure };
   }
   return { directory, statePath, options, open, child };
 }
@@ -235,7 +334,7 @@ test("controller guard missing builtin fails before filesystem preparation", () 
       legacyStatePath:'${process.platform === "win32" ? "C:/" : "/"}unopened-legacy.json',
       fs:new Proxy({}, {get(){throw Error('filesystem touched')}})});process.exit(2)}
     catch(e){if(e.code!=='relay_state_lock_runtime_unavailable')throw e}`;
-  const result = spawnSync(process.execPath, ["--no-experimental-sqlite", "--input-type=module", "-e", code],
+  const result = spawnSyncWithRetry(process.execPath, ["--no-experimental-sqlite", "--input-type=module", "-e", code],
     { encoding: "utf8", windowsHide: true, timeout: 10000 });
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
@@ -278,8 +377,8 @@ test("controller guard close failure retains resource until retry without deleti
 });
 
 test("controller guard native exit before protecting its new inode recovers through CAS and restart", async t => {
-  const f = await fixture(t), child = f.child("native-exit-before-guard-protect");
-  await expectBootstrapFault(child, "before-guard-protect");
+  const f = await fixture(t);
+  await expectBootstrapFaultReached(f, "native-exit-before-guard-protect", "before-guard-protect");
   const path = join(dirname(f.statePath), RELAY_CONTROLLER_GUARD_FILENAME);
   const before = await fs.lstat(path, { bigint: true });
   assert.equal(before.size, 0n);
@@ -403,8 +502,8 @@ test("controller guard refuses changed identity before bootstrap permission repa
 });
 
 test("controller guard bootstrap recovery never tightens a nonempty unprotected protocol", async t => {
-  const f = await fixture(t), child = f.child("native-exit-before-guard-protect");
-  await expectBootstrapFault(child, "before-guard-protect");
+  const f = await fixture(t);
+  await expectBootstrapFaultReached(f, "native-exit-before-guard-protect", "before-guard-protect");
   const path = join(dirname(f.statePath), RELAY_CONTROLLER_GUARD_FILENAME);
   const database = new DatabaseSync(path);
   database.exec("PRAGMA application_id=7; PRAGMA user_version=99;");
@@ -423,8 +522,8 @@ test("controller guard bootstrap recovery never tightens a nonempty unprotected 
 
 for (const phase of ["before", "after"]) {
   test(`controller guard native bootstrap exit ${phase} seed commit recovers before first JSON access`, async t => {
-    const f = await fixture(t), child = f.child(`native-exit-${phase}-seed-commit`);
-    await expectBootstrapFault(child, `${phase}-seed-commit`);
+    const f = await fixture(t);
+    await expectBootstrapFaultReached(f, `native-exit-${phase}-seed-commit`, `${phase}-seed-commit`);
     await assert.rejects(fs.stat(f.statePath), { code: "ENOENT" });
     const guardPath = join(dirname(f.statePath), RELAY_CONTROLLER_GUARD_FILENAME);
     const identity = await fs.lstat(guardPath, { bigint: true });

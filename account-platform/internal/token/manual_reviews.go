@@ -3,6 +3,8 @@ package token
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
@@ -23,6 +25,12 @@ type tokenManualReviewOverdue struct {
 	ownerID                   *uuid.UUID
 	stopLoss                  bool
 }
+
+const tokenManualReviewEscalationEligible = `status='OPEN'
+ AND ((claimed_at IS NULL AND claim_due_at<=checked_at) OR
+      (first_response_at IS NULL AND first_response_due_at<=checked_at) OR
+      (mitigation_at IS NULL AND mitigation_due_at<=checked_at) OR resolution_due_at<=checked_at)
+ AND (last_escalated_at IS NULL OR last_escalated_at<checked_at-interval '1 hour')`
 
 func (r *PostgresRepository) SyncManualReviewCases(ctx context.Context, limit int) (int, error) {
 	if limit < 1 || limit > 500 {
@@ -98,31 +106,61 @@ func (r *PostgresRepository) EscalateOverdueManualReviews(ctx context.Context, s
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	rows, err := r.pool.Query(ctx, `SELECT id,severity,owner_id,case_type,resource_id,CASE WHEN resolution_due_at<=now() THEN 'RESOLUTION_OVERDUE' WHEN mitigation_at IS NULL AND mitigation_due_at<=now() THEN 'MITIGATION_OVERDUE' WHEN first_response_at IS NULL AND first_response_due_at<=now() THEN 'FIRST_RESPONSE_OVERDUE' WHEN claimed_at IS NULL AND claim_due_at<=now() THEN 'CLAIM_OVERDUE' END,(severity IN ('P0','P1') AND mitigation_at IS NULL AND mitigation_due_at<=now()) FROM manual_review_cases WHERE status='OPEN' AND ((claimed_at IS NULL AND claim_due_at<=now()) OR (first_response_at IS NULL AND first_response_due_at<=now()) OR (mitigation_at IS NULL AND mitigation_due_at<=now()) OR resolution_due_at<=now()) AND (last_escalated_at IS NULL OR last_escalated_at<now()-interval '1 hour') ORDER BY CASE severity WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,created_at,id LIMIT $1`, limit)
+	rows, err := r.pool.Query(ctx, `SELECT id FROM manual_review_cases
+ CROSS JOIN (SELECT statement_timestamp() AS checked_at) AS clock
+ WHERE `+tokenManualReviewEscalationEligible+`
+ ORDER BY CASE severity WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,created_at,id LIMIT $1`, limit)
 	if err != nil {
 		return 0, err
 	}
-	items := []tokenManualReviewOverdue{}
+	ids := []uuid.UUID{}
 	for rows.Next() {
-		var item tokenManualReviewOverdue
-		if err := rows.Scan(&item.id, &item.severity, &item.ownerID, &item.caseType, &item.resourceID, &item.stage, &item.stopLoss); err != nil {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		items = append(items, item)
+		ids = append(ids, id)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 	count := 0
-	for _, item := range items {
+	for _, id := range ids {
 		tx, err := r.pool.Begin(ctx)
 		if err != nil {
 			return count, err
 		}
-		now := r.now()
+		item := tokenManualReviewOverdue{id: id}
+		var now time.Time
 		var level int
-		err = tx.QueryRow(ctx, `UPDATE manual_review_cases SET escalation_level=escalation_level+1,last_escalated_at=$2,updated_at=$2 WHERE id=$1 AND status='OPEN' RETURNING escalation_level`, item.id, now).Scan(&level)
+		// Sample the database clock after locking this row, so lock or queue
+		// delays cannot shorten the next one-hour window.
+		var locked bool
+		err = tx.QueryRow(ctx, `SELECT true FROM manual_review_cases WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&locked)
+		if err == nil {
+			err = tx.QueryRow(ctx, `UPDATE manual_review_cases
+ SET escalation_level=escalation_level+1,last_escalated_at=checked_at,updated_at=checked_at
+ FROM (SELECT statement_timestamp() AS checked_at) AS clock
+ WHERE id=$1 AND `+tokenManualReviewEscalationEligible+`
+ RETURNING last_escalated_at,escalation_level,severity,owner_id,case_type,resource_id,
+  CASE WHEN resolution_due_at<=checked_at THEN 'RESOLUTION_OVERDUE'
+       WHEN mitigation_at IS NULL AND mitigation_due_at<=checked_at THEN 'MITIGATION_OVERDUE'
+       WHEN first_response_at IS NULL AND first_response_due_at<=checked_at THEN 'FIRST_RESPONSE_OVERDUE'
+       WHEN claimed_at IS NULL AND claim_due_at<=checked_at THEN 'CLAIM_OVERDUE' END,
+  (severity IN ('P0','P1') AND mitigation_at IS NULL AND mitigation_due_at<=checked_at)`, id).
+				Scan(&now, &level, &item.severity, &item.ownerID, &item.caseType, &item.resourceID, &item.stage, &item.stopLoss)
+		}
+		if err != nil {
+			tx.Rollback(ctx)
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			return count, err
+		}
 		owner, assigned := schedule.Next(level - 1)
-		if err == nil && assigned {
+		if assigned {
 			_, err = tx.Exec(ctx, `UPDATE manual_review_cases SET owner_id=$2,last_assigned_at=$3,assignment_revision=assignment_revision+1,updated_at=$3 WHERE id=$1`, item.id, owner, now)
 		}
 		if err == nil && assigned {
@@ -181,8 +219,13 @@ func (r *PostgresRepository) evaluateTokenStopLoss(ctx context.Context, tx pgx.T
 	return events.AppendOutbox(ctx, tx, "token.manual-review.stop-loss-evaluated.v1", item.id, 1, map[string]any{"case_id": item.id, "severity": item.severity, "route_reference": tokenAccountID.String() + ":" + model, "route_paused": true})
 }
 
+type manualReviewSLARepository interface {
+	SyncManualReviewCases(context.Context, int) (int, error)
+	EscalateOverdueManualReviews(context.Context, manualreview.OnCallSchedule, int) (int, error)
+}
+
 type ManualReviewSLAWorker struct {
-	repository *PostgresRepository
+	repository manualReviewSLARepository
 	schedule   manualreview.OnCallSchedule
 	interval   time.Duration
 }
@@ -195,11 +238,7 @@ func NewManualReviewSLAWorker(repository *PostgresRepository, schedule manualrev
 }
 
 func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
-	run := func() {
-		_, _ = worker.repository.SyncManualReviewCases(ctx, 100)
-		_, _ = worker.repository.EscalateOverdueManualReviews(ctx, worker.schedule, 100)
-	}
-	run()
+	worker.runOne(ctx)
 	ticker := time.NewTicker(worker.interval)
 	defer ticker.Stop()
 	for {
@@ -207,8 +246,17 @@ func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			run()
+			worker.runOne(ctx)
 		}
+	}
+}
+
+func (worker *ManualReviewSLAWorker) runOne(ctx context.Context) {
+	if _, err := worker.repository.SyncManualReviewCases(ctx, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
+		slog.ErrorContext(ctx, "manual_review_sync_failed", "error_code", "MANUAL_REVIEW_SYNC_FAILED")
+	}
+	if _, err := worker.repository.EscalateOverdueManualReviews(ctx, worker.schedule, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
+		slog.ErrorContext(ctx, "manual_review_escalation_failed", "error_code", "MANUAL_REVIEW_ESCALATION_FAILED")
 	}
 }
 

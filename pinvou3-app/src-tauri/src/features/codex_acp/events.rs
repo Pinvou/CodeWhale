@@ -930,6 +930,7 @@ impl EventBridge {
             crate::features::behavior_telemetry::capture_failure_context(
                 &self.app,
                 &self.pinvou_session_id,
+                turn_id,
                 error,
                 true,
             );

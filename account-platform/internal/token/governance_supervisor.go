@@ -10,6 +10,13 @@ import (
 
 type governedWorkerRun func(context.Context, func()) error
 
+type governedWorkerExit struct {
+	index int
+	err   error
+}
+
+const governanceSupervisorFailure = "token governance supervisor failed"
+
 // tokenGovernanceEpoch owns the cancellation of one active generation. Both
 // supervisors replace/close this owner on state changes and close the remaining
 // owner on return; no per-iteration deferred cancellations accumulate.
@@ -103,7 +110,7 @@ func (s *TokenGovernanceSupervisor) Run(ctx context.Context) error {
 	var selected TokenCommandGovernanceActivation
 	var epoch *tokenGovernanceEpoch
 	var readyEvents chan int
-	var exits chan error
+	var exits chan governedWorkerExit
 	readyLoops := map[int]bool{}
 	closeEpoch := func() {
 		s.service.WithTokenAccountCreateCapability(false)
@@ -128,26 +135,32 @@ func (s *TokenGovernanceSupervisor) Run(ctx context.Context) error {
 			return nil
 		case <-timer.C:
 			activation, err := read()
-			if err != nil || activation.State != "ACTIVE" || activation.Epoch < 1 {
+			if err != nil {
+				closeEpoch()
+				reportTokenWorkerFailure(ctx, governanceSupervisorFailure, "poll_activation", err)
+			} else if activation.State != "ACTIVE" || activation.Epoch < 1 {
 				closeEpoch()
 			} else if epoch == nil || activation != selected {
 				closeEpoch()
 				workers, factoryErr := s.factory(activation)
-				if factoryErr == nil && len(workers) == 2 && workers[0] != nil && workers[1] != nil {
+				if factoryErr != nil || len(workers) != 2 || workers[0] == nil || workers[1] == nil {
+					reportTokenWorkerFailure(ctx, governanceSupervisorFailure, "build_workers", factoryErr)
+				} else {
 					epoch = newTokenGovernanceEpoch(ctx)
 					workerCtx := epoch.context
 					selected = activation
 					readyEvents = make(chan int, 2)
-					exits = make(chan error, 2)
+					exits = make(chan governedWorkerExit, 2)
 					for index, run := range workers {
 						readyChannel, exitChannel := readyEvents, exits
 						go func(index int, run governedWorkerRun) {
-							exitChannel <- run(workerCtx, func() {
+							err := run(workerCtx, func() {
 								select {
 								case readyChannel <- index:
 								case <-workerCtx.Done():
 								}
 							})
+							exitChannel <- governedWorkerExit{index: index, err: err}
 						}(index, run)
 					}
 				}
@@ -157,16 +170,24 @@ func (s *TokenGovernanceSupervisor) Run(ctx context.Context) error {
 			readyLoops[index] = true
 			if len(readyLoops) == 2 {
 				current, err := read()
-				if err != nil || current != selected {
+				if err != nil {
+					closeEpoch()
+					reportTokenWorkerFailure(ctx, governanceSupervisorFailure, "confirm_activation", err)
+				} else if current != selected {
 					closeEpoch()
 				} else {
 					s.service.WithTokenAccountCreateCapability(true)
 				}
 			}
-		case <-exits:
+		case exit := <-exits:
 			// An unexpected worker exit revokes readiness before cancellation.
 			// A later poll may safely establish new uniquely-owned DB leases.
 			closeEpoch()
+			stage := "account_worker_exit"
+			if exit.index == 1 {
+				stage = "lifecycle_worker_exit"
+			}
+			reportTokenWorkerFailure(ctx, governanceSupervisorFailure, stage, exit.err)
 		}
 	}
 }

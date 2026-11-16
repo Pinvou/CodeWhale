@@ -9,9 +9,28 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/google/uuid"
 )
+
+type materialProxyRecorder struct {
+	*httptest.ResponseRecorder
+	deadline time.Time
+}
+
+func (w *materialProxyRecorder) SetWriteDeadline(deadline time.Time) error {
+	w.deadline = deadline
+	return nil
+}
+
+type materialProxyTransport func(*http.Request) (*http.Response, error)
+
+func (transport materialProxyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return transport(r)
+}
 
 func TestProductAdmissionMaterialPortalBoundary(t *testing.T) {
 	base := "/admin/v1/recharge-products/" + uuid.NewString()
@@ -55,9 +74,13 @@ func TestProductAdmissionMaterialPortalBoundary(t *testing.T) {
 	defer account.Close()
 	service.config.AccountURL = parseTestURL(t, account.URL)
 	calls := 0
-	data := bytes.Repeat([]byte{0, 255, 128, 0, 1}, (5<<20)/5)
+	data := bytes.Repeat([]byte{0, 255, 128, 1}, (10<<20)/4)
 	billing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
+		if r.URL.Path == base+"/publish" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		raw, err := io.ReadAll(r.Body)
 		if err != nil || !bytes.Equal(raw, data) || r.Header.Get("Content-Type") != "image/png" {
 			t.Error("binary body changed")
@@ -66,12 +89,27 @@ func TestProductAdmissionMaterialPortalBoundary(t *testing.T) {
 	}))
 	defer billing.Close()
 	service.config.BillingURL = parseTestURL(t, billing.URL)
+	handler := httpserver.HandlerWithApplication(config.Config{ServiceName: "token-portal", Environment: "test"}, service.Handler(nil), nil)
+	transport := service.client.Transport
+	service.client.Transport = materialProxyTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == service.config.BillingURL.Host {
+			deadline, bounded := r.Context().Deadline()
+			want := 15 * time.Second
+			if productAdmissionMaterialUpload(r.Method, r.URL.Path) {
+				want = 70 * time.Second
+			}
+			if remaining := time.Until(deadline); !bounded || remaining < want-2*time.Second || remaining > want {
+				t.Errorf("unexpected Billing request budget for %s: %v", r.URL.Path, remaining)
+			}
+		}
+		return transport.RoundTrip(r)
+	})
 	r := financeBrowserRequest(service, session, "POST", "/api/admin/billing"+base+"/admission-materials", "")
 	body := &importCountingBody{}
 	r.Body = body
-	w := httptest.NewRecorder()
-	service.Handler(nil).ServeHTTP(w, r)
-	if w.Code != 403 || body.reads != 0 || calls != 0 {
+	w := &materialProxyRecorder{ResponseRecorder: httptest.NewRecorder()}
+	handler.ServeHTTP(w, r)
+	if w.Code != 403 || body.reads != 0 || calls != 0 || !w.deadline.IsZero() {
 		t.Fatalf("preflight status=%d reads=%d calls=%d", w.Code, body.reads, calls)
 	}
 	allowed = true
@@ -82,19 +120,28 @@ func TestProductAdmissionMaterialPortalBoundary(t *testing.T) {
 	}{
 		{"/admission-materials", data, 200},
 		{"/publish", data, 413},
+		{"/publish", []byte(`{}`), 204},
 		{"/admission-materials", make([]byte, (10<<20)+1), 413},
 	} {
 		r := financeBrowserRequest(service, session, "POST", "/api/admin/billing"+base+tc.suffix, "")
 		r.Body = io.NopCloser(bytes.NewReader(tc.body))
 		r.Header.Set("Content-Type", "image/png")
-		w := httptest.NewRecorder()
-		service.Handler(nil).ServeHTTP(w, r)
+		w := &materialProxyRecorder{ResponseRecorder: httptest.NewRecorder()}
+		started := time.Now()
+		handler.ServeHTTP(w, r)
 		if w.Code != tc.want {
 			t.Fatalf("%s status=%d", tc.suffix, w.Code)
 		}
+		if tc.suffix == "/admission-materials" {
+			if w.deadline.Before(started.Add(105*time.Second)) || w.deadline.After(time.Now().Add(105*time.Second)) {
+				t.Fatalf("upload response deadline = %v", w.deadline)
+			}
+		} else if !w.deadline.IsZero() {
+			t.Fatal("ordinary response deadline changed")
+		}
 	}
-	if calls != 1 {
-		t.Fatal("ordinary/oversized request reached Billing", calls)
+	if calls != 2 || service.client.Timeout != 15*time.Second {
+		t.Fatal("unexpected Billing calls or altered shared timeout", calls, service.client.Timeout)
 	}
 }
 

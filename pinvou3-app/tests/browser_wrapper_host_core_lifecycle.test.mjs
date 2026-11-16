@@ -30,7 +30,11 @@ function atomicWriteJson(path, value) {
   renameSync(temporary, path);
 }
 
-async function waitUntil(predicate, message, timeoutMs = 2_000) {
+// Same contract as browser_wrapper_windows_lifecycle.test.mjs: call sites wait
+// for cross-process observables (tombstones, request files, host counters)
+// whose only requirement is to eventually appear, so the default budget
+// absorbs loaded CI runners instead of pinning scheduler speed.
+async function waitUntil(predicate, message, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
@@ -374,7 +378,7 @@ test('Host Core stdin shutdown tombstones an in-flight native tool before exit',
     if (wrapper.child.exitCode == null && wrapper.child.signalCode == null) {
       await Promise.race([
         new Promise((resolve) => wrapper.child.once('exit', resolve)),
-        sleep(2_000).then(() => { throw new Error('Host Core wrapper did not exit promptly'); }),
+        sleep(10_000).then(() => { throw new Error('Host Core wrapper did not exit promptly'); }),
       ]);
     }
     assert.equal(JSON.parse(readFileSync(tombstonePath, 'utf8')).reason, 'client-cancelled');

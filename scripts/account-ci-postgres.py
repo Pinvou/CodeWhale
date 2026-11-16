@@ -1,10 +1,11 @@
-"""Admit and stop only this account CI job's six disposable Docker PostgreSQL services."""
+"""Admit and stop only this account CI job's disposable Docker PostgreSQL services."""
 import argparse
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import time
 import uuid
 
 SERVICES = {
@@ -13,10 +14,14 @@ SERVICES = {
     'financial': ('financial-postgres', 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea', '/var/lib/postgresql/data', '16'),
 }
 FINANCIAL_GROUPS = {"owners": "financial", "token": "financial_token",
-                    "billing-0": "financial_billing_0", "billing-1": "financial_billing_1"}
-for key in ("financial_token", "financial_billing_0", "financial_billing_1"):
+                    **{f"billing-{index}": f"financial_billing_{index}" for index in range(4)}}
+for key in ("financial_token", *(f"financial_billing_{index}" for index in range(4))):
     original = SERVICES["financial"]
     SERVICES[key] = (key.replace("_", "-") + "-postgres", *original[1:])
+CLOSURE_SERVICES = {'financial': SERVICES['financial']}
+CORE_SERVICES = {key: SERVICES[key] for key in ('audit', 'broker')}
+SERVICE_PROFILES = {'full': SERVICES, 'closure': CLOSURE_SERVICES,
+                    'core': CORE_SERVICES, 'financial': CLOSURE_SERVICES}
 
 IDENTITY_SQL = "SELECT system_identifier::text,current_setting('data_directory'),current_setting('port'),session_user,current_user,current_database(),(SELECT rolsuper FROM pg_roles WHERE rolname=session_user),current_setting('server_version_num') FROM pg_control_system()"
 
@@ -59,7 +64,8 @@ def save_receipt(path, value):
     os.replace(temporary, path)
 
 
-def stop_owned_services(metadata, receipt_path=None):
+def stop_owned_services(metadata, receipt_path=None, *, services=None):
+    services = SERVICES if services is None else services
     if os.environ.get('GITHUB_ACTIONS') != 'true':
         raise RuntimeError('service stop requires this job service context')
     # A graceful stop lets Docker AutoRemove remove anonymous data volumes.
@@ -72,7 +78,7 @@ def stop_owned_services(metadata, receipt_path=None):
     existing = set(run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines())
     ids, ports, volumes, selected = set(), set(), set(), []
     missing = []
-    for _, (name, image, _, _) in SERVICES.items():
+    for _, (name, image, _, _) in services.items():
         meta = metadata.get(name)
         if meta is None:
             missing.append(name)
@@ -95,6 +101,7 @@ def stop_owned_services(metadata, receipt_path=None):
     receipt = {'schema': 1, 'kind': 'postgres-services', 'state': 'registered', 'ids': sorted(ids), 'volumes': sorted(volumes), 'unregistered': missing}
     save_receipt(receipt_path, receipt)
     stop_error = None
+    deadline = None
     if selected:
         # AutoRemove also removes container logs. Preserve the diagnostics that
         # the runner normally prints after the job, before retiring the service.
@@ -104,15 +111,37 @@ def stop_owned_services(metadata, receipt_path=None):
                 print(run(['docker', 'logs', identifier], include_stderr=True), flush=True)
             except (RuntimeError, subprocess.TimeoutExpired):
                 print('::warning::PostgreSQL service log read failed; continuing owned-service cleanup', flush=True)
+        # Stop and AutoRemove acknowledgement share the existing 105s budget.
+        # A successful stop can precede disappearance from Docker's inventory.
+        deadline = time.monotonic() + 105
         try:
             run(['docker', 'stop', '--time', '15', *selected], timeout=105)
         except (RuntimeError, subprocess.TimeoutExpired) as error:
             stop_error = error
     # Command success is not a resource-release acknowledgement. Inspect only
     # the IDs/anonymous volumes admitted above; never prune or guess old names.
-    remaining_ids = ids.intersection(run(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines())
-    remaining_volumes = volumes.intersection(run(['docker', 'volume', 'ls', '--quiet']).splitlines())
-    clean = not remaining_ids and not remaining_volumes and not missing
+    # Pending sets are retained if the budget expires before an observation.
+    remaining_ids, remaining_volumes = set(ids), set(volumes)
+    clean = False
+    try:
+        while True:
+            def observe(argv):
+                budget = 30 if deadline is None else min(30, deadline - time.monotonic())
+                if budget <= 0:
+                    raise subprocess.TimeoutExpired(argv, 105)
+                return run(argv, timeout=budget)
+            remaining_ids = ids.intersection(observe(['docker', 'ps', '--all', '--quiet', '--no-trunc']).splitlines())
+            remaining_volumes = volumes.intersection(observe(['docker', 'volume', 'ls', '--quiet']).splitlines())
+            clean = not remaining_ids and not remaining_volumes and not missing
+            if clean or missing or deadline is None:
+                break
+            budget = deadline - time.monotonic()
+            if budget <= 0:
+                break
+            time.sleep(min(0.25, budget))
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        if stop_error is None:
+            stop_error = error
     receipt.update(state='released' if clean else 'unconfirmed', remaining_ids=sorted(remaining_ids), remaining_volumes=sorted(remaining_volumes))
     save_receipt(receipt_path, receipt)
     if stop_error is not None:
@@ -127,12 +156,15 @@ def identity_matches(value, directory, major):
         raise ValueError('service PostgreSQL identity mismatch')
     return fields[0]
 
-def main():
+def main(*, services=None):
+    services = SERVICES if services is None else services
     metadata = json.loads(os.environ['ACCOUNT_CI_SERVICES'])
+    if not isinstance(metadata, dict) or set(metadata) != {item[0] for item in services.values()}:
+        raise ValueError('job service set does not match the selected PostgreSQL profile')
     ids, ports, volumes, systems = set(), set(), set(), set()
     outputs = []
     financial = {}
-    for key, (name, image, directory, major) in SERVICES.items():
+    for key, (name, image, directory, major) in services.items():
         meta = metadata[name]
         identifier = meta.get('id', '')
         if not re.fullmatch('[0-9a-f]{64}', identifier):
@@ -160,8 +192,11 @@ def main():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--stop-owned-services', action='store_true')
-    if parser.parse_args().stop_owned_services:
+    parser.add_argument('--profile', choices=tuple(SERVICE_PROFILES), default='full')
+    args = parser.parse_args()
+    services = SERVICE_PROFILES[args.profile]
+    if args.stop_owned_services:
         ledger = os.environ.get('PINVOU_CI_RESOURCE_LEDGER')
-        stop_owned_services(json.loads(os.environ['ACCOUNT_CI_SERVICES']), Path(ledger) / 'postgres-services.json' if ledger else None)
+        stop_owned_services(json.loads(os.environ['ACCOUNT_CI_SERVICES']), Path(ledger) / 'postgres-services.json' if ledger else None, services=services)
     else:
-        main()
+        main(services=services)

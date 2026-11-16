@@ -400,6 +400,7 @@ const RUST_FORWARDED_EVENTS: &[&str] = &[
     "chat:usage",
     "chat:user_message",
     "chat:user_input_required",
+    "models:changed",
     "multiagent:agent_progress",
     "remote_control:tools_changed",
     "scheduled_task:run_updated",
@@ -618,6 +619,49 @@ impl ControllerRelayChannel {
     pub fn try_send(&self, message: Value) -> Result<(), String> {
         self.manager
             .send_controller_message(&self.generation, self.binding, message, &self.owner)
+    }
+
+    pub(crate) fn resume_socket_epoch(&self, lease: &LeaseContext) -> Option<u64> {
+        let inner = self.manager.inner.lock();
+        if inner.controller_binding != Some(self.binding)
+            || inner.controller_relay_generation.as_deref() != Some(self.generation.as_str())
+            || !inner
+                .endpoint
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.sender.same_channel(&self.owner))
+        {
+            return None;
+        }
+        self.owner
+            .controller_authority
+            .resume_socket_epoch(&self.generation, self.binding, lease)
+    }
+
+    pub(crate) fn try_send_resume_prepare(
+        &self,
+        message: Value,
+        epoch: u64,
+        deadline_b: u64,
+    ) -> Result<bool, String> {
+        let inner = self.manager.inner.lock();
+        if inner.controller_binding != Some(self.binding)
+            || inner.controller_relay_generation.as_deref() != Some(self.generation.as_str())
+            || !inner
+                .endpoint
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.sender.same_channel(&self.owner))
+        {
+            return Ok(false);
+        }
+        self.owner
+            .try_send_resume_prepare_owned(
+                &self.generation,
+                self.binding,
+                message,
+                epoch,
+                deadline_b,
+            )
+            .map_err(|error| error.controller_send_code().to_owned())
     }
 
     /// 可克隆的发送句柄（E2E-05）：B 端 worker 之外（例如权威 journal 的旁路）
@@ -1257,14 +1301,58 @@ fn load_config_for_stop() -> Option<WebAccessConfig> {
 /// Retire the exact endpoint's controller authority before removing its socket.
 /// Must run under the owner lock: late old-reader callbacks cannot reach a new lane.
 fn take_retired_endpoint(inner: &mut Inner) -> Option<ActiveEndpoint> {
+    retire_controller_inbound(inner);
+    inner.endpoint.take()
+}
+
+fn retire_controller_inbound(inner: &mut Inner) {
     if let Some(generation) = inner.controller_relay_generation.take()
         && let Some(endpoint) = &inner.endpoint
     {
-        endpoint.sender.controller_authority.retire(&generation);
+        let authority = &endpoint.sender.controller_authority;
+        if let Some(binding) = inner.controller_binding {
+            authority.retire_owned(&generation, binding);
+        } else {
+            authority.retire(&generation);
+        }
     }
     inner.controller_binding = None;
     inner.controller_inbound = None;
-    inner.endpoint.take()
+}
+
+// The caller holds the same owner lock used to select the active reader.
+// Once a frame is lost, buffered frames cannot safely advance the handshake.
+fn enqueue_controller_inbound(
+    inner: &mut Inner,
+    frame: ControllerRelayFrame,
+) -> Result<(), &'static str> {
+    use tokio::sync::mpsc::error::TrySendError;
+    // The shared reader and its wire backlog outlive controller operations.
+    // Reject an explicitly different generation before it consumes capacity
+    // or makes an already-full successor lane retire. Endpoint-wide messages
+    // without a generation retain their existing Legacy/connection semantics.
+    if let Some(generation) = frame.message.get("remote_control_generation")
+        && generation.as_str() != inner.controller_relay_generation.as_deref()
+    {
+        return Ok(());
+    }
+    let Some(sender) = &inner.controller_inbound else {
+        return Ok(());
+    };
+    let code = match sender.try_send(frame) {
+        Ok(()) => return Ok(()),
+        Err(TrySendError::Full(_)) => "desktop_controller_inbound_full",
+        Err(TrySendError::Closed(_)) => "desktop_controller_inbound_closed",
+    };
+    retire_controller_inbound(inner);
+    Err(code)
+}
+
+fn report_controller_inbound_failure(code: &'static str) {
+    crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+        "controller_inbound_retired",
+        code,
+    );
 }
 
 impl RemoteControlManager {
@@ -1341,7 +1429,7 @@ impl RemoteControlManager {
             self.clear_controller_channel(generation);
             return Err(error);
         }
-        let (owner, binding) = {
+        let (owner, binding, enqueue) = {
             let mut inner = self.inner.lock();
             if !inner
                 .controller_inbound
@@ -1365,28 +1453,30 @@ impl RemoteControlManager {
                 return Err("desktop_controller_authority_unavailable".to_owned());
             };
             inner.controller_binding = Some(binding);
-            (owner, binding)
-        };
-
-        // If the persistent endpoint was already active there will be no second
-        // desktop_endpoint_registered event. Replay a local projection so the
-        // caller can safely wait for one registration signal in both cases.
-        let already_registered = {
-            let inner = self.inner.lock();
-            inner
+            // An existing endpoint may already have registered. Do not await
+            // space before returning the only receiver to its consumer.
+            let already_registered = inner
                 .endpoint
                 .as_ref()
-                .is_some_and(|endpoint| endpoint.status != WebAccessStatusKind::ConnectingRelay)
-        };
-        if already_registered {
-            if let Some(message) = synthetic_registration {
-                let _ = sender
-                    .send(ControllerRelayFrame {
+                .is_some_and(|endpoint| endpoint.status != WebAccessStatusKind::ConnectingRelay);
+            let enqueue = if let Some(message) = synthetic_registration
+                && already_registered
+            {
+                enqueue_controller_inbound(
+                    &mut inner,
+                    ControllerRelayFrame {
                         message,
                         receipt: None,
-                    })
-                    .await;
-            }
+                    },
+                )
+            } else {
+                Ok(())
+            };
+            (owner, binding, enqueue)
+        };
+        if let Err(code) = enqueue {
+            report_controller_inbound_failure(code);
+            return Err(code.to_owned());
         }
         Ok(ControllerRelayChannel {
             manager: self.clone(),
@@ -1396,6 +1486,31 @@ impl RemoteControlManager {
             binding,
             last_receipt: Arc::new(Mutex::new(None)),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_prepare_write_failure_for_test(&self) -> bool {
+        let inner = self.inner.lock();
+        if inner.controller_relay_generation.is_none() || inner.controller_binding.is_none() {
+            return false;
+        }
+        let Some(endpoint) = inner.endpoint.as_ref() else {
+            return false;
+        };
+        endpoint
+            .sender
+            .controller_authority
+            .arm_prepare_write_failure();
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failed_prepare_digest_for_test(&self) -> Option<[u8; 32]> {
+        self.inner
+            .lock()
+            .endpoint
+            .as_ref()
+            .and_then(|endpoint| endpoint.sender.controller_authority.failed_prepare_digest())
     }
 
     pub fn controller_endpoint_id(&self) -> Result<String, String> {
@@ -1537,12 +1652,7 @@ impl RemoteControlManager {
             .as_deref()
             .is_some_and(|current| current == generation)
         {
-            if let Some(endpoint) = &inner.endpoint {
-                endpoint.sender.controller_authority.retire(generation);
-            }
-            inner.controller_relay_generation = None;
-            inner.controller_binding = None;
-            inner.controller_inbound = None;
+            retire_controller_inbound(&mut inner);
         }
     }
 
@@ -2896,7 +3006,7 @@ impl RemoteControlManager {
     ) {
         let message = json!({"type":"desktop_relay_connection", "endpoint_id":endpoint_id,
             "connected":connected, "error":error});
-        {
+        let enqueue = {
             let mut inner = self.inner.lock();
             let Some(endpoint) = inner.endpoint.as_mut() else {
                 return;
@@ -2924,12 +3034,16 @@ impl RemoteControlManager {
             }
             // Identity check, state projection and selection/enqueue of this
             // generation's channel are one transaction under the same lock.
-            if let Some(sender) = &inner.controller_inbound {
-                let _ = sender.try_send(ControllerRelayFrame {
+            enqueue_controller_inbound(
+                &mut inner,
+                ControllerRelayFrame {
                     message,
                     receipt: None,
-                });
-            }
+                },
+            )
+        };
+        if let Err(code) = enqueue {
+            report_controller_inbound_failure(code);
         }
         self.emit_status();
     }
@@ -2943,20 +3057,34 @@ impl RemoteControlManager {
         if !controller_relay_message(value) {
             return;
         }
-        let inner = self.inner.lock();
-        if reader_owner.is_some_and(|owner| {
-            !inner
-                .endpoint
-                .as_ref()
-                .is_some_and(|endpoint| endpoint.sender.same_channel(owner))
-        }) {
-            return;
-        }
-        if let Some(sender) = &inner.controller_inbound {
-            let _ = sender.try_send(ControllerRelayFrame {
+        self.enqueue_controller_relay_frame(
+            ControllerRelayFrame {
                 message: value.clone(),
                 receipt,
-            });
+            },
+            reader_owner,
+        );
+    }
+
+    fn enqueue_controller_relay_frame(
+        &self,
+        frame: ControllerRelayFrame,
+        reader_owner: Option<&RelaySender>,
+    ) {
+        let enqueue = {
+            let mut inner = self.inner.lock();
+            if reader_owner.is_some_and(|owner| {
+                !inner
+                    .endpoint
+                    .as_ref()
+                    .is_some_and(|endpoint| endpoint.sender.same_channel(owner))
+            }) {
+                return;
+            }
+            enqueue_controller_inbound(&mut inner, frame)
+        };
+        if let Err(code) = enqueue {
+            report_controller_inbound_failure(code);
         }
     }
 
@@ -2985,14 +3113,14 @@ impl RemoteControlManager {
             if controller_lane_unavailable_error(&value) {
                 // v1 controller 帧校验要求 relay-role error 必带 request_id，该
                 // 连接级信号没有可对应的请求，因此绕过 controller_relay_message
-                // 直推已绑定通道（reader 身份已在下方校验），且不触碰端点状态。
-                let inner = self.inner.lock();
-                if let Some(sender) = &inner.controller_inbound {
-                    let _ = sender.try_send(ControllerRelayFrame {
+                // 直推当前 reader 的通道，且不触碰 Legacy 端点状态。
+                self.enqueue_controller_relay_frame(
+                    ControllerRelayFrame {
                         message: value,
                         receipt: None,
-                    });
-                }
+                    },
+                    Some(reader_owner),
+                );
                 return;
             }
             // 注册终结码的处理先于 legacy error 折叠:reject 帧经 relay_client
@@ -4196,8 +4324,8 @@ impl RemoteControlManager {
 #[cfg(test)]
 mod tests {
     use super::persistence::{
-        acknowledge_pending_revocation_at, load_config_from, load_or_initialize_rpc_ledger_at,
-        load_pending_revocations_from, queue_pending_revocation_at,
+        load_config_from, load_or_initialize_rpc_ledger_at, load_pending_revocations_from,
+        persist_pending_revocations_to, queue_pending_revocation_at,
         queue_pending_revocation_for_removal_at,
     };
     use super::rpc::{WebSessionScope, web_session_scope};
@@ -4223,6 +4351,104 @@ mod tests {
         assert!(!controller_relay_message(&json!({
             "type": "chat:delta"
         })));
+    }
+
+    #[test]
+    fn stale_controller_generation_cannot_fill_or_retire_a_successor_queue() {
+        let mut inner = Inner::default();
+        let endpoint = test_active_endpoint(Some(TEST_LEASE_ID));
+        let owner = endpoint.sender.clone();
+        let generation = "generation-successor";
+        let binding = owner.controller_authority.bind(generation).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(128);
+        inner.endpoint = Some(endpoint);
+        inner.controller_relay_generation = Some(generation.to_owned());
+        inner.controller_binding = Some(binding);
+        inner.controller_inbound = Some(sender);
+        let frame = |generation: &str| ControllerRelayFrame {
+            message: json!({"type":"encrypted_frame", "remote_control_generation":generation}),
+            receipt: None,
+        };
+        for _ in 0..129 {
+            assert_eq!(
+                enqueue_controller_inbound(&mut inner, frame("generation-old")),
+                Ok(())
+            );
+        }
+        assert_eq!(receiver.len(), 0);
+        for _ in 0..128 {
+            assert_eq!(
+                enqueue_controller_inbound(&mut inner, frame(generation)),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            enqueue_controller_inbound(&mut inner, frame("generation-old")),
+            Ok(())
+        );
+        assert_eq!(receiver.len(), 128);
+        assert_eq!(inner.controller_binding, Some(binding));
+        assert_eq!(
+            owner.controller_authority.binding(generation),
+            Some(binding)
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap().message["remote_control_generation"],
+            generation
+        );
+        assert_eq!(
+            enqueue_controller_inbound(&mut inner, frame(generation)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn saturated_or_closed_controller_inbound_retires_only_its_binding() {
+        for closed in [false, true] {
+            let mut inner = Inner::default();
+            let endpoint = test_active_endpoint(Some(TEST_LEASE_ID));
+            let owner = endpoint.sender.clone();
+            let generation = "generation-inbound";
+            let binding = owner.controller_authority.bind(generation).unwrap();
+            let (sender, receiver) = tokio::sync::mpsc::channel(128);
+            inner.endpoint = Some(endpoint);
+            inner.controller_relay_generation = Some(generation.to_owned());
+            inner.controller_binding = Some(binding);
+            inner.controller_inbound = Some(sender);
+            let frame = || ControllerRelayFrame {
+                message: json!({"type": "desktop_endpoint_registered"}),
+                receipt: None,
+            };
+            if closed {
+                drop(receiver);
+                assert_eq!(
+                    enqueue_controller_inbound(&mut inner, frame()),
+                    Err("desktop_controller_inbound_closed")
+                );
+            } else {
+                for _ in 0..128 {
+                    assert_eq!(enqueue_controller_inbound(&mut inner, frame()), Ok(()));
+                }
+                assert_eq!(receiver.len(), 128);
+                // Keep the receiver live until the overloaded send completes.
+                assert_eq!(
+                    enqueue_controller_inbound(&mut inner, frame()),
+                    Err("desktop_controller_inbound_full")
+                );
+                assert!(receiver.is_closed());
+            }
+            assert!(inner.controller_inbound.is_none());
+            assert!(inner.controller_binding.is_none());
+            assert!(!owner.controller_authority.owns(generation));
+            let next = owner.controller_authority.bind(generation).unwrap();
+            assert_ne!(next, binding);
+            owner.controller_authority.retire_owned(generation, binding);
+            assert_eq!(owner.controller_authority.binding(generation), Some(next));
+            let active = inner.endpoint.as_ref().unwrap();
+            assert!(active.sender.same_channel(&owner));
+            assert_eq!(active.lease_id.as_deref(), Some(TEST_LEASE_ID));
+            assert!(active.web_client_connected);
+        }
     }
 
     #[test]
@@ -4905,6 +5131,7 @@ mod tests {
             "chat",
             "ingest_file",
             "delete_model",
+            "delete_model_if_store_link",
             "save_model",
             "set_active_model",
             "test_model_connection",
@@ -4958,6 +5185,7 @@ mod tests {
             "web_access_update_settings",
             "web_access_create_session",
             "web_access_create_session_and_chat",
+            "web_access_create_session_and_chat_with_model",
             "web_access_list_sessions",
             "web_access_list_archived_sessions",
             "web_access_chat",
@@ -5030,6 +5258,11 @@ mod tests {
         assert!(RUST_FORWARDED_EVENTS.contains(&"session:list_changed"));
         assert!(policy.events.contains("session:model_changed"));
         assert!(RUST_FORWARDED_EVENTS.contains(&"session:model_changed"));
+        assert!(policy.events.contains("models:changed"));
+        assert!(
+            RUST_FORWARDED_EVENTS.contains(&"models:changed"),
+            "store model refreshes must be deduped against the desktop proxy's app.emit leg"
+        );
         assert!(policy.events.contains("session:persona_changed"));
         assert!(RUST_FORWARDED_EVENTS.contains(&"session:persona_changed"));
         assert!(policy.events.contains("multiagent:agent_progress"));
@@ -5702,30 +5935,6 @@ mod tests {
     }
 
     #[test]
-    fn revocation_ack_removes_only_the_matching_durable_entry() {
-        let directory = std::env::temp_dir().join(format!(
-            "pinvou-web-revocation-ack-{}-{}",
-            std::process::id(),
-            crate::features::remote_control::short_token(12)
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("pending.json");
-        let first = test_pending_revocation("ep_retired_one");
-        let second = test_pending_revocation("ep_retired_two");
-        queue_pending_revocation_at(&path, first.clone()).unwrap();
-        queue_pending_revocation_at(&path, second.clone()).unwrap();
-
-        acknowledge_pending_revocation_at(&path, &first).unwrap();
-        assert_eq!(
-            load_pending_revocations_from(&path).unwrap().entries,
-            VecDeque::from([second.clone()])
-        );
-        acknowledge_pending_revocation_at(&path, &second).unwrap();
-        assert!(!path.exists(), "an empty revocation ledger is removed");
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn removal_queueing_evicts_the_oldest_entry_instead_of_blocking_the_lifecycle() {
         let directory = std::env::temp_dir().join(format!(
             "pinvou-web-revocation-evict-{}-{}",
@@ -6342,11 +6551,15 @@ mod tests {
         );
     }
 
-    /// 接线钉:确认必须针对进程内权威账本整体落盘
+    /// 接线钉(Round-11 复审 minor):确认必须针对进程内权威账本整体落盘
     /// (`persist_pending_revocations`),并同步维护 backlog;回退成「重读
-    /// 磁盘→删一条→重写」(`acknowledge_pending_revocation`)会在抢救降
-    /// 级后拿空账本清掉内存里的兄弟条目。方法体需要 AppHandle,行为钉
-    /// 驱动不了,按本模块惯例以源码契约钉住。
+    /// "disk → delete one entry → rewrite" (`acknowledge_pending_revocation`,
+    /// removed with its family in the round-1 sweep) would, after the
+    /// salvage degradation, wipe the in-memory sibling entries with an empty
+    /// ledger. The negative assertion now guards against a helper with this
+    /// name/shape growing back. Its body needs an AppHandle, so a behavioral
+    /// pin cannot drive it — per this module's convention it is pinned as a
+    /// source-contract assertion.
     #[test]
     fn revocation_ack_persists_the_process_backlog_instead_of_rereading_disk() {
         let source = include_str!("mod.rs");
@@ -6370,6 +6583,29 @@ mod tests {
             "the disk-rereading acknowledgement must not come back; it drops salvaged \
              siblings when the on-disk ledger is absent"
         );
+    }
+
+    /// Behavioral pin (round-1 sweep coverage backfill): persisting an
+    /// empty ledger must delete the file per the empty-ledger semantics
+    /// (`remove_private_file`) rather than leaving a zero-entry ledger for
+    /// the next load to re-parse. The swept-away old ack test was the only
+    /// coverage for this branch.
+    #[test]
+    fn persisting_an_emptied_revocation_ledger_removes_the_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "pinvou-web-revocation-empty-ledger-{}-{}",
+            std::process::id(),
+            crate::features::remote_control::short_token(12)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("pending.json");
+        queue_pending_revocation_at(&path, test_pending_revocation("ep_retired")).unwrap();
+        assert!(path.exists());
+
+        persist_pending_revocations_to(&path, &PendingRevocationLedger::default())
+            .expect("persist the drained ledger");
+        assert!(!path.exists(), "an empty revocation ledger is removed");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     /// source 契约钉:回放装载必须按「并集且内存

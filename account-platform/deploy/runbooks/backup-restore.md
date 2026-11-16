@@ -6,6 +6,8 @@
 
 数据库备份只是完整恢复集的一部分。能够重新启动 PostgreSQL 不等于账号平台已经恢复；NATS JetStream、独立模型网关、站点 Secret、边缘代理/证书/网络配置和目标 Commit 制品必须绑定同一个恢复集。完整新主机重建步骤见 [`full-redeployment.md`](full-redeployment.md)。
 
+恢复永久注册赠送资格时，使用配对的 Account、Billing 恢复点和绑定的指纹密钥。启动前先完成只读盘点，再按[注册赠送密钥恢复流程](../../docs/registration-bonus-backfill.md#recover-the-bound-hmac-key)在独立副本演练。
+
 可选的当前 PostgreSQL 依赖集群加密备份与受限调度工具见 [本机备份工具](local-backup-rollout.md)。它仅显式启用，保持独立风险接受和真实隔离恢复前提，不替代本手册完整恢复集或默认异机策略。
 
 ## 完整恢复集清单
@@ -72,7 +74,7 @@ done
     > SHA256SUMS && sha256sum -c SHA256SUMS)
 ```
 
-命令成功只证明文件可列目录和摘要一致，不等于已验证可恢复。必须在隔离 PostgreSQL 实例执行完整 restore、迁移校验和、三份领域审计 SQL 与跨域账实核对，才能把该子备份标记为 `VERIFIED`；只有其余恢复集组件也通过后，整个恢复集才能标记为 `RESTORABLE`。
+命令成功只证明文件可列目录和摘要一致。只有在隔离 PostgreSQL 实例完成 restore、迁移校验、领域审计、Outbox/Inbox 盘点和跨域账实核对，才能把该子备份标记为 `VERIFIED`；只有其余恢复集组件也通过后，整个恢复集才能标记为 `RESTORABLE`。
 
 ## 备份与迁移前门禁
 
@@ -92,6 +94,15 @@ node scripts/account-platform-migration-manifest.mjs check
 
 迁移器仍以数据库 `schema_migrations` 的实际校验和二次拒绝篡改。迁移完成后输出不含秘密的 `migration.post_verification` JSON，必须保存每库已应用数量、最高版本及校验和；不能用 Helm Job 成功状态代替该结果。
 
+### 迁移预算与超时恢复
+
+- `migrate --timeout 15m --dir /migrations/account` 为一次调用设置有限数据库预算；优先级为显式 `--timeout`、`MIGRATION_TIMEOUT`、默认 `2m`。使用 Go duration 格式，必须大于零且不超过 `24h`；无效值在连接数据库前以 `MIGRATION_TIMEOUT_INVALID` 失败，不回退为无限等待。
+- 预算从连接数据库开始，覆盖角色选择、迁移锁等待、所有版本的 Up/Down、最终数据库校验及退出时解锁和关闭连接，共用一个 deadline，不为每条 SQL 重置；解锁失败或取消时关闭本次自有连接，以免可复用的连接继续持有会话锁，不断开其他会话。读取本地 SQL 文件和写出 stdout 不属于数据库操作预算。基础 Compose 的四个迁移服务均读取宿主 `MIGRATION_TIMEOUT`；Helm 三域迁移 Job 使用 `migrations.timeout`（例如 `--set-string migrations.timeout=15m`）。生产 `deploy/production/compose.personal.yaml` 使用各迁移服务已有的私密 `env_file`，应在该文件中设置 `MIGRATION_TIMEOUT`，仅在宿主导出变量不会自动传入容器。外层 Helm `--timeout`、CI/Job 期限应留出启动、数据库预算和退出余量；设置更大的 CLI 预算不能覆盖外层取消。
+- `MIGRATION_DEADLINE_EXCEEDED` 表示数据库操作预算耗尽。当前版本可能回滚，先前版本可能已提交，提交响应丢失时结果也可能未知；没有成功 JSON 不能证明零副作用。不得自动执行 Down、清除迁移账本、修改历史 SQL 或直接重做业务资金动作。
+- 停止后续发布，保存构建 SHA、原始迁移包/manifest、域、方向、配置预算、退出码及脱敏错误码。通过受控只读连接核对该库 `schema_migrations` 的版本、名称与校验和，并确认原迁移进程及数据库会话退出；不强杀其他站点会话。若包或账本身份不符、实际效果与账本不符，停止并调查，不用延长预算掩盖冲突。
+- 对超时的 **Up**，完成核对后用同一 SQL 包和合适的有限预算重跑 `--direction up`；已提交且校验和匹配的版本跳过，未提交版本重新执行，最后必须取得新的 `migration.post_verification` JSON 才可继续。此步骤仍须满足生产备份证据、域身份、迁移角色和其他既有门禁。CLI 没有 `verify` direction。
+- 对 **Down**，先查清最高已应用版本和实际效果，再由发布负责人决定恢复路径。Down 每次针对当时最高版本；若上次已提交，再次调用会继续回退更早版本，因此不得盲目重试或沿用 Up 的恢复指令。
+
 ## 隔离恢复顺序
 
 1. 建立全新隔离实例/namespace，关闭 Ingress、支付回调、定时任务租约和模型出口；不得覆盖原实例，不得让新旧环境同时连接相同 NATS consumer 或接收相同公网流量。
@@ -99,7 +110,7 @@ node scripts/account-platform-migration-manifest.mjs check
 3. 恢复站点 Secret/override 的受控副本，核对版本引用和文件权限；恢复独立模型网关，但在 Token Gateway 就绪前不开放真实模型流量。
 4. 依次恢复 Keycloak、Billing、Account、Token。多库不是分布式快照；恢复后必须以支付渠道证据和不可变账本收敛。
 5. 对每库运行当前迁移器；已执行迁移校验和不同或文件缺失时立即停止，禁止修改历史脚本“适配”恢复库。
-6. 执行站点受控只读领域审计，完整核对 Account 权限/余额、Billing 账本/支付、Token 用量及 Outbox/Inbox；任一异常先调查。这四个历史审计 SQL 文件当前不在仓库，不能按虚构路径执行；缺实际审计载体或记录时保持恢复未完成，见 [运维证据](operational-evidence.md)。
+6. 执行 [运维证据中的数据库恢复核查](operational-evidence.md#数据库恢复核查)，保存 Account、Billing、Token 领域审计及三个数据库的 Outbox/Inbox 盘点。将结果与同一恢复点的可信记录、跨域资金/权限和 Broker 证据核对，任一异常先调查；缺少实际记录时保持恢复验收未完成。
 7. 恢复并核对 NATS stream、consumer、ack floor、pending 和 redelivery 后才启动 Account/Billing 两个普通 Relay。NATS 不可恢复时进入受审计事件核对流程，不得用空实例直接承接写流量。
 8. Redis 使用空实例启动，明确撤销全部旧 Session、验证码挑战和短期登录事务；不得尝试从日志恢复它们。
 9. 在业务 Deployment 与 Ingress 仍关闭时启动依赖和服务，检查 Readiness、Outbox、Inbox 与死信。Inbox 依赖 `event_id` 去重，不得清空后重放。

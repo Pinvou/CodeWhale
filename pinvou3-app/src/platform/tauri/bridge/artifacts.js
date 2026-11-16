@@ -53,13 +53,24 @@ function pinvouSharedtauriArtifacts() {
       if (bytes <= 100 * 1024 * 1024) return "10_100mib";
       return "100mib_plus";
     }
-    function beginAttachmentTelemetry(att, name, size, entryPoint) {
+    function attachmentErrorCategory(error) {
+      return root.PinvouAttachmentTelemetry
+        ? root.PinvouAttachmentTelemetry.errorCategory(error) : "internal_error";
+    }
+    function attachmentPhase(att, phase) {
+      var attempt = att && att.telemetryAttempt;
+      if (attempt && !attempt.finished && root.PinvouAttachmentTelemetry) {
+        attempt.step = root.PinvouAttachmentTelemetry.step(phase);
+      }
+    }
+    function beginAttachmentTelemetry(att, name, size, entryPoint, phase) {
       var attempt = {
         attachmentId: telemetryToken("attachment_"),
         operationId: telemetryToken("attachment_op_"),
         fileTypeBucket: fileTypeBucket(name),
         startedAt: Date.now(),
         finished: false,
+        step: phase === "ingest" ? "attachment_ingest" : "attachment_validation",
       };
       att.telemetryAttempt = attempt;
       invoke("track_behavior_event", { request: {
@@ -67,6 +78,7 @@ function pinvouSharedtauriArtifacts() {
         operationId: attempt.operationId, attemptIndex: 1,
         fileTypeBucket: attempt.fileTypeBucket, sizeBucket: sizeBucket(size),
         entryPoint: entryPoint,
+        stage: "submission", step: attempt.step, inputType: "attachment",
       } }).catch(function () {});
       return attempt;
     }
@@ -79,7 +91,8 @@ function pinvouSharedtauriArtifacts() {
         operationId: attempt.operationId, attemptIndex: 1,
         fileTypeBucket: attempt.fileTypeBucket, success: !!success,
         durationMs: Math.max(0, Date.now() - attempt.startedAt),
-        errorCategory: success ? undefined : (errorCategory || "validation_failed"),
+        errorCategory: success ? undefined : (errorCategory || "internal_error"),
+        stage: "submission", step: attempt.step, inputType: "attachment",
       } }).catch(function () {});
     }
   // ── 产物面板 ─────────────────────────────────────────────────────
@@ -157,12 +170,12 @@ function openScheduledTaskFolder(automationId) { return pinvouSharedtauriArtifac
     state.attachments.push(att); notify();
     try {
       var info = await artifactInfo(path).catch(function () { return null; });
-      beginAttachmentTelemetry(att, att.basename, info && info.size, "composer");
+      beginAttachmentTelemetry(att, att.basename, info && info.size, "composer", "ingest");
       var result = await invoke("ingest_file", { path: path });
       if (att.cancelled) { finishAttachmentTelemetry(att, false, "user_cancelled"); return; }
       att.status = "ready"; att.result = result;
       finishAttachmentTelemetry(att, true);
-    } catch (e) { att.status = "error"; att.error = String(e); finishAttachmentTelemetry(att, false, "validation_failed"); }
+    } catch (e) { att.status = "error"; att.error = String(e); finishAttachmentTelemetry(att, false, attachmentErrorCategory(e)); }
     notify();
   }
   async function addDroppedFileAttachment(file) {
@@ -175,7 +188,7 @@ function openScheduledTaskFolder(automationId) { return pinvouSharedtauriArtifac
     try {
       var uploader = root.PinvouChunkedFileUpload;
       if (!uploader || typeof uploader.uploadFile !== "function") {
-        throw new Error("chunked attachment uploader is unavailable");
+        throw Object.assign(new Error("chunked attachment uploader is unavailable"), { code: "attachment_uploader_unavailable" });
       }
       var uploadId = uploader.uploadId("desktop_attach");
       att.uploadId = uploadId;
@@ -183,6 +196,7 @@ function openScheduledTaskFolder(automationId) { return pinvouSharedtauriArtifac
         file: file,
         uploadId: uploadId,
         isCancelled: function () { return att.cancelled; },
+        onPhase: function (phase) { attachmentPhase(att, phase); },
         sendChunk: function (chunk) {
           return invoke("ingest_draft_file_chunk", {
             uploadId: chunk.uploadId,
@@ -224,7 +238,7 @@ function openScheduledTaskFolder(automationId) { return pinvouSharedtauriArtifac
             : e && e.code === "device_upload_invalid_result"
               ? bt("attachInvalidResult")
               : String(e);
-      finishAttachmentTelemetry(att, false, e && e.code === "device_upload_cancelled" ? "user_cancelled" : "validation_failed");
+      finishAttachmentTelemetry(att, false, attachmentErrorCategory(e));
     }
     notify();
   }

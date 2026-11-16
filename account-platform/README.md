@@ -16,13 +16,21 @@
 
 普通 `events.Relay` 必须显式设置非空 `AllowedSubjects`（精确主题或末尾 `.>` 子树）。`OutboxStore.Claim` 的最后一个参数为该主题范围，存储必须在领取租约前过滤，并同时保留自身的事件排除规则。越域返回整批失败且不修改重试或死信状态。普通崩溃重领保留 `PublicationGeneration` 和 broker 去重 ID；仅明确重新发布可推进代次。冻结投递使用独立协议。
 
+## 构建基础镜像
+
+主 `Dockerfile` 的默认 Go 构建镜像和 `deploy/keycloak/Dockerfile` 的 Maven provider 构建镜像均按多架构 **index digest** 固定。供应商平台 manifest/config 的 SHA256 与 OS/架构核验记录见 [构建基础镜像证据](deploy/build-base-image-evidence.json)；其中 Go 记录 8 个可运行平台、Maven 记录 5 个，`unknown/unknown` 的 attestation 不作为可运行平台。不能用单个 amd64 子 manifest digest 替换多架构 index。
+
+`GO_BUILD_IMAGE` 保留既有构建参数覆盖能力；使用镜像代理或自定义 SDK 时，应显式选择已核验的不可变 digest，并独立确认所需平台和版本。这个证据文件不参与构建时解析，也不会自动跟随 tag 更新。更新默认镜像时，先从官方 registry 核对 index 原文字节摘要、所有可运行平台的 manifest/config 摘要与 OS/架构，再同步更新 Dockerfile 与证据记录；版本 tag 只帮助识别，实际内容由 digest 固定。
+
+该记录只证明取得的元数据及其摘要关系，不代表 SDK 已执行、各架构镜像已构建、发布者签名已验证或平台支持范围扩大。Go 最终服务仍使用 scratch，Keycloak 最终镜像沿用其独立的固定引用；实际镜像构建和部署验收须按原发布流程完成。
+
 ## 本地验证
 
 在本目录执行 `go test -count=1 ./...`、`go vet ./...`。工具使用独立模块，在 `tools/kms-recovery/` 执行同样命令。真实 PostgreSQL、Keycloak 和 OpenBao 用例为显式 opt-in；条件跳过不代表实际集成或部署验收通过。Windows 的文件 mode 测试不证明 POSIX 权限或 Windows ACL，实际使用须按各工具文档限制宿主权限。
 
 普通 relay 的真实 TLS/NATS/PG 用例需要显式 `PINVOU_TEST_NATS_SERVER_BINARY` 与 `PINVOU_TEST_EVENTS_DATABASE_URL`；测试仅启动独有 loopback NATS、生成临时测试密钥并创建独有数据库 schema，结束后核对自身进程、监听器和 schema 已清理。它验证实际 broker ACK、SQL 标记和同代次去重，不等同生产部署或完整 E2E 验收。
 
-PR Check 的 `account-platform-test` 还会复用固定 Helm 3.16.4，以 `values-model-token-test.yaml`、`observability.prometheusRulesEnabled=true` 和 `availability.enabled=true` 离线渲染，再通过 `npm run test:prometheus-rules` 执行现有八个 relay 告警场景（五个告警、三个非告警控制）。仅测试工具固定为 promtool 3.13.5，下载归档经过官方 SHA256 校验；不启动 Prometheus 服务。夹具缺失、场景减少、渲染或规则执行失败都会阻断门禁，结果仅表示离线规则验证，不代表部署验收。
+PR Check 的 `account-platform-test` 复用固定 Helm 3.16.4 离线渲染启用授权专项就绪的 model-token 配置，再通过 `npm run test:prometheus-rules` 执行普通和授权 Relay 的告警及非告警对照。测试工具固定为 promtool 3.13.5，下载归档经过官方 SHA256 校验。此检查验证告警规则的离线行为；实际接收端和恢复证据属于站点验收。
 
 PR Check 对账号平台路径改动在 Draft、Ready 和 Merge Queue 均执行 Go race 测试与 vet，逐个发现主模块及嵌套工具模块；使用主模块 `go.mod` 锁定的工具链与 `-tags=nomsgpack -mod=readonly`，Linux runner 开启 CGO。相关检查失败、取消或意外跳过均阻断 `required-gate`。本地未提供 C 编译器的 Windows 环境不能证明 race 检测通过，须以实际 Linux CI 结果验证。此门禁不配置真实服务凭据，不替代显式集成测试或部署验收。
 
@@ -39,3 +47,11 @@ PR Check 对账号平台路径改动在 Draft、Ready 和 Merge Queue 均执行 
 Billing 的本地与部署初始化、升级角色前置见 [数据库运行说明](deploy/postgres/README.md)。迁移必须由独立 migrator 执行，服务启动不创建 owner 或扩大权限。
 
 迁移包的身份校验、已知旧快照的实际拒绝条件和核验限制见[迁移准入与快照识别](docs/migration-snapshot-admission.md)。该说明不替代历史库升级实证，也不撤销已有兼容承诺。
+
+Breakglass 结束后的专用临时凭据、在线/离线会话、桌面及 Portal 收尾见 [应急访问回收手册](deploy/runbooks/breakglass-retirement.md)。Account 角色到期不代替凭据回收，不自动停用既有正常 Keycloak 用户。
+
+## 密码预检的同一 grant 等待
+
+公开 `/v1/registration/password-prechecks` 对同一已准入 grant 保持单个本地分配所有者，注册及密码重置用途继续由原授权事实绑定。排队期间请求取消或等待预算耗尽，会以既有 `503 PASSWORD_PREPARATION_UNAVAILABLE` 结束当前等待；该等待者不再 claim 授权、读取密码或分配 handle，原所有者保留其所有权，已有引用按原有效期使用。
+
+同一 grant 的等待预算为 10 秒，较早的调用方取消/截止时间优先。取得所有权后，授权 claim 和密码引用分配继续使用原请求上下文及各自既有 I/O 限制。失败后须在原授权仍有效时重试同一操作，原所有者的结果按既有回执核实。不同 grant 继续独立处理，已有 handle 容量、有效期和操作回执语义不变，也不增加公开 bootstrap 的内部服务认证要求。

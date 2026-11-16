@@ -4,6 +4,10 @@ This chart deploys Account Service, Billing Service, Token Gateway, Token Portal
 Keycloak, and Redis. NATS, PostgreSQL and payment/model providers stay external so
 their backup, certificate, and merchant controls remain environment-owned.
 
+Aliyun SMS purpose templates, optional login-template fallback, runtime Secret
+keys and versioned configuration migration are documented in the
+[SMS configuration guide](../../../docs/sms-configuration-conflict-recovery.md#阿里云模板用途与兼容迁移).
+
 The bundled Keycloak uses the existing chart-wide `resources` requests and
 limits. Its management HTTP startup/readiness probes remain distinct from
 `/health/live`, which restarts a failed process only after startup succeeds.
@@ -144,9 +148,23 @@ token, payment adapter URL/HMAC keys, the environment-specific external
 secret-provider material, `token-default-provider-api-key`, and the New API
 reconciliation credentials (`token-reconciliation-newapi-admin-token` and
 `token-reconciliation-newapi-admin-user-id`). Mobile registration additionally
-requires `registration-query-hmac-key-base64`, isolated from the Identity password
-and SMS verification HMAC keys. Production authentication risk admission also
-requires an independent `auth-risk-hmac-key-base64`. Controlled audit export
+requires `registration-query-hmac-key-base64`, `identity-password-hmac-key-base64`,
+and the registration bonus fingerprint key. With `sms.provider=aliyun-managed`, supply the Aliyun access
+key ID, access key secret, sign name, and registration and login template keys.
+With `sms.provider=http-generated`, supply `sms-verification-hmac-key-base64`
+and configure `sms.httpEndpoint`. The HTTP bearer key is optional. Keep the
+HMAC keys independent of each other and of the Identity password key.
+
+Authentication risk admission requires an independent `auth-risk-hmac-key-base64`.
+For a private CA on the shared Redis endpoint, set `dependencies.redisUrl`
+to the `rediss://` endpoint and `dependencies.redisCAConfigMap` to an existing
+ConfigMap in the release namespace with the public issuer bundle in `ca.crt`.
+Portal mounts that single file read-only for its Redis client. Identity uses the
+same bundle when mobile authentication and `security.authRiskEnabled` are on.
+An empty ConfigMap name retains default trust. The New API Redis endpoint is
+configured separately through `dependencies.newApiRedisUrl`.
+
+Controlled audit export
 requires `audit-export-master-key-base64`, the standard Base64 encoding of 32
 independent random bytes; keep it in the external secret store, separate from
 registration, authentication, payment, and model keys. Account human-operation
@@ -174,9 +192,12 @@ rotation readiness requires zero old-key ciphertext. After disabling the old key
 Token Gateway instance and archive the scrubbed per-instance status, observation
 time, and release identity with the release record. These checks do not replace
 the separate external KMS/Vault, payment, and model-provider release evidence.
-Registry names, provider hosts, and CIDRs in the production values file are
-documentation examples; replace every one with the reviewed deployment values
-before rendering a release manifest.
+The staging and production values files are profile skeletons. Use the reviewed
+site overlay to supply the `external.*Cidrs` for the actual dependencies and
+configure the approved registry and provider hosts before rendering a release
+manifest. Apply the site overlay after the profile. An empty CIDR list adds no
+IP allow rule for that dependency. The production values schema requires all
+eleven `external.*Cidrs` lists to be nonempty at render time.
 
 ### User realm prerequisite
 

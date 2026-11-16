@@ -159,6 +159,10 @@ test('actual current models Compose keeps migrator credentials out of runtime mo
     assert.equal(checkProductionBusiness(f.render, f.inventory).workloads_checked, 23);
     assert.equal(checkBusinessMigrations(f.render, f.inventory).domains_checked, 3);
     assert.equal(runtime.service.depends_on['token-migrate'].condition, 'service_completed_successfully');
+    const relay = all.find(workload => workload.id === 'account-event-relay');
+    assert.equal(f.render.config.name, 'pinvou-personal');
+    assert.equal(relay.environment.APPROVAL_RELAY_HEALTHCHECK_URL, 'http://127.0.0.1:9090/health/ready/approval-authorization');
+    assert.ok(relay.environment.APPROVAL_RELAY_MONITOR_SCOPE);
   });
   for (const [label, value] of [['missing', undefined], ['empty', '']])
     await fixtureCase(t, 'compose', 'models', `${label} credential portal SQL DSN rejected after actual rerender`, f => {
@@ -206,6 +210,16 @@ test('actual production Helm migration hooks bind resolved Secret keys and backu
       w.id.match(/-([a-z]+)-event-relay\/container\/event-relay$/)?.[1]).sort(), ['account', 'billing']);
     assert.equal(checkProductionBusiness(f.render, f.inventory).workloads_checked, expectedContainers.length);
     assert.equal(checkBusinessMigrations(f.render, f.inventory).domains_checked, 3);
+  });
+  await fixtureCase(t, 'helm', 'models', 'authorized Relay monitoring preserves production preflight and the ordinary probe', f => {
+    const values = JSON.parse(readFileSync(f.recipe.valuesFile));
+    values.approvalRelay = { ...values.approvalRelay, requireReady: true };
+    writeFileSync(f.recipe.valuesFile, JSON.stringify(values));
+    f.rerender();
+    const relay = workloads(f.render, f.render.secrets).find(w => w.id.endsWith('-account-event-relay/container/event-relay'));
+    assert.equal(relay.environment.APPROVAL_RELAY_MONITOR_REPLICA, 'field:metadata.name');
+    assert.equal(relay.service.readinessProbe.httpGet.path, '/health/ready');
+    assert.equal(checkProductionBusiness(f.render, f.inventory).decision, 'BUSINESS_CONFIG_VALID');
   });
   for (const suffix of ['public-keys', 'manifest', 'receipt']) for (const value of [undefined, '', 'untrusted']) {
     await fixtureCase(t, 'helm', 'models', `Billing ${suffix} digest ${value === undefined ? 'missing' : value === '' ? 'empty' : 'invalid'} fails actual preflight`, f => {

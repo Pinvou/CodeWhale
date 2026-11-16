@@ -414,7 +414,14 @@ prepare_data_lock() {
 
 model_complete() {
   root=$1
-  { [ -f "$root/model.onnx" ] || [ -f "$root/onnx/model_int8.onnx" ]; } &&
+  # 与 pinvou-knowledge model_layout.rs 的 MODEL_ONNX_CANDIDATES 保持一致:
+  # root/model.onnx → onnx/model_int8.onnx → onnx/model.onnx(按优先级,
+  # 任一存在即视为权重就位)。只认前两个候选会把仅有第三候选的目录误判
+  # 为不完整,进而触发对 legacy 目录的整体复制,旧 root/model.onnx 混入后
+  # 会在加载端按优先级被静默选中。
+  { [ -f "$root/model.onnx" ] ||
+    [ -f "$root/onnx/model_int8.onnx" ] ||
+    [ -f "$root/onnx/model.onnx" ]; } &&
     [ -f "$root/tokenizer.json" ] &&
     [ -f "$root/config.json" ] &&
     [ -f "$root/special_tokens_map.json" ] &&

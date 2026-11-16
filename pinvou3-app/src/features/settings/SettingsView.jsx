@@ -18,7 +18,7 @@ import { pathBasename } from '../../shared/path-utils.js';
 import qwenIcon from '../../brand-icons/qwen.svg';
 import {
   MODEL_PRESET_DEFS, PROVIDER_KIND_CODING_PLAN, PROVIDER_KIND_OFFICIAL_API, PROVIDER_KIND_CUSTOM,
-  MODEL_CATALOG_SECTIONS, MODEL_CATALOG, CLOUD_MODEL_PROVIDERS,
+  MODEL_CATALOG, CLOUD_MODEL_PROVIDERS,
   BRAND_ICON_BY_PRESET, BRAND_ICON_BY_VENDOR,
   presetOptionsI18n, presetProviderLabel,
   normalizedProviderBaseUrl, findCloudProviderForModel, providerLabelForModel, isCodingPlanModel, catalogItemMatchesModel,
@@ -38,6 +38,7 @@ import {
   ACCOUNT_PLATFORM_SOURCE,
   LOCAL_CONFIG_SOURCE,
   platformModelSelectableAsDefault,
+  platformModelRuntimeSupported,
 } from '../account-platform/model-catalog-selection.js';
 import {
   VOICE_POSTPROCESS_ENABLED_KEY,
@@ -60,6 +61,7 @@ import {
 import { VoiceShortcutIntroModal } from '../voice-composer/VoiceShortcutIntroModal.jsx';
 import { ReasoningTierPicker, useModelReasoningTierState } from './local-server-tiers.jsx';
 import { StatusChip } from './StatusChip.jsx';
+import { isModelRouteUnchanged, modelRouteSnapshot } from './model-route-intent.js';
 
 function isReadonlyModel(model) {
   return !!(model && (model.readonly || model.system));
@@ -177,9 +179,24 @@ const formatMemoryTime = (item, copy) => {
           </span>
         );
       }
-      const src = BRAND_ICON_BY_PRESET[preset] || (vendor && BRAND_ICON_BY_VENDOR[vendor]);
+      // Vendor-stamped rows must not inherit the shared preset's mark: the
+      // vendors added in the 2026-11-03 catalog refresh (mistral/meta/
+      // together/groq) and the aggregators (openrouter/siliconflow) ride
+      // preset openai_compatible and otherwise wear the OpenAI logo
+      // (2026-11-05 review) — a vendor stamp without a brand mark gets the
+      // neutral Globe tile instead, and the preset brand only wins when no
+      // vendor stamp exists (plain openai_compatible relays).
+      const vendorMark = vendor && BRAND_ICON_BY_VENDOR[vendor];
+      if (vendor && !vendorMark) {
+        return (
+          <span className={`${compact ? 'h-8 w-8 rounded-[9px]' : 'h-9 w-9 rounded-[10px]'} shrink-0 flex items-center justify-center overflow-hidden bg-[#007AFF]/10 text-[#007AFF] dark:bg-[#0A84FF]/[0.18] dark:text-[#64B5F6]`}>
+            <Globe size={compact ? 17 : 19} strokeWidth={2.2} />
+          </span>
+        );
+      }
+      const src = vendorMark || BRAND_ICON_BY_PRESET[preset];
       if (!src) return null;
-      const darkBacked = preset === 'kimi';
+      const darkBacked = preset === 'kimi' || vendor === 'kimi';
       return (
         <span className={`${compact ? 'h-8 w-8 rounded-[9px]' : 'h-9 w-9 rounded-[10px]'} shrink-0 flex items-center justify-center overflow-hidden ${darkBacked ? 'bg-[#111827]' : ('bg-white border border-black/[0.08] dark:border-transparent')}`}>
           <img src={src} alt="" className={`${compact ? 'h-6 w-6' : 'h-7 w-7'} object-contain`} />
@@ -370,10 +387,23 @@ const formatMemoryTime = (item, copy) => {
       const [providerKey, setProviderKey] = useState(initialProvider ? initialProvider.key : '');
       const [providerKind, setProviderKind] = useState(initial.provider_kind || (initialProvider && initialProvider.providerKind) || (modelScope === 'cloud' ? PROVIDER_KIND_OFFICIAL_API : ''));
       const [vendor, setVendor] = useState(initial.vendor || (initialProvider && initialProvider.vendor) || '');
-      const [endpointMode, setEndpointMode] = useState((initialProvider && initialProvider.endpointMode) || '');
+      const [endpointMode, setEndpointMode] = useState(initial.endpoint_mode || (initialProvider && initialProvider.endpointMode) || '');
       const [model, setModel] = useState(initial.model || '');
       const [baseUrl, setBaseUrl] = useState(initial.base_url || '');
+      const [storeRouteAtOpen] = useState(() => ({
+        existing: !!initial.id && !initial.__new,
+        route: modelRouteSnapshot({
+          preset, provider_kind: providerKind, vendor, endpoint_mode: endpointMode,
+          model, base_url: baseUrl,
+        }),
+      }));
       const [contextWindow, setContextWindow] = useState(initial.context_window_tokens ? String(initial.context_window_tokens) : '');
+      // 上下文字段的编辑意图:表单挂载时的快照可能是旧值(后台商店同步可能已
+      // 把旧 32K 修复为 256K 并落盘一次性迁移标记)。未编辑时保存带
+      // preserve_context_window_tokens,后端保留库内最新值;用户编辑过(含目录
+      // 切换等显式重置)才提交表单值,显式改回 32K/清空仍然有效。
+      // 独立的编辑意图也保护首次探测期间刚确认的选择，即使仍为原来的 32K。
+      const [contextWindowTouched, setContextWindowTouched] = useState(false);
       const [maxOutput, setMaxOutput] = useState(initial.max_output_tokens ? String(initial.max_output_tokens) : '');
       // Thinking effort: initialize from the stored value (normalize first —
       // legacy records may carry pre-normalization values such as deepseek's
@@ -500,6 +530,7 @@ const formatMemoryTime = (item, copy) => {
         if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(nextModel));
         if (!nameTouched) setName(p === 'local_vllm' ? settingsCopy.localModelName(nextModel) : (item.custom ? group.title : (item.title || presetProviderLabel(p, t))));
         setContextWindow(p === 'local_vllm' ? '262144' : '');
+        setContextWindowTouched(true);
         // The output cap is no longer prefilled with 24K: left empty like
         // cloud/custom, declared uniformly by the runtime window tiers.
         setMaxOutput('');
@@ -695,10 +726,17 @@ const formatMemoryTime = (item, copy) => {
             id: id, name: saveName, preset: preset,
             alias: showAliasField ? (alias.trim() || null) : null,
             context_window_tokens: Number.isFinite(contextTokens) && contextTokens > 0 ? contextTokens : null,
+            preserve_context_window_tokens: !contextWindowTouched,
+            context_window_edit_requested: contextWindowTouched,
             max_output_tokens: Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : null,
             // 仅当前表单模型支持档位时保存；手输 model 变为无档位模型时置 null(#209)。
             reasoning_effort: reasoningEffortTiers.length > 0 ? (reasoningEffort || null) : null,
             model: model.trim(), base_url: baseUrl.trim(),
+            preserve_model_store_route: storeRouteAtOpen.existing
+              && isModelRouteUnchanged(storeRouteAtOpen.route, {
+                preset, provider_kind: providerKind, vendor, endpoint_mode: endpointMode,
+                model, base_url: baseUrl,
+              }),
             api_key: nextApiKey, credential_action: nextKeyAction,
             provider_kind: providerKind || null,
             vendor: vendor || null,
@@ -834,6 +872,7 @@ const formatMemoryTime = (item, copy) => {
         setBaseUrl(defs.baseUrl);
         setName(settingsCopy.localModelName(''));
         setContextWindow('');
+        setContextWindowTouched(true);
         setMaxOutput('');
         setApiKey('');
         setKeyAction('keep_existing');
@@ -886,6 +925,7 @@ const formatMemoryTime = (item, copy) => {
           setReasoningEffort(reasoningEffortForModelSwitch({ preset, model: nextModel, vendor, base_url: baseUrl }));
           // Explicit model switches also reset the manual context window so it never leaks across models (same reset discipline as applyCatalogItem).
           setContextWindow('');
+          setContextWindowTouched(true);
           // 与 applyCatalogItem 一致:未手动改过档位时按新条目的视觉能力标注预填。
           if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(nextModel));
           setProviderModelPickerOpen(false);
@@ -917,7 +957,7 @@ const formatMemoryTime = (item, copy) => {
                     >
                       <span className="min-w-0 flex-1">
                         <span className={`block text-[14px] leading-5 truncate ${active ? ('text-[#007AFF] dark:text-[#64B5F6]') : ('text-[#1C1C1E] dark:text-[#F2F2F7]')}`}>{item.custom ? ((activeProvider && settingsCopy.customModelTitles[activeProvider.key]) || settingsCopy.customModelTitle(selectedProvider)) : (item.title || item.model || `${settingsCopy.customModel} ID`)}</span>
-                        {item.desc && <span className={`block mt-0.5 text-[12px] leading-[16px] truncate text-[#8A8A8E] dark:text-[#8E8E93]`}>{item.custom
+                        {(item.desc || item.custom) && <span className={`block mt-0.5 text-[12px] leading-[16px] truncate text-[#8A8A8E] dark:text-[#8E8E93]`}>{item.custom
                           ? customModelDescFor(activeProvider, settingsCopy)
                           : (settingsCopy.modelDescriptions[item.desc] || item.desc)}</span>}
                       </span>
@@ -975,7 +1015,7 @@ const formatMemoryTime = (item, copy) => {
       const renderCloudProviderPicker = () => {
         const bySection = ['coding_plan', 'official_api', 'aggregator', 'custom'].map(section => ({
           section,
-          title: settingsCopy.catalogSections[section] || MODEL_CATALOG_SECTIONS[section],
+          title: settingsCopy.catalogSections[section],
           groups: catalogGroups.filter(group => (group.section || 'official_api') === section),
         })).filter(item => item.groups.length > 0);
         return (
@@ -1012,7 +1052,17 @@ const formatMemoryTime = (item, copy) => {
         <div className="space-y-4">
           {catalogGroups.map(group => (
             <section key={group.key}>
-              <div className={catalogSectionTitleClass}>{group.providerKind === PROVIDER_KIND_CODING_PLAN ? group.title : presetProviderLabel(group.preset, t)}</div>
+              {/* Header shows the group's own localized title (en/ja via the
+                  providerCatalog overlay, zh via the catalog's inline
+                  titles) — the raw preset label would misbrand every
+                  vendor group riding a shared preset as "OpenAI
+                  Compatible" (2026-11-04 round-4 review). The local group
+                  also has en/ja overlays but keeps its localized preset
+                  label on purpose: the overlay titles drop the (default)
+                  marker the preset label carries (本地模型（默认）), and
+                  the marker matters (corrected 2026-11-05 review — the
+                  earlier "no overlay" note was wrong). */}
+              <div className={catalogSectionTitleClass}>{group.key === 'local' ? presetProviderLabel(group.preset, t) : group.title}</div>
               <div className={catalogGroupClass}>
                 {group.items.map(item => {
                   const active = preset === group.preset && !item.custom && catalogItemMatchesModel(item, model);
@@ -1397,7 +1447,7 @@ const formatMemoryTime = (item, copy) => {
                     {!isLocalPreset && renderInlineField({
                       label: t.modelContextWindow,
                       value: contextWindow,
-                      onChange: e => setContextWindow(e.target.value.replaceAll(/[^0-9]/g, '').slice(0, 9)), // eslint-disable-line sonarjs/concise-regex -- keep [^0-9] literal instead of \D; readability first
+                      onChange: e => { setContextWindow(e.target.value.replaceAll(/[^0-9]/g, '').slice(0, 9)); setContextWindowTouched(true); }, // eslint-disable-line sonarjs/concise-regex -- keep [^0-9] literal instead of \D; readability first
                       placeholder: settingsCopy.modelContextWindowPlaceholder,
                       testId: 'model-form-context-window',
                       inputMode: 'numeric',
@@ -2041,7 +2091,7 @@ const formatMemoryTime = (item, copy) => {
     // eslint-disable-next-line sonarjs/cognitive-complexity -- settings page aggregates many form branches; splitting needs a dedicated design; tracked via this suppression for now
     /** @typedef {{ behaviorAnalyticsTitle: string, behaviorAnalyticsEntryTitle: string, behaviorAnalyticsEntryDesc: string, behaviorAnalyticsBack: string, behaviorAnalyticsLabel: string, behaviorAnalyticsDesc: string, behaviorAnalyticsNotConfigured: string, behaviorAnalyticsEnableConfirm: string, behaviorAnalyticsDisableConfirm: string, behaviorAnalyticsStatusEnabled: string, behaviorAnalyticsStatusDisabled: string, behaviorAnalyticsStatusWithdrawalPending: string, behaviorAnalyticsActionFailed: string }} BehaviorAnalyticsSettingsCopy */
     // eslint-disable-next-line no-unused-vars, sonarjs/cognitive-complexity -- contract slot parameters kept; the settings page aggregates many form branches, splitting needs a dedicated design
-    const SettingsView = ({ activeTheme, colorScheme, onColorSchemeChange, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, defaultModelRef, accountPlatformClient, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, chatStreamingAnimation = true, onChatStreamingAnimationChange, updateFocusTick, remoteConversationOpen, onRemoteConversationOpen, onRemoteConnected, onRemoteConversationClose, onCloseSettings, initialSection = 'general' }) => {
+    const SettingsView = ({ activeTheme, colorScheme, onColorSchemeChange, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, inputNeededNotif, setInputNeededNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, defaultModelRef, accountPlatformClient, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, chatStreamingAnimation = true, onChatStreamingAnimationChange, updateFocusTick, remoteConversationOpen, onRemoteConversationOpen, onRemoteConnected, onRemoteConversationClose, onCloseSettings, initialSection = 'general' }) => {
       const settingsCopy = /** @type {typeof t.uiSettingsDetail & BehaviorAnalyticsSettingsCopy} */ (t.uiSettingsDetail);
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const showSuperPermissionSettings = !!platformCapabilities.showSuperPermissionSettings;
@@ -2676,6 +2726,19 @@ const formatMemoryTime = (item, copy) => {
             <IOSRow label={t.uiSettings.taskNotice} desc={t.uiSettings.taskNoticeDesc}>
               <IOSSwitch checked={taskCompletedNotif} onChange={setTaskCompletedNotif} />
             </IOSRow>
+            {/* The task-completion switch is the master switch (its payload
+                carries enabled). The input row's effective display derives as
+                intent && master and is disabled while the master is off —
+                otherwise the switch would show on yet never fire; the Rust
+                delivery gate requires the same effective rule
+                (enabled && task_completed && needs_input). */}
+            <IOSRow label={t.uiSettings.inputNotice} desc={t.uiSettings.inputNoticeDesc}>
+              <IOSSwitch
+                checked={inputNeededNotif && taskCompletedNotif}
+                disabled={!taskCompletedNotif}
+                onChange={setInputNeededNotif}
+              />
+            </IOSRow>
           </IOSSection>
           )}
           <IOSSection title={t.uiSettings.voiceShortcuts}>
@@ -2847,6 +2910,7 @@ const formatMemoryTime = (item, copy) => {
                         {!selectable && <Tag tone="gray">{settingsCopy.modelUnavailable}</Tag>}
                       </div>
                       <div className="mt-0.5 text-[12px] leading-[17px] truncate text-[#8A8A8E] dark:text-[#98989D]">{item.model_id}</div>
+                      {!platformModelRuntimeSupported(item) && <p className="mt-1 text-[12px] leading-[17px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.modelRuntimeProtocolUnavailable}</p>}
                     </div>
                     <span className="text-[12px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.appliesToNewSessions}</span>
                   </div>

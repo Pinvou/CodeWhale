@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import postcss from 'postcss';
 import tailwindcss from 'tailwindcss';
 
-import { auditDistPresenceProblems, auditPortalAssets, runAudit } from '../scripts/audit-compat.mjs';
+import { auditDistCss, auditDistPresenceProblems, auditPortalAssets, runAudit } from '../scripts/audit-compat.mjs';
 import { staticRuntimeScripts } from '../vite.config.mjs';
 
 // WebView compatibility contract: the desktop minimum is macOS 11
@@ -156,6 +156,238 @@ test('the auditor flags inset shorthand that survives into dist CSS (Safari 14.0
   }
 });
 
+test('the auditor flags @layer blocks that survive into dist CSS (Safari 14.0 contract)', () => {
+  // Cascade layers ship in Safari 15.4+ and lightningcss does not flatten
+  // them at cssTarget safari14: a Tailwind 4 build puts most of its output
+  // inside @layer blocks and the macOS 11 / Safari 14.0 floor renders
+  // unstyled (the Tailwind 4 deps-bump audit verdict). The auditor fails on any survivor in
+  // the built artifact; other at-rules must not phantom-match.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-layer-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '@layer base{*{box-sizing:border-box}}',
+      '@media (min-width:640px){.ok{display:block}}',
+      '@keyframes spin{to{transform:rotate(360deg)}}',
+    ].join('\n'));
+    const violations = hermeticAudit({ distDir });
+    assert.equal(violations.length, 1, `exactly the surviving @layer must be reported; got: ${JSON.stringify(violations)}`);
+    assert.match(violations[0], /^dist:main\.css:1: @layer survives the build/);
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('the auditor flags anonymous, statement, and import-layer survivors too', () => {
+  // The `@layer` substring cannot see the import form: `@import url(…)
+  // layer(nav);` creates cascade layers without containing `@layer`. Pin the
+  // anonymous and statement forms alongside it. The import clause is parsed
+  // after the URL token: the bare anonymous `layer` clause and a clause
+  // after `supports()` must fire in any position, while `layer(` inside the
+  // import URL (or outside any @import) must not.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-layer-forms-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '@layer{*{box-sizing:border-box}}',
+      '@media (min-width:640px){.ok{display:block}}',
+    ].join('\n'));
+    const anonymous = hermeticAudit({ distDir });
+    assert.equal(anonymous.length, 1, `exactly the anonymous layer must be reported; got: ${JSON.stringify(anonymous)}`);
+    assert.match(anonymous[0], /^dist:main\.css:1: @layer survives the build/);
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '@layer base, utilities;',
+      '@media (min-width:640px){.ok{display:block}}',
+    ].join('\n'));
+    const statement = hermeticAudit({ distDir });
+    assert.equal(statement.length, 1, `exactly the layer statement must be reported; got: ${JSON.stringify(statement)}`);
+    assert.match(statement[0], /^dist:main\.css:1: @layer survives the build/);
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '@import url("./theme.css") layer(nav);',
+      '@media (min-width:640px){.ok{display:block}}',
+    ].join('\n'));
+    const importLayer = hermeticAudit({ distDir });
+    assert.equal(importLayer.length, 1, `exactly the import layer must be reported; got: ${JSON.stringify(importLayer)}`);
+    assert.match(importLayer[0], /^dist:main\.css:1: @import layer survives the build/);
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '@import url("./a.css") layer;',
+      '@media (min-width:640px){.ok{display:block}}',
+    ].join('\n'));
+    const anonymousClause = hermeticAudit({ distDir });
+    assert.equal(anonymousClause.length, 1, `exactly the anonymous import clause must be reported; got: ${JSON.stringify(anonymousClause)}`);
+    assert.match(anonymousClause[0], /^dist:main\.css:1: @import layer survives the build/);
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '@import url("./a.css") supports(display: grid) layer;',
+      '@media (min-width:640px){.ok{display:block}}',
+    ].join('\n'));
+    const supportsClause = hermeticAudit({ distDir });
+    assert.equal(supportsClause.length, 1, `the layer clause after supports() must be reported; got: ${JSON.stringify(supportsClause)}`);
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '@import url("./layer(v2).css");',
+      '@media (min-width:640px){.ok{display:block}}',
+    ].join('\n'));
+    assert.deepEqual(hermeticAudit({ distDir }), [], 'layer( inside an import URL must not fire');
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '@import url("./theme layer(v2).css");',
+      '@media (min-width:640px){.ok{display:block}}',
+    ].join('\n'));
+    assert.deepEqual(hermeticAudit({ distDir }), [], 'layer clause tokens inside the import URL must not fire');
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '.ok{background:url("./layer(v2).png")}',
+    ].join('\n'));
+    assert.deepEqual(hermeticAudit({ distDir }), [], 'layer( outside @import must not fire');
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('the layer scan is case-insensitive, string-aware, and blind to comments and strings', () => {
+  // CSS at-keywords are ASCII case-insensitive, so `@LAYER` and a `LAYER`
+  // import clause create real layers. An unquoted url() token may contain
+  // `;` (data URLs), which must not truncate the prelude capture before the
+  // clause. Comments (`/*! … */` license headers survive minification) and
+  // quoted strings (a `content` value may quote at-rule syntax) cannot
+  // create layers and must not fail the build.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-layer-hard-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'assets', 'upper.css'), '@LAYER base{*{box-sizing:border-box}}');
+    fs.writeFileSync(path.join(distDir, 'assets', 'upper-import.css'), '@IMPORT URL("./u.css") LAYER;');
+    fs.writeFileSync(path.join(distDir, 'assets', 'semicolon-url.css'), '@import url(data:text/css;base64,QGxheWVy) layer;');
+    fs.writeFileSync(path.join(distDir, 'assets', 'quoted-semicolon-anon.css'), '@import url("https://example.com/a.css?v=1;v2=2") layer;');
+    fs.writeFileSync(path.join(distDir, 'assets', 'quoted-semicolon-named.css'), '@import url("https://example.com/a.css?v=1;v2=2") layer(nav);');
+    fs.writeFileSync(path.join(distDir, 'assets', 'string-semicolon-named.css'), '@import "a.css;x" layer(nav);');
+    const violations = hermeticAudit({ distDir });
+    assert.equal(violations.length, 6, `all six layer shapes must be reported; got: ${JSON.stringify(violations)}`);
+    assert.deepEqual(
+      violations.map((violation) => violation.slice('dist:'.length).replace(/:.*/, '')).sort((a, b) => a.localeCompare(b)),
+      [
+        'quoted-semicolon-anon.css',
+        'quoted-semicolon-named.css',
+        'semicolon-url.css',
+        'string-semicolon-named.css',
+        'upper-import.css',
+        'upper.css',
+      ],
+      'each fixture file must be reported exactly once',
+    );
+    assert.match(violations.find((violation) => violation.includes('upper.css')), / @layer survives the build/);
+    for (const file of ['upper-import.css', 'semicolon-url.css', 'quoted-semicolon-anon.css', 'quoted-semicolon-named.css', 'string-semicolon-named.css']) {
+      assert.match(violations.find((violation) => violation.includes(file)), / @import layer survives the build/, `${file} must be an import-layer violation`);
+    }
+
+    fs.rmSync(path.join(distDir, 'assets'), { recursive: true, force: true });
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'assets', 'licensed.css'), [
+      '/*! derived from the @layer utilities documentation */',
+      '.ok{color:red}',
+    ].join('\n'));
+    fs.writeFileSync(path.join(distDir, 'assets', 'content-strings.css'), [
+      '.a:before{content:"@layer base"}',
+      '.b:after{content:"@import url(a) layer;"}',
+      '.c{background:url("./layer(v2).png")}',
+    ].join('\n'));
+    assert.deepEqual(
+      hermeticAudit({ distDir }),
+      [],
+      'comments and quoted strings must not fail the audit',
+    );
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('the auditor flags @layer behind an unquoted url token the minifier emits', () => {
+  // lightningcss drops url quotes whenever the value needs no escaping, so a
+  // quoted source url ships UNQUOTED in dist and a `/*` inside it is token
+  // content, not a comment opener. Pin the real minifier output: the genuine
+  // `@layer` behind that url must still be reported even though the quoted
+  // source form contains no scanner-visible `/*` outside the string.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-url-comment-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    const compiled = transformCss({
+      filename: 'main.css',
+      code: Buffer.from('a{background:url("https://example.com/a/*b.png")}@layer demo{b{color:red}}'),
+      targets: browserslistToTargets(['safari 14']),
+      minify: true,
+    }).code.toString();
+    assert.match(compiled, /url\(https:\/\/example\.com\/a\/\*b\.png\)/, 'minifier fixture must emit the unquoted url');
+    assert.match(compiled, /@layer demo/, 'minifier fixture must keep the real layer');
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), compiled);
+    const violations = hermeticAudit({ distDir });
+    assert.equal(violations.length, 1, `exactly the real layer must be reported; got: ${JSON.stringify(violations)}`);
+    assert.match(violations[0], /^dist:main\.css:1: @layer survives the build/);
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('unquoted url() bodies neither hide nor invent layer violations', () => {
+  // A `/*` inside a valid unquoted url() token is token content: it must not
+  // strip the remainder of the stylesheet (a real @layer behind it stays
+  // reported), while an `@layer` substring inside a token body must not
+  // phantom-match. A `url(` inside a comment stays comment text. All
+  // fixtures share one audit pass (a full runAudit re-parses every static
+  // runtime script), partitioned per file below.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-url-body-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(
+      path.join(distDir, 'assets', 'layer-behind.css'),
+      'a{background:url(https://example.com/a/*b.png)}@layer demo{b{color:red}}',
+    );
+    fs.writeFileSync(path.join(distDir, 'assets', 'inert.css'), [
+      '.ok{background:url(/@layer-demo.png)}',
+      'a{background:url(data:text/css;base64,QGxheWVy)}',
+    ].join('\n'));
+    fs.writeFileSync(path.join(distDir, 'assets', 'comment-url.css'), '/*! url(https://x/*y ) */@layer a{b{color:red}}');
+    const violations = hermeticAudit({ distDir });
+    assert.deepEqual(
+      violations.map((violation) => violation.slice('dist:'.length).replace(/:.*/, '')).sort((a, b) => a.localeCompare(b)),
+      ['comment-url.css', 'layer-behind.css'],
+      `exactly the two real layers must be reported; got: ${JSON.stringify(violations)}`,
+    );
+    for (const file of ['comment-url.css', 'layer-behind.css']) {
+      assert.match(violations.find((violation) => violation.includes(file)), /^dist:[^:]+:1: @layer survives the build/);
+    }
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('the import-prelude scan stays linear on an unterminated prelude', { timeout: 20000 }, () => {
+  // The former capture regex had overlapping alternation arms (a `url(…)`
+  // token could also be consumed by the `[^;"']` fallback), so an
+  // unterminated prelude of repeated url(…) tokens backtracked exponentially
+  // (~3.5s at 22 tokens). The single-pass prelude reader finishes each
+  // prelude exactly once; regressing to a backtracking shape hangs here
+  // (the scan is synchronous, so no timeout can mask it) and the wall-clock
+  // pin keeps lesser shape changes visible. Timed via auditDistCss because
+  // a full runAudit adds seconds of static-script parsing noise.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-perf-'));
+  try {
+    const assetsDir = path.join(distDir, 'assets');
+    fs.mkdirSync(assetsDir, { recursive: true });
+    fs.writeFileSync(path.join(assetsDir, 'main.css'), `@import ${'url(a)'.repeat(20000)} layer;`);
+    const started = Date.now();
+    const violations = auditDistCss(assetsDir);
+    const elapsed = Date.now() - started;
+    assert.equal(violations.length, 1, `the trailing layer clause must fire; got: ${JSON.stringify(violations)}`);
+    assert.match(violations[0], /@import layer survives the build/);
+    assert.ok(elapsed < 5000, `the audit must stay linear; took ${elapsed}ms`);
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
 test('the audit fails closed when a dist layer is absent or empty', () => {
   // The presence guards are the CLI's only defense against green-lighting an
   // audit whose dist layers were never produced: every layer runAudit scans
@@ -214,6 +446,316 @@ test('the audit fails closed when a dist layer is absent or empty', () => {
   }
 });
 
+test('the url() lexer keeps 1:1 offsets and value positions never fire', () => {
+  // Three pins over the shared stripper and scan, each discriminating a
+  // specific mutation:
+  // 1. at-rule position: `@layer` inside a declaration value (an svg-url()
+  //    function value's data token) is not an at-rule and must not fire.
+  //    An earlier draft pinned the opposite — "must fire" — as a lexer
+  //    ident-boundary discriminator, but that contract pinned a false
+  //    positive: a declaration value never hosts an at-rule, so verdict
+  //    correctness is owned by the rule-start/context check, not by how
+  //    much of the value the lexer blanks.
+  // 2. import URL peel: `url(…)layer(…)` with no whitespace before the clause
+  //    must fire — the fallback `(?:^|\s)layer` cannot see `)layer(`, so only
+  //    the explicit URL-token peel makes "clause in any position" true.
+  // 3. offset attribution: whitespace after `url(` must not be double-counted
+  //    (padded from the body start, not from `url(`), or the masked copy
+  //    drifts against the original and the violation's line number moves.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-lexer-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), '.i{mask-image:svg-url(data:@layer x{})}\n');
+    assert.deepEqual(
+      hermeticAudit({ distDir }),
+      [],
+      'an @layer token inside a declaration value must not fire',
+    );
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '@import url("./a.css")layer(nav);',
+      '@media (min-width:640px){.ok{display:block}}',
+    ].join('\n'));
+    const noSpaceClause = hermeticAudit({ distDir });
+    assert.equal(noSpaceClause.length, 1, `the import layer clause with no whitespace before it must fire; got: ${JSON.stringify(noSpaceClause)}`);
+    assert.match(noSpaceClause[0], /^dist:main\.css:1: @import layer survives the build/);
+
+    // Whitespace inside the url() token + `@layer` as the first token of the
+    // next line followed by its own newline: a double-counted pad shifts the
+    // match index past line 2's newline and reports line 3.
+    const drifted = 'a{background:url(        x)}\n@layer\ndemo{b{color:red}}\n';
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), drifted);
+    const trueLine = drifted.split('\n').findIndex((line) => /@layer/i.test(line)) + 1;
+    const attributed = hermeticAudit({ distDir });
+    assert.equal(attributed.length, 1, `exactly the surviving @layer must be reported; got: ${JSON.stringify(attributed)}`);
+    assert.match(attributed[0], new RegExp(`^dist:main\\.css:${trueLine}: @layer survives the build`), 'line attribution must survive whitespace inside url() tokens');
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('escaped idents neither mask a real layer nor fire as one', () => {
+  // Default-state CSS escapes are one token character: `.foo\"bar` is the
+  // ident `foo"bar` (single-quoted ident `foo'bar` alike), so the escaped
+  // quote must not open a string that blanks the rest of the stylesheet —
+  // the previous scanner hid the real `@layer` behind it and returned
+  // clean. Symmetrically, a bare `@layer` substring outside a rule-start
+  // position is not an at-rule: `.\@layer` is a class selector,
+  // `a{--token:@layer}` a custom-property value, and `@layered`/`@layering`
+  // idents — none may fail the audit. The real layer after an escaped
+  // selector must still be reported.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-escape-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'assets', 'double-quote-ident.css'), '.foo\\"bar{color:red}@layer demo{b{color:red}}');
+    fs.writeFileSync(path.join(distDir, 'assets', 'single-quote-ident.css'), ".a\\'b{color:red}@layer demo{b{color:red}}");
+    fs.writeFileSync(path.join(distDir, 'assets', 'escaped-class.css'), '.\\@layer{color:red}');
+    fs.writeFileSync(path.join(distDir, 'assets', 'custom-prop.css'), 'a{--token:@layer}');
+    fs.writeFileSync(path.join(distDir, 'assets', 'layer-idents.css'), '@layered x{color:red}@layering y{color:red}');
+    const violations = hermeticAudit({ distDir });
+    assert.deepEqual(
+      violations.map((violation) => violation.slice('dist:'.length).replace(/:.*/, '')).sort((a, b) => a.localeCompare(b)),
+      ['double-quote-ident.css', 'single-quote-ident.css'],
+      `exactly the two real layers behind escaped idents must be reported; got: ${JSON.stringify(violations)}`,
+    );
+    for (const file of ['double-quote-ident.css', 'single-quote-ident.css']) {
+      assert.match(violations.find((violation) => violation.includes(file)), /^dist:[^:]+:1: @layer survives the build/);
+    }
+
+    fs.rmSync(path.join(distDir, 'assets'), { recursive: true, force: true });
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'assets', 'both.css'), '.\\@layer{color:red}@layer real{b{color:red}}');
+    const both = hermeticAudit({ distDir });
+    assert.equal(both.length, 1, `the escaped selector must not mask the real layer after it; got: ${JSON.stringify(both)}`);
+    assert.match(both[0], /^dist:both\.css:1: @layer survives the build/);
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('custom-property value contexts never fire and real layers around them still do', () => {
+  // Minified dist keeps custom-property values verbatim (lightningcss does
+  // not rewrite their tokens at cssTarget safari14), and CSS Variables §2.1
+  // lets such values carry balanced `{}` component blocks, escaped
+  // characters, and `;` inside function blocks — none of them ends the
+  // declaration, so an `@layer` token inside the value is content, not a
+  // cascade layer, and must not fail the audit. The fixtures are the real
+  // minified safari14 output so the pins hold against the same producer the
+  // audit gates. Symmetrically, the declaration's own rule still ends at
+  // its `}` and the top-level layer after it, layers nested in layers, and
+  // a layer nested in a style rule (lowered by the minifier into a real
+  // layer) must all stay reported.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-declctx-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    const minify = (css) => transformCss({
+      filename: 'main.css',
+      code: Buffer.from(css),
+      targets: browserslistToTargets(['safari 14']),
+      minify: true,
+    }).code.toString();
+
+    const blockValue = minify('a{--token:{@layer demo{b{color:red}}};}');
+    assert.match(blockValue, /--token:\{@layer demo\{b\{color:red\}\}\}/, 'minifier fixture must keep the custom-property block value');
+    const escapedSemicolon = minify('a{--x:red\\;@layer demo{b{color:red}}}');
+    assert.match(escapedSemicolon, /--x:red\\;/, 'minifier fixture must keep the escaped semicolon');
+    const parenSemicolon = minify('a{--x:f(;@layer demo{b{color:red}})}');
+    assert.match(parenSemicolon, /--x:f\(;/, 'minifier fixture must keep the semicolon inside the function block');
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      blockValue,
+      escapedSemicolon,
+      parenSemicolon,
+    ].join('\n'));
+    assert.deepEqual(
+      hermeticAudit({ distDir }),
+      [],
+      '@layer tokens inside custom-property value contexts must not fire',
+    );
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      minify('a{--x:red\\;}@layer demo{b{color:red}}'),
+      minify('@layer a{@layer b{c{color:red}}}'),
+      minify('a{color:red;@layer b{c{color:red}}}'),
+    ].join('\n'));
+    const violations = hermeticAudit({ distDir });
+    // 1 (layer after the escaped-semicolon declaration) + 2 (nested layers
+    // both fire) + 1 (the style-rule layer the minifier lowers into a real
+    // top-level layer).
+    assert.equal(violations.length, 4, `the real layers around the value contexts must be reported; got: ${JSON.stringify(violations)}`);
+    for (const violation of violations) {
+      assert.match(violation, / @layer survives the build/);
+    }
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('a pseudo-class sibling rule does not mask the real layer after it', () => {
+  // In a rule-list frame the `:` of `.x:hover` used to record a pending
+  // declaration on the parent frame, and the nested rule's close left that
+  // stale state behind — the previous scanner returned 0 violations for the
+  // media fixture below (and 1 without `:hover`), hiding a real survivor.
+  // Opening a rule body must clear the parent's pending declaration: that
+  // colon was selector syntax, not a declaration opener. The media fixture
+  // is the real minified safari14 output — lightningcss keeps both the
+  // pseudo-class rule and the layer verbatim, so the miss was reachable in
+  // dist.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-pseudo-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    const minify = (css) => transformCss({
+      filename: 'main.css',
+      code: Buffer.from(css),
+      targets: browserslistToTargets(['safari 14']),
+      minify: true,
+    }).code.toString();
+    const mediaHover = minify('@media screen{.x:hover{color:red}@layer real{b{color:red}}}');
+    assert.match(mediaHover, /\.x:hover\{color:red\}/, 'minifier fixture must keep the pseudo-class rule');
+    assert.match(mediaHover, /@layer real\{b\{color:red\}\}/, 'minifier fixture must keep the real layer');
+    fs.writeFileSync(path.join(distDir, 'assets', 'media-hover.css'), mediaHover);
+    fs.writeFileSync(path.join(distDir, 'assets', 'raw-hover.css'), '@media screen{.x:hover{color:red}@layer real{b{color:red}}}');
+    // Raw nesting is lowered by the safari14 minifier (the nested layer
+    // becomes a top-level one), so the `&:hover` pin uses the hand-written
+    // form: the scanner must not lose the layer behind the pseudo-class in
+    // unminified input either.
+    fs.writeFileSync(path.join(distDir, 'assets', 'amp-nesting.css'), '.card{ &:hover{color:red} @layer real{b{color:red}} }');
+    fs.writeFileSync(path.join(distDir, 'assets', 'no-layer.css'), '@media screen{.x:hover{color:red}}');
+    const violations = hermeticAudit({ distDir });
+    assert.deepEqual(
+      violations.map((violation) => violation.slice('dist:'.length).replace(/:.*/, '')).sort((a, b) => a.localeCompare(b)),
+      ['amp-nesting.css', 'media-hover.css', 'raw-hover.css'],
+      `exactly the real layers after pseudo-class siblings must be reported; got: ${JSON.stringify(violations)}`,
+    );
+    for (const file of ['amp-nesting.css', 'media-hover.css', 'raw-hover.css']) {
+      assert.match(violations.find((violation) => violation.includes(file)), / @layer survives the build/);
+    }
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('a `--`-prefixed selector compound does not mask the real layer after it', () => {
+  // In a rule-list frame the `:` of a selector compound used to record a
+  // pending declaration on the enclosing frame; a `--`-prefixed compound
+  // (`.--x:hover`) recorded `custom`, so the nested rule's `{` was
+  // classified as a custom-property value block and the enclosing frame
+  // kept the stale `custom` state after the rule closed — the scanner
+  // returned 0 violations for the media fixture below while the real
+  // sibling layer survived the build. `--*` declarations are only legal
+  // inside a style-rule body; in a rule-list frame (prelude starts with an
+  // at-keyword: @media/@supports/@layer/…) every `:` is selector syntax
+  // and must not open a declaration. lightningcss keeps both the compound
+  // and the layer verbatim at the safari14 target, so the miss was
+  // reachable in dist; the custom-property value negative control stays.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-custom-sel-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    const minify = (css) => transformCss({
+      filename: 'main.css',
+      code: Buffer.from(css),
+      targets: browserslistToTargets(['safari 14']),
+      minify: true,
+    }).code.toString();
+    const mediaCustomSel = minify('@media screen{.--x:hover{color:red}@layer real{b{color:red}}}');
+    assert.match(mediaCustomSel, /\.--x:hover\{color:red\}/, 'minifier fixture must keep the `--`-prefixed compound rule');
+    assert.match(mediaCustomSel, /@layer real\{b\{color:red\}\}/, 'minifier fixture must keep the real layer');
+    const supportsCustomSel = minify('@supports (display:flex){.--x:hover{color:red}@layer real{b{color:red}}}');
+    assert.match(supportsCustomSel, /\.--x:hover\{color:red\}/, 'supports fixture must keep the compound rule');
+    assert.match(supportsCustomSel, /@layer real\{b\{color:red\}\}/, 'supports fixture must keep the real layer');
+    fs.writeFileSync(path.join(distDir, 'assets', 'media-custom-sel.css'), mediaCustomSel);
+    fs.writeFileSync(path.join(distDir, 'assets', 'supports-custom-sel.css'), supportsCustomSel);
+    fs.writeFileSync(path.join(distDir, 'assets', 'raw-custom-sel.css'), '@media screen{.--x:hover{color:red}@layer real{b{color:red}}}');
+    fs.writeFileSync(path.join(distDir, 'assets', 'no-layer.css'), '@media screen{.--x:hover{color:red}}');
+    fs.writeFileSync(path.join(distDir, 'assets', 'custom-prop.css'), 'a{--token:@layer demo{b{color:red}}}');
+    const violations = hermeticAudit({ distDir });
+    assert.deepEqual(
+      violations.map((violation) => violation.slice('dist:'.length).replace(/:.*/, '')).sort((a, b) => a.localeCompare(b)),
+      ['media-custom-sel.css', 'raw-custom-sel.css', 'supports-custom-sel.css'],
+      `exactly the real layers behind \`--\`-prefixed selector compounds must be reported; got: ${JSON.stringify(violations)}`,
+    );
+    for (const file of ['media-custom-sel.css', 'raw-custom-sel.css', 'supports-custom-sel.css']) {
+      assert.match(violations.find((violation) => violation.includes(file)), / @layer survives the build/);
+    }
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('an @import token outside a rule position is not a layered import', () => {
+  // The import scan shares the at-rule context walk with the @layer scan:
+  // a custom-property value is token content, not a rule list, so the
+  // `@import`/`LAYER(…)` tokens inside it never start a prelude. The
+  // previous scanner failed the audit on the uppercase value (custom
+  // properties keep their tokens verbatim through the real Vite +
+  // lightningcss build), and on a `layer(` token inside a value block.
+  // Real layered imports keep firing — beside a pseudo-class sibling rule
+  // and with the required whitespace before the URL token. A keyword-glued
+  // form like `@importurl(a.css)` is one unknown at-rule per the CSS
+  // tokenizer (only `(` ends the ident), so it must NOT be reported as a
+  // layered import; the audit must stay silent on it.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-import-ctx-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    const upperCustom = transformCss({
+      filename: 'main.css',
+      code: Buffer.from('a{--tokens:@IMPORT "x.css" LAYER(fake)}'),
+      targets: browserslistToTargets(['safari 14']),
+      minify: true,
+    }).code.toString();
+    assert.match(upperCustom, /--tokens:@IMPORT "x\.css" LAYER\(fake\)/, 'minifier fixture must keep the uppercase custom-property value');
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      upperCustom,
+      'a{--tokens:@import "x.css" layer(fake)}',
+      'a{--t:{@import "./a.css" layer(fake);};}',
+    ].join('\n'));
+    assert.deepEqual(
+      hermeticAudit({ distDir }),
+      [],
+      'import tokens inside declaration values must not fire',
+    );
+
+    fs.writeFileSync(path.join(distDir, 'assets', 'main.css'), [
+      '@IMPORT "a.css" LAYER(named);',
+      '@importurl(a.css)layer(b);',
+      '@import url("./c.css") layer(d);@media screen{.x:hover{color:red}}',
+    ].join('\n'));
+    const violations = hermeticAudit({ distDir });
+    assert.equal(violations.length, 2, `exactly the two real layered imports must be reported; got: ${JSON.stringify(violations)}`);
+    // Lines 1 (@IMPORT …) and 3 (@import url …) are real layered imports;
+    // line 2 (@importurl …, one unknown at-rule) must stay silent.
+    assert.match(violations[0], /^dist:main\.css:1: @import layer survives the build/u, violations[0]);
+    assert.match(violations[1], /^dist:main\.css:3: @import layer survives the build/u, violations[1]);
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
+test('a layer() token inside import supports() conditions is not a layer clause', () => {
+  // `supports(display: layer(x))` carries the `layer(` token as a feature
+  // argument, not as the import's layer clause — the import stays
+  // layer-free and must not fail the audit. The clause before or after the
+  // condition still fires in any position.
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-supports-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'assets', 'supports-layer-fn.css'), '@import url("./a.css") supports(display: layer(x));');
+    fs.writeFileSync(path.join(distDir, 'assets', 'supports-nested-enclosure.css'), '@import url("./a.css") supports((--t: layer));');
+    fs.writeFileSync(path.join(distDir, 'assets', 'clause-then-supports.css'), '@import url("./a.css") layer(nav) supports(display: layer(x));');
+    fs.writeFileSync(path.join(distDir, 'assets', 'supports-then-clause.css'), '@import url("./a.css") supports(display: grid) layer(real);');
+    const violations = hermeticAudit({ distDir });
+    assert.deepEqual(
+      violations.map((violation) => violation.slice('dist:'.length).replace(/:.*/, '')).sort((a, b) => a.localeCompare(b)),
+      ['clause-then-supports.css', 'supports-then-clause.css'],
+      `only the two imports with a real clause must be reported; got: ${JSON.stringify(violations)}`,
+    );
+    for (const file of ['clause-then-supports.css', 'supports-then-clause.css']) {
+      assert.match(violations.find((violation) => violation.includes(file)), / @import layer survives the build/);
+    }
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
 
 test('Portal compatibility audits actual entries, missing chunks and mixed-variable inset', () => {
   const portal = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-portal-'));

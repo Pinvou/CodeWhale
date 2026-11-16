@@ -367,6 +367,33 @@ test('an uncertain remote action uses dedicated non-retry safety guidance', () =
   assert.match(dict.ja.remoteConversation.actionResultUnknown, /確認.*再試行しない/);
 });
 
+test('an upload rejected at local capacity gets distinct translated guidance', () => {
+  const helpers = sourceSection(chat, 'function remoteActionFailureCode', 'function constrainDialogFocus');
+  const { remoteActionFailureCode, remoteActionFailureCopyKey } = new Function(`${helpers};
+    return {remoteActionFailureCode, remoteActionFailureCopyKey};`)();
+  const code = remoteActionFailureCode({ code: 'remote_attachment_capacity' });
+  assert.equal(code, 'remote_attachment_capacity');
+  assert.equal(remoteActionFailureCopyKey(code), 'attachmentCapacity');
+  for (const language of ['zh', 'en', 'ja']) {
+    const copy = dict[language].remoteConversation;
+    assert.ok(copy.attachmentCapacity, `${language} capacity guidance exists`);
+    assert.notEqual(copy.attachmentCapacity, copy.actionResultUnknown);
+  }
+});
+
+test('a fenced attachment batch has distinct translated recovery guidance', () => {
+  const helpers = sourceSection(chat, 'function remoteActionFailureCode', 'function constrainDialogFocus');
+  const { remoteActionFailureCode, remoteActionFailureCopyKey } = new Function(`${helpers};
+    return {remoteActionFailureCode, remoteActionFailureCopyKey};`)();
+  const code = remoteActionFailureCode({ code: 'remote_attachment_fenced' });
+  assert.equal(remoteActionFailureCopyKey(code), 'attachmentFenced');
+  for (const language of ['zh', 'en', 'ja']) {
+    const copy = dict[language].remoteConversation;
+    assert.ok(copy.attachmentFenced, `${language} fenced guidance exists`);
+    assert.notEqual(copy.attachmentFenced, copy.actionResultUnknown);
+  }
+});
+
 test('remote event roles and hidden-detail safety copy exist in all three languages', () => {
   for (const language of ['zh', 'en', 'ja']) {
     const copy = dict[language].remoteConversation;

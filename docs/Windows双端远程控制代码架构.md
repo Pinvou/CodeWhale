@@ -686,6 +686,8 @@ DEV-31 已删除未发布的 `RemoteConversationView`；`ChatView.jsx` 是唯一
 
 当前 A 端只保留 `openLiveRemoteProxy` 与 RemoteProxy 远程 action；任务提交使用 `reserveRemoteTask(localSessionId, remoteRef, intent) → 上传并确认附件 → commitRemoteTask(localSessionId, remoteRef, handle, attachmentIds)`。`reserve` 返回的 opaque handle 绑定已持久化的尚未尝试发送 outbox，调用方不能用自行构造的 task ID 或 fingerprint 替代；`commit` 才跨越 attempt barrier。一旦发送结果不确定，调用方必须展示 `result_unknown` 并对账，不能以新任务重发。B 端保留本地权威会话入口 `controlledTaskSend`。未发布的 `controllerSessionOpen`、`openRemoteSession`、`submitRemoteTask` 以及旧签名任务直发入口已直接删除，不设置别名或兼容代理。
 
+远控任务附件在读取和上传前按整批校验：每个文件非空且不超过 20 MiB，最多 8 个，合计不超过 64 MiB；B 端仍独立执行权威限制。产物下载保留独立的 32 MiB 单文件上限。一批上传确定失败时，主控端只撤销该批已知且尚未消费的句柄；撤销回执不保证物理暂存已立即删除。上传或撤销结果未知时，同进程、同连接内保留未知状态并阻止盲目重新上传；连接换代或进程重启后不自动恢复旧批次，远端资源依既有到期和清理机制回收，实际回收时间取决于运行和清理结果。
+
 ### 7.6 A 端远程历史与 SessionStore 分裂
 
 DEV-31 已删除实验期 `RemoteHistoryStore` 和前端 `remoteHistories`；A 端远程正文、对账游标和离线副本只由 `SessionStore.RemoteProxy` 供数。未发布的实验数据不迁移、不兼容读取，也不允许再引入第二个持久化数据源。

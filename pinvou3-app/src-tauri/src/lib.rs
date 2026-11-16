@@ -979,7 +979,7 @@ pub fn run() {
                 .build()
         })
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_window("main") {
                 crate::platform::window_startup::activate_main_window(window, "single_instance");
             }
         }))
@@ -1223,6 +1223,9 @@ pub fn run() {
             // 「同一张卡不许被两处同时操作」的唯一依据，各持一份等于没有约束。
             let model_store =
                 std::sync::Arc::new(features::model_store::ModelStoreService::default());
+            model_store.set_models_changed_handler(
+                app::model_store_events::live_models_changed_handler(app.handle().clone()),
+            );
             // 收掉上次没收干净的脚本进程。**这一步必须在这里真的被调用**：应用被强杀
             // 或崩溃之后，hf download 之类的子进程还活着、占着权重目录的文件锁，用户
             // 下一次下载会一直卡住且没有任何提示——真机上这么僵持过 16 小时。
@@ -1231,7 +1234,7 @@ pub fn run() {
             // 内置卡片的脚本编译在二进制里：应用升级就等于脚本升级，这里把已下载的
             // 内置卡刷到当前版本。不刷的话，卡片会一直跑下载那天固化的旧脚本——
             // 真机上因此白查过一轮：推了新应用、脚本改动一个都没生效。
-            features::model_store::run_startup_refresh();
+            features::model_store::run_startup_refresh(&model_store);
             app.handle().manage(model_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();
@@ -1808,6 +1811,10 @@ pub fn run() {
             // get_monitor_snapshot 时触发（监控页面 1s interval，离开页面停）。
             let monitor_state = MonitorState::new();
             app.handle().manage(monitor_state);
+            // MegaCube 设备管理：持有必须跨采样存续的 sysinfo System/Networks 实例
+            // （进程 CPU% 与网络速率都靠同一实例两次刷新求差）。非 MegaCube 平台
+            // 上无人调用，开销为零。
+            app.handle().manage(crate::features::device::DeviceState::new());
             app.handle()
                 .manage(notifications::NotificationState::default());
             app.handle()
@@ -2055,11 +2062,23 @@ pub fn run() {
             commands::sessions::clear_session,
             commands::monitor::get_monitor_snapshot,
             commands::monitor::get_backend_status,
+            commands::device::get_device_snapshot,
+            commands::device::get_device_services,
+            commands::device::get_external_models,
+            commands::device::device_register_external_model,
+            commands::device::device_remove_external_model,
+            commands::device::device_doctor_prompt,
             commands::monitor::discover_local_vllm,
             commands::model_store::model_store_availability,
             commands::model_store::model_store_cards,
             commands::model_store::model_store_library,
             commands::model_store::model_store_model_detail,
+            commands::model_store::model_store_follow_deployment_context,
+            commands::model_store::model_store_check_card_update,
+            commands::model_store::model_store_startup_update_check,
+            commands::model_store::model_store_versions,
+            commands::model_store::model_store_start_version_action,
+            commands::model_store::model_store_start_card_update,
             commands::model_store::model_store_start_download,
             commands::model_store::model_store_start_deploy,
             commands::model_store::model_store_start_lifecycle,
@@ -2081,6 +2100,8 @@ pub fn run() {
             commands::settings::probe_local_server_kind,
             commands::settings::save_model,
             commands::settings::delete_model,
+            commands::settings::delete_model_if_store_link,
+            commands::settings::delete_model_if_matches,
             commands::settings::set_active_model,
             commands::settings::set_session_model,
             commands::settings::get_session_model_id,
@@ -2243,6 +2264,7 @@ pub fn run() {
             commands::remote_control::web_access_list_archived_sessions,
             commands::remote_control::web_access_create_session,
             commands::remote_control::web_access_create_session_and_chat,
+            commands::remote_control::web_access_create_session_and_chat_with_model,
             commands::remote_control::web_access_cancel_session_download,
             commands::remote_control::web_access_load_session_chunk,
             commands::remote_control::web_access_ingest_file,
@@ -2799,7 +2821,12 @@ mod tool_allowlist_contract {
             "todo_write",
             "tool_search",
             "request_user_input",
-            "revert_turn",
+            // The base spillover footer and subagent worker records teach
+            // these two by name (retrieve_tool_result auto-activation,
+            // HANDLE_READ_ACTIVATION_HINT); excluding them recreates the
+            // phantom the allowlist exists to prevent.
+            "retrieve_tool_result",
+            "handle_read",
             "kb_search",
             "kb_open_source",
             "mcp_weather_get_weather",
@@ -2817,6 +2844,14 @@ mod tool_allowlist_contract {
         }
 
         for excluded in [
+            // Snapshot-based turn rollback is dead with `snapshots_enabled`
+            // false (app-side code_checkpoints owns rewind); admitting it
+            // would offer a permanently failing Required-approval tool.
+            "revert_turn",
+            // Taught by the base `agent` description as an alternative to
+            // `type=test` (the `Run` tool with action="verifiers");
+            // deliberately excluded, with the residual probe disclosed in
+            // tool_policy.rs.
             "Run",
             "tasks",
             "automation",

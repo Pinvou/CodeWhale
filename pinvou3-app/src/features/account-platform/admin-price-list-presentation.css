@@ -1,0 +1,17 @@
+.adm-pricing-workspace .adm-pricing-version-table td{vertical-align:top}
+.adm-price-scope,.adm-price-formula,.adm-price-window,.adm-price-exact,.adm-price-unit-lines li>span:first-child{display:grid;min-width:0;gap:4px}
+.adm-price-scope small,.adm-price-formula small,.adm-price-window small,.adm-price-exact small,.adm-price-unit-lines small,.adm-price-identifiers dt,.adm-price-evidence-note{color:var(--adm-muted)}
+.adm-price-scope,.adm-price-formula,.adm-price-unit-lines,.adm-price-identifiers code,.adm-price-id,.adm-pricing-preview code{white-space:normal;overflow-wrap:break-word;overflow-wrap:anywhere}
+.adm-price-scope .adm-name-link{justify-self:start;text-align:start;white-space:normal}
+.adm-price-unit-lines{display:grid;min-width:14rem;gap:8px;margin:0;padding:0;list-style:none}
+.adm-price-unit-lines li{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px;padding-block:5px;border-bottom:1px solid var(--adm-line)}
+.adm-price-unit-lines li:last-child{border-bottom:0}
+.adm-price-unit-lines li>span:last-child,.adm-price-exact{text-align:end;font-variant-numeric:tabular-nums}
+.adm-price-exact{display:block}
+.adm-price-exact small,.adm-pricing-preview th small{display:block}
+.adm-price-identifiers{margin-top:8px;max-width:26rem}
+.adm-price-identifiers summary{color:var(--adm-primary);cursor:pointer;white-space:normal}
+.adm-price-identifiers dl{display:grid;gap:7px;margin:8px 0 0}
+.adm-price-identifiers dd{margin:0}
+.adm-price-evidence-note{line-height:1.5}
+@media(max-width:760px){.adm-price-unit-lines{min-width:12rem}}
