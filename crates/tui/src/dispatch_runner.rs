@@ -48,6 +48,9 @@ const MAX_TITLE_CHARS: usize = 200;
 /// Ceiling for the PR body, kept well under forge limits (GitHub accepts
 /// roughly 65,536 characters).
 const MAX_BODY_CHARS: usize = 60_000;
+/// Body-summary budget inside the PR prefix (the title carries the 72-char
+/// form; this bounds the body's own copy so the receipts footer always fits).
+const MAX_SUMMARY_BODY_CHARS: usize = 2_000;
 /// Harness timeout for one cloud-agent turn.
 const HARNESS_TIMEOUT_SECS: u32 = 3_600;
 
@@ -237,7 +240,7 @@ fn drive(
     job.head_sha = Some(patch.head_sha.clone()); // replaced with the pushed sha after `forge.open`
     job.note = format!(
         "Agent turn complete ({}); raising branch {} and opening the PR on {}.",
-        patch.summary,
+        one_line(&patch.summary, MAX_SUMMARY_BODY_CHARS),
         job.branch,
         job.forge.as_str()
     );
@@ -381,10 +384,19 @@ pub fn compose_pr_title(job: &CloudJob, patch: &PatchReceipt) -> String {
 
 /// PR body whose `Head:` is the sha actually applied/pushed.
 pub fn compose_pr_body_for_head(job: &CloudJob, patch: &PatchReceipt, head_sha: &str) -> String {
+    // The summary rides in the prefix, so it needs its own budget: an
+    // unbudgeted commit subject (possible up to the 200k harness-output cap)
+    // would saturate the task budget below and push the receipts footer past
+    // the final truncation. The title already shows a 72-char form of it, so
+    // a clipped body summary discloses the elision and loses nothing the
+    // title does not carry.
     let summary = if patch.summary.trim().is_empty() {
         "(the agent's commit list is the record)".to_string()
     } else {
-        patch.summary.trim().to_string()
+        format!(
+            "{}[…truncated]",
+            one_line(patch.summary.trim(), MAX_SUMMARY_BODY_CHARS)
+        )
     };
     let receipts = format!(
         "\n\n\
@@ -1660,6 +1672,24 @@ mod tests {
         // Truncation must eat the Task section, never the receipts footer.
         assert!(body.contains("## Receipts"));
         assert!(body.contains("No-Issue: cloud dispatch cloud_00000000000000bb"));
+        assert!(body.ends_with("(no tracked issue; receipts above)"));
+
+        // The receipts-survival guarantee has a second axis: an unbudgeted
+        // commit summary (possible up to the 200k harness-output cap) rides
+        // in the prefix and would saturate the task budget, pushing the
+        // footer past the final truncation. The body summary is clamped and
+        // the elision disclosed, so the footer survives this too.
+        let bloated = PatchReceipt {
+            summary: "s".repeat(MAX_BODY_CHARS),
+            ..fixture_patch()
+        };
+        let body = compose_pr_body_for_head(&job, &bloated, &bloated.head_sha);
+        assert!(body.chars().count() <= MAX_BODY_CHARS);
+        assert!(
+            body.contains("[…truncated]"),
+            "summary elision is disclosed"
+        );
+        assert!(body.contains("## Receipts"));
         assert!(body.ends_with("(no tracked issue; receipts above)"));
         // Literal pins for the audited forge bounds (96/6000 → 200/60000):
         // GitHub's real caps are 256/65,536, so a bound raised past those or
