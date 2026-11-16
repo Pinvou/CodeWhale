@@ -219,6 +219,34 @@ class ReuseTests(unittest.TestCase):
         for step in regression['steps']: step['conclusion'] = 'skipped'
         self.assertEqual(self.lookup(), ([], None))
 
+    def test_financial_matrix_requires_six_exact_successful_groups_and_retirement(self):
+        self.proof['jobs'] = ['account-financial-test']
+        policy = REUSE.JOBS['account-financial-test']
+        rows = REUSE.PLAN['matrix_rows'](policy, self.config)
+        self.assertEqual({row['group'] for row in rows},
+                         {'owners', 'token', 'billing-0', 'billing-1', 'billing-2', 'billing-3'})
+        self.jobs = [self.jobs[0]] + [
+            {'name': REUSE.PLAN['display_name'](policy, row), 'conclusion': 'success', 'run_id': 12,
+             'labels': ['ubuntu-22.04'],
+             'steps': [{'name': step['name'], 'conclusion': 'success'}
+                       for step in policy['steps'] if step['name']]}
+            for row in rows]
+        original = copy.deepcopy(self.jobs)
+        self.assertEqual(self.lookup(), (['account-financial-test'], 12))
+        for invalid in (original[:-1], original[:-1] + [original[1]]):
+            self.jobs = copy.deepcopy(invalid)
+            self.assertEqual(self.lookup(), ([], None))
+        for index in range(1, 7):
+            for verdict in ('failure', 'cancelled', 'skipped', None):
+                self.jobs = copy.deepcopy(original)
+                self.jobs[index]['conclusion'] = verdict
+                self.assertEqual(self.lookup(), ([], None))
+            for target in ('Install financial contract dependencies', 'Verify financial contract Node consumers',
+                           'Run isolated financial group', 'Confirm Account test resource retirement'):
+                self.jobs = copy.deepcopy(original)
+                step = next(step for step in self.jobs[index]['steps'] if step['name'] == target)
+                step['conclusion'] = 'skipped'
+                self.assertEqual(self.lookup(), ([], None))
     def test_windows_private_pool_reuse_binds_actual_labels_and_configuration(self):
         labels = ['self-hosted', 'Windows', 'heavy']
         self.config['PINVOU_WINDOWS_HEAVY_RUNNER'] = json.dumps(labels)
@@ -302,7 +330,7 @@ class ReuseTests(unittest.TestCase):
             # workflow Bash and selector; assert each worker's actual options.
             (scripts/'run-frontend-smokes.mjs').write_text(
                 "import assert from 'node:assert/strict';\n"
-                "assert.deepEqual(process.argv.slice(2), ['--selected', '--shard', process.env.EXPECTED_SHARD]);\n"
+                "assert.deepEqual(process.argv.slice(2), ['--selected', '--shard', process.env.EXPECTED_SHARD, '--isolate-network']);\n"
                 "process.stdin.pipe(process.stdout);\n", encoding='utf-8')
             old = root/'pinvou3-app/src/features/settings/review.js'
             new = root/'pinvou3-app/src/shared/review.js'
