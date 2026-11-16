@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use crate::dependencies::ExternalTool;
 
+use super::process::drain_truncated;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_bool, optional_str, optional_u64,
@@ -110,6 +111,9 @@ impl ToolSpec for GitStatusTool {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (content, truncated, omitted_chars) = truncate_with_note(&stdout, MAX_OUTPUT_CHARS);
+        // A drain grace that gave up on a pipe still holding output means the
+        // stdout above is partial; surface that like any other truncation.
+        let truncated = truncated || drain_truncated(&output);
 
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
@@ -212,6 +216,7 @@ impl ToolSpec for GitDiffTool {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (content, truncated, omitted_chars) = truncate_with_note(&stdout, MAX_OUTPUT_CHARS);
+        let truncated = truncated || drain_truncated(&output);
 
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
