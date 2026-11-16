@@ -379,7 +379,12 @@ fn record_audio() -> RecordOutcome {
                 recorder_stalled = true;
                 break;
             }
-            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Disconnected) => {
+                // Every loop exit kills the recorder: the wait()/join() below
+                // must never block on a child that is still running.
+                let _ = child.lock().unwrap().kill();
+                break;
+            }
         }
     }
 
@@ -722,6 +727,12 @@ pub async fn capture_and_transcribe(
         if shared_done.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
+        // The safety cap is checked before any continue: a capture that
+        // never accumulates 0.5s of audio must still be able to leave this
+        // loop when the capture has ended without setting shared_done.
+        if ticks > interim_max_ticks {
+            break;
+        }
         if !interim_enabled || ticks < 2 {
             continue; // let a little audio accumulate before first interim
         }
@@ -763,9 +774,6 @@ pub async fn capture_and_transcribe(
             app.composer.cursor_position = original_cursor;
             // Also keep status as Spark does
             app.status_message = Some(format!("● Listening — “{trimmed}”  (⌥V to finish)"));
-        }
-        if ticks > interim_max_ticks {
-            break; // safety cap; normally released earlier by shared_done
         }
     }
 
