@@ -253,6 +253,7 @@ RETAINED_REQUIRED = {
     *REFUND_REQUIRED,
     "TestLedgerRepairClaimActivationReadErrorsPostgres",
     "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry",
+    "TestProviderHealthGlobalWindowIndexPostgres",
     "TestMemberQuotaBatchPersistedFactsAndFinancialReplay",
     "TestMemberHoldIdentityMutationBoundaries",
     "TestPersonalUsageHoldBoundaries",
@@ -303,6 +304,7 @@ EXACT_REQUIRED_CHILDREN = {
     "TestChargebackFrozenExecutionPostgres": {"actual-payment-origin-two-leg-reconciliation", "empty-digest-zero-effect", "activation-version-receipt-and-order-summary", "proof-claim-same-effective-component-tuple-drift", "wallet-source-lock-before-final-recompute"},
     "TestChargebackPrincipalIndependentCashPostgres": {"authorized-original-writer-partial-and-replay", "conflicts-retained-paginated-and-fresh-whole-blocked", "legacy-missing-cash-and-completed-receipt-stable", "binding-auth-input-rejections-zero-write-and-recovery", "combined-and-over-gross-cash-requires-review", "immutable-receipts-runtime-and-migration-owner", "active-cash-cache-refreshes-on-legacy-record-and-dismiss", "legacy-financial-completion-keeps-principal-review-marker", "recharge-and-permitted-write-off-retain-principal-review", "shared-supplier-evidence-cannot-bind-another-payment", "F14-partial-cash-fences-fresh-plan-and-retains-old-receipt", "storage-failure-rolls-back-and-next-attempt-recovers", "concurrent-peer-cash-serializes-and-retries-without-money", "retained-038-forward-upgrade-and-down-refusal", "keyset-evidence-pagination-index-and-boundary"},
     "TestRegistrationOutboxAggregateLookupPostgres": {"fresh-install", "retained-upgrade"},
+    "TestProviderHealthGlobalWindowIndexPostgres": {"fresh-install", "retained-upgrade"},
     "TestBillingHistoricalCatalogRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
         for version in (35, 36, 37, 51)

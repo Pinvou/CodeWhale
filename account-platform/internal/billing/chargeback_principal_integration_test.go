@@ -699,6 +699,7 @@ func TestChargebackPrincipalIndependentCashPostgres(t *testing.T) {
 
 func chargebackPrincipalUpgrade(t *testing.T) {
 	product := principalMigrationTool(t)
+	source, staged := stageBillingMigrationContract(t, 900044)
 	r, ctx := retainedFinanceRepository(t, 900038)
 	// This retained fixture represents historical owner facts, not a new supplier
 	// assertion. No original cash proof can be recovered from its points.
@@ -777,4 +778,11 @@ func chargebackPrincipalUpgrade(t *testing.T) {
 	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations WHERE version=900044`).Scan(&receipts); err != nil || receipts != 1 {
 		t.Fatal("migration ledger changed after down refusal", strconv.Itoa(receipts), err)
 	}
+	// Up and refused Down each acquire a reentrant session lock.
+	// Retire this exact owned connection before using another migration actor.
+	if err := connection.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	completeBillingMigrationContract(t, ctx, r, source, staged, product)
+	chargebackPrincipalPageIndex(t, ctx, r)
 }
