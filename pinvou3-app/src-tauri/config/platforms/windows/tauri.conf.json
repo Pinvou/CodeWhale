@@ -13,6 +13,11 @@
         ],
         "componentRefs": [
           "PythonNodeRuntimeEnvironment"
+        ],
+        "languages": [
+          "en-US",
+          "zh-CN",
+          "ja-JP"
         ]
       },
       "nsis": {
@@ -23,7 +28,8 @@
         "uninstallerIcon": "icons/icon.ico",
         "languages": [
           "SimpChinese",
-          "English"
+          "English",
+          "Japanese"
         ],
         "compression": "lzma"
       }
