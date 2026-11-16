@@ -71,7 +71,6 @@ async fn forkguard_host_http_policy_reaches_primary_fallback_and_vision() {
             model: "owned-vision-model".into(),
             api_key: None,
             base_url: Some(base.clone()),
-            model_http_policy: None,
         }),
         ..Config::default()
     };
@@ -123,14 +122,14 @@ async fn forkguard_host_http_policy_construction_denial_fails_closed() {
     };
     assert!(DeepSeekClient::new(&config).is_err());
     assert_eq!(policy.calls.load(Ordering::SeqCst), 1);
-    let tool = ImageAnalyzeTool::new_with_route_client(
+    let tool = ImageAnalyzeTool::new_with_http_policy(
         VisionModelConfig {
             model: "owned-fixture".into(),
             api_key: None,
             base_url: config.base_url,
-            model_http_policy: Some(policy.clone()),
         },
         None,
+        Some(policy.clone()),
     );
     assert!(
         tool.execute(

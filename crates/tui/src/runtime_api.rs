@@ -160,18 +160,13 @@ impl HostModelHttpPolicies {
     fn from_config(config: &Config) -> Self {
         Self {
             primary: config.model_http_policy.clone(),
-            vision: config
-                .vision_model
-                .as_ref()
-                .and_then(|vision| vision.model_http_policy.clone()),
+            vision: config.vision_model_http_policy.clone(),
         }
     }
 
     fn apply_to(&self, config: &mut Config) {
         config.model_http_policy = self.primary.clone();
-        if let Some(vision) = config.vision_model.as_mut() {
-            vision.model_http_policy = self.vision.clone();
-        }
+        config.vision_model_http_policy = self.vision.clone();
     }
 }
 

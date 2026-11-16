@@ -257,6 +257,8 @@ pub struct DeepSeekClient {
     // Configured route metadata for matching vision calls. Transport policies
     // remain on each client's own builder and are never borrowed from here.
     matching_vision_headers: HeaderMap,
+    // Host capability travels with cloned/rebound clients to child registries.
+    vision_http_policy: Option<Arc<dyn crate::config::ModelHttpPolicy>>,
     operation_id: Option<uuid::Uuid>,
     // In-memory only: includes frozen auth/context headers without exposing
     // their values in receipts, logs, prompts, or persisted session state.
@@ -594,6 +596,7 @@ impl Clone for DeepSeekClient {
             http1_client: self.http1_client.clone(),
             request_idempotency_header: self.request_idempotency_header.clone(),
             matching_vision_headers: self.matching_vision_headers.clone(),
+            vision_http_policy: self.vision_http_policy.clone(),
             operation_id: self.operation_id,
             operation_route_identity: self.operation_route_identity.clone(),
             api_key: self.api_key.clone(),
@@ -1130,27 +1133,65 @@ fn add_extra_root_certs(
         }
     };
 
-    if let Ok(certs) = reqwest::Certificate::from_pem_bundle(&bytes) {
-        let added = certs.len();
-        for cert in certs {
-            builder = builder.add_root_certificate(cert);
-        }
-        logging::info(format!(
-            "SSL_CERT_FILE={cert_path} loaded ({added} cert(s))"
-        ));
-        return builder;
-    }
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
 
-    match reqwest::Certificate::from_der(&bytes) {
-        Ok(cert) => {
-            builder = builder.add_root_certificate(cert);
-            logging::info(format!("SSL_CERT_FILE={cert_path} loaded (1 DER cert)"));
+    // No PEM sections is a successful empty parse, not evidence of PEM input.
+    // Validate all trust anchors before touching the builder: reqwest's rustls
+    // Certificate::from_der stores bytes lazily and does not validate them.
+    let certs =
+        match CertificateDer::pem_slice_iter(&bytes).collect::<std::result::Result<Vec<_>, _>>() {
+            Ok(certs) if !certs.is_empty() => certs,
+            _ => vec![CertificateDer::from(bytes.as_slice())],
+        };
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in &certs {
+        if let Err(err) = roots.add(cert.clone()) {
+            logging::warn(format!(
+                "SSL_CERT_FILE={cert_path} could not be parsed as PEM bundle or DER: {err}"
+            ));
+            return builder;
         }
+    }
+    let certs = match certs
+        .iter()
+        .map(|cert| reqwest::Certificate::from_der(cert.as_ref()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+    {
+        Ok(certs) => certs,
         Err(err) => {
             logging::warn(format!(
                 "SSL_CERT_FILE={cert_path} could not be parsed as PEM bundle or DER: {err}"
             ));
+            return builder;
         }
+    };
+    let added = certs.len();
+    for cert in certs {
+        builder = builder.add_root_certificate(cert);
+    }
+    logging::info(format!(
+        "SSL_CERT_FILE={cert_path} loaded ({added} cert(s))"
+    ));
+    builder
+}
+
+/// Apply process-level model transport defaults before a trusted host policy.
+/// Vision clients use the same trust-source and HTTP/1 controls as text clients.
+pub(crate) fn with_model_transport_environment(
+    mut builder: reqwest::ClientBuilder,
+    force_http1: bool,
+) -> reqwest::ClientBuilder {
+    let from_env = force_http1_from_env();
+    if force_http1 || from_env {
+        if from_env && !force_http1 {
+            logging::info("CODEWHALE_FORCE_HTTP1=1 — pinning HTTP client to HTTP/1.1");
+        }
+        builder = builder.http1_only();
+    }
+    if let Ok(cert_path) = std::env::var("SSL_CERT_FILE")
+        && !cert_path.is_empty()
+    {
+        builder = add_extra_root_certs(builder, &cert_path);
     }
     builder
 }
@@ -1368,10 +1409,19 @@ impl DeepSeekClient {
                 force_http1,
             )?;
             let builder = match config.model_http_policy.as_ref() {
-                Some(policy) => policy.configure(builder, &base_url)?,
+                Some(policy) => policy.configure(builder, &base_url).map_err(|_| {
+                    crate::error_taxonomy::ErrorEnvelope::model_transport_setup("host_policy")
+                })?,
                 None => builder,
             };
-            builder.build().map_err(Into::into)
+            builder.build().map_err(|err| {
+                if config.model_http_policy.is_some() {
+                    crate::error_taxonomy::ErrorEnvelope::model_transport_setup("client_builder")
+                        .into()
+                } else {
+                    err.into()
+                }
+            })
         };
         let http_client = build_client(false)?;
         // Always keep an HTTP/1.1 twin for automatic stream-header fallback
@@ -1397,6 +1447,7 @@ impl DeepSeekClient {
             http1_client,
             request_idempotency_header,
             matching_vision_headers,
+            vision_http_policy: config.vision_http_policy(),
             operation_id: None,
             operation_route_identity,
             api_key,
@@ -1705,7 +1756,7 @@ impl DeepSeekClient {
             wire_format,
             auth_disabled,
         )?;
-        let mut builder = crate::tls::reqwest_client_builder()
+        let builder = crate::tls::reqwest_client_builder()
             .default_headers(headers)
             .user_agent(client_user_agent(api_provider))
             .connect_timeout(Duration::from_secs(30))
@@ -1713,19 +1764,7 @@ impl DeepSeekClient {
             .http2_keep_alive_interval(Some(Duration::from_secs(15)))
             .http2_keep_alive_timeout(Duration::from_secs(20))
             .min_tls_version(reqwest::tls::Version::TLS_1_2);
-        let pin_http1 = force_http1 || force_http1_from_env();
-        if pin_http1 {
-            if force_http1_from_env() && !force_http1 {
-                logging::info("CODEWHALE_FORCE_HTTP1=1 — pinning HTTP client to HTTP/1.1");
-            }
-            builder = builder.http1_only();
-        }
-        if let Ok(cert_path) = std::env::var("SSL_CERT_FILE")
-            && !cert_path.is_empty()
-        {
-            builder = add_extra_root_certs(builder, &cert_path);
-        }
-        Ok(builder)
+        Ok(with_model_transport_environment(builder, force_http1))
     }
 
     /// HTTP/1.1 client for automatic stream-header fallback.
@@ -3396,13 +3435,23 @@ impl DeepSeekClient {
         }
     }
 
-    /// Seed matching route metadata before the vision host policy runs.
+    pub(crate) fn vision_http_policy(&self) -> Option<Arc<dyn crate::config::ModelHttpPolicy>> {
+        self.vision_http_policy.clone()
+    }
+
+    /// Preserve matching-route defaults before the vision host policy runs.
     /// The caller must first verify `idempotency_matches_route`.
-    pub(crate) fn with_vision_route_headers(
+    pub(crate) fn with_matching_vision_route_defaults(
         &self,
         builder: reqwest::ClientBuilder,
     ) -> reqwest::ClientBuilder {
-        builder.default_headers(self.matching_vision_headers.clone())
+        builder
+            .default_headers(self.matching_vision_headers.clone())
+            .user_agent(client_user_agent(self.api_provider))
+            .connect_timeout(Duration::from_secs(30))
+            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .http2_keep_alive_interval(Some(Duration::from_secs(15)))
+            .http2_keep_alive_timeout(Duration::from_secs(20))
     }
 
     pub(crate) fn idempotency_matches_route(&self, base_url: &str, api_key: &str) -> bool {

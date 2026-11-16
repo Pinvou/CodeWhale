@@ -24,7 +24,6 @@ fn forkguard_host_http_policy_clone_merge_and_vision_identity() {
             model: "fixture-vision".into(),
             api_key: None,
             base_url: Some("http://127.0.0.1:9/v1".into()),
-            model_http_policy: None,
         }),
         ..Config::default()
     };
@@ -33,27 +32,13 @@ fn forkguard_host_http_policy_clone_merge_and_vision_identity() {
         &base
     ));
     assert!(Arc::ptr_eq(
-        configured
-            .vision_model_config()
-            .unwrap()
-            .model_http_policy
-            .as_ref()
-            .unwrap(),
+        configured.vision_http_policy().as_ref().unwrap(),
         &base
     ));
     let mut explicit_vision = configured.clone();
-    explicit_vision
-        .vision_model
-        .as_mut()
-        .unwrap()
-        .model_http_policy = Some(override_policy.clone());
+    explicit_vision.vision_model_http_policy = Some(override_policy.clone());
     assert!(Arc::ptr_eq(
-        explicit_vision
-            .vision_model_config()
-            .unwrap()
-            .model_http_policy
-            .as_ref()
-            .unwrap(),
+        explicit_vision.vision_http_policy().as_ref().unwrap(),
         &override_policy
     ));
     for (base_policy, explicit, expected) in [
@@ -70,20 +55,31 @@ fn forkguard_host_http_policy_clone_merge_and_vision_identity() {
             Some(override_policy),
         ),
     ] {
-        let merged = merge_config(
-            Config {
-                model_http_policy: base_policy,
-                ..Config::default()
-            },
-            Config {
-                model_http_policy: explicit,
-                ..Config::default()
-            },
-        );
-        match (merged.model_http_policy, expected) {
-            (Some(actual), Some(expected)) => assert!(Arc::ptr_eq(&actual, &expected)),
-            (None, None) => (),
-            _ => panic!("host policy merge changed identity or optional baseline"),
+        for vision in [false, true] {
+            let merged = merge_config(
+                Config {
+                    model_http_policy: (!vision).then(|| base_policy.clone()).flatten(),
+                    vision_model_http_policy: vision.then(|| base_policy.clone()).flatten(),
+                    ..Config::default()
+                },
+                Config {
+                    model_http_policy: (!vision).then(|| explicit.clone()).flatten(),
+                    vision_model_http_policy: vision.then(|| explicit.clone()).flatten(),
+                    ..Config::default()
+                },
+            );
+            match (
+                if vision {
+                    merged.vision_model_http_policy
+                } else {
+                    merged.model_http_policy
+                },
+                expected.clone(),
+            ) {
+                (Some(actual), Some(expected)) => assert!(Arc::ptr_eq(&actual, &expected)),
+                (None, None) => (),
+                _ => panic!("host policy merge changed identity or optional baseline"),
+            }
         }
     }
 }
@@ -91,13 +87,13 @@ fn forkguard_host_http_policy_clone_merge_and_vision_identity() {
 #[test]
 fn forkguard_host_http_policy_cannot_be_supplied_by_toml() {
     let config: Config = toml::from_str(
-        "model_http_policy = { disable = true }\n[vision_model]\nmodel = 'fixture-vision'\nmodel_http_policy = { disable = true }\n",
+        "model_http_policy = { disable = true }\nvision_model_http_policy = { disable = true }\n[vision_model]\nmodel = 'fixture-vision'\nmodel_http_policy = { disable = true }\n",
     ).unwrap();
     assert!(config.model_http_policy.is_none());
-    assert!(config.vision_model.unwrap().model_http_policy.is_none());
+    assert!(config.vision_model_http_policy.is_none());
     let vision: VisionModelConfig = serde_json::from_value(serde_json::json!({
         "model": "fixture-vision", "model_http_policy": { "disable": true }
     }))
     .unwrap();
-    assert!(vision.model_http_policy.is_none());
+    assert_eq!(vision.model, "fixture-vision");
 }

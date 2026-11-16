@@ -71,28 +71,45 @@ impl ImageAnalyzeTool {
         config: VisionModelConfig,
         route_client: Option<DeepSeekClient>,
     ) -> Self {
+        let policy = route_client
+            .as_ref()
+            .and_then(DeepSeekClient::vision_http_policy);
+        Self::new_with_http_policy(config, route_client, policy)
+    }
+
+    /// Build an independent vision transport with an explicit trusted host
+    /// capability, including when no primary model client is available.
+    #[must_use]
+    pub fn new_with_http_policy(
+        config: VisionModelConfig,
+        route_client: Option<DeepSeekClient>,
+        policy: Option<std::sync::Arc<dyn crate::config::ModelHttpPolicy>>,
+    ) -> Self {
         let client = (|| {
             let base_url = config
                 .base_url
                 .as_deref()
                 .unwrap_or("https://api.openai.com/v1");
-            let builder = crate::tls::reqwest_client_builder()
-                // Bound only the connect handshake. A client- or request-level
-                // `read_timeout` would start counting at `send()` and never
-                // reset before the response headers, quietly re-introducing a
-                // total deadline on the upload + long non-streaming generation;
-                // the total bound lives in VISION_REQUEST_ENVELOPE instead.
-                .connect_timeout(Duration::from_secs(10));
+            let builder = crate::client::with_model_transport_environment(
+                crate::tls::reqwest_client_builder(),
+                false,
+            )
+            // Bound only the connect handshake. A client- or request-level
+            // `read_timeout` would start counting at `send()` and never
+            // reset before the response headers, quietly re-introducing a
+            // total deadline on the upload + long non-streaming generation;
+            // the total bound lives in VISION_REQUEST_ENVELOPE instead.
+            .connect_timeout(Duration::from_secs(10));
             let builder = match route_client.as_ref().filter(|route| {
                 route.idempotency_matches_route(
                     base_url,
                     config.api_key.as_deref().unwrap_or_default(),
                 )
             }) {
-                Some(route) => route.with_vision_route_headers(builder),
+                Some(route) => route.with_matching_vision_route_defaults(builder),
                 None => builder,
             };
-            let builder = match config.model_http_policy.as_ref() {
+            let builder = match policy.as_ref() {
                 Some(policy) => policy
                     .configure(builder, base_url)
                     .map_err(|_| VisionClientSetupFailure::HostPolicy)?,
@@ -470,6 +487,10 @@ impl ToolSpec for ImageAnalyzeTool {
 }
 
 #[cfg(test)]
+#[path = "transport_tests.rs"]
+mod transport_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
@@ -497,7 +518,6 @@ mod tests {
             model: "test-vision-model".to_string(),
             api_key: Some("test-key".to_string()),
             base_url: Some("https://example.invalid/v1".to_string()),
-            model_http_policy: None,
         }
     }
 
@@ -534,9 +554,11 @@ mod tests {
                 (false, VisionClientSetupFailure::ClientBuilder),
             ]
             .map(|(reject_policy, expected)| {
-                let mut config = fake_config();
-                config.model_http_policy = Some(std::sync::Arc::new(RejectedPolicy(reject_policy)));
-                let tool = ImageAnalyzeTool::new(config);
+                let tool = ImageAnalyzeTool::new_with_http_policy(
+                    fake_config(),
+                    None,
+                    Some(std::sync::Arc::new(RejectedPolicy(reject_policy))),
+                );
                 assert_eq!(tool.client.as_ref().err(), Some(&expected));
                 tool
             })
@@ -682,7 +704,6 @@ mod tests {
                 model,
                 api_key: None,
                 base_url: Some(base_url),
-                model_http_policy: None,
             },
             Some(client),
         );
@@ -891,7 +912,6 @@ mod tests {
             model: "test-vision-model".to_string(),
             api_key: Some("test-key".to_string()),
             base_url: Some(base_url),
-            model_http_policy: None,
         })
     }
 
@@ -1137,7 +1157,6 @@ mod tests {
                     model: "test-vision-model".into(),
                     api_key: Some(key.into()),
                     base_url: Some(server.uri()),
-                    model_http_policy: None,
                 },
                 Some(route),
             );
@@ -1225,7 +1244,6 @@ mod tests {
                     model: "test-vision-model".into(),
                     api_key: Some("owned-test-key".into()),
                     base_url: Some(base.clone()),
-                    model_http_policy: None,
                 },
                 Some(route),
             );
@@ -1306,14 +1324,14 @@ mod tests {
             ..Default::default()
         };
         let route = DeepSeekClient::new(&route_config).unwrap();
-        let tool = ImageAnalyzeTool::new_with_route_client(
+        let tool = ImageAnalyzeTool::new_with_http_policy(
             VisionModelConfig {
                 model: "test-vision-model".into(),
                 api_key: Some("owned-test-key".into()),
                 base_url: Some(format!("{}/v1", server.uri())),
-                model_http_policy: Some(Arc::new(TransportPolicy("vision"))),
             },
             Some(route.clone()),
+            Some(Arc::new(TransportPolicy("vision"))),
         );
         for _ in 0..2 {
             let result = tool
@@ -1362,14 +1380,14 @@ mod tests {
         );
         // Parent main-route state must not leak into a separately configured
         // vision provider, even when the loopback endpoint is the same.
-        let ordinary = ImageAnalyzeTool::new_with_route_client(
+        let ordinary = ImageAnalyzeTool::new_with_http_policy(
             VisionModelConfig {
                 model: "test-vision-model".into(),
                 api_key: Some("ordinary-vision-key".into()),
                 base_url: Some(format!("{}/v1", server.uri())),
-                model_http_policy: None,
             },
             Some(route),
+            None,
         );
         ordinary
             .execute(
@@ -1394,11 +1412,10 @@ mod tests {
             model: "test-vision-model".into(),
             api_key: None,
             base_url: shared_config.base_url.clone(),
-            model_http_policy: None,
         });
         let shared_vision = shared_config.vision_model_config().unwrap();
         assert!(Arc::ptr_eq(
-            shared_vision.model_http_policy.as_ref().unwrap(),
+            shared_config.vision_http_policy().as_ref().unwrap(),
             &shared_policy
         ));
         let shared_route = DeepSeekClient::new(&shared_config).unwrap();

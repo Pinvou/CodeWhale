@@ -683,6 +683,7 @@ fn authority_mutation_paths(name: &str, input: &Value) -> Result<Option<Vec<Stri
 /// Builder for constructing a `ToolRegistry` with common tools.
 pub struct ToolRegistryBuilder {
     tools: Vec<Arc<dyn ToolSpec>>,
+    vision_http_policy: Option<Arc<dyn crate::config::ModelHttpPolicy>>,
 }
 
 /// Feature/config-dependent native Agent-mode tool surface.
@@ -724,7 +725,10 @@ impl ToolRegistryBuilder {
     /// Create a new builder.
     #[must_use]
     pub fn new() -> Self {
-        Self { tools: Vec::new() }
+        Self {
+            tools: Vec::new(),
+            vision_http_policy: None,
+        }
     }
 
     /// Add a custom tool.
@@ -1015,6 +1019,17 @@ impl ToolRegistryBuilder {
         self.with_tool(Arc::new(FinanceTool::new()))
     }
 
+    /// Install the host capability before registering the vision surface.
+    /// This also covers injected model clients without a DeepSeekClient.
+    #[must_use]
+    pub fn with_vision_http_policy(
+        mut self,
+        policy: Option<Arc<dyn crate::config::ModelHttpPolicy>>,
+    ) -> Self {
+        self.vision_http_policy = policy;
+        self
+    }
+
     /// Register the `image_analyze` vision tool.
     /// Only registered when `[vision_model]` is configured in config.toml.
     #[must_use]
@@ -1024,10 +1039,13 @@ impl ToolRegistryBuilder {
         route_client: Option<DeepSeekClient>,
     ) -> Self {
         use crate::vision::tools::ImageAnalyzeTool;
-        self.with_tool(Arc::new(ImageAnalyzeTool::new_with_route_client(
-            config,
-            route_client,
-        )))
+        let tool = match self.vision_http_policy.clone() {
+            Some(policy) => {
+                ImageAnalyzeTool::new_with_http_policy(config, route_client, Some(policy))
+            }
+            None => ImageAnalyzeTool::new_with_route_client(config, route_client),
+        };
+        self.with_tool(Arc::new(tool))
     }
 
     /// Include request_user_input tool.

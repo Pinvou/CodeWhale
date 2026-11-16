@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "host_http_policy_tests.rs"]
+mod host_http_policy_tests;
+
 #[path = "operation_tests.rs"]
 mod operation_tests;
 
@@ -2565,7 +2568,9 @@ async fn queued_not_started_turn_cancels_older_goal_continuation() {
     );
     let goal_state = engine.config.goal_state.clone();
     engine.model_client = None;
-    engine.deepseek_client_error = Some("deterministic missing model client".to_string());
+    engine.deepseek_client_error = Some(ErrorEnvelope::fatal_auth(
+        "deterministic missing model client",
+    ));
 
     handle
         .send(active_goal_message_op(

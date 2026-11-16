@@ -60,7 +60,7 @@ impl Fixture {
         let vision = Arc::new(RecordingPolicy::default());
         let mut config = Config::load(Some(file.clone()), None)?;
         config.model_http_policy = Some(primary.clone());
-        config.vision_model.as_mut().unwrap().model_http_policy = Some(vision.clone());
+        config.vision_model_http_policy = Some(vision.clone());
         let (probe, state) = tokio::sync::oneshot::channel();
         let (addr, _, server) = spawn_test_server_with_root_token_mobile_workspace_and_overrides(
             root.path().join("server"),
@@ -108,13 +108,7 @@ impl Fixture {
                 &primary
             ));
             assert!(Arc::ptr_eq(
-                snapshot
-                    .vision_model
-                    .as_ref()
-                    .unwrap()
-                    .model_http_policy
-                    .as_ref()
-                    .unwrap(),
+                snapshot.vision_model_http_policy.as_ref().unwrap(),
                 &vision
             ));
         }

@@ -5,6 +5,39 @@
 
 use super::*;
 
+#[cfg(test)]
+#[path = "host_http_policy_tests.rs"]
+mod host_http_policy_tests;
+
+/// The Fleet activation boundary retains transport setup identity; only
+/// genuine/structural authentication failures use its legacy health receipt.
+fn validate_fleet_route_activation(
+    config: &Config,
+    provider: ApiProvider,
+    model: &str,
+) -> std::result::Result<crate::route_runtime::ValidatedRuntimeRoute, ErrorEnvelope> {
+    let legacy_auth = |message: String| {
+        ErrorEnvelope::new(
+            ErrorCategory::Authentication,
+            ErrorSeverity::Error,
+            false,
+            "route_validation_failed",
+            message,
+        )
+    };
+    crate::route_runtime::resolve_runtime_route(config, provider, Some(model))
+        .map_err(legacy_auth)
+        .and_then(|route| {
+            route.validate_with_error_envelope().map_err(|error| {
+                if error.category == ErrorCategory::Authentication {
+                    legacy_auth(error.message)
+                } else {
+                    error
+                }
+            })
+        })
+}
+
 /// How long the picker's ⇧F receipt stays in the footer: long enough to read
 /// a route and its roles, short enough to leave the chrome still.
 const FLEET_TOGGLE_TOAST_TTL_MS: u64 = 6_000;
@@ -1480,9 +1513,7 @@ pub(crate) async fn handle_view_events(
                 let provider_label = provider.display_name();
                 let mut scoped = config.clone();
                 scoped.provider = Some(provider_id.clone());
-                let validation =
-                    crate::route_runtime::resolve_runtime_route(&scoped, provider, Some(&model))
-                        .and_then(|route| route.validate().map_err(|err| err.to_string()));
+                let validation = validate_fleet_route_activation(&scoped, provider, &model);
                 match validation {
                     Ok(validated) => {
                         app.provider_health
@@ -1497,17 +1528,13 @@ pub(crate) async fn handle_view_events(
                         );
                     }
                     Err(error) => {
-                        let envelope = ErrorEnvelope::new(
-                            ErrorCategory::Authentication,
-                            ErrorSeverity::Error,
-                            false,
-                            "route_validation_failed",
-                            &error,
-                        );
                         app.provider_health
-                            .record_failure(&scoped, provider, &model, &envelope);
+                            .record_failure(&scoped, provider, &model, &error);
                         app.push_status_toast(
-                            format!("{provider_label} route activation failed: {error}"),
+                            format!(
+                                "{provider_label} route activation failed: {}",
+                                error.message
+                            ),
                             crate::tui::app::StatusToastLevel::Error,
                             None,
                         );
