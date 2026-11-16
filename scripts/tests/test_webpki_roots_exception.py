@@ -319,7 +319,7 @@ class WebpkiCiContractTests(unittest.TestCase):
 
     def test_existing_account_go_action_is_exactly_reviewed(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
-        self.assertEqual(workflow.count('uses: actions/setup-go@v6'), 2)
+        self.assertEqual(workflow.count('uses: actions/setup-go@v6'), 3)
         self.verify_workflow(workflow)
         for replacement in ['actions/setup-go@v7', 'actions/setup-go@main', 'actions/setup-go']:
             with self.subTest(action=replacement), self.assertRaisesRegex(AssertionError, 'unreviewed action'):
@@ -332,7 +332,7 @@ class WebpkiCiContractTests(unittest.TestCase):
         reviewed = [('required-gate', 'PR test success proof transport'),
                     ('frontend-test', 'Test resource lifecycle receipts'),
                     ('frontend-browser-test', 'Browser shard resource lifecycle receipts'),
-                    ('account-platform-test', 'Financial parallel diagnostics'),
+                    ('account-financial-test', 'Financial group lifecycle receipts'),
                     ('account-platform-test', 'Account test resource lifecycle receipts'),
                     ('account-closure-test', 'Account closure resource lifecycle receipts'),
                     ('windows-codex-runtime-test', 'Preserve browser fixture exit receipts'),
@@ -361,6 +361,8 @@ class WebpkiCiContractTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding='utf-8')
         for name in ['Confirm test resource retirement', 'Confirm Account test resource retirement',
                      'Test and vet all Account Platform Go modules',
+                     'Install financial contract dependencies', 'Verify financial contract Node consumers',
+                     'Run isolated financial group', 'Stop owned temporary PostgreSQL services',
                      'Windows browser wrapper lifecycle regression', 'Windows browser wrapper lazy regression',
                      'Windows ACP bridge runtime smoke',
                      'Windows PowerShell 5.1 与实际工具回归（禁止跳过）']:

@@ -169,16 +169,22 @@ surviving child resources stopped; use the owning process supervisor and ledger.
 
 ## CI and merge queue
 
-Account Platform PostgreSQL closure contracts run in `account-closure-test`,
-independently of `account-platform-test`; both are mandatory for Account changes.
-The financial gate runs six independently admitted services (owners, Token, and
-four Billing shards). Billing assigns complete test roots by longest estimated
-duration first using `scripts/account-financial-test-durations.json`; new roots
-receive the documented default weight and remain included exactly once. Weights
-affect scheduling only: race detection, required subcases, exclusive actors,
-identity checks and strict resource retirement remain mandatory. Closure uses
-its own job-owned service and its own cleanup receipt. Runner capacity must cover
-the extra PostgreSQL workers; the original per-worker CPU/memory caps remain.
+Account Platform PostgreSQL closure contracts remain in `account-closure-test`.
+Nonfinancial Account contracts run in `account-platform-test`; six independent
+`account-financial-test` jobs (owners, Token, and four Billing groups) can start
+alongside it on separate runners. Every applicable group, the base contracts and
+closure are mandatory. Each financial job admits and retires one private service;
+the base job retains only its audit/broker services. Matrix fail-fast is disabled.
+The matrix validator rejects omitted, repeated or unknown groups, and successful
+input reuse requires all six exact jobs and their mandatory retirement checks;
+old monolithic or partial evidence is insufficient. Workflow/verifier/policy
+changes retain the existing requirement for real Merge Queue execution.
+Billing still assigns complete roots by longest estimated duration first using
+`scripts/account-financial-test-durations.json`; new roots receive the documented
+default weight and remain included exactly once. Race detection, required roots
+and subcases, exclusive actors, identity checks, per-worker limits and strict
+retirement are unchanged. Runner availability controls actual concurrency; this
+scheduling change does not promise a fixed speedup.
 
 
 Pull requests use a staged, path-aware gate. Draft pull requests run fast feedback

@@ -1,18 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { parse } from 'acorn';
 import { FixtureScope } from './helpers/fixture-scope.mjs';
-import { confirmedChildStopper } from './helpers/browser-wrapper-fixture-cleanup.mjs';
+import { launchBrowser } from './helpers/browser-fixture.mjs';
 
-// Run the actual factory body with in-memory ownership boundaries. The native
-// launcher and directory are fakes; no browser, process or directory is created.
-const source = readFileSync(new URL('./helpers/browser-fixture.mjs', import.meta.url), 'utf8');
-const declaration = parse(source, { ecmaVersion: 'latest', sourceType: 'module' }).body.find(node => node.type === 'ExportNamedDeclaration' && node.declaration?.id?.name === 'launchBrowser')?.declaration;
-assert.ok(declaration, 'the real browser factory is available');
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const launchOwned = new AsyncFunction('fixtureScope', 'ownedDirectory', 'confirmedChildStopper', 'launchNative', 'options', source.slice(declaration.body.start + 1, declaration.body.end - 1));
+// Exercise the exported factory through its existing injection boundary. Only
+// the native browser handle and private directory are controlled; the actual
+// close observer and resource lifetime implementation remain in the call path.
 
 async function fixture({ exitCode = null, signalCode = null, historicalClose = false, automaticClose = false } = {}) {
   const child = Object.assign(new EventEmitter(), { exitCode, signalCode });
@@ -34,9 +28,9 @@ async function fixture({ exitCode = null, signalCode = null, historicalClose = f
       }
     },
   };
-  await launchOwned(scope, () => ({ path: 'synthetic-private-profile', remove: () => { calls.remove += 1; } }),
-    (owned, stop) => confirmedChildStopper(owned, stop, { closeMs: 5 }),
-    async options => { assert.equal(options.userDataDir, 'synthetic-private-profile'); return browser; }, {});
+  await launchBrowser(
+    async options => { assert.equal(options.userDataDir, 'synthetic-private-profile'); return browser; }, {},
+    { scope, createDirectory: () => ({ path: 'synthetic-private-profile', remove: () => { calls.remove += 1; } }) });
   return { browser, child, calls, started };
 }
 
