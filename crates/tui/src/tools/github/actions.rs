@@ -11,8 +11,8 @@ use crate::tools::spec::{
 
 use super::cli::{ensure_github_repo, git_status_porcelain, run_gh_json, run_gh_text};
 use super::shape::{
-    BODY_ARTIFACT_THRESHOLD, DIFF_ARTIFACT_THRESHOLD, artifact_refs_from_context,
-    github_event_metadata, shape_large_text, summarize, write_artifact_if_needed,
+    BODY_ARTIFACT_THRESHOLD, DIFF_ARTIFACT_THRESHOLD, PrDiffShaping, artifact_refs_from_context,
+    github_event_metadata, pr_diff_shaping, shape_large_text, summarize, write_artifact_if_needed,
 };
 use super::{GithubTool, validate_evidence};
 
@@ -67,10 +67,21 @@ impl GithubTool {
         let mut shaped = shape_large_text(context, raw, "pr_body", BODY_ARTIFACT_THRESHOLD)?;
         if optional_bool(input, "include_diff", false)? {
             let diff = run_gh_text(context, &["pr", "diff", &number_s, "--patch"]).await?;
-            let diff_ref =
-                write_artifact_if_needed(context, "pr_diff", &diff, DIFF_ARTIFACT_THRESHOLD)?;
-            shaped["diff_summary"] = json!(summarize(&diff, 900));
-            shaped["diff_artifact"] = json!(diff_ref);
+            match pr_diff_shaping(&diff) {
+                PrDiffShaping::Inline => {
+                    shaped["diff"] = json!(diff);
+                }
+                PrDiffShaping::Condensed => {
+                    let diff_ref = write_artifact_if_needed(
+                        context,
+                        "pr_diff",
+                        &diff,
+                        DIFF_ARTIFACT_THRESHOLD,
+                    )?;
+                    shaped["diff_summary"] = json!(summarize(&diff, 900));
+                    shaped["diff_artifact"] = json!(diff_ref);
+                }
+            }
         }
         let mut result = ToolResult::json(&json!({
             "summary": format!("PR #{number}: {}", shaped["title"].as_str().unwrap_or("")),
