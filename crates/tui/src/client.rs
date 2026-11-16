@@ -938,16 +938,13 @@ pub(crate) fn api_url(base_url: &str, path: &str) -> String {
 
 fn responses_api_url(base_url: &str, provider: ApiProvider) -> String {
     let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
+    // The same canonical URL sets the strict strip, the beta routing, and
+    // the doctor's classifier read (`config::DEEPSEEK_CANONICAL_*`), so this
+    // fourth official-deepseek check cannot drift from them when the sets
+    // change.
     let official_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
-        && matches!(
-            normalized.as_str(),
-            "https://api.deepseek.com"
-                | "https://api.deepseek.com/v1"
-                | "https://api.deepseek.com/beta"
-                | "https://api.deepseeki.com"
-                | "https://api.deepseeki.com/v1"
-                | "https://api.deepseeki.com/beta"
-        );
+        && (crate::config::DEEPSEEK_CANONICAL_BETA_URLS.contains(&normalized.as_str())
+            || crate::config::DEEPSEEK_CANONICAL_NON_BETA_URLS.contains(&normalized.as_str()));
     if official_deepseek {
         format!("{}/responses", unversioned_base_url(base_url))
     } else {

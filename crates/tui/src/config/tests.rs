@@ -13721,6 +13721,11 @@ fn strict_pipeline_scope_is_official_deepseek_family_routes() {
             "https://api.deepseek.com/anthropic",
             "https://api.deepseeki.com",
             "https://api.deepseeki.com/beta",
+            // Case-insensitive host matching is the documented gate behavior;
+            // pin the unpadded uppercase form so the lowercase branch keeps a
+            // positive case of its own (the padded negatives below exercise
+            // it only via the whitespace rejection that precedes them).
+            "HTTPS://API.DEEPSEEK.COM/V1",
         ] {
             assert!(
                 super::route_is_official_deepseek_family(provider, base_url),
@@ -13778,6 +13783,17 @@ fn strict_pipeline_scope_is_official_deepseek_family_routes() {
             ApiProvider::Deepseek,
             "https:// api.deepseek.com/beta",
             "interior whitespace is rejected without any trimming",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com:8443/beta",
+            "an explicit port is outside the scheme-and-host prefix the wire strip and \
+             the doctor classifier string-match, so the gate must not admit it",
+        ),
+        (
+            ApiProvider::Deepseek,
+            "https://user@api.deepseek.com/beta",
+            "userinfo before the host defeats the prefix match and must stay out of scope",
         ),
     ] {
         assert!(
