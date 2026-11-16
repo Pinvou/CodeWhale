@@ -16,7 +16,7 @@ SPEC.loader.exec_module(RUNNER)
 
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
-EXPECTED_RETAINED_ROOT_COUNT = 78
+EXPECTED_RETAINED_ROOT_COUNT = 80
 
 
 CHECKPOINT_LEAF_ROOTS = {
@@ -924,12 +924,16 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "lifecycle-reconciliation", "create", "retained-token", "retained-billing", "drop",
         ])
 
-    def test_account_job_budget_includes_retained_billing_and_later_closure(self):
+    def test_account_financial_jobs_keep_retained_budgets_and_independent_closure(self):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
         job = workflow.split("\n  account-platform-test:\n", 1)[1].split("\n  account-closure-test:\n", 1)[0]
         closure = workflow.split("\n  account-closure-test:\n", 1)[1].split("\n  windows-relay-dacl:\n", 1)[0]
         self.assertIn("\n    timeout-minutes: 180\n", job)
-        self.assertIn("python3 scripts/test-financial-parallel.py", job)
+        financial = workflow.split("\n  account-financial-test:\n", 1)[1].split("\n  account-platform-test:\n", 1)[0]
+        self.assertIn("\n    timeout-minutes: 180\n", financial)
+        self.assertIn('python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP"', financial)
+        self.assertIn("\n    needs: changes\n", financial)
+        self.assertNotIn("python3 scripts/test-financial-parallel.py", job)
         self.assertNotIn("python3 scripts/test-account-closure-postgres.py", job)
         self.assertIn("python3 scripts/test-account-closure-postgres.py", closure)
         self.assertIn("\n    needs: changes\n", closure)
@@ -2354,6 +2358,40 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                             events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_provider_health_read_failure_requires_all_three_streams(self):
+        root = "TestProviderHealthReadFailurePostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        expected = {"discovery", "latest-five", "failure-rate"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for name in {root, *(root + "/" + child for child in expected)}:
+            for invalid in ([e for e in events if e.get("Test") != name],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}]):
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_provider_health_index_requires_both_real_installation_scenarios(self):
+        root = "TestProviderHealthGlobalWindowIndexPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        expected = {"fresh-install", "retained-upgrade"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for name in {root, *(root + "/" + child for child in expected)}:
+            for invalid in ([e for e in events if e.get("Test") != name],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}]):
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
 
     def test_billing_evidence_guard_requires_both_original_relations(self):
         root = "TestClosedGrantEvidenceCurrentRoleGuardsPostgres"
