@@ -82,10 +82,10 @@ export function createDiagnosticWriter(ledger, limits = LIMITS) {
 
 // Runs in the page, immediately before its existing close. It neither reads
 // cookies/storage nor returns input values or inline application scripts.
-export function snapshotDocument({ maxCharacters, secretPattern }) {
+export function snapshotDocument({ maxCharacters, secretPattern, maskForScreenshot = true }) {
   const clone = document.documentElement.cloneNode(true);
   for (const element of clone.querySelectorAll('script, style, noscript, iframe, object, embed')) element.remove();
-  for (const element of clone.querySelectorAll('*')) {
+  for (const element of [clone, ...clone.querySelectorAll('*')]) {
     for (const attribute of [...element.attributes]) {
       if (/^on|password|token|secret|authorization|cookie|api.?key/i.test(attribute.name) || attribute.name === 'value') element.removeAttribute(attribute.name);
       else if (['href', 'src', 'action', 'poster'].includes(attribute.name)) {
@@ -97,38 +97,60 @@ export function snapshotDocument({ maxCharacters, secretPattern }) {
   }
   // Mask the real page only after assertions have finished, for the bounded
   // last-state screenshot. A failed mask means no screenshot is taken.
-  const style = document.createElement('style');
-  style.textContent = 'input,textarea,[contenteditable],[data-sensitive],[data-private]{visibility:hidden!important}';
-  document.head.appendChild(style);
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-  let node, count = 0;
-  while ((node = walker.nextNode()) && count++ < 5000) node.data = node.data.replace(new RegExp(secretPattern, 'gi'), '[redacted]');
-  return { url: location.href, title: document.title, readyState: document.readyState, html: clone.outerHTML.slice(0, maxCharacters) };
+  if (maskForScreenshot) {
+    const style = document.createElement('style');
+    style.textContent = 'input,textarea,iframe,object,embed,[contenteditable],[data-sensitive],[data-private]{visibility:hidden!important}';
+    document.head?.appendChild(style);
+    const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+    let node, count = 0;
+    while ((node = walker.nextNode()) && count++ < 5000) node.data = node.data.replace(new RegExp(secretPattern, 'gi'), '[redacted]');
+  }
+  return {
+    url: location.href, title: document.title, readyState: document.readyState,
+    elements: document.body?.querySelectorAll('*').length || 0,
+    scripts: [...document.scripts].slice(-12).map(node => ({ src: node.src, type: node.type })),
+    resources: performance.getEntriesByType('resource').slice(-12).map(entry => ({ url: entry.name, type: entry.initiatorType, durationMs: Math.round(entry.duration) })),
+    html: clone.outerHTML.slice(0, maxCharacters),
+  };
 }
 
-export function observeBrowser(browser, { ledger = process.env.PINVOU_CI_RESOURCE_LEDGER, limits = LIMITS } = {}) {
-  const writer = createDiagnosticWriter(ledger, limits);
-  if (!writer || typeof browser.on !== 'function') return { async close() {} };
+export function observeBrowser(browser, { ledger = process.env.PINVOU_CI_RESOURCE_LEDGER, limits = LIMITS, emit = line => process.stderr.write(line + '\n') } = {}) {
+  if (!ledger || typeof browser.on !== 'function') return { async close() {} };
+  const writer = createDiagnosticWriter(ledger, limits) || { record() {}, write() {}, finish() {} };
   const pages = new Map();
   const contexts = new WeakSet();
-  let pageNumber = 0, closing;
-  const record = event => writer.record(event);
+  let pageNumber = 0, closing, failureCount = 0;
+  const recent = [];
+  const record = event => {
+    const value = { t: new Date().toISOString(), ...event };
+    recent.push(value);
+    if (recent.length > 32) recent.shift();
+    writer.record(value);
+  };
   const listen = (page, event, callback) => page.on(event, (...args) => {
     try { callback(...args); } catch { record({ kind: 'event-unavailable', event }); }
   });
-  const capture = async (page, state) => {
-    if (state.captured || state.number > limits.pages) return;
-    state.captured = true;
+  const capture = async (page, state, failure) => {
+    if (!failure && (state.captured || state.number > limits.pages)) return;
+    if (!failure) state.captured = true;
     try {
       const address = new URL(page.url());
       if (!['127.0.0.1', 'localhost', '[::1]'].includes(address.hostname) || !['http:', 'https:'].includes(address.protocol)) {
         record({ kind: 'snapshot-skipped', page: state.number, reason: 'not a loopback fixture', url: diagnosticUrl(page.url()) });
         return;
       }
-      const snapshot = await page.evaluate(snapshotDocument, { maxCharacters: limits.dom, secretPattern: SECRET });
-      const metadata = { kind: 'page-state', page: state.number, url: diagnosticUrl(snapshot.url), title: diagnosticText(snapshot.title), readyState: snapshot.readyState };
+      const snapshot = await page.evaluate(snapshotDocument, { maxCharacters: limits.dom, secretPattern: SECRET, maskForScreenshot: !failure });
+      const metadata = {
+        kind: 'page-state', page: state.number, phase: failure ? 'wait-rejected' : 'before-close',
+        url: diagnosticUrl(snapshot.url), title: diagnosticText(snapshot.title), readyState: snapshot.readyState,
+        elements: snapshot.elements,
+        scripts: snapshot.scripts?.map(item => ({ src: diagnosticUrl(item.src), type: diagnosticText(item.type, 32) })),
+        resources: snapshot.resources?.map(item => ({ url: diagnosticUrl(item.url), type: diagnosticText(item.type, 32), durationMs: item.durationMs })),
+      };
       record(metadata);
-      writer.write(`page-${state.number}.dom.txt`, diagnosticText(snapshot.html, limits.dom));
+      const prefix = failure ? `failure-${failure.number}-page-${state.number}` : `page-${state.number}`;
+      writer.write(`${prefix}.dom.txt`, diagnosticText(snapshot.html, limits.dom));
+      if (failure) return metadata;
       if (typeof page.screenshot === 'function') {
         const image = await page.screenshot({ type: 'jpeg', quality: 35, fullPage: false });
         if (image.length <= limits.image) writer.write(`page-${state.number}.jpg`, image);
@@ -138,14 +160,59 @@ export function observeBrowser(browser, { ledger = process.env.PINVOU_CI_RESOURC
   };
   const attach = page => {
     if (!page || pages.has(page) || typeof page.on !== 'function') return;
-    const state = { number: ++pageNumber, captured: false };
+    const state = { number: ++pageNumber, captured: false, pending: new Map() };
     pages.set(page, state);
+    listen(page, 'framenavigated', frame => {
+      if (!frame.parentFrame()) record({ kind: 'navigation', page: state.number, url: diagnosticUrl(frame.url()) });
+    });
+    for (const event of ['domcontentloaded', 'load']) listen(page, event, () => record({ kind: event, page: state.number }));
+    listen(page, 'request', request => {
+      if (state.pending.size >= 32) state.pending.delete(state.pending.keys().next().value);
+      state.pending.set(request, { url: diagnosticUrl(request.url()), type: diagnosticText(request.resourceType(), 32), started: Date.now() });
+    });
+    listen(page, 'requestfinished', request => {
+      const item = state.pending.get(request);
+      if (item) record({ kind: 'request-finished', page: state.number, url: item.url, type: item.type, durationMs: Date.now() - item.started });
+      state.pending.delete(request);
+    });
     listen(page, 'console', message => record({ kind: 'console', page: state.number, level: diagnosticText(message.type(), 32), text: diagnosticText(message.text()) }));
     listen(page, 'pageerror', error => record({ kind: 'pageerror', page: state.number, text: diagnosticText(error?.stack || error?.message) }));
-    listen(page, 'requestfailed', request => record({ kind: 'requestfailed', page: state.number, url: diagnosticUrl(request.url()), method: diagnosticText(request.method(), 16), resource: diagnosticText(request.resourceType(), 32), error: diagnosticText(request.failure()?.errorText) }));
+    listen(page, 'requestfailed', request => {
+      state.pending.delete(request);
+      record({ kind: 'requestfailed', page: state.number, url: diagnosticUrl(request.url()), method: diagnosticText(request.method(), 16), resource: diagnosticText(request.resourceType(), 32), error: diagnosticText(request.failure()?.errorText) });
+    });
     listen(page, 'response', response => {
       if (response.status() >= 400) record({ kind: 'http-error', page: state.number, status: response.status(), url: diagnosticUrl(response.url()) });
     });
+    // Rejected waits are observed before a test catches/retries or navigates
+    // away. Never log function source/arguments, mutate the page, or replace
+    // the original error. Stderr survives a failed artifact upload.
+    for (const method of ['goto', 'reload', 'waitForSelector', 'waitForFunction', 'waitForNavigation']) {
+      if (typeof page[method] !== 'function') continue;
+      const native = page[method].bind(page);
+      page[method] = async (...args) => {
+        try { return await native(...args); }
+        catch (error) {
+          if (failureCount < limits.pages) {
+            const failure = { number: ++failureCount, method, error: diagnosticText(error?.message), page: state.number };
+            try {
+              const pending = [...state.pending.values()].map(item => ({ url: item.url, type: item.type, ageMs: Date.now() - item.started }));
+              const snapshot = await bounded(() => capture(page, state, failure), limits.captureMs);
+              const value = { ...failure, snapshot, pending, recent: recent.slice(-12) };
+              writer.write(`failure-${failure.number}.txt`, JSON.stringify(value));
+              const compact = { ...value, pending: pending.slice(0, 8), recent: recent.slice(-8) };
+              const shorten = (key, item) => typeof item === 'string' ? item.slice(0, 256) : item;
+              let line = JSON.stringify(compact, shorten);
+              if (Buffer.byteLength(line) > 14_000) line = JSON.stringify({ ...failure, snapshot: { readyState: snapshot?.readyState, elements: snapshot?.elements }, pending: pending.slice(0, 3), recent: recent.slice(-3) }, shorten);
+              emit('[browser-fixture-diagnostic] ' + line);
+            } catch {
+              try { emit('[browser-fixture-diagnostic] ' + JSON.stringify({ ...failure, snapshot: 'unavailable' })); } catch { /* preserve the original rejection */ }
+            }
+          }
+          throw error;
+        }
+      };
+    }
     const close = page.close.bind(page);
     page.close = async (...args) => {
       try { await bounded(() => capture(page, state), limits.captureMs); } catch { record({ kind: 'capture-timeout', page: state.number }); }

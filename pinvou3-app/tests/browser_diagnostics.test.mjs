@@ -12,23 +12,24 @@ const limits = { bytes: 8192, events: 8, pages: 3, dom: 2048, image: 256, captur
 function setup(t, options = {}) {
   const ledger = fs.mkdtempSync(path.join(os.tmpdir(), 'browser-diagnostics-test-'));
   t.after(() => fs.rmSync(ledger, { recursive: true, force: true }));
-  const order = [];
+  const order = [], emitted = [], captureOptions = [];
   class Page extends EventEmitter {
     url() { return 'http://127.0.0.1:1234/fixture?token=private#fragment'; }
-    async evaluate() { order.push('snapshot'); return { url: this.url(), title: 'fixture', readyState: 'complete', html: '<body>controlled DOM Bearer confidential</body>' }; }
+    async evaluate(fn, options) { order.push('snapshot'); captureOptions.push(options);return { url: this.url(), title: 'fixture', readyState: 'complete', elements: 3, html: '<body>controlled DOM Bearer confidential</body>' }; }
     async screenshot() { order.push('screenshot'); return Buffer.from('controlled-image'); }
     async close(...args) { order.push('native-page-close'); return args; }
+    async waitForSelector(...args) { this.waitArguments = args;if (this.waitError) throw this.waitError;return 'native-result'; }
   }
   const page = new Page();
   const context = { async newPage() { return page; }, async pages() { return [page]; }, async close() { order.push('native-context-close'); return 'context-result'; } };
   const browser = Object.assign(new EventEmitter(), { async newPage() { return page; }, async pages() { return []; }, async createBrowserContext() { return context; } });
-  const diagnostics = observeBrowser(browser, { ledger, limits, ...options });
+  const diagnostics = observeBrowser(browser, { ledger, limits, emit: line => emitted.push(line), ...options });
   const files = () => {
     const root = path.join(ledger, 'browser-diagnostics');
     if (!fs.existsSync(root)) return [];
     return fs.readdirSync(root).flatMap(directory => fs.readdirSync(path.join(root, directory)).map(name => ({ name, data: fs.readFileSync(path.join(root, directory, name), 'utf8') })));
   };
-  return { ledger, page, context, browser, diagnostics, order, files };
+  return { ledger, page, context, browser, diagnostics, order, files, emitted, captureOptions };
 }
 
 test('URL and error text discard credentials, query, fragments and common secret forms', () => {
@@ -113,6 +114,57 @@ test('a ledger bounds browser reservations across independent writers', t => {
   assert.ok(createDiagnosticWriter(f.ledger, cap));
   assert.equal(createDiagnosticWriter(f.ledger, cap), null);
   assert.equal(fs.readdirSync(path.join(f.ledger, 'browser-diagnostics')).length, 2);
+});
+
+test('a rejected wait preserves its error and captures pending requests without mutating a retriable page', async t => {
+  const f = setup(t);const page = await f.browser.newPage();
+  const original = new Error('controlled selector timeout token=private');page.waitError = original;
+  const request = { url: () => 'http://127.0.0.1/entry.jsx?token=private', resourceType: () => 'script' };
+  page.emit('request', request);
+  const options = { timeout: 1, custom: 'argument-private' };
+  await assert.rejects(page.waitForSelector('#ready', options), error => error === original);
+  assert.deepEqual(page.waitArguments, ['#ready', options]);
+  assert.equal(f.captureOptions[0].maskForScreenshot, false);
+  assert.ok(!f.order.includes('screenshot'));
+  const record = JSON.parse(f.emitted[0].split('[browser-fixture-diagnostic] ')[1]);
+  assert.equal(record.method, 'waitForSelector');assert.equal(record.snapshot.elements, 3);
+  assert.equal(record.pending[0].url, 'http://127.0.0.1/entry.jsx');
+  assert.ok(!f.emitted.join('').includes('private'));
+  page.waitError = undefined;assert.equal(await page.waitForSelector('#retry'), 'native-result');
+  await page.close();await f.diagnostics.close();
+  assert.ok(f.files().some(file => file.name.startsWith('failure-') && file.name.endsWith('.dom.txt')));
+});
+
+test('failure diagnostics still reach stderr after browser slots or artifact storage are exhausted', async t => {
+  const f = setup(t, { limits: { ...limits, browsers: 0 } });const page = await f.browser.newPage();
+  page.waitError = new Error('original wait failure');
+  for (let n = 0; n < 8; n++) await assert.rejects(page.waitForSelector('#ready'), error => error === page.waitError);
+  assert.equal(f.emitted.length, limits.pages);
+  assert.ok(f.emitted.every(line => Buffer.byteLength(line) < 15_000));
+  assert.ok(f.emitted.every(line => JSON.parse(line.split('[browser-fixture-diagnostic] ')[1]).method === 'waitForSelector'));
+  await f.diagnostics.close();
+});
+
+test('snapshot failure or an unavailable stderr sink cannot replace a native rejection', async t => {
+  const f = setup(t, { emit() { throw new Error('output unavailable'); } });const page = await f.browser.newPage();
+  page.waitError = new Error('original wait failure');page.evaluate = () => new Promise(() => {});
+  await assert.rejects(page.waitForSelector('#ready'), error => error === page.waitError);
+  await f.diagnostics.close();
+});
+
+test('a failed later page is captured even after the ordinary page snapshot limit', async t => {
+  const f = setup(t);await f.browser.newPage();let late;
+  for (let n = 0; n < limits.pages; n++) {
+    late = new f.page.constructor();
+    f.browser.emit('targetcreated', { page: async () => late });
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  late.waitError = new Error('late page timeout');
+  await assert.rejects(late.waitForSelector('#ready'), error => error === late.waitError);
+  const value = JSON.parse(f.emitted[0].split('[browser-fixture-diagnostic] ')[1]);
+  assert.ok(value.page > limits.pages);assert.equal(value.snapshot.elements, 3);
+  assert.ok(f.files().some(file => file.name.startsWith('failure-') && file.name.endsWith('.dom.txt')));
+  await f.diagnostics.close();
 });
 
 const chrome = process.env.CHROME || [

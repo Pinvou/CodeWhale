@@ -122,6 +122,12 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   1.5 seconds per close, reports omissions, and never changes assertion timeouts,
   native cleanup acknowledgements or the original test result. Native crashes
   and forcibly killed processes may leave only already-written events.
+  Rejected navigation/selector/function waits also emit bounded, redacted
+  `[browser-fixture-diagnostic]` stderr records with pending requests, recent
+  network events, script/resource timing and page readiness. These records
+  survive artifact-upload failures. Up to three read-only failure snapshots
+  per browser are allowed even after the first three page numbers; they do not
+  mask the live page or change the original exception, wait arguments or budget.
 - Run one-shot commands through `scripts/ci-fixture-process.py`. Its Linux
   subreaper / Windows child Job Object contains detached descendants and assigns
   a private temporary directory. A killed Linux controller can be recovered only

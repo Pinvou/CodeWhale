@@ -2,6 +2,7 @@
 import * as puppeteer from './puppeteer-fixture.mjs';
 import { createServer } from './http-fixture.mjs';
 import { fixtureScope } from './fixture-scope.mjs';
+import assert from 'node:assert/strict';
 
 let browser;
 try {
@@ -23,6 +24,9 @@ try {
     setTimeout(() => { window.probeDone = true; }, 10);
   });
   await page.waitForFunction(() => window.probeDone);
+  await assert.rejects(page.waitForSelector('#controlled-missing-element', { timeout: 25 }), /Waiting for selector/);
+  assert.equal(await page.$eval('input', node => getComputedStyle(node).visibility), 'visible');
+  assert.equal(await page.$eval('input', node => node.value), 'input-private');
   if (process.env.DIAGNOSTIC_PROBE_FAIL === '1') throw new Error('controlled primary assertion');
 } catch (error) {
   console.error(error.message);
