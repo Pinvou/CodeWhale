@@ -19,6 +19,9 @@ for key in ("financial_token", *(f"financial_billing_{index}" for index in range
     original = SERVICES["financial"]
     SERVICES[key] = (key.replace("_", "-") + "-postgres", *original[1:])
 CLOSURE_SERVICES = {'financial': SERVICES['financial']}
+CORE_SERVICES = {key: SERVICES[key] for key in ('audit', 'broker')}
+SERVICE_PROFILES = {'full': SERVICES, 'closure': CLOSURE_SERVICES,
+                    'core': CORE_SERVICES, 'financial': CLOSURE_SERVICES}
 
 IDENTITY_SQL = "SELECT system_identifier::text,current_setting('data_directory'),current_setting('port'),session_user,current_user,current_database(),(SELECT rolsuper FROM pg_roles WHERE rolname=session_user),current_setting('server_version_num') FROM pg_control_system()"
 
@@ -153,9 +156,38 @@ def identity_matches(value, directory, major):
         raise ValueError('service PostgreSQL identity mismatch')
     return fields[0]
 
-def main(*, services=None):
+def profile_metadata(metadata, services, *, portal_redis=False):
+    """Split the one declared companion from PG ownership; reject unknowns."""
+    names = {item[0] for item in services.values()}
+    if portal_redis and services != CORE_SERVICES:
+        raise ValueError('Portal Redis companion requires the core PG profile')
+    expected = names | ({'portal-redis'} if portal_redis else set())
+    if not isinstance(metadata, dict) or set(metadata) != expected:
+        raise ValueError('job service set does not match the selected PostgreSQL profile')
+    if portal_redis:
+        companion = metadata['portal-redis']
+        if not isinstance(companion, dict) or not isinstance(companion.get('id'), str) or not re.fullmatch('[0-9a-f]{64}', companion['id']):
+            raise ValueError('canonical Portal Redis registration required')
+        ports = companion.get('ports')
+        if not isinstance(ports, dict) or set(ports) != {'6379'}:
+            raise ValueError('canonical Portal Redis port registration required')
+        port = port_value(ports['6379'])
+        for name in names:
+            item = metadata[name]
+            if not isinstance(item, dict) or not isinstance(item.get('ports'), dict):
+                raise ValueError('canonical core PG registration required')
+            if item.get('id') == companion['id'] or item['ports'].get('5432') == port:
+                raise ValueError('Portal Redis and PG registrations must be distinct')
+    # Redis admission and retirement remain exclusively in account-ci-redis.py.
+    # Neither its ID nor its volume enters the PG supervisor's ownership set.
+    return {name: metadata[name] for name in metadata if name in names}
+
+
+def main(*, services=None, portal_redis=False):
     services = SERVICES if services is None else services
-    metadata = json.loads(os.environ['ACCOUNT_CI_SERVICES'])
+    metadata = profile_metadata(json.loads(os.environ['ACCOUNT_CI_SERVICES']), services, portal_redis=portal_redis)
+    if not isinstance(metadata, dict) or set(metadata) != {item[0] for item in services.values()}:
+        raise ValueError('job service set does not match the selected PostgreSQL profile')
     ids, ports, volumes, systems = set(), set(), set(), set()
     outputs = []
     financial = {}
@@ -187,11 +219,14 @@ def main(*, services=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--stop-owned-services', action='store_true')
-    parser.add_argument('--profile', choices=('full', 'closure'), default='full')
+    parser.add_argument('--profile', choices=tuple(SERVICE_PROFILES), default='full')
+    parser.add_argument('--with-portal-redis', action='store_true')
     args = parser.parse_args()
-    services = CLOSURE_SERVICES if args.profile == 'closure' else SERVICES
+    if args.with_portal_redis and args.profile != 'core':
+        parser.error('--with-portal-redis requires --profile core')
+    services = SERVICE_PROFILES[args.profile]
     if args.stop_owned_services:
         ledger = os.environ.get('PINVOU_CI_RESOURCE_LEDGER')
         stop_owned_services(json.loads(os.environ['ACCOUNT_CI_SERVICES']), Path(ledger) / 'postgres-services.json' if ledger else None, services=services)
     else:
-        main(services=services)
+        main(services=services, portal_redis=args.with_portal_redis)
