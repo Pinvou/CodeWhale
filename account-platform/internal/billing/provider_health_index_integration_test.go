@@ -207,6 +207,14 @@ func TestProviderHealthGlobalWindowIndexPostgres(t *testing.T) {
 	statement := providerHealthWindowStatement(t)
 	for _, scenario := range []string{"fresh-install", "retained-upgrade"} {
 		t.Run(scenario, func(t *testing.T) {
+			// Isolate main's exact45 Down and unchanged038 upgrade first.
+			// The complete branch carrier is installed on these same facts below.
+			var source, staged string
+			if scenario == "retained-upgrade" {
+				source, staged = stageBillingMigrationContract(t, 900045, 900045)
+			} else {
+				source, staged = stageBillingMigrationContract(t, 900045)
+			}
 			var r *PostgresRepository
 			var ctx context.Context
 			if scenario == "retained-upgrade" {
@@ -350,6 +358,7 @@ func TestProviderHealthGlobalWindowIndexPostgres(t *testing.T) {
 			if providerHealthFinancialFacts(t, ctx, r) != originalFinancial {
 				t.Fatal("observation pipeline changed actual payment financial facts")
 			}
+			completeBillingMigrationContract(t, ctx, r, source, staged, product)
 			t.Logf("PROVIDER_HEALTH_GLOBAL_VERIFIED scenario=%s synthetic_archived_observations=100000 source_observations=42 global_partitions=3 current_candidates=2 retained_evaluation_members=30", scenario)
 		})
 	}
