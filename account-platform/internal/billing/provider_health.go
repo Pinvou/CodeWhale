@@ -118,6 +118,9 @@ func (r *PostgresRepository) observationCandidates(ctx context.Context, now time
 		partitions = append(partitions, item)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	candidates := make([]providerStopLossCandidate, 0)
 	for _, partition := range partitions {
 		lastRows, err := r.pool.Query(ctx, "SELECT id,outcome,logical_order_id FROM payment_provider_health_observations WHERE provider_id=$1 AND provider_version=$2 AND capability=$3 AND channel=$4 AND route=$5 AND outcome<>'BUSINESS_REJECTION' AND received_at>$6::timestamptz-interval '5 minutes' ORDER BY received_at DESC,id DESC LIMIT 5", partition.providerID, partition.providerVersion, partition.capability, partition.channel, partition.route, now)
@@ -142,6 +145,9 @@ func (r *PostgresRepository) observationCandidates(ctx context.Context, now time
 			allFailures = allFailures && (outcome == "INFRASTRUCTURE_FAILURE" || outcome == "UNCERTAIN_RESULT")
 		}
 		lastRows.Close()
+		if err := lastRows.Err(); err != nil {
+			return nil, err
+		}
 		if len(lastIDs) == 5 && allFailures && len(orders) >= 3 {
 			candidates = append(candidates, providerStopLossCandidate{ProviderID: partition.providerID, ProviderVersion: partition.providerVersion, Capability: partition.capability, Channel: partition.channel, Route: partition.route, TriggerType: "CONSECUTIVE_FAILURES", WindowStart: now.Add(-5 * time.Minute), WindowEnd: now, ObservationIDs: lastIDs, DistinctOrders: len(orders), FailureCount: 5, SampleCount: 5})
 			continue
@@ -170,6 +176,9 @@ func (r *PostgresRepository) observationCandidates(ctx context.Context, now time
 			}
 		}
 		rateRows.Close()
+		if err := rateRows.Err(); err != nil {
+			return nil, err
+		}
 		if len(ids) >= 20 && failures*2 >= len(ids) && len(orders) >= 5 {
 			candidates = append(candidates, providerStopLossCandidate{ProviderID: partition.providerID, ProviderVersion: partition.providerVersion, Capability: partition.capability, Channel: partition.channel, Route: partition.route, TriggerType: "FAILURE_RATE", WindowStart: now.Add(-time.Minute), WindowEnd: now, ObservationIDs: ids, DistinctOrders: len(orders), FailureCount: failures, SampleCount: len(ids)})
 		}
