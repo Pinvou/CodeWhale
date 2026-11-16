@@ -309,6 +309,17 @@ fn auth_side_secret_name(lowered: &str) -> bool {
             lowered,
             "credential" | "signature" | "security-token" | "session_token" | "secret_key"
         )
+        // r38 P1-2（名单碎片化第七次，按评审建议谓词化收口）：整名精确匹配永远
+        // 追不上真实世界——本轮漏的是 DB 密码族（PGPASSWORD/POSTGRES_PASSWORD/
+        // MYSQL_PWD/MONGO_PASSWORD/REDIS_PASSWORD，短值原样落盘+导出双漏）与
+        // AWS 裸 KEY=VALUE 臂（AWS_SECRET_ACCESS_KEY=/AWS_SESSION_TOKEN=，
+        // r35 已登记）。子串族一并兜住 GITHUB_TOKEN 等未登记成员。
+        // `_pwd` 刻意带下划线：裸 `pwd` 会误伤 PWD/OLDPWD（工作目录回显）。
+        // `token` 子串会波及 TOKENIZERS_PARALLELISM/MAX_TOKENS 一类非机密键，
+        // 属 fail-closed 取舍：多抹一行日志比漏一把密码便宜。
+        || ["password", "passwd", "_pwd", "secret", "token", "api_key", "apikey", "access_key"]
+            .iter()
+            .any(|frag| lowered.contains(*frag))
 }
 
 /// r31 P1-1：Authorization 族头名。
@@ -1556,6 +1567,49 @@ mod tests {
             sanitize_for_disk("+ export token=sk-live-abc123def456ghi789").contains("token="),
             "键名被一起抹掉了"
         );
+    }
+
+    /// r38 P1-2：DB 密码族与 AWS 裸 KEY=VALUE 臂——整名精确匹配名单的第七次
+    /// 漏成员。这些值普遍短（<24 字符），导出侧广谱尺也不兜底，必须名字侧命中。
+    /// `declare -x` 引号回显形态同臂收口（键名解析后走同一谓词）。
+    /// 反证腿：PWD/OLDPWD（工作目录回显）不因 `_pwd` 子串被误抹。
+    #[test]
+    fn db_password_family_and_aws_bare_keys_redact_by_substring() {
+        for line in [
+            "+ export PGPASSWORD=mysecret123",
+            "declare -x AWS_SECRET_ACCESS_KEY=\"wJalrXUtnFEMI/K7MDENG\"",
+            "+ AWS_SESSION_TOKEN=shorttok123",
+            "+ AWS_SECURITY_TOKEN=shorttok456",
+            "+ POSTGRES_PASSWORD=pgpass998877",
+            "+ MYSQL_PWD=mysqlpwd4455",
+            "+ MONGO_PASSWORD=mongopwd6677",
+            "+ REDIS_PASSWORD=redispwd8899",
+            "+ MINIO_SECRET_KEY=miniokey3344",
+            "+ GITHUB_TOKEN=gho_abc123short",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            for secret in [
+                "mysecret123",
+                "wJalrXUtnFEMI/K7MDENG",
+                "shorttok123",
+                "shorttok456",
+                "pgpass998877",
+                "mysqlpwd4455",
+                "mongopwd6677",
+                "redispwd8899",
+                "miniokey3344",
+                "gho_abc123short",
+            ] {
+                assert!(!cleaned.contains(secret), "{line} -> {cleaned}");
+            }
+            let exported = sanitize_for_export(line);
+            assert!(!exported.contains("mysecret123"), "{line} -> {exported}");
+            assert!(!exported.contains("pgpass998877"), "{line} -> {exported}");
+        }
+        // 工作目录回显不该被 `_pwd` 误伤（PWD/OLDPWD 无下划线前缀）。
+        let kept = sanitize_for_disk("+ PWD=/opt/pinvou-model-store/data + OLDPWD=/root");
+        assert!(kept.contains("/opt/pinvou-model-store/data"), "{kept}");
+        assert!(kept.contains("/root"), "{kept}");
     }
 
     /// 落盘时**不能**上全量启发式。
