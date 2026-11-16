@@ -407,6 +407,56 @@ pub(crate) fn auto_compact_default_for_route(
 
 #[cfg(test)]
 mod tests {
+    /// The K3.1 family inherits the K3-series budget facts (the static
+    /// model-facts rows plus the endpoint-aware route overrides), so no
+    /// spelling may fall to the uncatalogued 8,192 compat clamp and each
+    /// route's effective cap must match its K3 sibling exactly.
+    #[test]
+    fn kimi_k31_budget_facts_match_the_k3_siblings() {
+        use super::{
+            OutputCeilingSource, effective_max_output_tokens_for_route, output_ceiling_source,
+            route_context_window_tokens,
+        };
+        use crate::config::ApiProvider;
+        for model in [
+            "kimi-k3.1-pro",
+            "kimi-k3.1-pro-highspeed",
+            "k3.1-pro",
+            "k3.1-pro-highspeed",
+        ] {
+            assert_eq!(
+                output_ceiling_source(ApiProvider::Moonshot, model),
+                OutputCeilingSource::Documented(131_072),
+                "{model} must inherit the K3-series documented output ceiling"
+            );
+            let cap = effective_max_output_tokens_for_route(ApiProvider::Moonshot, model, None);
+            assert_ne!(
+                cap, 8_192,
+                "{model} must not take the uncatalogued compat clamp"
+            );
+        }
+        assert_eq!(
+            effective_max_output_tokens_for_route(ApiProvider::Moonshot, "k3.1-pro", None),
+            effective_max_output_tokens_for_route(ApiProvider::Moonshot, "k3", None),
+            "membership K3.1 must budget identically to bare k3"
+        );
+        assert_eq!(
+            effective_max_output_tokens_for_route(ApiProvider::Moonshot, "kimi-k3.1-pro", None),
+            effective_max_output_tokens_for_route(ApiProvider::Moonshot, "kimi-k3", None),
+            "direct K3.1 must budget identically to kimi-k3"
+        );
+        // Context facts transfer too: the direct series column documents 1M;
+        // the membership spellings ride the plan-dependent safe baseline.
+        assert_eq!(
+            route_context_window_tokens(ApiProvider::Moonshot, "kimi-k3.1-pro", None),
+            1_048_576
+        );
+        assert_eq!(
+            route_context_window_tokens(ApiProvider::Moonshot, "k3.1-pro", None),
+            262_144
+        );
+    }
+
     #[test]
     fn route_inline_char_budget_is_three_percent_of_the_window_capped() {
         use super::route_inline_char_budget_with_raise as budget;

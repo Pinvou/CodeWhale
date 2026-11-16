@@ -232,6 +232,13 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         // Bare `k3` is plan-tier dependent; `k3-256k` is fixed at 256 KiTok.
         // Neither may fall through to the generic suffix heuristic.
         "k3" | "k3-256k" => Some(KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS),
+        // models-overview's K3-series column covers `kimi-k3.1-pro` /
+        // `kimi-k3.1-pro-highspeed` (verified 2026-11-16): 1,048,576 context
+        // like `kimi-k3`. The membership spellings are plan-tier dependent
+        // like bare `k3` and inherit the same safe membership baseline, with
+        // 1M reached through the entitlement report / explicit override.
+        "kimi-k3.1-pro" | "kimi-k3.1-pro-highspeed" => Some(KIMI_K3_CONTEXT_WINDOW_TOKENS),
+        "k3.1-pro" | "k3.1-pro-highspeed" => Some(KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS),
         // `kimi-k2.7-code-highspeed` is the same model on the direct
         // platform's high-speed tier (262,144 context), per
         // https://platform.kimi.ai/docs/pricing/chat-k27-code (2026-08-17).
@@ -367,6 +374,15 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         // applied later with endpoint-aware provenance; membership and
         // neighboring routes must not inherit it.
         "moonshotai/kimi-k3" | "kimi-k3" | "k3" | "k3-256k" | "opencode-go/kimi-k3" => {
+            Some(KIMI_K3_DEFAULT_MAX_COMPLETION_TOKENS)
+        }
+        // The K3.1 family inherits the K3-series default generation ceiling.
+        // The exact direct route's endpoint-aware 1M maximum is applied later
+        // with provenance, and — unlike the `kimi-for-coding` family below —
+        // the membership K3.1 spellings are static-row members exactly like
+        // bare `k3`, whose plan dependence is resolved by the membership
+        // floor and entitlement report rather than by absence here.
+        "kimi-k3.1-pro" | "kimi-k3.1-pro-highspeed" | "k3.1-pro" | "k3.1-pro-highspeed" => {
             Some(KIMI_K3_DEFAULT_MAX_COMPLETION_TOKENS)
         }
         // Kimi K2.7 Code has a 256K context window but its documented default
@@ -1320,6 +1336,30 @@ mod tests {
         assert_eq!(max_output_tokens_for_model("k3"), Some(131_072));
         assert_eq!(max_output_tokens_for_model("k3-256k"), Some(131_072));
         assert_eq!(max_output_tokens_for_model("kimi-k3"), Some(131_072));
+        // The K3.1 family sits in the same K3-series column: the direct
+        // spellings carry `kimi-k3`'s 1M context, the membership spellings
+        // carry bare `k3`'s plan-dependent safe floor, and every spelling
+        // carries the series' 131,072 default generation ceiling.
+        assert_eq!(context_window_for_model("kimi-k3.1-pro"), Some(1_048_576));
+        assert_eq!(
+            context_window_for_model("kimi-k3.1-pro-highspeed"),
+            Some(1_048_576)
+        );
+        assert_eq!(context_window_for_model("k3.1-pro"), Some(262_144));
+        assert_eq!(
+            context_window_for_model("k3.1-pro-highspeed"),
+            Some(262_144)
+        );
+        assert_eq!(max_output_tokens_for_model("kimi-k3.1-pro"), Some(131_072));
+        assert_eq!(
+            max_output_tokens_for_model("kimi-k3.1-pro-highspeed"),
+            Some(131_072)
+        );
+        assert_eq!(max_output_tokens_for_model("k3.1-pro"), Some(131_072));
+        assert_eq!(
+            max_output_tokens_for_model("k3.1-pro-highspeed"),
+            Some(131_072)
+        );
         // Never project max output as the context window.
         assert_ne!(
             context_window_for_model("k3"),
