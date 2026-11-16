@@ -1376,12 +1376,12 @@ jobs:
         run: |
           set -euo pipefail
           listing="$RUNNER_TEMP/frontend-setup-artifacts.json"
-          curl -sfSL --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" \
+          curl -sfSL --retry 3 --max-time 120 -H "Authorization: Bearer $GITHUB_TOKEN" \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$listing"
           bundle_id="$(python3 -c 'import json,sys; print(next(a["id"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == "frontend-setup-bundle"))' "$listing")"
           code=000
           for _ in 1 2 3 4 5; do
-            code="$(curl -sSL -w '%{http_code}' -o "$RUNNER_TEMP/frontend-setup-bundle.zip" \
+            code="$(curl -sSL --max-time 900 -w '%{http_code}' -o "$RUNNER_TEMP/frontend-setup-bundle.zip" \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
               "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$bundle_id/zip" || echo 000)"
             [[ "$code" == 200 ]] && break
@@ -1395,9 +1395,10 @@ jobs:
       - name: Unpack frontend setup bundle
         run: |
           tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
-          # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。
-          test -f pinvou3-app/dist/index.html
-          test -f remote-control-relay/web/dist/index.html
+          # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。注意本 job
+          # 的 run 默认工作目录是 pinvou3-app,校验路径须相对它解析。
+          test -f dist/index.html
+          test -f ../remote-control-relay/web/dist/index.html
 
       - name: ESLint (含 pet 缺失项,现已全覆盖)
         # Official 的存量 warning 仍可由本地 lint 完整查看；CI 只打印会阻断的
@@ -1540,12 +1541,12 @@ jobs:
         run: |
           set -euo pipefail
           listing="$RUNNER_TEMP/frontend-setup-artifacts.json"
-          curl -sfSL --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" \
+          curl -sfSL --retry 3 --max-time 120 -H "Authorization: Bearer $GITHUB_TOKEN" \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$listing"
           bundle_id="$(python3 -c 'import json,sys; print(next(a["id"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == "frontend-setup-bundle"))' "$listing")"
           code=000
           for _ in 1 2 3 4 5; do
-            code="$(curl -sSL -w '%{http_code}' -o "$RUNNER_TEMP/frontend-setup-bundle.zip" \
+            code="$(curl -sSL --max-time 900 -w '%{http_code}' -o "$RUNNER_TEMP/frontend-setup-bundle.zip" \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
               "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$bundle_id/zip" || echo 000)"
             [[ "$code" == 200 ]] && break
@@ -1559,9 +1560,10 @@ jobs:
       - name: Unpack frontend setup bundle
         run: |
           tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
-          # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。
-          test -f pinvou3-app/dist/index.html
-          test -f remote-control-relay/web/dist/index.html
+          # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。注意本 job
+          # 的 run 默认工作目录是 pinvou3-app,校验路径须相对它解析。
+          test -f dist/index.html
+          test -f ../remote-control-relay/web/dist/index.html
 
       - name: 准备浏览器
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
