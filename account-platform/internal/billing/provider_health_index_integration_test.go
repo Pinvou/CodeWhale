@@ -207,10 +207,18 @@ func TestProviderHealthGlobalWindowIndexPostgres(t *testing.T) {
 	statement := providerHealthWindowStatement(t)
 	for _, scenario := range []string{"fresh-install", "retained-upgrade"} {
 		t.Run(scenario, func(t *testing.T) {
+			// Isolate main's exact45 Down and unchanged038 upgrade first.
+			// The complete branch carrier is installed on these same facts below.
+			var source, staged string
+			if scenario == "retained-upgrade" {
+				source, staged = stageBillingMigrationContract(t, 900045, 900045)
+			} else {
+				source, staged = stageBillingMigrationContract(t, 900045)
+			}
 			var r *PostgresRepository
 			var ctx context.Context
 			if scenario == "retained-upgrade" {
-				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second, 900038)
+				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second, 900032)
 			} else {
 				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second)
 			}
@@ -221,6 +229,12 @@ func TestProviderHealthGlobalWindowIndexPostgres(t *testing.T) {
 			for n := 0; n < 5; n++ {
 				_, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, true)
 				orders = append(orders, order)
+			}
+			if scenario == "retained-upgrade" {
+				// The frozen pre-admission writer remains restricted to31/32.
+				// Create real paid facts there, then install the real038 prefix
+				// before taking the original health-upgrade snapshot.
+				installBillingFixturePrefix(t, ctx, r, 900038)
 			}
 			originalFinancial := providerHealthFinancialFacts(t, ctx, r)
 			for n := 0; n < 5; n++ {
@@ -350,6 +364,7 @@ func TestProviderHealthGlobalWindowIndexPostgres(t *testing.T) {
 			if providerHealthFinancialFacts(t, ctx, r) != originalFinancial {
 				t.Fatal("observation pipeline changed actual payment financial facts")
 			}
+			completeBillingMigrationContract(t, ctx, r, source, staged, product)
 			t.Logf("PROVIDER_HEALTH_GLOBAL_VERIFIED scenario=%s synthetic_archived_observations=100000 source_observations=42 global_partitions=3 current_candidates=2 retained_evaluation_members=30", scenario)
 		})
 	}
