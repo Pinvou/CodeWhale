@@ -13,7 +13,23 @@ import { buildReleaseSubprocessEnvironment } from "../scripts/controller-release
 
 // Real ownership supervision is supported on Windows and Linux. The
 // controlled clock and pre-start validation probes below remain portable.
-const nativeReleaseTest = ["win32", "linux"].includes(process.platform) ? test : test.skip;
+const nativeSupported = ["win32", "linux"].includes(process.platform);
+const registeredNativeCases = new Set();
+const completedNativeCases = new Set();
+function nativeReleaseTest(name, action) {
+  registeredNativeCases.add(name);
+  return (nativeSupported ? test : test.skip)(name, async (context) => {
+    await action(context);
+    completedNativeCases.add(name);
+  });
+}
+test.after(() => {
+  if (process.env.CI !== "true") return;
+  if (process.platform !== "win32" && process.platform !== "linux") return;
+  assert.ok(registeredNativeCases.size >= 10, "CI must retain the ten native ownership scenarios");
+  assert.deepEqual([...completedNativeCases].sort(), [...registeredNativeCases].sort(),
+    "every registered native ownership scenario must actually complete on supported CI platforms");
+});
 
 const guard = fileURLToPath(new URL("../../scripts/windows-e2e-process-guard.ps1", import.meta.url));
 const orchestrator = fileURLToPath(new URL("../../scripts/run-windows-remote-control-e2e.ps1", import.meta.url));
@@ -21,10 +37,7 @@ const env = buildReleaseSubprocessEnvironment(process.env, "test");
 const nodeHash = crypto.createHash("sha256").update(readFileSync(process.execPath)).digest("hex");
 const quote = (text) => `'${text.replaceAll("'", "''")}'`;
 
-nativeReleaseTest("a command cannot consume its supervisor's private control input", async () => {
-  if (process.platform === "win32") {
-    const python = process.env.PINVOU_CI_PYTHON || "python";
-    await runReleaseProcess(python, ["-B", "-c", `
+const windowsNullInputProbe = `
 import ctypes, os, sys
 from ctypes import wintypes as w
 kernel = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -36,12 +49,26 @@ if kernel.GetFileType(kernel.GetStdHandle(-10)) != 2:
     sys.exit(41)
 if os.read(0, 1) != b'':
     sys.exit(42)
-`], { env, python, timeoutMs: 5000 });
+`;
+nativeReleaseTest("a command cannot consume its supervisor's private control input", async () => {
+  if (process.platform === "win32") {
+    const python = process.env.PINVOU_CI_PYTHON || "python";
+    await runReleaseProcess(python, ["-B", "-c", windowsNullInputProbe], { env, python, timeoutMs: 5000 });
     return;
   }
   await runReleaseProcess(process.execPath, ["-e", "if(require('node:fs').readFileSync(0).length!==0)process.exitCode=41"],
     { env, timeoutMs: 5000 });
 });
+
+test("the Windows stdin probe rejects an ordinary pipe even when it has immediate EOF",
+  { skip: process.platform !== "win32" }, () => {
+    // The production-supervised case above supplies NUL. This independent
+    // pipe also has EOF, so only the Win32 device assertion can reject it.
+    const result = spawnSync(process.env.PINVOU_CI_PYTHON || "python", ["-B", "-c", windowsNullInputProbe],
+      { env, input: "", encoding: "utf8", timeout: 5000, windowsHide: true });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 41, result.stderr);
+  });
 
 test("CI preserves an interpreter usable by the filtered release environment", () => {
   const workflow = parse(readFileSync(new URL("../../.github/workflows/pr-check.yml", import.meta.url), "utf8"));
@@ -64,7 +91,8 @@ test("supervisor receipt failures retain known aborts and expose only closed dia
   const key = Symbol.for("pinvou.release.runner.receipt.probe");
   for (const abort of [null, "cancelled", "timeout"]) {
    for (const scenario of ["missing", "invalid", "unconfirmed", "reported-timeout", "primary", "start-error",
-     "unknown-reason", "false-reason", "object-reason", "string-cleanup", "missing-cleanup", "wrong-nonce", "invalid-supervisor-code"]) {
+     "unknown-reason", "false-reason", "object-reason", "string-cleanup", "missing-cleanup", "wrong-nonce", "invalid-supervisor-code",
+     "false-execution-error", "object-execution-error", "missing-execution-error"]) {
     const child = Object.assign(new EventEmitter(), { pid: scenario === "start-error" ? undefined : 1234, stdin: new PassThrough(),
       stdout: new PassThrough(), stderr: new PassThrough(), unref: () => {}, kill: () => true });
     let next = 0;
@@ -92,18 +120,21 @@ test("supervisor receipt failures retain known aborts and expose only closed dia
       }
       if (scenario === "start-error") child.emit("error", new Error("PRIVATE_DIAGNOSTIC_SENTINEL"));
       else {
-        const receipt = scenario === "invalid" ? {
-          nonce: request.nonce, execution_error: "PRIVATE_DIAGNOSTIC_SENTINEL", primary_exit_code: 23, reason: "cancelled",
-        } : { nonce: request.nonce, execution_error: null, exit_code: 86, forced: true,
+        const receipt = { nonce: request.nonce, execution_error: null, exit_code: 86, forced: true,
           root_exit_code: scenario === "primary" ? 23 : 143,
           primary_exit_code: scenario === "primary" ? 23 : null, cleanup_confirmed: false,
           reason: scenario === "reported-timeout" ? "timeout" : abort };
-        if (["unknown-reason", "false-reason", "object-reason", "wrong-nonce", "invalid-supervisor-code"].includes(scenario)) {
+        if (["unknown-reason", "false-reason", "object-reason", "wrong-nonce", "invalid-supervisor-code",
+          "invalid", "false-execution-error", "object-execution-error", "missing-execution-error"].includes(scenario)) {
           Object.assign(receipt, { exit_code: 0, root_exit_code: 0, forced: false, cleanup_confirmed: true, reason: null });
         }
         if (scenario === "unknown-reason") receipt.reason = "PRIVATE_DIAGNOSTIC_SENTINEL";
         if (scenario === "false-reason") receipt.reason = false;
         if (scenario === "object-reason") receipt.reason = { private: "PRIVATE_DIAGNOSTIC_SENTINEL" };
+        if (scenario === "invalid") receipt.execution_error = "PRIVATE_DIAGNOSTIC_SENTINEL";
+        if (scenario === "false-execution-error") receipt.execution_error = false;
+        if (scenario === "object-execution-error") receipt.execution_error = { private: "PRIVATE_DIAGNOSTIC_SENTINEL" };
+        if (scenario === "missing-execution-error") delete receipt.execution_error;
         if (scenario === "string-cleanup") receipt.cleanup_confirmed = "true";
         if (scenario === "missing-cleanup") delete receipt.cleanup_confirmed;
         if (scenario === "wrong-nonce") receipt.nonce = `other-${request.nonce}`;
@@ -119,7 +150,8 @@ test("supervisor receipt failures retain known aborts and expose only closed dia
       assert.equal(error.code, expected, `${abort}/${scenario}`);
       assert.equal(error.cleanupConfirmed, scenario === "start-error");
       if (scenario !== "start-error") assert.equal(error.cleanupError, "release_subgate_cleanup_unconfirmed");
-      if (["missing", "invalid", "unknown-reason", "false-reason", "object-reason", "string-cleanup", "missing-cleanup", "wrong-nonce", "invalid-supervisor-code"].includes(scenario)) {
+      if (["missing", "invalid", "unknown-reason", "false-reason", "object-reason", "string-cleanup", "missing-cleanup", "wrong-nonce", "invalid-supervisor-code",
+        "false-execution-error", "object-execution-error", "missing-execution-error"].includes(scenario)) {
         assert.equal(error.receiptStatus, ["missing", "wrong-nonce"].includes(scenario) ? "missing" : "invalid");
         assert.equal(error.supervisorExitCode, scenario === "missing" ? 127 : scenario === "invalid-supervisor-code" ? null : 0);
       }
@@ -131,6 +163,59 @@ test("supervisor receipt failures retain known aborts and expose only closed dia
       delete globalThis[key];
     }
    }
+  }
+});
+
+test("legal execution-error receipts retain classification, primary exits and independent cleanup evidence", async () => {
+  const key = Symbol.for("pinvou.release.runner.execution.receipt.probe");
+  for (const executionError of ["start_failed", "execution_failed"]) {
+    for (const cleanupConfirmed of [true, false]) {
+      for (const abort of [null, "cancelled", "timeout"]) {
+        for (const primary of [null, 23]) {
+          const child = Object.assign(new EventEmitter(), { pid: 1234, stdin: new PassThrough(),
+            stdout: new PassThrough(), stderr: new PassThrough(), unref: () => {}, kill: () => true });
+          let next = 0;
+          const timers = new Map();
+          globalThis[key] = { spawn: () => child,
+            setTimeout: (fn, delay) => { const id = ++next; timers.set(id, { fn, delay }); return id; },
+            clearTimeout: (id) => timers.delete(id) };
+          try {
+            let source = readFileSync(new URL("../scripts/release-process.mjs", import.meta.url), "utf8");
+            assert.ok(source.includes('import { spawn } from "node:child_process";'));
+            source = source.replace('import { spawn } from "node:child_process";',
+              'const {spawn,setTimeout,clearTimeout}=globalThis[Symbol.for("pinvou.release.runner.execution.receipt.probe")];');
+            assert.match(source, /^const supervisor = .+;$/mu);
+            source = source.replace(/^const supervisor = .+;$/mu, 'const supervisor="controlled-supervisor";');
+            const module = await import(`data:text/javascript;base64,${Buffer.from(source + `\n//${crypto.randomUUID()}`).toString("base64")}`);
+            const controller = new AbortController();
+            const running = module.runReleaseProcess(process.execPath, [], { env, timeoutMs: 1000, signal: controller.signal })
+              .then(() => null, (error) => error);
+            const request = JSON.parse(child.stdin.read().toString());
+            if (abort === "cancelled") controller.abort();
+            if (abort === "timeout") [...timers.values()].find(timer => timer.delay === 1000).fn();
+            // Exercise the reader's valid grammar in both cleanup states.
+            // The current adapter normally emits start_failed/true and
+            // execution_failed/false; neither supplies an invented exit code.
+            const receipt = { nonce: request.nonce, execution_error: executionError,
+              exit_code: null, forced: false, root_exit_code: primary,
+              primary_exit_code: primary, cleanup_confirmed: cleanupConfirmed, reason: abort };
+            child.stderr.write("PINVOU_RELEASE_PROCESS " + JSON.stringify(receipt) + "\n");
+            child.emit("close", 0);
+            const error = await running;
+            const expected = primary !== null ? "release_subgate_failed"
+              : abort ? `release_subgate_${abort}` : `release_subgate_${executionError}`;
+            assert.equal(error?.code, expected, `${executionError}/${cleanupConfirmed}/${abort}/${primary}`);
+            assert.equal(error.cleanupConfirmed, cleanupConfirmed);
+            assert.equal(error.exitCode, primary !== null ? primary : !cleanupConfirmed || abort ? null : undefined);
+            assert.equal(error.cleanupError, cleanupConfirmed ? undefined : "release_subgate_cleanup_unconfirmed");
+            assert.equal(error.cause, undefined);
+            assert.equal(timers.size, 0);
+          } finally {
+            child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); delete globalThis[key];
+          }
+        }
+      }
+    }
   }
 });
 
