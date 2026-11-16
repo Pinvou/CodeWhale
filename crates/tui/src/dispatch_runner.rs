@@ -390,13 +390,20 @@ pub fn compose_pr_body_for_head(job: &CloudJob, patch: &PatchReceipt, head_sha: 
     // the final truncation. The title already shows a 72-char form of it, so
     // a clipped body summary discloses the elision and loses nothing the
     // title does not carry.
-    let summary = if patch.summary.trim().is_empty() {
+    let trimmed_summary = patch.summary.trim();
+    let summary = if trimmed_summary.is_empty() {
         "(the agent's commit list is the record)".to_string()
     } else {
-        format!(
-            "{}[…truncated]",
-            one_line(patch.summary.trim(), MAX_SUMMARY_BODY_CHARS)
-        )
+        // `one_line` flattens control characters one-for-one, so only an
+        // actually clipped summary gets the elision marker; a short summary
+        // passes through verbatim and must not claim a truncation that
+        // never happened.
+        let flat = one_line(trimmed_summary, MAX_SUMMARY_BODY_CHARS);
+        if trimmed_summary.chars().count() > MAX_SUMMARY_BODY_CHARS {
+            format!("{flat}[…truncated]")
+        } else {
+            flat
+        }
     };
     let receipts = format!(
         "\n\n\
@@ -1669,6 +1676,13 @@ mod tests {
         let patch = fixture_patch();
         let body = compose_pr_body_for_head(&job, &patch, &patch.head_sha);
         assert!(body.chars().count() <= MAX_BODY_CHARS);
+        // A short summary passes through verbatim and must not claim an
+        // elision that never happened.
+        assert!(
+            !body.contains("[…truncated]"),
+            "a short summary must not claim a truncation that never happened"
+        );
+        assert!(body.contains("## What the agent did\nFix the flaky dispatch test\n"));
         // Truncation must eat the Task section, never the receipts footer.
         assert!(body.contains("## Receipts"));
         assert!(body.contains("No-Issue: cloud dispatch cloud_00000000000000bb"));
