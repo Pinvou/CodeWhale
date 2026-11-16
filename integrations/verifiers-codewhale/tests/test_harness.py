@@ -289,6 +289,38 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
                     {},
                 )
 
+    async def test_hung_version_check_fails_closed_on_timeout(self):
+        async def hang(argv, env):
+            await asyncio.sleep(30)
+            return ProgramResult(0, "", "")
+
+        runtime = FakeRuntime()
+        runtime.run = hang
+        config = CodewhaleHarnessConfig(
+            version="0.9.1", binary_path="/candidate/codewhale"
+        )
+
+        with mock.patch.object(harness_module, "ROLLOUT_TIMEOUT_SECS", 0.01):
+            with self.assertRaisesRegex(
+                RuntimeError, "binary version check did not finish within"
+            ):
+                await CodewhaleHarness(config).setup(runtime)
+
+    async def test_hung_install_fails_closed_on_timeout(self):
+        async def hang(argv, env):
+            await asyncio.sleep(30)
+            return ProgramResult(0, "", "")
+
+        runtime = FakeRuntime()
+        runtime.run = hang
+        config = CodewhaleHarnessConfig(version="0.9.1")
+
+        with mock.patch.object(harness_module, "ROLLOUT_TIMEOUT_SECS", 0.01):
+            with self.assertRaisesRegex(
+                RuntimeError, "binary install did not finish within"
+            ):
+                await CodewhaleHarness(config).setup(runtime)
+
     async def test_non_resolved_terminal_receipt_fails_closed(self):
         stdout = successful_stream().replace('"resolved"', '"approval_required"')
         runtime = FakeRuntime(result=ProgramResult(0, stdout, ""))
