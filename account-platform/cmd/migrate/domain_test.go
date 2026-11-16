@@ -18,6 +18,9 @@ func TestProtectedMigrationIdentityUsesFrozenFacts(t *testing.T) {
 		version                int64
 		name, checksum, domain string
 	}{
+		{17, "approval_execution", "changed", "billing"},
+		{17, "renamed", "f4d6ad26e66ab16e8c030adf5b3f22246459c2d4d844116fe50e57d537631b11", "billing"},
+		{17, "custom_business", "custom_checksum", ""},
 		{32, "audit_export_protection", "changed", "account"},
 		{32, "renamed", "d60a688ed9ee49014725543dbe458ac4386940033f09549877491f8f835be5ad", "account"},
 		{32, "custom_business", "custom_checksum", ""},
@@ -57,6 +60,9 @@ func TestProtectedMigrationIdentityUsesFrozenFacts(t *testing.T) {
 		{900020, "outbox_aggregate_lookup", "changed", "account"},
 		{900020, "renamed", "c4ad07bf49d5faa3f7493df352ca7885a3be3c23c49a618a804fcc4825e2e615", "account"},
 		{900020, "custom_business", "custom_checksum", ""},
+		{900045, "provider_health_recent", "changed", "billing"},
+		{900045, "renamed", "0d1b5cc17cce2342540c4c75d15c783f53f37177412247ca5eefcd24d942d961", "billing"},
+		{900045, "custom_business", "custom_checksum", ""},
 		{79, "registration_bonus", "changed", "billing"},
 		{6, "merchant_customer_key", "changed", "payment-simulator"},
 		{5, "renamed", "c10369f3c1201aa37752d686645fac25c435b6e68daba401158f54090ae4e0bb", "payment-simulator"},
@@ -146,19 +152,21 @@ func TestMigrationDomainRetainsUnrelatedCustomHistory(t *testing.T) {
 	if err = connection.QueryRow(ctx, `SELECT to_regclass('owned_custom_facts') IS NOT NULL OR EXISTS(SELECT 1 FROM schema_migrations)`).Scan(&remains); err != nil || remains {
 		t.Fatal("generic rollback did not preserve its original semantics")
 	}
-	// Sharing a version number alone must not turn a custom schema into Account.
-	loaded[0].Version = 28
-	if domain, err = migrationDomain(ctx, connection, loaded, "owned-custom-history"); err != nil || domain != "owned-custom-history" {
-		t.Fatal("unrelated custom version 28 no longer generic")
-	}
-	if err = migrations.Up(ctx, connection, loaded); err != nil {
-		t.Fatal(err)
-	}
-	if err = migrations.DownOne(ctx, connection, loaded); err != nil {
-		t.Fatal("unrelated custom version 28 rollback rejected")
-	}
-	if err = connection.QueryRow(ctx, `SELECT to_regclass('owned_custom_facts') IS NOT NULL OR EXISTS(SELECT 1 FROM schema_migrations)`).Scan(&remains); err != nil || remains {
-		t.Fatal("unrelated custom version 28 rollback changed semantics")
+	// A shared version alone must not turn custom history into Billing/Account.
+	for _, version := range []int64{17, 28} {
+		loaded[0].Version = version
+		if domain, err = migrationDomain(ctx, connection, loaded, "owned-custom-history"); err != nil || domain != "owned-custom-history" {
+			t.Fatal("unrelated custom history no longer generic", version)
+		}
+		if err = migrations.Up(ctx, connection, loaded); err != nil {
+			t.Fatal(err)
+		}
+		if err = migrations.DownOne(ctx, connection, loaded); err != nil {
+			t.Fatal("unrelated custom rollback rejected", version)
+		}
+		if err = connection.QueryRow(ctx, `SELECT to_regclass('owned_custom_facts') IS NOT NULL OR EXISTS(SELECT 1 FROM schema_migrations)`).Scan(&remains); err != nil || remains {
+			t.Fatal("unrelated custom rollback changed semantics", version)
+		}
 	}
 	mixed := []migrations.Migration{{Version: 900001, Name: "outbox_publication_generation"}, {Version: 6, Name: "merchant_customer_key"}}
 	if _, err = migrationDomain(ctx, connection, mixed, "owned-custom-history"); err == nil {
