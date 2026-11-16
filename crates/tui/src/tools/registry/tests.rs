@@ -1832,3 +1832,67 @@ fn registered_typed_required_only_union_keeps_its_branch_groups() {
         tool.input_schema
     );
 }
+
+struct OrderedEnumLiteralTool;
+
+#[async_trait::async_trait]
+impl ToolSpec for OrderedEnumLiteralTool {
+    fn name(&self) -> &str {
+        "ordered_enum_probe"
+    }
+
+    fn description(&self) -> &str {
+        "ordered enum literal fixture"
+    }
+
+    fn input_schema(&self) -> Value {
+        // A property deliberately named `required` beside an object-valued
+        // enum literal whose data array order matters (review 5915330170):
+        // the canonicalizer used to sort the literal's `["b","a"]` into
+        // `["a","b"]`, replacing the only permitted argument value.
+        json!({
+            "type": "object",
+            "properties": {
+                "required": {"type": "array", "items": {"type": "string"}}
+            },
+            "enum": [{"required": ["b", "a"]}]
+        })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+
+    async fn execute(
+        &self,
+        _input: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("ok"))
+    }
+}
+
+#[test]
+fn registered_enum_literal_data_survives_the_canonicalize_pass() {
+    // The registry pipeline is sanitize then canonicalize; the sanitizer's
+    // enum/const instance-data rule keeps the literal, and the canonicalizer
+    // must not descend into it either — the advertised schema through
+    // build_api_tools must carry the literal exactly as the plugin declared
+    // it, order included (review 5915330170).
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let registry = ToolRegistryBuilder::new()
+        .with_tool(Arc::new(OrderedEnumLiteralTool))
+        .build(ctx);
+    let tool = registry
+        .to_api_tools()
+        .into_iter()
+        .find(|tool| tool.name == "ordered_enum_probe")
+        .expect("ordered enum tool registered");
+    assert_eq!(
+        tool.input_schema["enum"],
+        json!([{"required": ["b", "a"]}]),
+        "the registered enum literal must keep its declared data order: {}",
+        tool.input_schema
+    );
+}

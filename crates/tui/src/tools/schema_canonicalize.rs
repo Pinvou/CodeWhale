@@ -27,6 +27,17 @@ use serde_json::Value;
 pub fn canonicalize_schema(value: &mut Value) {
     match value {
         Value::Object(map) => {
+            // `enum`, `const`, and `default` carry INSTANCE data, not
+            // schema: an object under them is a literal argument, and a
+            // `required` key inside that literal is plugin data. Sorting
+            // its array or rebuilding its keys rewrites the only permitted
+            // value — `enum: [{"required": ["b","a"]}]` advertised as
+            // `["a","b"]` excludes the argument the plugin declared — so
+            // these subtrees are skipped entirely. Their bytes come from
+            // the manifest verbatim on every reconnect, so prefix-cache
+            // stability is preserved (review 5915330170, the registry
+            // companion to the sanitizer's enum/const instance-data rule).
+            const INSTANCE_DATA_KEYS: &[&str] = &["enum", "const", "default"];
             // Sort `required` arrays (they are sets per JSON Schema spec).
             if let Some(Value::Array(req)) = map.get_mut("required") {
                 sort_string_array(req);
@@ -39,8 +50,11 @@ pub fn canonicalize_schema(value: &mut Value) {
                     }
                 }
             }
-            // Recurse into every child value.
-            for v in map.values_mut() {
+            // Recurse into every child value, leaving instance data alone.
+            for (k, v) in map.iter_mut() {
+                if INSTANCE_DATA_KEYS.contains(&k.as_str()) {
+                    continue;
+                }
                 canonicalize_schema(v);
             }
             // Rebuild the map with sorted keys so serialization is deterministic.
@@ -203,5 +217,52 @@ mod tests {
             .map(|s| s.as_str())
             .collect();
         assert_eq!(keys, vec!["a_field", "m_field", "z_field"]);
+    }
+
+    #[test]
+    fn enum_literal_data_is_never_sorted_or_key_rebuilt() {
+        // `enum`/`const`/`default` carry instance data: an object literal
+        // under them is a permitted ARGUMENT, and a `required` key inside
+        // it is plugin data. Sorting the array rewrote the only permitted
+        // value — `{"required": ["b","a"]}` advertised as
+        // `{"required": ["a","b"]}` excludes the argument the plugin
+        // declared (review 5915330170) — so the canonicalizer must leave
+        // these subtrees byte-identical while still sorting the schema's
+        // own contract arrays.
+        let mut schema = json!({
+            "type": "object",
+            "required": ["zeta", "alpha"],
+            "properties": {
+                "required": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            },
+            "enum": [
+                {"required": ["b", "a"], "mode": {"nested": ["y", "x"]}},
+                {"other": ["q", "p"]}
+            ],
+            "const": {"required": ["d", "c"]},
+            "default": {"sorted": ["k", "j"]}
+        });
+        canonicalize_schema(&mut schema);
+        assert_eq!(
+            schema["required"],
+            json!(["alpha", "zeta"]),
+            "the schema's own required set is still canonicalized"
+        );
+        assert_eq!(
+            schema["enum"][0]["required"],
+            json!(["b", "a"]),
+            "the enum literal's data array must keep its declared order"
+        );
+        assert_eq!(
+            schema["enum"][0]["mode"]["nested"],
+            json!(["y", "x"]),
+            "nested data arrays inside the literal stay untouched"
+        );
+        assert_eq!(schema["enum"][1]["other"], json!(["q", "p"]));
+        assert_eq!(schema["const"]["required"], json!(["d", "c"]));
+        assert_eq!(schema["default"]["sorted"], json!(["k", "j"]));
     }
 }
