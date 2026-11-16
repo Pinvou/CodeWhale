@@ -290,13 +290,6 @@ pub struct Capture {
     pub input_aligned: bool,
 }
 
-impl Capture {
-    /// Device physical pixels → input coordinate scale (per-platform rule encoded here).
-    pub fn input_scale(&self) -> (f64, f64) {
-        (self.input_scale_x, self.input_scale_y)
-    }
-}
-
 /// The UI element hit by `element_at_point` (coordinates in input coordinate space).
 #[derive(Debug, Clone, Serialize)]
 pub struct ElementInfo {
@@ -343,7 +336,8 @@ pub struct UiTreeOptions {
 #[derive(Debug, Clone)]
 pub enum ComputerUseError {
     /// This platform/session does not support the capability (e.g. the portal does not offer
-    /// RemoteDesktop, an unimplemented backend).
+    /// RemoteDesktop, an unimplemented backend), or a policy refusal on a supported
+    /// platform (e.g. macOS refusing self-targeted Accessibility reads).
     Unsupported {
         capability: &'static str,
         detail: String,
