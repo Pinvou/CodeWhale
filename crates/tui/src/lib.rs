@@ -7556,9 +7556,10 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             enabled: true,
             status: "custom_endpoint",
             function_strict_sent: false,
-            message: "enabled, but the strict tool pipeline only acts on official DeepSeek \
-                      https endpoints; this custom endpoint keeps its tools unreshaped and \
-                      `tool_choice` falls back to `auto`"
+            message: "enabled, but the strict tool pipeline only acts on official \
+                      DeepSeek-family https endpoints (the api.deepseeki.com legacy \
+                      compat host is also recognized); this custom endpoint keeps its \
+                      tools unreshaped and `tool_choice` falls back to `auto`"
                 .to_string(),
             recommended_base_url: None,
         };
@@ -7617,9 +7618,14 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
                 enabled: true,
                 status: "fallback_non_beta",
                 function_strict_sent: false,
-                message:
-                    "enabled, but function.strict is stripped for this non-beta DeepSeek endpoint"
-                        .to_string(),
+                // Only the flag is stripped here: the route gate is in scope,
+                // so the strict reshaping still applies and `tool_choice`
+                // stays `required` — the message must say so or the user
+                // reads this verdict as "strict semantics are fully off".
+                message: "enabled, but function.strict is stripped for this non-beta DeepSeek \
+                          endpoint; the strict schema reshaping still applies and \
+                          `tool_choice` stays `required`"
+                    .to_string(),
                 recommended_base_url: Some(recommended.to_string()),
             }
         }
@@ -14115,6 +14121,11 @@ mod doctor_endpoint_tests {
 
         assert_eq!(status.status, "fallback_non_beta");
         assert!(!status.function_strict_sent);
+        // Only the flag is stripped on this route: the verdict must disclose
+        // that the reshaping still applies and `tool_choice` stays
+        // `required`, or the user reads it as "strict semantics fully off".
+        assert!(status.message.contains("reshaping still applies"));
+        assert!(status.message.contains("`tool_choice` stays `required`"));
         assert_eq!(
             status.recommended_base_url.as_deref(),
             Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL)
@@ -14160,7 +14171,16 @@ mod doctor_endpoint_tests {
 
         assert_eq!(status.status, "custom_endpoint");
         assert!(!status.function_strict_sent);
-        assert!(status.message.contains("official DeepSeek"));
+        // "DeepSeek-family", not bare "official": the gate also accepts the
+        // legacy `api.deepseeki.com` compat host, which is recognized but
+        // not official (docs/REBRAND.md) — the same distinction the
+        // in-scope and provider_mismatch arms draw.
+        assert!(status.message.contains("official DeepSeek-family"));
+        assert!(
+            status
+                .message
+                .contains("`tool_choice` falls back to `auto`")
+        );
     }
 
     #[test]
