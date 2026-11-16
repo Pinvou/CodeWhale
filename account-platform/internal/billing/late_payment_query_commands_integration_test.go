@@ -65,7 +65,7 @@ func lateQueryFixture(t *testing.T) (*PostgresRepository, context.Context, *Serv
 		t.Fatal(err)
 	}
 	provider := &lateQueryTestProvider{result: ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Status: "PENDING", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, ExternalCustomerKey: order.RequesterID.String()}}
-	coordinator, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

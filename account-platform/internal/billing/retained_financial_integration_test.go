@@ -208,7 +208,7 @@ func retainedFinanceOrder(t *testing.T, r *PostgresRepository, ctx context.Conte
 	}
 	id := uuid.NewString()
 	provider := &retainedFinancialProvider{result: ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Status: "SUCCESS", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, ChannelTransactionID: &id, PaidAt: &now, ExternalCustomerKey: owner.String()}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func retainedFinanceOrder(t *testing.T, r *PostgresRepository, ctx context.Conte
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	order, _, err = c.mergeSuccessfulPaymentWithinTransaction(ctx, tx, order, "QUERY", "fixture-paid-"+id, []byte(`{"controlled":true}`), provider.result, false, now)
+	order, _, err = mergeRetainedFixturePayment(ctx, tx, c, order, "QUERY", "fixture-paid-"+id, []byte(`{"controlled":true}`), provider.result, false, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +734,7 @@ func TestRetainedSimulatorCallbackCreditsFrozenMappingExactlyOnce(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

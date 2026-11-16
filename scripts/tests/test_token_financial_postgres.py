@@ -16,7 +16,7 @@ SPEC.loader.exec_module(RUNNER)
 
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
-EXPECTED_RETAINED_ROOT_COUNT = 79
+EXPECTED_RETAINED_ROOT_COUNT = 81
 
 
 CHECKPOINT_LEAF_ROOTS = {
@@ -122,6 +122,56 @@ class PostgresQuiescenceTests(unittest.TestCase):
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_payment_credit_direct_guards_and_resolver_cases_are_mandatory(self):
+        required = {
+            "TestPaymentCreditJournalAdmissionGuardPostgres": {
+                f"{entry}-{mode}"
+                for entry in ("RECHARGE", "REPAIR_CREDIT")
+                for mode in ("missing", "wrong-order", "wrong-payer", "already-applied")
+            },
+            "TestPaymentCreditResolverIntegrityPostgres": {
+                "applied-without-effects", "prepared-with-effects",
+                "missing-transaction", "fingerprint-mismatch",
+            },
+        }
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        for root, children in required.items():
+            self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+            self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+            self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+            self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], root))
+            events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+            RUNNER.verify_results(events, {root}, **options)
+            for child in children:
+                for invalid in (
+                    [event for event in events if event.get("Test") != root + "/" + child],
+                    events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+                ):
+                    with self.subTest(root=root, child=child), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(invalid, {root}, **options)
+        self.assertIn("pending-subject-dml-and-closed-admission-boundaries", RUNNER.EXACT_REQUIRED_CHILDREN["TestPaymentCreditClosureBoundaryPostgres"])
+
+    def test_direct_repair_requires_historical_model_isolation_and_exact_prefix_down(self):
+        root = "TestDirectPaymentRepairCommandReceiptPostgres"
+        children = {"pre-admission-fixture-rejects-current-schema", "runtime-immutable-command-and-exact-prefix-down"}
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], root))
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
     def test_orphan_order_index_public_migration_is_mandatory(self):
         root = "TestOrphanPaidOrderIndexPublicMigration"
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
@@ -243,6 +293,29 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             ):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_payment_cleanup_boundary_and_clearance_are_selected_with_real_cases(self):
+        boundary = "TestPaymentCreditClosureBoundaryPostgres"
+        retention = "TestPaymentCreditRetentionPublicPostgres"
+        self.assertTrue({boundary, retention} <= RUNNER.SCHEMA_REQUIRED)
+        self.assertIn(boundary, RUNNER.SCHEMA_CHILD_REQUIRED)
+        self.assertIn(retention, RUNNER.SCHEMA_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        for root in (boundary,retention):
+            self.assertIn(root,command[command.index("-run")+1])
+        roots = {boundary,retention}
+        events = self.events(roots,RUNNER.SCHEMA_PACKAGE,children=True)
+        options = {"package":RUNNER.SCHEMA_PACKAGE,"exact_roots":True,"require_children":True,"children_required":{boundary,retention}}
+        RUNNER.verify_results(events,roots,**options)
+        for root in roots:
+            for invalid in ([event for event in events if event.get("Test","").split("/",1)[0]!=root],events+[{"Action":"skip","Package":RUNNER.SCHEMA_PACKAGE,"Test":root}]):
+                with self.subTest(root=root),self.assertRaises(RuntimeError):RUNNER.verify_results(invalid,roots,**options)
+        for child in RUNNER.EXACT_REQUIRED_CHILDREN[boundary]:
+            missing=[event for event in events if event.get("Test")!=boundary+"/"+child]
+            with self.subTest(child=child),self.assertRaises(RuntimeError):RUNNER.verify_results(missing,roots,**options)
+
 
     def test_password_preparation_requires_redaction_boundaries_and_reference_safety(self):
         root = "TestPasswordPreparationAuthorizationPostgres"
@@ -1057,7 +1130,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_reconciliation_retry_identity_root_is_selected_and_cannot_be_faked(self):
         root = "TestReconciliationFairRetryRegisteredIdentity"
-        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 14)
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 16)
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
         self.run_main_fixture()
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
@@ -1744,7 +1817,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres"})
+        self.assertEqual(roots, {"TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditRetentionPublicPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres"})
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)

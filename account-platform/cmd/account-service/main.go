@@ -18,6 +18,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcredit"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 )
 
@@ -117,6 +118,11 @@ func main() {
 	if err != nil {
 		log.Fatal("ACCOUNT_CLOSURE_CONFIGURATION_INVALID")
 	}
+	creditResolver, err := paymentcredit.NewHTTPClient(os.Getenv("BILLING_HTTP_URL"), credential)
+	if err != nil {
+		log.Fatal("ACCOUNT_PAYMENT_CREDIT_CONFIGURATION_INVALID")
+	}
+	workers = append(workers, accountBackgroundTask{"payment-credit-recovery", func(ctx context.Context) { repository.RunPaymentCreditRecovery(ctx, creditResolver) }})
 	workers = append(workers, accountBackgroundTask{"account-closure", account.NewAccountClosureWorker(repository, 5*time.Second, closureBilling, closureToken).WithCleanup(identities, closureBilling, closureToken).Run})
 
 	if enabled("MOBILE_AUTH_ENABLED") {

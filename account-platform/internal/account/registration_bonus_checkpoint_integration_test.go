@@ -255,7 +255,7 @@ func TestRegistrationBonusCheckpointGuardsPostgresIntegration(t *testing.T) {
 	// This guard release refuses at its forward-only head. Exercise the
 	// original checkpoint guard independently so that refusal cannot mask it.
 	assertHistoricalRollbackRefusal(t, r, loaded, 900014, "P0001", "registration bonus eligibility facts exist; destructive rollback is forbidden")
-	if err = accountschema.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "organization evidence truncate protection is forward-only") {
+	if err = accountschema.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "payment credit closure fence is forward-only; preserve pending and resolved outcomes") {
 		t.Fatalf("public down discarded a committed checkpoint: %v", err)
 	}
 	if registrationBonusCheckpointSnapshot(t, r) != before {
@@ -305,17 +305,7 @@ func TestRegistrationBonusCheckpointMigrationPostgresIntegration(t *testing.T) {
 	})
 	ctx := context.Background()
 	connection := registrationBonusCheckpointMigrator(t, r)
-	input, err := migrations.Load("../../migrations/account")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var history []migrations.Migration
-	for _, migration := range input {
-		if migration.Version <= 900014 {
-			history = append(history, migration)
-		}
-	}
-	input = history
+	input := registrationBonusCheckpointMigrationPrefix(t)
 	if err := accountschema.DownOne(ctx, connection, input); err != nil {
 		t.Fatal("empty unbound checkpoint rollback failed: ", err)
 	}
@@ -335,4 +325,19 @@ func TestRegistrationBonusCheckpointMigrationPostgresIntegration(t *testing.T) {
 	if err := accountschema.DownOne(ctx, connection, input); err == nil || !strings.Contains(err.Error(), "destructive rollback is forbidden") {
 		t.Fatalf("public down discarded a completed key binding: %v", err)
 	}
+}
+
+func registrationBonusCheckpointMigrationPrefix(t *testing.T) []migrations.Migration {
+	t.Helper()
+	loaded, err := migrations.Load("../../migrations/account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prefix []migrations.Migration
+	for _, migration := range loaded {
+		if migration.Version <= 900014 {
+			prefix = append(prefix, migration)
+		}
+	}
+	return prefix
 }

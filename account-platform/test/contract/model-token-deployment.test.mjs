@@ -458,6 +458,11 @@ test('Compose overlay uses one event cluster, per-service rotated credentials an
 test('workload roles preserve existing permissions and narrowly register credential authority/activation', async () => {
   const overlay = YAML.parse(await read('deploy/compose/compose.model-token.yaml'), { merge: true });
   const account = JSON.parse(overlay.services['account-service'].environment.WORKLOAD_IDENTITY_RULES_JSON);
+  // Both supported incoming Account arrays grant admission/retention checks
+  // once, only to Billing; another workload or a duplicate grant must fail.
+  for (const rules of [account, JSON.parse(await read('deploy/production/workload-account-rules.json.template'))]) {
+    assert.deepEqual(rules.flatMap(rule => rule.permissions.filter(permission => permission === 'internal.account.payment-credit.admit').map(() => rule.service)), ['billing-service']);
+  }
   assert.deepEqual(account.find(rule => rule.service === 'token-credential-portal').permissions, ['internal.authorization.check']);
   const token = JSON.parse(overlay.services['token-gateway'].environment.WORKLOAD_IDENTITY_RULES_JSON);
   const billing = JSON.parse(overlay.services['billing-service'].environment.WORKLOAD_IDENTITY_RULES_JSON);
@@ -487,7 +492,7 @@ test('workload roles preserve existing permissions and narrowly register credent
 const billingWorkloadPermissions = {
   'account-service': [
     'internal.billing.wallet.ensure', 'internal.billing.registration-bonus.provision', 'internal.billing.account-closure.assess',
-    'internal.billing.account-closure.isolate', 'internal.billing.organization.lifecycle',
+    'internal.billing.account-closure.isolate', 'internal.billing.payment-credit.resolve', 'internal.billing.organization.lifecycle',
     'internal.billing.organization-unit.lifecycle', 'internal.billing.organization-member.lifecycle',
     'internal.billing.approval-activation.read', 'internal.billing.approval-proof.read', 'internal.billing.approval-effect.read', 'internal.billing.approval-result.read',
   ],
@@ -528,9 +533,10 @@ function billingRulesFromHelmTemplate(source) {
   return rules;
 }
 
-test('Billing Compose and real Helm template preserve exact least-privilege workload sets', async () => {
+test('Billing Compose, Helm and production templates preserve exact least-privilege workload sets', async () => {
   const overlay = YAML.parse(await read('deploy/compose/compose.model-token.yaml'), { merge: true });
   assertBillingWorkloadPermissions(JSON.parse(overlay.services['billing-service'].environment.WORKLOAD_IDENTITY_RULES_JSON));
+  assertBillingWorkloadPermissions(JSON.parse(await read('deploy/production/workload-billing-rules.json.template')));
   const source = await read('deploy/helm/account-platform/templates/app-deployments.yaml');
   const rules = billingRulesFromHelmTemplate(source);
   assertBillingWorkloadPermissions(rules);

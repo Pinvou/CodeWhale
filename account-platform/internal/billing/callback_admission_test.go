@@ -91,7 +91,7 @@ func admissionFixture(t *testing.T, repository *PostgresRepository) (*Service, *
 	if repository == nil {
 		repository = &PostgresRepository{}
 	}
-	coordinator, err := NewPaymentCoordinatorWithProvider(repository, &admissionFixtureProvider{}, "test")
+	coordinator, err := newBillingFixturePaymentCoordinator(repository, &admissionFixtureProvider{}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
