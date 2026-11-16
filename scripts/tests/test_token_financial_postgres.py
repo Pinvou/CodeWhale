@@ -122,6 +122,25 @@ class PostgresQuiescenceTests(unittest.TestCase):
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_adjustment_proof_rollback_requires_empty_and_retained_public_entries(self):
+        root = "TestBillingManualAdjustmentProofRollbackPostgres"
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        expected = {f"{state}/{entry}" for state in ("empty", "retained-proof") for entry in ("public-api", "actual-cli", "renamed-history-cli")}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
     def test_commerce_account_roots_and_each_required_case_cannot_be_faked(self):
         expected = {
             "TestCommerceManualCompletionMigrationPostgres": {
@@ -1169,7 +1188,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_reconciliation_retry_identity_root_is_selected_and_cannot_be_faked(self):
         root = "TestReconciliationFairRetryRegisteredIdentity"
-        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 23)
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 24)
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
         self.run_main_fixture()
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
@@ -1856,7 +1875,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestCommerceClaimMappingLockKeepsLeaseLive", "TestCommerceClaimSubjectLockKeepsLeaseLive", "TestCommerceClosureCallbacksRespectSubjectFence", "TestF02CommerceClaimWaitStartsFreshLease", "TestF02CommerceConfirmedProducersPreserveStatuses", "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock", "TestF02CommerceOriginal15LateUpgradePreservesFacts", "TestF02CommerceSupersededGenerationCannotDispatch", "TestF02PublicCommerceCustomerLifecycle", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestF09EntitlementPackageIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestManualRetentionHistoricalHardeningPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestReconciliationFairRetryRegisteredIdentity", "TestTokenWalletReceiptSchemaPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestUsageWaiverHistoricalSchemaPostgres"})
+        self.assertEqual(roots, {"TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestCommerceClaimMappingLockKeepsLeaseLive", "TestCommerceClaimSubjectLockKeepsLeaseLive", "TestCommerceClosureCallbacksRespectSubjectFence", "TestF02CommerceClaimWaitStartsFreshLease", "TestF02CommerceConfirmedProducersPreserveStatuses", "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock", "TestF02CommerceOriginal15LateUpgradePreservesFacts", "TestF02CommerceSupersededGenerationCannotDispatch", "TestF02PublicCommerceCustomerLifecycle", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestF09EntitlementPackageIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestManualRetentionHistoricalHardeningPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestReconciliationFairRetryRegisteredIdentity", "TestTokenWalletReceiptSchemaPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingManualAdjustmentProofRollbackPostgres"})
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)
