@@ -2972,6 +2972,9 @@ impl TranscriptConfig {
 /// this hook, so trusted policies can overwrite matching default header keys.
 /// Matching vision route metadata is installed before its hook; vision retains
 /// its request-level authentication after client construction.
+/// This is a trusted in-process capability, not a sandbox: the host can change
+/// transport security settings, including disabling TLS certificate validation.
+/// Only install policy implementations supplied by the embedding host.
 pub trait ModelHttpPolicy: std::fmt::Debug + Send + Sync {
     fn configure(
         &self,

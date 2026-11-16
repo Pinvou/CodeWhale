@@ -94,7 +94,10 @@ impl ImageAnalyzeTool {
                 crate::tls::reqwest_client_builder(),
                 false,
             )
-            // Bound only the connect handshake. A client- or request-level
+            // Independent routes default to a 10-second connect handshake;
+            // matching primary-route defaults below replace this with 30 seconds,
+            // and the trusted host policy can override it afterward.
+            // A client- or request-level
             // `read_timeout` would start counting at `send()` and never
             // reset before the response headers, quietly re-introducing a
             // total deadline on the upload + long non-streaming generation;

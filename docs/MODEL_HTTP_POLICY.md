@@ -35,7 +35,10 @@ with logical-call idempotency enabled. Those matches retain the primary route's
 headers, user agent and connection defaults; unrelated routes do not borrow its
 authentication or context headers.
 The trusted host policy runs after these defaults and can explicitly override
-them. Vision request authentication is still applied at request time.
+them, including TLS certificate validation. This is a capability for trusted
+in-process host code, not an isolation boundary for untrusted policy plugins.
+Only the embedding host can install an implementation; deserializing settings
+cannot install one. Vision request authentication is still applied at request time.
 
 Speech synthesis uses the model client and is covered. Voice transcription,
 prompt suggestions, credential probes, MCP servers and separate Fleet worker
