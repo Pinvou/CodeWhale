@@ -330,7 +330,7 @@ class ReuseTests(unittest.TestCase):
             # workflow Bash and selector; assert each worker's actual options.
             (scripts/'run-frontend-smokes.mjs').write_text(
                 "import assert from 'node:assert/strict';\n"
-                "assert.deepEqual(process.argv.slice(2), ['--selected', '--shard', process.env.EXPECTED_SHARD]);\n"
+                "assert.deepEqual(process.argv.slice(2), ['--selected', '--shard', process.env.EXPECTED_SHARD, '--isolate-network']);\n"
                 "process.stdin.pipe(process.stdout);\n", encoding='utf-8')
             old = root/'pinvou3-app/src/features/settings/review.js'
             new = root/'pinvou3-app/src/shared/review.js'
