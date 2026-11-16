@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::git::MAX_OUTPUT_CHARS;
+use super::process::drain_truncated;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_bool, optional_str, optional_u64, required_str,
@@ -130,6 +131,9 @@ impl ToolSpec for GitLogTool {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (content, truncated, omitted_chars) = truncate_with_note(&stdout, MAX_OUTPUT_CHARS);
+        // A drain grace that gave up on a pipe still holding output means the
+        // stdout above is partial; surface that like any other truncation.
+        let truncated = truncated || drain_truncated(&output);
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
             "working_dir": git_ctx.working_dir,
@@ -252,6 +256,7 @@ impl ToolSpec for GitShowTool {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (content, truncated, omitted_chars) = truncate_with_note(&stdout, MAX_OUTPUT_CHARS);
+        let truncated = truncated || drain_truncated(&output);
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
             "working_dir": git_ctx.working_dir,
@@ -386,6 +391,7 @@ impl ToolSpec for GitBlameTool {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (content, truncated, omitted_chars) = truncate_with_note(&stdout, MAX_OUTPUT_CHARS);
+        let truncated = truncated || drain_truncated(&output);
         Ok(ToolResult::success(content).with_metadata(json!({
             "command": command_str,
             "working_dir": working_dir,
