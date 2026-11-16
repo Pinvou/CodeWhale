@@ -12093,12 +12093,17 @@ fn clip_evidence_block(block: &str) -> (String, bool) {
     if total <= SUBAGENT_EVIDENCE_CHAR_BUDGET {
         return (block.to_string(), false);
     }
-    let chars: Vec<char> = block.chars().collect();
-    let head: String = chars.iter().take(SUBAGENT_EVIDENCE_HEAD_CHARS).collect();
-    let tail: String = chars
-        .iter()
-        .skip(total.saturating_sub(SUBAGENT_EVIDENCE_TAIL_CHARS))
-        .collect();
+    // Char-counting without materializing the block: `chars().collect()` on a
+    // multi-megabyte evidence section would transiently cost ~4 bytes per
+    // input byte. The scan is O(total) time with O(head + tail) space.
+    let head: String = block.chars().take(SUBAGENT_EVIDENCE_HEAD_CHARS).collect();
+    let tail_start = block
+        .char_indices()
+        .rev()
+        .nth(SUBAGENT_EVIDENCE_TAIL_CHARS - 1)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let tail: String = block[tail_start..].to_string();
     let omitted = total
         .saturating_sub(SUBAGENT_EVIDENCE_HEAD_CHARS)
         .saturating_sub(SUBAGENT_EVIDENCE_TAIL_CHARS);
