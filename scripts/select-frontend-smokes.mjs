@@ -100,6 +100,7 @@ const FULL_PREFIXES = [
   "pinvou3-app/vite.config.mjs",
   "scripts/mcp-server-contract-smoke.py",
   "scripts/run-frontend-smokes.mjs",
+  "scripts/ci-browser-network.py",
   "scripts/run-user-journey-tests.sh",
   "scripts/select-frontend-smokes.mjs",
 ];
