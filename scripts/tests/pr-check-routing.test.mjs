@@ -1217,6 +1217,7 @@ test('frontend shards are independently scheduled only on applicable Ready and q
     const run = stepRun(browser, name);
     assert.match(run, /^set -euo pipefail$/m);
     assert.match(run, /run-frontend-smokes\.mjs --selected --shard "\$\{\{ matrix.shard \}\}\/4"/);
+    assert.match(run, /run-frontend-smokes\.mjs[^\n]+--isolate-network/);
   }
   const expression = browser.match(/^    if: \$\{\{ (.*) \}\}$/m)[1];
   for (const event of ['pull_request', 'merge_group', 'push']) {
@@ -1771,7 +1772,7 @@ test("credential origin browser matrix runs after browser preparation without ac
   const run = stepRun(job, name);
   assert.match(run, /^set -euo pipefail$/m);
   assert.match(run, /^test -x "\$\{CHROME:\?browser preparation must provide CHROME\}"$/m);
-  assert.match(run, /^python3 \.\.\/scripts\/ci-fixture-process\.py --receipt "\$PINVOU_CI_RESOURCE_LEDGER\/credential-origin\.json" -- node --test --test-reporter=tap tests\/credential_origin_scope_probe\.test\.mjs \| tee "\$report"$/m);
+  assert.match(run, /^python3 \.\.\/scripts\/ci-fixture-process\.py --receipt "\$PINVOU_CI_RESOURCE_LEDGER\/credential-origin\.json" -- python3 \.\.\/scripts\/ci-browser-network\.py -- node --test --test-reporter=tap tests\/credential_origin_scope_probe\.test\.mjs \| tee "\$report"$/m);
   assert.match(run, /^grep -Eq '\^# pass \[1-9\]\[0-9\]\*\$' "\$report"$/m);
   assert.match(run, /^grep -Fxq '# fail 0' "\$report"$/m);
   assert.match(run, /^grep -Fxq '# skipped 0' "\$report"$/m);
@@ -1791,7 +1792,8 @@ test("credential origin browser matrix shell rejects failed, empty or skipped re
       const prefix = `CHROME="$(command -v bash)";
         python3() {
           [[ "$1" == ../scripts/ci-fixture-process.py && "$2" == --receipt && "$3" == "$PINVOU_CI_RESOURCE_LEDGER/credential-origin.json" && "$4" == -- ]] || return 99;
-          shift 4; "$@";
+          [[ "$5" == python3 && "$6" == ../scripts/ci-browser-network.py && "$7" == -- ]] || return 98;
+          shift 7; "$@";
         }
         node() { printf '%s' '${summary}'; return ${exit}; };\n`;
       const result = spawnSync(bash, ["-c", prefix + run], {
@@ -1810,5 +1812,19 @@ test("credential origin browser matrix shell rejects failed, empty or skipped re
   } finally {
     assert.ok(directory.startsWith(join(tmpdir(), "pinvou-credential-matrix-gate-")));
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('all Linux frontend test entry points isolate their whole fixture tree after preparation', () => {
+  const job = jobBlock('frontend-test');
+  const logic = namedStep(job, '前端逻辑测试 (pet 全套 + diff parser + markdown)');
+  assert.match(logic, /ci-fixture-process\.py --receipt[^\n]+ -- python3 \.\.\/scripts\/ci-browser-network\.py -- npm test$/m);
+  assert.ok(job.indexOf(namedStep(job, 'Verify browser loopback isolation and retirement')) < job.indexOf(namedStep(job, '前端逻辑测试 (pet 全套 + diff parser + markdown)')));
+  assert.ok(job.indexOf(namedStep(job, '安装前端依赖')) < job.indexOf(namedStep(job, '前端逻辑测试 (pet 全套 + diff parser + markdown)')));
+  for (const id of ['frontend-test', 'frontend-browser-test']) {
+    const preflight = namedStep(jobBlock(id), 'Verify browser loopback isolation and retirement');
+    assert.match(preflight, /PINVOU_TEST_NETWORK_ISOLATION: "1"/);
+    assert.doesNotMatch(preflight, /^ {8}(?:if|continue-on-error):/m);
+    assert.match(preflight, /python3 -m unittest discover -s \.\.\/scripts\/tests -p test_ci_browser_network\.py -v/);
   }
 });
