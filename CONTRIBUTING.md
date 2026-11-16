@@ -131,6 +131,17 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   capture stalls. Up to three read-only failure snapshots
   per browser are allowed even after the first three page numbers; they do not
   mask the live page or change the original exception, wait arguments or budget.
+- Linux CI browser shards pass `--isolate-network` to the shared smoke runner.
+  After dependency installation and builds, each smoke's driver, mock servers,
+  Vite and Chrome share a private user/network namespace with loopback only.
+  This prevents other jobs' Docker interface changes from canceling local module
+  requests. The original UID/GID and resource cgroup are retained, setup
+  capabilities are dropped before tests execute, and the outer process
+  supervisor still owns detached descendants and cancellation. A missing
+  `unshare`, denied namespace, or unconfirmed isolation fails the job without
+  retrying in the host network. No fixture in this stage may depend on external
+  downloads/services; prepare those dependencies before isolation. Local runs
+  can request the same flag; other platforms keep their existing behavior.
 - Run one-shot commands through `scripts/ci-fixture-process.py`. Its Linux
   subreaper / Windows child Job Object contains detached descendants and assigns
   a private temporary directory. A killed Linux controller can be recovered only

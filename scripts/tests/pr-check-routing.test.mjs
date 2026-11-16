@@ -1210,6 +1210,7 @@ test('frontend shards are independently scheduled only on applicable Ready and q
     const run = stepRun(browser, name);
     assert.match(run, /^set -euo pipefail$/m);
     assert.match(run, /run-frontend-smokes\.mjs --selected --shard "\$\{\{ matrix.shard \}\}\/4"/);
+    assert.match(run, /run-frontend-smokes\.mjs[^\n]+--isolate-network/);
   }
   const expression = browser.match(/^    if: \$\{\{ (.*) \}\}$/m)[1];
   for (const event of ['pull_request', 'merge_group', 'push']) {

@@ -841,6 +841,7 @@ jobs:
               - 'scripts/deploy-remote-relay.sh'
               - 'scripts/run-user-journey-tests.sh'
               - 'scripts/run-frontend-smokes.mjs'
+              - 'scripts/ci-browser-network.py'
               - 'scripts/select-frontend-smokes.mjs'
               - 'scripts/mcp-server-contract-smoke.py'
               - 'pinvou3-app/package.json'
@@ -1354,6 +1355,11 @@ jobs:
       - name: Initialize owned test resource ledger
         run: python3 ../scripts/ci-resource-ledger.py --init
 
+      - name: Verify browser loopback isolation and retirement
+        env:
+          PINVOU_TEST_NETWORK_ISOLATION: "1"
+        run: timeout --kill-after=15 60 python3 -m unittest discover -s ../scripts/tests -p test_ci_browser_network.py -v
+
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
@@ -1422,7 +1428,7 @@ jobs:
           test -z "$extra"
           git diff --name-only "$base" "$TESTED_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
-            | node ../scripts/run-frontend-smokes.mjs --selected --shard "${{ matrix.shard }}/4"
+            | node ../scripts/run-frontend-smokes.mjs --selected --shard "${{ matrix.shard }}/4" --isolate-network
 
       - name: Merge Queue diff-selected browser smoke
         if: ${{ github.event_name == 'merge_group' }}
@@ -1435,7 +1441,7 @@ jobs:
           set -euo pipefail
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
-            | node ../scripts/run-frontend-smokes.mjs --selected --shard "${{ matrix.shard }}/4"
+            | node ../scripts/run-frontend-smokes.mjs --selected --shard "${{ matrix.shard }}/4" --isolate-network
 
       - name: Confirm test resource retirement
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
