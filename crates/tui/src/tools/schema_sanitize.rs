@@ -640,30 +640,70 @@ fn schema_number_equal(a: &serde_json::Number, b: &serde_json::Number) -> bool {
 /// between semantically equivalent branches and keep an unsatisfiable
 /// union (review thread PRRT_kwDOTh_H9863shgR). Numbers with float
 /// participation outside the exact window are therefore NOT provably
-/// disjoint; non-numeric pairs compare structurally.
+/// disjoint; compound values prove disjointness positively through
+/// [`compound_values_provably_disjoint`] (review 5916351834).
 fn pin_values_provably_disjoint(a: &Value, b: &Value) -> bool {
     match (a.as_number(), b.as_number()) {
-        (Some(x), Some(y)) => {
-            let xi = x
-                .as_i64()
-                .map(i128::from)
-                .or_else(|| x.as_u64().map(i128::from));
-            let yi = y
-                .as_i64()
-                .map(i128::from)
-                .or_else(|| y.as_u64().map(i128::from));
-            if let (Some(p), Some(q)) = (xi, yi) {
-                return p != q;
-            }
-            let (fx, fy) = (x.as_f64(), y.as_f64());
-            if fx != fy {
-                return true;
-            }
-            // f64-equal with a float (or an in-window integer) side:
-            // mathematically equal as far as the representation decides.
-            false
+        (Some(x), Some(y)) => numbers_provably_disjoint(x, y),
+        _ => compound_values_provably_disjoint(a, b),
+    }
+}
+
+/// The bounded numeric disjointness proof for a scalar pair: distinct
+/// integers are provably distinct through their stored values, differing
+/// f64 projections are provably distinct, and an f64-equal mixed/in-window
+/// pair stays unproven (mathematically equal as far as the representation
+/// decides).
+fn numbers_provably_disjoint(x: &serde_json::Number, y: &serde_json::Number) -> bool {
+    let xi = x
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| x.as_u64().map(i128::from));
+    let yi = y
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| y.as_u64().map(i128::from));
+    if let (Some(p), Some(q)) = (xi, yi) {
+        return p != q;
+    }
+    let (fx, fy) = (x.as_f64(), y.as_f64());
+    if fx != fy {
+        return true;
+    }
+    // f64-equal with a float (or an in-window integer) side:
+    // mathematically equal as far as the representation decides.
+    false
+}
+
+/// Disjointness for compound (and leaf) pairs, proved POSITIVELY: two
+/// containers are provably unequal when their shape differs or any child
+/// pair is provably disjoint. Negating recursive equality would promote an
+/// UNKNOWN child comparison — e.g. `9007199254740994` beside
+/// `9007199254740994.0` wrapped in otherwise-equal arrays — into a fake
+/// proof of disjointness, keeping equivalent branches and shipping an
+/// unsatisfiable exactly-one (review 5916351834). Leaves route numeric
+/// pairs through the bounded numeric proof; every other leaf kind has an
+/// exact equality, so representation inequality is affirmative proof.
+fn compound_values_provably_disjoint(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() != y.len()
+                || x.iter()
+                    .zip(y.iter())
+                    .any(|(p, q)| compound_values_provably_disjoint(p, q))
         }
-        _ => !schema_value_equal(a, b),
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() != y.len()
+                || x.keys().any(|key| !y.contains_key(key))
+                || x.iter().any(|(key, value)| {
+                    y.get(key)
+                        .is_some_and(|other| compound_values_provably_disjoint(value, other))
+                })
+        }
+        _ => match (a.as_number(), b.as_number()) {
+            (Some(x), Some(y)) => numbers_provably_disjoint(x, y),
+            _ => a != b,
+        },
     }
 }
 
@@ -829,6 +869,7 @@ impl<'a> PairAdmission<'a> {
                     .and_then(|props| props.get(name.as_str())),
             );
             if depth < 8
+                && self.enclosing_entry_admits_object_witness(name.as_str())
                 && is_object_branch(left_entry)
                 && is_object_branch(right_entry)
                 && self.witness_provable(
@@ -989,6 +1030,39 @@ impl<'a> PairAdmission<'a> {
             return json_value_is_type(candidate, expected);
         }
         false
+    }
+
+    /// Arm 3 witness root-validity: the nested witness sub-instance is an
+    /// OBJECT (both entries are object branches), so the CONTAINING root
+    /// field's own value constraint must admit object sub-instances. A root
+    /// declaring `payload: {type: string}` while the branches declare
+    /// `payload` as objects makes every root-valid sub-instance a string —
+    /// the nested witness matches no root-valid instance and the projected
+    /// union keeps no usable argument (review 5916351834). Only entries
+    /// within the bounded model (declared `type` absent or `"object"`, plus
+    /// the object-schema keywords the [`SchemaView`] checks already
+    /// validate the witness against) admit the witness; anything else — a
+    /// scalar `type`, a `const`/`enum`, a `minProperties` floor — could
+    /// reject the object witness and takes the protective flattening
+    /// fallback.
+    fn enclosing_entry_admits_object_witness(&self, name: &str) -> bool {
+        let Some(entry) = self.enclosing.props.and_then(|props| props.get(name)) else {
+            return true;
+        };
+        let Some(obj) = entry.as_object() else {
+            return false;
+        };
+        let type_admits = match obj.get("type") {
+            None => true,
+            Some(Value::String(expected)) => expected == "object",
+            // Type arrays and other exotic spellings are outside the
+            // bounded model.
+            Some(_) => false,
+        };
+        type_admits
+            && obj
+                .keys()
+                .all(|key| matches!(key.as_str(), "type" | "properties" | "required"))
     }
 }
 
@@ -4519,6 +4593,125 @@ mod tests {
         assert!(
             schema.get("oneOf").is_none(),
             "an unknown mixed-number comparison must not prove disjointness: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_keeps_compound_pin_disjointness_unproven_for_unknown_children() {
+        // Review 5916351834 (P2-1): the scalar mixed-number fix declines
+        // equality outside the ±2^53 window, but the compound fall-through
+        // negated recursive equality into a proof of disjointness. Wrapping
+        // the same mathematically-equal pins in arrays
+        // (`[9007199254740994]` vs `[9007199254740994.0]`) therefore
+        // "proved" a discriminator between branches the rehearsal leaves
+        // equivalent: the original `{"tag":[9007199254740994],"a":"x"}`
+        // matches only the first branch, while every root-valid instance
+        // matches both (dependencies dropped) or neither (scalar pins
+        // differ) — the shipped oneOf accepts nothing. Compound disjointness
+        // must be proved positively (shape mismatch or a provably-disjoint
+        // child), never by negating an unknown.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "tag": {"type": "array"},
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"tag": {"const": [9007199254740994u64]}},
+                    "required": ["tag"],
+                    "dependentRequired": {"tag": ["a"]}
+                },
+                {
+                    "type": "object",
+                    "properties": {"tag": {"const": [9.007199254740994e15]}},
+                    "required": ["tag"],
+                    "dependentRequired": {"tag": ["b"]}
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "an unknown comparison inside compound pins must not prove disjointness: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"tag": [9007199254740994u64], "a": "x"})),
+            "the original argument must stay valid under the fallback: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_declines_the_nested_witness_under_a_scalar_typed_root_field() {
+        // Review 5916351834 (P2-2): Arm 3 proved the nested a/b omission
+        // witness against the branch entries alone; the CONTAINING root
+        // field's own value constraint never entered the proof. With the
+        // root declaring `payload: {type: string}` while both branches
+        // declare `payload` as objects carrying distinct required groups,
+        // every root-valid instance either omits payload (matches both
+        // branches) or carries a string payload (matches neither) — the
+        // projected exactly-one accepts nothing, while the flattening
+        // fallback keeps the root contract usable. The witness must be
+        // root-valid: an object-shaped nested witness under a scalar-typed
+        // root field takes the protective fallback.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "flag": {"type": "string"},
+                "payload": {"type": "string"},
+                "x": {"type": "string"},
+                "y": {"type": "string"}
+            },
+            "required": ["flag"],
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "payload": {
+                            "type": "object",
+                            "properties": {"a": {"type": "string"}},
+                            "required": ["a"]
+                        }
+                    },
+                    "required": ["flag"],
+                    "dependentRequired": {"flag": ["x"]}
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "payload": {
+                            "type": "object",
+                            "properties": {"b": {"type": "string"}},
+                            "required": ["b"]
+                        }
+                    },
+                    "required": ["flag"],
+                    "dependentRequired": {"flag": ["y"]}
+                }
+            ]
+        });
+
+        sanitize_for_xai_parameters(&mut schema);
+
+        assert!(
+            schema.get("oneOf").is_none(),
+            "a nested witness must stay root-valid under the containing field's constraint: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"flag": "on", "x": "x"})),
+            "the root-valid instance must stay valid under the fallback: {schema}"
         );
     }
 
