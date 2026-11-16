@@ -29,6 +29,11 @@ func retainedRollbackGuard(ctx context.Context, tx pgx.Tx, migration migrations.
 			`LOCK TABLE payment_notifications,payment_order_repairs IN SHARE ROW EXCLUSIVE MODE`,
 			`SELECT EXISTS(SELECT 1 FROM payment_notifications WHERE result='MANUAL_REVIEW') OR EXISTS(SELECT 1 FROM payment_order_repairs)`,
 			"payment repair rollback cannot preserve review and repair facts")
+	case 17:
+		// The frozen Down removes approval/request/execution evidence and the
+		// constraint/trigger contract for future adjustments, even with an empty
+		// adjustment table. Preserve history and enforcement; recover forward.
+		return errors.New("manual adjustment approval proof rollback is forward-only")
 	case 23:
 		// Serialize both inputs to the frozen Down's SKU projection. Original
 		// 010 excludes empty SKUs; 023 Down's unique index includes them.
