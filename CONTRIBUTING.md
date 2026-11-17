@@ -94,6 +94,20 @@ up to 11.10 silently strips them and the same guard fails the strip.
 
 Tests requiring a live model, network service, credential, or large model asset must be ignored by default and provide an explicit opt-in command.
 
+Windows relay signer regressions report only closed spawn-error/signal categories,
+bounded status and elapsed time, and the last observed test instrumentation stage.
+Unknown values remain unknown; these observations do not establish an underlying
+timeout or infrastructure root cause. Invalid stored-key cases must prove refusal
+by the signer itself before publication, independently of the writer's safeguards.
+Raw child output and exception text must not enter failure diagnostics.
+
+Controller bootstrap workers retain a separate bounded diagnostic IPC cache.
+Unexpected exits report only closed opening/post-open, store-error and native-cause
+observations, plus an ancestor phase only when that verifier actually failed.
+Missing observations stay unknown and never add a wait. Ordinary worker messages,
+native defaults and the exact 81/82/83 fault-qualification exits remain unchanged;
+better diagnostics do not establish the cause of a previously unexplained exit.
+
 ### Test resource lifetime
 
 One-shot CI fixtures must create resources through the shared lifetime boundary:
@@ -116,6 +130,11 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   original navigation/action deadlines and readiness assertions; close the
   server in `finally` even when setup fails. Never share optimizer output across
   jobs or use module preparation to bypass a browser/application failure.
+  Vite's initial crawl-idle promise is one-shot: readiness must also traverse
+  each requested static import/re-export graph and await its optimizer generation.
+  Lazy `import()` branches stay case-triggered, and modules are transformed,
+  never executed during preparation. HTTP fixtures may explicitly include
+  `/@vite/client` so browser-client compilation is covered by the same budget.
   When `PINVOU_CI_RESOURCE_LEDGER` is set, the shared browser adapter also keeps
   bounded console/page errors, failed requests and HTTP errors under
   `browser-diagnostics/` in that job's existing resource artifact. Before close,
@@ -166,6 +185,24 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   (3.12 or newer) and binds its absolute executable for initialization, each
   filter and retirement. Missing or incompatible interpreters fail before the
   ledger starts; this fixture setup does not install or reconfigure system Python.
+- Node test Workers register with the shared fixture scope as `worker` resources.
+  Configuration changes require acknowledgement, and snapshots come from the
+  worker that owns the state. Close the owned listeners and observe Worker exit
+  before releasing its receipt or removing fixture files; a sent stop request
+  alone does not confirm retirement. Workers are never recovered by a PID sweep.
+- A deliberately blocked browser observer waits on shared counters of real
+  accepted host replies, after their IPC response files have been published.
+  Keep a bounded observer deadline and the intended minimum stall; do not infer
+  a reply count from a fixed sleep or compare different processes' wall clocks.
+  For cancellation cases, hold the fake upstream behind an owned release file
+  until its cancellation audit exists; assert that completion and host-end have
+  not happened, then release it and verify completion-before-end. A fixed fake
+  tool lifetime does not guarantee that a heartbeat has already failed. Release
+  finite barriers during cleanup even when assertions fail; intentionally
+  uncooperative shutdown fixtures retain their separate never-release path.
+  Keep live process fixtures behind explicit release barriers until ownership
+  assertions finish, rather than giving them fixed lifetimes that can expire
+  during another scope's startup.
 - Account CI installs `ci-fixture-docker.py` on **that job's PATH only**. Docker
   writes a fresh cidfile for every CLI `run`/`create`; the always-run ledger step
   validates all leases before stopping exact IDs and checks anonymous volumes.

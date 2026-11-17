@@ -23,6 +23,31 @@ const titleWorkflow = await readFile(
   "utf8",
 );
 
+test("browser wrapper helper-only changes select both native runtime gates", () => {
+  const helpers = [
+    "pinvou3-app/tests/helpers/ndjson-child-driver.mjs",
+    "pinvou3-app/tests/helpers/browser-wrapper-fixture-cleanup.mjs",
+    "pinvou3-app/tests/helpers/browser-wrapper-held-result.mjs",
+    "pinvou3-app/tests/helpers/browser-wrapper-host-fixture.mjs",
+  ];
+  for (const gate of ["windows_codex", "acp_runtime"]) {
+    // Comments inside a filter must not hide later patterns from these
+    // positive/negative assertions.
+    const paths = filterPaths(workflow.replace(/^ {14}#.*\r?\n/gm, ""), gate);
+    const selected = file => paths.some(pattern => !pattern.startsWith("!") && matchesGlob(file, pattern))
+      && !paths.some(pattern => pattern.startsWith("!") && matchesGlob(file, pattern.slice(1)));
+    for (const helper of helpers) assert.equal(selected(helper), true, `${gate}: ${helper}`);
+    for (const unrelated of ["docs/unrelated.md", "pinvou3-app/tests/helpers/unrelated-fixture.mjs"]) {
+      assert.equal(selected(unrelated), false, `${gate}: ${unrelated}`);
+    }
+    for (const helper of helpers) {
+      const narrowed = paths.filter(pattern => pattern !== helper);
+      assert.equal(narrowed.some(pattern => !pattern.startsWith("!") && matchesGlob(helper, pattern)), false,
+        `${gate} negative must detect removal of ${helper}`);
+    }
+  }
+});
+
 // Extract the path list of a named dorny/paths-filter output.
 function filterPaths(text, name) {
   const section = text.match(
@@ -254,6 +279,22 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
+  {
+    const receipt = namedStep(jobBlock("windows-relay-tools-test", text), "Preserve Windows relay tools process receipt");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Preserve Windows relay tools process receipt",
+      "        if: always()",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: ${{ runner.temp }}/windows-relay-tools-process.json",
+      "          if-no-files-found: warn",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
   for (const [job, name, id, artifact] of [
     ["frontend-test", "Test resource lifecycle receipts", "frontend_receipts_upload", "frontend-resource-lifecycle-${{ github.run_attempt }}"],
     ["frontend-browser-test", "Browser shard resource lifecycle receipts", "browser_receipts_upload", "frontend-browser-${{ matrix.shard }}-resource-lifecycle-${{ github.run_attempt }}"],
@@ -381,9 +422,13 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   const original = workflow.replaceAll("\r\n", "\n");
   assertWorkflowFailurePolicy(original);
   const windows = namedStep(jobBlock("windows-rust-test", original), "Windows 测试二进制导入诊断");
+  const relayReceipt = namedStep(jobBlock("windows-relay-tools-test", original), "Preserve Windows relay tools process receipt");
   const withoutWindowsExemption = original.replace(windows,
     windows.replace("        continue-on-error: true\n", ""));
   const mutants = [
+    original.replace(relayReceipt, relayReceipt.replace("windows-relay-tools-process.json", "other-process.json")),
+    original.replace("      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n",
+      "      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n        continue-on-error: true\n"),
     original.replace("  frontend-test:\n", "  frontend-test:\n    continue-on-error: true\n"),
     original.replace("  frontend-test:\n", "  frontend-test:\n    'continue-on-error': true\n"),
     original.replace("  windows-rust-test:\n", "  windows-rust-test:\n    continue-on-error: true\n"),
@@ -411,6 +456,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
     ["windows-codex-runtime-test", "Preserve ACP fixture exit receipt"],
     ["windows-rust-test", "Windows atomic lifecycle receipts"],
+    ["windows-relay-tools-test", "Preserve Windows relay tools process receipt"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,

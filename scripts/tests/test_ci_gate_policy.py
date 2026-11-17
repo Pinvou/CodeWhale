@@ -908,6 +908,10 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("runs-on: windows-latest", job)
         self.assertIn("needs: changes", job)
         self.assertIn("node scripts/run-windows-relay-tools-tests.mjs", job)
+        self.assertIn('run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs', job)
+        receipt = _step_named(job, "Preserve Windows relay tools process receipt")
+        self.assertIn('if: always()', receipt)
+        self.assertIn('path: ${{ runner.temp }}/windows-relay-tools-process.json', receipt)
         self.assertIn('node-version: "24"', job)
         self.assertIn("timeout-minutes: 10", job)
         expression = re.search(r"if: \$\{\{ (.*?) \}\}", job).group(1)
@@ -932,6 +936,7 @@ class CiGatePolicyTests(unittest.TestCase):
                      "scripts/remote-control-local-selftest.ps1", "scripts/run-remote-control-endpoint.ps1",
                      "scripts/run-windows-relay-tools-tests.mjs", "scripts/windows-relay-tools-test-summary.mjs",
                      "scripts/windows-relay-tools-preflight.mjs",
+                     "scripts/ci-fixture-process.py", "scripts/tests/test_ci_fixture_process.py",
                      ".github/workflows/pr-check.yml"):
             self.assertTrue(_matches_paths_filter(path, paths), path)
 
@@ -3654,6 +3659,7 @@ python3() { fixture_mock python3 "$@"; }
             "Preserve browser fixture exit receipts",
             "Preserve ACP fixture exit receipt",
             "Windows atomic lifecycle receipts",
+            "Preserve Windows relay tools process receipt",
         )
         self.assertEqual(
             len(step_level),
@@ -5359,6 +5365,7 @@ python3() { fixture_mock python3 "$@"; }
             windows_codex_filter,
         )
         self.assertIn("browser_wrapper_lazy.test.mjs", windows_codex_filter)
+        self.assertIn("browser-wrapper-host-control.test.mjs", windows_codex_filter)
 
         windows_job = self.pr_workflow.split(
             "\n  windows-codex-runtime-test:", maxsplit=1
@@ -5367,7 +5374,9 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn("runs-on: windows-latest", windows_job)
         self.assertIn("Windows browser wrapper lifecycle regression", windows_job)
         self.assertIn(
-            "node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs",
+            "node --test --test-concurrency=1 "
+            "pinvou3-app/tests/browser-wrapper-host-control.test.mjs "
+            "pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs",
             windows_job,
         )
         self.assertIn(
