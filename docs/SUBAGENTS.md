@@ -756,6 +756,14 @@ inside `worker_record`. The normal parent contract is not polling: keep working
 and consume the completion event when the child finishes. If audit detail is
 needed, inspect the returned `transcript_handle` with `handle_read`.
 
+Parent-message receipts acknowledge admission, not model processing. During
+normal completion, the final live-input check closes admission atomically:
+later `message` and `followup` calls fail before changing the inbox. Accepted
+live inputs remaining at the step limit are retained in the final checkpoint,
+even beyond the usual tail budget; they do not authorize another model call.
+Only the winning terminal result acknowledges that snapshot. Queue-only mail
+is not automatically drained or resumed by this completion path.
+
 Legacy follow-up delivery is retained only for old transcripts and internal
 recovery. If a message was delivered, the worker record stores a bounded preview
 and timestamp. New model-facing flows should open a replacement `agent` when a

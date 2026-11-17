@@ -1691,6 +1691,14 @@ struct PendingParentMail {
 }
 
 impl PendingParentMail {
+    fn is_uncheckpointed_in(&self, checkpoint: &SubAgentCheckpoint) -> bool {
+        !self.appended.load(std::sync::atomic::Ordering::Acquire)
+            || (!self.mail.text.trim().is_empty()
+                && self
+                    .retained_index(&checkpoint.messages, checkpoint.omitted_messages)
+                    .is_none())
+    }
+
     fn retained_index(&self, messages: &[Message], omitted: usize) -> Option<usize> {
         if !self.appended.load(std::sync::atomic::Ordering::Acquire) {
             return None;
@@ -3141,6 +3149,9 @@ pub struct SubAgent {
     terminal_delivery: Option<SubAgentTerminalDeliveryContext>,
     work_lifecycle: Option<SubAgentWorkLifecycle>,
     input_tx: Option<mpsc::UnboundedSender<SubAgentInput>>,
+    /// Process-local admission fence, independent of terminal arbitration.
+    /// The worker closes it under the manager lock at its final input check.
+    parent_mail_closed: bool,
     task_handle: Option<JoinHandle<()>>,
 }
 
@@ -3187,6 +3198,7 @@ impl SubAgent {
             terminal_delivery: None,
             work_lifecycle: None,
             input_tx: Some(input_tx),
+            parent_mail_closed: false,
             task_handle: None,
         }
     }
@@ -3459,6 +3471,47 @@ impl Drop for InFlightDispatchGuard {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParentMailTestPhase {
+    BeforeFinalDrain,
+    AfterFinalDrain,
+    BeforeTerminalCommit,
+}
+
+#[cfg(test)]
+struct ParentMailTestPause {
+    agent_id: String,
+    phase: ParentMailTestPhase,
+    reached: tokio::sync::oneshot::Sender<Option<SubAgentResult>>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+async fn pause_parent_mail_test(
+    manager: &SharedSubAgentManager,
+    agent_id: &str,
+    phase: ParentMailTestPhase,
+    result: Option<&SubAgentResult>,
+) {
+    let pause = {
+        let mut manager = manager.write().await;
+        if manager
+            .parent_mail_test_pause
+            .as_ref()
+            .is_some_and(|pause| pause.agent_id == agent_id && pause.phase == phase)
+        {
+            manager.parent_mail_test_pause.take()
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        let _ = pause.reached.send(result.cloned());
+        let _ = pause.resume.await;
+    }
+}
+
 pub struct SubAgentManager {
     agents: HashMap<String, SubAgent>,
     worker_records: HashMap<String, AgentWorkerRecord>,
@@ -3535,6 +3588,8 @@ pub struct SubAgentManager {
     /// Close a test receiver after an exact successful send, without scheduler races.
     #[cfg(test)]
     followup_delivery_hook: Option<Box<dyn Fn(usize) + Send + Sync>>,
+    #[cfg(test)]
+    parent_mail_test_pause: Option<ParentMailTestPause>,
     /// Test/observability: agent ids that received a live wake via followup.
     woken_agents: HashMap<String, bool>,
     /// Test/observability: the workspace root set each spawned child was
@@ -3680,6 +3735,8 @@ impl SubAgentManager {
             pending_follow_ups: HashMap::new(),
             #[cfg(test)]
             followup_delivery_hook: None,
+            #[cfg(test)]
+            parent_mail_test_pause: None,
             woken_agents: HashMap::new(),
             #[cfg(test)]
             spawned_workspace_roots: HashMap::new(),
@@ -4914,6 +4971,7 @@ impl SubAgentManager {
                 terminal_delivery: None,
                 work_lifecycle: None,
                 input_tx: None,
+                parent_mail_closed: false,
                 task_handle: None,
             };
             self.agents.insert(persisted.id, agent);
@@ -6289,11 +6347,16 @@ impl SubAgentManager {
         wake: bool,
     ) -> Result<ParentMailReceipt> {
         let agent_id = agent_id.to_owned();
-        let status = self
+        let agent = self
             .agents
             .get(&agent_id)
-            .map(|agent| subagent_status_name(&agent.status).to_string())
             .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
+        if agent.status == SubAgentStatus::Running && agent.parent_mail_closed {
+            return Err(anyhow!(
+                "Cannot queue a parent message for agent {agent_id}: the child is finalizing and no longer accepts messages"
+            ));
+        }
+        let status = subagent_status_name(&agent.status).to_string();
         let entry = QueuedParentMessage {
             text,
             queued_at_ms: epoch_millis_now(),
@@ -8643,6 +8706,12 @@ impl SubAgentManager {
             agent.input_tx = None;
             if let Some(inbox) = self.pending_follow_ups.remove(agent_id) {
                 let mut mail = inbox.lock().unwrap_or_else(|e| e.into_inner());
+                // Only the winning terminal commit may acknowledge its local
+                // final snapshot. Publishing it earlier would spoil a racing
+                // interrupt's still-continuable checkpoint.
+                if let Some(checkpoint) = agent.checkpoint.as_ref() {
+                    mail.retain(|ticket| ticket.is_uncheckpointed_in(checkpoint));
+                }
                 if matches!(result.status, SubAgentStatus::Interrupted(_))
                     && agent
                         .checkpoint
@@ -8694,13 +8763,7 @@ impl SubAgentManager {
             inbox
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .retain(|mail| {
-                    !mail.appended.load(std::sync::atomic::Ordering::Acquire)
-                        || (!mail.mail.text.trim().is_empty()
-                            && mail
-                                .retained_index(&checkpoint.messages, checkpoint.omitted_messages)
-                                .is_none())
-                });
+                .retain(|mail| mail.is_uncheckpointed_in(checkpoint));
         }
         // #freeze: hot per-step path — coalesce the full-fleet persist so 20
         // agents stepping concurrently do not serialize the whole fleet (with
@@ -11767,6 +11830,15 @@ async fn run_subagent_task_inner(task: SubAgentTask) {
         )
     });
 
+    #[cfg(test)]
+    pause_parent_mail_test(
+        &task.manager_handle,
+        &agent_id,
+        ParentMailTestPhase::BeforeTerminalCommit,
+        result.as_ref().ok(),
+    )
+    .await;
+
     // Every terminal path — successful/fatal model exit, explicit Stop,
     // coordination interrupt, and stale cleanup — arbitrates and publishes
     // through `finish_terminal_result`. Cancellation that already won leaves
@@ -12349,10 +12421,24 @@ async fn checkpoint_subagent_progress(
     let mut checkpoint =
         build_subagent_checkpoint(agent_id, reason, messages, steps_taken, continuable);
     let mut manager = runtime.manager.write().await;
-    // Projection preserves message positions. Protect only the newly accepted
-    // suffix; otherwise the normal history budget could omit an input just
-    // before the model sees it, yet falsely acknowledge its recovery ticket.
-    let preserve_from = manager.pending_follow_ups.get(agent_id).and_then(|inbox| {
+    protect_uncheckpointed_input_suffix(
+        &mut checkpoint,
+        messages,
+        manager.pending_follow_ups.get(agent_id),
+    );
+    manager.update_checkpoint(agent_id, checkpoint.clone());
+    checkpoint
+}
+
+fn protect_uncheckpointed_input_suffix(
+    checkpoint: &mut SubAgentCheckpoint,
+    messages: &[Message],
+    inbox: Option<&PendingParentMailQueue>,
+) {
+    // Projection preserves message positions. Keep newly accepted input even
+    // when the normal history tail would omit it. This only builds a snapshot;
+    // the manager acknowledges tickets after accepting the checkpoint.
+    let preserve_from = inbox.and_then(|inbox| {
         inbox
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -12365,8 +12451,6 @@ async fn checkpoint_subagent_progress(
             crate::image_attach::safe_tool_result_message_projection(&messages[start..]);
         checkpoint.omitted_messages = start;
     }
-    manager.update_checkpoint(agent_id, checkpoint.clone());
-    checkpoint
 }
 
 /// Render a checkpoint's message tail as readable prose for re-seeding a
@@ -13640,13 +13724,43 @@ async fn run_subagent(
                 .await;
                 continue;
             }
-            while let Ok(input) = input_rx.try_recv() {
-                input.mark_taken();
-                if input.interrupt {
-                    pending_inputs.clear();
+            #[cfg(test)]
+            pause_parent_mail_test(
+                &runtime.manager,
+                &agent_id,
+                ParentMailTestPhase::BeforeFinalDrain,
+                None,
+            )
+            .await;
+            {
+                // Serialize the final empty check with every manager sender.
+                // Inputs accepted before the fence take the existing next-step
+                // path; after it, admission fails before queueing any new mail.
+                let mut manager = runtime.manager.write().await;
+                while let Ok(input) = input_rx.try_recv() {
+                    input.mark_taken();
+                    if input.interrupt {
+                        pending_inputs.clear();
+                    }
+                    pending_inputs.push_back(input);
                 }
-                pending_inputs.push_back(input);
+                if pending_inputs.is_empty()
+                    && let Some(agent) = manager.agents.get_mut(&agent_id)
+                    && agent.status == SubAgentStatus::Running
+                    && !agent.completion_claimed
+                {
+                    agent.parent_mail_closed = true;
+                    input_rx.close();
+                }
             }
+            #[cfg(test)]
+            pause_parent_mail_test(
+                &runtime.manager,
+                &agent_id,
+                ParentMailTestPhase::AfterFinalDrain,
+                None,
+            )
+            .await;
             if pending_inputs.is_empty() {
                 record_agent_progress(
                     runtime,
@@ -13810,6 +13924,28 @@ async fn run_subagent(
         }
     }
 
+    {
+        // A step-limit exit may still own input accepted on the preceding
+        // step. Retain it in the final snapshot without authorizing another
+        // model call or changing the terminal outcome.
+        let mut manager = runtime.manager.write().await;
+        if let Some(agent) = manager.agents.get_mut(&agent_id)
+            && agent.status == SubAgentStatus::Running
+            && !agent.completion_claimed
+        {
+            agent.parent_mail_closed = true;
+        }
+        input_rx.close();
+        while let Ok(input) = input_rx.try_recv() {
+            input.mark_taken();
+            if input.interrupt {
+                pending_inputs.clear();
+            }
+            pending_inputs.push_back(input);
+        }
+    }
+    append_subagent_inputs_as_user_messages(&mut messages, &mut pending_inputs);
+
     release_resident_leases_for(&agent_id);
     let has_final_summary = final_result
         .as_deref()
@@ -13833,13 +13969,22 @@ async fn run_subagent(
         ))
     };
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-    latest_checkpoint = Some(build_subagent_checkpoint(
+    let mut final_checkpoint = build_subagent_checkpoint(
         &agent_id,
         subagent_status_name(&status),
         &messages,
         steps,
         false,
-    ));
+    );
+    {
+        let manager = runtime.manager.read().await;
+        protect_uncheckpointed_input_suffix(
+            &mut final_checkpoint,
+            &messages,
+            manager.pending_follow_ups.get(&agent_id),
+        );
+    }
+    latest_checkpoint = Some(final_checkpoint);
     insert_subagent_full_transcript_handle(
         runtime,
         &agent_id,

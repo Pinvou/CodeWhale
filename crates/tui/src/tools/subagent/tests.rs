@@ -12,6 +12,7 @@ use tempfile::{Builder as TempDirBuilder, tempdir};
 mod identity_selection;
 mod launch_receipt;
 mod operation_identity;
+mod terminal_parent_mail;
 
 fn built_in_whale_name_that_cannot_be_generated_for(agent_id: &str) -> &'static str {
     WHALE_NICKNAMES
