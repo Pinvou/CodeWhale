@@ -895,6 +895,10 @@ jobs:
               - 'docs/windows-update-release-console.md'
               - '.github/workflows/pr-check.yml'
             acp_runtime:
+              - 'pinvou3-app/tests/helpers/ndjson-child-driver.mjs'
+              - 'pinvou3-app/tests/helpers/browser-wrapper-fixture-cleanup.mjs'
+              - 'pinvou3-app/tests/helpers/browser-wrapper-held-result.mjs'
+              - 'pinvou3-app/tests/helpers/browser-wrapper-host-fixture.mjs'
               # 开发启动器。开源侧把 run-dev.sh 变更路由进 acp_runtime 门禁,
               # 本仓同路由:launcher-only PR 不再静默跳过运行时门禁。
               - 'pinvou3-app/run-dev.sh'
@@ -910,6 +914,13 @@ jobs:
               - 'pinvou3-app/package-lock.json'
               - '.github/workflows/pr-check.yml'
             windows_codex:
+              - 'pinvou3-app/tests/browser-wrapper-host-control.test.mjs'
+              - 'pinvou3-app/tests/helpers/claude-acp-startup-probe.cjs'
+              - 'pinvou3-app/tests/claude_acp_startup_probe.test.mjs'
+              - 'pinvou3-app/tests/helpers/ndjson-child-driver.mjs'
+              - 'pinvou3-app/tests/helpers/browser-wrapper-fixture-cleanup.mjs'
+              - 'pinvou3-app/tests/helpers/browser-wrapper-held-result.mjs'
+              - 'pinvou3-app/tests/helpers/browser-wrapper-host-fixture.mjs'
               - 'scripts/test-windows-acp-runtime.py'
               - 'scripts/tests/test_windows_acp_runtime_scope.py'
               - '.gitmodules'
@@ -4817,7 +4828,7 @@ jobs:
       - name: Windows browser wrapper lifecycle regression
         env:
           PINVOU3_TEST_BROWSER_NO_HOST: "1"
-        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test --test-concurrency=1 pinvou3-app/tests/browser-wrapper-host-control.test.mjs pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
 
       - name: Windows browser wrapper lazy regression
         env:
