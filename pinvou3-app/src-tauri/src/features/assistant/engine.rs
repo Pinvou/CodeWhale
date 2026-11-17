@@ -43,7 +43,8 @@ use crate::features::assistant::expert_roster::{
 use crate::features::assistant::platform::bridge::{Pinvou3Bridge, persisted_provider_route};
 use crate::features::assistant::turn_shell_tasks::TurnShellTaskRegistry;
 use crate::features::sessions::{
-    ChatEngineState, ScheduledEngineState, ScheduledRunProfile, SessionStore, transcript_revision,
+    ChatEngineState, ScheduledEngineState, ScheduledRunProfile, ScheduledTokenAccounting,
+    SessionStore, transcript_revision,
 };
 use crate::features::sessions::{SerializableMode, SessionModeState};
 
@@ -1874,7 +1875,15 @@ impl AppEngine {
         // 子智能体仍由 CodeWhale 的通用角色与运行时策略进一步收窄。
         let scheduled_profile = store.scheduled_profile(session_id);
         let scheduled_base_total_tokens = if scheduled_profile.is_some() {
-            Some(store.load(session_id)?.metadata.total_tokens)
+            // base 读取与两条 persist 写入路径走同一 `scheduled_mutation` 门
+            // （load_for_engine_spawn）：裸读会与在途 TurnComplete 落盘交错，
+            // 新 incarnation 先读后写时把旧引擎最后几轮的累计永久少记。
+            Some(
+                store
+                    .load_for_engine_spawn(session_id)?
+                    .metadata
+                    .total_tokens,
+            )
         } else {
             None
         };

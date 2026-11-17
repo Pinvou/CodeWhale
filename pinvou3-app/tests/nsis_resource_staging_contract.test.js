@@ -293,9 +293,17 @@ if (process.platform === "win32") {
     fs.rmSync(smokeRoot, { recursive: true, force: true });
   }
 }
-assert.match(packageJson.scripts["prebuild:nsis"], /clean-staging\.ps1/u);
-assert.doesNotMatch(
+// The clean step must never be named prebuild:nsis: npm would auto-run it as
+// a lifecycle pre-hook of build:nsis, doubling the clean pass.
+assert.match(packageJson.scripts["nsis:clean-staging"], /clean-staging\.ps1/u);
+assert.match(packageJson.scripts["build:nsis:stage"], /npm run nsis:clean-staging/u);
+assert.equal(
   packageJson.scripts["prebuild:nsis"],
+  undefined,
+  "the npm pre-hook name would double-run clean-staging on every build:nsis",
+);
+assert.doesNotMatch(
+  packageJson.scripts["nsis:clean-staging"],
   /ensure-rust-toolchain\.ps1/u,
   "build.js must establish the isolated RUSTUP_HOME before invoking the guard",
 );
@@ -351,9 +359,9 @@ assert.match(
 assert.match(packageJson.scripts["build:nsis:stage"], /--verbose/u);
 assert.match(packageJson.scripts["build:nsis:stage"], /--ci/u);
 assert.doesNotMatch(
-  packageJson.scripts["prebuild:nsis"],
+  packageJson.scripts["nsis:clean-staging"],
   /stage-runtime\.ps1|runtime:windows:stage/u,
-  "prebuild:nsis must leave runtime validation and staging to build.js",
+  "clean-staging must leave runtime validation and staging to build.js",
 );
 assert.ok(
   packageJson.scripts["bundle:nsis"].indexOf("stage-resources.ps1 -ValidateOnly") <
