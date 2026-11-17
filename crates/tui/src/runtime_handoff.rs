@@ -1535,8 +1535,8 @@ pub(crate) fn classify_user_turn_prompt(message: &Message) -> UserTurnPromptKind
 ///
 /// Truncating at the returned boundary removes everything from it onward —
 /// including the history's only stamped carrier when the boundary precedes
-/// it, which reverts the session to the legacy reading of
-/// [`crate::history_recognition::CheckpointEra`]: a later turn that pastes
+/// it, which reverts the session to the legacy reading of the history's
+/// `CheckpointEra`: a later turn that pastes
 /// the bare summary header is then indistinguishable from a saved bare
 /// carrier and the restore-time loose retain will drop it on the next
 /// reload-with-checkpoint.
@@ -1595,9 +1595,9 @@ pub fn user_turn_prompt_indices(history: &[Message]) -> Vec<usize> {
 /// because without the history there is no era to decide otherwise.
 /// History-aware callers (replacement retention, `/edit` targeting, anchor
 /// placement, host turn numbering) must derive the era instead — through
-/// [`classify_user_turn_prompt_in_era`] or [`user_turn_prompt_indices`] with
-/// [`crate::history_recognition::CheckpointEra::of_history`] — so a turn that
-/// pastes the bare header stays user-authored in a post-provenance history.
+/// `classify_user_turn_prompt_in_era` or [`user_turn_prompt_indices`] with
+/// `CheckpointEra::of_history` — so a turn that pastes the bare header
+/// stays user-authored in a post-provenance history.
 ///
 /// Host integrations that mutate history should use [`edit_last_turn_target`]
 /// when selecting a cut point so an unsupported latest user turn cannot be

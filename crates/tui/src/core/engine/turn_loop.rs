@@ -5659,15 +5659,15 @@ impl Engine {
                             evicted: evicted_this_result,
                         });
                     }
-                    if !pending_eviction_notes.is_empty() {
-                        if let Some(rendered) = super::tool_catalog::render_toolbox_eviction_notes(
+                    if !pending_eviction_notes.is_empty()
+                        && let Some(rendered) = super::tool_catalog::render_toolbox_eviction_notes(
                             &mut pending_eviction_notes,
                             &self.session.tool_activation_cache,
                             active_tool_names,
                             tool_catalog,
-                        ) {
-                            eviction_notes.push(rendered);
-                        }
+                        )
+                    {
+                        eviction_notes.push(rendered);
                     }
                     let output_for_context = if eviction_notes.is_empty() {
                         output_for_context
