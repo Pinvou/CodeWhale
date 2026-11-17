@@ -2454,19 +2454,29 @@ test("clamps a sub-floor heartbeat to the five second floor", async (t) => {
   // An empty value parses as 0 (the old parser took its default through the
   // falsy-string branch): measure the cadence between two pings, which is
   // phase-independent (the first ping can land anywhere in the cycle).
+  // The heartbeat timer starts when the relay process boots, so the first
+  // ping lands 0-5 s after the socket opens and the second 5 s later: the
+  // worst case is ~10 s. The deadline leaves several intervals of slack
+  // because CI runners under load (this suite spawns and kills one relay
+  // per test) can delay ticks by seconds; a deadline near the worst case
+  // turned the test flaky on the merge queue.
   const isolated = await spawnRelay({ HEARTBEAT_INTERVAL_MS: "" });
   try {
     const ws = await openSocket(isolated.wsUrl);
     t.after(() => closeSocket(ws));
     const pings = [];
+    const deadline = performance.now();
     ws.on("ping", () => pings.push(performance.now()));
     await new Promise((resolve, reject) => {
       // Both timers must clear on either exit path: an interval left running
       // would hold the test process open after a rejection.
       const timer = setTimeout(() => {
         clearInterval(poll);
-        reject(new Error("heartbeat pings never arrived"));
-      }, 15000);
+        reject(new Error(
+          `expected 2 heartbeat pings within 30 s, saw ${pings.length}`
+          + ` after ${Math.round(performance.now() - deadline)} ms`,
+        ));
+      }, 30000);
       const poll = setInterval(() => {
         if (pings.length >= 2) {
           clearInterval(poll);
