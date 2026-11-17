@@ -398,11 +398,20 @@ try {
     Assert-True -Condition $flattenedCopyThrew -Message "robocopy exit code 8 must fail the flattened copy arm with its real error message"
   } finally {
     $env:PATH = $previousRobocopyPath
+    # Guaranteed claiming: an earlier assertion throwing must not skip the
+    # recorded extraction trees (their deep entries need the long-path arm,
+    # so plain Remove-Item would leave past-MAX_PATH litter behind). The
+    # stub's robocopy would fail every claim, so this runs only after PATH
+    # is restored above.
+    foreach ($expandFailure in @($script:RuntimeExpandCleanupFailures)) {
+      Remove-TreeLongPath -Path $expandFailure.Path -MissingOk
+    }
   }
   # The stubbed flattened copy fails inside Expand-FlattenedRuntime, whose
-  # cleanup failures degrade to a loud warning: claim only the extraction
-  # trees this stub run recorded (their deep entries again need the long-path
-  # arm, so plain Remove-Item would leave past-MAX_PATH litter behind).
+  # cleanup failures degrade to a loud warning: the finally above already
+  # claimed this run's recorded trees; what remains here is asserting the
+  # recording itself stayed exact and the claiming actually removed them
+  # (the second pass is a no-op under -MissingOk).
   $expandCleanupFailures = @($script:RuntimeExpandCleanupFailures)
   Assert-True -Condition ($expandCleanupFailures.Count -ge 1) -Message "the stubbed extraction cleanup failure must be recorded for precise claiming"
   foreach ($expandFailure in $expandCleanupFailures) {

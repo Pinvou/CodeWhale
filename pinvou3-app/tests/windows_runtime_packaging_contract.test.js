@@ -358,6 +358,23 @@ assert.match(runtimeWrapper, /stageWindowsOnnxRuntime/);
 assert.match(onnxRuntimeScript, /-Mode StageOnnx/);
 assert.match(runtimeScript, /Get-VerifiedOnnxManifest/);
 assert.match(runtimeScript, /Stage-OnnxRuntime/);
+// The ZIP extraction parent calculation must stay on the long-path channel:
+// Path.GetDirectoryName on the plain entry path normalizes its argument and
+// throws past MAX_PATH on Windows PowerShell 5.1 hosts with
+// UseLegacyPathHandling=false plus BlockLongPaths=true, before the extended
+// directory creation or file extraction can run. The parent is derived on
+// the \\?\ form (device paths skip normalization) and stripped back to the
+// plain shape for the CreateDirectory/ExtractToFile consumers.
+assert.doesNotMatch(
+  runtimeScript,
+  /\[System\.IO\.Path\]::GetDirectoryName\(\$entryTargetPath\)/u,
+  "the ZIP extraction parent must not be computed from the plain entry path (GetDirectoryName normalizes and throws past MAX_PATH on long-path-blocking hosts)",
+);
+assert.match(
+  runtimeScript,
+  /Get-PlainPath \(\[System\.IO\.Path\]::GetDirectoryName\(\(Get-ExtendedPath \$entryTargetPath\)\)\)/u,
+  "the ZIP extraction parent must be derived on the extended \\?\ form and stripped back to the plain shape",
+);
 assert.match(onnxRuntimeSmoke, /LoadLibraryEx/);
 assert.match(onnxRuntimeSmoke, /OrtGetApiBase/);
 // The ONNX dev descriptor key produced by resolve-runtime.ps1's

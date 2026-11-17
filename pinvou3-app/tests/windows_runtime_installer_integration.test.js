@@ -131,17 +131,42 @@ test("Windows runtime wrapper scripts exit 0 on the success path", { skip: skipR
 test("Windows runtime wrapper scripts keep robocopy >= 8 failures non-zero", { skip: skipReason }, () => {
   assert.equal(process.platform, "win32", "this wrapper exit-code test requires Windows");
   const stubRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-robocopy-stub-"));
+  const ownershipLog = path.join(stubRoot, "ownership.log");
+  const readStubbedTargets = () => {
+    if (!fs.existsSync(ownershipLog)) {
+      return [];
+    }
+    return fs
+      .readFileSync(ownershipLog, "utf8")
+      .split(/\r?\n/u)
+      .map((line) => line.trim().replace(/^"|"$/gu, ""))
+      .filter(Boolean);
+  };
   try {
     // Same PATH-shadowing technique as the Git failure fixtures in
     // windows_runtime_cache_behavior.ps1: robocopy.cmd in a prepended
     // directory resolves ahead of System32's robocopy.exe. The stub fails the
     // rebuild before the old ONNX stage is replaced, so the staged runtime
-    // stays intact for the later onnx-smoke step.
+    // stays intact for the later onnx-smoke step. Every invocation also
+    // records its target tree (robocopy's second positional argument is the
+    // tree to copy into or /MIR-clear, for both the /E extraction arm and
+    // the /MIR cleanup arms) into an ownership log owned by this test, so
+    // the finally below can retire exactly the child-run's leftover trees
+    // instead of sweeping pinvou3-runtime-expand-*/.onnx-tmp-* names in the
+    // shared TEMP (a name sweep could catch a concurrent run's active tree).
     const stubDirectory = path.join(stubRoot, "stub");
     fs.mkdirSync(stubDirectory);
-    fs.writeFileSync(path.join(stubDirectory, "robocopy.cmd"), "@echo off\r\nexit /b 8\r\n", "utf8");
+    fs.writeFileSync(
+      path.join(stubDirectory, "robocopy.cmd"),
+      "@echo off\r\n>> \"%PINVOU3_TEST_ROBOCOPY_LOG%\" echo %2\r\nexit /b 8\r\n",
+      "utf8",
+    );
     const result = runRuntimeWrapper("stage-onnx-runtime.ps1", ["-Force"], {
-      env: { ...process.env, PATH: `${stubDirectory};${process.env.PATH}` },
+      env: {
+        ...process.env,
+        PATH: `${stubDirectory};${process.env.PATH}`,
+        PINVOU3_TEST_ROBOCOPY_LOG: ownershipLog,
+      },
     });
     assert.equal(result.error, undefined);
     assert.notEqual(
@@ -154,7 +179,30 @@ test("Windows runtime wrapper scripts keep robocopy >= 8 failures non-zero", { s
       /Robocopy \/MIR cleanup failed with exit code 8/u,
       "the wrapper failure must surface the real robocopy error, not a swallowed cleanup",
     );
+    const stubbedTargets = readStubbedTargets();
+    assert.ok(
+      stubbedTargets.length >= 1,
+      "the failing wrapper run must have driven the stubbed robocopy at least once",
+    );
+    // Retire the child-run's leftover trees through the \\?\ channel: their
+    // deep entries can exceed MAX_PATH, so a plain recursive rm would leave
+    // past-MAX_PATH litter behind.
+    for (const target of stubbedTargets) {
+      fs.rmSync(/^\\\\\?\\/u.test(target) ? target : `\\\\?\\${target}`, {
+        recursive: true,
+        force: true,
+      });
+    }
   } finally {
+    // Guaranteed claiming: an earlier assertion throwing must not skip the
+    // child-run's leftover trees, so the ownership log is drained here too
+    // (idempotent under force against trees the happy path already retired).
+    for (const target of readStubbedTargets()) {
+      fs.rmSync(/^\\\\\?\\/u.test(target) ? target : `\\\\?\\${target}`, {
+        recursive: true,
+        force: true,
+      });
+    }
     fs.rmSync(stubRoot, { recursive: true, force: true });
   }
 });

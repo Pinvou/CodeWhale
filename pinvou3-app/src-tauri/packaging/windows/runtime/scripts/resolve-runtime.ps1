@@ -247,7 +247,14 @@ function Expand-ZipArchiveLongPath {
         [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath $entryTargetPath))
         continue
       }
-      $parentDirectory = [System.IO.Path]::GetDirectoryName($entryTargetPath)
+      # GetDirectoryName must run on the \\?\ form: with the plain path, a
+      # Windows PowerShell 5.1 host using UseLegacyPathHandling=false plus
+      # BlockLongPaths=true normalizes the argument and throws past MAX_PATH
+      # before the extended creation or extraction below can run. Device
+      # paths skip normalization, and the resulting parent is stripped back
+      # to the plain shape so the CreateDirectory/ExtractToFile consumers
+      # keep their previous inputs unchanged.
+      $parentDirectory = Get-PlainPath ([System.IO.Path]::GetDirectoryName((Get-ExtendedPath $entryTargetPath)))
       if (-not [string]::IsNullOrEmpty($parentDirectory)) {
         [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath $parentDirectory))
       }
