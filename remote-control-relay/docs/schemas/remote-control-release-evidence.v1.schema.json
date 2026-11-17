@@ -4,7 +4,7 @@
   "title": "Pinvou Windows dual-device remote-control release evidence",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "version", "commit_sha", "provenance", "attestations", "relay", "legacy_relay", "driver", "installers", "machines", "started_at", "finished_at", "monotonic_start_ms", "monotonic_end_ms", "journeys", "artifacts", "gates"],
+  "required": ["schema", "version", "commit_sha", "provenance", "attestations", "relay", "legacy_relay", "driver", "installers", "machines", "started_at", "finished_at", "monotonic_start_ms", "monotonic_end_ms", "run_completion_artifact_sha256", "journeys", "artifacts", "gates"],
   "properties": {
     "schema": { "const": "pinvou-remote-control-release-evidence" },
     "version": { "const": 1 },
@@ -52,6 +52,7 @@
     "machines": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "$ref": "#/$defs/machine" } },
     "started_at": { "$ref": "#/$defs/timestamp" },
     "finished_at": { "$ref": "#/$defs/timestamp" },
+    "run_completion_artifact_sha256": { "$ref": "#/$defs/sha256" },
     "monotonic_start_ms": { "$ref": "#/$defs/monotonic" },
     "monotonic_end_ms": { "$ref": "#/$defs/monotonic" },
     "journeys": { "type": "array", "minItems": 27, "maxItems": 27, "items": { "$ref": "#/$defs/journey" } },
