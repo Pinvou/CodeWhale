@@ -150,6 +150,11 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   a private temporary directory. A killed Linux controller can be recovered only
   by the registered scope marker, UID, cgroup and pidfd identity. No PID/name
   sweep or shared Runner Job Object is used.
+- Node test Workers register with the shared fixture scope as `worker` resources.
+  Configuration changes require acknowledgement, and snapshots come from the
+  worker that owns the state. Close the owned listeners and observe Worker exit
+  before releasing its receipt or removing fixture files; a sent stop request
+  alone does not confirm retirement. Workers are never recovered by a PID sweep.
 - Account CI installs `ci-fixture-docker.py` on **that job's PATH only**. Docker
   writes a fresh cidfile for every CLI `run`/`create`; the always-run ledger step
   validates all leases before stopping exact IDs and checks anonymous volumes.

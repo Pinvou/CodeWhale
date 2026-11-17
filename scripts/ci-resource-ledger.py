@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 import tempfile
 
-KINDS = {'database', 'process', 'vite', 'browser', 'http', 'tcp', 'postgres-services', 'deployment-containers', 'docker'}
+KINDS = {'database', 'process', 'worker', 'vite', 'browser', 'http', 'tcp', 'postgres-services', 'deployment-containers', 'docker'}
 
 
 def inspect(directories):
