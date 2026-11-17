@@ -49,10 +49,12 @@ async function checkedPath(root, relative) {
 
 // All consumers, including later JSON parsing, use this boundary. Never reopen
 // a previously hashed path with an unbounded readFile: it may have changed.
-export async function readEvidenceArtifact(evidenceRoot, item) {
+export async function readEvidenceArtifact(evidenceRoot, item, { maxBytes } = {}) {
   const root = resolve(evidenceRoot);
   const before = await checkedPath(root, item.path);
-  const maxSize = TEXT_KINDS.has(item.kind) ? 32 * 1024 * 1024 : 1024 * 1024 * 1024;
+  const defaultMaxSize = TEXT_KINDS.has(item.kind) ? 32 * 1024 * 1024 : 1024 * 1024 * 1024;
+  if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > defaultMaxSize)) fail("evidence_artifact_size_invalid");
+  const maxSize = maxBytes ?? defaultMaxSize;
   const checkSize = (metadata) => {
     if (!metadata.isFile() || metadata.size <= 0n || metadata.size > BigInt(maxSize)) fail("evidence_artifact_size_invalid");
   };

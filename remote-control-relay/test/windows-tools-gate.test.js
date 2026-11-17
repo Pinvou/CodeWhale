@@ -96,7 +96,7 @@ test('Windows tools version probe emits only cached closed metadata and preserve
       if(mode==='success'){
         assert.equal(emitted,undefined);
         assert.deepEqual(executedTools,['local-selftest-ownership.test.js','local-selftest-identity.test.js',
-          'endpoint-launcher.test.js','controller-state-guard.test.js','controller-lock-rollout.test.js']);
+          'endpoint-launcher.test.js','controller-state-guard.test.js','windows-ancestor-paths.test.js','controller-lock-rollout.test.js']);
         assert.equal(calls,executedTools.length+1);
       }
       else {
