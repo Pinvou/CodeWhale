@@ -1484,6 +1484,85 @@ test("a state above the clamped capacity loads and refuses only new revocations"
   }
 });
 
+for (const [phase, initialCount] of [["commit", 6], ["restore", 7]]) {
+  test(`legacy capacity warning failure preserves ${phase}, teardown and subsequent denial`, { timeout: 30_000 }, async () => {
+    const statePath = join(testRoot, `warning-${phase}-state.json`);
+    const entries = Array.from({ length: initialCount }, (_, index) => ({
+      endpoint_id: `warning_seed_${index}`, revoked_at: "2026-01-01T00:00:00Z",
+    }));
+    await writeFile(statePath, JSON.stringify({ version: 1, revoked_endpoints: entries }));
+    const isolated = await spawnRelay({
+      PINVOU_REMOTE_STATE_PATH: statePath,
+      MAX_RELAY_STATE_BYTES: "2048", // The existing clamp gives eight entries, warning at seven.
+      ENDPOINT_CREATE_LIMIT: "100",
+    }, {
+      preload: new URL("./fixtures/legacy-capacity-warning-sink.js", import.meta.url).href,
+      ipc: true,
+      awaitListening: false, // Retain the child identity even if startup fails.
+    });
+    const sockets = [];
+    const attempts = async () => {
+      const response = waitForRegistrationProbe(isolated.child, "legacy-warning-attempts");
+      isolated.child.send({ type: "read-legacy-warning-attempts" });
+      return (await response).attempts;
+    };
+    try {
+      await waitForOutput(isolated.child, /pinvou remote relay listening/);
+      assert.equal(await attempts(), phase === "restore" ? 1 : 0);
+      const endpointId = `warning_${phase}_accepted`;
+      const access = `warning-${phase}-access-token-at-least-24`;
+      const secret = `warning-${phase}-desktop-secret-at-least-24`;
+      const desktop = await registerDesktop(endpointId, access, secret, isolated.wsUrl);
+      sockets.push(desktop.ws);
+      const connected = nextMessage(desktop.ws, "web_client_connected");
+      const web = await joinWeb(endpointId, access, {}, isolated.wsUrl);
+      sockets.push(web.ws);
+      await connected;
+      const revoked = nextMessage(desktop.ws, "desktop_endpoint_revoked");
+      desktop.ws.send(JSON.stringify({ v: 2, type: "desktop_endpoint_revoke", endpoint_id: endpointId }));
+      assert.equal((await revoked).endpoint_id, endpointId);
+      await Promise.all([waitForClose(desktop.ws), waitForClose(web.ws)]);
+      const health = await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`, { signal: AbortSignal.timeout(3000) });
+      assert.equal(health.status, 200);
+      assert.equal((await health.json()).endpoint_count, 0);
+      assert.equal(await attempts(), 1, "the real warning sink must be attempted once, despite throwing");
+
+      const denied = await openSocket(isolated.wsUrl);
+      sockets.push(denied);
+      const denial = nextMessage(denied, "error");
+      denied.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: endpointId,
+        access_token: access, desktop_secret: secret }));
+      assert.equal((await denial).code, "endpoint_revoked");
+      await waitForClose(denied);
+
+      const nextId = `warning_${phase}_next`;
+      const next = await registerDesktop(nextId, `warning-${phase}-next-access-token-000000`,
+        `warning-${phase}-next-desktop-secret-000000`, isolated.wsUrl);
+      sockets.push(next.ws);
+      const result = nextMessage(next.ws, phase === "commit" ? "desktop_endpoint_revoked" : "error");
+      next.ws.send(JSON.stringify({ v: 2, type: "desktop_endpoint_revoke", endpoint_id: nextId }));
+      const reply = await result;
+      if (phase === "commit") assert.equal(reply.endpoint_id, nextId);
+      else assert.equal(reply.code, "revoked_endpoint_capacity_reached", "real capacity rejection must remain distinct");
+      await waitForClose(next.ws);
+      assert.equal(await attempts(), 1, "subsequent operations must retain once-per-owner suppression");
+      const persisted = JSON.parse(await readFile(statePath, "utf8"));
+      assert.equal(persisted.version, 1);
+      assert.equal(persisted.revoked_endpoints.length, 8);
+      for (const entry of entries) assert.deepEqual(
+        persisted.revoked_endpoints.find(candidate => candidate.endpoint_id === entry.endpoint_id), entry,
+      );
+      assert.ok(persisted.revoked_endpoints.some(entry => entry.endpoint_id === endpointId
+        && Number.isFinite(Date.parse(entry.revoked_at))));
+      assert.equal(persisted.revoked_endpoints.some(entry => entry.endpoint_id === nextId), phase === "commit");
+      assert.equal(isolated.errors().includes("revocation_persist_failed"), false);
+    } finally {
+      for (const socket of sockets) closeSocket(socket);
+      await stopRelay(isolated.child);
+    }
+  });
+}
+
 test("forwards payloads larger than the previous 1 MiB limit", async (t) => {
   const endpointId = `endpoint_payload_${Date.now()}`;
   const accessToken = "access-token-payload-0000000000001";

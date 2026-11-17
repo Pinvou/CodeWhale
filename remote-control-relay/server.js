@@ -725,9 +725,13 @@ function reportLegacyRevocationCapacity(entries, bytes) {
   if (legacyCapacityWarning
     || (entries < Math.ceil(MAX_REVOKED_ENDPOINTS * 0.8) && bytes < Math.ceil(MAX_RELAY_STATE_BYTES * 0.8))) return;
   legacyCapacityWarning = true;
-  console.warn("[relay-capacity] legacy_revocations", JSON.stringify({
-    entries, max_entries: MAX_REVOKED_ENDPOINTS, serialized_bytes: bytes, max_bytes: MAX_RELAY_STATE_BYTES,
-  }));
+  try {
+    console.warn("[relay-capacity] legacy_revocations", JSON.stringify({
+      entries, max_entries: MAX_REVOKED_ENDPOINTS, serialized_bytes: bytes, max_bytes: MAX_RELAY_STATE_BYTES,
+    }));
+  } catch {
+    // Capacity observation cannot change a committed denial or valid restore.
+  }
 }
 
 async function loadRelayState() {
