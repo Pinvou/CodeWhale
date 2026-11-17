@@ -101,7 +101,7 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
 
     /// Validates the remote MCP connection when the manifest explicitly requires it (handshake + tools discoverable + all expected tools present);
     /// returns the discovered tool names on success and a user-readable `Err` on any failure. Tools that do not declare validation return
-    /// an empty-list success directly — the install pipeline only consumes success/failure, not the tool list.
+    /// an empty-list success directly; the install pipeline passes the inventory through to its caller.
     pub async fn validate_remote_connection(&self, tool_id: &str) -> Result<Vec<String>, String> {
         let manifest = self
             .load_manifest(tool_id)
