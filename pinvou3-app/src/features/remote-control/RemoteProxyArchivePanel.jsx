@@ -12,9 +12,17 @@ export default function RemoteProxyArchivePanel({ t }) {
   const [hasLoaded, setHasLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [quarantineConfirm, setQuarantineConfirm] = useState(null);
+  const [recoveryConfirm, setRecoveryConfirm] = useState(false);
+  const [recoveryFailure, setRecoveryFailure] = useState(null);
+  const [recoveryResult, setRecoveryResult] = useState(undefined);
   const confirmPanel = useRef(null);
   const request = useRef(0);
   const supported = typeof api?.listRemoteProxyArchives === 'function';
+  const recoveryAvailable = typeof api?.recoverRemoteProxyFile === 'function'
+    && ['remote_proxy_unreadable', 'remote_proxy_oversized', 'remote_proxy_malformed',
+      'remote_proxy_version_unsupported', 'remote_proxy_invalid_records', 'remote_proxy_archive_unavailable'].includes(status);
+  const quarantineAvailable = ['remote_proxy_oversized', 'remote_proxy_malformed',
+    'remote_proxy_invalid_records'].includes(status);
 
   const refresh = async (cursors = [null]) => {
     const intent = ++request.current;
@@ -57,8 +65,25 @@ export default function RemoteProxyArchivePanel({ t }) {
   }, [supported]);
 
   useEffect(() => {
-    if (quarantineConfirm) confirmPanel.current?.focus();
-  }, [quarantineConfirm]);
+    if (quarantineConfirm || recoveryConfirm) confirmPanel.current?.focus();
+  }, [quarantineConfirm, recoveryConfirm]);
+
+  const recover = async (confirmed) => {
+    const intent = ++request.current;
+    setBusy(true);
+    setRecoveryFailure(null);
+    try {
+      const exported = await api.recoverRemoteProxyFile(confirmed);
+      if (request.current !== intent) return;
+      setRecoveryResult(exported);
+      await refresh();
+    } catch (error) {
+      if (request.current === intent) setRecoveryFailure(
+        copy[error.code] ? error.code : 'remote_proxy_recovery_failed');
+    } finally {
+      if (request.current === intent) setBusy(false);
+    }
+  };
 
   const archive = async (id, quarantine = false) => {
     const intent = ++request.current;
@@ -105,10 +130,30 @@ export default function RemoteProxyArchivePanel({ t }) {
     <section className="space-y-3 rounded-xl border border-black/10 p-4 dark:border-white/10" data-testid="remote-proxy-archive">
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-[13px] font-semibold">{copy.title}</h3>
-        <button type="button" disabled={busy || !!quarantineConfirm} onClick={() => refresh(page)}>{copy.refresh}</button>
+        <button type="button" disabled={busy || !!quarantineConfirm || recoveryConfirm} onClick={() => refresh(page)}>{copy.refresh}</button>
       </div>
       <p className="text-[11px] leading-5">{copy.hint}</p>
       {status && <p role={['completed', 'cleanupPending', 'completedRefreshPending', 'quarantineCompleted', 'quarantineRefreshPending', 'quarantineCleanupPending'].includes(status) ? 'status' : 'alert'}>{copy[status]}</p>}
+      {recoveryAvailable && !recoveryConfirm && <div className="flex gap-3">
+        <button type="button" disabled={busy} onClick={() => recover(false)}>{copy.recoveryRetry}</button>
+        {quarantineAvailable && <button type="button" disabled={busy}
+          onClick={() => setRecoveryConfirm(true)}>{copy.recoveryQuarantine}</button>}
+      </div>}
+      {recoveryFailure && <p role="alert">{copy[recoveryFailure]}</p>}
+      {recoveryResult !== undefined && <p role="status">
+        {recoveryResult ? copy.recoveryExported : copy.recoveryReloaded}
+        {recoveryResult && <code className="block break-all">{recoveryResult}</code>}
+      </p>}
+      {recoveryConfirm && <section role="alertdialog" aria-modal="false" aria-labelledby="remote-recovery-confirm-title"
+        tabIndex={-1} ref={confirmPanel} className="space-y-3 rounded-lg border border-amber-500/40 p-3"
+        onKeyDown={event => { if (event.key === 'Escape') setRecoveryConfirm(false); }}>
+        <h4 id="remote-recovery-confirm-title">{copy.recoveryQuarantine}</h4>
+        <p>{copy.recoveryWarning}</p>
+        <div className="flex gap-3">
+          <button type="button" onClick={() => setRecoveryConfirm(false)}>{t.cpCancel}</button>
+          <button type="button" onClick={() => { setRecoveryConfirm(false); recover(true); }}>{copy.recoveryConfirm}</button>
+        </div>
+      </section>}
       {quarantineConfirm && <section role="alertdialog" aria-modal="false" aria-labelledby="remote-quarantine-confirm-title"
         tabIndex={-1} ref={confirmPanel} className="space-y-3 rounded-lg border border-amber-500/40 p-3"
         onKeyDown={event => { if (event.key === 'Escape') setQuarantineConfirm(null); }}>
