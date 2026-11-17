@@ -259,6 +259,13 @@ test("official desktop releases enable Windows and Linux and keep macOS disabled
     for (const step of job.steps) {
       assert.ok(step.env?.[flag] === undefined || step.env[flag] === value,
         `${name}: ${step.name || step.uses} must not override the platform policy`);
+      // 评审 round-3 P2-1：钉扎 job 的 run 文本不得出现 flag 字面量——
+      // `FLAG=0 node …` 前缀、`export FLAG=…` 与 GITHUB_ENV 注入都属
+      // 行内改写，job 级 env 钉扎对此无感知；开关只允许经钉死的 job env
+      // 选择。
+      assert.doesNotMatch(step.run ?? "", new RegExp(flag),
+        `${name}: ${step.name} must not touch ${flag} inside run text; `
+          + "the capability is selected only by the pinned job env");
     }
   }
   assert.doesNotMatch(source, /vars\.PINVOU_DESKTOP_CONTROLLER_ENABLED/u);
@@ -329,13 +336,25 @@ test("official desktop releases enable Windows and Linux and keep macOS disabled
   );
   // 可复用工作流委托禁令：影子 gate/构建工作流在 uses 上即可见，直接禁止
   // （评审 round-2 变异实证 3）；外部 action（owner/action@版本）不受影响。
+  // 评审 round-3 P2-2：GitHub 执行本地可复用工作流的唯一合法形态是 job 级
+  // `jobs.<id>.uses`；step 级 uses 根本不会被执行。两种形态一并禁止。
   const localReusableWorkflowUsers = Object.entries(jobs)
-    .flatMap(([name, job]) => (job.steps ?? [])
-      .filter((step) => typeof step.uses === "string" && /\.ya?ml$/u.test(step.uses))
-      .map((step) => `${name}: ${step.uses}`));
+    .flatMap(([name, job]) => {
+      const delegated = [];
+      if (typeof job.uses === "string" && /\.ya?ml$/u.test(job.uses)) {
+        delegated.push(`${name}: ${job.uses}`);
+      }
+      for (const step of job.steps ?? []) {
+        if (typeof step.uses === "string" && /\.ya?ml$/u.test(step.uses)) {
+          delegated.push(`${name}: ${step.uses}`);
+        }
+      }
+      return delegated;
+    });
   assert.deepEqual(localReusableWorkflowUsers, [],
     "release-packages.yml must not delegate build or gate logic to local reusable "
-      + "workflows; inline steps keep the compile/gate inventory exhaustive");
+      + "workflows (job-level or step-level uses); inline steps keep the "
+      + "compile/gate inventory exhaustive");
 });
 
 test("release platform and compiled capability contracts also run when Windows jobs are disabled", async () => {
