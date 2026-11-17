@@ -157,6 +157,11 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   a private temporary directory. A killed Linux controller can be recovered only
   by the registered scope marker, UID, cgroup and pidfd identity. No PID/name
   sweep or shared Runner Job Object is used.
+  The Windows atomic regression suite runs each original patched-executable
+  filter in an independent scope and retains attempted-receipt inventory even
+  on failure. Its capture-retention fixtures hand off the child's creation
+  identity before launcher exit and verify the same kernel object's exit;
+  a `finished` phase marker alone is not resource retirement.
 - Account CI installs `ci-fixture-docker.py` on **that job's PATH only**. Docker
   writes a fresh cidfile for every CLI `run`/`create`; the always-run ledger step
   validates all leases before stopping exact IDs and checks anonymous volumes.

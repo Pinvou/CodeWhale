@@ -4001,6 +4001,20 @@ jobs:
         if: ${{ matrix.phase == 'regression' }}
         run: npm --prefix pinvou3-app run test:windows-static-updater
 
+      - name: Windows atomic fixture Python
+        if: ${{ matrix.phase == 'regression' }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Initialize Windows atomic resource ledger
+        if: ${{ matrix.phase == 'regression' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -c 'import sys; assert sys.platform == "win32", "Windows fixture supervisor needs native Python"'
+          python scripts/ci-resource-ledger.py --init
+
       - name: Windows 原子替换状态机回归
         if: ${{ matrix.phase == 'regression' }}
         shell: bash
@@ -4014,6 +4028,10 @@ jobs:
             echo "FAIL: 测试 exe 不存在:$test_exe" >&2
             exit 1
           }
+          test_exe_windows="$(cygpath -w "$test_exe")"
+          ledger="$(cygpath -u "$PINVOU_CI_RESOURCE_LEDGER")"
+          : > "$ledger/atomic-expected.txt"
+          sha256sum "$test_exe"
           cd pinvou3-app/src-tauri
           # 逐过滤器断言至少命中 1 个测试,避免测试改名后过滤器 0 匹配却 exit 0
           # 导致的静默空跑。staging::tests 是 cfg(all(test, windows)) 的传输
@@ -4121,14 +4139,60 @@ jobs:
             'windows_attachment_runtime_stays_security_gated'; do
             index=$((index+1))
             started=$SECONDS
-            "$test_exe" "$filter" --test-threads=1 2>&1 | tee /tmp/windows_regression.log
-            grep -qE 'running [1-9][0-9]* tests?' /tmp/windows_regression.log || {
+            printf 'atomic-%s.json\n' "$index" >> "$ledger/atomic-expected.txt"
+            report="$ledger/atomic-$index.log"
+            receipt="$(cygpath -w "$ledger/atomic-$index.json")"
+            python ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"
+            grep -qE 'running [1-9][0-9]* tests?' "$report" || {
               echo "FAIL: 回归过滤器 '$filter' 匹配 0 个测试(疑似测试改名导致静默空跑)" >&2
               exit 1
             }
             echo "WINDOWS_RUST_TIMING phase=regression step=test-filter-$index elapsed_seconds=$((SECONDS-started)) status=0"
           done
           echo "WINDOWS_RUST_TIMING phase=regression step=regression-filter-suite elapsed_seconds=$((SECONDS-total_started)) status=0"
+
+      - name: Confirm Windows atomic resource retirement
+        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - "$PINVOU_CI_RESOURCE_LEDGER" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          root = Path(sys.argv[1])
+          expected = root / 'atomic-expected.txt'
+          if expected.is_symlink() or not expected.is_file() or expected.stat().st_size > 65536:
+              raise SystemExit('Windows atomic receipt inventory unavailable')
+          names = expected.read_text(encoding='utf-8').splitlines()
+          if not names or len(names) != len(set(names)) or any(not re.fullmatch(r'atomic-[1-9][0-9]*\.json', name) for name in names):
+              raise SystemExit('Windows atomic receipt inventory invalid or empty')
+          for name in names:
+              receipt = root / name
+              if receipt.is_symlink() or not receipt.is_file():
+                  raise SystemExit('Windows atomic resource receipt missing: ' + name)
+          PY
+          python scripts/ci-resource-ledger.py --directory "$PINVOU_CI_RESOURCE_LEDGER"
+
+      - name: Windows atomic lifecycle receipts
+        id: windows_atomic_receipts_upload
+        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/atomic-expected.txt
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/ledger.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when Windows atomic receipt delivery fails
+        if: ${{ always() && steps.windows_atomic_receipts_upload.outcome == 'failure' }}
+        shell: bash
+        run: echo '::warning::Windows atomic receipt upload failed; original receipts remain on the runner. Tests and retirement remain mandatory.'
 
       # Round-42 review: the pinvou-cli workspace's own cfg(windows) unit
       # tests previously ran on NO CI leg — the Linux cli-test leg cannot
