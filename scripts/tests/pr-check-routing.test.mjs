@@ -332,6 +332,26 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
+  {
+    const receipt = namedStep(jobBlock("windows-rust-test", text), "Windows atomic lifecycle receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Windows atomic lifecycle receipts",
+      "        id: windows_atomic_receipts_upload",
+      "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/atomic-expected.txt",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/ledger.txt",
+      "          if-no-files-found: error",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
   // Explicit YAML keys may put comments/newlines before their value indicator.
   const keySeparator = String.raw`(?:\s|#[^\n]*(?:\n|$))*:`;
   assert.doesNotMatch(remainder, new RegExp(String.raw`\bcontinue-on-error\s*['"]?` + keySeparator),
@@ -390,6 +410,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     ["account-closure-test", "Account closure resource lifecycle receipts"],
     ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
     ["windows-codex-runtime-test", "Preserve ACP fixture exit receipt"],
+    ["windows-rust-test", "Windows atomic lifecycle receipts"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,
@@ -408,6 +429,29 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
       mutants.push(withoutReceiptExemption.replace(receipt.replace("        continue-on-error: true\n", ""),
         `${receipt.replace("        continue-on-error: true\n", "")}      - ${first}\n${rest}        continue-on-error: true\n`));
     }
+  }
+  const atomicReceipt = namedStep(jobBlock("windows-rust-test", original), "Windows atomic lifecycle receipts");
+  for (const [old, replacement] of [
+    ["id: windows_atomic_receipts_upload", "id: unreviewed_upload"],
+    ["if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", "if: always()"],
+    ["${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json", "${{ github.workspace }}/**/*"],
+    ["retention-days: 7", "retention-days: 30"],
+    ["name: Windows atomic lifecycle receipts", "name: Unreviewed transport"],
+    ["        uses: actions/upload-artifact@v7", "        env:\n          UNREVIEWED: yes\n        uses: actions/upload-artifact@v7"],
+  ]) {
+    mutants.push(original.replace(atomicReceipt, atomicReceipt.replace(old, replacement)));
+  }
+  mutants.push(original.replace(atomicReceipt, atomicReceipt + atomicReceipt));
+  const frontendReceipt = namedStep(jobBlock("frontend-test", original), "Test resource lifecycle receipts");
+  mutants.push(original.replace(atomicReceipt, "").replace(frontendReceipt, frontendReceipt + atomicReceipt));
+  const withoutAtomicExemption = original.replace(atomicReceipt,
+    atomicReceipt.replace("        continue-on-error: true\n", ""));
+  for (const name of ["Windows 原子替换状态机回归", "Confirm Windows atomic resource retirement"]) {
+    const mandatory = namedStep(jobBlock("windows-rust-test", original), name);
+    mutants.push(original.replace(mandatory,
+      mandatory.replace("      - name: " + name + "\n", "      - name: " + name + "\n        continue-on-error: true\n")));
+    mutants.push(withoutAtomicExemption.replace(mandatory,
+      mandatory.replace("      - name: " + name + "\n", "      - name: " + name + "\n        continue-on-error: true\n")));
   }
   for (const mutant of mutants) {
     assert.notEqual(mutant, original, "the counterexample must change the actual workflow");
