@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test as nodeTest } from "node:test";
 
@@ -37,6 +40,7 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
     // Execute the actual producer block and artifact registration, without SSH,
     // a signer or deployment. The validator suite separately checks signatures.
     const script = `$ErrorActionPreference='Stop';
+      if($env:PINVOU_TEST_FOREIGN_MODULE_PATH -and (@($env:PSModulePath -split [IO.Path]::PathSeparator) -contains $env:PINVOU_TEST_FOREIGN_MODULE_PATH)){throw 'foreign-module-path-inherited'};
       if($env:OS -eq 'Windows_NT'){Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force};
       ${productionAst}
       foreach($name in @('Get-PinvouSha256Hex','Get-PinvouFileSha256','Assert-PinvouPathInside','Add-LocalArtifact')){
@@ -64,7 +68,7 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
         $count=$artifacts.Count;try{. $emit;throw 'overlong-run-accepted'}catch{if($_.Exception.Message -cne 'e2e_run_duration_invalid'){throw}};
         if($artifacts.Count -ne $count){throw 'overlong-run-published'}
       } finally {if(Test-Path -LiteralPath $evidenceRoot){Remove-Item -LiteralPath $evidenceRoot -Recurse -Force}}`;
-    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {encoding: 'utf8', timeout: 30000});
+    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {env: shellEnv, encoding: 'utf8', timeout: 30000});
     assert.equal(result.status, 0, result.error?.message ?? result.stderr);
     const actual = JSON.parse(result.stdout);
     const marker = JSON.parse(Buffer.from(actual.marker_base64, 'base64').toString('utf8'));
@@ -73,6 +77,27 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
     assert.equal(actual.interval_sha256, crypto.createHash('sha256').update(JSON.stringify(actual.interval)).digest('hex'));
   });
 }
+
+nodeTest("completion producer shells discard a foreign inherited Windows module path", {
+  skip: process.platform !== "win32",
+}, () => {
+  const foreignPath = mkdtempSync(join(tmpdir(), "pinvou-foreign-modules-"));
+  try {
+    const env = { ...process.env };
+    // This child starts an independent CLI runner. Inheriting the worker
+    // context makes node:test skip its files as a recursive runner invocation.
+    delete env.NODE_TEST_CONTEXT;
+    for (const name of Object.keys(env)) if (name.toUpperCase() === "PSMODULEPATH") delete env[name];
+    env.PSModulePath = foreignPath;
+    env.PINVOU_TEST_FOREIGN_MODULE_PATH = foreignPath;
+    const result = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--test-name-pattern=^production completion marker serializes", fileURLToPath(import.meta.url)], {
+      env, encoding: "utf8", timeout: 90000,
+    });
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
+    assert.match(result.stdout, /# pass 2\b/u, "both Windows PowerShell and PowerShell 7 must execute");
+    assert.match(result.stdout, /# skipped 0\b/u);
+  } finally { rmSync(foreignPath, { recursive: true, force: true }); }
+});
 
 // Execute the real legacy-flow parameter binder and try/finally without running
 // the top-level orchestrator. Only the external trusted-driver boundary is fake.

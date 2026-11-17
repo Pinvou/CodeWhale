@@ -17,7 +17,7 @@ Set-StrictMode -Version 2.0
 # $PSScriptRoot is populated. Resolve the default from the script body so the
 # public npm entry works without callers having to pass the hidden AppRoot.
 if ([string]::IsNullOrWhiteSpace($AppRoot)) {
-  $AppRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+  $AppRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")
 }
 
 function Resolve-AbsolutePath {

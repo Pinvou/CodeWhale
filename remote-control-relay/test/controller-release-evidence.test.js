@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { existsSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import childProcess, { execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -768,6 +771,113 @@ test("release gate is fail-closed when enabled and evidence configuration is abs
     () => runControllerReleaseGate({ PINVOU_DESKTOP_CONTROLLER_ENABLED: "true" }),
     (error) => error?.code === "release_feature_flag_invalid",
   );
+});
+
+test("enabled release gate checks authenticated evidence before and after external prerequisites", async (t) => {
+  for (const scenario of ["valid", "invalid-at-entry", "changed-after-prerequisites", "expired-after-prerequisites"]) {
+    await t.test(scenario, async (t) => {
+      const root = await mkdtemp(join(tmpdir(), "pinvou-release-gate-boundary-"));
+      t.after(() => rm(root, { recursive: true, force: true }));
+      const evidence = await validEvidence();
+      // Synthetic local certificates and keys exercise the real production
+      // validation path, not a real provider, attestation service or deployment.
+      for (const attestation of evidence.attestations) attestation.identity = "production";
+      evidence.relay.enrollment_deployment = "self_hosted";
+      await materializeEvidence(evidence, root);
+      const evidencePath = join(root, "release-evidence.json");
+      const markerPath = join(root, "gates/run-completion.json");
+      await writeFile(evidencePath, JSON.stringify(evidence));
+      const statePath = join(root, "controller-state.json");
+      const enabledPath = join(root, "enabled.env");
+      const disabledPath = join(root, "disabled.env");
+      const inventoryPath = join(root, "inventory.json");
+      const gatewayPath = join(root, "gateway.json");
+      // Preflight processes are mocked below. These files still go through the
+      // gate's real file, parser, parity and protected-state binding checks.
+      const envText = `PINVOU_DESKTOP_CONTROLLER_ENABLED=1\nPINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=self_hosted\nPINVOU_REMOTE_CONTROLLER_STATE_PATH=${statePath}\n`;
+      await Promise.all([
+        writeFile(statePath, "{}"), writeFile(enabledPath, envText),
+        writeFile(disabledPath, envText.replace("ENABLED=1", "ENABLED=0")),
+        writeFile(inventoryPath, "external-private-inventory"),
+        writeFile(gatewayPath, "external-protected-gateway-config"),
+      ]);
+      const identity = evidence.attestations[0];
+      const installer = evidence.installers[0];
+      const env = {
+        PINVOU_DESKTOP_CONTROLLER_ENABLED: "1", PINVOU_RELEASE_COMMIT_SHA: commit,
+        PINVOU_REMOTE_RELEASE_EVIDENCE: evidencePath,
+        PINVOU_TRUSTED_WINDOWS_SIGNER_THUMBPRINT: signer, PINVOU_TRUSTED_WINDOWS_SIGNER_PUBLISHER: publisher,
+        PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY: inventoryPath, PINVOU_REMOTE_GATEWAY_CONFIG_PATH: gatewayPath,
+        PINVOU_REMOTE_CONTROLLER_ENV_FILE: enabledPath, PINVOU_REMOTE_CONTROLLER_DISABLED_ENV_FILE: disabledPath,
+        PINVOU_REMOTE_CONTROLLER_STATE_PATH: statePath, PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted",
+        PINVOU_TRUSTED_E2E_DRIVER_SHA256: evidence.driver.sha256,
+        PINVOU_TRUSTED_E2E_NODE_SHA256: evidence.provenance.node_sha256,
+        PINVOU_TRUSTED_E2E_NODE_SIGNER_THUMBPRINT: evidence.provenance.node_authenticode_thumbprint,
+        PINVOU_TRUSTED_E2E_NODE_SIGNER_PUBLISHER: evidence.provenance.node_publisher,
+        PINVOU_TRUSTED_E2E_ATTESTATION_PUBLIC_KEY_SHA256: identity.public_key_sha256,
+        PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER: identity.provider,
+        PINVOU_TRUSTED_E2E_ATTESTATION_KEY_ID: identity.key_id,
+        PINVOU_TRUSTED_E2E_ATTESTATION_ACL_SHA256: identity.acl_attestation_sha256,
+        PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER_MEASUREMENT_SHA256: identity.provider_measurement_sha256,
+        PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER_VENDOR: identity.provider_vendor,
+        PINVOU_TRUSTED_E2E_PROVIDER_ROOT_CERTIFICATE_SHA256: providerRootSha256,
+        PINVOU_TRUSTED_E2E_PROVIDER_VERIFIER_CERTIFICATE_SHA256: providerLeafSha256,
+        PINVOU_TRUSTED_E2E_ORCHESTRATOR_ROLE_POLICY_SHA256: evidence.attestations[0].role_policy_sha256,
+        PINVOU_TRUSTED_E2E_A_ROLE_POLICY_SHA256: evidence.attestations[1].role_policy_sha256,
+        PINVOU_TRUSTED_E2E_B_ROLE_POLICY_SHA256: evidence.attestations[2].role_policy_sha256,
+        PINVOU_RELEASE_BUILD_PROVENANCE_SHA256: installer.build_provenance_artifact_sha256,
+        PINVOU_RELEASE_BUILD_REPOSITORY: "pinvou/pinvou3",
+        PINVOU_RELEASE_BUILD_WORKFLOW: ".github/workflows/windows-remote-control-build-evidence.yml",
+        PINVOU_RELEASE_BUILD_RUN_ID: "12345", PINVOU_TRUSTED_GH_PATH: process.execPath,
+        PINVOU_REMOTE_TELEMETRY_SNAPSHOT_URL: "https://telemetry.example.invalid/snapshot",
+        PINVOU_REMOTE_TELEMETRY_ADMIN_TOKEN_FILE: join(root, "unused-token-file"),
+        PINVOU_RELEASE_INSTALLER_SHA256: installer.sha256, PINVOU_RELEASE_VERSION: installer.version,
+      };
+      let now = Date.parse(evidence.finished_at);
+      t.mock.method(Date, "now", () => now);
+      const calls = [];
+      const invalidateMarker = () => writeFile(markerPath, "{}");
+      // Only subprocess boundaries are substituted. The imported gate and its
+      // deep reader retain actual file hashing, signatures, trust pins and time.
+      t.mock.method(childProcess, "spawn", (command, args) => {
+        calls.push({ command, args: [...args] });
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        queueMicrotask(async () => {
+          try {
+            if (args[0]?.endsWith("check-enrollment-gated-v2-rollback.mjs")) {
+              if (scenario === "changed-after-prerequisites") await invalidateMarker();
+              if (scenario === "expired-after-prerequisites") now += 86_400_001;
+            }
+            child.stdout.end(); child.stderr.end(); child.emit("close", 0);
+          } catch (error) { child.emit("error", error); }
+        });
+        return child;
+      });
+      syncBuiltinESMExports();
+      t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+      if (scenario === "invalid-at-entry") await invalidateMarker();
+      if (scenario === "valid") {
+        const result = await runControllerReleaseGate(env);
+        assert.equal(result.ok, true);
+        assert.equal(result.enabled, true);
+        assert.equal(result.evidence_required, true);
+        assert.equal(result.journey_count, 27);
+      } else {
+        await assert.rejects(() => runControllerReleaseGate(env), {
+          code: scenario === "expired-after-prerequisites"
+            ? "evidence_qualification_time_invalid" : "evidence_artifact_digest_mismatch",
+        });
+      }
+      if (scenario === "invalid-at-entry") {
+        assert.equal(calls.length, 0, "invalid evidence must fail before any external prerequisite");
+      } else {
+        assert.equal(calls.length, 8, "both attestations, two preflights, two tests, telemetry and rollback ran");
+        assert.ok(calls.at(-1).args[0].endsWith("check-enrollment-gated-v2-rollback.mjs"));
+      }
+    });
+  }
 });
 
 test("legacy rollback is safe only at exactly 100 percent coverage with zero misses", () => {

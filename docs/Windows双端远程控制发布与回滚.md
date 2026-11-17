@@ -2,6 +2,8 @@
 
 > 对应 DEV-25，需求基线为需求文档第 14～20 节。所有发布判断使用稳定旅程 ID，不使用会随文档编辑漂移的自然序号。
 
+本文曾随 A08 提前纳入，用于规划 DEV-25 的发布、灰度和回滚边界；文档存在不等于 A08 已实现或执行发布工作流。DEV-25 的实际发布门禁与证据装配由 A25（PR [#1342](https://github.com/Pinvou/pinvou3/pull/1342)）及其后继维护负责，A18 负责部署预检与回滚边界。A08 仅维护 Relay 发布单元和回滚文件清单，未据此执行 SSH 部署、服务启停或真实双机公网验收。历史与当前验证分层见[交付追溯补遗](remote-control-delivery-provenance.md)。
+
 ## 1. 发布前置门禁
 
 仅构建值为 `1` 的 Windows 客户端允许运行时未设变量时展示桌面远程控制入口；显式设置 `PINVOU_DESKTOP_CONTROLLER_ENABLED=0` 可紧急隐藏入口并拒绝全部远控 Command。构建值为 `0` 的普通发布产物不能在运行时重新开启。启用桌面产物与 Relay 均须取得以下属于待发布 commit 的全部门禁证据，才允许公开发布本功能及在 Relay 环境把 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 设为精确值 `1`：
@@ -62,7 +64,7 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 
 ## 2. Enrollment 迁移与灰度
 
-1. 从受保护的旧 endpoint inventory 运行 `enrollment-migrate.js --coverage`；覆盖率未达 100% 不进入灰度。
+1. 从受保护的旧 endpoint inventory 运行 `node remote-control-relay/scripts/enrollment-migrate.js --coverage`（仓库根目录）；覆盖率未达 100% 不进入灰度。
 2. 官方环境由已认证旧 socket 完成 challenge/proof 认领，保留 endpoint ID/token/Web 链接；身份冲突必须重新分享。
 3. 自托管先 `--dry-run`，再用稳定 request ID 执行批量 allowlist/re-enroll；re-enroll 会明确使旧 Web 链接失效。
 4. 生产只允许 `NODE_ENV=production`、独立验证过的 `self_hosted`，且 `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`。当前 `official` live claim 尚未接线，预检及启动明确失败关闭；不得以开发 TOFU 作为生产降级。
