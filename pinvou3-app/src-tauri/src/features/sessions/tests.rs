@@ -1864,7 +1864,28 @@ fn scheduled_engine_state_persists_full_snapshot_and_preserves_identity_and_prof
 
 #[test]
 fn scheduled_engine_token_accounting_preserves_persisted_totals_across_restarts() {
-    let (store, _g) = isolated_store();
+    with_isolated_store_restoring_home(|store| {
+        struct FixtureCleanup(PathBuf);
+
+        impl Drop for FixtureCleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let _fixture = FixtureCleanup(
+            store
+                .manager
+                .sessions_dir()
+                .parent()
+                .expect("fixture home")
+                .to_path_buf(),
+        );
+        scheduled_engine_token_accounting_contract(store);
+    });
+}
+
+fn scheduled_engine_token_accounting_contract(store: &SessionStore) {
     let scheduled = store
         .create_scheduled_run(scheduled_profile("task-token-accounting"))
         .expect("create scheduled run");
