@@ -121,8 +121,8 @@ function injectSource() {
         case 'install_marketplace_tool':
           if(BLOCKING_INSTALL_OAUTH_TOOLS.has(args.toolId)) return new Promise(resolve=>{state.finishOAuthInstall=()=>{state.installed[args.toolId]=true;state.finishOAuthInstall=null;resolve(null);};});
           state.installed[args.toolId]=true;
-          // weather declares remote validation: the command's Ok value is the
-          // discovered tool inventory the success card reports (round-2 P2).
+          // Synthetic inventory exercises the success-card subtitle independently
+          // of weather's real manifest; Rust tests cover native validation routing.
           if(args.toolId==='weather') return Promise.resolve(['gaode_weather_query']);
           return Promise.resolve(null);
         case 'uninstall_marketplace_tool': state.installed[args.toolId]=false; return Promise.resolve(null);
