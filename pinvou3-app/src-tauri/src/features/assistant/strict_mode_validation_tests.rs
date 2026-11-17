@@ -110,8 +110,8 @@ fn strict_mode_rejects_failed_turn_without_error_event() {
         Event::TurnComplete {
             usage: Usage::default(),
             status: TurnOutcomeStatus::Failed,
-            error: Some("engine task panicked".to_string()),
             error_source: None,
+            error: Some("engine task panicked".to_string()),
             tool_catalog: None,
             turn_id: None,
             submission_id: None,
@@ -142,8 +142,8 @@ fn strict_mode_waits_for_turn_complete_after_error() {
     let complete = Event::TurnComplete {
         usage: Usage::default(),
         status: TurnOutcomeStatus::Failed,
-        error: Some("stream recovery failed".to_string()),
         error_source: None,
+        error: Some("stream recovery failed".to_string()),
         tool_catalog: None,
         turn_id: None,
         submission_id: None,
