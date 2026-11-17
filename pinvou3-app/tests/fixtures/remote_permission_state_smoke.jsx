@@ -20,7 +20,7 @@ const items = new Map();
 function makeSession(id, leaseEpoch = 1, revision = 1, generation = 'generation-1') {
   const connection = {
     localSessionId: id, status: 'connected', sessionMode: 'chat', sessionRef: `ref-${id}`,
-    connectionId: 'connection-1', controllerLeaseId: `lease-${leaseEpoch}`, leaseEpoch,
+    connectionId: 'connection-1', controllerLeaseId: `lease-${leaseEpoch}`, leaseEpoch: String(leaseEpoch),
     relayEpoch: 'relay-1', generation, mappingConfirmed: true,
     capabilityRevision: revision, capabilityStatus: 'ready', capabilityError: null, temporaryModelAvailable: false,
   };
@@ -31,7 +31,7 @@ function makeSession(id, leaseEpoch = 1, revision = 1, generation = 'generation-
     unattemptedPending: [{ ...handle, dispatchState: 'prepared_never_attempted' }] };
   const capabilities = {
     connectionId: connection.connectionId, controllerLeaseId: connection.controllerLeaseId,
-    leaseEpoch, relayEpoch: connection.relayEpoch, remoteControlGeneration: connection.generation,
+    leaseEpoch: connection.leaseEpoch, relayEpoch: connection.relayEpoch, remoteControlGeneration: connection.generation,
     remoteSessionRef: connection.sessionRef, capabilityRevision: revision,
     expiresAtMs: Date.now() + (fixture.scenario.startsWith('idle') ? 30_000 : 3600000), modes: ['chat'], workspaces: [],
     skills: fixture.scenario.startsWith('idle')
