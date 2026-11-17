@@ -2879,17 +2879,11 @@ impl Engine {
                 }
             }
 
-            for tool in &mut tool_uses {
-                tool.invalidate_input_parse_proof();
-                let Some(schema) = tool_catalog
-                    .iter()
-                    .find(|candidate| candidate.name == tool.name)
-                    .map(|candidate| &candidate.input_schema)
-                else {
-                    continue;
-                };
-                normalize_schema_json_containers(&mut tool.input, schema);
-            }
+            repair_tool_arguments_with_request_owned_schemas(
+                &mut tool_uses,
+                &tool_catalog,
+                &turn.moonshot_mint_owners,
+            );
 
             #[cfg(feature = "benchmark-eval-controls")]
             if (benchmark_tool_budget_fused || benchmark_tools_disabled_from_start)
@@ -7831,6 +7825,52 @@ fn is_turn_metadata_text(text: &str) -> bool {
     text.trim_start().starts_with("<turn_meta>")
 }
 
+/// The registry name whose schema should direct this tool call's argument
+/// repair: the received spelling may be this request's minted wire name for
+/// a different registry tool, and repairing against a deferred namesake's
+/// schema would corrupt the owner's argument (a string payload normalized
+/// into the twin's object shape) before the ownership map restores the
+/// execution name later in planning (review 5931088224). The map is
+/// registry → minted, so the claim is a reverse lookup on the received
+/// spelling; non-Moonshot turns carry an empty map and keep the received
+/// name.
+fn repair_schema_lookup_name<'a>(
+    mint_owners: &'a std::collections::HashMap<String, String>,
+    received: &'a str,
+) -> &'a str {
+    mint_owners
+        .iter()
+        .find(|(_, minted)| minted.as_str() == received)
+        .map(|(registry, _)| registry.as_str())
+        .unwrap_or(received)
+}
+
+/// The schema-directed argument repair seam (`run_turn`): each tool call's
+/// input is normalized against the schema of the tool that **this request
+/// owns** for the received spelling — not against whatever namesake happens
+/// to sit in the full catalog (review 5931088224: repairing against a
+/// deferred twin corrupts the owner's argument before the ownership map
+/// restores the execution name, and the rewritten value reaches assistant
+/// history).
+fn repair_tool_arguments_with_request_owned_schemas(
+    tool_uses: &mut [ToolUseState],
+    tool_catalog: &[Tool],
+    mint_owners: &std::collections::HashMap<String, String>,
+) {
+    for tool in tool_uses {
+        tool.invalidate_input_parse_proof();
+        let repair_name = repair_schema_lookup_name(mint_owners, &tool.name);
+        let Some(schema) = tool_catalog
+            .iter()
+            .find(|candidate| candidate.name == repair_name)
+            .map(|candidate| &candidate.input_schema)
+        else {
+            continue;
+        };
+        normalize_schema_json_containers(&mut tool.input, schema);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8923,6 +8963,134 @@ mod tests {
         assert!(tool_def.is_some());
         assert_eq!(name, "_3D_render");
         assert_eq!(tool_def.expect("resolved").name, "_3D_render");
+    }
+
+    #[test]
+    fn repair_schema_lookup_resolves_the_request_owned_owner() {
+        // Review 5931088224: the received spelling may be this request's
+        // minted wire name for a different registry tool; the repair schema
+        // must come from the advertised owner, never from a deferred twin
+        // that merely shares the spelling in the full catalog.
+        let owners: std::collections::HashMap<String, String> =
+            [("3_parse".to_string(), "_3_parse".to_string())]
+                .into_iter()
+                .collect();
+        assert_eq!(
+            repair_schema_lookup_name(&owners, "_3_parse"),
+            "3_parse",
+            "the minted spelling must repair against the advertised owner's schema"
+        );
+        assert_eq!(
+            repair_schema_lookup_name(&owners, "3_parse"),
+            "3_parse",
+            "a raw registry spelling stays itself"
+        );
+        assert_eq!(
+            repair_schema_lookup_name(&owners, "unrelated"),
+            "unrelated",
+            "an unrelated tool keeps its received name"
+        );
+        let empty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        assert_eq!(
+            repair_schema_lookup_name(&empty, "_3_parse"),
+            "_3_parse",
+            "non-Moonshot turns carry an empty map and keep the received name"
+        );
+    }
+
+    #[test]
+    fn repair_targets_the_owner_schema_and_the_twin_schema_would_corrupt() {
+        // The corruption mechanism behind review 5931088224, pinned at the
+        // repair seam: the owner's schema (string payload) keeps the
+        // argument verbatim, while the deferred twin's schema (object
+        // payload) — the one the received spelling selects without the
+        // ownership claim — rewrites it into an object.
+        let owner_schema = serde_json::json!({
+            "type": "object",
+            "properties": {"payload": {"type": "string"}},
+            "required": ["payload"]
+        });
+        let twin_schema = serde_json::json!({
+            "type": "object",
+            "properties": {"payload": {"type": "object"}},
+            "required": ["payload"]
+        });
+        let mut repaired = serde_json::json!({"payload": "{}"});
+        normalize_schema_json_containers(&mut repaired, &owner_schema);
+        assert_eq!(repaired, serde_json::json!({"payload": "{}"}));
+        let mut corrupted = serde_json::json!({"payload": "{}"});
+        normalize_schema_json_containers(&mut corrupted, &twin_schema);
+        assert_eq!(corrupted, serde_json::json!({"payload": {}}));
+    }
+
+    #[test]
+    fn repair_tool_arguments_use_the_request_owned_schema() {
+        // The seam itself: with the ownership map, the repair must use the
+        // owner's schema and keep the string payload verbatim; without the
+        // ownership claim (the empty map = the pre-fix behavior) the same
+        // call repairs against the twin and corrupts the argument.
+        fn tool_with_payload(name: &str, payload_type: &str) -> Tool {
+            Tool {
+                tool_type: None,
+                name: name.to_string(),
+                description: String::new(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"payload": {"type": payload_type}},
+                    "required": ["payload"]
+                }),
+                allowed_callers: None,
+                defer_loading: None,
+                input_examples: None,
+                strict: None,
+                cache_control: None,
+            }
+        }
+        let catalog = vec![
+            tool_with_payload("3_parse", "string"),
+            tool_with_payload("_3_parse", "object"),
+        ];
+        let owners: std::collections::HashMap<String, String> =
+            [("3_parse".to_string(), "_3_parse".to_string())]
+                .into_iter()
+                .collect();
+
+        let mut owned = vec![ToolUseState {
+            id: "call-owner".to_string(),
+            name: "_3_parse".to_string(),
+            input: serde_json::json!({"payload": "{}"}),
+            caller: None,
+            thought_signature: None,
+            input_buffer: String::new(),
+            input_parse_error: None,
+            input_parse_proof: Default::default(),
+        }];
+        repair_tool_arguments_with_request_owned_schemas(&mut owned, &catalog, &owners);
+        assert_eq!(
+            owned[0].input,
+            serde_json::json!({"payload": "{}"}),
+            "the request-owned schema must keep the owner's string payload verbatim"
+        );
+
+        // The pre-fix behavior for contrast: without the ownership claim the
+        // received spelling selects the twin and the payload corrupts.
+        let empty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut unclaimed = vec![ToolUseState {
+            id: "call-owner".to_string(),
+            name: "_3_parse".to_string(),
+            input: serde_json::json!({"payload": "{}"}),
+            caller: None,
+            thought_signature: None,
+            input_buffer: String::new(),
+            input_parse_error: None,
+            input_parse_proof: Default::default(),
+        }];
+        repair_tool_arguments_with_request_owned_schemas(&mut unclaimed, &catalog, &empty);
+        assert_eq!(
+            unclaimed[0].input,
+            serde_json::json!({"payload": {}}),
+            "the twin's schema rewrites the string payload into an object"
+        );
     }
 
     #[test]

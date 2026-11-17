@@ -5918,6 +5918,73 @@ fn tool_surface_policy_never_reintroduces_denied_synthetic_tools() {
 }
 
 #[tokio::test]
+async fn moonshot_argument_repair_uses_the_request_owned_owner_schema() {
+    // Review 5931088224: the repair schema must be selected for the
+    // request-owned identity BEFORE schema-directed repair and the history
+    // copy. `3_parse` (advertised, string payload) owns the minted
+    // `_3_parse`; the twin `_3_parse` (object payload) sits in the full
+    // catalog. A valid response for the owner must reach ToolCallStarted
+    // with its string payload verbatim — not normalized into the twin's
+    // object shape by the deferred namesake's schema.
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let with_payload_schema = |name: &str, payload_type: &str| Tool {
+        name: name.to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {"payload": {"type": payload_type}},
+            "required": ["payload"]
+        }),
+        ..catalog_tool(name)
+    };
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn("call-owner", "_3_parse", r#"{"payload":"{}"}"#),
+        canned::simple_text_turn("Handled."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let catalog = vec![
+        with_payload_schema("3_parse", "string"),
+        with_payload_schema("_3_parse", "object"),
+    ];
+    let policy = policy_for_catalog(
+        catalog,
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Bypass,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    turn.moonshot_mint_owners
+        .insert("3_parse".to_string(), "_3_parse".to_string());
+
+    let (status, error) = engine.run_turn(&mut turn, policy, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let mut events = handle.rx_event.write().await;
+    let started = std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
+        Event::ToolCallStarted { name, input, .. } if name == "_3_parse" => Some(input),
+        _ => None,
+    });
+    let input = started.expect("the owner tool call must start under its received spelling");
+    assert_eq!(
+        input,
+        serde_json::json!({"payload": "{}"}),
+        "the started event carries the model's raw arguments"
+    );
+
+    // The repair's durable effect (the argument reaching execution and
+    // assistant history verbatim) is pinned at the repair seam itself —
+    // `repair_tool_arguments_use_the_request_owned_schema` in turn_loop
+    // proves the owner path keeps the payload verbatim while the twin path
+    // (the pre-fix behavior) rewrites it into an object.
+}
+
+#[tokio::test]
 async fn denied_synthetic_tool_is_blocked_by_the_same_turn_policy_at_execution() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
