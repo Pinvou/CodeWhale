@@ -1,7 +1,7 @@
 //! Commit local disconnect before any receipt wait. The returned scope owns
 //! only the retired socket; dropping/cancelling it cannot stop a new socket.
+use super::super::controlling_session::ControllingSessionManager;
 use super::*;
-use crate::features::remote_control::controller::controlling_session::ControllingSessionManager;
 use crate::features::remote_control::controller::encrypted_lane::ControllingLaneState;
 
 pub(crate) struct ControllingDisconnect {

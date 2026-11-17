@@ -584,7 +584,7 @@ Windows 发版机还应执行：
 
 ```powershell
 cd pinvou3-app
-npm run prebuild:nsis
+npm run nsis:clean-staging
 npm run build:nsis
 ```
 

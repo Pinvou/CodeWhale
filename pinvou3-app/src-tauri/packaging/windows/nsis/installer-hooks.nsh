@@ -3,6 +3,15 @@
 !define PINVOU_VC_REDIST_MIN_BUILD 36247
 !define PINVOU_VC_REDIST_MIN_REVISION 0
 
+; ${__FILEDIR__} inside !macro bodies keeps the insertion-site value (the
+; bundler renders installer.nsi under the cargo target dir's nsis/<arch>), so
+; anchor this hooks directory once at file level, where ${__FILEDIR__} is
+; still this file's directory. Both the committed base hooks
+; (packaging/windows/nsis) and the staged generated copy
+; (target/release/nsis-stage) sit exactly three directories below src-tauri,
+; so ${PINVOU_HOOKS_DIR}\..\..\.. always resolves to src-tauri.
+!define PINVOU_HOOKS_DIR "${__FILEDIR__}"
+
 !macro NSIS_HOOK_PREINSTALL
   DetailPrint "Checking Microsoft Visual C++ Redistributable 2015-2022 (x64)..."
 
@@ -40,8 +49,8 @@ pinvou_vc_redist_install:
   DetailPrint "Installing Microsoft Visual C++ Redistributable 2015-2022 (x64)..."
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
-  File "/oname=$PLUGINSDIR\VC_redist.x64.exe" "${__FILEDIR__}\..\..\..\windows-runtime\nsis\vc_redist\VC_redist.x64.exe"
-  File "/oname=$PLUGINSDIR\pinvou-vcredist-temp-preflight.ps1" "${__FILEDIR__}\..\..\..\..\packaging\windows\nsis\vcredist-temp-preflight.ps1"
+  File "/oname=$PLUGINSDIR\VC_redist.x64.exe" "${PINVOU_HOOKS_DIR}\..\..\..\target\windows-runtime\nsis\vc_redist\VC_redist.x64.exe"
+  File "/oname=$PLUGINSDIR\pinvou-vcredist-temp-preflight.ps1" "${PINVOU_HOOKS_DIR}\..\..\..\packaging\windows\nsis\vcredist-temp-preflight.ps1"
   nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\pinvou-vcredist-temp-preflight.ps1"'
   Pop $6
   Pop $7
@@ -92,29 +101,57 @@ pinvou_vc_redist_ready:
   DetailPrint "Microsoft Visual C++ Redistributable 2015-2022 (x64) is ready."
 !macroend
 
-!macro PINVOU_RUN_RUNTIME_ENV MODE REQUIRED
+; Configure the machine-wide bundled-runtime environment after install and
+; remove it on uninstall, mirroring wix/python-node-path.wxs for the MSI
+; target (same variable, value, and machine scope). Failure contracts differ
+; by leg: install aborts (MSI Environment writes roll back), uninstall warns
+; and continues (MSI would roll the whole uninstall back) so one stale
+; registry value can never strand a user or block removal; runtime-env.ps1
+; additionally only clears the value while it points at this install.
+!macro PinvouRunRuntimeEnv Mode FailHard
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
-  File "/oname=$PLUGINSDIR\pinvou-runtime-env.ps1" "${__FILEDIR__}\..\..\..\..\packaging\windows\nsis\runtime-env.ps1"
-  nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\pinvou-runtime-env.ps1" -Mode "${MODE}" -InstallDir "$INSTDIR"'
-  Pop $0
-  Pop $1
-  ${If} $0 != 0
-    DetailPrint "Pinvou runtime environment update failed: $1"
-    ${If} "${REQUIRED}" == "true"
-      MessageBox MB_ICONSTOP|MB_OK "Failed to configure bundled Python/Node environment. Please run the installer as administrator."
+  File "/oname=$PLUGINSDIR\pinvou-runtime-env.ps1" "${PINVOU_HOOKS_DIR}\..\..\..\packaging\windows\nsis\runtime-env.ps1"
+  ; Hand $INSTDIR to the script through the environment instead of the
+  ; command line: a quoted argument whose value ends in a backslash
+  ; (drive-root installs) swallows the closing quote during Windows
+  ; argument parsing, so PowerShell would bind a corrupted path.
+  System::Call 'Kernel32::SetEnvironmentVariableW(w "PINVOU_INSTALL_DIR", w "$INSTDIR") i.r8'
+  nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\pinvou-runtime-env.ps1" -Mode ${Mode}'
+  Pop $6
+  Pop $7
+  ${If} $6 != 0
+    DetailPrint "Bundled runtime environment update failed: $7"
+    MessageBox MB_ICONSTOP|MB_OK "无法更新内置运行时环境（PINVOU3_PYTHON）：$7。请确认安装脚本未被安全软件阻止。$\r$\nFailed to update the bundled runtime environment (PINVOU3_PYTHON): $7. Verify that security software is not blocking installer scripts.$\r$\n組み込みランタイム環境（PINVOU3_PYTHON）を更新できませんでした：$7。セキュリティソフトによってインストールスクリプトがブロックされていないか確認してください。" /SD IDOK
+    !if "${FailHard}" == "true"
       Abort
-    ${EndIf}
+    !endif
   ${EndIf}
+  DetailPrint "$7"
+  ; Deliberately no SetOutPath "$INSTDIR" here: on the uninstall leg the
+  ; template has already removed $INSTDIR, and SetOutPath would recreate it.
 !macroend
 
+; Both hooks are perMachine-only; config/platforms/windows/tauri.conf.json
+; pins installMode to perMachine. If "both" is ever enabled, a user-chosen
+; per-machine install (HKLM) would silently skip the env configuration.
 !macro NSIS_HOOK_POSTINSTALL
-  !insertmacro PINVOU_RUN_RUNTIME_ENV "Install" "true"
+  !if "${INSTALLMODE}" == "perMachine"
+    DetailPrint "Configuring the bundled runtime environment (PINVOU3_PYTHON)..."
+    !insertmacro PinvouRunRuntimeEnv Install true
+  !endif
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
-  !insertmacro PINVOU_RUN_RUNTIME_ENV "Uninstall" "false"
+  !if "${INSTALLMODE}" == "perMachine"
+    DetailPrint "Removing the bundled runtime environment (PINVOU3_PYTHON)..."
+    !insertmacro PinvouRunRuntimeEnv Uninstall false
+  !endif
 
+  ; Official keeps the opt-in delete-app-data removal in the uninstall hook
+  ; (the template's checkbox branch clears the WebView2 cache directories;
+  ; the ~/.pinvou3 data directory is removed here) so the checkbox matches
+  ; the MSI PINVOU_REMOVE_USER_DATA opt-in contract.
   ${If} $DeleteAppDataCheckboxState = 1
   ${AndIf} $UpdateMode <> 1
     SetShellVarContext current

@@ -9,6 +9,8 @@ use serde::Serialize;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
+// Keep the same child file for normal modules and the crypto harness's #[path] import.
+#[path = "controlling/disconnect.rs"]
 mod disconnect;
 
 use super::liveness::validate_liveness_epoch;

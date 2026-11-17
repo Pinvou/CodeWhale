@@ -516,11 +516,12 @@ pub async fn move_session_to_project(
     sessions: State<'_, SessionStore>,
     acp_pool: State<'_, AcpPool>,
 ) -> Result<MoveSessionOutcome, String> {
-    // 先确认会话真实存在:session_kind 对未知 id 不触盘、直接返回 Chat,
-    // 单靠它会把无效 id 写进归属表,因此像 set_session_pinned 一样补一次
-    // 真实 load。scheduled-run 的拒绝是归属域自身的产品决策(归属表只收
-    // chat 会话)——兄弟元数据命令(delete/rename/pin)并不拒绝
-    // scheduled-run,此处不与它们同口径。
+    // session_kind 校验 ID，以权威登记判定 RemoteProxy；本地分支先识别
+    // scheduled-run，再检查 transcript metadata，未知 ID 会报错。
+    // ensure_chat_session 先限制类型，再真实 load 确认本地 Chat/Code
+    // 数据可加载，之后才写归属表。
+    // scheduled-run 的拒绝是归属域自身的产品决策；兄弟元数据命令
+    // (delete/rename/pin) 不因此采用同一接受域。
     // Aux conversations are anchored to their main session (round-34
     // minor 3): admitting them into the assignments table would create the
     // ghost-entry class the sibling metadata guards prevent.

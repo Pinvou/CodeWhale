@@ -64,7 +64,7 @@ async fn keeper_closed_input_retires_real_installed_business_keys() {
 #[tokio::test]
 async fn keeper_owner_loss_retires_its_original_business_keys() {
     let fixture = connected(limits());
-    end_keeper(&fixture, || fixture.manager.stop()).await;
+    end_keeper(&fixture, || fixture.manager.stop(&fixture.business)).await;
     assert!(!fixture.business.is_installed());
 }
 
