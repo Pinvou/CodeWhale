@@ -162,3 +162,16 @@ test("POSIX regular-to-FIFO replacement fails without a writer", {
   assert.equal(reads, 0); assert.equal(closes, 1);
   assert.equal((await fs.lstat(path)).isFIFO(), true);
 });
+
+test("consumer caps narrow the same authenticated read boundary", async (t) => {
+  const { root, path, item, bytes } = await fixture(t, Buffer.alloc(16 * 1024, 97));
+  assert.deepEqual(await readEvidenceArtifact(root, item, { maxBytes: 16 * 1024 }), bytes);
+  const open = fs.open; let opens = 0;
+  t.mock.method(fs, "open", (...args) => { opens++; return open(...args); });
+  for (const cap of [0, -1, 1.5, NaN, 32 * 1024 * 1024 + 1]) {
+    await assert.rejects(readEvidenceArtifact(root, item, { maxBytes: cap }), /evidence_artifact_size_invalid/u);
+  }
+  await fs.appendFile(path, "x");
+  await assert.rejects(readEvidenceArtifact(root, item, { maxBytes: 16 * 1024 }), /evidence_artifact_size_invalid/u);
+  assert.equal(opens, 0, "invalid caps and over-limit files fail before content admission");
+});
