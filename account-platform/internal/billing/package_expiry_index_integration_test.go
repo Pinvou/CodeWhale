@@ -74,11 +74,28 @@ func packageExpiryIndex(t *testing.T, ctx context.Context, r *PostgresRepository
 
 func packageExpiryFacts(t *testing.T, ctx context.Context, r *PostgresRepository) string {
 	t.Helper()
+	return packageExpiryFactsWithOrder(t, ctx, r, false)
+}
+
+// Keep the original JSON-derived ordering as an independent query reference.
+// Both paths hash every column of every row and retain all metadata checks.
+func packageExpiryFactsWithOrder(t *testing.T, ctx context.Context, r *PostgresRepository, originalJSONOrder bool) string {
+	t.Helper()
 	var facts []string
 	for _, table := range []string{"wallets", "credit_lots", "entitlement_packages", "entitlement_components", "journal_entries", "ledger_postings", "outbox_events", "payment_orders", "payment_transactions"} {
 		var value string
 		// The digest is a test fingerprint, not a security or production attestation.
-		query := `SELECT COALESCE(md5(string_agg(md5(to_jsonb(row_value)::text),'' ORDER BY to_jsonb(row_value)->>'id',to_jsonb(row_value)->>'event_id')),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
+		// These UUID primary keys are non-null and unique. Their text order is
+		// the original JSON text order, without serializing each wide row twice
+		// more just to obtain its sort key. Outbox uses event_id instead of id.
+		key := "id"
+		if table == "outbox_events" {
+			key = "event_id"
+		}
+		query := `SELECT COALESCE(md5(string_agg(md5(to_jsonb(row_value)::text),'' ORDER BY row_value.` + pgx.Identifier{key}.Sanitize() + `::text)),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
+		if originalJSONOrder {
+			query = `SELECT COALESCE(md5(string_agg(md5(to_jsonb(row_value)::text),'' ORDER BY to_jsonb(row_value)->>'id',to_jsonb(row_value)->>'event_id')),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
+		}
 		if err := r.pool.QueryRow(ctx, query).Scan(&value); err != nil {
 			t.Fatal(table, err)
 		}
@@ -212,6 +229,11 @@ func TestPackageExpiryCrossWalletIndexPostgres(t *testing.T) {
 			}
 			packageExpiryHistory(t, ctx, owner, base)
 			before := packageExpiryFacts(t, ctx, r)
+			// Compare the full seeded carrier with the original query once per
+			// scenario; all later financial/authority checkpoints remain intact.
+			if reference := packageExpiryFactsWithOrder(t, ctx, r, true); reference != before {
+				t.Fatal("full-row facts differ from original JSON ordering")
+			}
 			if scenario == "retained-upgrade" {
 				if output, err := packageExpiryCLI(ctx, product, r, "billing_service", "up"); err == nil {
 					t.Fatal("runtime installed index", string(output))

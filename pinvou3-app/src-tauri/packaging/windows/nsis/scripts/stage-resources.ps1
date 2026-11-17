@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$tauriRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
+$tauriRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..\..\..")).Path
 $configPath = Join-Path $tauriRoot "tauri.conf.json"
 $runtimeConfigPath = Join-Path $tauriRoot "target\windows-runtime\tauri.generated.conf.json"
 $releaseRoot = Join-Path $tauriRoot "target\release"
@@ -15,6 +15,10 @@ $stagingConfigPath = Join-Path $stagingRoot "tauri.nsis-stage.conf.json"
 $stagingInstallerHooksPath = Join-Path $stagingRoot "installer-hooks.nsh"
 $manifestPath = Join-Path $stagingRoot "manifest.json"
 $baseInstallerHooksPath = Join-Path $tauriRoot "packaging\windows\nsis\installer-hooks.nsh"
+# The generated installer hooks File-reference the VC++ redistributable that
+# windows-installer.js stages for build/bundle runs; validate its presence so
+# standalone -ValidateOnly runs fail here instead of at makensis.
+$vcRedistPath = Join-Path $tauriRoot "target\windows-runtime\nsis\vc_redist\VC_redist.x64.exe"
 
 function Assert-ChildPath {
   param(
@@ -129,9 +133,10 @@ function Copy-DirectoryContents {
   )
 
   New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-  & robocopy.exe $Source $Destination /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+  $robocopyOutput = & robocopy.exe $Source $Destination /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
   if ($LASTEXITCODE -gt 7) {
-    throw "Failed to stage resource directory (robocopy exit code $LASTEXITCODE): $Source"
+    $robocopyTail = (@($robocopyOutput) | Select-Object -Last 5 | ForEach-Object { "$_" }) -join " | "
+    throw "Failed to stage resource directory (robocopy exit code $LASTEXITCODE): $Source. Output tail: $robocopyTail"
   }
 }
 
@@ -140,6 +145,9 @@ if ($ValidateOnly) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
       throw "NSIS staging is incomplete. Run 'npm run build:nsis:stage' first. Missing: $requiredPath"
     }
+  }
+  if (-not (Test-Path -LiteralPath $vcRedistPath)) {
+    throw "NSIS staging is incomplete: the VC++ redistributable is missing. Run 'npm run build:nsis:stage' first (build.js stages it): $vcRedistPath"
   }
 
   $manifestJson = [System.IO.File]::ReadAllText($manifestPath, [System.Text.Encoding]::UTF8)
@@ -197,6 +205,9 @@ if (-not (Test-Path -LiteralPath $runtimeConfigPath -PathType Leaf)) {
 }
 $runtimeConfigJson = [System.IO.File]::ReadAllText($runtimeConfigPath, [System.Text.Encoding]::UTF8)
 $runtimeConfig = ConvertFrom-Json -InputObject $runtimeConfigJson
+if ($null -eq $config.bundle.resources -or $null -eq $runtimeConfig.bundle.resources) {
+  throw "bundle.resources is missing from $configPath or $runtimeConfigPath"
+}
 $resourceProperties = @($config.bundle.resources.PSObject.Properties) + @($runtimeConfig.bundle.resources.PSObject.Properties)
 if ($resourceProperties.Count -eq 0) {
   throw "No bundle.resources mappings were found in $configPath"
@@ -204,6 +215,9 @@ if ($resourceProperties.Count -eq 0) {
 
 Assert-ChildPath -Root $releaseRoot -Path $stagingRoot
 Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $stagingRoot) {
+  throw "Failed to clear the NSIS staging root (a staged file may be locked): $stagingRoot"
+}
 New-Item -ItemType Directory -Path $stagingResourcesRoot -Force | Out-Null
 
 $resourceOverrides = [ordered]@{}
@@ -218,11 +232,17 @@ foreach ($property in $resourceProperties) {
   }
 
   $sourcePath = [System.IO.Path]::GetFullPath((Join-Path $tauriRoot $sourceSpec))
+  # Runtime overlay source keys end in a trailing separator; a trailing
+  # backslash before the closing quote corrupts the native robocopy argument
+  # on Windows PowerShell 5.1 (the \" is parsed as a literal quote), so strip
+  # it before any native invocation. robocopy /E copies the directory itself.
+  $sourcePath = $sourcePath.TrimEnd('\', '/')
   if (-not (Test-Path -LiteralPath $sourcePath)) {
     throw "Configured bundle resource does not exist: $sourceSpec ($sourcePath)"
   }
 
   $destinationPath = [System.IO.Path]::GetFullPath((Join-Path $stagingResourcesRoot $destinationSpec))
+  $destinationPath = $destinationPath.TrimEnd('\', '/')
   Assert-ChildPath -Root $stagingResourcesRoot -Path $destinationPath
 
   if (Test-Path -LiteralPath $sourcePath -PathType Container) {
