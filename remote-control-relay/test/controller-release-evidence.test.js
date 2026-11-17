@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { existsSync, writeFileSync } from "node:fs";
+import childProcess, { execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { test as nodeTest } from "node:test";
 import { runControllerReleaseGate } from "../scripts/controller-release-gate.mjs";
 import { validateMonotonicDeadlineObservation, validateReleaseEvidence } from "../scripts/validate-controller-release-evidence.mjs";
-import { providerAttestationPayload } from "../scripts/verify-provider-attestation.mjs";
+import { providerAttestationPayload, verifyProviderAttestation, verifyProviderAttestationForRun } from "../scripts/verify-provider-attestation.mjs";
 import { parseSigstoreJsonl, uniqueStatementForDigest, validateGitHubBuildIdentity } from "../scripts/verify-installer-supply-chain.mjs";
 import { requireCompleteCoverage } from "../../scripts/check-enrollment-gated-v2-rollback.mjs";
 
@@ -30,16 +34,22 @@ const testPublicKeySha256 = crypto.createHash("sha256")
 const certificateRoot = await mkdtemp(join(tmpdir(), "pinvou-provider-chain-"));
 // The provider X.509 fixture chain needs a real openssl build. Prefer the
 // openssl bundled with the active Git installation (git --exec-path also
-// covers portable or relocated Windows installs), then fall back to a PATH
-// lookup so self-hosted runners still execute the contract. When no candidate
-// responds, skip every test in this file explicitly instead of failing the
-// whole file on a missing environment precondition.
+// covers portable or relocated Windows installs, native `bin/` and MSYS
+// `usr/bin/` layouts alike), then fall back to a PATH lookup so self-hosted
+// runners still execute the contract. When no candidate responds, skip every
+// test in this file explicitly instead of failing the whole file on a missing
+// environment precondition.
 const opensslCandidates = [];
 if (process.platform === "win32") {
+  let gitExecPath = null;
   try {
-    opensslCandidates.push(join(execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim(), "..", "..", "bin", "openssl.exe"));
+    gitExecPath = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
   } catch {
     // git itself unavailable; the remaining candidates still apply.
+  }
+  if (gitExecPath !== null) {
+    opensslCandidates.push(resolve(gitExecPath, "../../bin/openssl.exe"));
+    opensslCandidates.push(resolve(gitExecPath, "../../../usr/bin/openssl.exe"));
   }
 }
 opensslCandidates.push("openssl");
@@ -111,7 +121,8 @@ function signArtifact(artifact) {
   artifact.signature = crypto.sign(null, payload, testKeysByRole.get(artifact.machine_role).privateKey).toString("base64");
 }
 
-const validationOptions = (extra = {}) => ({ expectedCommit: commit, allowTestAttestation: true, ...extra });
+const validationOptions = (extra = {}) => ({ expectedCommit: commit, allowTestAttestation: true,
+  qualificationClock: () => Date.parse(testFinishedAt), ...extra });
 
 test("digest-only references reject signed aliases independently of order", async () => {
   for (const select of [
@@ -237,6 +248,7 @@ async function validEvidence() {
   const driverSha = addArtifact("binaries/pinvou-e2e-driver.exe", "driver");
   const legacyRelaySha = addArtifact("binaries/legacy-relay.bin", "legacy-relay");
   const nodeSha = addArtifact("binaries/pinvou-node.exe", "toolchain");
+  const completionSha = addArtifact("gates/run-completion.json", "check");
   const legacyRuntimeSha = addArtifact("rollback/legacy-runtime.json", "rollback");
   const legacyRouteSpecSha = addArtifact("rollback/legacy-route-spec.json", "rollback");
   const legacyConfigurationSha = addArtifact("rollback/legacy-configuration.json", "rollback");
@@ -290,6 +302,7 @@ async function validEvidence() {
     schema: "pinvou-remote-control-release-evidence",
     version: 1,
     commit_sha: commit,
+    run_completion_artifact_sha256: completionSha,
     provenance: { kind: "physical-dual-windows", orchestrator: "pinvou-windows-e2e-v1", source_commit_sha: commit, synthetic: false,
       node_version: "24.8.0", node_sha256: nodeSha, node_artifact_path: "binaries/pinvou-node.exe",
       node_authenticode_thumbprint: signer, node_publisher: "CN=OpenJS Foundation" },
@@ -356,6 +369,11 @@ async function materializeEvidence(evidence, root) {
     if (artifact.path === "gates/ui_smoke.json") continue;
     const ui = uiReferences.find((item) => artifact.sha256 === item.sha256);
     let content = `{"status":"pass","ordinal":${index}}\n`;
+    if (artifact.path === "gates/run-completion.json") content = `${JSON.stringify({
+      schema: "pinvou-remote-control-run-completion", version: 1, source_commit_sha: evidence.commit_sha,
+      run_nonce: evidence.attestations[0].run_nonce, started_at: evidence.started_at, finished_at: evidence.finished_at,
+      monotonic_interval_sha256: hash(JSON.stringify([evidence.monotonic_start_ms, evidence.monotonic_end_ms])),
+    })}\n`;
     if (ui) {
       const value = { schema: "pinvou-remote-control-ui-smoke", version: 1, phase: ui.phase, result: "pass", checks: ["real_tauri_page", `phase_${ui.phase.replaceAll("-", "_")}`], actions: uiActions[ui.phase] };
       if (["approval-allow", "approval-deny", "attachment"].includes(ui.phase)) value.coordination_digest = hash(`coordination-${ui.phase}`);
@@ -376,7 +394,13 @@ async function materializeEvidence(evidence, root) {
     if (artifact.path.startsWith("build/attestation-provider")) {
       const role = artifact.path.endsWith("-A.json") ? "A" : artifact.path.endsWith("-B.json") ? "B" : "orchestrator";
       const identity = evidence.attestations.find((item) => item.role === role);
-      const receipt = { schema: "pinvou-provider-attestation-receipt", version: 1, role, role_policy_sha256: identity.role_policy_sha256, provider: "remote_signing_service", key_id: identity.key_id, run_nonce: runNonce, public_key_spki_pem: identity.public_key_spki_pem, public_key_sha256: identity.public_key_sha256, non_exportable: true, acl_attestation_sha256: hash("test-acl"), provider_measurement_sha256: hash("test-provider-measurement"), driver_sha256: replacements.get(evidence.driver.sha256), issued_at: testStartedAt, verifier: { kind: "independent-provider-verifier", vendor: "Pinvou Test Vendor", leaf_certificate_pem: providerLeafPem, certificate_chain_pem: [providerRootPem], signature_algorithm: "sha256", signature: "" } };
+      const receipt = { schema: "pinvou-provider-attestation-receipt", version: 1, role,
+        role_policy_sha256: identity.role_policy_sha256, provider: "remote_signing_service", key_id: identity.key_id,
+        run_nonce: runNonce, public_key_spki_pem: identity.public_key_spki_pem, public_key_sha256: identity.public_key_sha256,
+        non_exportable: true, acl_attestation_sha256: hash("test-acl"), provider_measurement_sha256: hash("test-provider-measurement"),
+        driver_sha256: replacements.get(evidence.driver.sha256), issued_at: evidence.started_at,
+        verifier: { kind: "independent-provider-verifier", vendor: "Pinvou Test Vendor", leaf_certificate_pem: providerLeafPem,
+          certificate_chain_pem: [providerRootPem], signature_algorithm: "sha256", signature: "" } };
       receipt.verifier.signature = crypto.sign("sha256", providerAttestationPayload(receipt), providerLeafKey).toString("base64");
       content = `${JSON.stringify(receipt)}\n`;
     }
@@ -398,6 +422,7 @@ if (artifact.path === "build/installer-attestation.sigstore.jsonl" || artifact.p
   for (const item of evidence.installers) item.sha256 = replacements.get(item.sha256);
   evidence.driver.sha256 = replacements.get(evidence.driver.sha256);
   evidence.provenance.node_sha256 = replacements.get(evidence.provenance.node_sha256);
+  evidence.run_completion_artifact_sha256 = replacements.get(evidence.run_completion_artifact_sha256);
   evidence.legacy_relay.sha256 = replacements.get(evidence.legacy_relay.sha256);
   evidence.legacy_relay.runtime_artifact_sha256 = replacements.get(evidence.legacy_relay.runtime_artifact_sha256);
   evidence.legacy_relay.route_spec_artifact_sha256 = replacements.get(evidence.legacy_relay.route_spec_artifact_sha256);
@@ -446,6 +471,191 @@ test("strict evidence validator accepts the exact 27 stable journey IDs", async 
   assert.equal(result.ok, true);
   assert.equal(result.journey_count, 27);
   assert.ok(result.artifact_count > 60);
+});
+
+test("qualification uses trusted current time, rejects stale/future runs and bounds long runs", async () => {
+  const evidence = await validEvidence();
+  const finish = Date.parse(evidence.finished_at);
+  for (const now of [finish + 86_400_001, finish - 30_001, NaN, Infinity, -1]) {
+    await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ qualificationClock: () => now })),
+      { code: "evidence_qualification_time_invalid" });
+  }
+  for (const now of [finish, finish + 86_400_000, finish - 30_000]) {
+    await assert.doesNotReject(() => validateReleaseEvidence(evidence, validationOptions({ qualificationClock: () => now })));
+  }
+  const tooLong = structuredClone(evidence);
+  tooLong.finished_at = new Date(Date.parse(tooLong.started_at) + 7_200_001).toISOString();
+  await assert.rejects(() => validateReleaseEvidence(tooLong, validationOptions({
+    qualificationClock: () => Date.parse(tooLong.finished_at),
+  })), { code: "evidence_qualification_time_invalid" });
+});
+
+test("real provider proof permits a one-hour run but cannot qualify an old completed run", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-provider-freshness-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  const finish = Date.parse(evidence.finished_at);
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    qualificationClock: () => finish + 86_400_001,
+  })), { code: "evidence_qualification_time_invalid" });
+});
+
+test("qualification checks time again after artifact verification instead of freezing the entry clock", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-provider-expiry-during-check-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  const finish = Date.parse(evidence.finished_at);
+  let reads = 0;
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    qualificationClock: () => ++reads === 1 ? finish : finish + 86_400_001,
+  })), { code: "evidence_qualification_time_invalid" });
+  assert.ok(reads >= 2);
+});
+
+test("a signed completion interval cannot be refreshed by editing manifest dates or swapping bytes after hashing", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-signed-completion-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  const finish = Date.parse(evidence.finished_at);
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    qualificationClock: () => finish + 23 * 60 * 60_000 }));
+  const now = finish + 24 * 60 * 60_000 + 10 * 60_000;
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    qualificationClock: () => now })), { code: "evidence_qualification_time_invalid" });
+  evidence.finished_at = new Date(finish + 20 * 60_000).toISOString();
+  // Eighty-minute run and recent unsigned finish would pass the window alone.
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    qualificationClock: () => now })), { code: "evidence_run_completion_invalid" });
+  const marker = join(root, "gates/run-completion.json");
+  const value = JSON.parse(await readFile(marker, "utf8"));
+  value.finished_at = evidence.finished_at;
+  let reads = 0;
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    qualificationClock: () => {
+      // The second observation follows the full artifact hash pass. Substitute
+      // matching untrusted dates before the semantic reader opens the file.
+      if (++reads === 2) writeFileSync(marker, `${JSON.stringify(value)}\n`);
+      return now;
+    } })), { code: "evidence_run_completion_invalid" });
+  assert.equal(reads, 2);
+});
+
+test("completion must be authenticated by the orchestrator even with a valid different-role signature", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-completion-role-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  const marker = evidence.artifacts.find((item) => item.sha256 === evidence.run_completion_artifact_sha256);
+  marker.machine_role = "A";
+  signArtifact(marker);
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root })),
+    { code: "evidence_artifact_reference_missing" });
+});
+
+async function replaceCompletionBytes(evidence, root, bytes) {
+  const artifact = evidence.artifacts.find((item) => item.path === "gates/run-completion.json");
+  await writeFile(join(root, ...artifact.path.split("/")), bytes);
+  artifact.sha256 = hash(bytes);
+  evidence.run_completion_artifact_sha256 = artifact.sha256;
+  signArtifact(artifact);
+}
+
+test("completion marker binds its source commit even when the changed bytes are authentically signed", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-completion-commit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
+  const value = JSON.parse(await readFile(join(root, "gates/run-completion.json"), "utf8"));
+  value.source_commit_sha = "c".repeat(40);
+  // Rebind the digest and genuine orchestrator signature so only the marker's
+  // source commit disagrees, rather than failing the earlier hash/signature pass.
+  await replaceCompletionBytes(evidence, root, Buffer.from(`${JSON.stringify(value)}\n`));
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root })),
+    { code: "evidence_run_completion_invalid" });
+});
+
+test("completion marker enforces its 16 KiB byte boundary after valid hashing and signing", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-completion-byte-limit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  const bytes = await readFile(join(root, "gates/run-completion.json"));
+  assert.ok(bytes.length < 16 * 1024);
+  // JSON whitespace keeps both boundary inputs semantically valid. Their
+  // updated digest/signature isolates the bounded reader from other guards.
+  const boundary = Buffer.concat([bytes, Buffer.alloc(16 * 1024 - bytes.length, 0x20)]);
+  await replaceCompletionBytes(evidence, root, boundary);
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
+  await replaceCompletionBytes(evidence, root, Buffer.concat([boundary, Buffer.from(" ")]));
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root })),
+    { code: "evidence_run_completion_invalid" });
+});
+
+test("qualification rechecks the authenticated certificate intersection after the final provenance await", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-provider-final-certificate-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const expiry = Math.min(Date.parse(new crypto.X509Certificate(providerRootPem).validTo),
+    Date.parse(new crypto.X509Certificate(providerLeafPem).validTo));
+  evidence.started_at = new Date(expiry - 3_601_000).toISOString();
+  evidence.finished_at = new Date(expiry - 1_000).toISOString();
+  for (const journey of evidence.journeys) {
+    journey.started_at = evidence.started_at;
+    journey.finished_at = evidence.finished_at;
+  }
+  await materializeEvidence(evidence, root);
+  await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root, qualificationClock: () => expiry - 1 }));
+  let reads = 0;
+  await assert.rejects(() => validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root,
+    // Entry, post-hash and three role verifications see a valid chain. The
+    // observation after provenance/SBOM I/O crosses notAfter by one millisecond.
+    qualificationClock: () => ++reads <= 5 ? expiry - 1 : expiry + 1,
+  })), { code: "evidence_attestation_provider_invalid" });
+  assert.equal(reads, 6);
+});
+
+test("provider online freshness and run qualification retain nonce, signature and certificate validity", async (t) => {
+  const evidence = await validEvidence();
+  const root = await mkdtemp(join(tmpdir(), "pinvou-provider-time-policy-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await materializeEvidence(evidence, root);
+  const attestation = evidence.attestations.find((value) => value.role === "A");
+  const artifact = evidence.artifacts.find((value) => value.sha256 === attestation.provider_attestation_artifact_sha256);
+  const receipt = JSON.parse(await readFile(join(root, ...artifact.path.split("/")), "utf8"));
+  const expected = {
+    role: "A", rolePolicySha256: attestation.role_policy_sha256, provider: attestation.provider,
+    keyId: attestation.key_id, runNonce: attestation.run_nonce, aclSha256: attestation.acl_attestation_sha256,
+    measurementSha256: attestation.provider_measurement_sha256, driverSha256: evidence.driver.sha256,
+    vendor: attestation.provider_vendor, rootCertificateSha256: providerRootSha256,
+    verifierCertificateSha256: providerLeafSha256,
+  };
+  const run = { startedAt: Date.parse(evidence.started_at), finishedAt: Date.parse(evidence.finished_at),
+    now: Date.parse(evidence.finished_at) };
+  assert.throws(() => verifyProviderAttestation(receipt, expected, run.now), { code: "provider_attestation_stale" });
+  assert.doesNotThrow(() => verifyProviderAttestationForRun(receipt, expected, run));
+  for (const now of [NaN, Infinity, -1]) assert.throws(() => verifyProviderAttestation(receipt, expected, now),
+    { code: "provider_attestation_stale" });
+  assert.throws(() => verifyProviderAttestationForRun(receipt, { ...expected, runNonce: hash("other-run") }, run),
+    { code: "provider_attestation_invalid" });
+  const tampered = structuredClone(receipt);
+  tampered.verifier.signature = Buffer.alloc(256).toString("base64");
+  assert.throws(() => verifyProviderAttestationForRun(tampered, expected, run),
+    { code: "provider_attestation_signature_invalid" });
+  const future = structuredClone(receipt);
+  future.issued_at = new Date(run.finishedAt + 1).toISOString();
+  assert.throws(() => verifyProviderAttestationForRun(future, expected, run), { code: "provider_attestation_stale" });
+  const expires = Math.min(Date.parse(new crypto.X509Certificate(providerRootPem).validTo),
+    Date.parse(new crypto.X509Certificate(providerLeafPem).validTo));
+  const expired = structuredClone(receipt);
+  expired.issued_at = new Date(expires - 1_000).toISOString();
+  expired.verifier.signature = crypto.sign("sha256", providerAttestationPayload(expired), providerLeafKey).toString("base64");
+  assert.throws(() => verifyProviderAttestationForRun(expired, expected,
+    { startedAt: expires - 1_000, finishedAt: expires - 500, now: expires + 1 }), { code: "provider_attestation_stale" });
 });
 
 test("validator executes the published draft-2020-12 JSON Schema before semantic checks", async () => {
@@ -523,10 +733,12 @@ test("production validation rejects the explicit test attestation identity and u
   );
   await assert.doesNotReject(() => validateReleaseEvidence(evidence, {
     expectedCommit: commit, expectedAttestationPublicKeySha256: testPublicKeySha256,
+    qualificationClock: () => Date.parse(testFinishedAt),
   }));
   evidence.artifacts[0].signature = evidence.artifacts[1].signature;
   await assert.rejects(
-    () => validateReleaseEvidence(evidence, { expectedCommit: commit, expectedAttestationPublicKeySha256: testPublicKeySha256 }),
+    () => validateReleaseEvidence(evidence, { expectedCommit: commit, expectedAttestationPublicKeySha256: testPublicKeySha256,
+      qualificationClock: () => Date.parse(testFinishedAt) }),
     (error) => error?.code === "evidence_artifact_signature_invalid",
   );
 });
@@ -586,6 +798,113 @@ test("release gate is fail-closed when enabled and evidence configuration is abs
     () => runControllerReleaseGate({ PINVOU_DESKTOP_CONTROLLER_ENABLED: "true" }),
     (error) => error?.code === "release_feature_flag_invalid",
   );
+});
+
+test("enabled release gate checks authenticated evidence before and after external prerequisites", async (t) => {
+  for (const scenario of ["valid", "invalid-at-entry", "changed-after-prerequisites", "expired-after-prerequisites"]) {
+    await t.test(scenario, async (t) => {
+      const root = await mkdtemp(join(tmpdir(), "pinvou-release-gate-boundary-"));
+      t.after(() => rm(root, { recursive: true, force: true }));
+      const evidence = await validEvidence();
+      // Synthetic local certificates and keys exercise the real production
+      // validation path, not a real provider, attestation service or deployment.
+      for (const attestation of evidence.attestations) attestation.identity = "production";
+      evidence.relay.enrollment_deployment = "self_hosted";
+      await materializeEvidence(evidence, root);
+      const evidencePath = join(root, "release-evidence.json");
+      const markerPath = join(root, "gates/run-completion.json");
+      await writeFile(evidencePath, JSON.stringify(evidence));
+      const statePath = join(root, "controller-state.json");
+      const enabledPath = join(root, "enabled.env");
+      const disabledPath = join(root, "disabled.env");
+      const inventoryPath = join(root, "inventory.json");
+      const gatewayPath = join(root, "gateway.json");
+      // Preflight processes are mocked below. These files still go through the
+      // gate's real file, parser, parity and protected-state binding checks.
+      const envText = `PINVOU_DESKTOP_CONTROLLER_ENABLED=1\nPINVOU_REMOTE_ENROLLMENT_DEPLOYMENT=self_hosted\nPINVOU_REMOTE_CONTROLLER_STATE_PATH=${statePath}\n`;
+      await Promise.all([
+        writeFile(statePath, "{}"), writeFile(enabledPath, envText),
+        writeFile(disabledPath, envText.replace("ENABLED=1", "ENABLED=0")),
+        writeFile(inventoryPath, "external-private-inventory"),
+        writeFile(gatewayPath, "external-protected-gateway-config"),
+      ]);
+      const identity = evidence.attestations[0];
+      const installer = evidence.installers[0];
+      const env = {
+        PINVOU_DESKTOP_CONTROLLER_ENABLED: "1", PINVOU_RELEASE_COMMIT_SHA: commit,
+        PINVOU_REMOTE_RELEASE_EVIDENCE: evidencePath,
+        PINVOU_TRUSTED_WINDOWS_SIGNER_THUMBPRINT: signer, PINVOU_TRUSTED_WINDOWS_SIGNER_PUBLISHER: publisher,
+        PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY: inventoryPath, PINVOU_REMOTE_GATEWAY_CONFIG_PATH: gatewayPath,
+        PINVOU_REMOTE_CONTROLLER_ENV_FILE: enabledPath, PINVOU_REMOTE_CONTROLLER_DISABLED_ENV_FILE: disabledPath,
+        PINVOU_REMOTE_CONTROLLER_STATE_PATH: statePath, PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "self_hosted",
+        PINVOU_TRUSTED_E2E_DRIVER_SHA256: evidence.driver.sha256,
+        PINVOU_TRUSTED_E2E_NODE_SHA256: evidence.provenance.node_sha256,
+        PINVOU_TRUSTED_E2E_NODE_SIGNER_THUMBPRINT: evidence.provenance.node_authenticode_thumbprint,
+        PINVOU_TRUSTED_E2E_NODE_SIGNER_PUBLISHER: evidence.provenance.node_publisher,
+        PINVOU_TRUSTED_E2E_ATTESTATION_PUBLIC_KEY_SHA256: identity.public_key_sha256,
+        PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER: identity.provider,
+        PINVOU_TRUSTED_E2E_ATTESTATION_KEY_ID: identity.key_id,
+        PINVOU_TRUSTED_E2E_ATTESTATION_ACL_SHA256: identity.acl_attestation_sha256,
+        PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER_MEASUREMENT_SHA256: identity.provider_measurement_sha256,
+        PINVOU_TRUSTED_E2E_ATTESTATION_PROVIDER_VENDOR: identity.provider_vendor,
+        PINVOU_TRUSTED_E2E_PROVIDER_ROOT_CERTIFICATE_SHA256: providerRootSha256,
+        PINVOU_TRUSTED_E2E_PROVIDER_VERIFIER_CERTIFICATE_SHA256: providerLeafSha256,
+        PINVOU_TRUSTED_E2E_ORCHESTRATOR_ROLE_POLICY_SHA256: evidence.attestations[0].role_policy_sha256,
+        PINVOU_TRUSTED_E2E_A_ROLE_POLICY_SHA256: evidence.attestations[1].role_policy_sha256,
+        PINVOU_TRUSTED_E2E_B_ROLE_POLICY_SHA256: evidence.attestations[2].role_policy_sha256,
+        PINVOU_RELEASE_BUILD_PROVENANCE_SHA256: installer.build_provenance_artifact_sha256,
+        PINVOU_RELEASE_BUILD_REPOSITORY: "pinvou/pinvou3",
+        PINVOU_RELEASE_BUILD_WORKFLOW: ".github/workflows/windows-remote-control-build-evidence.yml",
+        PINVOU_RELEASE_BUILD_RUN_ID: "12345", PINVOU_TRUSTED_GH_PATH: process.execPath,
+        PINVOU_REMOTE_TELEMETRY_SNAPSHOT_URL: "https://telemetry.example.invalid/snapshot",
+        PINVOU_REMOTE_TELEMETRY_ADMIN_TOKEN_FILE: join(root, "unused-token-file"),
+        PINVOU_RELEASE_INSTALLER_SHA256: installer.sha256, PINVOU_RELEASE_VERSION: installer.version,
+      };
+      let now = Date.parse(evidence.finished_at);
+      t.mock.method(Date, "now", () => now);
+      const calls = [];
+      const invalidateMarker = () => writeFile(markerPath, "{}");
+      // Only subprocess boundaries are substituted. The imported gate and its
+      // deep reader retain actual file hashing, signatures, trust pins and time.
+      t.mock.method(childProcess, "spawn", (command, args) => {
+        calls.push({ command, args: [...args] });
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        queueMicrotask(async () => {
+          try {
+            if (args[0]?.endsWith("check-enrollment-gated-v2-rollback.mjs")) {
+              if (scenario === "changed-after-prerequisites") await invalidateMarker();
+              if (scenario === "expired-after-prerequisites") now += 86_400_001;
+            }
+            child.stdout.end(); child.stderr.end(); child.emit("close", 0);
+          } catch (error) { child.emit("error", error); }
+        });
+        return child;
+      });
+      syncBuiltinESMExports();
+      t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+      if (scenario === "invalid-at-entry") await invalidateMarker();
+      if (scenario === "valid") {
+        const result = await runControllerReleaseGate(env);
+        assert.equal(result.ok, true);
+        assert.equal(result.enabled, true);
+        assert.equal(result.evidence_required, true);
+        assert.equal(result.journey_count, 27);
+      } else {
+        await assert.rejects(() => runControllerReleaseGate(env), {
+          code: scenario === "expired-after-prerequisites"
+            ? "evidence_qualification_time_invalid" : "evidence_artifact_digest_mismatch",
+        });
+      }
+      if (scenario === "invalid-at-entry") {
+        assert.equal(calls.length, 0, "invalid evidence must fail before any external prerequisite");
+      } else {
+        assert.equal(calls.length, 8, "both attestations, two preflights, two tests, telemetry and rollback ran");
+        assert.ok(calls.at(-1).args[0].endsWith("check-enrollment-gated-v2-rollback.mjs"));
+      }
+    });
+  }
 });
 
 test("legacy rollback is safe only at exactly 100 percent coverage with zero misses", () => {
@@ -664,7 +983,8 @@ test("valid signatures cannot substitute the wrong producer for UI phases or com
   const evidence = await validEvidence();
   await materializeEvidence(evidence, root);
   await validateReleaseEvidence(evidence, validationOptions({ evidenceRoot: root }));
-  const targets = evidence.artifacts.filter((item) => item.path.startsWith("ui/") || item.path.startsWith("gates/"));
+  const gateDigests = new Set(Object.values(evidence.gates).map((gate) => gate.artifact_sha256));
+  const targets = evidence.artifacts.filter((item) => item.path.startsWith("ui/") || gateDigests.has(item.sha256));
   assert.equal(targets.length, 13, "seven phases and all six gates");
   for (const artifact of targets) {
     const originalRole = artifact.machine_role;

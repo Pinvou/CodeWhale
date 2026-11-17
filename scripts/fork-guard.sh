@@ -74,13 +74,16 @@ bold "── 第 1 层：登记主题与父仓适配指纹 ──"
 fingerprints=(
   "T1|终态错误来源随真实选中结果传递     |CodeWhale/crates/tui/src/core/events.rs|error_source: Option<TurnErrorSource>,"
   "T1|普通路由本地准备失败保持运行时来源 |CodeWhale/crates/tui/src/core/engine/tests.rs|ordinary_route_preparation_failure_is_runtime_without_sending_http"
-  "T1|宿主显式保留新增来源字段兼容边界   |pinvou3-app/src-tauri/src/features/assistant/forwarder.rs|error_source: _,"
+  "T1|宿主只消费明确模型来源终态         |pinvou3-app/src-tauri/src/features/assistant/forwarder.rs|== Some(deepseek_tui::core::events::TurnErrorSource::Model))"
   "T2|待办缺省状态契约保持内容必填       |CodeWhale/crates/tui/src/tools/todo.rs|todo_item_status_is_optional_with_a_pending_default"
   "T2|待办缺省执行结果保持 pending       |CodeWhale/crates/tui/src/tools/todo.rs|work_update_treats_a_missing_status_as_pending"
   "T2|会话读取面归入只读助手精确名匹配   |CodeWhale/crates/tui/src/tools/registry.rs|\"mcp_session-reader_read_session\""
   "T2|会话列举面归入只读助手精确名匹配   |CodeWhale/crates/tui/src/tools/registry.rs|\"mcp_session-reader_list_sessions\""
   "T1|宿主输出预算复用真实组合导出       |CodeWhale/crates/tui/src/core/engine.rs|pub use context::route_effective_max_output_tokens;"
   "T1|输出预算导出覆盖真实组合结果       |CodeWhale/crates/tui/src/core/engine/context.rs|route_effective_max_output_tokens_matches_the_transport_composition"
+  "T1|Terminal error producer is explicit|CodeWhale/crates/tui/src/core/events.rs|pub enum TurnErrorSource"
+  "T1|Chosen failure owns its provenance|CodeWhale/crates/tui/src/core/engine/turn_loop.rs|struct TurnFailure"
+  "T1|Model and real local REPL EOF recover independently|pinvou3-app/src-tauri/src/features/behavior_telemetry/model_producer_tests.rs|fn forkguard_model_terminal_provenance_excludes_repl_eof_and_recovers"
   "T1|宿主单 execution-root 显式配置     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|workspace_roots: _, // host exposes one execution root"
   "T1|宿主同步使用当前会话冻结根集合    |pinvou3-app/src-tauri/src/features/assistant/engine.rs|sync_session_workspace_roots(&session_id,"
   "T1|宿主同步保持非辅助会话完整根回归  |pinvou3-app/src-tauri/src/features/assistant/engine.rs|fn session_sync_root_selection_preserves_the_frozen_non_aux_keychain()"
@@ -546,6 +549,22 @@ run_pinned_session_reader_tests || fail=1
 echo
 bold "── 第 3 层：pinvou3-app forkguard 回归 ──"
 ( cd "$APP" && cargo test --lib --locked forkguard_ -- --test-threads=1 ) || fail=1
+# This registered producer regression lives in the feature-gated standalone
+# telemetry harness, not the lib harness above. Pin the full test path and
+# require execution: libtest otherwise succeeds even when it selects zero tests.
+run_model_provenance_test() {
+  local output
+  output=$( cd "$APP" && cargo test --test behavior_telemetry --locked \
+    --features behavior-telemetry-test \
+    behavior_telemetry::tests::model_producer::forkguard_model_terminal_provenance_excludes_repl_eof_and_recovers \
+    -- --exact --test-threads=1 2>&1 ) || { printf '%s\n' "$output"; return 1; }
+  printf '%s\n' "$output"
+  if ! grep -q 'test result: ok\. 1 passed; 0 failed; 0 ignored;' <<<"$output"; then
+    red "❌ pinned model provenance regression did not execute exactly once"
+    return 1
+  fi
+}
+run_model_provenance_test || fail=1
 ( cd "$APP" && cargo check --all-targets --features benchmark-hooks --locked ) || fail=1
 ( cd "$APP" && cargo test --lib --locked --features benchmark-hooks eval_send_message_op_isolated_from_gui_authority_and_installs_exact_policy -- --test-threads=1 ) || fail=1
 ( cd "$APP" && cargo test --lib --locked --features benchmark-hooks features::assistant::product_runtime::headless_bridge::tests -- --test-threads=1 ) || fail=1
