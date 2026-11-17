@@ -1,11 +1,11 @@
-import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync, unlinkSync, mkdirSync, watch } from 'node:fs';
 import { join } from 'node:path';
 import { Worker, MessageChannel, isMainThread, workerData } from 'node:worker_threads';
 import { createServer } from './http-fixture.mjs';
 import { fixtureScope } from './fixture-scope.mjs';
 import { readPendingHostRequest } from './browser-wrapper-fixture-cleanup.mjs';
 
-const progressPhases = ['starting', 'idle', 'scan', 'read', 'write', 'control', 'cdp', 'failed'];
+const progressPhases = ['starting', 'idle', 'scan', 'read', 'write', 'control', 'cdp', 'failed', 'exists', 'directory'];
 let workerProgress;
 function progress(phase) {
   if (!workerProgress) return;
@@ -21,8 +21,9 @@ function atomicWriteJson(path, value) {
   renameSync(temporary, path);
 }
 
-function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SESSION_TOKEN }) {
+function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SESSION_TOKEN }, watchRequests) {
   const requestDirectory = join(fixture.root, 'host-requests');
+  mkdirSync(requestDirectory, { recursive: true });
   const handled = new Set();
   const state = {
     prepareCalls: 0,
@@ -78,9 +79,13 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
     state.operationTimeline.push({ operation, at: Date.now() });
   };
 
-  const timer = setInterval(() => {
+  let stopped = false;
+  let scheduled;
+  const poll = () => {
+    if (stopped) return;
     progress('scan');
     if (state.failure) { progress('failed'); return; }
+    progress('exists');
     if (!existsSync(requestDirectory)) { progress('idle'); return; }
     try {
       if (
@@ -91,7 +96,10 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
           recordOperation(operation);
         }
       }
-      for (const name of readdirSync(requestDirectory)) {
+      progress('directory');
+      const names = readdirSync(requestDirectory);
+      progress('scan');
+      for (const name of names) {
         if (!name.endsWith('.json') || handled.has(name)) continue;
         progress('read');
         const raw = readPendingHostRequest(join(requestDirectory, name));
@@ -181,7 +189,19 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
       progress('failed');
     }
     if (!state.failure) progress('idle');
-  }, 5);
+  };
+  // Avoid 200 synchronous directory walks/second sharing the control/CDP loop.
+  // Notifications are hints only: keep a bounded fallback for lost/coalesced
+  // Windows events, still well below the unchanged 400ms host-refresh deadline.
+  const schedule = () => {
+    if (stopped || scheduled) return;
+    scheduled = setImmediate(() => { scheduled = undefined; poll(); });
+  };
+  const watcher = watchRequests ? watch(requestDirectory, schedule) : null;
+  const watcherExit = watcher ? new Promise(resolve => watcher.once('close', resolve)) : Promise.resolve();
+  watcher?.on('error', error => { state.failure ||= error; progress('failed'); });
+  const timer = setInterval(schedule, 100);
+  let closing;
 
   return {
     state,
@@ -189,8 +209,13 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
       try { unlinkSync(fixture.workspacePath); } catch { /* already stopped */ }
     },
     close() {
-      clearInterval(timer);
-      if (state.failure) throw state.failure;
+      return closing ||= (async () => {
+        stopped = true;
+        clearInterval(timer);
+        if (scheduled) clearImmediate(scheduled);
+        if (watcher) { watcher.close(); await watcherExit; }
+        if (state.failure) throw state.failure;
+      })();
     },
   };
 }
@@ -198,7 +223,8 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
 // The real host is independent of the MCP test coordinator. Keep the model,
 // request poller and CDP endpoint together in an owned worker as well: blocking
 // an observer must not suppress the host's 400ms input-refresh replies.
-export async function createBrowserWrapperHost(fixture, identity, { scope = fixtureScope } = {}) {
+export async function createBrowserWrapperHost(fixture, identity, { scope = fixtureScope, watchRequests = true } = {}) {
+  if (typeof watchRequests !== 'boolean') throw new TypeError('watchRequests must be boolean');
   const { port1, port2 } = new MessageChannel();
   const sharedProgress = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 3);
   const observedProgress = new Int32Array(sharedProgress);
@@ -309,6 +335,7 @@ export async function createBrowserWrapperHost(fixture, identity, { scope = fixt
         identity,
         control: port2,
         sharedProgress,
+        watchRequests,
       },
       transferList: [port2],
     });
@@ -371,7 +398,7 @@ export async function createBrowserWrapperHost(fixture, identity, { scope = fixt
   };
 }
 
-async function serveHostWorker({ fixture, identity, control, sharedProgress }) {
+async function serveHostWorker({ fixture, identity, control, sharedProgress, watchRequests }) {
   workerProgress = new Int32Array(sharedProgress);
   progress('starting');
   const cdp = createServer((request, response) => {
@@ -383,16 +410,16 @@ async function serveHostWorker({ fixture, identity, control, sharedProgress }) {
   });
   await new Promise((resolve, reject) => { cdp.once('error', reject); cdp.listen(0, '127.0.0.1', resolve); });
   atomicWriteJson(fixture.portPath, { port: cdp.address().port, owner: 'app' });
-  const model = createFakeHostModel(fixture, identity);
+  const model = createFakeHostModel(fixture, identity, watchRequests);
   let revision = 0;
   let pollerStopped = false;
   let shuttingDown = false;
   let commands = Promise.resolve();
-  const stopPoller = () => {
-    if (pollerStopped) return;
+  let stopping;
+  const stopPoller = () => stopping ||= (async () => {
     pollerStopped = true;
-    model.close();
-  };
+    await model.close();
+  })();
   const configure = change => {
     const { field, action, key, value } = change ?? {};
     if (field === 'preparePublishesWorkspace' && action === 'set' && typeof value === 'boolean') {
@@ -416,11 +443,11 @@ async function serveHostWorker({ fixture, identity, control, sharedProgress }) {
     switch (request.command) {
       case 'configure': return configure(request.change);
       case 'snapshot': return { revision, state: model.state };
-      case 'stop_polling': stopPoller(); return { pollerStopped };
+      case 'stop_polling': await stopPoller(); return { pollerStopped };
       case 'shutdown': {
         shuttingDown = true;
         let modelFailure = null;
-        try { stopPoller(); } catch (error) { modelFailure = error; }
+        try { await stopPoller(); } catch (error) { modelFailure = error; }
         modelFailure ||= model.state.failure;
         try {
           await new Promise((resolve, reject) => cdp.close(error => error ? reject(error) : resolve()));

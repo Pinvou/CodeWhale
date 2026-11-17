@@ -447,8 +447,8 @@ async function makeFixture() {
   };
 }
 
-async function createFakeHost(fixture) {
-  return createBrowserWrapperHost(fixture, { sessionId: SESSION_ID, sessionToken: SESSION_TOKEN });
+async function createFakeHost(fixture, options) {
+  return createBrowserWrapperHost(fixture, { sessionId: SESSION_ID, sessionToken: SESSION_TOKEN }, options);
 }
 
 function driveWrapper(fixture) {
@@ -668,6 +668,34 @@ test('Windows proxy: stdin shutdown cannot release a request buffered during sta
   }
 });
 
+test('Windows proxy: missing filesystem notifications still service host requests', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const fixture = await makeFixture();
+  const host = await createFakeHost(fixture, { watchRequests: false });
+  const wrapper = driveWrapper(fixture);
+  try {
+    const ready = await initializeWorkspace(wrapper, 'windows-host-poll-fallback-test');
+    assert.equal(ready.result.structuredContent.pages.length, 1);
+    const before = await host.snapshot();
+    const response = await wrapper.request('tools/call', {
+      name: 'click', arguments: { uid: 'fallback-target' },
+    });
+    assert.equal(response.error, undefined, JSON.stringify(heldRequestResultDiagnostic(response)));
+    assert.notEqual(response.result?.isError, true);
+    const after = await host.snapshot();
+    assert.ok((after.operationCalls.get('begin_agent_operation') || 0)
+      > (before.operationCalls.get('begin_agent_operation') || 0));
+    assert.equal(readAudit(fixture.auditPath)
+      .filter(entry => entry.kind === 'tool' && entry.name === 'click').length, 1);
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
+  } finally {
+    await cleanupFixture(fixture, host, wrapper);
+  }
+});
+
 test('Windows proxy: committed close with unusable host acknowledgement is non-retryable', {
   skip: process.platform !== 'win32',
 }, async () => {
@@ -676,8 +704,7 @@ test('Windows proxy: committed close with unusable host acknowledgement is non-r
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-close-ack-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-close-ack-test');
 
     const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
     atomicWriteJson(fixture.workspacePath, {
@@ -742,8 +769,7 @@ test('Windows proxy: committed close stays non-retryable when post-commit page s
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-close-post-sync-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-close-post-sync-test');
 
     const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
     atomicWriteJson(fixture.workspacePath, {
@@ -794,8 +820,7 @@ test('Windows proxy: native tab-close uncertainty is structured and non-retryabl
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-close-native-unknown-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-close-native-unknown-test');
     const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
     atomicWriteJson(fixture.workspacePath, {
       ...workspace,
@@ -839,8 +864,7 @@ test('Windows proxy: settled mutation errors are commit-unknown and never redisp
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-upstream-mutation-error-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-upstream-mutation-error-test');
 
     const assertMutationUnknown = async ({ name, arguments: args, mode, upstreamError }) => {
       const beforeDispatches = readAudit(fixture.auditPath)
@@ -1018,8 +1042,7 @@ test('Windows proxy: external close cancellation reaches the host tombstone befo
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-close-cancel-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-close-cancel-test');
 
     const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
     atomicWriteJson(fixture.workspacePath, {
@@ -1084,8 +1107,7 @@ test('Windows proxy: external cancellation tombstones an in-flight tab activatio
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-activation-cancel-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-activation-cancel-test');
 
     await host.deferOperation('activate_tab', true);
     const operationBeginBefore = (await host.snapshot()).operationCalls.get('begin_agent_operation') || 0;
@@ -1140,8 +1162,7 @@ test('Windows proxy: stdin shutdown tombstones an in-flight close before exit', 
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-close-stdin-shutdown-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-close-stdin-shutdown-test');
     const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
     atomicWriteJson(fixture.workspacePath, {
       ...workspace,
@@ -1296,8 +1317,7 @@ test('Windows proxy: held response observation exceeds fifteen seconds without a
   const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
   try {
-    await initializeWrapper(wrapper, 'windows-held-observer-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-held-observer-test');
     writeFileSync(fixture.modePath, JSON.stringify({ snapshotDelayMs: 15_500 }));
     const beforeHostState = await host.snapshot();
     const before = {
@@ -1336,8 +1356,7 @@ test('Windows proxy: a paused observer cannot starve the independent host input 
   const wrapper = driveWrapper(fixture);
   const releasePath = join(fixture.root, 'paused-observer.release');
   try {
-    await initializeWrapper(wrapper, 'windows-paused-observer-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-paused-observer-test');
     writeFileSync(fixture.modePath, JSON.stringify({ clickReleasePath: releasePath }));
     const before = await host.snapshot();
     const request = requestHeldTool(wrapper, 'click', { uid: 'pause-observer' });
@@ -1382,8 +1401,7 @@ test('Windows proxy: a genuinely withheld host refresh still fails closed withou
   const wrapper = driveWrapper(fixture);
   const releasePath = join(fixture.root, 'withheld-refresh.release');
   try {
-    await initializeWrapper(wrapper, 'windows-withheld-host-refresh-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-withheld-host-refresh-test');
     // ACK the host configuration before dispatch: this withholds real IPC
     // responses, unlike freezeObservations, which still answers every request.
     await host.deferOperation('refresh_agent_input', true);
@@ -1474,7 +1492,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     const first = await wrapper.request('tools/call', {
       name: 'list_pages',
       arguments: {},
-    });
+    }, WORKSPACE_RECOVERY_OBSERVATION_MS);
     assert.equal(first.result.structuredContent.pages[0].id, 1);
     assert.equal((await host.snapshot()).prepareCalls, 1);
     assert.equal(readAudit(fixture.auditPath).filter((entry) => entry.kind === 'start').length, 1);
@@ -1821,7 +1839,14 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
         .filter((entry) => entry.kind === 'tool-complete' && entry.name === 'click').length ===
         externalCancelBefore.completed + 1 &&
         ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) === externalCancelBefore.end + 1,
-      'cancelled upstream completion and host end did not both settle',
+      async () => JSON.stringify({
+        message: 'cancelled upstream completion and host end did not both settle',
+        expected: externalCancelBefore,
+        audit: readAudit(fixture.auditPath).filter(entry =>
+          ['tool', 'tool-complete', 'cancel'].includes(entry.kind)).slice(-12),
+        host: (await host.snapshot()).operationTimeline.slice(-12),
+        progress: host.diagnostic(),
+      }),
       5_000,
     );
     const externalCancelAudit = readAudit(fixture.auditPath);
@@ -1949,8 +1974,7 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-upstream-crash-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-upstream-crash-test');
 
     writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 5_000 }));
     const beforeHostState = await host.snapshot();
