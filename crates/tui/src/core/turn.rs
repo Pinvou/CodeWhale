@@ -61,6 +61,15 @@ pub struct TurnContext {
     /// Written only when run_turn selects its final failure, never by an
     /// advisory event or an attempt which may still recover.
     pub(crate) terminal_error_source: Option<TurnErrorSource>,
+
+    /// Mint ownership from the OUTGOING Moonshot request this turn is
+    /// answering: registry spelling → minted `_<digit>` wire spelling,
+    /// post schema projection and collision/length filtering (delivered on
+    /// the response stream before any provider SSE). Dispatch claims a
+    /// minted response spelling only for an owner in THIS map — the
+    /// engine's active names include tools that schema projection or the
+    /// collision filter never advertised (review 5915692444).
+    pub(crate) moonshot_mint_owners: std::collections::HashMap<String, String>,
 }
 
 impl TurnContext {
@@ -81,6 +90,7 @@ impl TurnContext {
             compaction_refusal_notified: false,
             pending_route: None,
             terminal_error_source: None,
+            moonshot_mint_owners: std::collections::HashMap::new(),
         }
     }
 

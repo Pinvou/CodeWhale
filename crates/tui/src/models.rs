@@ -668,6 +668,17 @@ pub enum StreamEvent {
         omitted_tool_names: Vec<String>,
         omitted_tool_count: usize,
     },
+    /// Local pre-stream receipt: the mint ownership the OUTGOING Moonshot
+    /// request actually advertised — registry spelling → minted `_<digit>`
+    /// wire spelling, post schema projection and collision/length filtering.
+    /// Dispatch must resolve minted response spellings from this mapping,
+    /// not from the engine's active set (review 5915692444). This is not
+    /// provider SSE and must not count as content.
+    #[serde(rename = "moonshot_mint_owners")]
+    MoonshotMintOwners {
+        /// (registry spelling, minted wire spelling) pairs.
+        owners: Vec<(String, String)>,
+    },
     #[serde(rename = "message_start")]
     MessageStart { message: MessageResponse },
     #[serde(rename = "content_block_start")]
