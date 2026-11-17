@@ -88,6 +88,7 @@ ACCOUNT_REQUIRED = {
     "TestF06OrganizationDeletionVersionAndTerminalScope",
     "TestF06Review5566377593PublicPostgres",
     "TestOrganizationEvidenceTruncatePublicPostgres",
+    "TestProviderQuotaConcurrentBoundary",
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
@@ -306,6 +307,7 @@ EXACT_REQUIRED_CHILDREN = {
         "conflicting-original-customer", "conflicting-original-sku",
         "conflicting-original-channel",
     },
+    "TestProviderQuotaConcurrentBoundary": {"migration-round-trip", "send", "verify", "login-registration", "login-profile"},
     "TestProviderHealthReadFailurePostgres": {"discovery", "latest-five", "failure-rate"},
     "TestApprovalPaginationSourcePostgres": {
         "registered-replicas-use-distinct-admitted-client-keys",
