@@ -332,7 +332,10 @@ class WebpkiCiContractTests(unittest.TestCase):
         # 例外:frontend-setup 的工件上传(2026-11-16 setup 工件化)是功能性
         # 传输——4 个消费分片依赖它,上传失败必须让 job 显式红,因此它不属于
         # diagnostic 通道(retention 1 天同 run 内消费;无 continue-on-error)。
-        functional = [('frontend-setup', 'Upload frontend setup bundle')]
+        functional = [('frontend-setup', 'Upload frontend setup bundle'),
+                      # 同名工件 overwrite 重试通道:主上传 stall 后自动补试一次,
+                      # 与主上传同为功能性传输(retention 1 天,无 continue-on-error)。
+                      ('frontend-setup', 'Upload frontend setup bundle (retry)')]
         reviewed = [('required-gate', 'PR test success proof transport'),
                     ('frontend-test', 'Test resource lifecycle receipts'),
                     ('frontend-browser-test', 'Browser shard resource lifecycle receipts'),
