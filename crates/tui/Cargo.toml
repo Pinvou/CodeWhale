@@ -81,7 +81,9 @@ shellexpand = "3"
 toml.workspace = true
 toml_edit.workspace = true
 tokio.workspace = true
-tokio-util = { version = "0.7.16", features = ["io"] }
+# Only CancellationToken (sync module, ungated) is used; the `io` feature is
+# an empty alias in tokio-util 0.7 and pulls nothing, so it is not declared.
+tokio-util = "0.7.16"
 unicode-width = "0.2"
 unicode-segmentation = "1.12"
 unicode-normalization = "0.1"
@@ -150,7 +152,9 @@ portable-pty = "0.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL"] }
+# The NSObject feature has no references in this crate: the macOS OCR code
+# imports exactly the other five types.
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSString", "NSURL"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Environment", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
