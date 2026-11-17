@@ -395,6 +395,10 @@ jobs:
               # attribution positive control); a change confined to it must
               # run the leg that executes the guard it pins.
               - 'scripts/tests/test_registry_guard.py'
+              # This cleanup runs between the real Rust harnesses; script-only
+              # changes must exercise that same job before entering the queue.
+              - 'scripts/prune-rust-test-artifacts.py'
+              - 'scripts/tests/test_prune_rust_test_artifacts.py'
               - 'pinvou3-app/src-tauri/**/*.rs'
               - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
               # diagnostics.rs 在生产校验中 include_str! v1 schema，
@@ -3074,10 +3078,7 @@ jobs:
       - name: 回收已完成的主测试产物
         if: ${{ github.event_name != 'push' }}
         run: |
-          target="pinvou3-app/src-tauri/target/debug/deps"
-          find "$target" -maxdepth 1 -type f \
-            \( -name 'pinvou3_lib-*' -o -name 'libpinvou3_lib-*' \) \
-            -print -delete
+          python3 scripts/prune-rust-test-artifacts.py
           df -h "$GITHUB_WORKSPACE"
 
       - name: cargo test --test behavior_telemetry (standalone memory-bounded harness)
