@@ -125,6 +125,22 @@ impl ControlledHandshake {
         self.stage
     }
 
+    /// A repeated notification reuses the current authenticated reservation;
+    /// it cannot mint new secrets or repeat a one-shot handshake frame.
+    pub(crate) fn is_reserved_replay(
+        &self,
+        message: &Value,
+        trust: &AuthenticatedRelayTrustConfig,
+    ) -> bool {
+        let Ok(parsed) = parse_controller_pairing_transcript(&message.to_string()) else {
+            return false;
+        };
+        let Ok(candidate) = authenticate_relay_transcript(trust, parsed) else {
+            return false;
+        };
+        self.install_context.same_pairing_reservation(candidate)
+    }
+
     pub(crate) fn signed_expires_at_ms(&self) -> u64 {
         self.install_context.signed_expires_at_ms()
     }
@@ -405,6 +421,92 @@ mod tests {
                 .encode(relay.key_pair.sign(&preimage).as_ref())
         );
         message
+    }
+
+    #[test]
+    fn reservation_replay_requires_the_entire_authenticated_binding() {
+        let relay = signed_relay();
+        let a_keys = HandshakeKeyPair::generate().unwrap();
+        let b_keys = HandshakeKeyPair::generate().unwrap();
+        let encoded = |bytes: [u8; 32]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let reserved = signed_reservation(
+            &relay,
+            &encoded(a_keys.public_key().to_bytes()),
+            &encoded(b_keys.public_key().to_bytes()),
+        );
+        let mut a = ControllingHandshake::new(
+            reserved["request_id"].as_str().unwrap(),
+            "claim-replay",
+            "2345678",
+            a_keys,
+            relay.trust.clone(),
+        );
+        assert!(
+            !a.is_reserved_replay(&reserved),
+            "no replay admission before the first request is bound"
+        );
+        a.accept_reserved(&reserved).unwrap();
+        let b = ControlledHandshake::new(&reserved, b_keys, &relay.trust).unwrap();
+        let mut retry = reserved.clone();
+        retry["request_id"] = json!("request-replay-different");
+        assert!(a.is_reserved_replay(&retry));
+        assert!(b.is_reserved_replay(&retry, &relay.trust));
+        retry["relay_signature_b64"] =
+            json!(base64::engine::general_purpose::STANDARD.encode([0_u8; 64]));
+        assert!(!a.is_reserved_replay(&retry));
+        assert!(!b.is_reserved_replay(&retry, &relay.trust));
+        // Re-sign each changed binding with the genuinely trusted key. Merely
+        // checking reservation_id/generation, or merely verifying a signature,
+        // would incorrectly swallow several of these independent changes.
+        for field in [
+            "reservation_id",
+            "remote_control_generation",
+            "relay_epoch",
+            "controller_connection_identity",
+            "endpoint_id",
+            "handshake_public_key_a_b64",
+            "handshake_public_key_b_b64",
+            "expires_at_ms",
+        ] {
+            let mut changed = reserved.clone();
+            changed["transcript"][field] = match field {
+                "handshake_public_key_a_b64" | "handshake_public_key_b_b64" => json!(encoded(
+                    HandshakeKeyPair::generate()
+                        .unwrap()
+                        .public_key()
+                        .to_bytes()
+                )),
+                "expires_at_ms" => json!("1700000020001"),
+                _ => json!("different-valid-binding"),
+            };
+            if ["reservation_id", "remote_control_generation", "relay_epoch"].contains(&field) {
+                changed[field] = changed["transcript"][field].clone();
+            }
+            if field == "expires_at_ms" {
+                changed["handshake_expires_at_ms"] = changed["transcript"][field].clone();
+            }
+            let preimage = build_pairing_transcript_preimage(&changed["transcript"]).unwrap();
+            changed["transcript_hash"] = json!(hex_lower(&Sha256::digest(&preimage)));
+            changed["relay_signature_b64"] = json!(
+                base64::engine::general_purpose::STANDARD
+                    .encode(relay.key_pair.sign(&preimage).as_ref())
+            );
+            assert!(!a.is_reserved_replay(&changed), "A must reject {field}");
+            assert!(
+                !b.is_reserved_replay(&changed, &relay.trust),
+                "B must reject {field}"
+            );
+        }
+        assert_eq!(
+            a.stage(),
+            super::super::controlling_handshake::HandshakeStage::Reserved
+        );
+        assert_eq!(b.stage(), ControlledHandshakeStage::Committed);
+        assert!(
+            a.is_reserved_replay(&reserved),
+            "a rejected replay must not replace the cached binding"
+        );
+        assert!(b.is_reserved_replay(&reserved, &relay.trust));
     }
 
     /// E2E-02 双端契约：A 与 B 用同一签名 transcript 独立推进，只有双方都

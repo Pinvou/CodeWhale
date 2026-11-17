@@ -12,6 +12,8 @@
 
 本桌面功能未发布，不迁移或兼容旧独立 history、状态别名、旧 UI / wire 入口，不双写，不保留稳定版本兼容窗口。下文 DEV-26～DEV-31 原计划明确作为历史附录，旧迁移要求已经废弃，不作为待办或技术债；已发布 Legacy Web v2 的兼容和 enrollment 迁移要求不受影响。真实浏览器、双 Windows、公网部署与 DEV-25 发布证据仍须分别验证，不以历史计划或单元测试代替。
 
+完整 DEV ↔ A01～A27/S01/S02 的历史交付映射、A00 定位与保留原历史的计数/归因补遗见[交付追溯补遗](remote-control-delivery-provenance.md)。
+
 ## 1. 目的与执行规则
 
 本文把需求基线拆成可独立实现、独立测试、独立验收和独立提交的开发任务。任务编号是交付单元，不是需求优先级；同一任务内必须先补协议模型或失败测试，再完成实现，提交时不得留下预期失败的门禁。
@@ -259,7 +261,7 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 + DEV-26..DEV-31 ── DEV-25 公网
 - **目标**：在 Rust 提供可互操作的独立 code-wrap/handshake keypair、Relay 签名 transcript 验证、Finished、receipt commitment、业务 AEAD 和防重放原语。
 - **范围**：严格 LP 编码、32 字节随机 receipt secret、域分离、固定测试向量、密钥派生/清零、nonce/epoch/sequence、`SensitiveString`、加密帧尺寸前置检查；JS 仅实现 Relay 所需 commitment 校验和 fixture 验证。
 - **不做**：不联网、不拥有连接状态、不把共同派生 key 当 receipt 证据。
-- **预计文件**：`controller/crypto.rs`、`controller/protocol.rs`（新）、`remote-control-relay/protocol-controller.js`、双方固定向量 fixture、Rust/Node 单测。
+- **预计文件**：`controller/crypto.rs`（新）、`controller/protocol.rs`（修改 DEV-00 已创建文件）、`remote-control-relay/protocol-controller.js`、双方固定向量 fixture、Rust/Node 单测。
 - **协议/数据**：发送方只在加密 Finished 内给对端 secret；接收方验证后恰好一次经角色认证 socket 回传；Relay 只验证 commitment，不能导出业务会话密钥。
 - **测试**：文档固定 preimage/commitment 向量、字段顺序/长度/编码、跨角色/跨用途替换、损坏 Finished、secret 重放、nonce/sequence 重放、未知 epoch、Debug/错误脱敏、内存清理钩子。
 - **验收**：Rust/Node 对固定向量完全一致；任何 receipt secret 不出现在明文业务消息和日志；两套 keypair 类型上不能互换。
@@ -857,6 +859,8 @@ npm --prefix pinvou3-app run lint:ui
 | 发布 | 两台隔离 Windows、生产等价 TLS/网关、网络故障、抓包/日志扫描 | 单元测试或 mock-only E2E |
 
 ## 9. 合入与灰度出口
+
+以下是历史阶段摘要，列出的任务不是完整依赖清单。每个出口须沿第 4 节 DAG 递归闭合所有显式及传递前置：例如基础出口中的 DEV-20 依赖 DEV-19、DEV-22 依赖 DEV-21，不能因为后二者列在完整能力出口就跳过。A08 已选择性前移所需实现，当前验收以真实完整链路与现行门禁为准；这些历史分组不降低门禁，也不代表已有双机或发布资格。
 
 1. **协议出口**：DEV-00～DEV-09 完成，测试客户端能建立密文租约、证明 30 秒 watchdog 并完成无业务 provisional resume；旧 Web v2 全绿。
 2. **基础功能出口**：DEV-10～DEV-13、DEV-20、DEV-22 完成，两台 Windows 可用 B 模型完成普通任务、安全断开和后台窗口旅程。

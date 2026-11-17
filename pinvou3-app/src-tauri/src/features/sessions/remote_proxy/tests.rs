@@ -688,6 +688,77 @@ fn malformed_and_oversized_remote_cache_do_not_block_local_startup() {
 }
 
 #[test]
+fn recovery_preserves_corrupt_and_oversized_files_and_fences_older_writers() {
+    for bytes in [
+        b"{broken".to_vec(),
+        vec![b' '; super::schema::MAX_REMOTE_PROXY_FILE_BYTES + 1],
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let old = make_store(temp.path());
+        let path = temp.path().join("sessions/_remote_proxies.json");
+        std::fs::write(&path, &bytes).unwrap();
+        let recovery = make_store(temp.path());
+        assert!(
+            recovery
+                .prepare_remote_proxy_open(None, &context())
+                .is_err()
+        );
+        let local = recovery
+            .create_new("/model".into(), None, temp.path().to_path_buf())
+            .unwrap();
+        assert!(recovery.recover_remote_proxy_file(false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let exported = recovery.recover_remote_proxy_file(true).unwrap().unwrap();
+        assert_eq!(std::fs::read(&exported).unwrap(), bytes);
+        assert!(!path.exists());
+        assert_eq!(recovery.remote_proxy_load_failure_code(), None);
+        assert!(old.test_commit_remote_proxy_open(None, &context()).is_err());
+        assert!(!path.exists());
+        assert!(recovery.load(&local.metadata.id).is_ok());
+        assert!(recovery.recover_remote_proxy_file(true).is_err());
+        let opened = recovery
+            .test_commit_remote_proxy_open(None, &context())
+            .unwrap();
+        let restarted = make_store(temp.path());
+        assert!(
+            restarted
+                .read_remote_proxy_history(&opened.local_session_id)
+                .is_some()
+        );
+        assert!(restarted.load(&local.metadata.id).is_ok());
+        assert_eq!(std::fs::read(&exported).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn recovery_reloads_repaired_state_and_does_not_quarantine_unsupported_schema() {
+    let temp = tempfile::tempdir().unwrap();
+    let old = make_store(temp.path());
+    let record = old.test_commit_remote_proxy_open(None, &context()).unwrap();
+    let path = temp.path().join("sessions/_remote_proxies.json");
+    let valid = std::fs::read(&path).unwrap();
+    let mut future: serde_json::Value = serde_json::from_slice(&valid).unwrap();
+    future["schema_version"] = serde_json::json!(999);
+    let future = serde_json::to_vec(&future).unwrap();
+    std::fs::write(&path, &future).unwrap();
+    let recovery = make_store(temp.path());
+    assert_eq!(
+        recovery.remote_proxy_load_failure_code(),
+        Some("remote_proxy_version_unsupported")
+    );
+    assert!(recovery.recover_remote_proxy_file(true).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), future);
+    std::fs::write(&path, &valid).unwrap();
+    assert_eq!(recovery.recover_remote_proxy_file(false).unwrap(), None);
+    assert!(
+        recovery
+            .read_remote_proxy_history(&record.local_session_id)
+            .is_some()
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), valid);
+}
+
+#[test]
 fn remote_cache_local_id_collision_does_not_block_local_startup() {
     let temp = tempfile::tempdir().unwrap();
     let store = make_store(temp.path());

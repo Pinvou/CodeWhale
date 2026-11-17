@@ -1716,6 +1716,14 @@ impl LeaseInstallValidationContext {
         &self.request_id
     }
 
+    /// A stable claim retry can change only the outer transport request ID.
+    /// Compare every authenticated install field, including future additions;
+    /// this is replay recognition, never authorization for a new admission.
+    pub(crate) fn same_pairing_reservation(&self, mut candidate: Self) -> bool {
+        candidate.request_id.clone_from(&self.request_id);
+        self == &candidate
+    }
+
     pub(crate) fn pairing_id(&self) -> &str {
         &self.expected_pairing_id
     }
