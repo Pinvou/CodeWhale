@@ -109,6 +109,13 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   loopback ports; Vite optimizer output and browser profiles are private. Await
   close acknowledgement before deleting directories. Legacy explicit exits use
   `fixture-exit.cjs` so cleanup completes without replacing the original failure.
+  A smoke with a large Vite import graph may explicitly call
+  `prepareFixtureModules(server, ['/tests/fixtures/entry.jsx'])` before its first
+  case. It waits for static module transforms and optimizer crawl in that owned
+  server, with one setup budget capped at 30 seconds and no retry. Keep the
+  original navigation/action deadlines and readiness assertions; close the
+  server in `finally` even when setup fails. Never share optimizer output across
+  jobs or use module preparation to bypass a browser/application failure.
   When `PINVOU_CI_RESOURCE_LEDGER` is set, the shared browser adapter also keeps
   bounded console/page errors, failed requests and HTTP errors under
   `browser-diagnostics/` in that job's existing resource artifact. Before close,
