@@ -586,12 +586,15 @@ function pinvouSharedweb() {
       webChatFailed: "The desktop could not admit this turn. Reopen the conversation and try again.",
       webSessionCreateFailed: "The desktop could not create this chat. Reopen the conversation list and try again.",
       editStaleRevision: "This conversation changed on the desktop since it was loaded. Reopen the conversation, then edit again.",
-      editRevisionUnavailable: "The conversation state could not be verified for this edit. Reopen the conversation, then try again.",
+      editRevisionUnavailable: "The conversation state could not be verified for this edit. Reopen the conversation and try again.",
       artifactTooLarge: "This artifact is too large to preview over remote control. Download it instead.",
       artifactPreviewTooLarge: "The rendered preview exceeds the remote-control response limit. Download the artifact instead.",
       artifactEditTooLarge: "This markdown is too large to edit over remote control. Download it instead.",
       artifactReadFailed: "The artifact could not be read on the desktop.",
       attachReadFailed: "This attachment could not be read on the desktop.",
+      betaVersionSuffix: " (Beta)",
+      voiceEditNoChange: "Voice edit made no changes; original text kept",
+      voiceEditPostprocessFailed: "Voice edit processing failed; your input was not changed. Please try again.",
     },
     ja: {
       newChatFailed: "⚠️ 新規チャットの作成に失敗: ", loadChatFailed: "⚠️ チャットの読み込みに失敗: ", deleteFailed: "⚠️ 削除に失敗: ",
@@ -736,6 +739,9 @@ function pinvouSharedweb() {
       artifactEditTooLarge: "この Markdown はリモートコントロールで編集できる上限を超えています。代わりにダウンロードしてください。",
       artifactReadFailed: "デスクトップで成果物を読み取れませんでした。",
       attachReadFailed: "この添付ファイルはデスクトップで読み取れませんでした。",
+      betaVersionSuffix: " (ベータ版)",
+      voiceEditNoChange: "音声編集による変更はありません。原文を保持しました",
+      voiceEditPostprocessFailed: "音声編集の処理に失敗しました。入力は変更されていません。再試行してください。",
     },
     zh: {
       newChatFailed: "⚠️ 新建对话失败: ", loadChatFailed: "⚠️ 加载对话失败: ", deleteFailed: "⚠️ 删除失败: ",
@@ -880,6 +886,9 @@ function pinvouSharedweb() {
       artifactEditTooLarge: "Markdown 过大，无法在远程控制中编辑，请改为下载。",
       artifactReadFailed: "桌面端无法读取该产物。",
       attachReadFailed: "桌面端无法读取该附件。",
+      betaVersionSuffix: " (内测版)",
+      voiceEditNoChange: "语音编辑无变化，已保留原文",
+      voiceEditPostprocessFailed: "语音编辑整理失败，当前输入未修改，请重试。",
     },
   };
 function bt(key) { return pinvouSharedweb().bt(key); }
@@ -3319,11 +3328,9 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
   // (t.uiAttachments.*)同源语义。与 tauri bridge chat.js 同一口径。
   // 远端折叠错误码(remote_control.rs 折叠族,原生错误链只留在桌面日志)与
   // edit_last_turn 乐观并发护栏码在此映射为三语文案;未识别文本仍走下方
-  // 脱敏兜底。码表分两档:官方树可达码(session/revision/admission 族,
-  // 折叠族由 Rust 侧 stable_web_error_codes_are_locked 锁定)与闭源侧
-  // 产物/分块车道码(官方 Rust 暂无对应 emit 点,映射保留以维持跨树同步,
-  // 官方侧落地时随上述锁扩列);官方树的 turn-in-progress 码是无 web_
-  // 前缀的 session_turn_in_progress,由上方前缀族先行命中。
+  // 脱敏兜底。码表与 Rust 侧 stable_web_error_codes_are_locked 同步演进;
+  // 官方 Rust 已实发 web_artifact_* 折叠族与带 web_ 前缀的 turn-in-progress
+  // 码(web_session_turn_in_progress),均经本表精确命中,无前缀兜底规则。
   const WEB_TURN_ERROR_KEYS = {
     web_session_chat_failed: "webChatFailed",
     // 专属完整句文案:复用 newChatFailed(供 wireLaneError 拼接细节的前缀串)
@@ -6298,7 +6305,10 @@ function currentMemoryArtifacts() { return pinvouSharedweb().currentMemoryArtifa
       if (downloaded) trackArtifactExported(path, sessionId);
       return downloaded;
     } catch (e) {
-      addSystemItem(bt("downloadFailed") + String((e && e.message) || e));
+      // 稳定错误码在此折叠为三语文案(与 turn-error 车道同一 displayTurnError
+      // 映射);裸 String 兜底会渲染机器码,EN/JA 界面还会泄漏 zh-only admission
+      // 文案(open round-9)。
+      addSystemItem(bt("downloadFailed") + displayTurnError(e));
       return false;
     }
   }
@@ -6445,7 +6455,7 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
       }
       return await downloadConversationAttachment(reference);
     } catch (e) {
-      addSystemItem(bt("openFailed") + e);
+      addSystemItem(wireLaneError(e, "openFailed"));
       return false;
     }
   }
@@ -6455,7 +6465,7 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
       await invoke("reveal_conversation_attachment", conversationAttachmentArgs(reference));
       return true;
     } catch (e) {
-      addSystemItem(bt("openFailed") + e);
+      addSystemItem(wireLaneError(e, "openFailed"));
       return false;
     }
   }
