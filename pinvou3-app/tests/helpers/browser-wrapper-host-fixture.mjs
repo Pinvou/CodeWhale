@@ -85,11 +85,6 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
   };
 
   const recordOperation = async (operation) => {
-    state.operationCalls.set(
-      operation,
-      (state.operationCalls.get(operation) || 0) + 1,
-    );
-    state.operationLog.push(operation);
     const event = { operation, at: Date.now() };
     if (operation === 'end_agent_operation') {
       // Capture an actual happens-before witness, rather than ordering wall
@@ -107,6 +102,13 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
         }
       }
     }
+    // Snapshot RPC may run while the audit read is pending. Publish the count,
+    // log and completed witness together so it cannot observe a partial event.
+    state.operationCalls.set(
+      operation,
+      (state.operationCalls.get(operation) || 0) + 1,
+    );
+    state.operationLog.push(operation);
     state.operationTimeline.push(event);
   };
 
