@@ -449,7 +449,7 @@ React UI / ChatView
 - 正常成功、失败和取消收尾按精确回合 owner 回收远程引擎条目；私有快照由 Bridge/Engine 的 Arc 所有权保持，最后一个所有者释放后回收，不写回或恢复 B 的共享技能目录。旧 worker、旧 owner 或重复收尾不得修改新回合；远程取消及终态等待绑定原预留 generation，不能取消后继预留的 shell scope 或用新本地回合活动延长旧任务的终态等待。
 - A 远程附件由绑定完整租约、Session、任务的 B 上传 receipt 消费，不能混同 B 本地附件描述符；取消映射校验遵循会话意图锁在连接 owner 锁之前的顺序。B 的远控只读视图和凭据门控只作用于当前受控 Session，不作用于其他本地会话。
 
-当前实现边界：私有快照不使用共享技能冻结或恢复协议。未发布的冷启动资源由 custody 保持，已发布快照由实际 Bridge/Engine 所有权保持；这不等于 OS 只读权限、真实 provider/core 已停止或异常清理有界的证明。捕获 panic、证明停止及精确 owner 有界收尾仍由 #1400 跟进；底座自主继发轮的子代理级联取消仍有 #254 所述边界，此段不宣称该边界、异常恢复或真实双 Windows 发布验收已完成。
+当前实现边界：私有快照不使用共享技能冻结或恢复协议。未发布的冷启动资源由 custody 保持，已发布快照由实际 Bridge/Engine 所有权保持；这不等于 OS 只读权限、真实 provider/core 已停止或异常清理有界的证明。捕获 panic、证明停止及精确 owner 有界收尾仍由 #1400 跟进；底座自主继发轮的子代理级联取消仍有 [Pinvou/pinvou-agent#254](https://github.com/Pinvou/pinvou-agent/issues/254) 所述边界，此段不宣称该边界、异常恢复或真实双 Windows 发布验收已完成。
 
 ### 7.6 模型选择与临时凭证
 
