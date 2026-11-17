@@ -2368,6 +2368,70 @@ test("a failure after staging backup cannot silently authorize after restart", a
   assert.deepEqual(await fs.readFile(statePath), committedPrimary);
 });
 
+test("empty bootstrap recovery denies registration until an explicit durable enrollment", async t => {
+  const statePath = await temporaryState(t);
+  const fault = { ...fs, async rename(source, target) {
+    if (target === statePath) throw Object.assign(Error("injected first primary publication failure"), { code: "EIO" });
+    return fs.rename(source, target);
+  } };
+  await rejectsCode(openStateStore(statePath, { fs: fault }), "relay_state_persist_failed");
+  await assert.rejects(fs.stat(statePath), { code: "ENOENT" });
+  const backup = await fs.readFile(`${statePath}.bak`);
+  const store = await openStateStore(statePath);
+  resourcesFor(t).stores.push(store);
+  assert.deepEqual(await fs.readFile(statePath), backup);
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+  const registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  const request = { endpointId: "bootstrap-endpoint", accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL };
+  await rejectsCode(registry.authorizeWebRegistration(request), "enrollment_required");
+  await rejectsCode(registry.authorizePairingRegistration(request), "enrollment_required");
+  await rejectsCode(registry.authorizeDesktopRegistration(request), "enrollment_required");
+  await registry.enroll({ endpointId: request.endpointId, credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL });
+  assert.equal((await registry.authorizeDesktopRegistration(request)).status, "active");
+  await store.close();
+  const restarted = await openStateStore(statePath);
+  resourcesFor(t).stores.push(restarted);
+  const next = EnrollmentRegistry.open({ stateStore: restarted, config: configForState(statePath) });
+  assert.equal((await next.authorizeDesktopRegistration(request)).status, "active");
+});
+
+test("missing primary never promotes staged enrollment and preserves prior committed authorization evidence", async t => {
+  const statePath = await temporaryState(t);
+  let primaryWrites = 0;
+  const fault = { ...fs, async rename(source, target) {
+    if (target === statePath && ++primaryWrites === 3) {
+      throw Object.assign(Error("injected enrollment primary publication failure"), { code: "EIO" });
+    }
+    return fs.rename(source, target);
+  } };
+  const store = await openStateStore(statePath, { fs: fault });
+  resourcesFor(t).stores.push(store);
+  const registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  await registry.enroll({ endpointId: "bootstrap-committed", credential: FIRST_CREDENTIAL });
+  const committed = await fs.readFile(statePath);
+  await rejectsCode(registry.enroll({ endpointId: "bootstrap-uncommitted", credential: SECOND_CREDENTIAL }), "enrollment_registry_unavailable");
+  await store.close();
+  const staged = await fs.readFile(`${statePath}.bak`);
+  assert.equal(JSON.parse(staged).namespaces[ENROLLMENT_NAMESPACE].value.entries.length, 2);
+  await fs.unlink(statePath);
+  // A faulty implementation/negative control may unexpectedly open the store.
+  // Register it before the rejection assertion so that failure still closes it.
+  await rejectsCode(openStateStore(statePath).then(unexpected => {
+    resourcesFor(t).stores.push(unexpected);
+  }), "relay_state_unavailable");
+  await assert.rejects(fs.stat(statePath), { code: "ENOENT" });
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), staged);
+  // Test-only offline restoration has exact evidence of the last successful
+  // primary. Production never chooses or promotes this staged backup.
+  await fs.writeFile(statePath, committed, { mode: 0o600 });
+  await fs.writeFile(`${statePath}.bak`, committed);
+  const restored = await openStateStore(statePath);
+  resourcesFor(t).stores.push(restored);
+  const next = EnrollmentRegistry.open({ stateStore: restored, config: configForState(statePath) });
+  assert.equal((await next.authorizeWebRegistration({ endpointId: "bootstrap-committed", accessToken: FIRST_CREDENTIAL })).status, "active");
+  await rejectsCode(next.authorizeWebRegistration({ endpointId: "bootstrap-uncommitted", accessToken: SECOND_CREDENTIAL }), "enrollment_required");
+});
+
 test("a damaged or mismatched backup prevents authorization", async (t) => {
   const statePath = await temporaryState(t);
   let store = await openStateStore(statePath);

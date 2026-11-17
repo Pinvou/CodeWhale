@@ -327,8 +327,14 @@ the store enters a permanent degraded state and rejects all reads and writes;
 the process must be restarted after operators resolve the disk problem. On
 startup the valid primary and backup must be byte-equivalent after canonical
 parsing; a mismatch, a missing peer copy, or a damaged backup fails closed. A
-valid backup may restore a malformed primary; a missing primary fails closed so
-a staged but uncommitted backup cannot become authoritative. Malformed,
+valid backup may restore a malformed primary. A missing primary is recreated
+only for a validated current-format backup with revision `"0"` and no namespaces:
+this is the exact empty initialization written before the first primary, with
+no authorization to activate. Recovery holds the normal guard and owner lock,
+preserves the backup, and publishes the primary through the existing private,
+alias-checked atomic writer. A later revision, any namespace, an older-format
+migration, or uncertain/nonempty backup still fails closed so a staged but
+uncommitted commit cannot become authoritative. Malformed,
 oversized, unsupported, or ambiguous candidates otherwise fail closed.
 Recognizable controller-state versions newer than this implementation are
 reported as `relay_state_unsupported` before validating the current field set,
