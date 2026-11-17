@@ -241,6 +241,145 @@ test("single release path policy covers every remote-control security boundary",
   assert.equal(changedPathsRequireRemoteControlRelease("docs/unrelated.md\nREADME.md\n"), false);
 });
 
+test("official desktop releases enable Windows and Linux and keep macOS disabled without repository variables", async () => {
+  const source = await readFile(new URL("../../.github/workflows/release-packages.yml", import.meta.url), "utf8");
+  const { jobs } = parse(source);
+  const flag = "PINVOU_DESKTOP_CONTROLLER_ENABLED";
+  const gateJobName = "remote-control-release-gate";
+  const pinnedCompileJobs = {
+    "build-windows-x64": "1",
+    "build-linux-x64": "1",
+    "build-linux-arm64": "1",
+    "build-linux-loongarch64": "1",
+    "build-macos-universal": "0",
+  };
+  for (const [name, value] of Object.entries({ [gateJobName]: "1", ...pinnedCompileJobs })) {
+    const job = jobs[name];
+    assert.equal(job?.env?.[flag], value, `${name} must explicitly select its build capability`);
+    for (const step of job.steps) {
+      assert.ok(step.env?.[flag] === undefined || step.env[flag] === value,
+        `${name}: ${step.name || step.uses} must not override the platform policy`);
+      // 评审 round-3 P2-1：钉扎 job 的 run 文本不得出现 flag 字面量——
+      // `FLAG=0 node …` 前缀、`export FLAG=…` 与 GITHUB_ENV 注入都属
+      // 行内改写，job 级 env 钉扎对此无感知；开关只允许经钉死的 job env
+      // 选择。
+      assert.doesNotMatch(step.run ?? "", new RegExp(flag),
+        `${name}: ${step.name} must not touch ${flag} inside run text; `
+          + "the capability is selected only by the pinned job env");
+    }
+  }
+  assert.doesNotMatch(source, /vars\.PINVOU_DESKTOP_CONTROLLER_ENABLED/u);
+  const windows = jobs["build-windows-x64"];
+  assert.ok(windows.needs?.includes("remote-control-release-gate"), "build-windows-x64 must depend on remote-control-release-gate");
+  assert.match(windows.if ?? "", /needs\.remote-control-release-gate\.result == 'success'/u);
+  // Reverse inventory: a release build without the flag silently compiles the
+  // controller out (build.rs defaults to '0'), so the whitelist above must be
+  // exhaustive. Every job whose steps invoke a desktop compile entry point has
+  // to be pinned above, and every pinned job has to actually compile, so the
+  // two sets must stay equal; the evidence gate is inventoried separately by
+  // its controller-release-gate.mjs invocation.
+  // 评审 round-2 P2：识别面不止 run 内三种子串——(1) npx/cargo/yarn 等非 npm
+  // 标记的构建命令；(2) step/job env 注入的命令文本；(3) 经 uses 委托本地可
+  // 复用工作流的影子构建/门禁。识别不到的新 job 由下方全量登记兜底 fail-closed。
+  const desktopCompileMarkers = [
+    "scripts/tauri/build.js build",
+    "npm run build",
+    "yarn build",
+    "tauri build",
+    "scripts/ci-build-linux-loongarch64.sh",
+  ];
+  const isDesktopCompileStep = (step, jobEnv = {}) => {
+    const run = typeof step.run === "string" ? step.run : "";
+    const uses = typeof step.uses === "string" ? step.uses : "";
+    const envText = [
+      ...Object.values(step.env ?? {}),
+      ...Object.values(jobEnv ?? {}),
+    ].map((value) => String(value)).join("\n");
+    return desktopCompileMarkers.some((marker) => run.includes(marker) || envText.includes(marker))
+      || /\.ya?ml$/u.test(uses);
+  };
+  const compileJobNames = Object.keys(jobs)
+    .filter((name) => (jobs[name]?.steps ?? []).some((step) => isDesktopCompileStep(step, jobs[name].env)))
+    .sort();
+  assert.deepEqual(
+    compileJobNames,
+    Object.keys(pinnedCompileJobs).sort(),
+    "every desktop compile job in release-packages.yml must be pinned to an explicit "
+      + `${flag} value; unpinned compile jobs would ship official installers `
+      + "without the desktop remote control capability",
+  );
+  const gateJobNames = Object.keys(jobs)
+    .filter((name) => (jobs[name]?.steps ?? []).some((step) => (
+      typeof step.run === "string" && step.run.includes("remote-control-relay/scripts/controller-release-gate.mjs")
+    )));
+  assert.deepEqual(gateJobNames, [gateJobName], "controller-release-gate.mjs may only run inside the pinned gate job");
+  // Fail-closed 全量登记：release-packages.yml 的每一个 job 都必须在册
+  // （编译 job 见 pinnedCompileJobs，门禁 job 见 gateJobName，其余为下表
+  // 辅助 job）。任何新增 job 未登记即转红——包括 run 内无标记的包装脚本
+  // 形态（评审 round-2 变异实证 1）。
+  const registeredAuxJobs = [
+    "check-version-bump",
+    "validate-windows-runtime-pr",
+  ];
+  const registeredJobNames = [
+    gateJobName,
+    ...registeredAuxJobs,
+    ...Object.keys(pinnedCompileJobs),
+  ].sort();
+  assert.deepEqual(
+    Object.keys(jobs).sort(),
+    registeredJobNames,
+    "every job in release-packages.yml must be registered in this inventory "
+      + "(compile jobs in pinnedCompileJobs, the evidence gate by name, the rest "
+      + "in registeredAuxJobs); unknown jobs fail closed so wrapper-script or "
+      + "reusable-workflow shapes cannot silently escape the platform policy",
+  );
+  // 可复用工作流委托禁令：影子 gate/构建工作流在 uses 上即可见，直接禁止
+  // （评审 round-2 变异实证 3）；外部 action（owner/action@版本）不受影响。
+  // 评审 round-3 P2-2：GitHub 执行本地可复用工作流的唯一合法形态是 job 级
+  // `jobs.<id>.uses`；step 级 uses 根本不会被执行。两种形态一并禁止。
+  const localReusableWorkflowUsers = Object.entries(jobs)
+    .flatMap(([name, job]) => {
+      const delegated = [];
+      if (typeof job.uses === "string" && /\.ya?ml$/u.test(job.uses)) {
+        delegated.push(`${name}: ${job.uses}`);
+      }
+      for (const step of job.steps ?? []) {
+        if (typeof step.uses === "string" && /\.ya?ml$/u.test(step.uses)) {
+          delegated.push(`${name}: ${step.uses}`);
+        }
+      }
+      return delegated;
+    });
+  assert.deepEqual(localReusableWorkflowUsers, [],
+    "release-packages.yml must not delegate build or gate logic to local reusable "
+      + "workflows (job-level or step-level uses); inline steps keep the "
+      + "compile/gate inventory exhaustive");
+});
+
+test("release platform and compiled capability contracts also run when Windows jobs are disabled", async () => {
+  const { jobs } = parse(await readFile(new URL("../../.github/workflows/pr-check.yml", import.meta.url), "utf8"));
+  const steps = jobs["release-contract-test"].steps;
+  const dependencies = steps.find((step) => step.run?.includes("npm --prefix remote-control-relay ci"));
+  assert.ok(dependencies, "YAML policy tests require Relay dependencies on Linux too");
+  assert.equal(dependencies.if, undefined);
+  // Match by test-file presence instead of pinning one node --test invocation:
+  // reordering the runner arguments or splitting the contract step in two must
+  // stay green, as long as every contract file runs ungated after the Relay
+  // dependencies install.
+  const contract = steps.find((step) => step.run?.includes("remote-control-relay/test/release-path-policy.test.js"));
+  assert.ok(contract, "the shared platform contract must run on every release-contract matrix leg");
+  assert.equal(contract.if, undefined);
+  for (const companion of [
+    "pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs",
+    "pinvou3-app/tests/desktop_remote_loaded_capability.test.mjs",
+  ]) {
+    assert.ok(steps.some((step) => step.run?.includes(companion)),
+      `release-contract-test must execute ${companion} on every matrix leg`);
+  }
+  assert.ok(steps.indexOf(dependencies) < steps.indexOf(contract));
+});
+
 test("PR and release workflows execute or route every policy-sensitive change", async () => {
   const release = await readFile(new URL("../../.github/workflows/release-packages.yml", import.meta.url), "utf8");
   const pr = await readFile(new URL("../../.github/workflows/pr-check.yml", import.meta.url), "utf8");

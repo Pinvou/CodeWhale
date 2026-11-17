@@ -80,16 +80,17 @@
 ## 0. 当前状态（2026-11-15）
 
 - 当前公开维护头与父仓 gitlink：`687358f7efde6abd3592737b8ec48adc74ba5a84`（2026-11-15）。在原 `8e8d52fdb` 之上消费已合入的 #157 `687358f7e`。父仓只消费已公开提交，不推进维护分支、不移动标签。
-- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 100 个提交，r1 `1fafee7e2` 之上 85 个；97 个带 DCO sign-off。未签名的提交为 #107 `f27672935`、#116 `e9a7f48da1` 与 #157 `687358f7e`（CodeWhale 仓 squash 合入未携带签署），不能声称未签名集合有界于历史两项。保留已发布历史，不改写维护分支。
+- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 100 个提交，r1 `1fafee7e2` 之上 85 个；97 个带 DCO sign-off。未签名的提交为 #107 `f27672935`、#116 `e9a7f48da1` 与 #157 `687358f7e`（CodeWhale 仓 squash 合入未携带签署）。保留已发布历史，不改写维护分支。
 - 不可变 tag `pinjou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
 - 实测 drift：551 files, +121146/-49817，净增 71329；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
 
-### 2026-11-15 公开维护头对齐（#157，随来源 PR #875）
+### 2026-11-15 公开维护头对齐（#157，随来源 PR #875 合入主线；父仓 PR #2395 同步消费同一头）
 
-- 公共 CI 的 `verify-public-submodule.sh` 仍严格要求父仓 gitlink 等于 `pinjou3-clean`。公开维护分支以一个 squash 提交推进后，本批只按既定过渡规则更新消费点，保留 r3 标签及全部门禁；维护基线 `6f7a3a748` 仍是新头祖先，公开维护头门禁继续生效。
-- #157 `687358f7e` 归入 T2：一方 session-reader 只读读取面分类修复——`mcp_session-reader_read_session` 与 `mcp_session-reader_list_sessions` 以精确工具名加入引擎只读辅助名单。服务端契约（游标分页、仅已完成回合、逐条截断、跨 session 前缀拒绝）使其真只读；此前被误分类为需审批的网络工具，导致 Plan 钉死的 aux lane 唯一工具即此读取时在执行前死锁。名单精确匹配使前缀伪装（`mcp_session-reader_read_session_export`）仍留在需审批侧。`registry/tests.rs` 以数据条目扩展既有只读面测试（无新增 `forkguard_*` 行为名，登记数仍 301）；父仓无镜像分类，本批父仓源码零改动。
-- 父仓同步 gitlink 与 guard 登记头/提交数（99→100）及注释；不触及 Cargo manifest 或锁文件，无需重生成依赖锁；不修改底座源码、公开维护分支或不可变 r3 标签。
-- 验证按父仓门禁与原仓测试证据分开记录；原仓已合入和已有回归不代表本批次已重跑父仓 Rust 集成测试，完整编译验证由父仓 CI 与合入后最新 `main` 承担。
+- 公共 CI 的 `verify-public-submodule.sh` 仍严格要求父仓 gitlink 等于 `pinjou3-clean`。公开维护分支以一个未签署 squash 提交推进到 `687358f7`（#157）后，按既定过渡规则只更新消费点，保留 r3 标签及全部门禁；维护基线 `8e8d52fdb` 仍是新头祖先，公开维护头门禁继续生效。
+- #157 `687358f7e` 归入 T2：一方 session-reader 只读读取面分类修复——`mcp_session-reader_read_session` 与 `mcp_session-reader_list_sessions` 以精确工具名加入引擎只读辅助名单（`is_mcp_read_helper`），按 ReadOnly/Auto/eager 分类而非保守的 `[Network, RequiresApproval]` 默认。服务端契约（游标分页、仅已完成回合、逐条截断、跨 session 前缀拒绝）使其真只读；此前被误分类为需审批的网络工具，导致 Plan 钉死的 aux lane 唯一工具即此读取时在执行前死锁。前缀冒名（如 `mcp_session-reader_read_session_export`）与其余 MCP 工具仍留在需审批侧。回归由 `registry/tests.rs` 扩展两个既有测试（`mcp_read_helpers_remain_auto_and_eagerly_loaded`、`mcp_actions_require_approval_with_exact_helper_matching`）的表驱动数据条目覆盖（+23 行，无既有行为改写，无新增 `forkguard_*` 行为名，登记数仍 301）。
+- guard 同步：登记头 `8e8d52fdb`→`687358f7`、提交数 99→100、注释更新（随来源 PR #875 落地）；父仓 PR #2395 同步批补强：第 1 层新增两条源码指纹（`"mcp_session-reader_read_session"` 与 `"mcp_session-reader_list_sessions"`，钉 `registry.rs` 的精确名匹配分支）；第 2 层新增按名执行上述两个既有测试的 pinned runner（要求恰 1 passed，改名或删除即响红而非静默 no-op）。#157 无 DCO 签署，并入未签署 squash 例外清单。
+- 父仓同步 gitlink 与 guard 登记及补强条目；不触及 Cargo manifest 或锁文件，无需重生成依赖锁；不修改底座源码、公开维护分支或不可变 r3 标签。
+- 验证按父仓门禁与原仓测试证据分开记录；#157 的回归由其自带表驱动条目覆盖（fork-guard pinned runner 裁决），原仓已合入和已有回归不代表本批次已重跑父仓 Rust 集成测试，完整编译验证由父仓 CI 与合入后最新 `main` 承担。
 
 ### 2026-11-14 公开维护头对齐（#156，随来源 PR #850）
 
