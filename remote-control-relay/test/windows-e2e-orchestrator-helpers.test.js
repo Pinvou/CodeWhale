@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,7 +39,11 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
   test(`production completion marker serializes the authenticated interval [${shell}]`, () => {
     // Execute the actual producer block and artifact registration, without SSH,
     // a signer or deployment. The validator suite separately checks signatures.
-    const script = `$ErrorActionPreference='Stop';
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "pinvou-completion-"));
+    const evidenceIdentity = lstatSync(evidenceRoot);
+    let primaryError;
+    try {
+      const script = `$ErrorActionPreference='Stop';
       if($env:PINVOU_TEST_FOREIGN_MODULE_PATH -and (@($env:PSModulePath -split [IO.Path]::PathSeparator) -contains $env:PINVOU_TEST_FOREIGN_MODULE_PATH)){throw 'foreign-module-path-inherited'};
       if($env:OS -eq 'Windows_NT'){Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force};
       ${productionAst}
@@ -51,8 +55,7 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
       $end=$source.IndexOf('foreach ($artifact in $artifacts)', $start);
       if($start -lt 0 -or $end -lt 0){throw 'completion-block-missing'};
       $emit=[scriptblock]::Create($source.Substring($start,$end-$start));
-      $evidenceRoot=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-completion-'+[Guid]::NewGuid().ToString('N'));
-      try {
+      $evidenceRoot=${quote(evidenceRoot)};
         New-Item -ItemType Directory -Path (Join-Path $evidenceRoot 'gates') -Force | Out-Null;
         $artifacts=[Collections.Generic.List[object]]::new();$actualHead='${'b'.repeat(40)}';$runNonce='${'d'.repeat(64)}';
         $TimestampFormat='yyyy-MM-ddTHH:mm:ss.fffZ';$runStartedAt=[DateTime]::UtcNow.ToString($TimestampFormat);
@@ -61,20 +64,42 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
         $artifact=$artifacts[0];$bytes=[IO.File]::ReadAllBytes((Join-Path $evidenceRoot $artifact.path));
         $marker=[Text.Encoding]::UTF8.GetString($bytes)|ConvertFrom-Json;
         if($marker.schema -cne 'pinvou-remote-control-run-completion' -or $marker.version -ne 1 -or $marker.source_commit_sha -cne $actualHead -or $marker.run_nonce -cne $runNonce){throw 'completion-fields-invalid'};
-        if($artifact.path -cne 'gates/run-completion.json' -or $artifact.kind -cne 'check' -or $artifact.machine_role -cne 'orchestrator' -or $artifact.signature -cne '' -or $completionSha -cne (Get-PinvouSha256Hex $bytes)){throw 'completion-artifact-invalid'};
+        if($artifact.path -cne 'gates/run-completion.json' -or $artifact.kind -cne 'check' -or $artifact.machine_role -cne 'orchestrator' -or $artifact.signature -cne '' -or $artifact.sha256 -cne $completionSha -or $completionSha -cne (Get-PinvouSha256Hex $bytes)){throw 'completion-artifact-invalid'};
         [ordered]@{interval=@([long]0,[long]$runClock.ElapsedMilliseconds);interval_sha256=$marker.monotonic_interval_sha256;marker_base64=[Convert]::ToBase64String($bytes);started_at=$runStartedAt;finished_at=$runFinishedAt}|ConvertTo-Json -Compress;
         # The same production block rejects overlong runs before publishing a marker.
         $runClock=[pscustomobject]@{ElapsedMilliseconds=[long]7200001};$runClock|Add-Member ScriptMethod Stop {};
         $count=$artifacts.Count;try{. $emit;throw 'overlong-run-accepted'}catch{if($_.Exception.Message -cne 'e2e_run_duration_invalid'){throw}};
         if($artifacts.Count -ne $count){throw 'overlong-run-published'}
-      } finally {if(Test-Path -LiteralPath $evidenceRoot){Remove-Item -LiteralPath $evidenceRoot -Recurse -Force}}`;
-    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {env: shellEnv, encoding: 'utf8', timeout: 30000});
-    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
-    const actual = JSON.parse(result.stdout);
-    const marker = JSON.parse(Buffer.from(actual.marker_base64, 'base64').toString('utf8'));
-    assert.equal(marker.started_at, actual.started_at);
-    assert.equal(marker.finished_at, actual.finished_at);
-    assert.equal(actual.interval_sha256, crypto.createHash('sha256').update(JSON.stringify(actual.interval)).digest('hex'));
+        # The expected overlong exception must not become the -Command exit status.
+        exit 0
+      `;
+      const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {env: shellEnv, encoding: 'utf8', timeout: 30000});
+      assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+      const actual = JSON.parse(result.stdout);
+      const marker = JSON.parse(Buffer.from(actual.marker_base64, 'base64').toString('utf8'));
+      assert.equal(marker.started_at, actual.started_at);
+      assert.equal(marker.finished_at, actual.finished_at);
+      assert.equal(actual.interval_sha256, crypto.createHash('sha256').update(JSON.stringify(actual.interval)).digest('hex'));
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      // The parent owns this exact root and retires it after spawnSync has
+      // returned. Keep both failures if producer verification and cleanup fail.
+      try {
+        const current = lstatSync(evidenceRoot);
+        assert.ok(current.isDirectory() && !current.isSymbolicLink(), "completion root must remain an owned directory");
+        assert.equal(current.dev, evidenceIdentity.dev, "completion root device changed");
+        assert.equal(current.ino, evidenceIdentity.ino, "completion root identity changed");
+        rmSync(evidenceRoot, { recursive: true });
+        assert.equal(existsSync(evidenceRoot), false, "completion root must be retired");
+      } catch (cleanupError) {
+        if (primaryError) {
+          throw new AggregateError([primaryError, cleanupError], "completion verification and cleanup failed", { cause: primaryError });
+        }
+        throw cleanupError;
+      }
+    }
   });
 }
 
