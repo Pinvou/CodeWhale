@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { RELAY_CONTROLLER_GUARD_FILENAME, RELAY_CONTROLLER_GUARD_JOURNAL, RelayStateGuard, requireControllerLockRuntime } from "./relay-state-guard.js";
 import { WINDOWS_ACL_VERIFY_SCRIPT, buildGuardJournalAclScript } from "./windows-guard-acl.js";
+import { encodeWindowsAncestorPaths, WINDOWS_REPARSE_VERIFY_SCRIPT } from "./windows-ancestor-paths.js";
 
 export const RELAY_CONTROLLER_STATE_SCHEMA = "pinvou-relay-controller-state";
 export const RELAY_CONTROLLER_STATE_VERSION = 1;
@@ -69,21 +70,6 @@ foreach ($rule in $actual) {
 [Console]::Out.Write('ok')
 `;
 
-const WINDOWS_REPARSE_VERIFY_SCRIPT = `
-$ErrorActionPreference = 'Stop'
-if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_start') }
-$json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:PINVOU_PATHS_B64))
-if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_payload_decoded') }
-$paths = Microsoft.PowerShell.Utility\\ConvertFrom-Json -InputObject $json
-if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_decoded') }
-foreach ($target in $paths) {
-  $item = Microsoft.PowerShell.Management\\Get-Item -LiteralPath ([string]$target) -Force
-  if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'reparse point rejected' }
-}
-if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_checked') }
-[Console]::Out.Write('ok')
-`;
-
 function encodedPowerShell(script) {
   return Buffer.from(script, "utf16le").toString("base64");
 }
@@ -118,7 +104,7 @@ async function runWindowsAclScript(script, target, kind) {
 }
 
 export async function verifyWindowsAncestors(paths, { onDiagnostic } = {}) {
-  const encodedPaths = Buffer.from(JSON.stringify(paths), "utf8").toString("base64");
+  const encodedPaths = encodeWindowsAncestorPaths(paths);
   const diagnostic = typeof onDiagnostic === "function";
   const complete = "pinvou_ancestor_start\npinvou_ancestor_payload_decoded\npinvou_ancestor_decoded\npinvou_ancestor_checked\n";
   const normalize = (output) => typeof output === "string" && Buffer.byteLength(output, "utf8") <= 512
@@ -145,7 +131,7 @@ export async function verifyWindowsAncestors(paths, { onDiagnostic } = {}) {
       "-EncodedCommand", encodedPowerShell(WINDOWS_REPARSE_VERIFY_SCRIPT),
     ], {
       windowsHide: true,
-      env: windowsChildEnvironment({ PINVOU_PATHS_B64: encodedPaths,
+      env: windowsChildEnvironment({ PINVOU_PATHS_B64_LINES: encodedPaths,
         ...(diagnostic ? { PINVOU_ANCESTOR_DIAGNOSTIC: "1" } : {}) }),
       timeout: 15_000,
       maxBuffer: 64 * 1024,
@@ -165,8 +151,58 @@ export async function protectWindowsPath(target, kind) {
   await runWindowsAclScript(WINDOWS_ACL_SCRIPT, target, kind);
 }
 
-export async function verifyWindowsPath(target, kind) {
-  await runWindowsAclScript(WINDOWS_ACL_VERIFY_SCRIPT, target, kind);
+export async function verifyWindowsPath(target, kind, { onDiagnostic } = {}) {
+  if (typeof onDiagnostic !== "function") {
+    await runWindowsAclScript(WINDOWS_ACL_VERIFY_SCRIPT, target, kind);
+    return;
+  }
+  // Opt-in native-test instrumentation. Keep the reviewed ACL statements,
+  // 15s watchdog and strict stdout contract; emit only closed phase names.
+  const phases = [
+    ["$ErrorActionPreference = 'Stop'", "script_started"],
+    ["$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User", "identity_resolved"],
+    ["$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $target", "acl_loaded"],
+    ["if ($acl.Owner -ne $current.Value -and $acl.Owner -ne $current.Translate([System.Security.Principal.NTAccount]).Value) { throw 'unexpected ACL owner' }", "owner_checked"],
+    ["$actual = @($acl.Access)", "entries_loaded"],
+  ];
+  let script = WINDOWS_ACL_VERIFY_SCRIPT;
+  for (const [anchor, phase] of phases) {
+    if (script.split(anchor).length !== 2) fail("relay_state_acl_unverified");
+    script = script.replace(anchor, `${anchor}\n[Console]::Out.WriteLine('pinvou_acl_${phase}')`);
+  }
+  const encoded = encodedPowerShell(script);
+  let stdout;
+  const observe = output => {
+    const normalized = typeof output === "string" && Buffer.byteLength(output, "utf8") <= 512
+      ? output.replace(/\r\n/gu, "\n") : "";
+    const markers = phases.map(([, phase]) => `pinvou_acl_${phase}\n`);
+    let prefix = "", phase = "unknown";
+    for (let index = 0; index < markers.length; index++) {
+      prefix += markers[index];
+      if (normalized === prefix || (index === markers.length - 1 && normalized === `${prefix}ok`)) {
+        phase = phases[index][1];
+      }
+    }
+    if (normalized === `${prefix}ok`) phase = "checks_completed";
+    try { onDiagnostic(phase); } catch { /* Observers cannot change validation. */ }
+  };
+  try {
+    ({ stdout } = await execFileAsync(windowsPowerShellExecutable(), [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded,
+    ], {
+      windowsHide: true,
+      env: windowsChildEnvironment({ PINVOU_ACL_TARGET: target, PINVOU_ACL_KIND: kind }),
+      timeout: 15_000, maxBuffer: 64 * 1024,
+    }));
+  } catch (error) {
+    let output;
+    try { output = error?.stdout; } catch { /* Never emit exception contents. */ }
+    observe(output);
+    throw error;
+  }
+  observe(stdout);
+  const expected = phases.map(([, phase]) => `pinvou_acl_${phase}\n`).join("") + "ok";
+  if (stdout.replace(/\r\n/gu, "\n") !== expected) fail("relay_state_acl_unverified");
 }
 
 async function verifyWindowsGuardJournal(target) {
@@ -516,6 +552,27 @@ export class RelayStateStore {
     return store;
   }
 
+  static async recoverStagedBackup(options, { primaryRevision, primarySha256, backupSha256, archiveRoot } = {}) {
+    const revision = decimal(primaryRevision, "expected_primary_revision");
+    const sha256 = /^[a-f0-9]{64}$/u;
+    if (typeof primarySha256 !== "string" || typeof backupSha256 !== "string"
+      || !sha256.test(primarySha256) || !sha256.test(backupSha256)
+      || primarySha256 === backupSha256) fail("relay_state_recovery_evidence_invalid");
+    if (archiveRoot !== undefined && (typeof archiveRoot !== "string" || !isAbsolute(archiveRoot))) {
+      fail("relay_state_recovery_archive_root_invalid");
+    }
+    const store = new RelayStateStore(options);
+    const recovered = await store.#open({ revision, primarySha256, backupSha256, archiveRoot });
+    try {
+      await store.close();
+    } catch (error) {
+      store.#markAbandonedOpen();
+      throw Object.assign(new RelayStateStoreError("relay_state_recovery_close_failed",
+        "relay_state_recovery_close_failed", { cause: error }), { recoveryArchive: recovered.archive });
+    }
+    return recovered;
+  }
+
   #fs;
   #path;
   #backupPath;
@@ -526,12 +583,14 @@ export class RelayStateStore {
   #processReserved = false;
   #legacyStatePath;
   #maxBytes;
+  #capacityWarning = false;
   #randomBytes;
   #sleep;
   #processIdentity;
   #protectPath;
   #verifyPath;
   #verifyAncestors;
+  #onNativeDiagnostic;
   #ancestorSnapshot = null;
   #state = null;
   #lockOwner = null;
@@ -554,6 +613,7 @@ export class RelayStateStore {
     protectPath = process.platform === "win32" ? protectWindowsPath : null,
     verifyPath = process.platform === "win32" ? verifyWindowsPath : null,
     verifyAncestors = process.platform === "win32" ? verifyWindowsAncestors : null,
+    onNativeDiagnostic = null,
   } = {}) {
     this.#path = safeStatePath(statePath);
     this.#legacyStatePath = safeStatePath(legacyStatePath);
@@ -579,9 +639,10 @@ export class RelayStateStore {
     this.#protectPath = protectPath;
     this.#verifyPath = verifyPath;
     this.#verifyAncestors = verifyAncestors;
+    this.#onNativeDiagnostic = typeof onNativeDiagnostic === "function" ? onNativeDiagnostic : null;
   }
 
-  async #open() {
+  async #open(recoveryEvidence) {
     try {
       const Database = await requireControllerLockRuntime();
       await this.#reserveProcessPath();
@@ -600,6 +661,7 @@ export class RelayStateStore {
       await this.#guard.acquire();
       await this.#rejectLegacyAliases();
       await this.#acquireLock();
+      if (recoveryEvidence) return await this.#recoverStagedBackup(recoveryEvidence);
       const primary = await this.#loadCandidate(this.#path);
       const backup = await this.#loadCandidate(this.#backupPath);
       if (primary.kind === "missing" && backup.kind === "missing") {
@@ -617,6 +679,7 @@ export class RelayStateStore {
           await this.#persist(primary.state);
           return;
         }
+        this.#reportCapacity(serializeState(primary.state, this.#maxBytes));
         return;
       }
       if (primary.kind === "missing" && backup.kind === "valid" && !backup.migrated
@@ -632,6 +695,7 @@ export class RelayStateStore {
       if (primary.kind === "invalid" && backup.kind === "valid" && !backup.migrated) {
         this.#state = backup.state;
         await this.#legacyAliasGuardedWrite(this.#path, serializeState(backup.state, this.#maxBytes));
+        this.#reportCapacity(serializeState(backup.state, this.#maxBytes));
         return;
       }
       fail("relay_state_unavailable");
@@ -647,6 +711,126 @@ export class RelayStateStore {
       }
       throw primaryError;
     }
+  }
+
+  async #recoveryCandidate(path) {
+    const metadata = await this.#fs.lstat(path, { bigint: true });
+    const bytes = await this.#readBoundedBytes(path, this.#maxBytes, "relay_state_file_unsafe", true);
+    await this.#assertRecoveryFileVersion(path, metadata);
+    return { identity: fileIdentity(metadata), metadata, bytes,
+      sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
+  }
+
+  async #assertRecoveryFileVersion(path, expected) {
+    const current = await this.#fs.lstat(path, { bigint: true });
+    if (!sameFileIdentity(fileIdentity(expected), fileIdentity(current))
+      || current.size !== expected.size || current.mtimeNs !== expected.mtimeNs
+      || current.ctimeNs !== expected.ctimeNs) fail("relay_state_recovery_changed");
+  }
+
+  async #recoverStagedBackup(evidence) {
+    const primary = await this.#recoveryCandidate(this.#path);
+    const backup = await this.#recoveryCandidate(this.#backupPath);
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const committed = parseState(decoder.decode(primary.bytes));
+    const staged = parseState(decoder.decode(backup.bytes));
+    if (committed.migrated || staged.migrated || BigInt(committed.state.revision) !== evidence.revision
+      || BigInt(staged.state.revision) !== evidence.revision + 1n
+      || primary.sha256 !== evidence.primarySha256 || backup.sha256 !== evidence.backupSha256) {
+      fail("relay_state_recovery_evidence_mismatch");
+    }
+
+    const directory = dirname(this.#path);
+    const archiveRoot = resolve(evidence.archiveRoot ?? dirname(directory));
+    if (pathWithin(archiveRoot, directory)) fail("relay_state_recovery_archive_root_invalid");
+    const archiveRootSnapshot = await this.#validatePathAncestors(archiveRoot, true);
+    await this.#verifyFilesystemPath(archiveRoot, "directory");
+    const archive = join(archiveRoot,
+      `controller-recovery-${this.#randomBytes(8).toString("hex")}`);
+    await this.#assertAncestorSnapshot();
+    await this.#assertPathSnapshot(archiveRootSnapshot);
+    try {
+      await this.#fs.mkdir(archive, { mode: 0o700 });
+    } catch (error) {
+      if (["EACCES", "EPERM"].includes(error?.code)) fail("relay_state_recovery_archive_root_unwritable", error);
+      throw error;
+    }
+    const archiveIdentity = await this.#pathIdentity(archive);
+    const verifyArchive = async () => {
+      await this.#assertAncestorSnapshot();
+      await this.#assertPathSnapshot(archiveRootSnapshot);
+      await this.#verifyFilesystemPath(archive, "directory");
+      if (comparablePath(await this.#fs.realpath(archive)) !== comparablePath(archive)
+        || !sameFileIdentity(archiveIdentity, await this.#pathIdentity(archive))) {
+        fail("relay_state_recovery_changed");
+      }
+    };
+    await this.#prepareRecoveryArchivePath(archive, "directory", archiveIdentity);
+    const archived = [];
+    for (const [name, snapshot] of [["primary.json", primary], ["backup.json", backup]]) {
+      await verifyArchive();
+      const target = join(archive, name);
+      const handle = await this.#fs.open(target, "wx", 0o600);
+      try {
+        const identity = await this.#handleIdentity(handle);
+        await this.#prepareRecoveryArchivePath(target, "file", identity);
+        archived.push([target, identity, snapshot.sha256]);
+        await handle.writeFile(snapshot.bytes);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    }
+    await this.#syncDirectory(archive);
+    await this.#syncDirectory(dirname(archive));
+
+    const verifySnapshots = async (snapshots) => {
+      await this.#guard.assertIdentity();
+      await verifyArchive();
+      const sampled = [];
+      for (const [path, identity, sha256] of snapshots) {
+        const current = await this.#recoveryCandidate(path);
+        if (!sameFileIdentity(current.identity, identity) || current.sha256 !== sha256) {
+          fail("relay_state_recovery_changed");
+        }
+        sampled.push([path, current.metadata]);
+      }
+      await verifyArchive();
+      await Promise.all(sampled.map(([path, metadata]) => this.#assertRecoveryFileVersion(path, metadata)));
+    };
+    const primarySnapshot = [this.#path, primary.identity, primary.sha256];
+    let published = false;
+    try {
+      const installed = await this.#legacyAliasGuardedWrite(this.#backupPath, primary.bytes, {
+        beforeReplace: async (temporaryPath, temporaryIdentity) => {
+          await verifySnapshots([
+            ...archived, primarySnapshot,
+            [this.#backupPath, backup.identity, backup.sha256],
+            [temporaryPath, temporaryIdentity, primary.sha256],
+          ]);
+        },
+        published: () => { published = true; },
+      });
+      await verifySnapshots([...archived, primarySnapshot, [this.#backupPath, installed, primary.sha256]]);
+    } catch (error) {
+      if (published) {
+        throw Object.assign(new RelayStateStoreError("relay_state_recovery_outcome_unknown",
+          "relay_state_recovery_outcome_unknown", { cause: error }), { recoveryArchive: archive });
+      }
+      throw error;
+    }
+    return Object.freeze({ revision: committed.state.revision, archive });
+  }
+
+  async #prepareRecoveryArchivePath(target, kind, identity) {
+    const metadata = await this.#fs.lstat(target, { bigint: true });
+    if (metadata.isSymbolicLink() || !sameFileIdentity(identity, fileIdentity(metadata))
+      || (kind === "directory" ? !metadata.isDirectory() : !metadata.isFile())) {
+      fail("relay_state_recovery_changed");
+    }
+    if (process.platform === "win32") await this.#protectFilesystemPath(target, kind);
+    await this.#verifyFilesystemPath(target, kind);
+    if (!sameFileIdentity(identity, await this.#pathIdentity(target))) fail("relay_state_recovery_changed");
   }
 
   async #prepareDedicatedDirectory() {
@@ -753,7 +937,11 @@ export class RelayStateStore {
 
   async #assertAncestorSnapshot() {
     if (!this.#ancestorSnapshot) fail("relay_state_unavailable");
-    for (const expected of this.#ancestorSnapshot) {
+    await this.#assertPathSnapshot(this.#ancestorSnapshot);
+  }
+
+  async #assertPathSnapshot(snapshot) {
+    for (const expected of snapshot) {
       const metadata = await this.#fs.lstat(expected.path);
       const canonical = await this.#fs.realpath(expected.path);
       const identity = await this.#pathIdentity(expected.path);
@@ -784,7 +972,15 @@ export class RelayStateStore {
     if (process.platform === "win32") {
       if (typeof this.#verifyPath !== "function") fail("relay_state_acl_unavailable");
       try {
-        await this.#verifyPath(target, kind);
+        if (this.#verifyPath === verifyWindowsPath && this.#onNativeDiagnostic) {
+          const start = performance.now();
+          await verifyWindowsPath(target, kind, {
+            onDiagnostic: phase => this.#onNativeDiagnostic({ operation: "verify_acl", phase, kind,
+              elapsed_ms: Math.round(performance.now() - start) }),
+          });
+        } else {
+          await this.#verifyPath(target, kind);
+        }
       } catch (error) {
         if (error instanceof RelayStateStoreError) throw error;
         fail("relay_state_acl_unverified", error);
@@ -917,7 +1113,7 @@ export class RelayStateStore {
     }
   }
 
-  async #legacyAliasGuardedWrite(path, contents) {
+  async #legacyAliasGuardedWrite(path, contents, recovery) {
     await this.#guard.assertIdentity();
     await this.#assertAncestorSnapshot();
     const transaction = { protectedIdentities: new Set(), legacyBeforeIdentity: null };
@@ -926,8 +1122,9 @@ export class RelayStateStore {
       transaction.protectedIdentities,
     );
     let operationError = null;
+    let installed;
     try {
-      await this.#writeAtomic(path, contents, transaction);
+      installed = await this.#writeAtomic(path, contents, transaction, recovery);
     } catch (error) {
       operationError = error;
     }
@@ -947,9 +1144,19 @@ export class RelayStateStore {
       throw operationError;
     }
     if (auditError) throw auditError;
+    return installed;
   }
 
   async #readBoundedFile(target, limit, errorCode = "relay_state_file_unsafe", verifyAcl = true) {
+    const contents = await this.#readBoundedBytes(target, limit, errorCode, verifyAcl);
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(contents);
+    } catch (error) {
+      fail(errorCode, error);
+    }
+  }
+
+  async #readBoundedBytes(target, limit, errorCode, verifyAcl) {
     await this.#assertAncestorSnapshotIfReady();
     const before = await this.#fs.lstat(target);
     const beforeIdentity = await this.#pathIdentity(target);
@@ -978,11 +1185,7 @@ export class RelayStateStore {
       const afterIdentity = await this.#pathIdentity(target);
       if (after.isSymbolicLink() || !sameFileIdentity(openedIdentity, afterIdentity)) fail(errorCode);
       await this.#assertAncestorSnapshotIfReady();
-      try {
-        return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total));
-      } catch (error) {
-        fail(errorCode, error);
-      }
+      return Buffer.concat(chunks, total);
     } finally {
       try { await handle?.close(); } catch {}
     }
@@ -1292,10 +1495,11 @@ export class RelayStateStore {
     }
   }
 
-  async #replaceWithRetry(source, target) {
+  async #replaceWithRetry(source, target, beforeReplace) {
     let lastError;
     for (const delay of REPLACE_RETRY_DELAYS_MS) {
       if (delay > 0) await this.#sleep(delay);
+      if (beforeReplace) await beforeReplace();
       try {
         await this.#fs.rename(source, target);
         return;
@@ -1307,7 +1511,7 @@ export class RelayStateStore {
     throw lastError;
   }
 
-  async #writeAtomic(path, contents, transaction) {
+  async #writeAtomic(path, contents, transaction, recovery) {
     const temporaryPath = `${path}.${process.pid}.${this.#randomBytes(8).toString("hex")}.tmp`;
     let handle;
     try {
@@ -1321,15 +1525,21 @@ export class RelayStateStore {
       await handle.sync();
       await handle.close();
       handle = null;
-      const beforeReplace = await this.#fs.lstat(temporaryPath);
-      if (beforeReplace.isSymbolicLink()
+      const temporaryMetadata = await this.#fs.lstat(temporaryPath);
+      if (temporaryMetadata.isSymbolicLink()
         || !sameFileIdentity(temporaryIdentity, await this.#pathIdentity(temporaryPath))) {
         fail("relay_state_temporary_file_changed");
       }
       const retired = await this.#optionalIdentity(path);
       const retiredKey = fileIdentityKey(retired?.identity);
       if (retiredKey) transaction.protectedIdentities.add(retiredKey);
-      await this.#replaceWithRetry(temporaryPath, path);
+      await this.#replaceWithRetry(temporaryPath, path, recovery && (async () => {
+        await recovery.beforeReplace(temporaryPath, temporaryIdentity);
+        if (!sameFileIdentity(temporaryIdentity, await this.#pathIdentity(temporaryPath))) {
+          fail("relay_state_temporary_file_changed");
+        }
+      }));
+      recovery?.published();
       const installed = await this.#fs.lstat(path);
       if (installed.isSymbolicLink()
         || !sameFileIdentity(temporaryIdentity, await this.#pathIdentity(path))) {
@@ -1337,6 +1547,7 @@ export class RelayStateStore {
       }
       await this.#syncDirectory(dirname(path));
       await this.#assertAncestorSnapshot();
+      return temporaryIdentity;
     } catch (error) {
       try { await handle?.close(); } catch {}
       try { await this.#fs.rm(temporaryPath, { force: true }); } catch {}
@@ -1377,6 +1588,20 @@ export class RelayStateStore {
       this.#degraded = true;
       fail("relay_state_persist_failed", error);
     }
+    this.#reportCapacity(contents);
+  }
+
+  #reportCapacity(contents) {
+    // Every namespace shares these bytes. Observing only enrollment writes
+    // misses pairing growth; telemetry must never change a committed result.
+    try {
+      const bytes = Buffer.byteLength(contents);
+      if (this.#capacityWarning || bytes < Math.ceil(this.#maxBytes * 0.8)) return;
+      this.#capacityWarning = true;
+      console.warn("[relay-capacity] controller_state", JSON.stringify({
+        serialized_bytes: bytes, max_bytes: this.#maxBytes,
+      }));
+    } catch {}
   }
 
   #assertReady() {

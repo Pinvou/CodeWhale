@@ -302,7 +302,8 @@ class WebpkiCiContractTests(unittest.TestCase):
             run = re.search(r'        run: \|\n((?:          [^\n]*\n|\n)*)', scan)
             self.assertIsNotNone(run)
             commands = [line.strip() for line in run[1].splitlines() if line.strip()]
-            self.assertEqual(commands, [guard, deny], "guard must succeed before the locked scan in the same step")
+            chrono_guard = guard.replace('guard-webpki-roots-exception.py', 'guard-chrono-maintenance-exception.py')
+            self.assertEqual(commands, [guard, chrono_guard, deny], "both guards must succeed before the locked scan in the same step")
             self.assertEqual(re.findall(r'^        shell: (.*)$', scan, re.M), ['bash'],
                              'pin the built-in fail-fast shell above job/workflow defaults')
             self.assertEqual(re.findall(r'^        working-directory: (.*)$', scan, re.M),

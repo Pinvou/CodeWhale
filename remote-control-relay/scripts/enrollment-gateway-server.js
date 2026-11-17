@@ -31,6 +31,7 @@ try {
   store = await RelayStateStore.open({
     statePath: config.controller_state_path,
     legacyStatePath: config.legacy_web_state_path,
+    maxBytes: config.controller_state_max_bytes,
   });
   const registry = EnrollmentRegistry.open({ stateStore: store, config });
   gateway = createEnrollmentGateway({

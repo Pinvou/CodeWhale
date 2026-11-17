@@ -1314,6 +1314,7 @@ desktopHint:'请先在桌面端安装 Obsidian 并创建笔记库，然后在这
   connectedBannerIma:'已连接腾讯 ima · 工具开关默认关闭，可在输入框工具列表中开启',
   connectedTool:name=>`已连接${name}`, disconnectedTool:name=>`已断开${name}`,
   connectedQuoted:name=>`已连接「${name}」`, installedQuoted:name=>`已安装「${name}」`, uninstalledQuoted:name=>`已卸载「${name}」`,
+  validatedToolsDiscovered:tools=>`已验证，发现工具：${tools.join('、')}`,
   uploadedSkill:'用户上传的技能',
   oauthBrowserTimeout:'未收到浏览器授权回调，请确认是否已完成授权，或稍后重新授权。',
   stoppingAuth:'正在停止浏览器授权等待…', authWaitCancelled:'已取消等待浏览器授权，可稍后重新授权。', cancelFailed:'取消失败，可重试；授权等待仍在继续。',

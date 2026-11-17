@@ -90,7 +90,7 @@ pub(crate) async fn drive_controlling_handshake<P: ControllingRelayPort>(
     on_stage(ControllingStageEvent::ClaimSent)?;
 
     // 1) 等 controller_pairing_reserved，产出本端 commit。
-    let reserved = next_of_type(port, "controller_pairing_reserved").await?;
+    let reserved = next_of_type(port, "controller_pairing_reserved", handshake).await?;
     let commit = handshake.accept_reserved(&reserved)?;
     port.send(commit)
         .map_err(|_| HandshakeError::new("controller_commit_failed"))?;
@@ -99,20 +99,20 @@ pub(crate) async fn drive_controlling_handshake<P: ControllingRelayPort>(
     })?;
 
     // 2) 等对端 commit，产出本端 Finished。
-    let peer_commit = next_of_type(port, "finished_receipt_commit").await?;
+    let peer_commit = next_of_type(port, "finished_receipt_commit", handshake).await?;
     let finished = handshake.accept_peer_commitment(&peer_commit)?;
     port.send(finished)
         .map_err(|_| HandshakeError::new("controller_finished_failed"))?;
     on_stage(ControllingStageEvent::FinishedSent)?;
 
     // 3) 等对端 Finished，产出本端 receipt ack。
-    let peer_finished = next_of_type(port, "encrypted_handshake_finished").await?;
+    let peer_finished = next_of_type(port, "encrypted_handshake_finished", handshake).await?;
     let ack = handshake.accept_peer_finished(&peer_finished)?;
     port.send(ack)
         .map_err(|_| HandshakeError::new("controller_ack_failed"))?;
 
     // 4) 等 controller_joined：只有到这里才产生租约身份。
-    let joined = next_of_type(port, "controller_joined").await?;
+    let joined = next_of_type(port, "controller_joined", handshake).await?;
     let lease = handshake.accept_joined(&joined)?;
     on_stage(ControllingStageEvent::Joined)?;
     // 会话密钥在 Joined 之后才可取用；此后握手对象不再持有密钥材料。
@@ -133,9 +133,19 @@ pub(crate) async fn drive_controlling_handshake<P: ControllingRelayPort>(
 async fn next_of_type<P: ControllingRelayPort>(
     port: &mut P,
     expected: &'static str,
+    handshake: &ControllingHandshake,
 ) -> Result<Value, HandshakeError> {
     loop {
         match port.recv().await {
+            Some(message)
+                if kind(&message) == Some("controller_pairing_reserved")
+                    && handshake.is_reserved_replay(&message) =>
+            {
+                // The Relay replays both notifications for a stable claim.
+                // Ignore it at every later stage, without resending one-shot
+                // commit/Finished frames or extending the original deadline.
+                continue;
+            }
             Some(message) if kind(&message) == Some(expected) => {
                 // Relay 会把本端 commit 原样回投（router 契约）：自帧不是对端输入，
                 // 跳过继续等待，否则会被误判成 sender_role 不符而失败关闭。
