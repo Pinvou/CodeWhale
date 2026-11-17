@@ -2208,6 +2208,10 @@ fn readonly_filter_discovery_admits_linked_submodule_worktrees() {
 /// count). Every other spelling is the `invalid gitfile format` git itself
 /// fatals on, and this lane refuses it instead of silently trimming a
 /// target git would never open.
+// Unix-only fixture: the interior-newline gitdir below is a filesystem
+// NAME, and Windows refuses LF/CR in names before any assertion runs
+// (review 4600361389).
+#[cfg(unix)]
 #[test]
 fn readonly_git_dir_link_is_parsed_byte_exactly() {
     let root = tempdir().expect("root");
@@ -2290,6 +2294,9 @@ fn readonly_git_dir_link_is_parsed_byte_exactly() {
 /// path, interior newlines included. The scan follows the whole value — a filter
 /// declared in a shared directory whose NAME carries the newline is
 /// discovered exactly where git reads it, not skipped by a first-line cut.
+// Unix-only fixture: `shared\ndata` is a filesystem NAME and Windows
+// refuses LF/CR in names before any assertion runs (review 4600361389).
+#[cfg(unix)]
 #[test]
 fn readonly_git_commondir_follows_the_multiline_value_git_resolves() {
     let root = tempdir().expect("root");
@@ -3303,6 +3310,9 @@ async fn readonly_shell_lane_refuses_an_escaped_core_worktree_relocation() {
 /// the assertion cannot pass vacuously: a one-strip mutant resolves one of
 /// them, none is a git directory, and the validity wall refuses where this
 /// test demands the real target.
+// Unix-only fixture: the one-strip decoys are directories whose NAMES end
+// in LF/CR, which Windows refuses to create (review 4600361389).
+#[cfg(unix)]
 #[test]
 fn readonly_git_dir_link_strips_every_trailing_newline_byte_like_git() {
     let root = tempdir().expect("root");
@@ -3352,6 +3362,9 @@ fn readonly_git_dir_link_strips_every_trailing_newline_byte_like_git() {
 /// order and count) from the pointer's value, so `shared\n\n` resolves
 /// `shared` — the one-strip decoys here carry a DIFFERENT filter name, so
 /// a mutant resolving one of them pins and asserts the wrong name.
+// Unix-only fixture: the decoy names end in LF/CR, which Windows refuses
+// to create (review 4600361389).
+#[cfg(unix)]
 #[test]
 fn readonly_git_commondir_strips_every_trailing_newline_byte_like_git() {
     let root = tempdir().expect("root");

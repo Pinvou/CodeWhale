@@ -1436,17 +1436,35 @@ fn is_agent_readonly_od(tokens: &[String]) -> bool {
     true
 }
 
-/// One od `-j`/`-N` value: digits with GNU coreutils' optional
-/// multiplicative suffix (`b`=512, `k`/`K`=1024, through `e`/`E`=1024⁶),
-/// computed with checked arithmetic — a 200-digit spelling or a
-/// suffix-multiplied overflow refuses here rather than erroring at od.
+/// One od `-j`/`-N` value: GNU coreutils' base-0 radix parse followed by an
+/// optional multiplicative suffix (`b`=512, `k`/`K`=1024, through
+/// `e`/`E`=1024⁶), computed with checked arithmetic — a 200-digit spelling
+/// or a suffix-multiplied overflow refuses here rather than erroring at od.
+/// The radix parse consumes the LONGEST valid prefix first, exactly like
+/// strtoll: `0xff` is the hex number 255 and `0xffb` the hex number 4091
+/// (a trailing `b` is a hex digit, not a suffix), while `0xffk` leaves `k`
+/// as the suffix letter. Splitting a suffix off the last character first
+/// would reject every alphabetic-ending hex spelling before the radix
+/// parse ran (review 4600361393: `0xff` refused, `0xffb` mis-valued as a
+/// 512-suffix form).
 fn is_od_offset_or_count_value(value: &str) -> bool {
-    let (digits, suffix) = match value.char_indices().last() {
-        Some((_, last)) if last.is_ascii_digit() => (value, ""),
-        Some((index, _)) => (&value[..index], &value[index..]),
-        None => return false,
+    let radix_end = if value.len() >= 2 && (value.starts_with("0x") || value.starts_with("0X")) {
+        value[2..]
+            .char_indices()
+            .find(|(_, ch)| !ch.is_ascii_hexdigit())
+            .map_or(value.len(), |(index, _)| index + 2)
+    } else if value.len() > 1 && value.starts_with('0') {
+        value[1..]
+            .char_indices()
+            .find(|(_, ch)| !matches!(ch, '0'..='7'))
+            .map_or(value.len(), |(index, _)| index + 1)
+    } else {
+        value
+            .char_indices()
+            .find(|(_, ch)| !ch.is_ascii_digit())
+            .map_or(value.len(), |(index, _)| index)
     };
-    let multiplier: u64 = match suffix {
+    let multiplier: u64 = match &value[radix_end..] {
         "" => 1,
         "b" => 512,
         "k" | "K" => 1024,
@@ -1457,15 +1475,13 @@ fn is_od_offset_or_count_value(value: &str) -> bool {
         "e" | "E" => 1024 * 1024 * 1024 * 1024 * 1024 * 1024,
         _ => return false,
     };
-    // GNU od parses the count with strtoll base-0 semantics: a `0x`/`0X`
-    // prefix is hex (`od -A d -j 0x10 f` skips 16), a leading `0` octal
-    // (`od -j 010` skips 8, not 10). The suffix letters ride either base.
+    let digits = &value[..radix_end];
     let count = if let Some(hex) = digits
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
     {
         u64::from_str_radix(hex, 16).ok()
-    } else if digits != "0" && digits.starts_with('0') {
+    } else if digits.len() > 1 && digits.starts_with('0') {
         u64::from_str_radix(&digits[1..], 8).ok()
     } else {
         digits.parse::<u64>().ok()
@@ -1484,11 +1500,23 @@ fn od_admits_hex_and_octal_offset_spellings() {
     assert!(is_od_offset_or_count_value("010"));
     assert!(is_od_offset_or_count_value("0x1k"));
     assert!(is_od_offset_or_count_value("10"));
-    // strtoll base-0 rejects an octal spelling carrying an 8/9 digit, and a
-    // bare `0x` prefix with no digits is not a number.
+    // The radix parse consumes the LONGEST valid prefix, so an
+    // alphabetic-ending hex spelling is the number itself (`0xff` is 255;
+    // `0xffb` is 4091 with the trailing `b` a hex digit, not a 512-suffix
+    // form), while a suffix letter after the radix digits still rides
+    // (`0xffk` is 255 × 1024) — review 4600361393.
+    assert!(is_od_offset_or_count_value("0xff"));
+    assert!(is_od_offset_or_count_value("0XFF"));
+    assert!(is_od_offset_or_count_value("0xffb"));
+    assert!(is_od_offset_or_count_value("0xffk"));
+    // strtoll base-0 rejects an octal spelling carrying an 8/9 digit, a
+    // bare `0x` prefix with no digits is not a number, and a remainder
+    // that is not one suffix letter refuses.
     assert!(!is_od_offset_or_count_value("08"));
     assert!(!is_od_offset_or_count_value("0x"));
     assert!(!is_od_offset_or_count_value("0xg"));
+    assert!(!is_od_offset_or_count_value("0fx"));
+    assert!(!is_od_offset_or_count_value("ffk"));
 }
 
 /// Token-level recognition of one command as an admitted GitHub read, without
