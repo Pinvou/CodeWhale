@@ -877,6 +877,11 @@ def _with_verified_reuse_guard(value, name):
 
 GATE_JOB_LEVEL_IFS = {name: _with_verified_reuse_guard(value, name) if name not in {'merge-authored-audit', 'fast-gate', 'commit-message', 'changes', 'backflow-portability', 'required-gate'} else value for name, value in GATE_JOB_LEVEL_IFS.items()}
 
+# Frontend setup artifact gate: frontend-test / frontend-browser-test 追加
+# needs.frontend-setup.result == 'success' 尾卫,setup 失败时消费者显式跳过,
+# 不再空跑后死于工件缺失(与 pr-check.yml 的 job 级 if 逐字一致)。
+GATE_JOB_LEVEL_IFS = {name: (value.removesuffix(" }}") + " && needs.frontend-setup.result == 'success' }}") if name in {'frontend-test', 'frontend-browser-test'} else value for name, value in GATE_JOB_LEVEL_IFS.items()}
+
 
 class CiGatePolicyTests(unittest.TestCase):
     @classmethod
