@@ -116,6 +116,11 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   original navigation/action deadlines and readiness assertions; close the
   server in `finally` even when setup fails. Never share optimizer output across
   jobs or use module preparation to bypass a browser/application failure.
+  Vite's initial crawl-idle promise is one-shot: readiness must also traverse
+  each requested static import/re-export graph and await its optimizer generation.
+  Lazy `import()` branches stay case-triggered, and modules are transformed,
+  never executed during preparation. HTTP fixtures may explicitly include
+  `/@vite/client` so browser-client compilation is covered by the same budget.
   When `PINVOU_CI_RESOURCE_LEDGER` is set, the shared browser adapter also keeps
   bounded console/page errors, failed requests and HTTP errors under
   `browser-diagnostics/` in that job's existing resource artifact. Before close,
