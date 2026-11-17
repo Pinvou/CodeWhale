@@ -507,6 +507,8 @@ mod tests {
         let cpu = crate::features::monitor::CpuSnapshot {
             name: "CPU".into(),
             total_usage_pct: Some(11.0),
+            process_usage_pct: None,
+            logical_processors: 4,
         };
         let ram = crate::features::monitor::RamSnapshot {
             total_kib: 10,
