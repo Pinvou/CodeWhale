@@ -4221,6 +4221,8 @@ python3() { fixture_mock python3 "$@"; }
         for route_path in (
             "scripts/test-registry-guard.py",
             "scripts/tests/test_registry_guard.py",
+            "scripts/prune-rust-test-artifacts.py",
+            "scripts/tests/test_prune_rust_test_artifacts.py",
         ):
             self.assertTrue(
                 (ROOT / route_path).is_file(),
@@ -4229,7 +4231,7 @@ python3() { fixture_mock python3 "$@"; }
             self.assertTrue(
                 _matches_paths_filter(route_path, rust_full_paths),
                 f"{route_path}: a rust_full exclude entry (or the entry's "
-                "deletion) silently unroutes the test-registry guard from "
+                "deletion) silently unroutes the Rust job helper from "
                 "the rust-test leg that executes it — a guard-script-only "
                 "PR would run no rust leg",
             )

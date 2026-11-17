@@ -11,8 +11,9 @@ $ErrorActionPreference = "Stop"
 # A Windows PowerShell 5.1 process spawned under a pwsh 7 parent (a CI step
 # shell or a pwsh terminal) inherits pwsh's PSModulePath and then cannot load
 # its own built-in modules (Get-FileHash). Rebuild the host default module
-# path before the lock-file hashing; plain 5.1 consoles already match and are
-# left untouched.
+# path whenever the process path is missing the system module directory or
+# carries pwsh entries; plain 5.1 consoles already match and are left
+# untouched.
 if ($PSVersionTable.PSVersion.Major -lt 6) {
   $systemModulePath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\Modules"
   $modulePathEntries = @(
@@ -48,12 +49,15 @@ function Invoke-Git {
     [string]$GitCommand = "git"
   )
 
-  $gitExecutable = [string](
-    Get-Command -Name $GitCommand -CommandType Application -ErrorAction Stop |
-      Select-Object -First 1 -ExpandProperty Source
-  )
-  if ([string]::IsNullOrWhiteSpace($gitExecutable)) {
-    throw "Unable to resolve the Git executable: $GitCommand"
+  try {
+    $gitExecutable = [string](
+      Get-Command -Name $GitCommand -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1 -ExpandProperty Source
+    )
+  } catch {
+    # A missing/unresolvable executable must keep the contextual failure
+    # message instead of surfacing the raw Get-Command error.
+    throw "$FailureMessage Unable to resolve the Git executable '$GitCommand': $($_.Exception.Message)"
   }
   $previousErrorActionPreference = $ErrorActionPreference
   $exitCode = $null

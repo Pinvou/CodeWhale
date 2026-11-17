@@ -194,6 +194,55 @@ try {
 
   . (Join-Path $PSScriptRoot 'windows_runtime_lfs_behavior.ps1')
 
+  # Behavioral coverage for the LFS relocation contract: the submodule update
+  # must run with GIT_LFS_SKIP_SMUDGE=1 in effect (pointers only), so the
+  # explicit `git lfs pull -c lfs.storage=...` stays the single
+  # materialization step into the relocated cache, and the previous env value
+  # must be restored afterwards.
+  $script:lfsRecorderCalls = New-Object System.Collections.Generic.List[object]
+  function Invoke-Git {
+    param(
+      [string]$WorkingDirectory,
+      [string[]]$Arguments,
+      [string]$FailureMessage,
+      [string]$GitCommand = "git"
+    )
+    $script:lfsRecorderCalls.Add([pscustomobject]@{
+      WorkingDirectory = $WorkingDirectory
+      Arguments = [string[]]$Arguments
+      SkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
+    })
+    return @()
+  }
+  $previousLfsSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
+  # Sample the variable right after the production call and BEFORE this
+  # fixture's own finally restores it: an observation taken after the finally
+  # would pass even if the production restore itself regressed (the fixture
+  # would mask it), so the production-side restore contract needs its own
+  # pre-cleanup observation. Compare with [string] coercion against the value
+  # preset for the call: "unset" presents as $null on Windows but as an empty
+  # string after a .NET restore on Unix, so raw equality would be
+  # platform-fragile; the coercion makes both render as "" while a real
+  # leftover ("1") still differs.
+  $presetSkipSmudge = $null
+  $postCallSkipSmudge = $null
+  try {
+    $env:GIT_LFS_SKIP_SMUDGE = $null
+    $presetSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
+    Update-RuntimeSubmoduleWithoutLfsSmudge
+    $postCallSkipSmudge = $env:GIT_LFS_SKIP_SMUDGE
+  } finally {
+    $env:GIT_LFS_SKIP_SMUDGE = $previousLfsSkipSmudge
+    # Restore the production Invoke-Git for the remainder of the test run.
+    . $runtimeInitPath -ImportFunctionsOnly
+  }
+  Assert-True -Condition ($script:lfsRecorderCalls.Count -eq 1) -Message "the submodule update must invoke Git exactly once"
+  $lfsRecorderCall = $script:lfsRecorderCalls[0]
+  Assert-True -Condition ($lfsRecorderCall.SkipSmudge -ceq "1") -Message "the submodule update must run under GIT_LFS_SKIP_SMUDGE=1 so pointers are materialized only by the explicit lfs pull"
+  Assert-True -Condition (@($lfsRecorderCall.Arguments) -ccontains "submodule" -and @($lfsRecorderCall.Arguments) -ccontains "update") -Message "the submodule update arguments must drive the gitlink checkout"
+  Assert-True -Condition ([string]$postCallSkipSmudge -ceq [string]$presetSkipSmudge) -Message "the production submodule update must restore GIT_LFS_SKIP_SMUDGE itself (fixture cleanup must not be what masks a regression)"
+  Assert-True -Condition ([string]$env:GIT_LFS_SKIP_SMUDGE -ceq [string]$previousLfsSkipSmudge) -Message "GIT_LFS_SKIP_SMUDGE must be restored after the submodule update"
+
   $stagingParent = Join-Path $testRoot "windows-runtime"
   $stagingRoot = Join-Path $stagingParent $stageId
   $stageManifestPath = Join-Path $stagingRoot ".stage-manifest.json"
@@ -226,6 +275,14 @@ try {
   Write-TestFile -Path $runtimeDependencyPath -Content "abc"
 
   Write-TauriOverlay -StageId $stageId
+
+  # The overlay is consumed by build.js and the NSIS staging script; pin its
+  # emitted shape instead of leaving the call side-effect-free.
+  Assert-True -Condition (Test-Path -LiteralPath $generatedConfigPath -PathType Leaf) -Message "Write-TauriOverlay must emit tauri.generated.conf.json"
+  $generatedOverlay = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($generatedConfigPath, [System.Text.Encoding]::UTF8))
+  $overlayProperties = @($generatedOverlay.bundle.resources.PSObject.Properties)
+  Assert-True -Condition ($overlayProperties.Count -gt 0) -Message "the generated runtime overlay must declare bundle.resources mappings"
+  Assert-True -Condition (@($overlayProperties | Where-Object { [string]::IsNullOrEmpty([string]$_.Value) }).Count -eq 0) -Message "runtime overlay mappings must carry non-empty destinations"
 
   $trustedStagedFiles = @(Get-StagedRelativeFiles -Root $stagingRoot)
   Write-StageCacheMetadata -Root $stagingRoot
@@ -281,6 +338,19 @@ try {
 
   $duplicateTrustedEntries = @($trustedStagedFiles) + @($trustedStagedFiles[0])
   Assert-True -Condition (-not (Test-StagedFilesAgainstTrustedManifest -Root $stagingRoot -TrustedEntries $duplicateTrustedEntries)) -Message "duplicate Windows-insensitive trusted paths must be rejected"
+
+  # Same bytes and path modulo casing: the rejection must be
+  # case-insensitive (OrdinalIgnoreCase), or two trusted entries that only
+  # differ by case would stage the same file twice.
+  $caseVariantTrustedEntries = @($trustedStagedFiles) + @(
+    [pscustomobject]@{
+      path = $bootstrapperRelativePath -creplace 'VC_redist', 'vc_REDIST'
+      bytes = [long]$bootstrapperItem.Length
+      sha256 = (Get-Sha256 -Path $bootstrapperSourcePath)
+    }
+  )
+  Assert-True -Condition ($caseVariantTrustedEntries[-1].path -cne $bootstrapperRelativePath) -Message "case-variant fixture must differ from the trusted path letter-for-letter"
+  Assert-True -Condition (-not (Test-StagedFilesAgainstTrustedManifest -Root $stagingRoot -TrustedEntries $caseVariantTrustedEntries)) -Message "case-insensitive duplicate trusted paths must be rejected"
   $escapingEntry = [pscustomobject]@{ path = "../escape.dll"; bytes = 0; sha256 = ("0" * 64) }
   Assert-True -Condition (-not (Test-StagedFilesAgainstTrustedManifest -Root $stagingRoot -TrustedEntries @($escapingEntry))) -Message "trusted paths escaping the staging root must be rejected"
 
