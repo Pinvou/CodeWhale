@@ -141,12 +141,6 @@ jobs:
       - name: fork-guard 指纹层 (秒级,不编译)
         run: ./scripts/fork-guard.sh --fast
 
-      - name: unicode-width patch guard
-        # The CJK-aware patch tables in pinvou-cli and pinvou3-app/src-tauri
-        # point into the CodeWhale submodule (#4479 follow-up): fail loudly
-        # if a table, the patched copy, or the lock resolution regresses.
-        run: python3 scripts/guard-unicode-width-patch.py
-
       - name: Merge authored audit
         if: ${{ github.event_name != 'push' }}
         run: |
@@ -1151,6 +1145,12 @@ jobs:
 
       - name: fork-guard 指纹层 (秒级,不编译)
         run: ./scripts/fork-guard.sh --fast
+
+      - name: unicode-width patch guard
+        # The CJK-aware patch tables in pinvou-cli and pinvou3-app/src-tauri
+        # point into the CodeWhale submodule (#4479 follow-up): fail loudly
+        # if a table, the patched copy, or the lock resolution regresses.
+        run: python3 scripts/guard-unicode-width-patch.py
 
       - name: fork 合规联动 (gitlink ↔ fork-modifications)
         run: |
