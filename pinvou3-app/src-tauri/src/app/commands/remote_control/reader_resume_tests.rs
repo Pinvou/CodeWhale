@@ -213,7 +213,21 @@ fn real_reader_journal_owner_rejects_late_replay_after_fifo_rotation() {
     runtime.block_on(async {
         tokio::time::timeout(Duration::from_secs(60),
             crate::features::remote_control::controller::relay_runtime::reader_resume_tests::journal_owner_tests::journal_owner_round_trip(
-                |probe| super::super::desktop_remote_task::journal_owner_tests::host(Some(probe)),
+                |probe, diagnostics| {
+                    use tauri::Listener as _;
+                    let (handle, business, host) =
+                        super::super::desktop_remote_task::journal_owner_tests::host(Some(probe));
+                    let listener = handle.listen(
+                        crate::features::remote_control::controller::relay_runtime::reader_resume_tests::journal_owner_tests::JournalOwnerDiagnostics::EVENT_NAME,
+                        move |event| diagnostics.event(event.payload()),
+                    );
+                    let listener = JournalStatusListener {
+                        handle: handle.clone(),
+                        listener,
+                    };
+                    // Unregister before the owned Wry host, including unwind.
+                    (handle, business, (listener, host))
+                },
                 |handle,lease,remote_ref| {
                     use tauri::Manager as _;
                     handle.state::<std::sync::Arc<super::super::desktop_remote_task::DesktopRemoteTaskRuntime>>()
@@ -221,6 +235,18 @@ fn real_reader_journal_owner_rejects_late_replay_after_fifo_rotation() {
                 }
             )).await.unwrap();
     });
+}
+
+struct JournalStatusListener {
+    handle: tauri::AppHandle,
+    listener: u32,
+}
+
+impl Drop for JournalStatusListener {
+    fn drop(&mut self) {
+        use tauri::Listener as _;
+        self.handle.unlisten(self.listener);
+    }
 }
 
 #[test]
