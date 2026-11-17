@@ -227,7 +227,11 @@ The Relay reports rejects with a `type: "error"` message carrying a `code`.
 Codes enforced by the reject helper also close the socket with WebSocket close
 code 1008. Five informational codes leave the connection open:
 `bad_json`, `bad_message`, `binary_unsupported`, `unsupported_message_type`,
-and `desktop_offline`. Graceful closes wait for the peer's close handshake so
+and `desktop_offline`. A sixth informational send exists on the controller
+lane: when a `desktop_endpoint_register` conflicts with an already-reserved
+controller role, the router replies with a `bad_desktop_endpoint_register`
+error frame and leaves the socket open, so the incumbent registration stays
+live. Graceful closes wait for the peer's close handshake so
 queued messages are delivered, and frames that arrive after the close are
 ignored; a peer that withholds the handshake is terminated unconditionally
 after 5 seconds, so the drain cannot outlive ws's own 30-second close timeout.
@@ -241,7 +245,7 @@ after 5 seconds, so the drain cannot outlive ws's own 30-second close timeout.
 | `legacy_token_alias_unsupported` | The message carries a legacy top-level `token` or `pairing_token` field. |
 | `authentication_required` | A non-handshake message arrived before authentication completed. |
 | `authentication_timeout` | The socket did not authenticate within the deadline. |
-| `bad_desktop_endpoint_register` | Malformed `desktop_endpoint_register`: invalid `endpoint_id`, missing or oversized credentials, or the socket already authenticated. |
+| `bad_desktop_endpoint_register` | Malformed `desktop_endpoint_register`: invalid `endpoint_id`, missing or oversized credentials, or the socket already authenticated. Also the informational role-conflict send: a register that conflicts with a reserved controller role gets this error frame while the connection stays open (the incumbent registration is preserved). |
 | `endpoint_capacity_reached` | Creating a new endpoint would exceed total endpoint capacity. |
 | `endpoint_creation_rate_limited` | The per-IP endpoint creation rate was exceeded. |
 | `invalid_access_token` | Desktop re-registration whose access token hash does not match the endpoint. |
@@ -339,7 +343,12 @@ observes the implicit `1006` abnormal-closure code on its side.
   bind address. Three runtime events share the same fixed-line discipline and
   leave the process up: `websocket_protocol_violation code=<ws error code>`
   (a contained per-socket protocol violation), `revocation_persist_failed
-  code=<errno>`, and `revocation_unexpected_failure`.
+  code=<errno>`, and `revocation_unexpected_failure`. A contained receiver
+  error additionally logs one paired free-text diagnostic line
+  (`[relay] receiver error on <role> socket: <ws library error string>`)
+  beside the fixed `websocket_protocol_violation` line and increments the
+  `receiver_error_terminations` healthz counter; the free-text line carries
+  no client-controlled content beyond ws's own fixed error strings.
 - After the handlers are installed at the very end of startup, `SIGINT` and
   `SIGTERM` terminate all WebSocket clients without a close handshake (peers
   observe an abnormal closure) and exit the process with code 0; in-flight

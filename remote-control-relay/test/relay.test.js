@@ -1499,13 +1499,14 @@ test("a cross-endpoint revoker keeps its own session", async () => {
     // from A's desktop-role socket is refused as unsupported_message_type
     // (desktops may not originate rpc_request) — an answered error proving
     // the socket is alive, not a dead one.
+    const alive = nextMessage(desktopA.ws, "error");
     desktopA.ws.send(JSON.stringify({
       v: 2,
       type: "rpc_request",
       request_id: "post-revoke-1",
       payload: { tool: "ping" },
     }));
-    await nextMessage(desktopA.ws, "error");
+    assert.equal((await alive).code, "unsupported_message_type");
   } finally {
     closeSocket(desktopA.ws);
     closeSocket(desktopB.ws);
@@ -1541,6 +1542,8 @@ test("an unauthenticated cross-endpoint revoker stays bounded by the auth timeou
     await revoked;
     // The endpoint is gone; the revoker has no credentials left to
     // authenticate with and must be closed by the re-armed timeout.
+    const timeoutError = nextMessage(revoker, "error", 5000);
+    assert.equal((await timeoutError).code, "authentication_timeout");
     await waitForClose(revoker, 6000);
   } finally {
     closeSocket(revoker);
@@ -2154,6 +2157,47 @@ test("a non-numeric heartbeat falls back instead of a 1 ms NaN tick", async (t) 
   }
 });
 
+test("clamps a finite sub-floor heartbeat to the five second floor", async (t) => {
+  // A finite value below the floor must be clamped, not passed through or
+  // replaced by the fallback: measure the cadence between two pings, which
+  // is phase-independent (the first ping can land anywhere in the cycle).
+  // The socket here is deliberately unauthenticated, so the 10 s default
+  // auth timeout races the second ping (~10 s at the 5 s cadence) — under
+  // suite load that race loses and only one ping lands. Raise the auth
+  // timeout for this relay so the cadence measurement never competes with
+  // the close timer, and widen the deadline the same way open #885 did.
+  const isolated = await spawnRelay({
+    HEARTBEAT_INTERVAL_MS: "1000",
+    WS_AUTH_TIMEOUT_MS: "60000",
+  });
+  try {
+    const ws = await openSocket(isolated.wsUrl);
+    t.after(() => closeSocket(ws));
+    const pings = [];
+    ws.on("ping", () => pings.push(performance.now()));
+    await new Promise((resolve, reject) => {
+      // Both timers must clear on either exit path: an interval left running
+      // would hold the test process open after a rejection.
+      const timer = setTimeout(() => {
+        clearInterval(poll);
+        reject(new Error("heartbeat pings never arrived"));
+      }, 30000);
+      const poll = setInterval(() => {
+        if (pings.length >= 2) {
+          clearInterval(poll);
+          clearTimeout(timer);
+          resolve();
+        }
+      }, 100);
+    });
+    const cadence = pings[1] - pings[0];
+    assert.ok(cadence >= 4500 && cadence <= 9000,
+      `heartbeat cadence ${Math.round(cadence)} ms — expected the 5 s floor`);
+  } finally {
+    await stopRelay(isolated.child);
+  }
+});
+
 test("tombstone capacity stays inside what the state limit can hold", async () => {
   // MAX_REVOKED_ENDPOINTS is clamped to what MAX_RELAY_STATE_BYTES can hold:
   // revocations past the clamp refuse through the normal capacity path instead
@@ -2515,6 +2559,30 @@ test("trusted proxy malformed sources never crash the enabled controller or bypa
   }
 });
 
+
+test("matches a mixed-case IPv4-mapped trust entry with the plain peer address", async () => {
+  // The trust entry is spelled with an uppercase mapped prefix; the loopback
+  // peer reports plain "127.0.0.1". Canonical reduction must make trust hold,
+  // so the forwarded connection opens its own bucket (the second forwarded
+  // attempt hits the 429) while the untouched peer bucket still admits a
+  // plain connection.
+  const isolated = await spawnRelay({
+    WS_CONNECT_LIMIT: "1",
+    PINVOU_REMOTE_TRUSTED_PROXY_IPS: "::FFFF:127.0.0.1",
+  });
+  let first;
+  try {
+    first = await openSocket(isolated.wsUrl, { headers: { "x-forwarded-for": "198.51.100.9" } });
+    assert.equal(await rejectedUpgrade(isolated.wsUrl, {
+      headers: { "x-forwarded-for": "198.51.100.9" },
+    }), 429);
+    const plain = await openSocket(isolated.wsUrl);
+    closeSocket(plain);
+  } finally {
+    closeSocket(first);
+    await stopRelay(isolated.child);
+  }
+});
 
 test("expired Web endpoint releases its exact interaction slot before deletion", async () => {
   const isolated = await spawnRelay(controllerEnvironment("expired-slot", { ENDPOINT_OFFLINE_TTL_MS: "1000" }));
@@ -4361,7 +4429,13 @@ test("clamps a sub-floor heartbeat to the five second floor", async (t) => {
   // because CI runners under load (this suite spawns and kills one relay
   // per test) can delay ticks by seconds; a deadline near the worst case
   // turned the test flaky on the merge queue.
-  const isolated = await spawnRelay({ HEARTBEAT_INTERVAL_MS: "" });
+  const isolated = await spawnRelay({
+    HEARTBEAT_INTERVAL_MS: "",
+    // Same unauthenticated-socket race the finite variant fixes: the second
+    // ping lands at socket-relative ~10 s against the default 10 s auth
+    // close, so raise the close deadline the same way.
+    WS_AUTH_TIMEOUT_MS: "60000",
+  });
   try {
     const ws = await openSocket(isolated.wsUrl);
     t.after(() => closeSocket(ws));
@@ -4393,6 +4467,7 @@ test("clamps a sub-floor heartbeat to the five second floor", async (t) => {
     await stopRelay(isolated.child);
   }
 });
+
 test("notifies the desktop when the active web client disconnects", async (t) => {
   const endpointId = `endpoint_disconnect_notice_${Date.now()}`;
   const accessToken = "access-token-disconnect-notice-000001";

@@ -1491,9 +1491,10 @@ async function revokeFromSocket(ws, msg) {
     return;
   }
   revokeEndpoint(endpoint, msg.reason || "revoked", ws);
-  // Only a socket of the revoked endpoint goes down with it. A desktop
-  // revoking a different endpoint with that endpoint's secret keeps its own
-  // session; teardownEndpoint already told it desktop_endpoint_revoked.
+  // Only a socket of the revoked endpoint goes down with it. Any other
+  // authenticated socket — a desktop or a web client revoking a different
+  // endpoint with that endpoint's secret — keeps its own session;
+  // teardownEndpoint already told it desktop_endpoint_revoked.
   if (ws.endpointId !== endpointId) {
     ws.revokePending = false;
     // The revoke cleared the authentication timer. A cross-endpoint revoker
@@ -1616,7 +1617,10 @@ wss.on("connection", (ws, req) => {
   // this socket; the close handler then runs the endpoint bookkeeping. The
   // termination is loud (log + healthz counter): an operator must be able to
   // tell "client hung up" from "endpoint keeps sending poisoned frames"
-  // (round-11 review).
+  // (round-11 review). This listener sits after the controller addSocket()
+  // block, so a socket rejected there with connection_initialization_failed
+  // never reaches the counter below — the fixed-line error handler attached
+  // earlier still covers that socket's drain-window errors.
   ws.on("error", (error) => {
     relayStats.receiverErrorTerminations += 1;
     console.error(
