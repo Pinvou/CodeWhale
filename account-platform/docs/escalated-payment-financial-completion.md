@@ -12,6 +12,8 @@
 
 仅有人工说明、截图摘要、客户端提交的金额、退款请求、超时或未知结果均不构成完成事实。现有 H3C 适配器不支持退款查询，不从查询订单或本地点数推断外部退款。没有可验证的完成证据时继续保留原资金阻断，运营应先在既有受控财务流程中取得实际完成回执。
 
+`NO_FINANCIAL_EFFECT` 只完成财务异常结案及订单终态更新，不生成供应商失败确认记录（`payment_provider_failure_confirmations`）或 `billing.payment-provider.failure-confirmed.v1` 事件。因此，以此方式结案的订单不能作为供应商恢复探针的证明订单，财务完成回执也不能替代恢复审批所需的供应商确认。供应商恢复仍须通过独立的既有确认和探针流程取得符合条件的证明；本次结案不会赋予该订单恢复证明资格。
+
 ## 不变量
 
 现有异常详情 GET 直接列出服务端验证通过的原交易修复/全额退款回执供选择，不要求管理员查库或填写金额。提出使用 `POST /admin/v1/payment-anomalies/{case_id}/financial-completion-proposals`，请求为 `proof_kind`、已有回执 `reference_id` 和 `reason`；无资金效果不提供 `reference_id`。复核使用 `POST /admin/v1/payment-anomalies/{case_id}/financial-completion-proposals/{proposal_id}/confirm`，只提交独立复核 `reason`。两个入口均要求原 `Idempotency-Key`、当前修复权限，并由 Portal 的已有会话/CSRF 代理转发。
