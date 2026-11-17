@@ -496,8 +496,15 @@ fn successful_enable_repairs_same_route_and_notifies_only_after_persistence() {
             },
         )]);
         db::set_scripts_content(CARD, &scripts, &Default::default()).unwrap();
-        let started =
-            service::start_lifecycle(&service, CARD.into(), "enable".into(), false).unwrap();
+        let started = runtime
+            .block_on(service::start_lifecycle(
+                &service,
+                CARD.into(),
+                "enable".into(),
+                false,
+                false,
+            ))
+            .unwrap();
         let run_id = started["run_id"].as_str().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut from = 0;
