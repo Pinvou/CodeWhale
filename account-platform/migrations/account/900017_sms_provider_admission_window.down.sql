@@ -1,0 +1,2 @@
+DROP INDEX sms_send_attempts_accepted_provider_window_idx;
+DROP INDEX sms_verification_attempts_accepted_provider_window_idx;

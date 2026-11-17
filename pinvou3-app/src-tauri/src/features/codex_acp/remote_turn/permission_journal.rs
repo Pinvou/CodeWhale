@@ -83,9 +83,11 @@ impl PermissionJournal {
         if record.sequence != self.owner.task_sequence
             || record.session_id != self.owner.session_id
             || record.lease != TaskLeaseBinding::from_context(&self.owner.lease)
-            || record.is_terminal()
         {
             return Err("permission_binding_stale".into());
+        }
+        if record.is_terminal() {
+            return Err("permission_task_terminal".into());
         }
         let mut count = 0;
         for (callback, approval) in &self.registered {

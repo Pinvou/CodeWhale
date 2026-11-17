@@ -468,6 +468,61 @@ async fn registered_distinct_approval_ids_each_project_exactly_once() {
 }
 
 #[tokio::test]
+async fn terminal_projection_rejects_success_without_masking_execution_or_stale_owner_errors() {
+    let fixture = Fixture::new();
+    let sink = JournalSink::new();
+    let mut journal = PermissionJournal::new(fixture.owner.clone());
+    let (view, receiver) = fixture.mint("callback-terminal").await;
+    journal.register("callback-terminal", &view, &sink).unwrap();
+    fixture.decide(&view.permission_request_id, PermissionDecision::Allow);
+    fixture.respond(&view.permission_request_id, true).await;
+    receiver.await.unwrap();
+    fixture
+        .tasks
+        .ledger()
+        .complete(
+            &fixture.owner.task_id,
+            RemoteTaskTerminal::Interrupted,
+            None,
+            3,
+        )
+        .unwrap();
+
+    assert_eq!(
+        project_permission_result(
+            Ok(()),
+            &mut journal,
+            &fixture.authority,
+            &fixture.tasks,
+            &sink,
+        )
+        .unwrap_err(),
+        "permission_task_terminal"
+    );
+    assert_eq!(
+        project_permission_result(
+            Err("original_failure".into()),
+            &mut journal,
+            &fixture.authority,
+            &fixture.tasks,
+            &sink,
+        )
+        .unwrap_err(),
+        "original_failure"
+    );
+    let mut stale_owner = fixture.owner.clone();
+    stale_owner.task_sequence += 1;
+    let mut stale_journal = PermissionJournal::new(stale_owner);
+    assert_eq!(
+        stale_journal
+            .project_all(&fixture.authority, &fixture.tasks, &sink)
+            .unwrap_err(),
+        "permission_binding_stale"
+    );
+    assert_eq!(sink.states(), vec!["pending"]);
+}
+
+#[tokio::test]
 async fn retired_owner_cannot_consume_or_project_into_the_reused_task() {
     let fixture = Fixture::new();
     let sink = JournalSink::new();
