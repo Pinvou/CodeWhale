@@ -344,6 +344,9 @@ const MAX_AGENT_WORKER_EVENTS_PER_RECORD: usize = 128;
 /// this budget (always at least the last one, so continuability is
 /// preserved) and records how many older messages were omitted. Full tool
 /// outputs remain recoverable from the spillover files on disk.
+/// The first checkpoint of freshly accepted parent input also retains that
+/// input's complete suffix until the manager confirms its recovery handoff;
+/// subsequent history checkpoints use the ordinary tail budget again.
 const SUBAGENT_CHECKPOINT_MESSAGE_BUDGET_BYTES: usize = 256 * 1024;
 /// Byte budget for the message tail embedded in a `subagent_full_transcript`
 /// handle (#3882). One handle is retained in memory per agent; the payload
@@ -1669,29 +1672,56 @@ pub(crate) fn subagent_thinking_label(thinking: SubAgentThinking) -> &'static st
 }
 
 #[derive(Debug, Clone)]
-struct SubAgentInput {
+pub(crate) struct SubAgentInput {
     text: String,
     interrupt: bool,
-    /// Live "queued for the next round" counter shared with the manager.
-    /// Decremented when the child loop takes the input off its channel, so
-    /// the rail's `· N queued` count is the truthful number of follow-ups the
-    /// child has not yet folded into its next model round.
-    pending: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    /// Shared recovery ticket. Taking it updates the rail's unread count;
+    /// checkpoint acceptance confirms that its content can be recovered.
+    pending: Option<Arc<PendingParentMail>>,
 }
+
+/// The manager retains accepted input until a checkpoint includes it. Taking
+/// an item off the channel updates the UI count, but is not a recovery commit.
+#[derive(Debug)]
+struct PendingParentMail {
+    mail: QueuedParentMessage,
+    taken: std::sync::atomic::AtomicBool,
+    appended: std::sync::atomic::AtomicBool,
+    message_index: std::sync::atomic::AtomicUsize,
+}
+
+impl PendingParentMail {
+    fn is_uncheckpointed_in(&self, checkpoint: &SubAgentCheckpoint) -> bool {
+        !self.appended.load(std::sync::atomic::Ordering::Acquire)
+            || (!self.mail.text.trim().is_empty()
+                && self
+                    .retained_index(&checkpoint.messages, checkpoint.omitted_messages)
+                    .is_none())
+    }
+
+    fn retained_index(&self, messages: &[Message], omitted: usize) -> Option<usize> {
+        if !self.appended.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
+        }
+        let index = self
+            .message_index
+            .load(std::sync::atomic::Ordering::Acquire);
+        let message = messages.get(index.checked_sub(omitted)?)?;
+        (message.role == Role::User
+            && matches!(message.content.as_slice(), [ContentBlock::Text { text, .. }] if text == &self.mail.text))
+            .then_some(index)
+    }
+}
+
+type PendingParentMailQueue = Arc<std::sync::Mutex<VecDeque<Arc<PendingParentMail>>>>;
 
 impl SubAgentInput {
     /// Mark this input as consumed by the child loop.
     fn mark_taken(&self) {
         if let Some(pending) = self.pending.as_ref() {
-            // std renamed `fetch_update` to `try_update` and deprecated the
-            // old name in Rust 1.99. The workspace MSRV (1.88) predates the
-            // new name, so keep the old call until the MSRV passes 1.99.
-            #[allow(deprecated)]
-            let _ = pending.fetch_update(
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-                |value| Some(value.saturating_sub(1)),
-            );
+            pending
+                .taken
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 }
@@ -1702,6 +1732,11 @@ fn append_subagent_inputs_as_user_messages(
 ) {
     while let Some(input) = pending_inputs.pop_front() {
         if !input.text.trim().is_empty() {
+            if let Some(pending) = input.pending.as_ref() {
+                pending
+                    .message_index
+                    .store(messages.len(), std::sync::atomic::Ordering::Release);
+            }
             messages.push(Message {
                 role: Role::User,
                 content: vec![ContentBlock::Text {
@@ -1709,6 +1744,11 @@ fn append_subagent_inputs_as_user_messages(
                     cache_control: None,
                 }],
             });
+        }
+        if let Some(pending) = input.pending {
+            pending
+                .appended
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 }
@@ -3109,6 +3149,9 @@ pub struct SubAgent {
     terminal_delivery: Option<SubAgentTerminalDeliveryContext>,
     work_lifecycle: Option<SubAgentWorkLifecycle>,
     input_tx: Option<mpsc::UnboundedSender<SubAgentInput>>,
+    /// Process-local admission fence, independent of terminal arbitration.
+    /// The worker closes it under the manager lock at its final input check.
+    parent_mail_closed: bool,
     task_handle: Option<JoinHandle<()>>,
 }
 
@@ -3155,6 +3198,7 @@ impl SubAgent {
             terminal_delivery: None,
             work_lifecycle: None,
             input_tx: Some(input_tx),
+            parent_mail_closed: false,
             task_handle: None,
         }
     }
@@ -3427,6 +3471,47 @@ impl Drop for InFlightDispatchGuard {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParentMailTestPhase {
+    BeforeFinalDrain,
+    AfterFinalDrain,
+    BeforeTerminalCommit,
+}
+
+#[cfg(test)]
+struct ParentMailTestPause {
+    agent_id: String,
+    phase: ParentMailTestPhase,
+    reached: tokio::sync::oneshot::Sender<Option<SubAgentResult>>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+async fn pause_parent_mail_test(
+    manager: &SharedSubAgentManager,
+    agent_id: &str,
+    phase: ParentMailTestPhase,
+    result: Option<&SubAgentResult>,
+) {
+    let pause = {
+        let mut manager = manager.write().await;
+        if manager
+            .parent_mail_test_pause
+            .as_ref()
+            .is_some_and(|pause| pause.agent_id == agent_id && pause.phase == phase)
+        {
+            manager.parent_mail_test_pause.take()
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        let _ = pause.reached.send(result.cloned());
+        let _ = pause.resume.await;
+    }
+}
+
 pub struct SubAgentManager {
     agents: HashMap<String, SubAgent>,
     worker_records: HashMap<String, AgentWorkerRecord>,
@@ -3497,12 +3582,14 @@ pub struct SubAgentManager {
     /// Parent mail queued by `agents/message` without waking the child.
     /// `agents/followup` drains into `input_tx` when a live wake is possible.
     queued_mail: HashMap<String, VecDeque<QueuedParentMessage>>,
-    /// Follow-ups handed to a running child's live input channel that the
-    /// child has not yet taken at a round boundary. Read by the rail rows.
-    pending_follow_ups: HashMap<String, Arc<std::sync::atomic::AtomicUsize>>,
+    /// Accepted follow-ups not yet included in a stored checkpoint. The rail
+    /// counts only untaken tickets; recovery retains their content longer.
+    pending_follow_ups: HashMap<String, PendingParentMailQueue>,
     /// Close a test receiver after an exact successful send, without scheduler races.
     #[cfg(test)]
     followup_delivery_hook: Option<Box<dyn Fn(usize) + Send + Sync>>,
+    #[cfg(test)]
+    parent_mail_test_pause: Option<ParentMailTestPause>,
     /// Test/observability: agent ids that received a live wake via followup.
     woken_agents: HashMap<String, bool>,
     /// Test/observability: the workspace root set each spawned child was
@@ -3648,6 +3735,8 @@ impl SubAgentManager {
             pending_follow_ups: HashMap::new(),
             #[cfg(test)]
             followup_delivery_hook: None,
+            #[cfg(test)]
+            parent_mail_test_pause: None,
             woken_agents: HashMap::new(),
             #[cfg(test)]
             spawned_workspace_roots: HashMap::new(),
@@ -4882,6 +4971,7 @@ impl SubAgentManager {
                 terminal_delivery: None,
                 work_lifecycle: None,
                 input_tx: None,
+                parent_mail_closed: false,
                 task_handle: None,
             };
             self.agents.insert(persisted.id, agent);
@@ -6257,11 +6347,16 @@ impl SubAgentManager {
         wake: bool,
     ) -> Result<ParentMailReceipt> {
         let agent_id = agent_id.to_owned();
-        let status = self
+        let agent = self
             .agents
             .get(&agent_id)
-            .map(|agent| subagent_status_name(&agent.status).to_string())
             .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
+        if agent.status == SubAgentStatus::Running && agent.parent_mail_closed {
+            return Err(anyhow!(
+                "Cannot queue a parent message for agent {agent_id}: the child is finalizing and no longer accepts messages"
+            ));
+        }
+        let status = subagent_status_name(&agent.status).to_string();
         let entry = QueuedParentMessage {
             text,
             queued_at_ms: epoch_millis_now(),
@@ -6330,7 +6425,13 @@ impl SubAgentManager {
     }
 
     fn followup_child_by_id(&mut self, agent_id: &str, text: String) -> Result<ParentMailReceipt> {
-        let agent_id = agent_id.to_owned();
+        // Terminal receipt ids stay immutable, but new follow-ups belong to
+        // their latest resumed incarnation. Otherwise accepted mail parks on
+        // a predecessor that will never drain again and prevents retirement.
+        let mut agent_id = agent_id.to_owned();
+        while let Some(target) = self.resume_targets.get(&agent_id) {
+            agent_id = target.clone();
+        }
         let status = self
             .agents
             .get(&agent_id)
@@ -6371,15 +6472,24 @@ impl SubAgentManager {
                 let mut undelivered = VecDeque::new();
                 let mut delivered = 0_usize;
                 if let Some(tx) = input_tx {
-                    let counter =
+                    let inbox =
                         Arc::clone(self.pending_follow_ups.entry(agent_id.clone()).or_default());
                     while let Some(mail) = pending.next() {
-                        counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        let ticket = Arc::new(PendingParentMail {
+                            mail: mail.clone(),
+                            taken: std::sync::atomic::AtomicBool::new(false),
+                            appended: std::sync::atomic::AtomicBool::new(false),
+                            message_index: std::sync::atomic::AtomicUsize::new(usize::MAX),
+                        });
+                        inbox
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push_back(Arc::clone(&ticket));
                         if tx
                             .send(SubAgentInput {
                                 text: mail.text.clone(),
                                 interrupt: false,
-                                pending: Some(Arc::clone(&counter)),
+                                pending: Some(Arc::clone(&ticket)),
                             })
                             .is_ok()
                         {
@@ -6389,7 +6499,10 @@ impl SubAgentManager {
                                 hook(delivered);
                             }
                         } else {
-                            counter.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                            inbox
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .retain(|entry| !Arc::ptr_eq(entry, &ticket));
                             undelivered.push_back(mail);
                             undelivered.extend(pending);
                             break;
@@ -6757,7 +6870,12 @@ impl SubAgentManager {
                 .and_then(|record| record.spec.child_route.clone());
             (
                 agent.agent_type.clone(),
-                build_resume_prompt(&agent.prompt, checkpoint, followup_text),
+                build_resume_prompt(
+                    &agent.prompt,
+                    checkpoint,
+                    self.queued_mail.get(&agent_id),
+                    followup_text,
+                ),
                 agent.assignment.clone(),
                 agent.allowed_tools.clone(),
                 agent.model.clone(),
@@ -6833,6 +6951,28 @@ impl SubAgentManager {
             allowed_tools,
             options,
         )?;
+        // A second interrupt may win before the new task first polls. Its
+        // accepted initial input must already have a real recovery route.
+        let initial = self
+            .agents
+            .get(&resumed.agent_id)
+            .expect("spawn registered child")
+            .prompt
+            .clone();
+        let checkpoint = build_subagent_checkpoint(
+            &resumed.agent_id,
+            "resume_admitted",
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: initial,
+                    cache_control: None,
+                }],
+            }],
+            0,
+            true,
+        );
+        self.update_checkpoint(&resumed.agent_id, checkpoint);
         let receipt = ParentMailReceipt {
             agent_id: resumed.agent_id.clone(),
             status: subagent_status_name(&resumed.status).to_string(),
@@ -6845,6 +6985,10 @@ impl SubAgentManager {
                 resumed.agent_id, resumed.model, agent_id
             ),
         };
+        // The initial prompt already contains the accepted FIFO before the
+        // latest instruction. Remove it only after spawn succeeds; no later
+        // follow-up is needed to deliver it, and failed spawns retain it.
+        self.queued_mail.remove(&agent_id);
         self.resume_targets.insert(agent_id, resumed.agent_id);
         Ok(receipt)
     }
@@ -6949,13 +7093,18 @@ impl SubAgentManager {
     ) -> HashMap<String, usize> {
         self.pending_follow_ups
             .iter()
-            .filter_map(|(agent_id, counter)| {
+            .filter_map(|(agent_id, inbox)| {
                 if active_session_id.is_some_and(|session_id| {
                     !self.agent_id_is_owned_by_session(agent_id, session_id)
                 }) {
                     return None;
                 }
-                let count = counter.load(std::sync::atomic::Ordering::Acquire);
+                let count = inbox
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .filter(|mail| !mail.taken.load(std::sync::atomic::Ordering::Acquire))
+                    .count();
                 (count > 0).then(|| (agent_id.clone(), count))
             })
             .collect()
@@ -7112,10 +7261,39 @@ impl SubAgentManager {
         }
     }
 
+    /// Test helper: drop a child's parked mailbox so a scenario can verify the
+    /// retirement gate tracks the live queue instead of latching on history.
+    #[cfg(test)]
+    pub fn clear_test_queued_mail(&mut self, agent_id: &str) {
+        self.queued_mail.remove(agent_id);
+    }
+
+    /// Test helper: commit a terminal result through the production path
+    /// (`claim` → `finish_terminal_result`) so the counter and mailbox
+    /// bookkeeping behave exactly as a real completion would.
+    #[cfg(test)]
+    pub fn commit_test_terminal_result(&mut self, agent_id: &str, status: SubAgentStatus) {
+        let mut result = self.get_result(agent_id).expect("test agent");
+        result.status = status;
+        assert!(
+            self.finish_terminal_result(agent_id, result, true, false),
+            "test terminal commit must claim the running child"
+        );
+    }
+
+    /// Test helper: move an already-terminal child to a dead-end status,
+    /// modeling a terminal commit that no resume can undo.
+    #[cfg(test)]
+    pub fn mark_test_agent_failed(&mut self, agent_id: &str) {
+        let agent = self.agents.get_mut(agent_id).expect("test agent");
+        agent.status = SubAgentStatus::Failed("test dead end".to_string());
+        agent.input_tx = None;
+    }
+
     /// Test helper exposing the receiving side so delivery and provenance can
     /// be verified rather than inferred from a still-present sender handle.
     #[cfg(test)]
-    fn insert_test_running_agent_with_input(
+    pub(crate) fn insert_test_running_agent_with_input(
         &mut self,
         name: &str,
         workspace: &Path,
@@ -7230,6 +7408,57 @@ impl SubAgentManager {
             agent.task_handle = None;
         }
         (agent_id, handle)
+    }
+
+    /// Conservative retirement check, unlike UI/capacity counts: a timed-out
+    /// heartbeat does not establish that its task has stopped. Do not claim or
+    /// discard terminal delivery here; the actor checks its completion queue too.
+    /// Mail parked on non-running children (queue-only receipts) is accepted
+    /// work as well when a delivery path remains: it lives only in the
+    /// in-memory mailbox, so retirement must refuse until the owner session
+    /// drains it. Mail on a dead-end child (Completed/Failed/Cancelled/
+    /// BudgetExhausted) has no such path — `followup` refuses those statuses —
+    /// so it is undeliverable bookkeeping, not accepted work, and must not
+    /// refuse retirement forever.
+    pub(crate) fn has_live_work_for_session(&self, active_session_id: &str) -> bool {
+        self.agents.values().any(|agent| {
+            self.agent_is_owned_by_session(agent, active_session_id)
+                && (agent.status == SubAgentStatus::Running
+                    || agent
+                        .task_handle
+                        .as_ref()
+                        .is_some_and(|task| !task.is_finished()))
+        }) || self.has_queued_follow_ups_for_session(active_session_id)
+            || self.queued_mail.iter().any(|(agent_id, queue)| {
+                !queue.is_empty()
+                    && self.agent_id_is_owned_by_session(agent_id, active_session_id)
+                    && self
+                        .agents
+                        .get(agent_id)
+                        .is_some_and(|agent| self.can_still_deliver_mail(agent))
+            })
+    }
+
+    /// Whether session-owned input still needs consumption or checkpoint
+    /// confirmation; channel receipt alone does not finish a recovery handoff.
+    pub(crate) fn has_queued_follow_ups_for_session(&self, active_session_id: &str) -> bool {
+        self.pending_follow_ups.iter().any(|(agent_id, inbox)| {
+            inbox
+                .try_lock()
+                .map(|mail| !mail.is_empty())
+                .unwrap_or(true)
+                && self.agent_id_is_owned_by_session(agent_id, active_session_id)
+        })
+    }
+
+    /// Whether mail parked in the in-memory mailbox can still reach a child:
+    /// a running child drains it directly, and an interrupted child drains it
+    /// after a resume from a continuable checkpoint. A dead-end status has no
+    /// remaining delivery path.
+    fn can_still_deliver_mail(&self, agent: &SubAgent) -> bool {
+        agent.status == SubAgentStatus::Running
+            || matches!(&agent.status, SubAgentStatus::Interrupted(_)
+                if agent.checkpoint.as_ref().is_some_and(|cp| cp.continuable && !cp.messages.is_empty()))
     }
 
     /// Count running agents.
@@ -7674,6 +7903,21 @@ impl SubAgentManager {
             };
         agent.owner_session_id = runtime.context.state_namespace.clone();
         agent.terminal_delivery = Some(SubAgentTerminalDeliveryContext::from_runtime(&runtime));
+        // Input can be accepted before the task first polls. Give even the
+        // first incarnation a recovery route before exposing its live inbox.
+        agent.checkpoint = Some(build_subagent_checkpoint(
+            &agent_id,
+            "spawn_admitted",
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: prompt.clone(),
+                    cache_control: None,
+                }],
+            }],
+            0,
+            true,
+        ));
         self.register_worker_for_session(worker_spec, &runtime.context.state_namespace);
         if let Some(scope) = budget_scope {
             self.attach_budget_scope(&agent_id, scope);
@@ -8460,6 +8704,36 @@ impl SubAgentManager {
         agent.needs_input = result.needs_input.clone();
         if result.status != SubAgentStatus::Running {
             agent.input_tx = None;
+            if let Some(inbox) = self.pending_follow_ups.remove(agent_id) {
+                let mut mail = inbox.lock().unwrap_or_else(|e| e.into_inner());
+                // Only the winning terminal commit may acknowledge its local
+                // final snapshot. Publishing it earlier would spoil a racing
+                // interrupt's still-continuable checkpoint.
+                if let Some(checkpoint) = agent.checkpoint.as_ref() {
+                    mail.retain(|ticket| ticket.is_uncheckpointed_in(checkpoint));
+                }
+                if matches!(result.status, SubAgentStatus::Interrupted(_))
+                    && agent
+                        .checkpoint
+                        .as_ref()
+                        .is_some_and(|cp| cp.continuable && !cp.messages.is_empty())
+                {
+                    // These inputs were accepted but not committed into the
+                    // stored checkpoint. They precede any newer parked mail.
+                    let mut recovered: VecDeque<_> =
+                        mail.drain(..).map(|ticket| ticket.mail.clone()).collect();
+                    if !recovered.is_empty() {
+                        recovered.extend(self.queued_mail.remove(agent_id).unwrap_or_default());
+                        self.queued_mail.insert(agent_id.to_owned(), recovered);
+                    }
+                } else if !mail.is_empty() {
+                    tracing::warn!(
+                        target: "subagent", agent_id = %agent_id,
+                        uncheckpointed = mail.len(),
+                        "sub-agent went terminal without a resume path for accepted follow-ups"
+                    );
+                }
+            }
         }
         agent.completion_claimed = false;
         agent.task_handle = None;
@@ -8476,9 +8750,21 @@ impl SubAgentManager {
         let Some(agent) = self.agents.get_mut(agent_id) else {
             return false;
         };
+        if agent.status != SubAgentStatus::Running {
+            return false;
+        }
         agent.steps_taken = checkpoint.steps_taken;
         agent.checkpoint = Some(checkpoint);
         agent.last_activity_at = Instant::now();
+        // This write lock serializes checkpoint acceptance with interrupt.
+        // A received input still in pending_inputs is deliberately retained.
+        if let Some(inbox) = self.pending_follow_ups.get(agent_id) {
+            let checkpoint = agent.checkpoint.as_ref().expect("checkpoint assigned");
+            inbox
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|mail| mail.is_uncheckpointed_in(checkpoint));
+        }
         // #freeze: hot per-step path — coalesce the full-fleet persist so 20
         // agents stepping concurrently do not serialize the whole fleet (with
         // full transcripts) to disk under the write lock on every step.
@@ -11544,6 +11830,15 @@ async fn run_subagent_task_inner(task: SubAgentTask) {
         )
     });
 
+    #[cfg(test)]
+    pause_parent_mail_test(
+        &task.manager_handle,
+        &agent_id,
+        ParentMailTestPhase::BeforeTerminalCommit,
+        result.as_ref().ok(),
+    )
+    .await;
+
     // Every terminal path — successful/fatal model exit, explicit Stop,
     // coordination interrupt, and stale cleanup — arbitrates and publishes
     // through `finish_terminal_result`. Cancellation that already won leaves
@@ -12123,11 +12418,39 @@ async fn checkpoint_subagent_progress(
     steps_taken: u32,
     continuable: bool,
 ) -> SubAgentCheckpoint {
-    let checkpoint =
+    let mut checkpoint =
         build_subagent_checkpoint(agent_id, reason, messages, steps_taken, continuable);
     let mut manager = runtime.manager.write().await;
+    protect_uncheckpointed_input_suffix(
+        &mut checkpoint,
+        messages,
+        manager.pending_follow_ups.get(agent_id),
+    );
     manager.update_checkpoint(agent_id, checkpoint.clone());
     checkpoint
+}
+
+fn protect_uncheckpointed_input_suffix(
+    checkpoint: &mut SubAgentCheckpoint,
+    messages: &[Message],
+    inbox: Option<&PendingParentMailQueue>,
+) {
+    // Projection preserves message positions. Keep newly accepted input even
+    // when the normal history tail would omit it. This only builds a snapshot;
+    // the manager acknowledges tickets after accepting the checkpoint.
+    let preserve_from = inbox.and_then(|inbox| {
+        inbox
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|mail| mail.retained_index(messages, 0))
+            .min()
+    });
+    if let Some(start) = preserve_from.filter(|start| *start < checkpoint.omitted_messages) {
+        checkpoint.messages =
+            crate::image_attach::safe_tool_result_message_projection(&messages[start..]);
+        checkpoint.omitted_messages = start;
+    }
 }
 
 /// Render a checkpoint's message tail as readable prose for re-seeding a
@@ -12190,8 +12513,25 @@ fn checkpoint_messages_to_text(messages: &[Message]) -> String {
 fn build_resume_prompt(
     original_prompt: &str,
     checkpoint: &SubAgentCheckpoint,
+    parked_mail: Option<&VecDeque<QueuedParentMessage>>,
     followup_text: &str,
 ) -> String {
+    // A checkpoint can already contain the complete prior resume prompt.
+    // Do not duplicate that nested input again on every incarnation.
+    let original_prompt = if checkpoint.messages.iter().any(|message| {
+        message.role == Role::User && message.content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text, .. } if text.contains(original_prompt))
+        })
+    }) {
+        ""
+    } else {
+        original_prompt
+    };
+    let parked = parked_mail
+        .into_iter()
+        .flatten()
+        .map(|mail| format!("Parent follow-up: {}\n\n", mail.text))
+        .collect::<String>();
     format!(
         "{original_prompt}\n\n\
          [RESUMED SESSION — checkpoint {}]\n\
@@ -12199,7 +12539,7 @@ fn build_resume_prompt(
          continue the work from where it left off. The parent follow-up below is the latest \
          instruction.\n\n\
          --- prior conversation (tail) ---\n{}\n--- end prior conversation ---\n\n\
-         Parent follow-up: {followup_text}",
+         {parked}Parent follow-up: {followup_text}",
         checkpoint.checkpoint_id,
         checkpoint.steps_taken,
         checkpoint_messages_to_text(&checkpoint.messages),
@@ -12578,12 +12918,12 @@ fn subagent_cancellation_projection(
         turn_end_parking.is_some_and(|signal| signal.load(std::sync::atomic::Ordering::Acquire));
     if parking_requested {
         let reason = format!(
-            "Parent turn ended before this turn-owned child settled. Work was parked instead of discarded; resume with agent(action=\"start\", prompt=\"Continue the parked assignment.\", resume_from=\"{agent_id}\")."
+            "Parent turn ended before this turn-owned child settled. Work was parked instead of discarded; resume with agent(action=\"followup\", agent_id=\"{agent_id}\", message=\"Continue the parked assignment.\")."
         );
         let checkpoint = build_subagent_checkpoint(agent_id, &reason, messages, steps, true);
         let needs_input = SubAgentNeedsInput {
             question: format!(
-                "Resume this parked child with agent(action=\"start\", prompt=\"Continue the parked assignment.\", resume_from=\"{agent_id}\")."
+                "Resume this parked child with agent(action=\"followup\", agent_id=\"{agent_id}\", message=\"Continue the parked assignment.\")."
             ),
         };
         return (
@@ -13384,13 +13724,43 @@ async fn run_subagent(
                 .await;
                 continue;
             }
-            while let Ok(input) = input_rx.try_recv() {
-                input.mark_taken();
-                if input.interrupt {
-                    pending_inputs.clear();
+            #[cfg(test)]
+            pause_parent_mail_test(
+                &runtime.manager,
+                &agent_id,
+                ParentMailTestPhase::BeforeFinalDrain,
+                None,
+            )
+            .await;
+            {
+                // Serialize the final empty check with every manager sender.
+                // Inputs accepted before the fence take the existing next-step
+                // path; after it, admission fails before queueing any new mail.
+                let mut manager = runtime.manager.write().await;
+                while let Ok(input) = input_rx.try_recv() {
+                    input.mark_taken();
+                    if input.interrupt {
+                        pending_inputs.clear();
+                    }
+                    pending_inputs.push_back(input);
                 }
-                pending_inputs.push_back(input);
+                if pending_inputs.is_empty()
+                    && let Some(agent) = manager.agents.get_mut(&agent_id)
+                    && agent.status == SubAgentStatus::Running
+                    && !agent.completion_claimed
+                {
+                    agent.parent_mail_closed = true;
+                    input_rx.close();
+                }
             }
+            #[cfg(test)]
+            pause_parent_mail_test(
+                &runtime.manager,
+                &agent_id,
+                ParentMailTestPhase::AfterFinalDrain,
+                None,
+            )
+            .await;
             if pending_inputs.is_empty() {
                 record_agent_progress(
                     runtime,
@@ -13554,6 +13924,28 @@ async fn run_subagent(
         }
     }
 
+    {
+        // A step-limit exit may still own input accepted on the preceding
+        // step. Retain it in the final snapshot without authorizing another
+        // model call or changing the terminal outcome.
+        let mut manager = runtime.manager.write().await;
+        if let Some(agent) = manager.agents.get_mut(&agent_id)
+            && agent.status == SubAgentStatus::Running
+            && !agent.completion_claimed
+        {
+            agent.parent_mail_closed = true;
+        }
+        input_rx.close();
+        while let Ok(input) = input_rx.try_recv() {
+            input.mark_taken();
+            if input.interrupt {
+                pending_inputs.clear();
+            }
+            pending_inputs.push_back(input);
+        }
+    }
+    append_subagent_inputs_as_user_messages(&mut messages, &mut pending_inputs);
+
     release_resident_leases_for(&agent_id);
     let has_final_summary = final_result
         .as_deref()
@@ -13577,13 +13969,22 @@ async fn run_subagent(
         ))
     };
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-    latest_checkpoint = Some(build_subagent_checkpoint(
+    let mut final_checkpoint = build_subagent_checkpoint(
         &agent_id,
         subagent_status_name(&status),
         &messages,
         steps,
         false,
-    ));
+    );
+    {
+        let manager = runtime.manager.read().await;
+        protect_uncheckpointed_input_suffix(
+            &mut final_checkpoint,
+            &messages,
+            manager.pending_follow_ups.get(&agent_id),
+        );
+    }
+    latest_checkpoint = Some(final_checkpoint);
     insert_subagent_full_transcript_handle(
         runtime,
         &agent_id,

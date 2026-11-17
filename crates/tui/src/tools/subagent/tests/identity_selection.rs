@@ -526,15 +526,34 @@ async fn forkguard_agent_identity_checkpoint_retry_keeps_old_receipt_and_resumed
     assert_eq!(delivery["delivered"], true);
     assert_eq!(delivery["message_preview"], "healthy next");
     assert!(delivery["reason"].is_null());
+    // A host without an attached resume runtime reaches followup_child
+    // directly. The retained predecessor must still route to the successor.
     {
         let mut guard = manager.write().await;
+        let receipt = guard
+            .followup_child_for_session("workspace", &a, "direct late follow-up".into())
+            .unwrap();
+        assert_eq!(receipt.agent_id, target);
+        assert!(receipt.woke);
+        assert_eq!(receipt.queue_depth, 0);
+        assert!(guard.queued_mail_depth(&a).is_none());
+    }
+    assert_eq!(rx.try_recv().unwrap().text, "direct late follow-up");
+    let task = {
+        let mut guard = manager.write().await;
+        let task = guard.agents.get_mut(&target).unwrap().task_handle.take();
         let mut terminal = guard.get_result(&target).unwrap();
         terminal.status = SubAgentStatus::Completed;
         assert!(guard.finish_terminal_result(&target, terminal, true, false));
-    }
+        task
+    };
     let rejected = json!({"action":"followup","agent_id":a,"message":"must not disappear"});
     assert!(public.execute(rejected.clone(), &context).await.is_err());
     assert!(hidden.execute(rejected, &context).await.is_err());
+    if let Some(task) = task {
+        task.abort();
+        let _ = task.await;
+    }
     let mut guard = manager.write().await;
     assert!(
         guard
@@ -557,6 +576,26 @@ async fn forkguard_agent_identity_checkpoint_retry_keeps_old_receipt_and_resumed
         SubAgentStatus::Running
     );
     assert_eq!(guard.queued_mail_depth(&c), None);
+    // The identity-collision controls remain running through all assertions
+    // above. Settle them too before asking whether the whole session is idle.
+    let mut tasks = Vec::new();
+    for id in [&b, &c] {
+        if let Some(task) = guard.agents.get_mut(id).unwrap().task_handle.take() {
+            tasks.push(task);
+        }
+        let mut terminal = guard.get_result(id).unwrap();
+        terminal.status = SubAgentStatus::Completed;
+        assert!(guard.finish_terminal_result(id, terminal, true, false));
+    }
+    drop(guard);
+    for task in tasks {
+        task.abort();
+        let _ = task.await;
+    }
+    assert!(
+        !manager.read().await.has_live_work_for_session("workspace"),
+        "delivered old-id mail must not strand retirement after all children settle"
+    );
 }
 
 #[tokio::test]

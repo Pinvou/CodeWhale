@@ -8,7 +8,10 @@ Handles constructed directly with `Engine::new` return `NotObserved`.
 
 Each waiter receives the same terminal value. Cancelling one wait neither stops
 the engine nor consumes another waiter's result. Waiting does not initiate
-shutdown; callers must use the existing shutdown protocol. The observation
+shutdown; callers must use an existing shutdown protocol: send `Op::Shutdown`
+for an immediate stop, or `EngineHandle::shutdown_when_idle` to retire an idle
+engine at its own quiescent boundary without losing accepted work (see
+`core/engine/idle_shutdown.rs`). The observation
 does not keep another engine or operation-mailbox sender alive.
 
 The one-shot exec consumer uses a two-second absolute deadline shared between

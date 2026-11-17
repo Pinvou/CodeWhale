@@ -358,6 +358,8 @@ Pending → Running → (Completed | Failed(reason) | Cancelled | Interrupted(re
 
 `agent` 返回一个会话投影，这些字段位于顶层和 `worker_record` 内部。正常的父代理契约不是轮询：继续工作，在子代理完成时消费完成事件。如果需要审计细节，用 `handle_read` 检查返回的 `transcript_handle`。
 
+父消息回执只确认接纳，不代表模型已经处理。正常完成时，最终的实时输入检查与关闭接纳在同一锁内完成；之后的 `message` 和 `followup` 在改变收件箱前即返回失败。步数耗尽时仍待处理的已接纳实时消息会完整保留到最终 checkpoint，必要时超出常规尾部预算，但不会因此增加模型调用。只有获胜的终态结果能确认该快照中的消息。本完成路径不会自动消费或恢复仅排队的消息。
+
 Legacy 后续消息投递仅为旧转录和内部恢复保留。如果一条消息被投递，worker 记录会存储一个有界预览和时间戳。新的面向模型的流程应该在子代理的委派不再合适时打开一个替代 `agent`。
 
 工件是符号引用。用 `handle_read` 处理返回的 `transcript_handle` 获取转录详情，除非 `verification.status` 指向一个单独的关卡或回执，否则把 `result_summary` 当作子代理自报。`usage.status` 在 provider 用量报告之前是 `unknown`；之后切换到 `reported`，或者当配置的共享 token 预算没有剩余 token 时切换到 `budget_exhausted`。

@@ -5255,6 +5255,48 @@ fn cleanup_keeps_an_unconfirmed_stop_until_the_exit_is_confirmed() {
     );
 }
 
+/// The retirement gate must agree with the coordination scope on unconfirmed
+/// stops: a stop that was sent but whose exit nobody observed is still live
+/// work even when the completion evidence was already claimed, and a
+/// confirmed exit releases the frame. A real child, because the confirmation
+/// inside the gate is a real reap.
+#[cfg(unix)]
+#[test]
+fn retirement_gate_holds_an_unconfirmed_stop_until_the_exit_is_confirmed() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    manager.seed_running_shell_for_test("job-1", "agent-1");
+    let child = Command::new("sleep").arg("30").spawn().expect("spawn");
+    let pid = child.id();
+    {
+        let shell = manager.processes.get_mut("job-1").expect("seeded job");
+        shell.owner_session_id = "session-1".to_string();
+        shell.status = ShellStatus::Killed;
+        shell.completion_reported = true;
+        shell.stop_unconfirmed = true;
+        shell.child = Some(ShellChild::Process(child));
+    }
+    assert!(
+        manager.has_live_or_unreported_work_for_session("session-1"),
+        "a stop whose exit was never observed is live work even with the completion claimed"
+    );
+
+    // The OS ends the child; the confirm inside the gate reaps it and the
+    // same observation certifies the session for retirement.
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if !manager.has_live_or_unreported_work_for_session("session-1") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the retirement gate never released the confirmed stop"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// Capacity cleanup must not count — or evict — a job whose stop has not been
 /// confirmed: it still holds its write scope even though its status is
 /// finished. The production age bound keeps the fresh filler records, so the
@@ -5366,4 +5408,37 @@ fn dropping_the_manager_stops_a_child_with_an_unconfirmed_stop() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn forkguard_idle_shutdown_shell_predicate_gates_on_live_and_unreported_work() {
+    let workspace = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(workspace.path().to_path_buf());
+    assert!(
+        !manager.has_live_or_unreported_work_for_session("session-a"),
+        "an empty manager has no session work"
+    );
+    assert!(
+        !manager.has_live_or_unreported_work_for_session(""),
+        "an empty session id matches nothing, like the sibling helpers"
+    );
+    manager.seed_session_shell_for_test("live-job", "session-a", true);
+    assert!(
+        manager.has_live_or_unreported_work_for_session("session-a"),
+        "a running session shell is live work"
+    );
+    assert!(
+        !manager.has_live_or_unreported_work_for_session("session-b"),
+        "another session's shell is not this engine's work"
+    );
+    manager.finish_seeded_shell_for_test("live-job");
+    assert!(
+        manager.has_live_or_unreported_work_for_session("session-a"),
+        "finished output not yet delivered must survive retirement"
+    );
+    manager.mark_seeded_completion_reported_for_test("live-job");
+    assert!(
+        !manager.has_live_or_unreported_work_for_session("session-a"),
+        "delivered shell evidence no longer blocks retirement"
+    );
 }
