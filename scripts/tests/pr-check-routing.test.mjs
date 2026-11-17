@@ -1225,7 +1225,7 @@ test('frontend shards are independently scheduled only on applicable Ready and q
       for (const release of ['true', 'false']) for (const reused of [true, false]) {
         const actual = runInNewContext(expression, {
           github: { event_name: event, event: { action: 'synchronize', pull_request: { draft } } },
-          needs: { changes: { outputs: { frontend, pet: 'false', pure_release_backflow: release,
+          needs: { 'frontend-setup': { result: 'success' }, changes: { outputs: { frontend, pet: 'false', pure_release_backflow: release,
             reuse_verified: reused ? 'true' : 'false', reused_jobs: '["frontend-browser-test"]' } } },
           cancelled: () => false, fromJSON: JSON.parse, contains: (items, value) => items.includes(value),
         });

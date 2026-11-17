@@ -880,7 +880,7 @@ GATE_JOB_LEVEL_IFS = {name: _with_verified_reuse_guard(value, name) if name not 
 # Frontend setup artifact gate: frontend-test / frontend-browser-test 追加
 # needs.frontend-setup.result == 'success' 尾卫,setup 失败时消费者显式跳过,
 # 不再空跑后死于工件缺失(与 pr-check.yml 的 job 级 if 逐字一致)。
-GATE_JOB_LEVEL_IFS = {name: (value.removesuffix(" }}") + " && needs.frontend-setup.result == 'success' }}") if name in {'frontend-test', 'frontend-browser-test'} else value for name, value in GATE_JOB_LEVEL_IFS.items()}
+GATE_JOB_LEVEL_IFS = {name: (value.removesuffix(" }}") + " && needs['frontend-setup'].result == 'success' }}") if name in {'frontend-test', 'frontend-browser-test'} else value for name, value in GATE_JOB_LEVEL_IFS.items()}
 
 
 class CiGatePolicyTests(unittest.TestCase):
@@ -4232,8 +4232,6 @@ python3() { fixture_mock python3 "$@"; }
         for route_path in (
             "scripts/test-registry-guard.py",
             "scripts/tests/test_registry_guard.py",
-            "scripts/prune-rust-test-artifacts.py",
-            "scripts/tests/test_prune_rust_test_artifacts.py",
         ):
             self.assertTrue(
                 (ROOT / route_path).is_file(),
@@ -4242,7 +4240,7 @@ python3() { fixture_mock python3 "$@"; }
             self.assertTrue(
                 _matches_paths_filter(route_path, rust_full_paths),
                 f"{route_path}: a rust_full exclude entry (or the entry's "
-                "deletion) silently unroutes the Rust job helper from "
+                "deletion) silently unroutes the test-registry guard from "
                 "the rust-test leg that executes it — a guard-script-only "
                 "PR would run no rust leg",
             )

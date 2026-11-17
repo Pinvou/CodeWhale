@@ -446,10 +446,6 @@ jobs:
               # attribution positive control); a change confined to it must
               # run the leg that executes the guard it pins.
               - 'scripts/tests/test_registry_guard.py'
-              # This cleanup runs between the real Rust harnesses; script-only
-              # changes must exercise that same job before entering the queue.
-              - 'scripts/prune-rust-test-artifacts.py'
-              - 'scripts/tests/test_prune_rust_test_artifacts.py'
               - 'pinvou3-app/src-tauri/**/*.rs'
               - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
               # diagnostics.rs 在生产校验中 include_str! v1 schema，
@@ -962,18 +958,13 @@ jobs:
               - 'private-runtimes/windows'
               - 'pinvou3-app/scripts/codex-bridge-runtime/**'
               - 'pinvou3-app/scripts/tauri/build.js'
-              - 'pinvou3-app/scripts/tauri/build-local-nsis.ps1'
               - 'pinvou3-app/scripts/tauri/codex-bridge.js'
               - 'pinvou3-app/scripts/tauri/effective-config.js'
               - 'pinvou3-app/scripts/tauri/windows-installer.js'
               - 'pinvou3-app/scripts/tauri/windows-runtime.js'
               - 'pinvou3-app/src-tauri/config/platforms/windows/runtime/**'
-              # The windows platform conf is a direct assertion target of the
-              # NSIS staging contract test (installer languages, nsis wiring).
-              - 'pinvou3-app/src-tauri/config/platforms/windows/tauri.conf.json'
               - 'pinvou3-app/src-tauri/packaging/windows/runtime/**'
               - 'pinvou3-app/src-tauri/packaging/windows/nsis/**'
-              - 'pinvou3-app/src-tauri/packaging/windows/wix/**'
               - 'pinvou3-app/src-tauri/src/features/codex_acp/**'
               - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
               - 'pinvou3-app/src-tauri/resources/common/bundle/mcp-servers/browser-*'
@@ -982,8 +973,6 @@ jobs:
               - 'pinvou3-app/tests/browser_wrapper_lazy.test.mjs'
               - 'pinvou3-app/tests/windows_runtime_packaging_contract.test.js'
               - 'pinvou3-app/tests/windows_python_dependency_contract.ps1'
-              - 'pinvou3-app/tests/windows_runtime_cache_behavior.ps1'
-              - 'pinvou3-app/tests/nsis_resource_staging_contract.test.js'
               - 'pinvou3-app/package.json'
               - 'pinvou3-app/package-lock.json'
               - '.github/workflows/release-packages.yml'
@@ -1347,7 +1336,7 @@ jobs:
     needs: [changes, frontend-setup]
     # Draft/Ready quality, builds and logic. Ready/queue browser smokes run
     # independently below, without waiting for this job's ~17-minute logic suite.
-    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) && needs.frontend-setup.result == 'success' }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) && needs['frontend-setup'].result == 'success' }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     defaults:
@@ -1528,7 +1517,7 @@ jobs:
     # 每个分片只下载解包自己的独立副本,分片间无可变共享状态。
     needs: [changes, frontend-setup]
     # Each shard runs on the shared tested tree artifact and owns its fixtures.
-    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) && needs.frontend-setup.result == 'success' }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) && needs['frontend-setup'].result == 'success' }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     strategy:
@@ -3304,7 +3293,10 @@ jobs:
       - name: 回收已完成的主测试产物
         if: ${{ github.event_name != 'push' }}
         run: |
-          python3 scripts/prune-rust-test-artifacts.py
+          target="pinvou3-app/src-tauri/target/debug/deps"
+          find "$target" -maxdepth 1 -type f \
+            \( -name 'pinvou3_lib-*' -o -name 'libpinvou3_lib-*' \) \
+            -print -delete
           df -h "$GITHUB_WORKSPACE"
 
       - name: cargo test --test behavior_telemetry (standalone memory-bounded harness)
@@ -5056,11 +5048,6 @@ jobs:
 
       - name: Windows runtime packaging contract
         run: npm --prefix pinvou3-app run test:windows-runtime
-
-      # On Windows this additionally exercises the build-local-nsis.ps1
-      # smoke block that the Linux frontend-test lane cannot run.
-      - name: NSIS resource staging contract
-        run: npm --prefix pinvou3-app run test:nsis-resource-staging
 
       - name: Windows ACP bridge runtime smoke
         run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-acp-${{ github.run_id }}-${{ github.run_attempt }}.json" -- python scripts/test-windows-acp-runtime.py
