@@ -415,4 +415,3 @@ async function serveHostWorker({ fixture, identity, control }) {
 if (!isMainThread && workerData?.kind === 'pinvou-browser-fixture-host-v1') {
   await serveHostWorker(workerData);
 }
-
