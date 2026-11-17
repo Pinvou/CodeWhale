@@ -7,11 +7,30 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { RelayStateStore } from "../relay-state-store.js";
+import { RelayStateStore, verifyWindowsAncestors, verifyWindowsPath, protectWindowsPath } from "../relay-state-store.js";
 import { RELAY_CONTROLLER_GUARD_FILENAME, RelayStateGuard } from "../relay-state-guard.js";
 import { WINDOWS_ACL_VERIFY_SCRIPT, buildGuardJournalAclScript } from "../windows-guard-acl.js";
 
 const childFile = fileURLToPath(new URL("./fixtures/controller-guard-child.mjs", import.meta.url));
+
+if (process.platform === "win32") test("native ACL diagnostics cannot change success or accept a missing target", async t => {
+  const directory = await fs.mkdtemp(join(tmpdir(), "pinvou-acl-observer-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = join(directory, "owned-file");
+  await fs.writeFile(target, "fixture");
+  await protectWindowsPath(target, "file");
+  const phases = [];
+  await verifyWindowsPath(target, "file", { onDiagnostic(phase) {
+    phases.push(phase);
+    throw new Error("observer failure must not replace native result");
+  } });
+  assert.deepEqual(phases, ["checks_completed"]);
+  const failures = [];
+  await assert.rejects(verifyWindowsPath(join(directory, "missing"), "file", {
+    onDiagnostic: phase => failures.push(phase),
+  }));
+  assert.deepEqual(failures, ["identity_resolved"]);
+});
 
 test("guard journal ACL script fails closed when either reviewed template anchor drifts", () => {
   const inherited = "if (-not $acl.AreAccessRulesProtected) { throw 'ACL inheritance enabled' }";
@@ -252,7 +271,11 @@ async function fixture(t) {
       return `guard-test-process:${pid}`;
     }, ...security };
   async function open(overrides = {}) {
-    const store = await openGuardStore(t, { ...options, ...overrides });
+    const store = await openGuardStore(t, { ...options, ...overrides,
+      onNativeDiagnostic: event => t.diagnostic(`controller_guard_acl_phase ${JSON.stringify({
+        ...event, sequence: ++nativeAclSequence,
+      })}`),
+    });
     stores.push(store);
     return store;
   }
@@ -283,6 +306,8 @@ async function fixture(t) {
   }
   return { directory, statePath, options, open, child };
 }
+
+let nativeAclSequence = 0;
 
 test("controller guard excludes another process before a stale reclaimer may rename", async t => {
   const f = await fixture(t);
@@ -452,7 +477,11 @@ test("controller guard native exit before protecting its new inode recovers thro
     assert.equal(metadata.matches_creator_default, true);
     assert.notEqual(metadata.token_owner, "other");
   }
-  const native = { protectPath: undefined, verifyPath: undefined, verifyAncestors: undefined };
+  const native = { protectPath: undefined,
+    verifyPath: undefined,
+    verifyAncestors: process.platform === "win32" ? paths => verifyWindowsAncestors(paths, {
+      onDiagnostic: phase => t.diagnostic(`controller_guard_ancestor_phase ${JSON.stringify({ phase })}`),
+    }) : undefined };
   const restored = await f.open(native);
   await restored.compareAndSwap("guard_test", "0", { commits: 1 });
   await restored.close();

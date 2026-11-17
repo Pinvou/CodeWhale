@@ -199,7 +199,13 @@ else process.kill(process.pid,'SIGTERM');
     def test_two_scopes_do_not_retire_each_others_children(self):
         with tempfile.TemporaryDirectory() as directory:
             receipt = Path(directory) / 'other.json'
-            other = subprocess.Popen([sys.executable, str(SUPERVISOR), '--receipt', str(receipt), '--', sys.executable, '-c', "import os,time;print(os.getpid(),flush=True);time.sleep(2)"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            release = Path(directory) / 'other-release'
+            # Keep the first scope alive until the ownership assertion, rather
+            # than assuming a second Windows process scope starts within 2s.
+            source = ("import os,time,pathlib\nprint(os.getpid(),flush=True)\n"
+                      f"release=pathlib.Path({str(release)!r})\n"
+                      "while not release.exists(): time.sleep(0.025)\n")
+            other = subprocess.Popen([sys.executable, str(SUPERVISOR), '--receipt', str(receipt), '--', sys.executable, '-c', source], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
                 pid = int(other.stdout.readline())
                 self.assertTrue(alive(pid))
@@ -207,8 +213,10 @@ else process.kill(process.pid,'SIGTERM');
                 self.assertEqual(p.returncode, 0, p.stderr)
                 self.assertTrue(alive(pid), 'another scope killed the first scope')
                 self.assertFalse(result['cleanup_failed'])
+                release.touch()
                 self.assertEqual(other.wait(timeout=10), 0)
             finally:
+                release.touch()
                 if other.poll() is None:
                     other.terminate()
                     other.wait(timeout=10)
