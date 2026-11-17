@@ -51,6 +51,7 @@ REQUIRED = {
     "TestOrganizationModelPolicyPublicPostgres",
     "TestContextEligibilityUsesCurrentScopedProductionRoutes",
     "TestReconciliationEvidenceMatchesPublicSchema",
+    "TestReconciliationSequentialClaimsPublicPostgres",
     "TestF05DispatchLeaseLifecycle",
     "TestF05IncompleteUpstreamErrorReplayPublicPostgres",
     "TestF05MissingReferenceDeadlineFundsPublicPostgres",
@@ -203,6 +204,7 @@ REFUND_REQUIRED = {
 RETAINED_REQUIRED = {
     "TestRetainedOrganizationOrderHistoryPagination",
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
+    "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease",
     "TestExpiredHoldProofRetryDiagnosticsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
     "TestEscalatedForcedRefundWalletLockOrderPostgres",
@@ -316,6 +318,10 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestOrganizationStartupDiagnosticsPostgres": {
         "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease": {
+        "first-RPC-release-crash-keeps-durable-intent",
+        "slow-proof-exhaustion-persists-backoff-and-next-healthy-progress",
     },
     "TestBillingHistoricalStateRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
