@@ -120,6 +120,11 @@ assert.equal('sessionId' in ingestCommand.args, false);
 assert.equal(ingestCommand.args.commit, true);
 assert.equal(ingestCommand.args.dataBase64, 'AQID');
 assert.equal(
+  invokedCommands.filter(c => c.command === 'ingest_draft_file_chunk').length,
+  1,
+  'exactly one ingest invoke — a duplicate would re-upload the draft payload',
+);
+assert.equal(
   Object.prototype.propertyIsEnumerable.call(
     state.attachments[0].result,
     '__pinvouManagedDraftAttachmentId',

@@ -37,10 +37,16 @@ const bridgeSource = (() => {
     .replace(
       'function bt(key) { return pinvouSharedweb().bt(key); }',
       'function bt(key) { return pinvouSharedweb().bt(key); } window.__btForContract = bt;',
+    )
+    // Expose the lane wrapper so the consumer contract below can pin
+    // wireLaneError's fold/concat behavior, not just its table membership.
+    .replace(
+      'function wireLaneError(err, prefixKey)',
+      'window.__wireLaneError = function wireLaneError(err, prefixKey)',
     );
   assert.ok(
-    injected.includes('window.__btForContract'),
-    'web bridge bt() delegate source drifted; update the injection anchor',
+    injected.includes('window.__btForContract') && injected.includes('window.__wireLaneError'),
+    'web bridge bt()/wireLaneError source drifted; update the injection anchors',
   );
   return injected;
 })();
@@ -354,6 +360,41 @@ assert.equal(typeof btFor, 'function', 'bt contract hook must be exposed');
 assert.ok(
   rawBridgeSource.split('WEB_TURN_ERROR_KEYS').length >= 4,
   'one code table must serve both consumers (definition + displayTurnError + wireLaneError)',
+);
+const wireLaneError = windowObject.__wireLaneError;
+assert.equal(typeof wireLaneError, 'function', 'wireLaneError contract hook must be exposed');
+// Round-5: pin the wrapper's behavior, not just the table's consumer count —
+// a stable code folds to the full localized sentence; unmapped text keeps the
+// lane prefix copy so download/attachment lanes read like the UI language.
+for (const language of Object.keys(LOCALE_MARKERS)) {
+  await withLanguage(language, () => {
+    assert.equal(
+      wireLaneError(new Error('web_session_chat_failed'), 'openFailed'),
+      btFor('webChatFailed'),
+      `${language}: stable code folds to the full sentence`,
+    );
+    assert.equal(
+      wireLaneError(new Error('boom detail'), 'openFailed'),
+      btFor('openFailed') + 'boom detail',
+      `${language}: unmapped text keeps the lane prefix copy`,
+    );
+  });
+}
+// Consumer wiring pins: each lane catch routes through the wrapper, so
+// reverting any single catch back to bare concatenation turns this leg red
+// (external URL open, artifact open, attachment open, attachment reveal).
+assert.equal(
+  rawBridgeSource.split('wireLaneError(e, "openFailed")').length,
+  5,
+  'four lane catches must go through wireLaneError (split length = sites + 1)',
+);
+assert.ok(
+  rawBridgeSource.includes('addSystemItem(bt("downloadFailed") + displayTurnError(e));'),
+  'download catch must fold stable codes via displayTurnError (open round-9)',
+);
+assert.ok(
+  !rawBridgeSource.includes('bt("downloadFailed") + String('),
+  'download catch must not render raw machine codes',
 );
 const CODE_TABLE = [
   ['web_session_chat_failed', 'webChatFailed'],
