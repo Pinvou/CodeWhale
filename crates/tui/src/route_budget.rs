@@ -294,7 +294,21 @@ pub(crate) fn effective_max_output_tokens_for_route(
     route_limits: Option<RouteLimits>,
 ) -> u32 {
     let window = route_context_window_tokens(provider, model, route_limits);
-    let compatibility_source = output_ceiling_source(provider, model);
+    let mut compatibility_source = output_ceiling_source(provider, model);
+    // Review 5929534479: the K3.1 catalogue rows publish the family's
+    // documented maximum, but a route that reports no output limit of its
+    // own (a custom gateway) provides no evidence it accepts requests that
+    // large. Scope the promoted maximum to routes that actually report it;
+    // such routes keep the family's default-sized conservative ceiling, and
+    // direct hosts and reported plan limits still carry the full maximum.
+    if compatibility_source
+        == OutputCeilingSource::Documented(crate::models::KIMI_K31_MAX_OUTPUT_TOKENS)
+        && crate::models::is_kimi_k31_documented_maximum_row(model)
+        && route_output_limit_tokens(route_limits).is_none()
+    {
+        compatibility_source =
+            OutputCeilingSource::Documented(crate::models::KIMI_K3_DEFAULT_MAX_COMPLETION_TOKENS);
+    }
     let compatibility_cap = compatibility_source.clamp_tokens();
     let route_cap = route_output_limit_tokens(route_limits);
     // With a known route window and no published output limit, reserve a
@@ -502,6 +516,58 @@ mod tests {
             ),
             65_536,
             "automatic K3.1 requests keep the ordinary 64K default sizing"
+        );
+    }
+
+    #[test]
+    fn kimi_k31_gateway_without_an_output_limit_keeps_the_conservative_ceiling() {
+        // Review 5929534479: the 1M maximum is scoped to routes that report
+        // it. A gateway supplies no output limit, so it gives no evidence it
+        // accepts requests that large — the explicit override keeps the
+        // family's default-sized conservative ceiling there, exactly as on
+        // the pre-promotion rows.
+        let _env_lock = crate::test_support::lock_test_env();
+        let _guard = crate::test_support::EnvVarGuard::set("CODEWHALE_MAX_OUTPUT_TOKENS", "262144");
+        for model in [
+            "kimi-k3.1-pro",
+            "kimi-k3.1-pro-highspeed",
+            "k3.1-pro",
+            "k3.1-pro-highspeed",
+        ] {
+            // No route facts at all.
+            assert_eq!(
+                effective_max_output_tokens_for_route(ApiProvider::Moonshot, model, None),
+                131_072,
+                "{model} on a route with no output fact keeps the conservative ceiling"
+            );
+            // Route reports context but no output limit — same conclusion.
+            let context_only = RouteLimits {
+                context_tokens: Some(1_048_576),
+                ..RouteLimits::default()
+            };
+            assert_eq!(
+                effective_max_output_tokens_for_route(
+                    ApiProvider::Moonshot,
+                    model,
+                    Some(context_only)
+                ),
+                131_072,
+                "{model} with a context-only route keeps the conservative ceiling"
+            );
+        }
+        // A reported route output maximum restores the full override.
+        let reported = RouteLimits {
+            context_tokens: Some(1_048_576),
+            output_tokens: Some(1_048_576),
+            ..RouteLimits::default()
+        };
+        assert_eq!(
+            effective_max_output_tokens_for_route(
+                ApiProvider::Moonshot,
+                "kimi-k3.1-pro",
+                Some(reported)
+            ),
+            262_144
         );
     }
 

@@ -32,6 +32,19 @@ pub const KIMI_K3_DEFAULT_MAX_COMPLETION_TOKENS: u32 = 131_072;
 /// publish as the model's output ceiling. Explicit operator overrides within
 /// the resolved route/window ceiling must survive it (review 5927442709).
 pub const KIMI_K31_MAX_OUTPUT_TOKENS: u32 = 1_048_576;
+
+/// Whether this id's catalogue output row is the K3.1 family's documented
+/// maximum (see [`KIMI_K31_MAX_OUTPUT_TOKENS`]). Route budget demotes that
+/// ceiling on routes that report no output limit of their own — a gateway
+/// gives no evidence it accepts requests that large, so such routes keep
+/// the family's default-sized conservative ceiling (review 5929534479).
+#[must_use]
+pub(crate) fn is_kimi_k31_documented_maximum_row(model: &str) -> bool {
+    matches!(
+        model,
+        "kimi-k3.1-pro" | "kimi-k3.1-pro-highspeed" | "k3.1-pro" | "k3.1-pro-highspeed"
+    )
+}
 /// Documented maximum output for the exact direct Kimi K3 API route.
 ///
 /// Source: <https://platform.kimi.ai/docs/guide/kimi-k3-quickstart> (verified 2026-07-20).
