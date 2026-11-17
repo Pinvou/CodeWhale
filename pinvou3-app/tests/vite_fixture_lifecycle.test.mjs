@@ -5,10 +5,49 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { createServer } from './helpers/vite-fixture.mjs';
+import { createServer, prepareFixtureModules } from './helpers/vite-fixture.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const config = { root, configFile: false, logLevel: 'error', optimizeDeps: { noDiscovery: true } };
+
+test('module readiness includes a delayed static dependency before a browser case starts', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-vite-module-crawl-'));
+  fs.writeFileSync(path.join(directory, 'entry.js'), "import {value} from './dependency.js'; export {value};");
+  fs.writeFileSync(path.join(directory, 'dependency.js'), 'export const value = 1;');
+  let dependencyTransformed = false;
+  const server = await createServer({ ...config, root: directory, plugins: [{
+    name: 'controlled-delayed-dependency',
+    async transform(_code, id) {
+      if (id.endsWith('/dependency.js')) {
+        await new Promise(resolve => setTimeout(resolve, 80));
+        dependencyTransformed = true;
+      }
+    },
+  }], server: { middlewareMode: true } });
+  try {
+    await prepareFixtureModules(server, ['/entry.js']);
+    assert.equal(dependencyTransformed, true, 'listener/entry readiness alone is insufficient');
+    assert.ok((await server.environments.client.moduleGraph.getModuleByUrl('/dependency.js')).transformResult);
+    await assert.rejects(prepareFixtureModules(server, ['/absent.js']), /Failed to load url|does not exist/u);
+  } finally { await server.close(); fs.rmSync(directory, { recursive: true }); }
+});
+
+test('module setup propagates failure, enforces one bounded deadline and never retries', async () => {
+  const failure = new Error('controlled fixture transform failure');
+  let calls = 0;
+  const server = { environments: { client: {
+    transformRequest() { calls++; throw failure; },
+    waitForRequestsIdle() { throw new Error('must not report readiness after a failed transform'); },
+  } } };
+  await assert.rejects(prepareFixtureModules(server, ['/entry.js']), error => error === failure);
+  assert.equal(calls, 1);
+  server.environments.client.transformRequest = async () => ({ code: 'entry' });
+  server.environments.client.waitForRequestsIdle = () => new Promise(() => {});
+  await assert.rejects(prepareFixtureModules(server, ['/entry.js'], { timeoutMs: 20 }), /setup budget exceeded/u);
+  for (const entry of ['https://example.org/x.js', '//example.org/x.js', '/../x.js', '/x.js?fetch']) {
+    await assert.rejects(prepareFixtureModules(server, [entry]), /root-relative paths/u);
+  }
+});
 
 test('two middleware fixtures have private optimizer output and no default WebSocket listener', async () => {
   const servers = [];

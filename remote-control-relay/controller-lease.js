@@ -566,7 +566,6 @@ export class ControllerLeaseManager {
     livenessEpochB,
     tokenA,
     tokenB,
-    latencyMs,
     resumeDeadlineMs,
   } = {}) {
     controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
@@ -620,11 +619,16 @@ export class ControllerLeaseManager {
       // Only the immediate predecessor can still have a hook installation in
       // flight. One entry per live lease, not an ever-growing resume history.
       this.#previousLeases.set(controllerLeaseId, lease);
-      this.#emit("controller_resume_completed", latencyMs);
       return updated;
     } finally {
       nextTokenA.fill(0);
       nextTokenB.fill(0);
+    }
+  }
+
+  reportResumeDelivery(lease, latencyMs) {
+    if (this.#leases.get(lease.controller_lease_id) === lease) {
+      this.#emit("controller_resume_completed", latencyMs);
     }
   }
 
