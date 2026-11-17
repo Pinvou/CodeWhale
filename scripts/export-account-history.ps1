@@ -53,7 +53,7 @@ function New-PrivateDirectory([string]$Path) {
 
 function Resolve-PgTool([string]$Name) {
   $binary=if($IsWindows){$Name+'.exe'}else{$Name}
-  if($PgToolsDirectory){$path=Join-Path $PgToolsDirectory $binary}else{$path=(Get-Command $binary -CommandType Application -ErrorAction Stop).Source}
+  if($PgToolsDirectory){$path=Join-Path $PgToolsDirectory $binary}else{$path=@(Get-Command $binary -CommandType Application -ErrorAction Stop)[0].Source}
   $item=Get-Item -LiteralPath $path -Force
   if($item.PSIsContainer){throw 'HISTORY_TOOL_REJECTED'}
   return $item.FullName
@@ -101,7 +101,7 @@ function Invoke-OwnedPg([string]$Name,[string[]]$Arguments,[string]$Label) {
     if($outCopy -and $errCopy){$null=[Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($outCopy,$errCopy),10000)}
     if($outStream){$outStream.Dispose()};if($errStream){$errStream.Dispose()};$process.Dispose()
   }
-  if((Get-Item -LiteralPath $stdout).Length -gt 524288){throw 'HISTORY_METADATA_TOO_LARGE'}
+  if((Get-Item -LiteralPath $stdout -Force).Length -gt 524288){throw 'HISTORY_METADATA_TOO_LARGE'}
   return [IO.File]::ReadAllText($stdout)
 }
 

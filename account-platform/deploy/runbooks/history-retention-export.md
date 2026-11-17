@@ -54,6 +54,8 @@ pwsh -NoProfile -File scripts/export-account-history.ps1 -Domain billing -Output
 导出成功仅输出 `ACCOUNT_HISTORY_EXPORT_COMPLETE`；校验成功仅输出
 `ACCOUNT_HISTORY_EXPORT_VERIFIED`。失败退出非零并输出固定失败标记，数据库错误细节
 只保存在受保护目录中。失败目录不能当作交接完成；查明后使用新的目录重试。
+自动化回归仅报告固定阶段、退出状态和白名单错误码；不会输出原始进程内容、
+错误记录或调用栈。排障时在受控目录中查看完整诊断，不要将其复制到 CI 日志。
 超时终止的是本次拥有的客户端进程树；数据库只读事务随连接退出而释放。
 
 `history.dump` 是 pg_dump 自身一致快照中的选定表数据；`manifest.json` 保存域、

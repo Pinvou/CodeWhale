@@ -61,8 +61,8 @@ func TestHistoryExportPublicDomainsPostgres(t *testing.T) {
 	// Make the custodial parent private before any archive bytes are written.
 	privacy := `param($p) if($IsWindows){$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;$a=[Security.AccessControl.DirectorySecurity]::new();$a.SetSecurityDescriptorSddlForm(('O:{0}D:P(A;OICI;FA;;;{0})(A;OICI;FA;;;SY)' -f $sid));Set-Acl -LiteralPath $p -AclObject $a}else{[IO.File]::SetUnixFileMode($p,[IO.UnixFileMode]448)}`
 	cmd := exec.CommandContext(ctx, shell, "-NoProfile", "-Command", "& {"+privacy+"} '"+strings.ReplaceAll(root, "'", "''")+"'")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("private fixture directory: %v %s", err, output)
+	if _, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("private fixture directory: %+v", historyExportDiagnosticFor("private-fixture", root, err))
 	}
 	script, err := filepath.Abs("../../../scripts/export-account-history.ps1")
 	if err != nil {
@@ -153,7 +153,7 @@ func TestHistoryExportPublicDomainsPostgres(t *testing.T) {
 			}
 			dest := filepath.Join(root, domain)
 			if output, e := run(dest, domain, false, "30"); e != nil || strings.TrimSpace(string(output)) != "ACCOUNT_HISTORY_EXPORT_COMPLETE" {
-				t.Fatalf("real read-only export failed: %v %s", e, output)
+				t.Fatalf("real read-only export failed: %+v", historyExportDiagnosticFor("export", dest, e))
 			}
 			manifestBytes, e := os.ReadFile(filepath.Join(dest, "manifest.json"))
 			if e != nil {
@@ -177,7 +177,7 @@ func TestHistoryExportPublicDomainsPostgres(t *testing.T) {
 			decode := exec.CommandContext(ctx, restore, "--file", decoded, filepath.Join(dest, "history.dump"))
 			decode.Env = env
 			if _, e := decode.CombinedOutput(); e != nil {
-				t.Fatal("real archive extraction failed")
+				t.Fatalf("real archive extraction failed: %+v", historyExportDiagnosticFor("archive", dest, e))
 			}
 			data, e := os.ReadFile(decoded)
 			if e != nil || !strings.Contains(string(data), event) || !strings.Contains(string(data), "preserve-original") || !strings.Contains(string(data), "COPY public.schema_migrations") {
@@ -187,13 +187,13 @@ func TestHistoryExportPublicDomainsPostgres(t *testing.T) {
 				t.Fatal("archive lost health observation evidence")
 			}
 			if output, e := run(dest, domain, true, "30"); e != nil || strings.TrimSpace(string(output)) != "ACCOUNT_HISTORY_EXPORT_VERIFIED" {
-				t.Fatalf("verify: %v %s", e, output)
+				t.Fatalf("verify: %+v", historyExportDiagnosticFor("verify", dest, e))
 			}
 			assertFailure := func(dest, selected string, verify bool, timeout string) {
 				t.Helper()
 				out, e := run(dest, selected, verify, timeout)
 				if e == nil || strings.Contains(string(out), "COMPLETE") || strings.Contains(string(out), "VERIFIED") || strings.Contains(string(out), "preserve-original") {
-					t.Fatalf("unsafe success or disclosure: %v %s", e, out)
+					t.Fatalf("unsafe success or disclosure: %+v", historyExportDiagnosticFor("rejected-input", dest, e))
 				}
 			}
 			assertFailure(dest, domain, false, "30") // Never overwrite an accepted archive.
@@ -235,14 +235,14 @@ func TestHistoryExportPublicDomainsPostgres(t *testing.T) {
 				case result.err != nil && strings.TrimSpace(string(result.output)) == "ACCOUNT_HISTORY_EXPORT_FAILED":
 					rejected++
 				default:
-					t.Fatalf("unexpected concurrent CLI result: %v %s", result.err, result.output)
+					t.Fatalf("unexpected concurrent CLI result: %+v", historyExportDiagnosticFor("race", raceDestination, result.err))
 				}
 			}
 			if accepted != 1 || rejected != 1 {
 				t.Fatal("concurrent exporters did not have exactly one destination owner")
 			}
-			if output, e := run(raceDestination, domain, true, "30"); e != nil {
-				t.Fatalf("losing CLI damaged accepted output: %v %s", e, output)
+			if _, e := run(raceDestination, domain, true, "30"); e != nil {
+				t.Fatalf("losing CLI damaged accepted output: %+v", historyExportDiagnosticFor("race-verify", raceDestination, e))
 			}
 			files, e := filepath.Glob(filepath.Join(raceDestination, ".failure-*.txt"))
 			if e != nil || len(files) != 0 {
@@ -281,8 +281,8 @@ func TestHistoryExportPublicDomainsPostgres(t *testing.T) {
 			if e = os.WriteFile(archive, original, 0600); e != nil {
 				t.Fatal(e)
 			}
-			if output, e := run(dest, domain, true, "30"); e != nil {
-				t.Fatalf("next verification after corrupt input: %v %s", e, output)
+			if _, e := run(dest, domain, true, "30"); e != nil {
+				t.Fatalf("next verification after corrupt input: %+v", historyExportDiagnosticFor("recovery", dest, e))
 			}
 			if _, e = operator.Exec(ctx, `ALTER TABLE public.outbox_events ENABLE ROW LEVEL SECURITY`); e != nil {
 				t.Fatal(e)
@@ -312,8 +312,9 @@ func TestHistoryExportPublicDomainsPostgres(t *testing.T) {
 			if e = tx.Rollback(ctx); e != nil {
 				t.Fatal(e)
 			}
-			if output, e := run(filepath.Join(root, domain+"-next"), domain, false, "30"); e != nil {
-				t.Fatalf("next export after dependency recovery: %v %s", e, output)
+			nextDestination := filepath.Join(root, domain+"-next")
+			if _, e := run(nextDestination, domain, false, "30"); e != nil {
+				t.Fatalf("next export after dependency recovery: %+v", historyExportDiagnosticFor("recovery", nextDestination, e))
 			}
 			var unchanged int
 			if e = operator.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE event_id=$1 AND payload->>'evidence'='preserve-original' AND published_at IS NULL AND attempts=0`, event).Scan(&unchanged); e != nil || unchanged != 1 {
