@@ -539,7 +539,7 @@ export function clampPetDragToBounds(state, bounds = state.bounds) {
 }
 
 // Proportional resize-handle math for the pet window: dragging the grip
-// scales it between 0.5x and 1.2x, anchored at the window's top-left in
+// scales it between 0.5x and 1.2x, anchored at the pet role slot's top-left in
 // physical pixels. Pure functions, self-contained; consumed by the resize
 // grip in PetWindow.jsx.
 const MIN_SCALE = 0.5;
