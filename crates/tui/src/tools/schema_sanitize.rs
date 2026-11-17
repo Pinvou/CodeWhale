@@ -347,10 +347,12 @@ struct PairAdmission<'a> {
     enclosing: SchemaView<'a>,
     /// Whether the enclosing schema constrains instances through nothing
     /// beyond `type`/`properties`/`required` (own-level composition aside):
-    /// the broad-matcher arm's omission witness is only guaranteed
-    /// root-valid under that bounded shape — a `minProperties` floor with
-    /// `additionalProperties: false` can make every omission impossible
-    /// while the keys stay otherwise ordinary (review 4580299113).
+    /// every omission-witness arm (1–4) runs behind this gate, because a
+    /// `minProperties` floor with `additionalProperties: false` can make
+    /// every omission impossible while the keys stay otherwise ordinary
+    /// (review 4580299113), and a sibling composition on the container is
+    /// a same-instance assertion the bounded witness never reads (review
+    /// 5940770432).
     enclosing_omission_clean: bool,
     /// Every branch of the union under judgment. The pin arm's witness
     /// must fail not only the pair's right branch but every OTHER branch
@@ -800,7 +802,20 @@ impl<'a> PairAdmission<'a> {
         // branch) while carrying the left branch's group and everything
         // the enclosing schema requires. This also kills the review
         // 5814012140 form: two different groups the root requires in full.
-        if self.witness_provable(left, left_group, &self.enclosing)
+        //
+        // The enclosing bound is the same `enclosing_omission_clean` gate
+        // Arms 3/4 already run behind: a sibling composition on the object
+        // holding the judged union is a same-instance assertion the
+        // bounded witness never reads (review 5940770432). A raw-MCP `not`
+        // predicate there declares its `required` with no local
+        // `properties`, so the recursive prune guts it into `not:{}` — an
+        // alternative that rejects EVERY instance, the constructed
+        // omission witness included — while the witness proof only sees
+        // the container's `required`/`properties` entries and would call
+        // the pair discriminated. The union then takes the flattening
+        // fallback, whose merged root keeps the original instance usable.
+        if self.enclosing_omission_clean
+            && self.witness_provable(left, left_group, &self.enclosing)
             && right_group
                 .iter()
                 .any(|name| !left_group.contains(name) && !self.enclosing.required.contains(name))
@@ -831,6 +846,10 @@ impl<'a> PairAdmission<'a> {
             // fallback (fail closed).
             if let (Some(left_set), Some(right_set)) =
                 (pinned_value_set(left_entry), pinned_value_set(right_entry))
+                // The same enclosing bound as Arm 1 (review 5940770432):
+                // a sibling composition on the container could reject the
+                // pinned witness just as it rejects the omission witness.
+                && self.enclosing_omission_clean
                 && self.witness_provable(left, left_group, &self.enclosing)
                 && left_set.iter().any(|candidate| {
                     right_set
@@ -4056,7 +4075,12 @@ mod tests {
         // holds for no instance while the union still ships unflattened.
         // The raw registered-tool path (no prune needed: both branches
         // declare the fields they require) must take the flattening
-        // fallback, keeping the original witness valid.
+        // fallback. The pristine union itself admits nothing here, so the
+        // final assertion checks FALLBACK USABILITY — the merged schema
+        // keeps the instance valid — not original-input preservation
+        // (review 5940770432's P3: only the transformed schema is
+        // compiled; the instance was never valid against the pristine
+        // union).
         let mut schema = json!({
             "type": "object",
             "properties": {
@@ -4102,7 +4126,120 @@ mod tests {
             .expect("the flattened schema must compile");
         assert!(
             validator.is_valid(&json!({"a": "x", "b": "y"})),
-            "a valid instance of the original union must stay valid: {schema}"
+            "the flattening fallback must keep the instance usable: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_union_beside_a_sibling_anyof_the_prune_guts() {
+        // Review 5940770432: the object holding the judged union may also
+        // carry a sibling composition. A raw-MCP `not` predicate declares
+        // its `required` with no local `properties`, so the recursive prune
+        // guts `not:{required:["z"]}` into `not:{}` — an alternative that
+        // rejects EVERY instance. Both sibling alternatives then reject
+        // every instance the inner oneOf's omission witness would carry,
+        // while the bounded witness proof only reads the container's
+        // `required`/`properties` entries. The container's own-level
+        // `anyOf` is an unproven same-instance assertion, so the inner
+        // union stays unproven and the whole root takes the flattening
+        // fallback, whose merged root keeps the original instance usable:
+        // the pristine root here accepts `{"a":"x"}`, and the gutted
+        // pass-through would have shipped a schema admitting nothing.
+        let branch = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["a"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"b": {"type": "string"}},
+                    "required": ["b"]
+                }
+            ],
+            "anyOf": [
+                {"not": {"required": ["z"]}},
+                {"not": {"required": ["w"]}}
+            ]
+        });
+        let mut schema = json!({
+            "type": "object",
+            "anyOf": [branch.clone(), branch]
+        });
+
+        let _ = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "a union beside an unproven sibling composition must not reach \
+             the wire: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"a": "x"})),
+            "the pristine root accepts this instance, so the flattened \
+             fallback must keep it usable: {schema}"
+        );
+    }
+
+    #[test]
+    fn xai_sanitize_flattens_union_whose_pins_a_sibling_anyof_voids() {
+        // Review 5940770432's pin-arm form: the gutted sibling composition
+        // voids the pin arm's witness the same way it voids the omission
+        // witness — the pinned value the proof constructs is an instance
+        // the `not:{}` alternatives reject, so the pair stays unproven and
+        // the root takes the flattening fallback.
+        let branch = json!({
+            "type": "object",
+            "properties": {"kind": {"type": "string"}},
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": "x"}},
+                    "required": ["kind"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"kind": {"const": "y"}},
+                    "required": ["kind"]
+                }
+            ],
+            "anyOf": [
+                {"not": {"required": ["z"]}},
+                {"not": {"required": ["w"]}}
+            ]
+        });
+        let mut schema = json!({
+            "type": "object",
+            "anyOf": [branch.clone(), branch]
+        });
+
+        let _ = sanitize_for_xai_parameters(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(
+            schema.get("oneOf").is_none() && schema.get("anyOf").is_none(),
+            "a pin pair whose witness an unproven sibling composition \
+             rejects must not reach the wire: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the flattened schema must compile");
+        assert!(
+            validator.is_valid(&json!({"kind": "x"})),
+            "the pristine root accepts this pin, so the flattened fallback \
+             must keep it usable: {schema}"
         );
     }
 
