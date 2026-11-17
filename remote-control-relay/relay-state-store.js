@@ -619,6 +619,16 @@ export class RelayStateStore {
         }
         return;
       }
+      if (primary.kind === "missing" && backup.kind === "valid" && !backup.migrated
+        && backup.state.revision === "0" && Object.keys(backup.state.namespaces).length === 0) {
+        // Only the current writer's exact empty bootstrap has no preceding
+        // commit and no authorization to activate. Every namespace CAS advances
+        // the store revision. Never generalize this to a staged normal commit,
+        // an older-format migration, or an empty later revision.
+        this.#state = backup.state;
+        await this.#legacyAliasGuardedWrite(this.#path, serializeState(backup.state, this.#maxBytes));
+        return;
+      }
       if (primary.kind === "invalid" && backup.kind === "valid" && !backup.migrated) {
         this.#state = backup.state;
         await this.#legacyAliasGuardedWrite(this.#path, serializeState(backup.state, this.#maxBytes));
