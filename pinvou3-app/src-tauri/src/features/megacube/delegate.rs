@@ -384,7 +384,19 @@ pub fn purge(
         .and_then(|t| t.as_str())
         .ok_or_else(|| "管理面应答缺 task_id".to_string())?;
     wait_task(&client, task_id, log, cancelled)?;
-    let _ = std::fs::remove_file(ownership_path(card_id)?);
+    // r5 台账 #2：归属记录 unlink 失败不能吞——管理面已注销而本地记录残留，
+    // 同卡 id 的后续操作会永久 ownership_conflict，而提示的补救（恢复设备
+    // 记录）在注销后已不可能。失败上抛并给出确切路径与处置方法；调用方
+    // 保留商店记录，用户清理该文件后可重试。文件本就不在视为幂等成功。
+    let ownership = ownership_path(card_id)?;
+    if let Err(error) = std::fs::remove_file(&ownership) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "管理面已注销，但本机归属记录清理失败（{error}）。请删除 {} 后重试删除。",
+                ownership.display()
+            ));
+        }
+    }
     Ok(DelegateOutcome::Purged)
 }
 
