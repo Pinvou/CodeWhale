@@ -50,8 +50,10 @@ type PaymentAnomalyFilter struct {
 }
 
 type PaymentAnomalyDetail struct {
-	Case   PaymentAnomalyCase      `json:"case"`
-	Events []ManualReviewCaseEvent `json:"events"`
+	Case                        PaymentAnomalyCase                  `json:"case"`
+	Events                      []ManualReviewCaseEvent             `json:"events"`
+	FinancialCompletionProposal *PaymentFinancialCompletionProposal `json:"financial_completion_proposal,omitempty"`
+	FinancialCompletionProofs   []PaymentFinancialCompletionFacts   `json:"financial_completion_proofs,omitempty"`
 }
 
 type paymentAnomalyReference struct {
@@ -164,7 +166,31 @@ func (r *PostgresRepository) PaymentAnomalyDetail(ctx context.Context, caseID uu
 		}
 		eventsList = append(eventsList, event)
 	}
-	return PaymentAnomalyDetail{Case: item, Events: eventsList}, rows.Err()
+	if err := rows.Err(); err != nil {
+		return PaymentAnomalyDetail{}, err
+	}
+	rows.Close()
+	detail := PaymentAnomalyDetail{Case: item, Events: eventsList}
+	if paymentCompletionEligible(item) {
+		proofs, err := r.paymentCompletionCandidates(ctx, item.ID)
+		if err != nil {
+			return PaymentAnomalyDetail{}, err
+		}
+		detail.FinancialCompletionProofs = proofs
+		var proposalID uuid.UUID
+		err = r.pool.QueryRow(ctx, `SELECT id FROM payment_anomaly_commands WHERE payment_anomaly_case_id=$1 AND action=$2 ORDER BY created_at DESC,id DESC LIMIT 1`, caseID, paymentCompletionPropose).Scan(&proposalID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return PaymentAnomalyDetail{}, err
+		}
+		if err == nil {
+			proposal, err := loadPaymentCompletionProposal(ctx, r.pool, caseID, proposalID)
+			if err != nil {
+				return PaymentAnomalyDetail{}, err
+			}
+			detail.FinancialCompletionProposal = &proposal
+		}
+	}
+	return detail, nil
 }
 
 func paymentAnomalyCommandHash(action, reason string) string {

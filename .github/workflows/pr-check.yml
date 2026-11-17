@@ -351,6 +351,8 @@ jobs:
               - '.gitmodules'
               - '.github/workflows/pr-check.yml'
             rust_dependencies:
+              - 'scripts/guard-chrono-maintenance-exception.py'
+              - 'scripts/tests/test_chrono_maintenance_exception.py'
               - 'scripts/guard-webpki-roots-exception.py'
               - 'scripts/tests/test_webpki_roots_exception.py'
               - '**/Cargo.toml'
@@ -511,6 +513,8 @@ jobs:
               - 'pinvou-knowledge/deploy/**'
               - '.github/workflows/pr-check.yml'
             knowledge_dependencies:
+              - 'scripts/guard-chrono-maintenance-exception.py'
+              - 'scripts/tests/test_chrono_maintenance_exception.py'
               - 'scripts/guard-webpki-roots-exception.py'
               - 'scripts/tests/test_webpki_roots_exception.py'
               - 'pinvou-knowledge/Cargo.toml'
@@ -1167,6 +1171,9 @@ jobs:
 
       - name: Gate policy test suite (scripts/tests)
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
+      - name: Expiring chrono maintenance exception
+        run: python3 scripts/guard-chrono-maintenance-exception.py
 
       # Keep the other fast checks independent of the changes job. This filter
       # runs only after them and uses the same PR / merge-group diff semantics.
@@ -2491,6 +2498,7 @@ jobs:
         working-directory: .
         run: |
           python3 scripts/guard-webpki-roots-exception.py
+          python3 scripts/guard-chrono-maintenance-exception.py
           cargo deny --locked --manifest-path pinvou-knowledge/Cargo.toml --config pinvou3-app/src-tauri/deny.toml check advisories licenses bans sources
 
   # clippy/fmt/deny 独立 job:与 rust-test 并行,各自独立 cache。
@@ -2732,6 +2740,7 @@ jobs:
         working-directory: pinvou3-app/src-tauri
         run: |
           python3 ../../scripts/guard-webpki-roots-exception.py
+          python3 ../../scripts/guard-chrono-maintenance-exception.py
           cargo deny --locked check advisories licenses bans sources
 
   rust-test:
