@@ -2373,7 +2373,7 @@ test("missing primary never promotes staged enrollment and preserves prior commi
   assert.deepEqual(await fs.readFile(`${statePath}.bak`), staged);
   // Test-only offline restoration has exact evidence of the last successful
   // primary. Production never chooses or promotes this staged backup.
-  await fs.writeFile(statePath, committed);
+  await fs.writeFile(statePath, committed, { mode: 0o600 });
   await fs.writeFile(`${statePath}.bak`, committed);
   const restored = await openStateStore(statePath);
   resourcesFor(t).stores.push(restored);
