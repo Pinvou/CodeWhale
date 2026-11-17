@@ -10,6 +10,8 @@ node remote-control-relay/scripts/enrollment-migrate.js --capacity
 
 响应具有独立 v1 closed schema 和 HMAC domain，绑定 nonce、store binding、gateway instance、检查时间，以及相同的 store revision。`storage.serialized_bytes` 是当前共享状态的真实持久编码字节数（包括末尾换行），`max_bytes` 是该 writer 的配置上限；默认共享预算仍为 16 MiB，适用于所有 namespace。`ledger` 仅提供总行数、pending / succeeded / failed 行数、原固定 100000 行上限和 revision。它不公开 request ID、endpoint、路径、digest、凭证或原始请求参数。
 
+两个容量预算均采用默认值时（包括显式配置默认值），store binding 保持已发布的 v1 字节兼容。任一预算改为非默认值时，绑定同时包含条目和字节预算；查询端与运行中 Relay 必须使用相同配置，否则拒绝接受该实例的证明。匿名注册策略及保留密钥仍独立参与绑定。
+
 观测是当前快照，不是下一次 CAS 的空间预留。其他 namespace 和并发写仍会消耗预算，达到既有行数或共享字节上限时拒绝新增请求。既有 ID 仍先按原参数摘要和状态验证：pending 可恢复，terminal 返回既有结果，参数冲突仍拒绝。观测不推进命令、不改 revision、不重新派发旧代际任务。
 
 当前安全合同保留所有历史 request ID 与终态证据；restore/import 不能擦除该账本。没有自动 GC、保留期限、额外硬上限或固定百分比告警。操作方可依据这些数值接入现有监控，容量逼近时应保留证据并规划已有配置支持的扩容，不能删除 terminal 行来复用旧 ID。

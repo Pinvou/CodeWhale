@@ -843,6 +843,24 @@ impl PermissionAuthority {
             .ok_or_else(|| error("permission_unknown"))
     }
 
+    /// Read a retained fact for the exact original lease and task. This does
+    /// not expire, renew, decide, or adopt an approval for another turn.
+    pub(crate) fn view_for_binding(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        request_id: &str,
+    ) -> Result<PermissionView> {
+        let pending = self.pending.lock();
+        let entry = pending
+            .get(request_id)
+            .ok_or_else(|| error("permission_unknown"))?;
+        if !entry.binding.matches(lease, task_id, request_id) {
+            return Err(error("permission_binding_stale"));
+        }
+        Ok(Self::view_locked(entry))
+    }
+
     pub(crate) fn pending_for_task(&self, task_id: &str) -> Vec<PermissionView> {
         self.sweep_expired(self.now_ms());
         let pending = self.pending.lock();
@@ -1009,6 +1027,57 @@ fn bounded_reason(reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_projection_view_requires_all_binding_fields_without_expiring_or_reading_clock() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let authority = PermissionAuthority::with_clock(std::sync::Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            100_000
+        }));
+        let live = lease();
+        let view = authority
+            .request(&live, "task-0001", request(60_000), 1_000)
+            .unwrap();
+        assert_eq!(
+            authority
+                .view_for_binding(&live, "task-0001", &view.permission_request_id)
+                .unwrap(),
+            view
+        );
+        for field in 0..5 {
+            let mut foreign = live.clone();
+            match field {
+                0 => foreign.connection_id.push_str("-old"),
+                1 => foreign.controller_lease_id.push_str("-old"),
+                2 => foreign.lease_epoch = "2".into(),
+                3 => foreign.relay_epoch.push_str("-old"),
+                _ => foreign.remote_control_generation.push_str("-old"),
+            }
+            assert_eq!(
+                authority
+                    .view_for_binding(&foreign, "task-0001", &view.permission_request_id)
+                    .unwrap_err()
+                    .code,
+                "permission_binding_stale"
+            );
+        }
+        assert_eq!(
+            authority
+                .view_for_binding(&live, "other-task", &view.permission_request_id)
+                .unwrap_err()
+                .code,
+            "permission_binding_stale"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(authority.view(&view.permission_request_id).unwrap(), view);
+        authority.sweep_expired(100_000);
+        assert_eq!(
+            authority.view(&view.permission_request_id).unwrap().state,
+            "expired"
+        );
+    }
 
     #[test]
     fn production_permission_clock_uses_the_shared_domain() {

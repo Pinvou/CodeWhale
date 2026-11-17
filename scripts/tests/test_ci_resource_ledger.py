@@ -14,6 +14,17 @@ spec.loader.exec_module(ledger)
 
 
 class LedgerTests(unittest.TestCase):
+    def test_worker_receipts_require_confirmed_retirement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'worker.json'
+            for state, failed, clean in [('created', False, False), ('unconfirmed', True, False), ('released', True, False), ('released', False, True)]:
+                with self.subTest(state=state, cleanup_failed=failed):
+                    path.write_text(json.dumps(dict(schema=1, kind='worker', state=state, cleanup_failed=failed)))
+                    result = ledger.inspect([root])
+                    self.assertEqual(result['receipts'], 1)
+                    self.assertEqual(result['clean'], clean)
+
     def test_initialization_keeps_an_artifact_before_any_test_starts(self):
         with tempfile.TemporaryDirectory() as directory:
             envfile = Path(directory) / 'github-env'

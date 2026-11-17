@@ -5301,6 +5301,7 @@ python3() { fixture_mock python3 "$@"; }
             windows_codex_filter,
         )
         self.assertIn("browser_wrapper_lazy.test.mjs", windows_codex_filter)
+        self.assertIn("browser-wrapper-host-control.test.mjs", windows_codex_filter)
 
         windows_job = self.pr_workflow.split(
             "\n  windows-codex-runtime-test:", maxsplit=1
@@ -5309,7 +5310,9 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn("runs-on: windows-latest", windows_job)
         self.assertIn("Windows browser wrapper lifecycle regression", windows_job)
         self.assertIn(
-            "node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs",
+            "node --test --test-concurrency=1 "
+            "pinvou3-app/tests/browser-wrapper-host-control.test.mjs "
+            "pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs",
             windows_job,
         )
         self.assertIn(

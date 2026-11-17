@@ -4,14 +4,11 @@ use crate::features::codex_acp::RemoteOwnedPermission;
 use crate::features::remote_control::controller::task::TaskLeaseBinding;
 
 use super::{
-    AcpPool, ControllerTaskEventSink, JournalKind, PermissionAuthority, REMOTE_PERMISSION_TTL_MS,
+    AcpPool, ControllerTaskEventSink, PermissionAuthority, REMOTE_PERMISSION_TTL_MS,
     permission_mint_projection,
 };
 use crate::features::remote_control::controller::permission::PermissionView;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 // This seam keeps the polling state machine independent of Tauri. Production
 // still enters the pool's runtime/turn-fenced operations unchanged.
@@ -69,8 +66,7 @@ pub(super) async fn sync(
     authority: &PermissionAuthority,
     tasks: &RemoteTaskService,
     owner: &RemotePermissionOwner,
-    registered: &mut HashMap<String, String>,
-    resolved: &mut HashSet<String>,
+    journal: &mut super::PermissionJournal,
     events: &Arc<dyn ControllerTaskEventSink>,
 ) -> Result<(), String> {
     let pending = pool.pending_remote_permissions(owner).await;
@@ -78,12 +74,12 @@ pub(super) async fn sync(
         crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis();
     authority.sweep_expired(authority.now_ms());
     for request in pending {
-        if let Some(approval_id) = registered.get(&request.callback_id) {
+        if let Some(approval_id) = journal.approval(&request.callback_id) {
             if request.approval_id.as_deref() != Some(approval_id) {
                 return Err("permission_binding_stale".to_owned());
             }
             let view = authority
-                .view(approval_id)
+                .view_for_binding(&owner.lease, &owner.task_id, approval_id)
                 .map_err(|error| error.code.to_owned())?;
             let decision = match view.state.as_str() {
                 "allowed" => Some(true),
@@ -110,21 +106,16 @@ pub(super) async fn sync(
             .mint_remote_permission(
                 owner,
                 &request.callback_id,
-                authority,
+                &authority,
                 &tasks.ledger(),
                 REMOTE_PERMISSION_TTL_MS,
             )
             .await;
-        // The authority admits one active approval per task. Keep other
-        // callbacks queued until it resolves (or the journal gate opens),
-        // and retry at the next bounded poll without retiring the runtime.
+        // No approval is minted during the brief journal resource gate.
+        // Retry at the next bounded poll without retiring this runtime.
         let Some(view) = permission_mint_projection(minted)? else {
             continue;
         };
-        registered.insert(
-            request.callback_id.clone(),
-            view.permission_request_id.clone(),
-        );
         let record = tasks
             .status(&owner.task_id)
             .map_err(|error| error.code.to_owned())?;
@@ -144,50 +135,17 @@ pub(super) async fn sync(
         } else if record.state != RemoteTaskState::WaitingPermission {
             return Err("task_state_conflict".to_owned());
         }
-        events.emit_journal(
-            JournalKind::Permission,
-            &owner.session_id,
-            Some(&owner.task_id),
-            serde_json::json!({
-                "status": "pending",
-                "operation_type": view.operation_type,
-                "risk_level": view.risk_level,
-                "target_scope": view.target_scope,
-            }),
-        );
+        journal.register(&request.callback_id, &view, events.as_ref())?;
     }
 
-    // Responses above can remove callbacks, while this poll can also mint
-    // the next approval. Resume only after the entire exact owner's set is
-    // empty, rather than when any one registered callback disappears.
+    // Responses in this very poll can remove entries. Observe the actual
+    // pending set again rather than requiring another 200ms iteration.
     let remaining = pool.pending_remote_permissions(owner).await;
     let current = remaining
         .iter()
         .map(|request| request.callback_id.clone())
         .collect::<HashSet<_>>();
-    let mut resolved_this_poll = false;
-    for (callback_id, request_id) in registered.iter().filter(|(id, _)| !current.contains(*id)) {
-        if !resolved.insert(callback_id.clone()) {
-            continue;
-        }
-        resolved_this_poll = true;
-        let view = authority
-            .view(request_id)
-            .map_err(|error| error.code.to_owned())?;
-        events.emit_journal(
-            JournalKind::Permission,
-            &owner.session_id,
-            Some(&owner.task_id),
-            serde_json::json!({
-                "status": view.state,
-                "operation_type": view.operation_type,
-                "risk_level": view.risk_level,
-                "target_scope": view.target_scope,
-                "decision": view.decision,
-            }),
-        );
-    }
-    if resolved_this_poll {
+    if journal.project_missing(authority, tasks, events.as_ref(), &current)? > 0 {
         resume_when_clear(tasks, owner, &remaining)?;
     }
     Ok(())
@@ -220,5 +178,7 @@ pub(super) fn resume_when_clear(
     Ok(())
 }
 
+#[cfg(test)]
+use std::collections::HashMap;
 #[cfg(test)]
 mod tests;

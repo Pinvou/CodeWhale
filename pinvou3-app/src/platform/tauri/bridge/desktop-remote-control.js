@@ -1072,6 +1072,26 @@
       }).catch(function (failure) { throw asBoundedError(failure); });
     }
 
+    function recoverRemoteProxyFile(quarantineConfirmed) {
+      ensureAvailable();
+      const selected = current().remoteProxyHistory;
+      return invoke("desktop_remote_proxy_recover", { quarantineConfirmed: quarantineConfirmed === true })
+        .then(function (location) {
+          if (location !== null && (typeof location !== "string" || location.length === 0)) {
+            throw asBoundedError("remote_proxy_recovery_failed");
+          }
+          ++proxyListIntent;
+          ++proxyReadEpoch;
+          proxyReadIntents = Object.create(null);
+          if (location !== null && selected && !selected.archived
+            && current().remoteProxyHistory === selected) {
+            publish(logic.hideRemoteProxyHistory(current(), selected.localSessionId));
+          }
+          listRemoteProxyHistory().catch(function () {});
+          return location;
+        }).catch(function (failure) { throw asBoundedError(failure); });
+    }
+
     function listRemoteProxyArchiveCandidates() {
       ensureAvailable();
       return invoke("desktop_remote_proxy_archive_candidates", {})
@@ -1576,6 +1596,7 @@
       listRemoteProxyArchives: listRemoteProxyArchives,
       listRemoteProxyArchiveCandidates: listRemoteProxyArchiveCandidates,
       getRemoteProxyLoadStatus: getRemoteProxyLoadStatus,
+      recoverRemoteProxyFile: recoverRemoteProxyFile,
       reserveRemoteTask: reserveRemoteTask,
       commitRemoteTask: commitRemoteTask,
       cancelRemoteTask: cancelRemoteTask,

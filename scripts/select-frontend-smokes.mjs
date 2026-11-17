@@ -8,6 +8,7 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("npm", "test:bridge-smoke"),
   command("npm", "test:failure-diagnostics-ui"),
   command("npm", "test:conversation-virtualization"),
+  command("npm", "test:streaming-rich-text"),
   command("npm", "test:code-viewer-ui"),
   command("npm", "test:code-viewer-diff-ui"),
   command("npm", "test:workspace-panel-ui"),

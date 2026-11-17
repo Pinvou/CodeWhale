@@ -35,6 +35,14 @@ const BUSY_GRACE: Duration = Duration::from_secs(5);
 const MAX_AUTHORIZED_REFS: usize = 64;
 const REMOTE_PERMISSION_TTL_MS: u64 = 5 * 60 * 1000;
 
+#[path = "remote_turn/permission_journal.rs"]
+mod permission_journal;
+use permission_journal::PermissionJournal;
+
+#[cfg(test)]
+#[path = "remote_turn/permission_journal_tests.rs"]
+mod permission_journal_tests;
+
 /// Tauri-independent boundary for turning files created by a successful ACP
 /// turn into remote artifacts. Implementations must copy eligible project
 /// files into B's private session storage before indexing them; the authorized
@@ -573,8 +581,7 @@ impl AcpPoolCodeTurnPort {
     async fn sync_remote_permissions(
         &self,
         owner: &RemotePermissionOwner,
-        registered: &mut HashMap<String, String>,
-        resolved: &mut HashSet<String>,
+        journal: &mut PermissionJournal,
         events: &Arc<dyn ControllerTaskEventSink>,
     ) -> std::result::Result<(), String> {
         permission_waiting::sync(
@@ -582,8 +589,7 @@ impl AcpPoolCodeTurnPort {
             &self.permission_authority,
             &self.tasks,
             owner,
-            registered,
-            resolved,
+            journal,
             events,
         )
         .await
@@ -769,6 +775,9 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
             task_id,
             reservation.turn_id(),
         );
+        // Keep registered IDs beyond the polling future. A resolved ACP entry
+        // may disappear immediately before its turn-completed notification.
+        let mut permissions = PermissionJournal::new(owner.clone());
         let mut result = budget
             .run(&cancel, async {
                 reservation
@@ -783,14 +792,12 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
                             .to_owned()
                         }
                     })?;
-                let mut registered = HashMap::new();
-                let mut resolved = HashSet::new();
                 let mut missing_terminal_since = None;
                 loop {
                     if turn_relay.state.lock().terminal.is_some() {
                         return terminal_result(&turn_relay.state.lock());
                     }
-                    self.sync_remote_permissions(&owner, &mut registered, &mut resolved, &events)
+                    self.sync_remote_permissions(&owner, &mut permissions, &events)
                         .await?;
                     if reservation.is_active() {
                         missing_terminal_since = None;
@@ -807,6 +814,13 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
                 }
             })
             .await;
+        result = project_permission_result(
+            result,
+            &mut permissions,
+            &self.permission_authority,
+            &self.tasks,
+            events.as_ref(),
+        );
         if let Err(error) = &result {
             reservation.retire(error).await;
         }
@@ -852,12 +866,6 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
             })
             .await;
         }
-        let dangling = budget
-            .run(&cancel, async {
-                Ok(self.pool.pending_remote_permissions(&owner).await)
-            })
-            .await
-            .unwrap_or_default();
         // A late old port must not deny a reused task ID's new approvals.
         // If cleanup already owns the gate, its terminal hook supplies this
         // denial; a missing/stale record grants no authority over a new owner.
@@ -871,22 +879,15 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
                         self.permission_authority.now_ms(),
                     )
                 });
-        if !dangling.is_empty() {
-            for request in dangling {
-                events.emit_journal(
-                    JournalKind::Permission,
-                    &owner.session_id,
-                    Some(&owner.task_id),
-                    serde_json::json!({
-                        "status": "denied",
-                        "operation_type": request.projection.operation_type,
-                        "risk_level": request.projection.risk_level,
-                        "target_scope": request.projection.target_scope,
-                        "decision": "deny",
-                    }),
-                );
-            }
-        }
+        // Read registered authoritative results, including already-removed ACP
+        // callbacks. Unregistered prompts had no pending journal to resolve.
+        result = project_permission_result(
+            result,
+            &mut permissions,
+            &self.permission_authority,
+            &self.tasks,
+            events.as_ref(),
+        );
         if result.is_ok() {
             result = budget.checkpoint(&cancel);
         }
@@ -895,6 +896,19 @@ impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
         }
         settle_turn_result(result, budget, &cancel, reservation.release()).await
     }
+}
+
+fn project_permission_result(
+    result: Result<(), String>,
+    permissions: &mut PermissionJournal,
+    authority: &PermissionAuthority,
+    tasks: &RemoteTaskService,
+    events: &dyn ControllerTaskEventSink,
+) -> Result<(), String> {
+    let projected = permissions.project_all(authority, tasks, events);
+    // Projection must run even on cancellation/deadline failure, while its
+    // failure must never replace the original execution error.
+    result.and(projected.map(|_| ()))
 }
 
 /// Cleanup ownership survives its bounded wait, but that wait grants no new

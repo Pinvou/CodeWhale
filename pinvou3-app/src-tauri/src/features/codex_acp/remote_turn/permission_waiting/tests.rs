@@ -117,7 +117,7 @@ struct Fixture {
     clock: Arc<AtomicU64>,
     pool: Pool,
     registered: HashMap<String, String>,
-    resolved: HashSet<String>,
+    journal: super::super::PermissionJournal,
 }
 impl Fixture {
     fn new() -> Self {
@@ -159,24 +159,29 @@ impl Fixture {
                     owner.clone(),
                 )])),
             },
+            journal: super::super::PermissionJournal::new(owner.clone()),
             owner,
             clock,
             registered: HashMap::new(),
-            resolved: HashSet::new(),
         }
     }
     async fn tick(&mut self) -> Result<(), String> {
         let events: Arc<dyn ControllerTaskEventSink> = Arc::new(Events);
-        sync(
+        let result = sync(
             &self.pool,
             &self.authority,
             &self.tasks,
             &self.owner,
-            &mut self.registered,
-            &mut self.resolved,
+            &mut self.journal,
             &events,
         )
-        .await
+        .await;
+        for request in self.pool.pending_remote_permissions(&self.owner).await {
+            if let Some(approval) = request.approval_id {
+                self.registered.insert(request.callback_id, approval);
+            }
+        }
+        result
     }
     fn state(&self) -> RemoteTaskState {
         self.tasks.status(&self.owner.task_id).unwrap().state
