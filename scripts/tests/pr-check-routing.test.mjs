@@ -23,6 +23,31 @@ const titleWorkflow = await readFile(
   "utf8",
 );
 
+test("browser wrapper helper-only changes select both native runtime gates", () => {
+  const helpers = [
+    "pinvou3-app/tests/helpers/ndjson-child-driver.mjs",
+    "pinvou3-app/tests/helpers/browser-wrapper-fixture-cleanup.mjs",
+    "pinvou3-app/tests/helpers/browser-wrapper-held-result.mjs",
+    "pinvou3-app/tests/helpers/browser-wrapper-host-fixture.mjs",
+  ];
+  for (const gate of ["windows_codex", "acp_runtime"]) {
+    // Comments inside a filter must not hide later patterns from these
+    // positive/negative assertions.
+    const paths = filterPaths(workflow.replace(/^ {14}#.*\r?\n/gm, ""), gate);
+    const selected = file => paths.some(pattern => !pattern.startsWith("!") && matchesGlob(file, pattern))
+      && !paths.some(pattern => pattern.startsWith("!") && matchesGlob(file, pattern.slice(1)));
+    for (const helper of helpers) assert.equal(selected(helper), true, `${gate}: ${helper}`);
+    for (const unrelated of ["docs/unrelated.md", "pinvou3-app/tests/helpers/unrelated-fixture.mjs"]) {
+      assert.equal(selected(unrelated), false, `${gate}: ${unrelated}`);
+    }
+    for (const helper of helpers) {
+      const narrowed = paths.filter(pattern => pattern !== helper);
+      assert.equal(narrowed.some(pattern => !pattern.startsWith("!") && matchesGlob(helper, pattern)), false,
+        `${gate} negative must detect removal of ${helper}`);
+    }
+  }
+});
+
 // Extract the path list of a named dorny/paths-filter output.
 function filterPaths(text, name) {
   const section = text.match(
