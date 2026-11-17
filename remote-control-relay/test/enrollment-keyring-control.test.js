@@ -102,3 +102,25 @@ test("coverage binding distinguishes enabled anonymous registration and preserve
   assert.notEqual(enabled, original);
   assert.equal(await binding({ ...env, PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION: "1" }), enabled);
 });
+
+test("coverage binding preserves default capacity and binds every custom budget", async () => {
+  for (const selfRegistration of ["false", "true"]) {
+    const env = { ...environment([]), PINVOU_REMOTE_ENROLLMENT_SELF_REGISTRATION: selfRegistration };
+    const original = await binding(env);
+    const defaults = { PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES: "100000",
+      PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES: "16777216" };
+    for (const explicit of [{}, { PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES: "100000" },
+      { PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES: "16777216" }, defaults]) {
+      assert.equal(await binding({ ...env, ...explicit }), original);
+    }
+    const customEntries = await binding({ ...env, PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES: "99999" });
+    const customBytes = await binding({ ...env, PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES: "16777215" });
+    const customBoth = await binding({ ...env, PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES: "99999",
+      PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES: "16777215" });
+    assert.equal(new Set([original, customEntries, customBytes, customBoth]).size, 4);
+    assert.equal(await binding({ ...env, PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES: "99999",
+      PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES: defaults.PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES }), customEntries);
+    assert.equal(await binding({ ...env, PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES: "16777215",
+      PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES: defaults.PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES }), customBytes);
+  }
+});
