@@ -802,6 +802,40 @@ impl Default for ModelRegistry {
                 supports_tools: true,
                 supports_reasoning: true,
             },
+            // K3.1 ships under the same two-product split as K3 (models
+            // -overview's K3-series column covers kimi-k3.1-pro[-highspeed]
+            // on the direct platform; the membership endpoint serves the
+            // bare k3.1-pro[-highspeed] spellings). Resolvable here so
+            // `--model kimi-k3.1-pro` does not fall through to the provider
+            // default, with the same separate-entry alias hygiene as K3.
+            ModelInfo {
+                id: "kimi-k3.1-pro".to_string(),
+                provider: ProviderKind::Moonshot,
+                aliases: vec!["moonshot-kimi-k3.1-pro".to_string()],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
+            ModelInfo {
+                id: "kimi-k3.1-pro-highspeed".to_string(),
+                provider: ProviderKind::Moonshot,
+                aliases: vec!["moonshot-kimi-k3.1-pro-highspeed".to_string()],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
+            ModelInfo {
+                id: "k3.1-pro".to_string(),
+                provider: ProviderKind::Moonshot,
+                aliases: vec!["kimi-code-k3.1-pro".to_string()],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
+            ModelInfo {
+                id: "k3.1-pro-highspeed".to_string(),
+                provider: ProviderKind::Moonshot,
+                aliases: vec!["kimi-code-k3.1-pro-highspeed".to_string()],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
             ModelInfo {
                 id: "deepseek-ai/DeepSeek-V4-Pro".to_string(),
                 provider: ProviderKind::Sglang,
@@ -2017,11 +2051,23 @@ mod tests {
     /// v0.9.1 dogfood report: a user ran `--provider moonshot --model kimi-k3` and was told
     /// the model was `kimi-k2.7-code`. The registry knew neither Moonshot K3
     /// product, so the explicit request fell through to the provider default.
+    /// The K3.1 spellings must stay resolvable the same way — the runtime
+    /// accepts them on the vendor routes, so an advisory resolve that
+    /// rejects them would disagree with the engine.
     #[test]
     fn moonshot_resolves_both_k3_products_without_crossing_them() {
         let registry = ModelRegistry::default();
 
-        for (requested, expected) in [("kimi-k3", "kimi-k3"), ("k3", "k3")] {
+        for (requested, expected) in [
+            ("kimi-k3", "kimi-k3"),
+            ("k3", "k3"),
+            ("kimi-k3.1-pro", "kimi-k3.1-pro"),
+            ("kimi-k3.1-pro-highspeed", "kimi-k3.1-pro-highspeed"),
+            ("k3.1-pro", "k3.1-pro"),
+            ("k3.1-pro-highspeed", "k3.1-pro-highspeed"),
+            ("moonshot-kimi-k3.1-pro", "kimi-k3.1-pro"),
+            ("kimi-code-k3.1-pro", "k3.1-pro"),
+        ] {
             let resolved = registry.resolve_ok(Some(requested), Some(ProviderKind::Moonshot));
 
             assert_eq!(resolved.resolved.provider, ProviderKind::Moonshot);
@@ -2030,6 +2076,7 @@ mod tests {
                 !resolved.used_fallback,
                 "an explicit Moonshot K3 request is not a fallback: {resolved:?}"
             );
+            assert!(resolved.resolved.supports_reasoning, "{resolved:?}");
         }
     }
 

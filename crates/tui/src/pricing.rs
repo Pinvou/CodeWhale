@@ -464,11 +464,16 @@ fn zai_surface(shape: &EndpointShape) -> Option<&'static str> {
 }
 
 fn moonshot_surface(shape: &EndpointShape) -> Option<&'static str> {
-    // Kimi Code is a distinct membership product on api.kimi.com.  Accept the
-    // exact shipped endpoint as well as its slash-normalized parent; do not
-    // infer a plan from a model id or from an arbitrary host carrying a
-    // `/coding` path.
-    if shape.host == "api.kimi.com" && matches!(shape.path.as_str(), "/coding" | "/coding/v1") {
+    // Kimi Code is a distinct membership product on api.kimi.com, with the
+    // official overseas alias api.kimi.ai serving the same plan. Accept the
+    // exact shipped endpoints as well as their slash-normalized parents; do
+    // not infer a plan from a model id or from an arbitrary host carrying a
+    // `/coding` path. Keep this in lockstep with the exact route gate
+    // (`is_exact_kimi_code_route`), or the billing surface would disagree
+    // with the route display on the alias host.
+    if matches!(shape.host.as_str(), "api.kimi.com" | "api.kimi.ai")
+        && matches!(shape.path.as_str(), "/coding" | "/coding/v1")
+    {
         Some(MOONSHOT_KIMI_CODE_BILLING_SURFACE)
     } else if matches!(shape.host.as_str(), "api.moonshot.ai" | "api.moonshot.cn")
         && matches!(shape.path.as_str(), "" | "/v1" | "/anthropic")
@@ -2339,6 +2344,14 @@ mod tests {
             (
                 ApiProvider::Moonshot,
                 crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                MOONSHOT_KIMI_CODE_BILLING_SURFACE,
+                EndpointMetering::ExactSubscription,
+            ),
+            // The official overseas alias serves the same membership plan;
+            // its billing surface must agree with the route display.
+            (
+                ApiProvider::Moonshot,
+                "https://api.kimi.ai/coding/v1",
                 MOONSHOT_KIMI_CODE_BILLING_SURFACE,
                 EndpointMetering::ExactSubscription,
             ),

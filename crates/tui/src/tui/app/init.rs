@@ -494,14 +494,19 @@ impl App {
             reasoning_effort = ReasoningEffort::from_setting_for_provider(effort, provider);
         }
         if !auto_model
-            && crate::config::is_exact_direct_moonshot_k3_route(
+            && (crate::config::is_exact_direct_moonshot_k3_route(
                 provider,
                 &active_route_base_url,
                 &model,
-            )
+            ) || crate::config::is_kimi_k31_on_direct_platform_route(
+                provider,
+                &active_route_base_url,
+                &model,
+            ))
         {
             // Keep the visible/effective tier truthful on first launch too;
-            // direct K3 cannot honor a persisted `off` setting.
+            // direct K3 (including the K3.1 family spellings) cannot honor a
+            // persisted `off` setting.
             reasoning_effort =
                 reasoning_effort.normalize_for_route(provider, &active_route_base_url, &model);
         } else if !auto_model && !reasoning_effort_explicit {

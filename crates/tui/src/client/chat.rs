@@ -17,9 +17,9 @@ use tokio::time::timeout as tokio_timeout;
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
     is_exact_xai_grok_4_6_route, is_exact_zai_chat_route, is_exact_zai_forced_thinking_route,
-    is_exact_zai_tiered_effort_route, is_kimi_code_membership_model,
-    minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_kimi_code,
-    wire_model_for_provider_route,
+    is_exact_zai_tiered_effort_route, is_kimi_code_k31_route, is_kimi_code_membership_model,
+    is_kimi_k31_on_direct_platform_route, minimax_m3_route_uses_max_completion_tokens,
+    moonshot_base_url_is_exact_kimi_code, wire_model_for_provider_route,
 };
 
 // The bounded response-header wait (`stream_open_timeout`) and its env
@@ -68,7 +68,8 @@ fn apply_provider_token_limit(
     let use_max_completion_tokens = provider == ApiProvider::XiaomiMimo
         || (provider == ApiProvider::Openai && model_is_openai_reasoning_family(model))
         || minimax_m3_route_uses_max_completion_tokens(provider, base_url, model)
-        || is_exact_direct_moonshot_k3_route(provider, base_url, model);
+        || is_exact_direct_moonshot_k3_route(provider, base_url, model)
+        || is_kimi_k31_on_direct_platform_route(provider, base_url, model);
     if !use_max_completion_tokens {
         return;
     }
@@ -185,6 +186,17 @@ fn apply_inkling_reasoning_effort(
 /// generic Moonshot shaping. Other Moonshot and Kimi-compatible routes accept
 /// only the generic enabled/disabled form, so the exact endpoint and bare
 /// model identifier are both part of this guard.
+///
+/// The nested `thinking.effort` dialect predates the current Kimi Code docs,
+/// which now document top-level `reasoning_effort` for the coding endpoint;
+/// the nested form is what the shipped membership models demonstrably accept
+/// in production, so do not switch shapes without a live round-trip.
+///
+/// The K3.1 membership spellings share this dialect: the family is
+/// always-reasoning like K3, so a stale raw `off` maps to the lowest tier
+/// instead of the generic disabled payload the API rejects (the K3.1 docs
+/// confirm `off`/`none`/`disabled` are refused with HTTP 400 for this
+/// family, making the defensive mapping load-bearing rather than cosmetic).
 fn apply_kimi_code_k3_reasoning_effort(
     body: &mut Value,
     provider: ApiProvider,
@@ -192,7 +204,9 @@ fn apply_kimi_code_k3_reasoning_effort(
     model: &str,
     effort: Option<&str>,
 ) {
-    if !is_exact_kimi_code_k3_route(provider, base_url, model) {
+    if !is_exact_kimi_code_k3_route(provider, base_url, model)
+        && !is_kimi_code_k31_route(provider, base_url, model)
+    {
         return;
     }
     let Some(effort) = effort else {
@@ -224,6 +238,9 @@ fn apply_kimi_code_k3_reasoning_effort(
 /// Moonshot `thinking: {type: disabled}` payload is not truthful for this
 /// route. Treat a legacy raw `off` as the lowest supported tier defensively;
 /// route-aware callers normalize it before it reaches this layer.
+///
+/// The K3.1 direct-platform spellings (`kimi-k3.1-pro[-highspeed]`) inherit
+/// the K3 parameter constraints verbatim and share this dialect.
 fn apply_direct_moonshot_k3_reasoning_effort(
     body: &mut Value,
     provider: ApiProvider,
@@ -231,7 +248,9 @@ fn apply_direct_moonshot_k3_reasoning_effort(
     model: &str,
     effort: Option<&str>,
 ) {
-    if !is_exact_direct_moonshot_k3_route(provider, base_url, model) {
+    if !is_exact_direct_moonshot_k3_route(provider, base_url, model)
+        && !is_kimi_k31_on_direct_platform_route(provider, base_url, model)
+    {
         return;
     }
 
@@ -925,13 +944,19 @@ fn apply_mistral_route_reasoning_controls(
 /// omits `temperature` and `top_p`. Strip legacy/generic values only from the
 /// exact first-party route so compatible gateways keep their own contract.
 /// Source: <https://platform.kimi.ai/docs/guide/kimi-k3-quickstart> (verified 2026-07-20).
+///
+/// The K3.1 direct-platform spellings share this contract: models-overview
+/// lists them in the same K3-series parameter column, so a stale sampling
+/// value would meet the same fixed-sampling schema the bare `kimi-k3` does.
 fn apply_direct_moonshot_k3_fixed_sampling(
     body: &mut Value,
     provider: ApiProvider,
     base_url: &str,
     model: &str,
 ) {
-    if !is_exact_direct_moonshot_k3_route(provider, base_url, model) {
+    if !is_exact_direct_moonshot_k3_route(provider, base_url, model)
+        && !is_kimi_k31_on_direct_platform_route(provider, base_url, model)
+    {
         return;
     }
     if let Some(object) = body.as_object_mut() {
@@ -944,7 +969,17 @@ fn apply_direct_moonshot_k3_fixed_sampling(
 /// Strip generic controls only on the exact first-party membership route;
 /// custom gateways and unknown model ids retain their own wire contract.
 /// Source: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
-/// (verified 2026-08-26).
+/// (verified 2026-08-26; re-checked 2026-11-15 — that page no longer
+/// documents the sampling restriction, so the standing evidence is the
+/// models-overview K3-series parameter column
+/// <https://platform.kimi.com/docs/api/models-overview> plus the route's
+/// observed behavior).
+///
+/// The K3.1 membership spellings (`k3.1-pro[-highspeed]`) inherit the K3
+/// parameter constraints verbatim (models-overview K3-series column), and
+/// the route demonstrably rejects sampling parameters for its membership
+/// models — so the family strip rides the same guard as the effort shaper
+/// rather than waiting on the rosters, which stay picker/label-scoped.
 fn apply_kimi_code_fixed_sampling(
     body: &mut Value,
     provider: ApiProvider,
@@ -953,7 +988,8 @@ fn apply_kimi_code_fixed_sampling(
 ) {
     if provider != ApiProvider::Moonshot
         || !moonshot_base_url_is_exact_kimi_code(base_url)
-        || !is_kimi_code_membership_model(model)
+        || !(is_kimi_code_membership_model(model)
+            || crate::config::is_kimi_k31_model_spelling(model))
     {
         return;
     }
@@ -3488,6 +3524,18 @@ fn should_replay_reasoning_content_for_provider(
 /// Moonshot and arbitrary OpenAI-compatible routes can also expose a `k3`
 /// model name, but only Kimi Code's exact membership-plan endpoint has this
 /// replay contract.
+///
+/// The K3.1 family spellings inherit the K3 replay contract verbatim through
+/// their own arm below — always-reasoning, so like bare K3 the arm precedes
+/// the effort check. All four spellings replay on both vendor routes (the
+/// membership and direct-platform endpoints); models-overview documents the
+/// K3-series constraints as shared with `kimi-k3`
+/// (<https://platform.kimi.com/docs/api/models-overview>, verified
+/// 2026-11-13), and the API answers HTTP 400 — "thinking is enabled but
+/// reasoning_content is missing in assistant tool call message" — when a
+/// later tool turn's assistant message lost the field
+/// (<https://www.kimi.com/code/docs/kimi-code/error-reference.html>,
+/// verified 2026-11-13).
 fn should_replay_reasoning_content_for_provider_on_route(
     provider: ApiProvider,
     base_url: &str,
@@ -3501,6 +3549,16 @@ fn should_replay_reasoning_content_for_provider_on_route(
         || is_exact_kimi_code_k3_route(provider, base_url, model)
         || (is_exact_mistral_chat_route(provider, base_url)
             && mistral_model_has_native_reasoning(model))
+    {
+        return true;
+    }
+
+    // The exact-K3 matchers above only learn the bare k3 ids, and the K3.1
+    // spellings carry their own arm. The gate is deliberately narrower than
+    // extending the shared matchers, whose other consumers (effort shaping,
+    // route validation, pickers) carry different K3-only contracts.
+    if is_kimi_code_k31_route(provider, base_url, model)
+        || is_kimi_k31_on_direct_platform_route(provider, base_url, model)
     {
         return true;
     }
@@ -3589,6 +3647,17 @@ fn is_reasoning_model_for_stream_on_route(
 ) -> bool {
     if is_exact_kimi_code_k3_route(provider, base_url, model)
         || is_exact_direct_moonshot_k3_route(provider, base_url, model)
+    {
+        return true;
+    }
+
+    // The K3.1 family is always-reasoning like bare K3, so its deltas are
+    // thinking, never inline answer text. Same vendor-route restriction as
+    // the replay gate: custom Moonshot-compatible gateways keep their own
+    // dialect. (The `kimi-`-prefixed spellings already classify through the
+    // generic heuristic below; this arm covers the bare membership ids.)
+    if is_kimi_code_k31_route(provider, base_url, model)
+        || is_kimi_k31_on_direct_platform_route(provider, base_url, model)
     {
         return true;
     }
@@ -5565,12 +5634,13 @@ mod alias_thinking_detection_tests {
     //! turn. See upstream API docs:
     //! <https://api-docs.deepseek.com/guides/thinking_mode>
     use super::{
-        ReasoningStreamStyle, apply_direct_moonshot_k3_fixed_sampling,
-        apply_inkling_reasoning_effort, apply_kimi_code_fixed_sampling,
-        apply_kimi_code_k3_reasoning_effort, apply_openai_reasoning_effort,
-        apply_provider_token_limit, apply_route_reasoning_controls, is_reasoning_model_for_stream,
-        is_reasoning_model_for_stream_on_route, provider_accepts_reasoning_content,
-        reasoning_stream_style_for_route, requires_reasoning_content,
+        REASONING_REPLAY_PLACEHOLDER, ReasoningStreamStyle,
+        apply_direct_moonshot_k3_fixed_sampling, apply_inkling_reasoning_effort,
+        apply_kimi_code_fixed_sampling, apply_kimi_code_k3_reasoning_effort,
+        apply_openai_reasoning_effort, apply_provider_token_limit, apply_route_reasoning_controls,
+        is_reasoning_model_for_stream, is_reasoning_model_for_stream_on_route,
+        provider_accepts_reasoning_content, reasoning_stream_style_for_route,
+        requires_reasoning_content, sanitize_thinking_mode_messages_for_route,
         should_replay_reasoning_content, should_replay_reasoning_content_for_provider,
         should_replay_reasoning_content_for_provider_on_route,
     };
@@ -6270,6 +6340,125 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
+    fn kimi_k31_reasoning_streams_as_thinking_on_the_vendor_routes() {
+        for (label, base_url, model) in [
+            (
+                "membership",
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+            (
+                "membership overseas highspeed",
+                "https://api.kimi.ai/coding/v1",
+                crate::config::KIMI_CODE_K31_PRO_HIGHSPEED_MODEL,
+            ),
+            (
+                "direct",
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            ),
+            (
+                "direct cn highspeed",
+                "https://api.moonshot.cn/v1",
+                crate::config::MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL,
+            ),
+        ] {
+            assert!(
+                is_reasoning_model_for_stream_on_route(ApiProvider::Moonshot, base_url, model),
+                "{label}: K3.1 is always-reasoning; deltas must classify as thinking"
+            );
+            assert_eq!(
+                reasoning_stream_style_for_route(ApiProvider::Moonshot, base_url, model, None),
+                ReasoningStreamStyle::SeparateField,
+                "{label}: reasoning_content deltas must not inline as answer text"
+            );
+        }
+
+        // Outside the vendor's own routes the dialect stays generic: a
+        // custom Moonshot-compatible gateway keeps its own stream shape, and
+        // so does a different provider that happens to point at the
+        // membership host.
+        for (label, provider, base_url, model) in [
+            (
+                "custom gateway",
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+            (
+                "non-moonshot provider",
+                ApiProvider::Openai,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+            (
+                "non-moonshot provider on the direct platform",
+                ApiProvider::Openai,
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            ),
+        ] {
+            assert!(
+                !is_reasoning_model_for_stream_on_route(provider, base_url, model),
+                "{label}: must not gain the vendor stream dialect"
+            );
+        }
+    }
+
+    /// The K3.1 membership dialect must survive the full route-control
+    /// pipeline, not just the unit shaper: the generic Moonshot layer runs
+    /// first and would leave `thinking: {type: disabled}` — the payload the
+    /// API rejects for this always-reasoning family — if the route shaper
+    /// ever stopped overwriting it.
+    #[test]
+    fn kimi_k31_membership_effort_ladder_survives_route_controls() {
+        for base_url in [
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            "https://api.kimi.ai/coding/v1",
+        ] {
+            for (requested, expected) in [
+                ("off", "low"),
+                ("none", "low"),
+                ("low", "low"),
+                ("medium", "high"),
+                ("high", "high"),
+                ("max", "max"),
+            ] {
+                let mut body = json!({ "reasoning_effort": "stale" });
+                apply_route_reasoning_controls(
+                    &mut body,
+                    ApiProvider::Moonshot,
+                    base_url,
+                    crate::config::KIMI_CODE_K31_PRO_MODEL,
+                    Some(requested),
+                );
+
+                assert_eq!(
+                    body["thinking"],
+                    json!({ "type": "enabled", "effort": expected }),
+                    "{base_url} requested {requested}"
+                );
+                assert!(
+                    body.get("reasoning_effort").is_none(),
+                    "{requested}: {body}"
+                );
+            }
+
+            // An omitted effort keeps the body untouched: the endpoint owns
+            // its documented default (high for K3.1).
+            let mut body = json!({});
+            apply_route_reasoning_controls(
+                &mut body,
+                ApiProvider::Moonshot,
+                base_url,
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+                None,
+            );
+            assert_eq!(body, json!({}), "{base_url}: no effort injected");
+        }
+    }
+
+    #[test]
     fn xiaomi_mimo_uses_max_completion_tokens_payload_key() {
         let mut body = json!({
             "model": "mimo-v2.5-pro",
@@ -6489,6 +6678,55 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
+    fn kimi_k31_membership_uses_the_k3_nested_thinking_dialect() {
+        for base_url in [
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            "https://api.kimi.ai/coding/v1",
+        ] {
+            for model in [
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+                crate::config::KIMI_CODE_K31_PRO_HIGHSPEED_MODEL,
+            ] {
+                for (requested, expected) in [
+                    ("off", json!({ "type": "enabled", "effort": "low" })),
+                    ("none", json!({ "type": "enabled", "effort": "low" })),
+                    ("low", json!({ "type": "enabled", "effort": "low" })),
+                    ("medium", json!({ "type": "enabled", "effort": "high" })),
+                    ("high", json!({ "type": "enabled", "effort": "high" })),
+                    ("max", json!({ "type": "enabled", "effort": "max" })),
+                ] {
+                    let mut body = json!({ "reasoning_effort": "stale" });
+                    apply_kimi_code_k3_reasoning_effort(
+                        &mut body,
+                        ApiProvider::Moonshot,
+                        base_url,
+                        model,
+                        Some(requested),
+                    );
+
+                    assert_eq!(
+                        body["thinking"], expected,
+                        "{base_url} {model} requested {requested}"
+                    );
+                    assert!(body.get("reasoning_effort").is_none());
+                }
+            }
+        }
+
+        // A custom gateway keeps its own dialect: no nested effort is
+        // injected there, and a stale disabled payload is left alone.
+        let mut gateway = json!({ "thinking": { "type": "disabled" } });
+        apply_kimi_code_k3_reasoning_effort(
+            &mut gateway,
+            ApiProvider::Moonshot,
+            "https://gateway.example/v1",
+            crate::config::KIMI_CODE_K31_PRO_MODEL,
+            Some("off"),
+        );
+        assert_eq!(gateway["thinking"], json!({ "type": "disabled" }));
+    }
+
+    #[test]
     fn kimi_code_k3_256k_uses_k3_reasoning_and_membership_sampling_contracts() {
         let mut body = json!({
             "reasoning_effort": "stale",
@@ -6544,6 +6782,147 @@ mod alias_thinking_detection_tests {
         }
     }
 
+    /// The K3.1 membership spellings inherit the membership sampling
+    /// contract (models-overview lists them in the K3-series parameter
+    /// column; the route rejects sampling parameters for its membership
+    /// models), so the strip must ride the family matcher and not wait on
+    /// the picker rosters.
+    #[test]
+    fn kimi_code_k31_membership_owns_fixed_sampling() {
+        for base_url in [
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            "https://api.kimi.ai/coding/v1",
+        ] {
+            for model in [
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+                crate::config::KIMI_CODE_K31_PRO_HIGHSPEED_MODEL,
+            ] {
+                let mut body = json!({ "temperature": 0.3, "top_p": 0.8 });
+                apply_kimi_code_fixed_sampling(&mut body, ApiProvider::Moonshot, base_url, model);
+                assert!(body.get("temperature").is_none(), "{base_url} {model}");
+                assert!(body.get("top_p").is_none(), "{base_url} {model}");
+            }
+        }
+
+        // Neighboring routes keep their own wire contract: a custom gateway,
+        // a non-Moonshot provider pointed at the membership host, and an
+        // unknown near-miss spelling must retain the caller's sampling.
+        for (provider, base_url, model) in [
+            (
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+            (
+                ApiProvider::Openai,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+            ),
+            (
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                "k3.1-pro-preview",
+            ),
+        ] {
+            let mut body = json!({ "temperature": 0.3, "top_p": 0.8 });
+            apply_kimi_code_fixed_sampling(&mut body, provider, base_url, model);
+            assert_eq!(
+                body["temperature"],
+                json!(0.3),
+                "{provider:?} {base_url} {model}"
+            );
+            assert_eq!(body["top_p"], json!(0.8), "{provider:?} {base_url} {model}");
+        }
+    }
+
+    /// The direct-platform K3.1 spellings share the bare `kimi-k3` wire
+    /// contract: the modern `max_completion_tokens` field and the
+    /// fixed-sampling schema (no `temperature`/`top_p`), on the exact
+    /// first-party route only.
+    #[test]
+    fn direct_moonshot_k31_uses_modern_token_field_and_fixed_sampling_only_on_exact_route() {
+        for model in [
+            crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            crate::config::MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL,
+        ] {
+            // Both direct-platform hosts ride the same exact-route gate.
+            for base_url in [
+                crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                "https://api.moonshot.cn/v1",
+            ] {
+                let mut direct = json!({
+                    "max_tokens": 64,
+                    "temperature": 0.2,
+                    "top_p": 0.9,
+                });
+                apply_provider_token_limit(&mut direct, ApiProvider::Moonshot, base_url, model, 64);
+                apply_direct_moonshot_k3_fixed_sampling(
+                    &mut direct,
+                    ApiProvider::Moonshot,
+                    base_url,
+                    model,
+                );
+                assert_eq!(
+                    direct["max_completion_tokens"],
+                    json!(64),
+                    "{model} {base_url}"
+                );
+                assert!(direct.get("max_tokens").is_none(), "{model} {base_url}");
+                assert!(direct.get("temperature").is_none(), "{model} {base_url}");
+                assert!(direct.get("top_p").is_none(), "{model} {base_url}");
+            }
+        }
+
+        let mut neighbor = json!({
+            "max_tokens": 64,
+            "temperature": 0.2,
+            "top_p": 0.9,
+        });
+        apply_provider_token_limit(
+            &mut neighbor,
+            ApiProvider::Moonshot,
+            "https://proxy.example/v1",
+            crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            64,
+        );
+        apply_direct_moonshot_k3_fixed_sampling(
+            &mut neighbor,
+            ApiProvider::Moonshot,
+            "https://proxy.example/v1",
+            crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+        );
+        assert_eq!(neighbor["max_tokens"], json!(64));
+        assert!(neighbor.get("max_completion_tokens").is_none());
+        assert_eq!(neighbor["temperature"], json!(0.2));
+        assert_eq!(neighbor["top_p"], json!(0.9));
+    }
+
+    /// The membership endpoint keeps the legacy `max_tokens` field for the
+    /// K3.1 family: only the exact direct route switches to
+    /// `max_completion_tokens`, so a predicate swap between the two route
+    /// gates would silently rewrite membership requests to a wire field the
+    /// membership API does not document.
+    #[test]
+    fn kimi_k31_membership_keeps_the_legacy_max_tokens_field() {
+        for model in [
+            crate::config::KIMI_CODE_K31_PRO_MODEL,
+            crate::config::KIMI_CODE_K31_PRO_HIGHSPEED_MODEL,
+        ] {
+            for base_url in [
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                "https://api.kimi.ai/coding/v1",
+            ] {
+                let mut body = json!({ "max_tokens": 64 });
+                apply_provider_token_limit(&mut body, ApiProvider::Moonshot, base_url, model, 64);
+                assert_eq!(body["max_tokens"], json!(64), "{model} {base_url}");
+                assert!(
+                    body.get("max_completion_tokens").is_none(),
+                    "{model} {base_url}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn direct_moonshot_k3_uses_top_level_effort_and_never_disables_thinking() {
         for (requested, expected) in [
@@ -6581,6 +6960,122 @@ mod alias_thinking_detection_tests {
         );
         assert!(provider_default.get("thinking").is_none());
         assert!(provider_default.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn direct_moonshot_k31_uses_top_level_effort_and_never_disables_thinking() {
+        for model in [
+            crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            crate::config::MOONSHOT_KIMI_K31_PRO_HIGHSPEED_MODEL,
+        ] {
+            for (requested, expected) in [
+                ("off", "low"),
+                ("none", "low"),
+                ("low", "low"),
+                ("medium", "high"),
+                ("high", "high"),
+                ("max", "max"),
+            ] {
+                let mut body = json!({
+                    "model": model,
+                    "thinking": { "type": "disabled" },
+                });
+                apply_route_reasoning_controls(
+                    &mut body,
+                    ApiProvider::Moonshot,
+                    crate::config::DEFAULT_MOONSHOT_BASE_URL,
+                    model,
+                    Some(requested),
+                );
+
+                assert_eq!(body["reasoning_effort"], json!(expected), "{requested}");
+                assert!(body.get("thinking").is_none(), "{requested}: {body}");
+            }
+        }
+
+        // Both direct-platform hosts at effort off specifically: the generic
+        // Moonshot disabled payload must be replaced, never kept alongside —
+        // the API rejects disabled-thinking requests for the K3.1 family.
+        for base_url in [
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            "https://api.moonshot.cn/v1",
+        ] {
+            let mut body = json!({ "thinking": { "type": "disabled" } });
+            apply_route_reasoning_controls(
+                &mut body,
+                ApiProvider::Moonshot,
+                base_url,
+                crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+                Some("off"),
+            );
+            assert_eq!(body["reasoning_effort"], json!("low"), "{base_url}");
+            assert!(body.get("thinking").is_none(), "{base_url}: {body}");
+        }
+
+        // An omitted effort leaves the provider default in control: a stale
+        // generic `thinking` payload is still stripped, but no tier is
+        // injected (the bare-K3 twin pins the same shape).
+        let mut stale = json!({ "thinking": { "type": "disabled" } });
+        apply_route_reasoning_controls(
+            &mut stale,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            crate::config::MOONSHOT_KIMI_K31_PRO_MODEL,
+            None,
+        );
+        assert_eq!(stale, json!({}), "omitted effort: {stale}");
+    }
+
+    #[test]
+    fn kimi_k31_tool_round_gets_the_replay_placeholder_when_trace_was_dropped() {
+        let body = || {
+            json!({
+                "model": "k3.1-pro",
+                "messages": [
+                    { "role": "user", "content": "Need the date" },
+                    { "role": "assistant", "content": null, "tool_calls": [
+                        { "id": "tool-1", "type": "function",
+                          "function": { "name": "get_date", "arguments": "{}" } }
+                    ] },
+                    { "role": "user", "content": "2026-04-23" },
+                ],
+            })
+        };
+
+        for base_url in [
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            "https://api.kimi.ai/coding/v1",
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+        ] {
+            let mut wire = body();
+            let sanitized = sanitize_thinking_mode_messages_for_route(
+                &mut wire,
+                "k3.1-pro",
+                Some("off"),
+                ApiProvider::Moonshot,
+                base_url,
+            );
+            assert!(sanitized.is_some(), "{base_url}: K3.1 is a replay gate");
+            assert_eq!(
+                wire["messages"][1]["reasoning_content"],
+                json!(REASONING_REPLAY_PLACEHOLDER),
+                "{base_url}: a dropped trace must replay as the placeholder"
+            );
+        }
+
+        // A custom gateway is not a replay gate: the trace stays absent.
+        let mut gateway = body();
+        assert!(
+            sanitize_thinking_mode_messages_for_route(
+                &mut gateway,
+                "k3.1-pro",
+                Some("off"),
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+            )
+            .is_none()
+        );
+        assert!(gateway["messages"][1].get("reasoning_content").is_none());
     }
 
     #[test]
@@ -6630,6 +7125,27 @@ mod alias_thinking_detection_tests {
         assert!(neighbor.get("max_completion_tokens").is_none());
         assert_eq!(neighbor["temperature"], json!(0.2));
         assert_eq!(neighbor["top_p"], json!(0.9));
+    }
+
+    #[test]
+    fn kimi_k31_direct_prepared_request_carries_an_explicit_override_cap() {
+        // Review 5927442709: the resolved-route budget for K3.1 ids is the
+        // documented maximum, so an operator override above the 131,072
+        // default (here 262,144, under the 1M direct-route maximum) must
+        // reach the wire as `max_completion_tokens` rather than being
+        // silently clamped to the family default.
+        let mut direct = json!({
+            "temperature": 0.2,
+        });
+        apply_provider_token_limit(
+            &mut direct,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            "kimi-k3.1-pro",
+            262_144,
+        );
+        assert_eq!(direct["max_completion_tokens"], json!(262_144));
+        assert!(direct.get("max_tokens").is_none());
     }
 
     #[test]

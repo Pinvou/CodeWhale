@@ -74,10 +74,11 @@ const TACHYON_PICKER_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::Medium,
     ReasoningEffort::XHigh,
 ];
-/// Kimi Code K3 accepts route-specific low and medium controls at the
-/// official membership endpoint. Medium becomes K3's nested high wire effort,
-/// but keeping the selected intent visible is important for recovery and
-/// route receipts.
+/// Kimi Code K3 (and the K3.1 family spellings on the same membership
+/// endpoint) accept route-specific low and medium controls at the official
+/// membership endpoint. Medium becomes K3's nested high wire effort, but
+/// keeping the selected intent visible is important for recovery and route
+/// receipts.
 const KIMI_CODE_K3_PICKER_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::Auto,
     ReasoningEffort::Off,
@@ -2978,10 +2979,13 @@ pub(crate) fn picker_efforts_for_route(
     if model_is_auto {
         return AUTO_MODEL_PICKER_EFFORTS.to_vec();
     }
-    // Exact-route overrides still win over catalog metadata: Kimi Code K3 and
-    // OpenAI Codex have wire dialects the generic Models.dev shape does not
-    // fully describe.
-    if crate::config::is_exact_kimi_code_k3_route(provider, base_url, wire_model) {
+    // Exact-route overrides still win over catalog metadata: Kimi Code K3
+    // (including the K3.1 family spellings, which inherit the K3 contracts on
+    // the same membership endpoint) and OpenAI Codex have wire dialects the
+    // generic Models.dev shape does not fully describe.
+    if crate::config::is_exact_kimi_code_k3_route(provider, base_url, wire_model)
+        || crate::config::is_kimi_code_k31_route(provider, base_url, wire_model)
+    {
         return KIMI_CODE_K3_PICKER_EFFORTS.to_vec();
     }
     if provider == ApiProvider::OpenaiCodex {
@@ -3229,6 +3233,39 @@ mod tests {
             picker.move_up();
             assert_eq!(picker.resolved_effort(), ReasoningEffort::Medium);
         }
+    }
+
+    /// The K3.1 membership route must offer the K3 ladder — without the arm
+    /// the generic default list hides the documented Low/Medium rungs the
+    /// route actually honors, mirroring the bare-k3 treatment.
+    #[test]
+    fn kimi_k31_membership_route_offers_the_k3_effort_ladder() {
+        for base_url in [
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            "https://api.kimi.ai/coding/v1",
+        ] {
+            for model in [
+                crate::config::KIMI_CODE_K31_PRO_MODEL,
+                crate::config::KIMI_CODE_K31_PRO_HIGHSPEED_MODEL,
+            ] {
+                assert_eq!(
+                    picker_efforts_for_route(ApiProvider::Moonshot, base_url, model, false),
+                    KIMI_CODE_K3_PICKER_EFFORTS.to_vec(),
+                    "{base_url} {model}: Low/Medium must be selectable on the K3.1 membership route"
+                );
+            }
+        }
+        // A gateway URL keeps the generic ladder: the dialect is vendor-route
+        // scoped, not spelling scoped.
+        assert_eq!(
+            picker_efforts_for_route(
+                ApiProvider::Moonshot,
+                "https://gateway.example/v1",
+                "k3.1-pro",
+                false,
+            ),
+            DEFAULT_PICKER_EFFORTS.to_vec(),
+        );
     }
 
     fn render_text(picker: &ModelPickerView, width: u16, height: u16) -> String {

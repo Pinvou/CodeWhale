@@ -317,17 +317,22 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
         } else {
             // `/model` normally resolves against the active provider's
             // catalog-default endpoint so it retains the existing local
-            // provider/model validation. The one endpoint-sensitive model
-            // selection is Kimi Code's bare `k3`: resolve it against the
-            // committed Kimi Code route rather than silently falling back to
-            // Moonshot's direct API route. Do not pass an unrelated stale
-            // endpoint through here; doing so would turn a foreign provider
-            // model into an apparent custom-route selection.
-            let route_base_url = crate::config::is_exact_kimi_code_k3_route(
+            // provider/model validation. The endpoint-sensitive model
+            // selections are Kimi Code's bare `k3` and the K3.1 family
+            // spellings on the committed membership route: resolve them
+            // against the committed Kimi Code route rather than silently
+            // falling back to Moonshot's direct API route. Do not pass an
+            // unrelated stale endpoint through here; doing so would turn a
+            // foreign provider model into an apparent custom-route selection.
+            let route_base_url = (crate::config::is_exact_kimi_code_k3_route(
                 app.api_provider,
                 &app.active_route_base_url,
                 &model_id,
-            )
+            ) || crate::config::is_kimi_code_k31_route(
+                app.api_provider,
+                &app.active_route_base_url,
+                &model_id,
+            ))
             .then(|| app.active_route_base_url.clone());
             match crate::route_runtime::resolve_route_candidate_with_context_metadata(
                 app.api_provider,
@@ -1197,6 +1202,49 @@ mod tests {
                 .and_then(|limits| limits.context_tokens),
             Some(u64::from(crate::config::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS))
         );
+    }
+
+    /// `/model` must not silently migrate a K3.1 selection off the committed
+    /// Kimi Code membership route: without the endpoint pin the resolution
+    /// falls back to Moonshot's direct default, where the membership
+    /// spelling is now a rejected cross-pairing instead of a working route.
+    #[test]
+    fn model_command_pins_active_kimi_code_endpoint_for_k31() {
+        let _settings = SettingsPathGuard::new();
+        let mut app = create_test_app();
+        app.set_provider_identity(crate::config::ApiProvider::Moonshot, "moonshot");
+        app.model_ids_passthrough = true;
+        app.active_route_base_url = crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string();
+        app.active_context_window_override = None;
+
+        for spelling in [
+            crate::config::KIMI_CODE_K31_PRO_MODEL,
+            crate::config::KIMI_CODE_K31_PRO_HIGHSPEED_MODEL,
+        ] {
+            let result = model(&mut app, Some(spelling));
+            assert!(
+                !result.is_error,
+                "membership {spelling} should resolve on the committed route: {result:?}"
+            );
+            assert_eq!(app.model, spelling);
+        }
+
+        // The direct spelling on the membership endpoint is a known-bad
+        // cross-pairing and fails closed with guidance.
+        let rejected = model(&mut app, Some(crate::config::MOONSHOT_KIMI_K31_PRO_MODEL));
+        assert!(
+            rejected.is_error,
+            "kimi-k3.1-pro on the membership endpoint must fail closed: {rejected:?}"
+        );
+
+        // The direct platform keeps serving the direct spelling.
+        app.active_route_base_url = crate::config::DEFAULT_MOONSHOT_BASE_URL.to_string();
+        let direct = model(&mut app, Some(crate::config::MOONSHOT_KIMI_K31_PRO_MODEL));
+        assert!(
+            !direct.is_error,
+            "direct kimi-k3.1-pro remains valid: {direct:?}"
+        );
+        assert_eq!(app.model, crate::config::MOONSHOT_KIMI_K31_PRO_MODEL);
     }
 
     #[test]
