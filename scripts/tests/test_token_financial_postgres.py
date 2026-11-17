@@ -1854,6 +1854,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestF06OrganizationDeletionVersionAndTerminalScope",
             "TestF06Review5566377593PublicPostgres",
             "TestOrganizationEvidenceTruncatePublicPostgres",
+            "TestProviderQuotaConcurrentBoundary",
             "TestOrdinaryDeadLetterReplayRuntimePostgres",
             "TestIdentityRecoveryClaimsRuntimePostgres",
             "TestProfileSessionRevocationRecoveryRuntimePostgres",
@@ -2389,6 +2390,20 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             with self.subTest(events=len(invalid)), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(invalid, roots, **options)
 
+
+    def test_provider_quota_requires_migration_send_and_verify(self):
+        root = "TestProviderQuotaConcurrentBoundary"
+        self.assertIn(root, RUNNER.ACCOUNT_CHILD_REQUIRED)
+        expected = {"migration-round-trip", "send", "verify", "login-registration", "login-profile"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in ([e for e in events if e.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
 
     def test_account_evidence_guard_requires_both_installation_paths_and_every_table(self):
         root = "TestOrganizationEvidenceTruncatePublicPostgres"
