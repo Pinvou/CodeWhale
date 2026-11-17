@@ -2658,8 +2658,9 @@ pub(crate) enum ControlledResumeOutcome {
 
 /// E2E-06：`desktop socket` 掉线后启动 B 端恢复：投影 reconnecting、取恢复材料，
 /// 并按冻结协议发出 `controller_resume_prepare`。任一步失败返回 false，调用方
-/// 必须结束本代通道。管理器内部的恢复失败会立即清理租约与本代凭证；构造或
-/// 入队等管理器外失败由已冻结的 watchdog 截止及命令层
+/// 必须结束本代通道。仅管理器 resume_gate.prepare 失败分支会立即清理
+/// 租约与本代凭证；operation 失效、非 Reconnecting、缺 lease context 的
+/// 前置拒绝不执行该清理。构造或入队等管理器外失败由已冻结的 watchdog 截止及命令层
 /// `desktop_remote_controlled::spawn_watchdog_reaper`（应用 setup 注册、独立每秒轮询）
 /// 有界收口；它独立于本 worker 的两秒 poll，不随本 worker 退出而停止。
 /// 不表示所有返回 false 的路径都已经完成清理，也不会因恢复而延长截止。

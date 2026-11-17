@@ -313,6 +313,45 @@ pub(crate) fn desktop_remote_proxy_load_status(
 }
 
 #[tauri::command]
+pub(crate) async fn desktop_remote_proxy_recover<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    quarantine_confirmed: bool,
+) -> Result<Option<String>, String> {
+    super::desktop_remote_task::run_a_dispatch_blocking(move || {
+        let dispatch = super::desktop_remote_state::ready_state::<_, RemoteDispatchService>(&app)?;
+        let manager =
+            super::desktop_remote_state::ready_state::<_, ControllingDeviceManager>(&app)?;
+        dispatch.with_remote_history_recovery(|store| {
+            manager.with_remote_archive_owner(|identity| {
+                if identity.is_some() {
+                    return Err("remote_proxy_recovery_online".to_owned());
+                }
+                store
+                    .recover_remote_proxy_file(quarantine_confirmed)
+                    .map(|export| export.map(|path| path.to_string_lossy().into_owned()))
+                    .map_err(|error| {
+                        match error.to_string().as_str() {
+                            "remote_proxy_recovery_busy" => "remote_proxy_recovery_busy",
+                            "remote_proxy_recovery_not_needed" => {
+                                "remote_proxy_recovery_not_needed"
+                            }
+                            "remote_proxy_recovery_retry_failed" => {
+                                "remote_proxy_recovery_retry_failed"
+                            }
+                            "remote_proxy_recovery_quarantine_unavailable" => {
+                                "remote_proxy_recovery_quarantine_unavailable"
+                            }
+                            _ => "remote_proxy_recovery_failed",
+                        }
+                        .to_owned()
+                    })
+            })
+        })
+    })
+    .await
+}
+
+#[tauri::command]
 pub(crate) async fn desktop_remote_proxy_archive<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     local_session_id: String,

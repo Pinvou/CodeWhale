@@ -88,6 +88,7 @@ ACCOUNT_REQUIRED = {
     "TestF06OrganizationDeletionVersionAndTerminalScope",
     "TestF06Review5566377593PublicPostgres",
     "TestOrganizationEvidenceTruncatePublicPostgres",
+    "TestProviderQuotaConcurrentBoundary",
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
@@ -294,6 +295,7 @@ EXACT_REQUIRED_CHILDREN = {
     "TestBillingManualAdjustmentProofRollbackPostgres": {
         f"{state}/{entry}" for state in ("empty", "retained-proof") for entry in ("public-api", "actual-cli", "renamed-history-cli")
     },
+    "TestProviderQuotaConcurrentBoundary": {"migration-round-trip", "send", "verify", "login-registration", "login-profile"},
     "TestProviderHealthReadFailurePostgres": {"discovery", "latest-five", "failure-rate"},
     "TestApprovalPaginationSourcePostgres": {
         "registered-replicas-use-distinct-admitted-client-keys",
