@@ -28,12 +28,41 @@ use super::store::{
 };
 use super::validators::generate_session_id;
 
-/// Borrows the paths module's process-level env lock — avoiding parallel
-/// races with other tests that mutate PINVOU3_HOME. Returns the store with
-/// the guard; the lock is released only when the guard drops.
-fn isolated_store() -> (SessionStore, std::sync::MutexGuard<'static, ()>) {
-    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    (boot_isolated_store_locked(), guard)
+/// RAII teardown for `isolated_store`: Drop removes the temporary home while
+/// the environment lock is held; field order then restores the environment
+/// before releasing that lock.
+struct TestHomeGuard {
+    _env: crate::platform::test_support::EnvRestore,
+    _lock: std::sync::MutexGuard<'static, ()>,
+    home: std::path::PathBuf,
+}
+
+impl Drop for TestHomeGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+/// Take the process-level environment lock and restore both the prior home
+/// and temporary-directory cleanup on every exit, including panics.
+fn isolated_store() -> (SessionStore, TestHomeGuard) {
+    let (lock, env) = crate::platform::test_support::locked_env(&["PINVOU3_HOME"]);
+    let tmp = std::env::temp_dir().join(format!(
+        "pinvou3-sessions-test-{}-{}",
+        std::process::id(),
+        paths::tests::unique_suffix()
+    ));
+    // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+    unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+    let store = SessionStore::boot_with_scheduled_root(tmp.join("scheduled")).expect("boot");
+    (
+        store,
+        TestHomeGuard {
+            _env: env,
+            _lock: lock,
+            home: tmp,
+        },
+    )
 }
 
 fn boot_isolated_store_locked() -> SessionStore {
