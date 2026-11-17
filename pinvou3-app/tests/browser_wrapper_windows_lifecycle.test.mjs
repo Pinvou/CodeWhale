@@ -443,8 +443,15 @@ async function makeFixture() {
     modePath,
     auditPath,
     portPath,
+    releaseGates: new Set(),
     cdp: null,
   };
+}
+
+function ownedReleaseGate(fixture, filename) {
+  const path = join(fixture.root, filename);
+  fixture.releaseGates.add(path);
+  return path;
 }
 
 async function createFakeHost(fixture, options) {
@@ -523,6 +530,12 @@ async function cleanupFixture(fixture, host, ...wrappers) {
       console.error('[browser-host-fixture-events]', JSON.stringify({ unavailable: true,
         progress: host.diagnostic() }));
     }
+  }
+  // Release only this fixture's finite barriers, even after an assertion.
+  // The intentional never-release shutdown case is not registered here.
+  for (const path of fixture.releaseGates) {
+    try { writeFileSync(path, 'cleanup release'); }
+    catch (error) { (fixture.primaryErrors ||= []).push(error); }
   }
   await cleanupBrowserFixture({
     primaryErrors: fixture.primaryErrors,
@@ -1263,7 +1276,8 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
     assert.equal(outcome.response.result.structuredContent.pages[0].id, 1);
     assert.equal((await host.snapshot()).operationCalls.get('create_tab') || 0, 0);
     const diagnostic = host.diagnostic();
-    assert.deepEqual(Object.keys(diagnostic).sort(), ['ageMs', 'exited', 'phase', 'sequence']);
+    assert.deepEqual(Object.keys(diagnostic).sort(), ['ageMs', 'exited', 'inputRefreshReplies', 'phase', 'sequence']);
+    assert.equal(diagnostic.inputRefreshReplies, 0, 'read-only setup must not invent input renewals');
     assert.ok(Number.isSafeInteger(diagnostic.sequence) && diagnostic.sequence > 0);
     assert.ok(Number.isSafeInteger(diagnostic.ageMs) && diagnostic.ageMs >= 0);
   } catch (error) {
@@ -1323,7 +1337,8 @@ test('Windows proxy: workspace recovery observes a prepare response beyond the d
     fixture.primaryErrors = [error];
     throw error;
   } finally {
-    await host.deferOperation('prepare', false);
+    try { await host.deferOperation('prepare', false); }
+    catch (error) { (fixture.primaryErrors ||= []).push(error); }
     await cleanupFixture(fixture, host, wrapper);
   }
 });
@@ -1372,7 +1387,7 @@ test('Windows proxy: a paused observer cannot starve the independent host input 
   const fixture = await makeFixture();
   const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
-  const releasePath = join(fixture.root, 'paused-observer.release');
+  const releasePath = ownedReleaseGate(fixture, 'paused-observer.release');
   try {
     await initializeWorkspace(wrapper, 'windows-paused-observer-test');
     writeFileSync(fixture.modePath, JSON.stringify({ clickReleasePath: releasePath }));
@@ -1382,15 +1397,18 @@ test('Windows proxy: a paused observer cannot starve the independent host input 
     request.catch(() => {});
     await waitUntil(async () => (await host.snapshot()).operationCalls.get('refresh_agent_input') >
       (before.operationCalls.get('refresh_agent_input') || 0), 'first real input refresh did not arrive');
-    const pauseStart = Date.now();
-    // Block only this coordinator, after an actual renewal. The independent
-    // wrapper and worker must continue their unchanged 250ms/400ms protocol.
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_100);
-    const pauseEnd = Date.now();
-    const observed = await host.snapshot();
-    const duringPause = observed.operationTimeline.filter(entry => entry.operation === 'refresh_agent_input'
-      && entry.at > pauseStart && entry.at < pauseEnd);
-    assert.ok(duringPause.length >= 2, 'host must really answer renewals while the observer is blocked');
+    // A renewal interval includes the actual host-file round trip, not just
+    // the 250ms timer. Keep the >=1.1s stall, but end the synchronous barrier
+    // only after two real accepted replies instead of comparing wall clocks.
+    let observerTicked = false;
+    const pendingTick = setImmediate(() => { observerTicked = true; });
+    try {
+      const replies = host.waitForInputRefreshesWhileBlocked(2, { minBlockedMs: 1_100 });
+      assert.equal(observerTicked, false, 'the coordinator must stay synchronously blocked');
+      assert.ok(replies.blockedMs >= 1_100);
+      assert.ok(replies.after - replies.before >= 2, 'host must really answer renewals while the observer is blocked');
+      console.log('[browser-blocked-observer-witness]', JSON.stringify(replies));
+    } finally { clearImmediate(pendingTick); }
     assert.equal(readAudit(fixture.auditPath).filter(entry => entry.kind === 'tool' && entry.name === 'click').length, 1);
     writeFileSync(releasePath, 'release');
     const response = await request;
@@ -1417,7 +1435,7 @@ test('Windows proxy: a genuinely withheld host refresh still fails closed withou
   const fixture = await makeFixture();
   const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
-  const releasePath = join(fixture.root, 'withheld-refresh.release');
+  const releasePath = ownedReleaseGate(fixture, 'withheld-refresh.release');
   try {
     await initializeWorkspace(wrapper, 'windows-withheld-host-refresh-test');
     // ACK the host configuration before dispatch: this withholds real IPC
@@ -1427,6 +1445,9 @@ test('Windows proxy: a genuinely withheld host refresh still fails closed withou
     const before = await host.snapshot();
     const request = requestHeldTool(wrapper, 'click', { uid: 'withhold-host-refresh' });
     request.catch(() => {});
+    assert.throws(() => host.waitForInputRefreshesWhileBlocked(1, { timeoutMs: 1_000 }),
+      /blocked observer did not receive real input refresh replies/u,
+      'idle worker progress must not count as a successful authorization reply');
     await waitUntil(() => readAudit(fixture.auditPath).some(entry => entry.kind === 'cancel'),
       'withheld refresh must cause real upstream cancellation');
     // The claimed upstream fails only after cancellation was observed. A
@@ -1552,7 +1573,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     // serial refresh also includes host-file round-trip time, so a fixed 1.6s
     // duration cannot guarantee four refreshes on a loaded Windows runner.
     // The bounded barrier must fail if the wrapper stops refreshing entirely.
-    const clickReleasePath = join(fixture.root, 'long-input.release');
+    const clickReleasePath = ownedReleaseGate(fixture, 'long-input.release');
     writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 1_600, clickReleasePath }));
     const longInputBeforeHostState = await host.snapshot();
     const longInputBefore = {
@@ -1610,7 +1631,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     // Slow non-input/DOM work uses the generic 5s operation heartbeat. It must
     // neither borrow the trusted-input suppression endpoint nor leave a timer
     // running after the host operation is ended.
-    const snapshotReleasePath = join(fixture.root, 'slow-snapshot.release');
+    const snapshotReleasePath = ownedReleaseGate(fixture, 'slow-snapshot.release');
     writeFileSync(fixture.modePath, JSON.stringify({ snapshotDelayMs: 5_500, snapshotReleasePath }));
     const slowSnapshotBeforeHostState = await host.snapshot();
     const slowSnapshotBefore = {
@@ -1670,7 +1691,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     // authority here couples the observer regression to dozens of unrelated
     // 400ms host round trips. The separate slow-snapshot test above covers
     // the historical 15s ceiling without an active native-input lease.
-    const lateRecoveryReleasePath = join(fixture.root, 'late-recovery.release');
+    const lateRecoveryReleasePath = ownedReleaseGate(fixture, 'late-recovery.release');
     writeFileSync(
       fixture.modePath,
       JSON.stringify({ clickDelayMs: 1_600, clickReleasePath: lateRecoveryReleasePath }),
@@ -1770,16 +1791,26 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
         .filter((entry) => entry.kind === 'tool-complete' && entry.name === 'click').length,
       timeline: failedHeartbeatBeforeHostState.operationTimeline.length,
     };
-    const failedHeartbeatStartedAt = Date.now();
-    const failedHeartbeat = await wrapper.request('tools/call', {
-      name: 'click',
-      arguments: { uid: 'revoked-button' },
-    });
+    const failedHeartbeatRelease = ownedReleaseGate(fixture, 'rejected-heartbeat.release');
+    writeFileSync(fixture.modePath, JSON.stringify({ clickReleasePath: failedHeartbeatRelease }));
+    const failedHeartbeatRequest = requestHeldTool(wrapper, 'click', { uid: 'revoked-button' });
+    failedHeartbeatRequest.catch(() => {});
+    try {
+      await waitUntil(
+        async () => readAudit(fixture.auditPath).filter(entry => entry.kind === 'cancel').length ===
+          failedHeartbeatBefore.cancellations + 1,
+        'heartbeat failure did not cancel the claimed upstream request',
+      );
+      assert.equal(readAudit(fixture.auditPath)
+        .filter(entry => entry.kind === 'tool-complete' && entry.name === 'click').length,
+      failedHeartbeatBefore.completed, 'the upstream must stay held after cancellation');
+      assert.equal((await host.snapshot()).operationCalls.get('end_agent_operation') || 0,
+        failedHeartbeatBefore.end, 'host end must not precede the held upstream completion');
+    } finally {
+      writeFileSync(failedHeartbeatRelease, 'release');
+    }
+    const failedHeartbeat = await failedHeartbeatRequest;
     assert.equal(failedHeartbeat.result.content[0].text, 'clicked');
-    assert.ok(
-      Date.now() - failedHeartbeatStartedAt >= 1_400,
-      'heartbeat failure must wait for an upstream that ignores cancellation to really settle',
-    );
     assert.equal(
       ((await host.snapshot()).operationCalls.get('begin_agent_operation') || 0) - failedHeartbeatBefore.begin,
       1,
@@ -1828,7 +1859,8 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     // client abandons its response, but the wrapper must retain the internal
     // request until an upstream that ignores cancellation really completes;
     // only then may it end the Rust operation.
-    writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 1_600 }));
+    const externalCancelRelease = ownedReleaseGate(fixture, 'external-cancel.release');
+    writeFileSync(fixture.modePath, JSON.stringify({ clickReleasePath: externalCancelRelease }));
     const externalCancelBeforeHostState = await host.snapshot();
     const externalCancelBefore = {
       clicks: readAudit(fixture.auditPath)
@@ -1837,6 +1869,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
         .filter((entry) => entry.kind === 'tool-complete' && entry.name === 'click').length,
       end: externalCancelBeforeHostState.operationCalls.get('end_agent_operation') || 0,
       timeline: externalCancelBeforeHostState.operationTimeline.length,
+      cancellations: readAudit(fixture.auditPath).filter(entry => entry.kind === 'cancel').length,
     };
     const cancelled = wrapper.startRequest('tools/call', {
       name: 'click',
@@ -1853,6 +1886,20 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       requestId: cancelled.id,
       reason: 'user cancelled the browser tool',
     });
+    try {
+      await waitUntil(
+        async () => readAudit(fixture.auditPath).filter(entry => entry.kind === 'cancel').length ===
+          externalCancelBefore.cancellations + 1,
+        'external cancellation did not reach the held upstream request',
+      );
+      assert.equal(readAudit(fixture.auditPath)
+        .filter(entry => entry.kind === 'tool-complete' && entry.name === 'click').length,
+      externalCancelBefore.completed, 'the cancelled upstream must remain held');
+      assert.equal((await host.snapshot()).operationCalls.get('end_agent_operation') || 0,
+        externalCancelBefore.end, 'host end must wait for real upstream completion');
+    } finally {
+      writeFileSync(externalCancelRelease, 'release');
+    }
     await waitUntil(
       async () => readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool-complete' && entry.name === 'click').length ===
@@ -1997,7 +2044,9 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
   try {
     await initializeWorkspace(wrapper, 'windows-upstream-crash-test');
 
-    writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 5_000 }));
+    writeFileSync(fixture.modePath, JSON.stringify({
+      clickReleasePath: ownedReleaseGate(fixture, 'upstream-crash.release'),
+    }));
     const beforeHostState = await host.snapshot();
     const before = {
       begin: beforeHostState.operationCalls.get('begin_agent_operation') || 0,

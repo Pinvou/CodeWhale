@@ -6,6 +6,7 @@ import { fixtureScope } from './fixture-scope.mjs';
 import { readPendingHostRequest } from './browser-wrapper-fixture-cleanup.mjs';
 
 const progressPhases = ['starting', 'idle', 'scan', 'read', 'write', 'control', 'cdp', 'failed', 'exists', 'directory', 'audit'];
+const inputReplySlot = 3;
 let workerProgress;
 function progress(phase) {
   if (!workerProgress) return;
@@ -68,6 +69,14 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
         ...response,
       },
     );
+    // Count accepted replies only after the real IPC response is published.
+    // Idle progress, rejected requests and withheld responses cannot satisfy
+    // the observer's synchronous barrier.
+    if (request.operation === 'refresh_agent_input' && response.ok === true
+      && response.result?.accepted === true) {
+      Atomics.add(workerProgress, inputReplySlot, 1);
+      Atomics.notify(workerProgress, inputReplySlot);
+    }
   };
 
   const recordOperation = (operation) => {
@@ -243,12 +252,13 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
 export async function createBrowserWrapperHost(fixture, identity, { scope = fixtureScope, watchRequests = true } = {}) {
   if (typeof watchRequests !== 'boolean') throw new TypeError('watchRequests must be boolean');
   const { port1, port2 } = new MessageChannel();
-  const sharedProgress = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 3);
+  const sharedProgress = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 4);
   const observedProgress = new Int32Array(sharedProgress);
   const diagnostic = () => ({
     phase: progressPhases[Atomics.load(observedProgress, 0)] || 'unknown',
     sequence: Atomics.load(observedProgress, 2),
     ageMs: Math.max(0, Math.trunc(performance.now()) - Atomics.load(observedProgress, 1)),
+    inputRefreshReplies: Atomics.load(observedProgress, inputReplySlot),
     exited,
   });
   let worker;
@@ -394,6 +404,27 @@ export async function createBrowserWrapperHost(fixture, identity, { scope = fixt
     // Shared counters remain readable when the worker cannot acknowledge RPC.
     // No fixture paths, host/tool messages, request payloads or identities.
     diagnostic,
+    waitForInputRefreshesWhileBlocked(count, { minBlockedMs = 0, timeoutMs = 10_000 } = {}) {
+      if (!Number.isSafeInteger(count) || count < 1 || count > 100
+        || !Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 10_000
+        || !Number.isFinite(minBlockedMs) || minBlockedMs < 0 || minBlockedMs >= timeoutMs) {
+        throw new RangeError('invalid blocked-observer barrier');
+      }
+      const started = performance.now();
+      const before = Atomics.load(observedProgress, inputReplySlot);
+      while (true) {
+        const after = Atomics.load(observedProgress, inputReplySlot);
+        const blockedMs = performance.now() - started;
+        if (after - before >= count && blockedMs >= minBlockedMs) return { before, after, blockedMs };
+        const remaining = timeoutMs - blockedMs;
+        if (remaining <= 0) {
+          throw new Error('blocked observer did not receive real input refresh replies: '
+            + JSON.stringify({ expected: count, received: after - before, progress: diagnostic() }));
+        }
+        const untilMinimum = after - before >= count ? minBlockedMs - blockedMs : remaining;
+        Atomics.wait(observedProgress, inputReplySlot, after, Math.max(1, Math.min(remaining, untilMinimum)));
+      }
+    },
     async snapshot() {
       const result = await rpc('snapshot');
       if (result?.revision !== revision) throw new Error('browser host fixture snapshot revision mismatch');

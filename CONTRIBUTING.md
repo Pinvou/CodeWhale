@@ -162,6 +162,19 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   worker that owns the state. Close the owned listeners and observe Worker exit
   before releasing its receipt or removing fixture files; a sent stop request
   alone does not confirm retirement. Workers are never recovered by a PID sweep.
+- A deliberately blocked browser observer waits on shared counters of real
+  accepted host replies, after their IPC response files have been published.
+  Keep a bounded observer deadline and the intended minimum stall; do not infer
+  a reply count from a fixed sleep or compare different processes' wall clocks.
+  For cancellation cases, hold the fake upstream behind an owned release file
+  until its cancellation audit exists; assert that completion and host-end have
+  not happened, then release it and verify completion-before-end. A fixed fake
+  tool lifetime does not guarantee that a heartbeat has already failed. Release
+  finite barriers during cleanup even when assertions fail; intentionally
+  uncooperative shutdown fixtures retain their separate never-release path.
+  Keep live process fixtures behind explicit release barriers until ownership
+  assertions finish, rather than giving them fixed lifetimes that can expire
+  during another scope's startup.
 - Account CI installs `ci-fixture-docker.py` on **that job's PATH only**. Docker
   writes a fresh cidfile for every CLI `run`/`create`; the always-run ledger step
   validates all leases before stopping exact IDs and checks anonymous volumes.
