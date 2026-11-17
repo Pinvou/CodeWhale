@@ -37,6 +37,11 @@ process.on("message", message => {
   if (message === "exit") process.exit(0); // Test real OS release, no store.close.
 });
 const io = { ...fs, async rename(source, target) {
+  if (seedMode === "exit-before-state-primary" && target === statePath) {
+    // The real backup write, file sync, rename and directory sync completed.
+    // Exit before the first primary publication without running store.close.
+    process.exit(84);
+  }
   if (mode === "pause-reclaim" && source === `${statePath}.lock`) {
     process.send({ event: "before-reclaim" });
     await barrier;

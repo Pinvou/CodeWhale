@@ -57,7 +57,10 @@ function invoke(platform, result, { temporary, verifyFails = false, verifyFailur
     child.execFile=(...args)=>{ const done=args.at(-1); done(${verifyFails ? 'new Error("injected preflight rejection")' : 'null'},'ok',''); };
     child.execFile[Symbol.for('nodejs.util.promisify.custom')]=async(...args)=>{
       verification++;
-      const paths=JSON.parse(Buffer.from(args[2].env.PINVOU_PATHS_B64,'base64').toString('utf8'));
+      const encoded=args[2].env.PINVOU_PATHS_B64_LINES;
+      assert.equal(typeof encoded,'string');
+      assert.equal(args[2].env.PINVOU_PATHS_B64,undefined);
+      const paths=encoded.split(String.fromCharCode(10)).map(value=>Buffer.from(value,'base64').toString('utf8'));
       const last=paths.at(-1);
       if(last&&/^pinvou-relay-dacl-[A-Za-z0-9]+$/u.test(basename(last)))owned=last;
       if(verification===${JSON.stringify(verifyFailureAt ?? null)})throw failure();
