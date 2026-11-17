@@ -58,7 +58,7 @@ function install(read, remove, select, isCurrent = () => true) {
   return { feature, chat, invokes, sessionStates, state, remoteProxyDrafts, root, sandbox };
 }
 
-function installRemoteHistory() {
+function installRemoteHistory(recover = () => Promise.reject(new Error('unexpected recovery'))) {
   let remote;
   const requests = [];
   const harness = install(
@@ -76,6 +76,7 @@ function installRemoteHistory() {
   remote = harness.root.__PINVOU_TAURI_BRIDGE_FEATURES__['desktop-remote-control']({
     state: harness.state, can: () => true, notify() {}, listen: async () => () => {},
     invoke(command, args) {
+      if (command === 'desktop_remote_proxy_recover') return recover(args.quarantineConfirmed);
       if (command !== 'desktop_remote_proxy_history_read') return Promise.resolve([]);
       return new Promise((resolve, reject) => requests.push({ id: args.localSessionId, resolve, reject }));
     },
@@ -100,6 +101,26 @@ function installRemoteHistory() {
   }
   return { ...harness, remote, requests, complete };
 }
+
+test('RemoteProxy recovery passes explicit confirmation and fences stale history', async () => {
+  const confirmed = [];
+  const exportPath = 'private/local-recovery.json';
+  const { feature, remote, state, complete } = installRemoteHistory(value => {
+    confirmed.push(value);
+    return value ? Promise.resolve(exportPath) : Promise.reject(new Error('remote_proxy_recovery_retry_failed'));
+  });
+  const initial = feature.switchToSession('remote-local-1');
+  complete(0, 'old history', 1);
+  assert.equal(await initial, true);
+  await assert.rejects(remote.recoverRemoteProxyFile(false), { code: 'remote_proxy_recovery_retry_failed' });
+  assert.equal(state.remoteProxyHistory.title, 'old history');
+  const stale = remote.readRemoteProxyHistory('remote-local-1');
+  assert.equal(await remote.recoverRemoteProxyFile(true), exportPath);
+  complete(1, 'late old history', 2);
+  assert.equal(await stale, null);
+  assert.equal(state.remoteProxyHistory, null);
+  assert.deepEqual(confirmed, [false, true]);
+});
 
 for (const newer of ['navigation', 'refresh']) {
   test(`an older cross-kind reply cannot replace the published ${newer} snapshot`, async () => {
