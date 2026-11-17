@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { RelayStateStore } from "../relay-state-store.js";
+import { RelayStateStore, verifyWindowsAncestors } from "../relay-state-store.js";
 import { RELAY_CONTROLLER_GUARD_FILENAME, RelayStateGuard } from "../relay-state-guard.js";
 import { WINDOWS_ACL_VERIFY_SCRIPT, buildGuardJournalAclScript } from "../windows-guard-acl.js";
 
@@ -390,7 +390,10 @@ test("controller guard native exit before protecting its new inode recovers thro
     assert.equal(metadata.matches_creator_default, true);
     assert.notEqual(metadata.token_owner, "other");
   }
-  const native = { protectPath: undefined, verifyPath: undefined, verifyAncestors: undefined };
+  const native = { protectPath: undefined, verifyPath: undefined,
+    verifyAncestors: process.platform === "win32" ? paths => verifyWindowsAncestors(paths, {
+      onDiagnostic: phase => t.diagnostic(`controller_guard_ancestor_phase ${JSON.stringify({ phase })}`),
+    }) : undefined };
   const restored = await f.open(native);
   await restored.compareAndSwap("guard_test", "0", { commits: 1 });
   await restored.close();

@@ -489,7 +489,23 @@ async function initializeWrapper(wrapper, clientName) {
   return initialized;
 }
 
+async function initializeWorkspace(wrapper, clientName) {
+  await initializeWrapper(wrapper, clientName);
+  // The initialize shim can answer before native prepare (25s) and MCP startup.
+  // Observe that setup path explicitly before a case's 15s mutation deadline.
+  const response = await wrapper.request('tools/call', {
+    name: 'list_pages', arguments: {},
+  }, WORKSPACE_RECOVERY_OBSERVATION_MS);
+  assert.equal(response?.error, undefined, JSON.stringify(heldRequestResultDiagnostic(response)));
+  assert.notEqual(response?.result?.isError, true, JSON.stringify(heldRequestResultDiagnostic(response)));
+  assert.ok(response?.result?.structuredContent?.pages, JSON.stringify(heldRequestResultDiagnostic(response)));
+  return response;
+}
+
 async function cleanupFixture(fixture, host, ...wrappers) {
+  if (fixture.primaryErrors?.length) {
+    console.error('[browser-host-fixture-diagnostic]', JSON.stringify(host.diagnostic()));
+  }
   await cleanupBrowserFixture({
     primaryErrors: fixture.primaryErrors,
     closeHost: () => host.close(),
@@ -925,7 +941,7 @@ test('Windows proxy: host tab-navigation uncertainty is never compensated into a
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-create-navigation-unknown-test');
+    await initializeWorkspace(wrapper, 'windows-create-navigation-unknown-test');
     await host.setOperationError(
       'create_tab',
       'browser/action-commit-unknown-after-tab-navigation: final CAS acknowledgement lost',
@@ -1180,6 +1196,48 @@ test('Windows proxy: stdin shutdown tombstones an in-flight close before exit', 
   }
 });
 
+test('Windows proxy: first workspace setup may outlive the mutation observer without dispatching a mutation', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const fixture = await makeFixture();
+  const host = await createFakeHost(fixture);
+  const wrapper = driveWrapper(fixture);
+  let settled = false;
+  let pending;
+  try {
+    await host.deferOperation('prepare', true);
+    pending = initializeWorkspace(wrapper, 'windows-first-workspace-setup-test').then(
+      response => { settled = true; return { response }; },
+      error => { settled = true; return { error }; },
+    );
+    const requests = join(fixture.root, 'host-requests');
+    await waitUntil(() => existsSync(requests) && readdirSync(requests).some(name => {
+      if (!name.endsWith('.json')) return false;
+      const raw = readPendingHostRequest(join(requests, name));
+      return raw !== null && JSON.parse(raw).operation === 'prepare';
+    }), 'initial setup did not publish prepare');
+    await sleep(16_000);
+    assert.equal(settled, false, 'setup must not inherit the shorter mutation observer');
+    await host.deferOperation('prepare', false);
+    const outcome = await pending;
+    assert.ifError(outcome.error);
+    assert.equal(outcome.response.result.structuredContent.pages[0].id, 1);
+    assert.equal((await host.snapshot()).operationCalls.get('create_tab') || 0, 0);
+    const diagnostic = host.diagnostic();
+    assert.deepEqual(Object.keys(diagnostic).sort(), ['ageMs', 'exited', 'phase', 'sequence']);
+    assert.ok(Number.isSafeInteger(diagnostic.sequence) && diagnostic.sequence > 0);
+    assert.ok(Number.isSafeInteger(diagnostic.ageMs) && diagnostic.ageMs >= 0);
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
+  } finally {
+    try { await host.deferOperation('prepare', false); }
+    catch (error) { (fixture.primaryErrors ||= []).push(error); }
+    await cleanupFixture(fixture, host, wrapper);
+    await pending;
+  }
+});
+
 test('Windows proxy: workspace recovery observes a prepare response beyond the driver default', {
   skip: process.platform !== 'win32',
 }, async () => {
@@ -1188,8 +1246,7 @@ test('Windows proxy: workspace recovery observes a prepare response beyond the d
   const wrapper = driveWrapper(fixture);
   let settled = false;
   try {
-    await initializeWrapper(wrapper, 'windows-delayed-prepare-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-delayed-prepare-test');
     host.stopSessionA();
     const before = (await host.snapshot()).prepareCalls;
     await host.deferOperation('prepare', true);
@@ -1215,6 +1272,9 @@ test('Windows proxy: workspace recovery observes a prepare response beyond the d
     }
     const outcome = await pending;
     assert.ifError(outcome.error);
+    assert.equal(outcome.response?.error, undefined, JSON.stringify(heldRequestResultDiagnostic(outcome.response)));
+    assert.notEqual(outcome.response?.result?.isError, true, JSON.stringify(heldRequestResultDiagnostic(outcome.response)));
+    assert.ok(outcome.response?.result?.structuredContent?.pages, JSON.stringify(heldRequestResultDiagnostic(outcome.response)));
     assert.equal(outcome.response.result.structuredContent.pages[0].id, 2);
     assert.equal((await host.snapshot()).prepareCalls - before, 1);
     assert.equal(readAudit(fixture.auditPath).filter(entry => entry.kind === 'start').length, 1);

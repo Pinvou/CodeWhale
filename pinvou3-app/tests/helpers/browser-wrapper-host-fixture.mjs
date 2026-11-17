@@ -5,7 +5,17 @@ import { createServer } from './http-fixture.mjs';
 import { fixtureScope } from './fixture-scope.mjs';
 import { readPendingHostRequest } from './browser-wrapper-fixture-cleanup.mjs';
 
+const progressPhases = ['starting', 'idle', 'scan', 'read', 'write', 'control', 'cdp', 'failed'];
+let workerProgress;
+function progress(phase) {
+  if (!workerProgress) return;
+  Atomics.store(workerProgress, 0, progressPhases.indexOf(phase));
+  Atomics.store(workerProgress, 1, Math.trunc(performance.now()));
+  Atomics.add(workerProgress, 2, 1);
+}
+
 function atomicWriteJson(path, value) {
+  progress('write');
   const temporary = `${path}.${process.pid}.tmp`;
   writeFileSync(temporary, JSON.stringify(value));
   renameSync(temporary, path);
@@ -69,7 +79,9 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
   };
 
   const timer = setInterval(() => {
-    if (!existsSync(requestDirectory) || state.failure) return;
+    progress('scan');
+    if (state.failure) { progress('failed'); return; }
+    if (!existsSync(requestDirectory)) { progress('idle'); return; }
     try {
       if (
         state.deferredObservations.size === 0 &&
@@ -81,6 +93,7 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
       }
       for (const name of readdirSync(requestDirectory)) {
         if (!name.endsWith('.json') || handled.has(name)) continue;
+        progress('read');
         const raw = readPendingHostRequest(join(requestDirectory, name));
         if (raw === null) continue;
         const request = JSON.parse(raw);
@@ -165,7 +178,9 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
       }
     } catch (error) {
       state.failure = error;
+      progress('failed');
     }
+    if (!state.failure) progress('idle');
   }, 5);
 
   return {
@@ -185,6 +200,14 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
 // an observer must not suppress the host's 400ms input-refresh replies.
 export async function createBrowserWrapperHost(fixture, identity, { scope = fixtureScope } = {}) {
   const { port1, port2 } = new MessageChannel();
+  const sharedProgress = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 3);
+  const observedProgress = new Int32Array(sharedProgress);
+  const diagnostic = () => ({
+    phase: progressPhases[Atomics.load(observedProgress, 0)] || 'unknown',
+    sequence: Atomics.load(observedProgress, 2),
+    ageMs: Math.max(0, Math.trunc(performance.now()) - Atomics.load(observedProgress, 1)),
+    exited,
+  });
   let worker;
   let exited = false;
   let serverClosed = false;
@@ -217,7 +240,7 @@ export async function createBrowserWrapperHost(fixture, identity, { scope = fixt
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`browser host fixture ${command} acknowledgement timed out`));
+        reject(new Error(`browser host fixture ${command} acknowledgement timed out; progress=${JSON.stringify(diagnostic())}`));
       }, 5_000);
       pending.set(id, { resolve, reject, timer });
       try { port1.postMessage({ id, command, expectedRevision: revision, ...values }); }
@@ -285,6 +308,7 @@ export async function createBrowserWrapperHost(fixture, identity, { scope = fixt
         fixture: { root: fixture.root, workspacePath: fixture.workspacePath, portPath: fixture.portPath },
         identity,
         control: port2,
+        sharedProgress,
       },
       transferList: [port2],
     });
@@ -323,6 +347,9 @@ export async function createBrowserWrapperHost(fixture, identity, { scope = fixt
     revision = result.revision;
   };
   return {
+    // Shared counters remain readable when the worker cannot acknowledge RPC.
+    // No fixture paths, host/tool messages, request payloads or identities.
+    diagnostic,
     async snapshot() {
       const result = await rpc('snapshot');
       if (result?.revision !== revision) throw new Error('browser host fixture snapshot revision mismatch');
@@ -344,8 +371,11 @@ export async function createBrowserWrapperHost(fixture, identity, { scope = fixt
   };
 }
 
-async function serveHostWorker({ fixture, identity, control }) {
+async function serveHostWorker({ fixture, identity, control, sharedProgress }) {
+  workerProgress = new Int32Array(sharedProgress);
+  progress('starting');
   const cdp = createServer((request, response) => {
+    progress('cdp');
     if (request.url === '/json/version') {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end('{"webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/fake"}');
@@ -380,6 +410,7 @@ async function serveHostWorker({ fixture, identity, control }) {
     return { revision };
   };
   const execute = async request => {
+    progress('control');
     if (shuttingDown) throw new Error('browser host fixture is shutting down');
     if (request.expectedRevision !== revision) throw new Error('browser host fixture stale configuration revision');
     switch (request.command) {
