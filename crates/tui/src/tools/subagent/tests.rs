@@ -16313,6 +16313,43 @@ fn terminal_synthesis_is_scoped_to_owner_and_keeps_delivery_history() {
 }
 
 #[test]
+fn control_resolution_rejects_a_caller_owned_outside_the_active_session() {
+    let workspace = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(workspace.path().to_path_buf(), 5);
+    let (agent_a, _input_a) =
+        manager.insert_test_running_agent_with_input("session_a", workspace.path());
+    let (agent_b, _input_b) =
+        manager.insert_test_running_agent_with_input("session_b", workspace.path());
+    assign_test_session_owner(&mut manager, &agent_a, "session-a");
+    assign_test_session_owner(&mut manager, &agent_b, "session-b");
+
+    // The target resolves in the active session, so the resolution leg
+    // cannot be the failure source; the caller id is owned by another
+    // session, which is exactly the folded caller-ownership guard in
+    // ensure_caller_controls_descendant_for_session. This pin keeps the
+    // early-Err leg distinct from the "Refusing" descendant check.
+    manager
+        .get_result_by_ref_for_session("session-a", &agent_a)
+        .expect("target resolves in the active session");
+    let error = manager
+        .ensure_caller_controls_descendant_for_session(
+            "session-a",
+            &agent_a,
+            Some(&agent_b),
+            "agent/cancel",
+        )
+        .expect_err("a caller owned outside the active session must fail closed");
+    assert_eq!(error.to_string(), "Agent not found in the active session");
+    assert_eq!(
+        manager
+            .get_result(&agent_a)
+            .expect("A still running")
+            .status,
+        SubAgentStatus::Running
+    );
+}
+
+#[test]
 fn active_session_owns_every_roster_and_control_resolution() {
     let workspace = tempdir().expect("tempdir");
     let mut manager = SubAgentManager::new(workspace.path().to_path_buf(), 5);
