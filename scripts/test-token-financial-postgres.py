@@ -51,6 +51,7 @@ REQUIRED = {
     "TestOrganizationModelPolicyPublicPostgres",
     "TestContextEligibilityUsesCurrentScopedProductionRoutes",
     "TestReconciliationEvidenceMatchesPublicSchema",
+    "TestReconciliationSequentialClaimsPublicPostgres",
     "TestF05DispatchLeaseLifecycle",
     "TestF05IncompleteUpstreamErrorReplayPublicPostgres",
     "TestF05MissingReferenceDeadlineFundsPublicPostgres",
@@ -89,6 +90,7 @@ ACCOUNT_REQUIRED = {
     "TestF06OrganizationDeletionVersionAndTerminalScope",
     "TestF06Review5566377593PublicPostgres",
     "TestOrganizationEvidenceTruncatePublicPostgres",
+    "TestProviderQuotaConcurrentBoundary",
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
@@ -204,6 +206,7 @@ RETAINED_REQUIRED = {
     "TestRetainedOrganizationOrderHistoryPagination",
     "TestBillingFinancialJSONObjectsPostgres",
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
+    "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease",
     "TestExpiredHoldProofRetryDiagnosticsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
     "TestEscalatedForcedRefundWalletLockOrderPostgres",
@@ -298,6 +301,7 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestAccountFinancialJSONObjectsPostgres": {"fresh-current-producer", "upgrade-current-producer", "dirty-critical-history", "dirty-financial-history"},
     "TestBillingFinancialJSONObjectsPostgres": {"fresh-current-producer", "upgrade-current-producer", "dirty-details", "dirty-provider_capability_snapshot", "dirty-policy_snapshot", "dirty-evidence_summary", "dirty-payload_snapshot"},
+    "TestProviderQuotaConcurrentBoundary": {"migration-round-trip", "send", "verify", "login-registration", "login-profile"},
     "TestProviderHealthReadFailurePostgres": {"discovery", "latest-five", "failure-rate"},
     "TestApprovalPaginationSourcePostgres": {
         "registered-replicas-use-distinct-admitted-client-keys",
@@ -318,6 +322,10 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestOrganizationStartupDiagnosticsPostgres": {
         "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease": {
+        "first-RPC-release-crash-keeps-durable-intent",
+        "slow-proof-exhaustion-persists-backoff-and-next-healthy-progress",
     },
     "TestBillingHistoricalStateRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
