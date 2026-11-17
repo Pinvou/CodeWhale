@@ -2286,6 +2286,16 @@
         "sha256": "458f58680bc1ff48ceb59ec274329e429d5806a07000e0aae3c9551136eaaa70"
       },
       {
+        "file": "900043_package_expiry_scan.down.sql",
+        "version": 900043,
+        "sha256": "0a2edbe127d2abfdbe978298cf6b1e84bbef14e217fd7fbf9a653810fac334d6"
+      },
+      {
+        "file": "900043_package_expiry_scan.up.sql",
+        "version": 900043,
+        "sha256": "010fb10ad9c02c80f86fece213a603b602dca7b3e19a263d5a498a51270dd205"
+      },
+      {
         "file": "900045_provider_health_recent.down.sql",
         "version": 900045,
         "sha256": "07fe0346755f15f629f927ca3ac040e1b07e59b9fa248c3e932ce8197dd1d3ef"
