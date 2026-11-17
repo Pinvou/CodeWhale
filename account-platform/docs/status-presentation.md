@@ -12,10 +12,12 @@
 | --- | --- | --- |
 | 账户用户状态 | Account `000027_account_closure_saga.up.sql` 的用户约束 | `DELETED` 表示已注销；`BOOTSTRAP_PENDING` 表示等待初始化 |
 | 付款订单状态 | Billing 付款订单及本地到期合同 | `PENDING` 表示待支付，不是审批完成；入账状态另列 |
-| 审计导出状态 | Account `000032_audit_export_protection.up.sql` | `READY` 表示可下载；不表示已经下载 |
+| 审计导出状态 | Account `000032_audit_export_protection.up.sql`；实际页面的 `auditExportPresentation[language].status` | `READY` 显示“文件已生成”；`DOWNLOADED` 显示“下载票据已使用”，不证明文件已保存到客户端 |
 | 支付异常及晚到付款案件 | Billing 原案件状态及既有筛选合同 | 异常 `RESOLVED` 表示处置已记录，不据此宣称财务修复已完成；渠道事实不可见不表示未付款 |
 
 审批、注册/资料修复、角色、用量、Token、价格和健康面板沿用各自已有领域标签，并补充通用状态词汇。价格派生状态仍由 Billing 的 `derivePriceLifecycleStatus` 产生；注册、角色和会话的状态转换、过期、重试与授权规则均不改变。
+
+审计导出页面沿用 `AuditWorkspace` 的 `auditExportPresentation`，包括“排队中”“生成中”“文件已生成”“下载票据已使用”“导出失败”“已过期”的三语词条。`accountStatusCopy.auditExports` 和 `auditExportStatusLabel` 是预留辅助词汇，当前没有 UI 调用，辅助函数的枚举测试不证明页面采用这些词条。支付异常的 `OPEN/RESOLVED` 沿用 `adminLayoutCopy.anomalyQueueStatus`；其他异常码与晚到付款状态由对应封闭词典展示。
 
 资料修复列表的当前 DTO 不提供注册阶段字段，页面继续不显示该项，不将其缺失解释成新的异常。付款订单展示兼容旧状态代码的读取；当前服务仍按现行迁移及各摘要字段表达退款与入账事实。
 

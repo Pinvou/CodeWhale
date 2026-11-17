@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 import { createServer } from './helpers/vite-fixture.mjs';
-import { adminLayoutCopy } from '../src/shared/i18n.js';
+import { accountStatusCopy, adminLayoutCopy } from '../src/shared/i18n.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chrome = process.env.CHROME || [
@@ -117,10 +117,22 @@ try {
     await page.evaluate(() => { window.f02.wrongRefund = false; }); await click('retry'); await page.waitForFunction(() => window.f02.calls.filter(call => call.url.endsWith('/refunds')).length === 2); await settled();
     assert.ok(await page.evaluate(() => { const calls = window.f02.calls.filter(call => call.url.endsWith('/refunds')); return calls[0].key === calls[1].key && calls[0].body === calls[1].body; }));
   });
-  await caseRun('Owned late review uses its actual review_status and query route', async () => {
-    await fresh('admin'); await click('sla'); await page.waitForFunction(() => document.body.textContent.includes('REVIEW_REQUIRED_LATE_PAYMENT')); await settled(); await click('details'); await page.waitForSelector('article'); await settled(); await click('query');
-    await page.waitForSelector('[role=alertdialog]'); await click('confirmQueryAction');
+  for (const language of ['zh', 'en', 'ja']) await caseRun(`Owned late review uses localized review_status and its original query route [${language}]`, async () => {
+    const expectedStatus = accountStatusCopy[language].latePayments.REVIEW_REQUIRED_LATE_PAYMENT;
+    await fresh('admin'); await page.select('[aria-label=fixture-language]', language); await click('sla');
+    await page.waitForFunction(expected => [...document.querySelectorAll('tbody td')].some(cell => cell.textContent === expected), {}, expectedStatus);
+    await settled(); await click('details'); await page.waitForSelector('article'); await settled();
+    await page.waitForFunction(expected => [...document.querySelectorAll('article p')].some(element => element.textContent.startsWith(`${expected} / P2 / `)), {}, expectedStatus);
+    await click('query');
+    await page.waitForSelector('[role=alertdialog]');
+    assert.equal(await page.evaluate(() => window.f02.calls.filter(call => /\/query-(?:commands|command-results)$/.test(call.url) && call.method === 'POST').length), 0, 'opening confirmation must not send a query');
+    assert.equal(await page.evaluate(() => window.f02.queryDispatches || 0), 0);
+    await click('confirmQueryAction');
     await page.waitForFunction(() => window.f02.calls.some(call => call.url.endsWith('/query-commands') && call.method === 'POST')); await settled();
+    const dispatched = await page.evaluate(() => ({ id: window.f02.id, requests: window.f02.calls.filter(call => /\/query-(?:commands|command-results)$/.test(call.url) && call.method === 'POST'), effects: window.f02.queryDispatches }));
+    assert.equal(dispatched.requests.length, 1, 'one confirmed query must make exactly one request');
+    assert.equal(dispatched.requests[0].url, `/api/admin/billing/admin/v1/late-payment-reviews/${dispatched.id}/query-commands`);
+    assert.equal(dispatched.effects, 1, 'one confirmed query must dispatch exactly once');
   });
   // QUERY_PROTOCOL_CASES_START
   const openLateQuery = async () => { await fresh('admin'); await click('sla'); await page.waitForSelector('tbody tr'); await settled(); await click('details'); await page.waitForSelector('article'); await settled(); };
