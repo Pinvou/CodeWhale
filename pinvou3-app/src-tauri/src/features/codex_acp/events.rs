@@ -898,8 +898,25 @@ impl EventBridge {
         error: Option<&str>,
         recovery_reason: Option<&str>,
     ) -> bool {
+        self.finish_turn_once_from_source(
+            turn_id,
+            status,
+            error,
+            recovery_reason,
+            crate::features::behavior_telemetry::FailureSource::AcpRuntime,
+        )
+    }
+
+    pub(super) fn finish_turn_once_from_source(
+        &self,
+        turn_id: &str,
+        status: &str,
+        error: Option<&str>,
+        recovery_reason: Option<&str>,
+        source: crate::features::behavior_telemetry::FailureSource,
+    ) -> bool {
         self.with_active_runtime(|| {
-            self.finish_active_turn_once(turn_id, status, error, recovery_reason)
+            self.finish_active_turn_once(turn_id, status, error, recovery_reason, source)
         })
         .unwrap_or(false)
     }
@@ -910,6 +927,7 @@ impl EventBridge {
         status: &str,
         error: Option<&str>,
         recovery_reason: Option<&str>,
+        source: crate::features::behavior_telemetry::FailureSource,
     ) -> bool {
         if !super::stall::claim_current_turn(&self.current_turn, turn_id) {
             return false;
@@ -932,7 +950,7 @@ impl EventBridge {
                 &self.pinvou_session_id,
                 turn_id,
                 error,
-                true,
+                source,
             );
         }
         crate::features::behavior_telemetry::finish_task(
