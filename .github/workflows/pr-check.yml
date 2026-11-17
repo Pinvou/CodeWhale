@@ -1316,6 +1316,19 @@ jobs:
           # 同 run 内消费,最小保留。
           retention-days: 1
 
+      # 自建机上行到 GitHub 工件存储实测偶发 stall(见上方 Pack 注释的 run 证据),
+      # 上传动作无内建重试;主上传失败时以 overwrite 重建同名工件,自动补试一次。
+      - name: Upload frontend setup bundle (retry)
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-setup-bundle
+          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
+          if-no-files-found: error
+          # 同 run 内消费,最小保留。
+          retention-days: 1
+          overwrite: true
+
   frontend-test:
     name: frontend-test
     # Setup 工件化:依赖与三份 build 产物来自 frontend-setup 的单次构建
@@ -1323,7 +1336,7 @@ jobs:
     needs: [changes, frontend-setup]
     # Draft/Ready quality, builds and logic. Ready/queue browser smokes run
     # independently below, without waiting for this job's ~17-minute logic suite.
-    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) && needs.frontend-setup.result == 'success' }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     defaults:
@@ -1382,9 +1395,19 @@ jobs:
         run: |
           set -euo pipefail
           listing="$RUNNER_TEMP/frontend-setup-artifacts.json"
-          curl -sfSL --retry 3 --max-time 120 -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$listing"
-          bundle_id="$(python3 -c 'import json,sys; print(next(a["id"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == "frontend-setup-bundle"))' "$listing")"
+          # 工件列表存在最终一致窗口(上传完成 ≠ 列表可见),对「列表获取 + 工件
+          # 查找」做有界轮询;耗尽后显式报错退出,而非裸 StopIteration。
+          bundle_id=""
+          for _ in 1 2 3 4 5; do
+            if curl -sfSL --retry 3 --max-time 120 -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$listing"; then
+              bundle_id="$(python3 -c 'import json,sys; ids=[a["id"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == "frontend-setup-bundle"]; print(ids[0] if ids else "")' "$listing")"
+            fi
+            [[ -n "$bundle_id" ]] && break
+            echo "frontend setup 工件尚未在列表可见,25s 后重试"
+            sleep 25
+          done
+          [[ -n "$bundle_id" ]] || { echo "::error::frontend setup 工件缺失;请重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
           code=000
           for _ in 1 2 3 4 5; do
             code="$(curl -sSL --max-time 900 -w '%{http_code}' -o "$RUNNER_TEMP/frontend-setup-bundle.zip" \
@@ -1494,7 +1517,7 @@ jobs:
     # 每个分片只下载解包自己的独立副本,分片间无可变共享状态。
     needs: [changes, frontend-setup]
     # Each shard runs on the shared tested tree artifact and owns its fixtures.
-    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) && needs.frontend-setup.result == 'success' }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     strategy:
@@ -1557,9 +1580,19 @@ jobs:
         run: |
           set -euo pipefail
           listing="$RUNNER_TEMP/frontend-setup-artifacts.json"
-          curl -sfSL --retry 3 --max-time 120 -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$listing"
-          bundle_id="$(python3 -c 'import json,sys; print(next(a["id"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == "frontend-setup-bundle"))' "$listing")"
+          # 工件列表存在最终一致窗口(上传完成 ≠ 列表可见),对「列表获取 + 工件
+          # 查找」做有界轮询;耗尽后显式报错退出,而非裸 StopIteration。
+          bundle_id=""
+          for _ in 1 2 3 4 5; do
+            if curl -sfSL --retry 3 --max-time 120 -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$listing"; then
+              bundle_id="$(python3 -c 'import json,sys; ids=[a["id"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == "frontend-setup-bundle"]; print(ids[0] if ids else "")' "$listing")"
+            fi
+            [[ -n "$bundle_id" ]] && break
+            echo "frontend setup 工件尚未在列表可见,25s 后重试"
+            sleep 25
+          done
+          [[ -n "$bundle_id" ]] || { echo "::error::frontend setup 工件缺失;请重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
           code=000
           for _ in 1 2 3 4 5; do
             code="$(curl -sSL --max-time 900 -w '%{http_code}' -o "$RUNNER_TEMP/frontend-setup-bundle.zip" \
