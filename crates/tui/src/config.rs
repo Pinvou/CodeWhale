@@ -1725,9 +1725,73 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
 
 // === Types ===
 
+/// Independent recovery limits for HTTP 429; other transport errors keep their policy.
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+#[serde(try_from = "RawRateLimitRetryPolicy")]
+pub struct RateLimitRetryPolicy {
+    pub max_attempts: u32,
+    pub recovery_budget_secs: u64,
+    pub initial_delay_secs: u64,
+    pub max_delay_secs: u64,
+}
+
+impl Default for RateLimitRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 20,
+            recovery_budget_secs: 600,
+            initial_delay_secs: 5,
+            max_delay_secs: 60,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+struct RawRateLimitRetryPolicy {
+    max_attempts: u32,
+    recovery_budget_secs: u64,
+    initial_delay_secs: u64,
+    max_delay_secs: u64,
+}
+
+impl Default for RawRateLimitRetryPolicy {
+    fn default() -> Self {
+        let p = RateLimitRetryPolicy::default();
+        Self {
+            max_attempts: p.max_attempts,
+            recovery_budget_secs: p.recovery_budget_secs,
+            initial_delay_secs: p.initial_delay_secs,
+            max_delay_secs: p.max_delay_secs,
+        }
+    }
+}
+
+impl TryFrom<RawRateLimitRetryPolicy> for RateLimitRetryPolicy {
+    type Error = String;
+    fn try_from(p: RawRateLimitRetryPolicy) -> Result<Self, Self::Error> {
+        if !(1..=1000).contains(&p.max_attempts)
+            || !(1..=86400).contains(&p.recovery_budget_secs)
+            || p.initial_delay_secs == 0
+            || p.initial_delay_secs > p.max_delay_secs
+            || p.max_delay_secs > 86400
+        {
+            return Err("invalid retry.rate_limit policy: attempts 1..1000, budget 1..86400s, 1 <= initial <= max <= 86400s".into());
+        }
+        Ok(Self {
+            max_attempts: p.max_attempts,
+            recovery_budget_secs: p.recovery_budget_secs,
+            initial_delay_secs: p.initial_delay_secs,
+            max_delay_secs: p.max_delay_secs,
+        })
+    }
+}
+
 /// Raw retry configuration loaded from config files.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RetryConfig {
+    #[serde(default)]
+    pub rate_limit: RateLimitRetryPolicy,
     pub enabled: Option<bool>,
     pub max_retries: Option<u32>,
     pub initial_delay: Option<f64>,
@@ -2618,6 +2682,7 @@ impl HeaderItem {
 /// Resolved retry policy with defaults applied.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
+    pub rate_limit: RateLimitRetryPolicy,
     pub enabled: bool,
     pub max_retries: u32,
     pub initial_delay: f64,
@@ -2964,6 +3029,9 @@ impl TranscriptConfig {
 /// Resolved CLI configuration, including defaults and environment overrides.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
+    /// Host-owned location for content-free provider reset receipts.
+    #[serde(default)]
+    pub rate_limit_recovery_dir: Option<std::path::PathBuf>,
     /// Single-token inputs that cancel the active turn before dispatch.
     #[serde(default)]
     pub stop_words: Option<Vec<String>>,
@@ -7874,6 +7942,7 @@ impl Config {
     #[must_use]
     pub fn retry_policy(&self) -> RetryPolicy {
         let defaults = RetryPolicy {
+            rate_limit: RateLimitRetryPolicy::default(),
             enabled: true,
             max_retries: 3,
             initial_delay: 1.0,
@@ -7886,6 +7955,7 @@ impl Config {
         };
 
         RetryPolicy {
+            rate_limit: cfg.rate_limit.clone(),
             enabled: cfg.enabled.unwrap_or(defaults.enabled),
             max_retries: cfg.max_retries.unwrap_or(defaults.max_retries),
             initial_delay: cfg.initial_delay.unwrap_or(defaults.initial_delay),
@@ -10628,6 +10698,9 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
             .or(base.managed_config_path),
         requirements_path: override_cfg.requirements_path.or(base.requirements_path),
         max_subagents: override_cfg.max_subagents.or(base.max_subagents),
+        rate_limit_recovery_dir: override_cfg
+            .rate_limit_recovery_dir
+            .or(base.rate_limit_recovery_dir),
         retry: override_cfg.retry.or(base.retry),
         auto_review: override_cfg.auto_review.or(base.auto_review),
         tui: override_cfg.tui.or(base.tui),

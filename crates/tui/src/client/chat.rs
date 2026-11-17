@@ -1348,30 +1348,13 @@ impl DeepSeekClient {
         );
         let idle_timeout = open_req.idle_timeout;
         let response = super::stream_entry::open_sse_response(&open_req, |policy| async move {
-            match policy {
-                // The prebuilt HTTP/1.1 twin carries the same default
-                // headers/auth; send once, without the JSON retry loop
-                // (matching the pre-seam H1-pin behavior).
-                super::stream_entry::StreamHttpPolicy::Http1Only => {
-                    let client = super::stream_entry::client_for_policy(
-                        &self.http_client,
-                        self.http1_fallback_client(),
-                        policy,
-                    );
-                    Ok(self
-                        .with_operation_header(client.post(url))
-                        .header(reqwest::header::CONTENT_TYPE, "application/json")
-                        .json(body)
-                        .send()
-                        .await?)
-                }
-                super::stream_entry::StreamHttpPolicy::DualWithH1Fallback => {
-                    // Stream open: no per-request total — the response body
-                    // outlives the open, and a total would ride on it and
-                    // truncate the stream.
-                    self.open_stream_json_with_retry(url, body).await
-                }
-            }
+            let client = super::stream_entry::client_for_policy(
+                &self.http_client,
+                self.http1_fallback_client(),
+                policy,
+            );
+            self.open_stream_json_with_retry(client, url, body, policy)
+                .await
         })
         .await?;
         Ok((response, idle_timeout))

@@ -396,6 +396,14 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
     let thread_id = ids.thread_id.clone();
     let session_id = ids.session_id.clone();
     match event {
+        Event::ModelRecovery { receipt } => wire::EventMsg::Status {
+            thread_id,
+            session_id,
+            message: format!(
+                "Model recovery: {} ({}/{}) next_retry_at_ms={:?}",
+                receipt.state, receipt.attempt, receipt.max_attempts, receipt.next_retry_at_ms
+            ),
+        },
         Event::ToolProjectionWarning {
             provider,
             omitted_tool_names,

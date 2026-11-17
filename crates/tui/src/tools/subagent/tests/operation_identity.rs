@@ -28,6 +28,7 @@ async fn forkguard_model_operation_child_retries_keep_id() {
         default_text_model: Some("deepseek-v4-pro".into()),
         request_idempotency_header: Some("idempotency-key".into()),
         retry: Some(crate::config::RetryConfig {
+            rate_limit: crate::config::RateLimitRetryPolicy::default(),
             enabled: Some(false),
             max_retries: Some(0),
             initial_delay: Some(0.0),
