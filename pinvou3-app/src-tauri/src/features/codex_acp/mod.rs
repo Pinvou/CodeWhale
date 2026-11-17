@@ -1498,7 +1498,13 @@ impl AcpSession {
                     Some(cursor) => kimi_failure_after(&cursor).await,
                     None => None,
                 } {
-                    self.settle_turn_once(&turn_id, "Failed", Some(&error), None);
+                    self.settle_turn_once_from_source(
+                        &turn_id,
+                        "Failed",
+                        Some(&error),
+                        None,
+                        crate::features::behavior_telemetry::FailureSource::AcpPrompt,
+                    );
                     return false;
                 }
                 let status = match response.stop_reason {
@@ -1517,7 +1523,13 @@ impl AcpSession {
                 let message = format!("ACP Agent: {error}");
                 if codex_upgrade_required(&message) {
                     return self.bridge.close_runtime_if(|| {
-                        if !self.settle_turn_once(&turn_id, "Failed", Some(&message), None) {
+                        if !self.settle_turn_once_from_source(
+                            &turn_id,
+                            "Failed",
+                            Some(&message),
+                            None,
+                            crate::features::behavior_telemetry::FailureSource::AcpPrompt,
+                        ) {
                             return false;
                         }
                         self.lifecycle.begin_expected_shutdown();
@@ -1526,7 +1538,13 @@ impl AcpSession {
                         true
                     });
                 }
-                self.settle_turn_once(&turn_id, "Failed", Some(&message), None);
+                self.settle_turn_once_from_source(
+                    &turn_id,
+                    "Failed",
+                    Some(&message),
+                    None,
+                    crate::features::behavior_telemetry::FailureSource::AcpPrompt,
+                );
                 false
             }
         }
@@ -1545,11 +1563,33 @@ impl AcpSession {
         error: Option<&str>,
         recovery_reason: Option<&str>,
     ) -> bool {
+        self.settle_turn_once_from_source(
+            turn_id,
+            status,
+            error,
+            recovery_reason,
+            crate::features::behavior_telemetry::FailureSource::AcpRuntime,
+        )
+    }
+
+    fn settle_turn_once_from_source(
+        &self,
+        turn_id: &str,
+        status: &str,
+        error: Option<&str>,
+        recovery_reason: Option<&str>,
+        source: crate::features::behavior_telemetry::FailureSource,
+    ) -> bool {
         self.bridge.settle_runtime_turn(
             &self.busy,
             || {
-                self.bridge
-                    .finish_turn_once(turn_id, status, error, recovery_reason)
+                self.bridge.finish_turn_once_from_source(
+                    turn_id,
+                    status,
+                    error,
+                    recovery_reason,
+                    source,
+                )
             },
             || {
                 crate::features::assistant::timing::finish_turn(
