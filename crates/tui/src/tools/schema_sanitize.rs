@@ -412,6 +412,14 @@ fn root_composition_constraint_note(obj: &Map<String, Value>) -> Option<String> 
         let Some(items) = obj.get(key).and_then(Value::as_array) else {
             continue;
         };
+        // A union alternative that admits the empty instance keeps omission
+        // legal on the flattened wire schema, so a "must" hint would walk
+        // the model onto a path the schema does not require (review
+        // 4604994801: the unconstrained `{type:"object"}` alternative
+        // accepts `{}` while the note claimed a group must be provided).
+        // allOf keeps the strong wording — every branch constrains the
+        // same instance, so each surviving group genuinely is required.
+        let optional = key != "allOf" && items.iter().any(alternative_admits_omission);
         let mut groups: Vec<String> = items.iter().filter_map(required_group_label).collect();
         groups.sort();
         groups.dedup();
@@ -420,13 +428,30 @@ fn root_composition_constraint_note(obj: &Map<String, Value>) -> Option<String> 
         // constraint (e.g. only one of two branches required it), and
         // suppressing the note there used to hide the loosening entirely.
         if !groups.is_empty() {
+            let verb = if optional { "may be" } else { "must be" };
             return Some(format!(
-                "{prefix} of these parameter groups must be provided: {}.",
+                "{prefix} of these parameter groups {verb} provided: {}.",
                 groups.join(" | ")
             ));
         }
     }
     None
+}
+
+/// Whether one composition alternative admits an instance carrying no
+/// group at all: an object-typed (or type-unconstrained) alternative with
+/// no surviving `required` accepts `{}` itself. A scalar-typed
+/// alternative or a `false` schema admits no empty instance and keeps the
+/// strong wording.
+fn alternative_admits_omission(item: &Value) -> bool {
+    let Some(obj) = item.as_object() else {
+        return item == &Value::Bool(true);
+    };
+    obj.get("type").is_none_or(|declared| declared == "object")
+        && obj
+            .get("required")
+            .and_then(Value::as_array)
+            .is_none_or(|required| required.is_empty())
 }
 
 /// Strip `dependentSchemas` / `dependentRequired` from every node.
@@ -1148,7 +1173,10 @@ mod tests {
         // only one of the branches carries a required group, the flatten
         // relaxes that requirement and the note must fire — it used to be
         // suppressed below the two-group gate, hiding the loosening
-        // entirely.
+        // entirely. The unconstrained object alternative accepts `{}`, so
+        // the disclosure stays OPTIONAL — the wire schema permits omitting
+        // the group, and a "must" hint would walk the model onto an
+        // unnecessary path (review 4604994801).
         let mut schema = json!({
             "anyOf": [
                 {
@@ -1166,7 +1194,7 @@ mod tests {
         assert!(schema.get("anyOf").is_none());
         assert_eq!(
             note.as_deref(),
-            Some("At least one of these parameter groups must be provided: `path`.")
+            Some("At least one of these parameter groups may be provided: `path`.")
         );
     }
 }
@@ -2043,6 +2071,10 @@ fn mfjs_keyword_allowed_for_type(keyword: &str, schema_type: &str, is_root: bool
     // mfjs-spec.zh.md>, fetched 2026-11-05). The engine therefore neither
     // restricts its placement by node type nor type-checks its value — the
     // caller owns the value's correctness, exactly as the document says.
+    // Placement caveat (review 4604994865): the earlier `$ref`-sibling and
+    // union-sibling whitelists below still refuse `default`, so a default
+    // beside either form drops the whole tool. That restriction predates
+    // the default support and stays disclosed rather than widened here.
     if is_root && keyword == "$defs" {
         return true;
     }

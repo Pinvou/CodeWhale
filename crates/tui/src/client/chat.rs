@@ -1214,8 +1214,20 @@ fn prefix_digit_led_tool_names_for_moonshot(
             dropped.push(name);
             return false;
         }
+        // Both walls compare the same API spelling the mint produces: the
+        // wire names are already `to_api_tool_name`-encoded, and a RAW
+        // registry name must be encoded the same way before the compare —
+        // raw `_3d--render` encodes to `_3d----render`, so comparing its
+        // raw spelling against the minted `_3d--render` falsely collided a
+        // pair that stays distinct on the wire and dropped the digit-led
+        // tool (and its forced choice) for a custom catalog (review
+        // 4604994816). Dispatch resolves through the encoded spelling
+        // (`from_api_tool_name`), so the encoded form is the collision
+        // identity that matters.
         if wire_names.iter().any(|existing| existing == &minted)
-            || registry_names.iter().any(|existing| existing == &minted)
+            || registry_names
+                .iter()
+                .any(|existing| to_api_tool_name(existing) == minted)
         {
             // A schema-dropped `_3d_render` sibling keeps its handler in the
             // registry, and dispatch exact-matches the registry: letting the
@@ -6914,6 +6926,58 @@ mod alias_thinking_detection_tests {
             vec!["3d_render".to_string()],
             "the drop must be reported under its registry spelling so forced \
              choice can refuse the shadowed name"
+        );
+    }
+
+    #[test]
+    fn moonshot_wire_keeps_a_hyphenated_mint_whose_raw_twin_encodes_away() {
+        // Review 4604994816: the reserved-name wall must compare the
+        // registry's names in the SAME encoding as the mint. Raw
+        // `3d-render` encodes to `3d--render` and mints to `_3d--render`;
+        // raw `_3d--render` encodes to `_3d----render`. Comparing the
+        // minted spelling against the RAW registry name `_3d--render`
+        // falsely collided a pair that stays distinct on the wire and
+        // dropped the digit-led tool (and refused its forced choice) for a
+        // custom catalog.
+        let mut request = sampling_probe_request(crate::config::DEFAULT_MOONSHOT_MODEL);
+        let mut hyphen_probe = digit_led_name_probe_tool("3d-render");
+        hyphen_probe.description = "hyphen probe".to_string();
+        request.tools = Some(vec![hyphen_probe, digit_led_name_probe_tool("_3d--render")]);
+        request.tool_choice = Some(json!({"type": "tool", "name": "3d-render"}));
+
+        let body = crate::client::chat::build_chat_wire_body(
+            &request,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            false,
+        )
+        .expect("Moonshot wire body");
+
+        let tools = body.body["tools"].as_array().expect("tools on the wire");
+        assert_eq!(
+            tools.len(),
+            2,
+            "the encoded forms are distinct, so nothing is dropped: {tools:?}"
+        );
+        assert_eq!(
+            tools[0]["function"]["name"],
+            json!("_3d--render"),
+            "the digit-led tool carries its minted wire spelling"
+        );
+        assert_eq!(
+            tools[1]["function"]["name"],
+            json!("_3d----render"),
+            "the raw underscore tool keeps its own encoded spelling"
+        );
+        assert!(
+            body.omitted_tool_names.is_empty(),
+            "no name pair collides after encoding: {:?}",
+            body.omitted_tool_names
+        );
+        assert_eq!(
+            body.body["tool_choice"]["function"]["name"],
+            json!("_3d--render"),
+            "the forced choice survives for the minted tool"
         );
     }
 
