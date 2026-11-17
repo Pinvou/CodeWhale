@@ -228,6 +228,7 @@ RETAINED_REQUIRED = {
     "TestReconciliationLedgerRepairPublicPostgres",
     "TestCallbackHTTPAdmissionPersistsPostgres",
     "TestDirectPaymentRepairCommandReceiptPostgres",
+    "TestEscalatedPaymentFinancialCompletionPostgres",
     "TestLatePaymentQueryCommandPostgres",
     "TestLatePaymentQueryClientHTTPPostgres",
     "TestLatePaymentArchiveCommandReplayPostgres",
@@ -296,6 +297,17 @@ BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
     "TestBillingManualAdjustmentProofRollbackPostgres": {
         f"{state}/{entry}" for state in ("empty", "retained-proof") for entry in ("public-api", "actual-cli", "renamed-history-cli")
+    },
+    "TestEscalatedPaymentFinancialCompletionPostgres": {
+        "lost-ack-replays-exact-committed-result",
+        "concurrent-reviewers-complete-once",
+        "actual-full-refund-receipt", "confirmation-audit-failure-rolls-back",
+        "payment-repair-late", "payment-repair-duplicate",
+        "no-effect-failed-evidence", "no-effect-legacy-order-only",
+        "new-payment-evidence-keeps-blocked",
+        "conflicting-original-amount", "conflicting-original-currency",
+        "conflicting-original-customer", "conflicting-original-sku",
+        "conflicting-original-channel",
     },
     "TestProviderQuotaConcurrentBoundary": {"migration-round-trip", "send", "verify", "login-registration", "login-profile"},
     "TestProviderHealthReadFailurePostgres": {"discovery", "latest-five", "failure-rate"},
