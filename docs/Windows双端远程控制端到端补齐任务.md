@@ -10,6 +10,8 @@
 >
 > **DEV-31/DEV-25 收口说明**：本文第 5～11 节保留早期 E2E 提交与审核记录，其中 `RemoteConversationView`、`RemoteHistoryStore`、A 端独立 `tasks/transcript`、旧 desktop Command/Event 及“隐藏能力”决策只是历史实现证据，不是当前契约。这些未发布路径不迁移、不兼容；当前发布契约以需求文档、代码架构、27 条稳定 journey catalog、发布与回滚文档及双机演练清单为准。
 
+历史 298/295 原日志未追回，差异原因不可核实；A12/A13 引用净增量的固定范围、可复现清单及原计数限制见[交付追溯补遗](remote-control-delivery-provenance.md)。
+
 ## 1. 执行规则
 
 1. 每个任务先实现、后审核；审核未通过时修复并复审，通过后才能进入下一任务。
@@ -148,7 +150,7 @@
 
 - 目标差异核对：第 5.2 节三步全部落地；E2E-02 出口「A 只有在完整握手和 lease 安装后才进入 connected」由 `happy_path_installs_the_lease_and_reaches_connected` 断言（阶段顺序 connecting→safety_handshake→connected、transport generation 已绑定、租约上下文与协商能力一致、`live_lease()` 可用）。
 - 关键失败路径：Relay 拒绝（`relay_rejection_is_surfaced_as_a_bounded_public_error`）、断线与本地 40 秒上限（`disconnect_and_timeout_map_to_peer_unavailable`）、伪造签名 transcript 与二次 generation 绑定（`untrusted_transcript_and_generation_bind_failure_fail_closed`）、阶段回调失败立即中止（`stage_callback_failure_aborts_before_any_lease_material`）、B 端错序/重复接管/绑定不符（`driver_*` 三例）均有真实用例；失败路径统一断言「无租约 + transport 已停止 + 状态为 error」。
-- 敏感信息：连接码只在 claim 中使用并在提交后立刻 zeroize（`claim_submits_before...`/`claim_is_protocol_valid_and_carries_the_local_handshake_key` 断言握手对象内码已清空、二次 claim 失败关闭）；恢复凭证只以 `[u8;32]` 存在且 `JoinedLease`/`ControllerLease` 的 Debug 都是 `[REDACTED]`（A/B 两侧各有用例）；出站手握手帧走敏感（Zeroizing）队列；未新增日志或遥测调用点。
+- 敏感信息：连接码只在 claim 中使用并在提交后立刻 zeroize（`claim_is_protocol_valid_and_carries_the_local_handshake_key` 断言握手对象内码已清空、二次 claim 失败关闭）；恢复凭证只以 `[u8;32]` 存在且 `JoinedLease`/`ControllerLease` 的 Debug 都是 `[REDACTED]`（A/B 两侧各有用例）；出站手握手帧走敏感（Zeroizing）队列；未新增日志或遥测调用点。
 - 跨 generation / lease 边界：A 端 generation 必须来自验签 transcript 且只能绑定一次；未绑定或绑定不符时 `install_authenticated_lease` 拒绝；入站帧在绑定后按 generation 硬门过滤；B 端租约只在双收据完成且 `controller_joined` 与验签 transcript 绑定一致时产生；`is_connecting` / `is_pending_handshake` 门保证在途失败不覆盖用户显式断开或已被取代的状态（A/B 两侧各有用例）。
 - 审核发现与处置（均为 minor，已修复）：
   1. `transport_channels` 与生产入口同名且会新建独立 generation 单元格，生产误用会失去共享绑定 → 加 `#[cfg(test)]` 并注明生产唯一入口（`39781d0aa`）。
@@ -230,7 +232,7 @@ E2E-04（加密业务帧双向派发）。开工前需先读第 4 节与本节�
    - `ControllerTaskEventSink::emit_journal` 默认端口 + `ChatTurnExecutor` 产出 `user_message`/`assistant_delta` + `EnginePoolChatTurnPort::run_chat_turn` 返回回复文本（`StoreChatTranscript` 从 SessionStore 读最后一条 assistant 文本）；
    - 命令层 `TaskEventBridge::emit_journal` 与 `DesktopTaskEventSink::publish_task_event` 都先写权威 journal，再经加密通道回传 A。
 2. **缺口恢复**（剩余）：A 端发现 `event_sequence` 缺口时用 `journal_replay_request`/`session_snapshot_request`（DEV-19 已有 B 侧 API）补齐；当前只做增量事件，缺口时 A 端历史等待下一次 epoch 或 E2E-07 的显式重放。
-3. **E2E-07 渲染**（剩余）：前端订阅 `desktop-remote-controller-journal`，按 `historyId` 落库并渲染 transcript；未绑定历史时先创建/绑定。
+3. **E2E-07 渲染**（历史剩余计划，已退役）：当时计划订阅 `desktop-remote-controller-journal` 并按 `historyId` 渲染；该事件及 `RemoteHistoryStore::find_by_session_reference` 均不是现行指令，不得恢复。当前认证 journal 经 `RemoteSessionProjectionPort` 投影到唯一 SessionStore RemoteProxy，由现有 ChatView 消费；详见《Windows双端远程控制代码架构》的当前合同。
 
 ### 8.3 E2E-05 审核要点（轮次 1，结论 PASS）
 
