@@ -1,8 +1,13 @@
 """The real Windows atomic entry must retain tests and fail on missing receipts."""
 import importlib.util
+# Load ctypes before the ABI negative control changes struct.calcsize.
+import ctypes
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 from pathlib import Path
 import re
+import struct
 import sys
 import tempfile
 import unittest
@@ -37,7 +42,7 @@ def run_body(step):
 class WindowsAtomicResourceTests(unittest.TestCase):
     def inventory_check(self, root):
         body = run_body(windows_step('Confirm Windows atomic resource retirement'))
-        code = re.search(r"python - [^\n]* <<'PY'\n(.*?)^PY$", body, re.M | re.S)[1]
+        code = re.search(r'''"\$python_exe" - [^\n]* <<'PY'\n(.*?)^PY$''', body, re.M | re.S)[1]
         with mock.patch.object(sys, 'argv', ['-', str(root)]):
             exec(compile(code, '<Windows atomic receipt inventory>', 'exec'), {})
 
@@ -48,14 +53,47 @@ class WindowsAtomicResourceTests(unittest.TestCase):
         self.assertIn('test_exe_windows="$(cygpath -w "$test_exe")"', body)
         self.assertIn("'platform::process::tests::'", body)
         self.assertIn("'windows_attachment_runtime_stays_security_gated'", body)
-        command = 'python ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"'
+        command = '"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"'
         self.assertIn(command, body)
         self.assertLess(body.index("printf 'atomic-%s.json"), body.index(command))
         self.assertIn("grep -qE 'running [1-9][0-9]* tests?' \"$report\"", body)
         self.assertNotRegex(body, re.compile(r'^\s*"\$test_exe" "\$filter"', re.M))
         initialization = run_body(windows_step('Initialize Windows atomic resource ledger'))
-        self.assertIn('sys.platform == "win32"', initialization)
-        self.assertIn('python scripts/ci-resource-ledger.py --init', initialization)
+        provider = windows_step('Windows atomic fixture Python')
+        self.assertNotIn('actions/setup-python', provider)
+        self.assertIn("sys.platform != 'win32'", run_body(provider))
+        binding = 'python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"'
+        retirement = run_body(windows_step('Confirm Windows atomic resource retirement'))
+        for consumer in (initialization, body, retirement):
+            self.assertIn(binding, consumer)
+        self.assertIn('"$python_exe" scripts/ci-resource-ledger.py --init', initialization)
+        self.assertIn('"$python_exe" scripts/ci-resource-ledger.py --directory "$PINVOU_CI_RESOURCE_LEDGER"', retirement)
+
+    def selector_code(self):
+        body = run_body(windows_step('Windows atomic fixture Python'))
+        return body.split('<<\'PY\' >> "$GITHUB_ENV"\n', 1)[1].rsplit('\nPY\n', 1)[0]
+
+    @unittest.skipUnless(sys.platform == 'win32', 'Native interpreter selection is validated on Windows')
+    def test_native_selector_exports_the_verified_interpreter(self):
+        output = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(io.StringIO()):
+            exec(compile(self.selector_code(), '<Windows atomic Python selector>', 'exec'), {})
+        self.assertEqual(output.getvalue(), 'PINVOU_WINDOWS_ATOMIC_PYTHON=' + sys.executable + '\n')
+
+    def test_selector_rejects_incompatible_identity_before_export(self):
+        cases = (
+            (sys, 'platform', 'linux'),
+            (sys, 'version_info', (3, 11, 99)),
+            (struct, 'calcsize', lambda _format: 4),
+            (sys, 'executable', 'relative-python.exe'),
+        )
+        for owner, name, value in cases:
+            with self.subTest(field=name), mock.patch.object(sys, 'platform', 'win32'):
+                output = io.StringIO()
+                with mock.patch.object(owner, name, value), redirect_stdout(output):
+                    with self.assertRaises(SystemExit):
+                        exec(compile(self.selector_code(), '<Windows atomic Python selector>', 'exec'), {})
+                self.assertEqual(output.getvalue(), '')
 
     def test_actual_inventory_reader_rejects_missing_empty_duplicate_or_unowned_names(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -89,7 +127,7 @@ class WindowsAtomicResourceTests(unittest.TestCase):
         self.assertIn("matrix.phase == 'regression'", check)
         self.assertNotIn('continue-on-error', check)
         body = run_body(check)
-        self.assertIn('python scripts/ci-resource-ledger.py --directory "$PINVOU_CI_RESOURCE_LEDGER"', body)
+        self.assertIn('"$python_exe" scripts/ci-resource-ledger.py --directory "$PINVOU_CI_RESOURCE_LEDGER"', body)
         self.assertNotIn('|| true', body)
         upload = windows_step('Windows atomic lifecycle receipts')
         self.assertIn('timeout-minutes: 3', upload)

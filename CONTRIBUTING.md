@@ -162,6 +162,10 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   on failure. Its capture-retention fixtures hand off the child's creation
   identity before launcher exit and verify the same kernel object's exit;
   a `finished` phase marker alone is not resource retirement.
+  This Windows atomic chain validates the job's existing native 64-bit CPython
+  (3.12 or newer) and binds its absolute executable for initialization, each
+  filter and retirement. Missing or incompatible interpreters fail before the
+  ledger starts; this fixture setup does not install or reconfigure system Python.
 - Account CI installs `ci-fixture-docker.py` on **that job's PATH only**. Docker
   writes a fresh cidfile for every CLI `run`/`create`; the always-run ledger step
   validates all leases before stopping exact IDs and checks anonymous volumes.

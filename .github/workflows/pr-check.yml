@@ -4003,17 +4003,42 @@ jobs:
 
       - name: Windows atomic fixture Python
         if: ${{ matrix.phase == 'regression' }}
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Compilation helpers already require Python in this job. Bind the
+          # verified native executable without changing the runner installation.
+          python -X utf8 - <<'PY' >> "$GITHUB_ENV"
+          import ctypes
+          import os
+          import struct
+          import sys
+          if (
+              sys.platform != 'win32'
+              or sys.implementation.name != 'cpython'
+              or sys.version_info < (3, 12)
+              or struct.calcsize('P') != 8
+          ):
+              raise SystemExit('Windows atomic fixtures require native 64-bit CPython 3.12 or newer')
+          executable = sys.executable
+          if (
+              not os.path.isabs(executable)
+              or not os.path.isfile(executable)
+              or any(char in executable for char in '\r\n\0')
+          ):
+              raise SystemExit('Windows atomic fixture Python executable is unavailable')
+          ctypes.WinDLL('kernel32', use_last_error=True)
+          print('Windows atomic fixture Python ' + sys.version.split()[0] + ' (native, 64-bit)', file=sys.stderr)
+          print('PINVOU_WINDOWS_ATOMIC_PYTHON=' + executable)
+          PY
 
       - name: Initialize Windows atomic resource ledger
         if: ${{ matrix.phase == 'regression' }}
         shell: bash
         run: |
           set -euo pipefail
-          python -c 'import sys; assert sys.platform == "win32", "Windows fixture supervisor needs native Python"'
-          python scripts/ci-resource-ledger.py --init
+          python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"
+          "$python_exe" scripts/ci-resource-ledger.py --init
 
       - name: Windows 原子替换状态机回归
         if: ${{ matrix.phase == 'regression' }}
@@ -4021,6 +4046,7 @@ jobs:
         run: |
           set -euo pipefail
           total_started=$SECONDS
+          python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"
           # 直接运行已经由 mt.exe 修补的链接产物。这里不能再次调用 cargo test，
           # 否则 Cargo 可能重链并覆盖 exe，导致 Common-Controls v6 清单丢失。
           test_exe="$(cygpath -u "$PINVOU3_TEST_EXE")"
@@ -4142,7 +4168,7 @@ jobs:
             printf 'atomic-%s.json\n' "$index" >> "$ledger/atomic-expected.txt"
             report="$ledger/atomic-$index.log"
             receipt="$(cygpath -w "$ledger/atomic-$index.json")"
-            python ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"
+            "$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"
             grep -qE 'running [1-9][0-9]* tests?' "$report" || {
               echo "FAIL: 回归过滤器 '$filter' 匹配 0 个测试(疑似测试改名导致静默空跑)" >&2
               exit 1
@@ -4156,7 +4182,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python - "$PINVOU_CI_RESOURCE_LEDGER" <<'PY'
+          python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"
+          "$python_exe" - "$PINVOU_CI_RESOURCE_LEDGER" <<'PY'
           from pathlib import Path
           import re
           import sys
@@ -4172,7 +4199,7 @@ jobs:
               if receipt.is_symlink() or not receipt.is_file():
                   raise SystemExit('Windows atomic resource receipt missing: ' + name)
           PY
-          python scripts/ci-resource-ledger.py --directory "$PINVOU_CI_RESOURCE_LEDGER"
+          "$python_exe" scripts/ci-resource-ledger.py --directory "$PINVOU_CI_RESOURCE_LEDGER"
 
       - name: Windows atomic lifecycle receipts
         id: windows_atomic_receipts_upload

@@ -4776,7 +4776,7 @@ python3() { fixture_mock python3 "$@"; }
         ):
             with self.subTest(module=module):
                 self.assertEqual(filters.count(module), 1)
-        self.assertIn('python ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', step)
+        self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', step)
         self.assertIn(
             "grep -qE 'running [1-9][0-9]* tests?' \"$report\" || {",
             step,
@@ -5039,7 +5039,7 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn('"PINVOU3_TEST_EXE=$testExe" | Out-File', windows_rust_test)
         self.assertIn('test_exe="$(cygpath -u "$PINVOU3_TEST_EXE")"', windows_rust_test)
         regression = _step_named(windows_rust_test, "Windows 原子替换状态机回归")
-        self.assertIn('python ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', regression)
+        self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', regression)
         self.assertNotIn("cargo test", regression)
         self.assertIn(
             "'connector_introspection_guard_matches_complete_names_only'",
@@ -5077,7 +5077,7 @@ python3() { fixture_mock python3 "$@"; }
                 filters.count("'app::commands::remote_control::reader_resume_tests::'"),
                 1,
             )
-            self.assertIn('python ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5088,7 +5088,7 @@ python3() { fixture_mock python3 "$@"; }
         # cannot satisfy this wiring contract. These are not Wry runtime evidence.
         for old, new in (
             ("'app::commands::remote_control::reader_resume_tests::'", "'features::remote_control::'"),
-            ('python ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compile-only"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compile-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
         ):
@@ -5114,7 +5114,7 @@ python3() { fixture_mock python3 "$@"; }
             filters, commands = loop.split("; do", maxsplit=1)
             for prefix in required:
                 self.assertEqual(filters.count(prefix), 1)
-            self.assertIn('python ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5126,7 +5126,7 @@ python3() { fixture_mock python3 "$@"; }
         mutations = [(prefix, change) for prefix in required
                      for change in ("", "'renamed_no_matching_tests'")]
         mutations += [
-            ('python ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compiled-only"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compiled-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
         ]
@@ -5156,7 +5156,7 @@ python3() { fixture_mock python3 "$@"; }
             filters, commands = loop.split("; do", maxsplit=1)
             for required in required_filters:
                 self.assertEqual(filters.count(required), 1)
-            self.assertIn('python ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5170,7 +5170,7 @@ python3() { fixture_mock python3 "$@"; }
             for required in required_filters
             for replacement in ("", "'features::remote_control::'")
         ] + [
-            ('python ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compile-only"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compile-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
         ]
