@@ -505,6 +505,24 @@ async function initializeWorkspace(wrapper, clientName) {
 async function cleanupFixture(fixture, host, ...wrappers) {
   if (fixture.primaryErrors?.length) {
     console.error('[browser-host-fixture-diagnostic]', JSON.stringify(host.diagnostic()));
+    try {
+      const audit = readAudit(fixture.auditPath).slice(-40).map(({ kind, name, pid, at }) =>
+        ({ kind, name, pid, at }));
+      console.error('[browser-upstream-fixture-events]', JSON.stringify(audit));
+    } catch {
+      console.error('[browser-upstream-fixture-events]', JSON.stringify({ unavailable: true }));
+    }
+    try {
+      const observed = await host.snapshot();
+      console.error('[browser-host-fixture-events]', JSON.stringify({
+        timeline: observed.operationTimeline.slice(-40),
+        pendingObservations: observed.pendingObservations,
+        prepareCalls: observed.prepareCalls,
+      }));
+    } catch {
+      console.error('[browser-host-fixture-events]', JSON.stringify({ unavailable: true,
+        progress: host.diagnostic() }));
+    }
   }
   await cleanupBrowserFixture({
     primaryErrors: fixture.primaryErrors,
@@ -1798,7 +1816,8 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
         failedHeartbeatBefore.completed,
       1,
     );
-    assert.ok(completion && end && end.at >= completion.at, 'end must occur after real upstream completion');
+    assert.ok(completion && end && end.completedToolCounts.click >= failedHeartbeatBefore.completed + 1,
+      'end must observe real upstream completion: ' + JSON.stringify({ completion, end }));
     const refreshesAfterFailure = (await host.snapshot()).operationCalls.get('refresh_agent_input') || 0;
     await sleep(600);
     assert.equal((await host.snapshot()).operationCalls.get('refresh_agent_input') || 0, refreshesAfterFailure);
@@ -1858,8 +1877,10 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       .filter((entry) => entry.operation === 'end_agent_operation')
       .at(-1);
     assert.ok(
-      externalCompletion && externalEnd && externalCompletion.at <= externalEnd.at,
-      'external cancellation must not end the host operation before upstream completion',
+      externalCompletion && externalEnd
+        && externalEnd.completedToolCounts.click >= externalCancelBefore.completed + 1,
+      'external cancellation must observe upstream completion before host end: '
+        + JSON.stringify({ completion: externalCompletion, end: externalEnd }),
     );
     writeFileSync(fixture.modePath, '{}');
 

@@ -165,8 +165,58 @@ export async function protectWindowsPath(target, kind) {
   await runWindowsAclScript(WINDOWS_ACL_SCRIPT, target, kind);
 }
 
-export async function verifyWindowsPath(target, kind) {
-  await runWindowsAclScript(WINDOWS_ACL_VERIFY_SCRIPT, target, kind);
+export async function verifyWindowsPath(target, kind, { onDiagnostic } = {}) {
+  if (typeof onDiagnostic !== "function") {
+    await runWindowsAclScript(WINDOWS_ACL_VERIFY_SCRIPT, target, kind);
+    return;
+  }
+  // Opt-in native-test instrumentation. Keep the reviewed ACL statements,
+  // 15s watchdog and strict stdout contract; emit only closed phase names.
+  const phases = [
+    ["$ErrorActionPreference = 'Stop'", "script_started"],
+    ["$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User", "identity_resolved"],
+    ["$acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $target", "acl_loaded"],
+    ["if ($acl.Owner -ne $current.Value -and $acl.Owner -ne $current.Translate([System.Security.Principal.NTAccount]).Value) { throw 'unexpected ACL owner' }", "owner_checked"],
+    ["$actual = @($acl.Access)", "entries_loaded"],
+  ];
+  let script = WINDOWS_ACL_VERIFY_SCRIPT;
+  for (const [anchor, phase] of phases) {
+    if (script.split(anchor).length !== 2) fail("relay_state_acl_unverified");
+    script = script.replace(anchor, `${anchor}\n[Console]::Out.WriteLine('pinvou_acl_${phase}')`);
+  }
+  const encoded = encodedPowerShell(script);
+  let stdout;
+  const observe = output => {
+    const normalized = typeof output === "string" && Buffer.byteLength(output, "utf8") <= 512
+      ? output.replace(/\r\n/gu, "\n") : "";
+    const markers = phases.map(([, phase]) => `pinvou_acl_${phase}\n`);
+    let prefix = "", phase = "unknown";
+    for (let index = 0; index < markers.length; index++) {
+      prefix += markers[index];
+      if (normalized === prefix || (index === markers.length - 1 && normalized === `${prefix}ok`)) {
+        phase = phases[index][1];
+      }
+    }
+    if (normalized === `${prefix}ok`) phase = "checks_completed";
+    try { onDiagnostic(phase); } catch { /* Observers cannot change validation. */ }
+  };
+  try {
+    ({ stdout } = await execFileAsync(windowsPowerShellExecutable(), [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded,
+    ], {
+      windowsHide: true,
+      env: windowsChildEnvironment({ PINVOU_ACL_TARGET: target, PINVOU_ACL_KIND: kind }),
+      timeout: 15_000, maxBuffer: 64 * 1024,
+    }));
+  } catch (error) {
+    let output;
+    try { output = error?.stdout; } catch { /* Never emit exception contents. */ }
+    observe(output);
+    throw error;
+  }
+  observe(stdout);
+  const expected = phases.map(([, phase]) => `pinvou_acl_${phase}\n`).join("") + "ok";
+  if (stdout.replace(/\r\n/gu, "\n") !== expected) fail("relay_state_acl_unverified");
 }
 
 async function verifyWindowsGuardJournal(target) {
@@ -532,6 +582,7 @@ export class RelayStateStore {
   #protectPath;
   #verifyPath;
   #verifyAncestors;
+  #onNativeDiagnostic;
   #ancestorSnapshot = null;
   #state = null;
   #lockOwner = null;
@@ -554,6 +605,7 @@ export class RelayStateStore {
     protectPath = process.platform === "win32" ? protectWindowsPath : null,
     verifyPath = process.platform === "win32" ? verifyWindowsPath : null,
     verifyAncestors = process.platform === "win32" ? verifyWindowsAncestors : null,
+    onNativeDiagnostic = null,
   } = {}) {
     this.#path = safeStatePath(statePath);
     this.#legacyStatePath = safeStatePath(legacyStatePath);
@@ -579,6 +631,7 @@ export class RelayStateStore {
     this.#protectPath = protectPath;
     this.#verifyPath = verifyPath;
     this.#verifyAncestors = verifyAncestors;
+    this.#onNativeDiagnostic = typeof onNativeDiagnostic === "function" ? onNativeDiagnostic : null;
   }
 
   async #open() {
@@ -774,7 +827,15 @@ export class RelayStateStore {
     if (process.platform === "win32") {
       if (typeof this.#verifyPath !== "function") fail("relay_state_acl_unavailable");
       try {
-        await this.#verifyPath(target, kind);
+        if (this.#verifyPath === verifyWindowsPath && this.#onNativeDiagnostic) {
+          const start = performance.now();
+          await verifyWindowsPath(target, kind, {
+            onDiagnostic: phase => this.#onNativeDiagnostic({ operation: "verify_acl", phase, kind,
+              elapsed_ms: Math.round(performance.now() - start) }),
+          });
+        } else {
+          await this.#verifyPath(target, kind);
+        }
       } catch (error) {
         if (error instanceof RelayStateStoreError) throw error;
         fail("relay_state_acl_unverified", error);

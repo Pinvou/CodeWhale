@@ -5,7 +5,7 @@ import { createServer } from './http-fixture.mjs';
 import { fixtureScope } from './fixture-scope.mjs';
 import { readPendingHostRequest } from './browser-wrapper-fixture-cleanup.mjs';
 
-const progressPhases = ['starting', 'idle', 'scan', 'read', 'write', 'control', 'cdp', 'failed', 'exists', 'directory'];
+const progressPhases = ['starting', 'idle', 'scan', 'read', 'write', 'control', 'cdp', 'failed', 'exists', 'directory', 'audit'];
 let workerProgress;
 function progress(phase) {
   if (!workerProgress) return;
@@ -76,7 +76,24 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
       (state.operationCalls.get(operation) || 0) + 1,
     );
     state.operationLog.push(operation);
-    state.operationTimeline.push({ operation, at: Date.now() });
+    const event = { operation, at: Date.now() };
+    if (operation === 'end_agent_operation') {
+      // Capture an actual happens-before witness, rather than ordering wall
+      // clocks from independent processes. The fake MCP appends completion
+      // before writing its response; a premature host end cannot see it.
+      event.completedToolCounts = {};
+      progress('audit');
+      const audit = readFileSync(fixture.auditPath, 'utf8');
+      progress('read');
+      for (const line of audit.split('\n').slice(0, -1)) {
+        if (!line) continue;
+        const entry = JSON.parse(line);
+        if (entry.kind === 'tool-complete') {
+          event.completedToolCounts[entry.name] = (event.completedToolCounts[entry.name] || 0) + 1;
+        }
+      }
+    }
+    state.operationTimeline.push(event);
   };
 
   let stopped = false;
@@ -331,7 +348,7 @@ export async function createBrowserWrapperHost(fixture, identity, { scope = fixt
     worker = new Worker(new URL(import.meta.url), {
       workerData: {
         kind: 'pinvou-browser-fixture-host-v1',
-        fixture: { root: fixture.root, workspacePath: fixture.workspacePath, portPath: fixture.portPath },
+        fixture: { root: fixture.root, workspacePath: fixture.workspacePath, portPath: fixture.portPath, auditPath: fixture.auditPath },
         identity,
         control: port2,
         sharedProgress,
