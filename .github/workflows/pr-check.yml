@@ -913,6 +913,8 @@ jobs:
               - 'pinvou3-app/package-lock.json'
               - '.github/workflows/pr-check.yml'
             windows_codex:
+              - 'pinvou3-app/tests/helpers/claude-acp-startup-probe.cjs'
+              - 'pinvou3-app/tests/claude_acp_startup_probe.test.mjs'
               - 'pinvou3-app/tests/helpers/ndjson-child-driver.mjs'
               - 'pinvou3-app/tests/helpers/browser-wrapper-fixture-cleanup.mjs'
               - 'pinvou3-app/tests/helpers/browser-wrapper-held-result.mjs'
