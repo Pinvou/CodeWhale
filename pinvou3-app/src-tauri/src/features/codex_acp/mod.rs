@@ -5632,17 +5632,9 @@ impl AcpPool {
             let request = pending
                 .get(&key)
                 .context("remote_permission_binding_stale")?;
-            let option = remote_permission_option_id(&request.option_kinds, allow);
-            let (response, outcome) = match option.as_ref() {
-                Some(option) => (
-                    RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                        option.clone(),
-                    )),
-                    "selected",
-                ),
-                None if !allow => (RequestPermissionOutcome::Cancelled, "cancelled"),
-                None => bail!("remote_permission_allow_option_missing"),
-            };
+            if allow && remote_permission_option_id(&request.option_kinds, true).is_none() {
+                bail!("remote_permission_allow_option_missing");
+            }
             if allow {
                 if request
                     .sdk_responder
@@ -5653,11 +5645,21 @@ impl AcpPool {
                 }
                 budget.checkpoint(cancel).map_err(anyhow::Error::msg)?;
             }
-            pending
-                .remove(&key)
-                .context("remote_permission_binding_stale")?
-                .respond(RequestPermissionResponse::new(response))?;
-            Ok((option, outcome))
+            // Consume only inside the final fenced send. Keep the shared
+            // exact-owner option selection and deny fallback on this real path.
+            let RemotePermissionResolution {
+                request,
+                response,
+                option_id,
+                outcome,
+            } = take_remote_permission_resolution(
+                &mut pending,
+                owner,
+                permission_request_id,
+                allow,
+            )?;
+            request.respond(response)?;
+            Ok((option_id, outcome))
         };
         let authority = self.app.try_state::<Arc<PermissionAuthority>>();
         let mut dispatch_telemetry = None;
@@ -7335,6 +7337,54 @@ fn remote_permission_response_key(
         (remote_request_owned_by(request.remote_owner.as_ref(), owner)
             && request.remote_approval_id.as_deref() == Some(approval_id))
         .then(|| key.clone())
+    })
+}
+
+/// The production pending-map operation, inside the caller's active runtime
+/// and turn gates. A controlled ACP fixture can exercise the same consumption
+/// and response selection without launching an external provider.
+struct RemotePermissionResolution {
+    request: PendingPermission,
+    response: RequestPermissionResponse,
+    option_id: Option<String>,
+    outcome: &'static str,
+}
+
+fn take_remote_permission_resolution(
+    pending: &mut HashMap<String, PendingPermission>,
+    owner: &RemotePermissionOwner,
+    approval_id: &str,
+    allow: bool,
+) -> Result<RemotePermissionResolution> {
+    let key = remote_permission_response_key(pending, owner, approval_id)
+        .context("remote_permission_binding_stale")?;
+    let request = pending
+        .remove(&key)
+        .context("remote_permission_binding_stale")?;
+    let selected = remote_permission_option_id(&request.option_kinds, allow);
+    let (response, option_id, outcome) = if let Some(option_id) = selected {
+        (
+            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(option_id.clone()),
+            )),
+            Some(option_id),
+            "selected",
+        )
+    } else if !allow {
+        (
+            RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
+            None,
+            "cancelled",
+        )
+    } else {
+        pending.insert(key, request);
+        bail!("remote_permission_allow_option_missing");
+    };
+    Ok(RemotePermissionResolution {
+        request,
+        response,
+        option_id,
+        outcome,
     })
 }
 

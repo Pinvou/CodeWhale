@@ -104,7 +104,7 @@ controller 环境文件使用本预检支持的裸 `KEY=value`：值不加引号
 
 生产脚本必须同时配置 `PINVOU_CONFIRM_PRODUCTION_DEPLOY=1`、`PINVOU_REMOTE_DEPLOY_SERVER`、`PINVOU_REMOTE_EXPECTED_DEPLOY_SERVER`、`SSH_KEY`、`PINVOU_REMOTE_DIRECT_URL` 和 `PINVOU_REMOTE_HARDENING_FILE`。两份目标必须一致，不配置或不一致时，在联网、上传前退出。确认标志不是 enrollment、验收或回滚门禁豁免。
 
-硬化文件必须显式指定为本地受控输入，可按仓库 `remote-control-relay/10-hardening.conf` 的无实例通用模板准备；仅接受八项通用限制，禁止代理条款和其他未知条款。代理允许/信任地址唯一来源为服务器受权限保护的 controller 环境文件，保留 IPv4/IPv6 非空且相同集合的远端预检，不在硬化文件中重复配置。数量/字节/认证等待不能超过模板上限，两项限流窗口固定为模板的 60000ms（缩短会弱化限流）。文件或父目录不能是链接。缺失、重复/未知条款或不合法限制在任何网络操作前拒绝。上传使用验证后的私有快照，回滚仍恢复原 drop-in；实例值、文件内容与路径不写入提交或 PR。
+硬化文件必须显式指定为本地受控输入，可按仓库 `remote-control-relay/10-hardening.conf` 的无实例通用模板准备；仅接受八项通用限制，禁止代理条款和其他未知条款。代理允许/信任地址唯一来源为服务器受权限保护的 controller 环境文件，保留 IPv4/IPv6 非空且相同集合的远端预检，不在硬化文件中重复配置。数量/字节/认证等待不能超过模板上限，两项限流窗口固定为模板的 60000ms（缩短会弱化限流）。文件和用户选择的父目录不能是链接；唯一窄例外是 darwin 上 root-owned 的系统 `/tmp → /private/tmp`、`/var → /private/var`，`readlink` 解析目标与 `realpath` 必须精确匹配，且 `/private` 目标整条祖先均为普通路径。该例外不允许任意叶/父链接，不代表支持 macOS 桌面远控。缺失、重复/未知条款或不合法限制在任何网络操作前拒绝。上传使用验证后的私有快照，回滚仍恢复原 drop-in；实例值、文件内容与路径不写入提交或 PR。
 
 硬化输入统一使用主线名称 `MAX_ENDPOINTS`、`ENDPOINT_CREATE_LIMIT`、`ENDPOINT_CREATE_WINDOW_MS`。
 已有私有配置须分别将 `MAX_ROOMS`、`ROOM_CREATE_LIMIT`、`ROOM_CREATE_WINDOW_MS` 改为上述新名称，
@@ -132,7 +132,7 @@ controller 环境文件使用本预检支持的裸 `KEY=value`：值不加引号
 
 当次通过受限 SSH 跳板完成代理侧专用隧道账户、authorized_keys、sshd 转发限制、nginx 测试路由和反向隧道的配置。保留这些变更类型以便核查副作用，具体管理目标与配置布局仅在运维清单登记。
 
-当次探测记录包含测试/生产健康接口成功、旧版本页面成功及不完整 controller claim 返回 `invalid_message`。旧页面含 bridge 的观测不是当前产物校验标准；现在使用 CLI 检查 index、base、startup 和模块资源，并检查公网当前 base 的 assets。
+当次探测记录包含测试/生产健康接口成功、旧版本页面成功及不完整 controller claim 返回 `invalid_message`。旧页面含 bridge 的观测不是当前产物校验标准；现在使用 CLI 检查 index、base、startup 和模块资源，并检查公网当前 base 的 assets。这是 `remote-control-relay/verify-web-dist.js` 的离线防错预检：只检查 index 及其直接 script/link 的 src/href、base 和资源 realpath/stat 边界；不解析 JavaScript import 图，不覆盖传递依赖或懒加载 chunk，不验证内容 hash，也不是全部运行资源或防篡改证明。真实浏览器加载、发布产物完整性与实际部署验收仍须各自取证。
 
 历史本机到公网不可达曾触发 Relay 侧自动回滚；不把其他位置的探测成功等同于本机发布脚本成功，也不声称这次审核重跑了公网验收。临时部署密钥已在当次操作后删除，文件名与目标不入库。
 
