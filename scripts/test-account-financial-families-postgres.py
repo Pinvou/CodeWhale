@@ -6,6 +6,7 @@ commands, runtime/migration actors, race and internal budgets are preserved.
 """
 import base64
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -14,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 FIN = runpy.run_path(str(ROOT / "scripts/test-token-financial-postgres.py"))
@@ -37,6 +39,14 @@ MEMBER_FACTS = "SELECT COALESCE(jsonb_agg(jsonb_build_array(roleid,member,granto
 EXTERNAL_BILLING_DEPENDENCIES = """SELECT
  EXISTS(SELECT 1 FROM pg_shdepend WHERE refclassid='pg_authid'::regclass AND refobjid IN(SELECT oid FROM pg_roles WHERE rolname IN('billing_migrator','billing_schema_owner','billing_service')) AND dbid<>0)
  OR EXISTS(SELECT 1 FROM pg_auth_members WHERE (roleid IN(SELECT oid FROM pg_roles WHERE rolname IN('billing_migrator','billing_schema_owner','billing_service')) OR member IN(SELECT oid FROM pg_roles WHERE rolname IN('billing_migrator','billing_schema_owner','billing_service'))) AND NOT(roleid IN(SELECT oid FROM pg_roles WHERE rolname IN('billing_migrator','billing_schema_owner','billing_service')) AND member IN(SELECT oid FROM pg_roles WHERE rolname IN('billing_migrator','billing_schema_owner','billing_service'))))"""
+RESTORATION_SNAPSHOT = """SELECT jsonb_build_object(
+ 'databases', (""" + DATABASE_FACTS + """),
+ 'roles', (""" + ROLE_FACTS + """)::jsonb,
+ 'members', (""" + MEMBER_FACTS + """)::jsonb,
+ 'objects', (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema') +
+            (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema'),
+ 'clients', (SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' AND pid<>pg_backend_pid()),
+ 'external_billing_dependencies', (""" + EXTERNAL_BILLING_DEPENDENCIES + """))::text"""
 
 
 def validate_roots(roots):
@@ -96,14 +106,16 @@ def query_function(raw):
     psql = os.environ.get("PINVOU_ACCOUNT_TEST_PSQL", "psql")
     identity = "SELECT jsonb_build_array(session_user,current_user,pg_catalog.current_database(),pg_catalog.current_setting('port'),pg_catalog.current_setting('data_directory'),(SELECT system_identifier::text FROM pg_catalog.pg_control_system()))::text"
 
-    def execute(sql, guard=()):
+    def execute(sql, guard=(), *, timeout=30):
         statements = (sql,) if isinstance(sql, str) else sql
         if not isinstance(statements, tuple) or not statements or any(not isinstance(statement, str) or not statement.strip() for statement in statements):
             raise ValueError("owned PostgreSQL operation requires explicit SQL commands")
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 30:
+            raise ValueError("owned PostgreSQL operation requires a bounded timeout")
         command = [psql, raw, "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", *FIN["ci_identity_guard"](raw), *guard]
         for statement in statements:
             command.extend(("-c", statement))
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=30)
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=timeout)
         if result.returncode:
             raise RuntimeError("owned family PostgreSQL operation failed")
         return result.stdout.strip()
@@ -117,8 +129,8 @@ def query_function(raw):
     encoded = base64.b64encode(admitted.encode("utf-8")).decode("ascii")
     bound_guard = "DO $owned$ BEGIN IF (" + identity + ")::jsonb <> convert_from(decode('" + encoded + "','base64'),'UTF8')::jsonb THEN RAISE EXCEPTION 'owned coordinator identity changed; no operation permitted'; END IF; END $owned$;"
 
-    def query(sql):
-        return execute(sql, ("-c", bound_guard))
+    def query(sql, *, timeout=30):
+        return execute(sql, ("-c", bound_guard), timeout=timeout)
     query.identity = values
     return query
 
@@ -139,28 +151,49 @@ class OwnedInstance:
         self.retained_members = None
         self.assert_restored()
 
-    def assert_restored(self):
+    def assert_restored(self, *, timeout_seconds=15, now=None, pause=None):
+        # Match the existing financial/closure retirement boundary: one guarded
+        # snapshot per sample, and only valid positive client counts may drain.
+        # A psql/Go process exit alone does not confirm server backend exit.
+        if type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 15:
+            raise ValueError("restoration observation budget must be positive and at most 15 seconds")
+        now = time.monotonic if now is None else now
+        pause = time.sleep if pause is None else pause
+        deadline = now() + timeout_seconds
         expected = self.retained_roles if self.retained_roles is not None else self.roles
         expected_members = self.retained_members if self.retained_roles is not None else self.members
-        observed = {}
-        self.last_observation = observed
-        observed["databases"] = self.query(DATABASE_FACTS)
-        observed["roles"] = json.loads(self.query(ROLE_FACTS))
-        observed["members"] = json.loads(self.query(MEMBER_FACTS))
-        observed["objects"] = self.query("""SELECT
- (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema') +
- (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema')""")
-        observed["clients"] = self.query("SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' AND pid<>pg_backend_pid()")
-        if observed["databases"] != self.databases or observed["roles"] != expected:
-            raise RuntimeError("database or role identity changed; no fixture continuation or deletion permitted")
-        if observed["members"] != expected_members:
-            raise RuntimeError("role membership facts changed; no fixture continuation or deletion permitted")
-        if observed["objects"] != "0":
-            raise RuntimeError("coordinator database contains user objects")
-        if observed["clients"] != "0":
-            raise RuntimeError("another client is active; exclusive fixture required")
-        if self.retained_roles is not None and self.query(EXTERNAL_BILLING_DEPENDENCIES) != "f":
-            raise RuntimeError("external dependencies prohibit Billing fixture continuation or retirement")
+        while True:
+            remaining = deadline - now()
+            if remaining <= 0:
+                raise RuntimeError("another client is active; exclusive fixture required")
+            self.last_observation = {}
+            try:
+                observed = json.loads(self.query(RESTORATION_SNAPSHOT, timeout=remaining))
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("PostgreSQL restoration observation timed out; no writes permitted") from None
+            except (ValueError, TypeError):
+                raise RuntimeError("invalid PostgreSQL restoration observation; no writes permitted") from None
+            if not isinstance(observed, dict) or set(observed) != {"databases", "roles", "members", "objects", "clients", "external_billing_dependencies"}:
+                raise RuntimeError("invalid PostgreSQL restoration observation; no writes permitted")
+            self.last_observation = observed.copy()
+            if observed["databases"] != self.databases or observed["roles"] != expected:
+                raise RuntimeError("database or role identity changed; no fixture continuation or deletion permitted")
+            if observed["members"] != expected_members:
+                raise RuntimeError("role membership facts changed; no fixture continuation or deletion permitted")
+            if type(observed["objects"]) is not int or observed["objects"] != 0:
+                raise RuntimeError("coordinator database contains user objects or invalid facts")
+            clients = observed["clients"]
+            if type(clients) is not int or clients < 0 or type(observed["external_billing_dependencies"]) is not bool:
+                raise RuntimeError("invalid PostgreSQL restoration observation; no writes permitted")
+            if self.retained_roles is not None and observed["external_billing_dependencies"]:
+                raise RuntimeError("external dependencies prohibit Billing fixture continuation or retirement")
+            # Keep the existing decimal-string diagnostic fields in resources.json.
+            self.last_observation.update(objects="0", clients=str(clients))
+            if now() >= deadline:
+                raise RuntimeError("another client is active; exclusive fixture required")
+            if clients == 0:
+                return
+            pause(min(0.05, max(0, deadline - now())))
 
     def create_billing(self):
         self.assert_restored()
