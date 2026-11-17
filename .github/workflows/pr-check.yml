@@ -913,6 +913,7 @@ jobs:
               - 'pinvou3-app/package-lock.json'
               - '.github/workflows/pr-check.yml'
             windows_codex:
+              - 'pinvou3-app/tests/browser-wrapper-host-control.test.mjs'
               - 'pinvou3-app/tests/helpers/claude-acp-startup-probe.cjs'
               - 'pinvou3-app/tests/claude_acp_startup_probe.test.mjs'
               - 'pinvou3-app/tests/helpers/ndjson-child-driver.mjs'
@@ -4825,7 +4826,7 @@ jobs:
       - name: Windows browser wrapper lifecycle regression
         env:
           PINVOU3_TEST_BROWSER_NO_HOST: "1"
-        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test --test-concurrency=1 pinvou3-app/tests/browser-wrapper-host-control.test.mjs pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
 
       - name: Windows browser wrapper lazy regression
         env:

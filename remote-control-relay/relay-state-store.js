@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { RELAY_CONTROLLER_GUARD_FILENAME, RELAY_CONTROLLER_GUARD_JOURNAL, RelayStateGuard, requireControllerLockRuntime } from "./relay-state-guard.js";
 import { WINDOWS_ACL_VERIFY_SCRIPT, buildGuardJournalAclScript } from "./windows-guard-acl.js";
+import { encodeWindowsAncestorPaths, WINDOWS_REPARSE_VERIFY_SCRIPT } from "./windows-ancestor-paths.js";
 
 export const RELAY_CONTROLLER_STATE_SCHEMA = "pinvou-relay-controller-state";
 export const RELAY_CONTROLLER_STATE_VERSION = 1;
@@ -69,21 +70,6 @@ foreach ($rule in $actual) {
 [Console]::Out.Write('ok')
 `;
 
-const WINDOWS_REPARSE_VERIFY_SCRIPT = `
-$ErrorActionPreference = 'Stop'
-if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_start') }
-$json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:PINVOU_PATHS_B64))
-if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_payload_decoded') }
-$paths = Microsoft.PowerShell.Utility\\ConvertFrom-Json -InputObject $json
-if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_decoded') }
-foreach ($target in $paths) {
-  $item = Microsoft.PowerShell.Management\\Get-Item -LiteralPath ([string]$target) -Force
-  if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'reparse point rejected' }
-}
-if ($env:PINVOU_ANCESTOR_DIAGNOSTIC -eq '1') { [Console]::Out.WriteLine('pinvou_ancestor_checked') }
-[Console]::Out.Write('ok')
-`;
-
 function encodedPowerShell(script) {
   return Buffer.from(script, "utf16le").toString("base64");
 }
@@ -118,7 +104,7 @@ async function runWindowsAclScript(script, target, kind) {
 }
 
 export async function verifyWindowsAncestors(paths, { onDiagnostic } = {}) {
-  const encodedPaths = Buffer.from(JSON.stringify(paths), "utf8").toString("base64");
+  const encodedPaths = encodeWindowsAncestorPaths(paths);
   const diagnostic = typeof onDiagnostic === "function";
   const complete = "pinvou_ancestor_start\npinvou_ancestor_payload_decoded\npinvou_ancestor_decoded\npinvou_ancestor_checked\n";
   const normalize = (output) => typeof output === "string" && Buffer.byteLength(output, "utf8") <= 512
@@ -145,7 +131,7 @@ export async function verifyWindowsAncestors(paths, { onDiagnostic } = {}) {
       "-EncodedCommand", encodedPowerShell(WINDOWS_REPARSE_VERIFY_SCRIPT),
     ], {
       windowsHide: true,
-      env: windowsChildEnvironment({ PINVOU_PATHS_B64: encodedPaths,
+      env: windowsChildEnvironment({ PINVOU_PATHS_B64_LINES: encodedPaths,
         ...(diagnostic ? { PINVOU_ANCESTOR_DIAGNOSTIC: "1" } : {}) }),
       timeout: 15_000,
       maxBuffer: 64 * 1024,

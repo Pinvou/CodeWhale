@@ -1,13 +1,18 @@
-import { existsSync, readFileSync, readdirSync, writeFileSync, renameSync, unlinkSync, mkdirSync, watch } from 'node:fs';
+import { unlinkSync, mkdirSync, watch } from 'node:fs';
+import { readFile, readdir, writeFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Worker, MessageChannel, isMainThread, workerData } from 'node:worker_threads';
 import { createServer } from './http-fixture.mjs';
 import { fixtureScope } from './fixture-scope.mjs';
-import { readPendingHostRequest } from './browser-wrapper-fixture-cleanup.mjs';
 
 const progressPhases = ['starting', 'idle', 'scan', 'read', 'write', 'control', 'cdp', 'failed', 'exists', 'directory', 'audit'];
 const inputReplySlot = 3;
 let workerProgress;
+async function waitForBarrier(shared) {
+  if (!shared) return;
+  const barrier = new Int32Array(shared);
+  while (Atomics.load(barrier, 0) === 1) await Atomics.waitAsync(barrier, 0, 1).value;
+}
 function progress(phase) {
   if (!workerProgress) return;
   Atomics.store(workerProgress, 0, progressPhases.indexOf(phase));
@@ -15,14 +20,14 @@ function progress(phase) {
   Atomics.add(workerProgress, 2, 1);
 }
 
-function atomicWriteJson(path, value) {
+async function atomicWriteJson(path, value) {
   progress('write');
   const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, JSON.stringify(value));
-  renameSync(temporary, path);
+  await writeFile(temporary, JSON.stringify(value));
+  await rename(temporary, path);
 }
 
-function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SESSION_TOKEN }, watchRequests) {
+function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SESSION_TOKEN }, watchRequests, requestReadBarrier) {
   const requestDirectory = join(fixture.root, 'host-requests');
   mkdirSync(requestDirectory, { recursive: true });
   const handled = new Set();
@@ -47,9 +52,9 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
     failure: null,
   };
 
-  const publishWorkspace = () => {
+  const publishWorkspace = async () => {
     state.generation += 1;
-    atomicWriteJson(fixture.workspacePath, {
+    await atomicWriteJson(fixture.workspacePath, {
       version: 2,
       mapping_authority: 'host',
       revision: state.generation,
@@ -59,8 +64,8 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
     });
   };
 
-  const respond = (request, response) => {
-    atomicWriteJson(
+  const respond = async (request, response) => {
+    await atomicWriteJson(
       join(requestDirectory, `${SESSION_TOKEN}-${request.request_id}.response`),
       {
         protocol_version: request.protocol_version,
@@ -79,7 +84,7 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
     }
   };
 
-  const recordOperation = (operation) => {
+  const recordOperation = async (operation) => {
     state.operationCalls.set(
       operation,
       (state.operationCalls.get(operation) || 0) + 1,
@@ -92,7 +97,7 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
       // before writing its response; a premature host end cannot see it.
       event.completedToolCounts = {};
       progress('audit');
-      const audit = readFileSync(fixture.auditPath, 'utf8');
+      const audit = await readFile(fixture.auditPath, 'utf8');
       progress('read');
       for (const line of audit.split('\n').slice(0, -1)) {
         if (!line) continue;
@@ -107,59 +112,66 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
 
   let stopped = false;
   let scheduled;
-  const poll = () => {
+  let pendingPoll;
+  const poll = async () => {
     if (stopped) return;
     progress('scan');
     if (state.failure) { progress('failed'); return; }
-    progress('exists');
-    if (!existsSync(requestDirectory)) { progress('idle'); return; }
     try {
       if (
         state.deferredObservations.size === 0 &&
         state.pendingObservations.length
       ) {
         for (const operation of state.pendingObservations.splice(0)) {
-          recordOperation(operation);
+          await recordOperation(operation);
         }
       }
       progress('directory');
-      const names = readdirSync(requestDirectory);
+      // Real host control and CDP do not synchronously wait for a filesystem
+      // metadata call. The optional test barrier models a pending directory
+      // read without consuming a worker thread or changing lease deadlines.
+      await waitForBarrier(requestReadBarrier);
+      const names = await readdir(requestDirectory);
       progress('scan');
       for (const name of names) {
         if (!name.endsWith('.json') || handled.has(name)) continue;
         progress('read');
-        const raw = readPendingHostRequest(join(requestDirectory, name));
-        if (raw === null) continue;
+        let raw;
+        try { raw = await readFile(join(requestDirectory, name), 'utf8'); }
+        catch (error) {
+          if (['ENOENT', 'EPERM', 'EBUSY'].includes(error?.code)) continue;
+          throw error;
+        }
         const request = JSON.parse(raw);
         if (state.deferredOperations.has(request.operation)) continue;
         handled.add(name);
         if (state.deferredObservations.has(request.operation)) {
           state.pendingObservations.push(request.operation);
         } else {
-          recordOperation(request.operation);
+          await recordOperation(request.operation);
         }
 
         if (request.operation === 'prepare') {
           state.prepareCalls += 1;
-          if (state.preparePublishesWorkspace) publishWorkspace();
-          respond(request, { ok: true, result: { ready: true } });
+          if (state.preparePublishesWorkspace) await publishWorkspace();
+          await respond(request, { ok: true, result: { ready: true } });
           continue;
         }
 
         const configuredError = state.operationErrors.get(request.operation);
         if (configuredError) {
-          respond(request, { ok: false, error: configuredError });
+          await respond(request, { ok: false, error: configuredError });
           continue;
         }
 
         if (request.operation === 'activate_tab') {
-          const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
+          const workspace = JSON.parse(await readFile(fixture.workspacePath, 'utf8'));
           const tab = workspace.tabs.find((candidate) => candidate.token === request.tab_token);
           if (!tab) {
-            respond(request, { ok: false, error: 'browser/page-not-found' });
+            await respond(request, { ok: false, error: 'browser/page-not-found' });
             continue;
           }
-          respond(request, {
+          await respond(request, {
             ok: true,
             result: {
               sessionId: SESSION_ID,
@@ -174,25 +186,25 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
         }
 
         if (request.operation === 'close_tab') {
-          const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
+          const workspace = JSON.parse(await readFile(fixture.workspacePath, 'utf8'));
           const tabs = workspace.tabs.filter((tab) => tab.token !== request.tab_token);
           if (tabs.length === workspace.tabs.length || tabs.length === 0) {
-            respond(request, { ok: false, error: 'browser/page-not-found' });
+            await respond(request, { ok: false, error: 'browser/page-not-found' });
             continue;
           }
-          atomicWriteJson(fixture.workspacePath, {
+          await atomicWriteJson(fixture.workspacePath, {
             ...workspace,
             revision: workspace.revision + 1,
             active_tab: tabs[0].token,
             tabs,
           });
           if (state.malformedOperationResponses.has(request.operation)) {
-            atomicWriteJson(
+            await atomicWriteJson(
               join(requestDirectory, `${SESSION_TOKEN}-${request.request_id}.response`),
               { malformed: true },
             );
           } else {
-            respond(request, { ok: true, result: {} });
+            await respond(request, { ok: true, result: {} });
           }
           continue;
         }
@@ -204,11 +216,11 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
           'refresh_agent_operation',
           'end_agent_operation',
         ].includes(request.operation)) {
-          respond(request, { ok: true, result: { accepted: true } });
+          await respond(request, { ok: true, result: { accepted: true } });
           continue;
         }
 
-        respond(request, { ok: false, error: `unexpected operation: ${request.operation}` });
+        await respond(request, { ok: false, error: `unexpected operation: ${request.operation}` });
       }
     } catch (error) {
       state.failure = error;
@@ -216,12 +228,15 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
     }
     if (!state.failure) progress('idle');
   };
-  // Avoid 200 synchronous directory walks/second sharing the control/CDP loop.
+  // Keep one owned read/write sequence in flight; notifications coalesce.
   // Notifications are hints only: keep a bounded fallback for lost/coalesced
   // Windows events, still well below the unchanged 400ms host-refresh deadline.
   const schedule = () => {
-    if (stopped || scheduled) return;
-    scheduled = setImmediate(() => { scheduled = undefined; poll(); });
+    if (stopped || scheduled || pendingPoll) return;
+    scheduled = setImmediate(() => {
+      scheduled = undefined;
+      pendingPoll = poll().finally(() => { pendingPoll = undefined; });
+    });
   };
   const watcher = watchRequests ? watch(requestDirectory, schedule) : null;
   const watcherExit = watcher ? new Promise(resolve => watcher.once('close', resolve)) : Promise.resolve();
@@ -240,6 +255,7 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
         clearInterval(timer);
         if (scheduled) clearImmediate(scheduled);
         if (watcher) { watcher.close(); await watcherExit; }
+        await pendingPoll;
         if (state.failure) throw state.failure;
       })();
     },
@@ -249,8 +265,14 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
 // The real host is independent of the MCP test coordinator. Keep the model,
 // request poller and CDP endpoint together in an owned worker as well: blocking
 // an observer must not suppress the host's 400ms input-refresh replies.
-export async function createBrowserWrapperHost(fixture, identity, { scope = fixtureScope, watchRequests = true } = {}) {
+export async function createBrowserWrapperHost(fixture, identity, {
+  scope = fixtureScope, watchRequests = true, requestReadBarrier, configurationReplyBarrier,
+} = {}) {
   if (typeof watchRequests !== 'boolean') throw new TypeError('watchRequests must be boolean');
+  for (const barrier of [requestReadBarrier, configurationReplyBarrier]) {
+    if (barrier !== undefined && (!(barrier instanceof SharedArrayBuffer)
+      || barrier.byteLength !== Int32Array.BYTES_PER_ELEMENT)) throw new TypeError('invalid host fixture barrier');
+  }
   const { port1, port2 } = new MessageChannel();
   const sharedProgress = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 4);
   const observedProgress = new Int32Array(sharedProgress);
@@ -363,6 +385,8 @@ export async function createBrowserWrapperHost(fixture, identity, { scope = fixt
         control: port2,
         sharedProgress,
         watchRequests,
+        requestReadBarrier,
+        configurationReplyBarrier,
       },
       transferList: [port2],
     });
@@ -446,7 +470,7 @@ export async function createBrowserWrapperHost(fixture, identity, { scope = fixt
   };
 }
 
-async function serveHostWorker({ fixture, identity, control, sharedProgress, watchRequests }) {
+async function serveHostWorker({ fixture, identity, control, sharedProgress, watchRequests, requestReadBarrier, configurationReplyBarrier }) {
   workerProgress = new Int32Array(sharedProgress);
   progress('starting');
   const cdp = createServer((request, response) => {
@@ -457,8 +481,8 @@ async function serveHostWorker({ fixture, identity, control, sharedProgress, wat
     } else { response.writeHead(404); response.end(); }
   });
   await new Promise((resolve, reject) => { cdp.once('error', reject); cdp.listen(0, '127.0.0.1', resolve); });
-  atomicWriteJson(fixture.portPath, { port: cdp.address().port, owner: 'app' });
-  const model = createFakeHostModel(fixture, identity, watchRequests);
+  await atomicWriteJson(fixture.portPath, { port: cdp.address().port, owner: 'app' });
+  const model = createFakeHostModel(fixture, identity, watchRequests, requestReadBarrier);
   let revision = 0;
   let pollerStopped = false;
   let shuttingDown = false;
@@ -487,7 +511,11 @@ async function serveHostWorker({ fixture, identity, control, sharedProgress, wat
   const execute = async request => {
     progress('control');
     if (shuttingDown) throw new Error('browser host fixture is shutting down');
-    if (request.expectedRevision !== revision) throw new Error('browser host fixture stale configuration revision');
+    // The transferred control port owns this worker. Retirement must remain
+    // possible after a timed-out configure was applied but its reply was lost.
+    if (!['stop_polling', 'shutdown'].includes(request.command) && request.expectedRevision !== revision) {
+      throw new Error('browser host fixture stale configuration revision');
+    }
     switch (request.command) {
       case 'configure': return configure(request.change);
       case 'snapshot': return { revision, state: model.state };
@@ -511,7 +539,11 @@ async function serveHostWorker({ fixture, identity, control, sharedProgress, wat
   control.on('message', request => {
     if (request?.command === 'ack_shutdown' && shuttingDown) { control.close(); return; }
     commands = commands.then(async () => {
-      try { control.postMessage({ id: request.id, value: await execute(request) }); }
+      try {
+        const value = await execute(request);
+        if (request.command === 'configure') await waitForBarrier(configurationReplyBarrier);
+        control.postMessage({ id: request.id, value });
+      }
       catch (error) { control.postMessage({ id: request.id, error: error?.message || 'browser host fixture command failed' }); }
     });
   });
