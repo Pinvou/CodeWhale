@@ -707,10 +707,12 @@ async fn forkguard_rate_limit_transport_preserves_logical_request() {
         }
     }).mount(&server).await;
     let mut cfg = config(&server.uri(), Some("idempotency-key"));
-    let mut policy = crate::config::RateLimitRetryPolicy::default();
-    policy.max_attempts = 2;
-    policy.initial_delay_secs = 1;
-    policy.max_delay_secs = 1;
+    let policy = crate::config::RateLimitRetryPolicy {
+        max_attempts: 2,
+        initial_delay_secs: 1,
+        max_delay_secs: 1,
+        ..Default::default()
+    };
     cfg.retry = Some(crate::config::RetryConfig {
         rate_limit: policy,
         enabled: None,

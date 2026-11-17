@@ -236,10 +236,12 @@ async fn turn_provider_clock_http_recovery_preserves_the_next_step() {
             })
             .mount(&server)
             .await;
-        let mut policy = crate::config::RateLimitRetryPolicy::default();
-        policy.max_attempts = 3;
-        policy.initial_delay_secs = 1;
-        policy.max_delay_secs = 1;
+        let policy = crate::config::RateLimitRetryPolicy {
+            max_attempts: 3,
+            initial_delay_secs: 1,
+            max_delay_secs: 1,
+            ..Default::default()
+        };
         let config = Config {
             provider: Some("custom".into()),
             default_text_model: Some(crate::config::DEFAULT_TEXT_MODEL.to_string()),
@@ -1089,10 +1091,12 @@ fn forkguard_rate_limit_stream_reopen_keeps_budget_identity_and_receipts() {
                         "data: [DONE]\n\n"))
             }
         }).mount(&server).await;
-            let mut policy = crate::config::RateLimitRetryPolicy::default();
-            policy.max_attempts = max_attempts;
-            policy.initial_delay_secs = 1;
-            policy.max_delay_secs = 1;
+            let policy = crate::config::RateLimitRetryPolicy {
+                max_attempts,
+                initial_delay_secs: 1,
+                max_delay_secs: 1,
+                ..Default::default()
+            };
             let config = Config {
                 provider: Some("custom".into()),
                 // Wiremock may reuse a server address between independent cases.
@@ -1233,9 +1237,11 @@ fn forkguard_rate_limit_vision_tool_dispatch_publishes_recovery() {
         let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=").unwrap();
         fs::write(workspace.path().join("tiny.png"), png).unwrap();
         let base = server.uri();
-        let mut policy = crate::config::RateLimitRetryPolicy::default();
-        policy.initial_delay_secs = 1;
-        policy.max_delay_secs = 1;
+        let policy = crate::config::RateLimitRetryPolicy {
+            initial_delay_secs: 1,
+            max_delay_secs: 1,
+            ..Default::default()
+        };
         let route = crate::client::DeepSeekClient::new(&Config {
             api_key: Some("owned-vision-key".into()),
             base_url: Some(base.clone()),

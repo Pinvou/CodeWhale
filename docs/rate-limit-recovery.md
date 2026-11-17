@@ -74,6 +74,44 @@ affected before changing any deadline. Do not copy credentials, scope keys or
 private absolute paths into public reports. A valid future reset should be
 waited out, even if it exceeds the automatic recovery budget.
 
+To locate the receipt for the current CLI configuration and selected Fleet
+operator, explicitly run:
+
+```sh
+codewhale doctor --recovery-json
+```
+
+Use the same working directory, config/profile, routing overrides and credential
+environment as the affected call. This opt-in output is private: `located`
+includes the exact receipt path, even if that file does not currently exist.
+Do not paste it into public logs, model prompts or issue reports. Ordinary
+doctor output and request errors do not expose this scope identifier.
+
+The locator follows fresh-launch Fleet selection and explicit provider/model
+overrides. Interactive project overlays are not resolved: if a workspace has a
+project config, it conservatively reports `unavailable`. Use
+`--no-project-config` only when that matches the route being repaired; otherwise
+identify its effective provider/model and config privately before locating a
+receipt. Session-restored routes are not resolved.
+
+The locator uses the dispatch scope recipe, reads credentials through existing
+read-only adapters and never sends a provider request, refreshes credentials,
+loads a recovery receipt or changes quota state. It reports `unavailable`
+instead of guessing when its configuration or read-only credential resolution
+fails, or a path cannot be represented losslessly in JSON. Outer CLI argument or
+config-parse errors can still exit before the locator emits JSON.
+Managed OAuth that may enter a refresh lifecycle is not resolved: owned ChatGPT
+credentials and official xAI OAuth routes can therefore be unavailable. Codex
+process-token overrides and explicitly consented, valid external Codex
+credentials remain supported. No new credential access consent is granted.
+
+This describes a fresh CLI credential snapshot, not every historical account,
+an already-running host's frozen route, or an independently configured auxiliary
+route. If credentials have rotated or a host chose its own route, do not use
+this result to guess which older receipt to change. Consult that host's private
+configuration instead. The command only locates a file; it neither confirms
+that a provider reset has cleared nor authorizes deleting its saved minimum.
+
 If the provider confirms a reset has cleared, or the local receipt is known to
 be invalid, an operator can recover deliberately:
 

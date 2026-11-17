@@ -1638,36 +1638,8 @@ impl DeepSeekClient {
             wire_format,
             auth_disabled,
         )?;
-        let mut quota_headers = std::collections::BTreeMap::<String, Vec<u8>>::new();
-        for (name, value) in &effective_headers {
-            let name = name.as_str();
-            if [
-                "key",
-                "token",
-                "auth",
-                "account",
-                "project",
-                "organization",
-                "workspace",
-                "secret",
-                "credential",
-                "cookie",
-            ]
-            .iter()
-            .any(|part| name.contains(part))
-            {
-                quota_headers.insert(name.to_owned(), value.as_bytes().to_vec());
-            }
-        }
-        if let Some(account_id) = &codex_account_id {
-            quota_headers.insert("chatgpt-account-id".into(), account_id.as_bytes().to_vec());
-        }
-        let quota_endpoint = reqwest::Url::parse(&base_url)?
-            .to_string()
-            .trim_end_matches('/')
-            .to_owned();
         let quota_key =
-            crate::hashing::sha256_hex(&serde_json::to_vec(&(&quota_endpoint, &quota_headers))?);
+            recovery_scope_key(&base_url, &effective_headers, codex_account_id.as_deref())?;
         let shared_quota = shared_quota(
             quota_key,
             request_concurrency_limit,
@@ -2121,6 +2093,121 @@ impl DeepSeekClient {
             true,
         )
     }
+}
+
+/// One scope recipe for dispatch and the explicit, private doctor locator.
+fn recovery_scope_key(
+    base_url: &str,
+    effective_headers: &HeaderMap,
+    codex_account_id: Option<&str>,
+) -> Result<String> {
+    let mut quota_headers = std::collections::BTreeMap::<String, Vec<u8>>::new();
+    for (name, value) in effective_headers {
+        let name = name.as_str();
+        if [
+            "key",
+            "token",
+            "auth",
+            "account",
+            "project",
+            "organization",
+            "workspace",
+            "secret",
+            "credential",
+            "cookie",
+        ]
+        .iter()
+        .any(|part| name.contains(part))
+        {
+            quota_headers.insert(name.to_owned(), value.as_bytes().to_vec());
+        }
+    }
+    if let Some(account_id) = codex_account_id {
+        quota_headers.insert("chatgpt-account-id".into(), account_id.as_bytes().to_vec());
+    }
+    let quota_endpoint = reqwest::Url::parse(base_url)?
+        .to_string()
+        .trim_end_matches('/')
+        .to_owned();
+    Ok(crate::hashing::sha256_hex(&serde_json::to_vec(&(
+        &quota_endpoint,
+        &quota_headers,
+    ))?))
+}
+
+/// Locate only the currently selected route. Never construct a client, register
+/// quota state, load a receipt, refresh OAuth, or contact a provider. The result
+/// is private correlation metadata and belongs only in explicit local output.
+pub(crate) fn recovery_receipt_location(config: &Config) -> Result<std::path::PathBuf> {
+    let mut config = config.clone();
+    let provider = config.api_provider();
+    let (base_url, wire_format) = if provider.metadata().is_some_and(|metadata| {
+        metadata.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
+    }) {
+        let route = crate::route_runtime::resolve_runtime_route(&config, provider, None)
+            .map_err(anyhow::Error::msg)?;
+        let endpoint = route.candidate.endpoint().base_url.clone();
+        let protocol = route.candidate.protocol();
+        config = *route.config;
+        (endpoint, protocol)
+    } else {
+        (
+            config.deepseek_base_url(),
+            provider_wire_format_for_config(provider, Some(&config)),
+        )
+    };
+    validate_base_url_security(&base_url)?;
+    let (api_key, account_id) = if provider == ApiProvider::OpenaiCodex {
+        if let Some(credentials) = crate::oauth::credentials_from_env() {
+            (credentials.access_token, credentials.account_id)
+        } else if config.provider_uses_custom_endpoint(provider) {
+            (config.deepseek_api_key_read_only()?, None)
+        } else {
+            // The runtime may refresh owned OAuth even when credentials_valid
+            // is true. Do not enter that lifecycle from a read-only diagnostic.
+            anyhow::ensure!(
+                !crate::oauth::credentials_valid(crate::oauth::OAuthProvider::Chatgpt, &config),
+                "Owned OAuth scope cannot be located without entering its credential lifecycle"
+            );
+            let path = crate::oauth::auth_file_path();
+            let grant = config.external_credential_read_grant(
+                provider,
+                codewhale_config::ExternalCredentialSource::CodexCli,
+                &path,
+            )?;
+            let credentials = crate::oauth::get_credentials(&grant)?;
+            (credentials.access_token, credentials.account_id)
+        }
+    } else {
+        anyhow::ensure!(
+            provider != ApiProvider::Xai
+                || config.provider_uses_custom_endpoint(provider)
+                || !config
+                    .auth_mode_for_provider(provider)
+                    .as_deref()
+                    .is_some_and(crate::oauth::auth_mode_uses_xai_oauth),
+            "Owned OAuth scope cannot be located without entering its credential lifecycle"
+        );
+        (config.deepseek_api_key_read_only()?, None)
+    };
+    let headers = build_default_headers(
+        &api_key,
+        &config.http_headers(),
+        provider,
+        &base_url,
+        wire_format,
+        auth_mode_disables_api_key(config.auth_mode_for_provider(provider).as_deref()),
+    )?;
+    let key = recovery_scope_key(&base_url, &headers, account_id.as_deref())?;
+    let directory = config.rate_limit_recovery_dir.clone().or_else(|| {
+        codewhale_paths::codewhale_home()
+            .ok()
+            .flatten()
+            .map(|home| home.join("rate-limit-recovery"))
+    });
+    Ok(directory
+        .context("Recovery storage location is unavailable")?
+        .join(format!("{key}.json")))
 }
 
 fn build_default_headers(

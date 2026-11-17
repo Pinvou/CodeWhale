@@ -88,9 +88,14 @@ fn policy_validation_and_equal_jitter() {
 
 #[tokio::test(start_paused = true)]
 async fn rate_budget_is_independent_and_operation_scoped() {
-    let mut config = RetryConfig::default();
-    config.max_retries = 0;
-    config.rate_limit.max_attempts = 3;
+    let config = RetryConfig {
+        max_retries: 0,
+        rate_limit: crate::config::RateLimitRetryPolicy {
+            max_attempts: 3,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
     let calls = AtomicU32::new(0);
     let budget = Arc::new(std::sync::Mutex::new(OperationRecovery::default()));
     let first: RetryResult<()> = with_operation(

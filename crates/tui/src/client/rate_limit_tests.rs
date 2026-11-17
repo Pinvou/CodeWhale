@@ -1,5 +1,98 @@
 use super::*;
 
+// Credential environment is process-wide; keep this fixture on one runtime.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn forkguard_recovery_locator_matches_writer_without_changing_saved_state() {
+    let _env = crate::test_support::lock_test_env();
+    let _ambient_source = crate::test_support::EnvVarGuard::set(
+        codewhale_config::LEGACY_CLI_API_KEY_SOURCE_ENV,
+        "cli",
+    );
+    let _ambient_key = crate::test_support::EnvVarGuard::set(
+        codewhale_config::CLI_API_KEY_ENV,
+        "fixture-ambient-cli",
+    );
+    let _source =
+        crate::test_support::EnvVarGuard::remove(codewhale_config::CLI_API_KEY_SOURCE_ENV);
+    let _legacy_source =
+        crate::test_support::EnvVarGuard::remove(codewhale_config::LEGACY_CLI_API_KEY_SOURCE_ENV);
+    let _cli_key = crate::test_support::EnvVarGuard::remove(codewhale_config::CLI_API_KEY_ENV);
+    let directory = tempfile::tempdir().unwrap();
+    let config = Config {
+        provider: Some("custom".into()),
+        api_key: Some(format!("locator-account-a-{}", uuid::Uuid::new_v4())),
+        base_url: Some("https://locator.example.invalid/v1".into()),
+        rate_limit_recovery_dir: Some(directory.path().to_owned()),
+        http_headers: Some(HashMap::from([(
+            "X-Project-Token".into(),
+            "locator-header-canary".into(),
+        )])),
+        ..Default::default()
+    };
+    let mut other_config = config.clone();
+    other_config.api_key = Some(format!("locator-account-b-{}", uuid::Uuid::new_v4()));
+    let first = DeepSeekClient::new(&config).unwrap();
+    let second = DeepSeekClient::new(&other_config).unwrap();
+    assert_ne!(first.shared_quota.key, second.shared_quota.key);
+    for client in [&first, &second] {
+        client.shared_quota.pause(Duration::from_secs(3600));
+        client.shared_quota.persist().await.unwrap();
+    }
+    let first_path = directory
+        .path()
+        .join(format!("{}.json", first.shared_quota.key));
+    let second_path = directory
+        .path()
+        .join(format!("{}.json", second.shared_quota.key));
+    // Corrupt only a real writer's receipt; locating it must not read/relearn it.
+    std::fs::write(&first_path, b"damaged deadline fixture").unwrap();
+    assert!(first.shared_quota.initialize().await.is_err());
+    let first_bytes = std::fs::read(&first_path).unwrap();
+    let second_bytes = std::fs::read(&second_path).unwrap();
+    let first_touch = *first.shared_quota.last_used.lock().unwrap();
+    let second_touch = *second.shared_quota.last_used.lock().unwrap();
+    let second_deadline = *second.shared_quota.pause.lock().unwrap();
+    assert_eq!(recovery_receipt_location(&config).unwrap(), first_path);
+    assert_eq!(
+        recovery_receipt_location(&other_config).unwrap(),
+        second_path
+    );
+    assert_eq!(std::fs::read(&first_path).unwrap(), first_bytes);
+    assert_eq!(std::fs::read(&second_path).unwrap(), second_bytes);
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    assert_eq!(*first.shared_quota.last_used.lock().unwrap(), first_touch);
+    assert_eq!(*second.shared_quota.last_used.lock().unwrap(), second_touch);
+    assert_eq!(*second.shared_quota.pause.lock().unwrap(), second_deadline);
+
+    let _token = crate::test_support::EnvVarGuard::set(
+        "OPENAI_CODEX_ACCESS_TOKEN",
+        "locator-codex-token-canary",
+    );
+    let codex = Config {
+        provider: Some("openai-codex".into()),
+        ..config
+    };
+    let _account =
+        crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCOUNT_ID", "locator-codex-account-a");
+    let account_a = DeepSeekClient::new(&codex).unwrap();
+    let path_a = recovery_receipt_location(&codex).unwrap();
+    assert_eq!(
+        path_a.file_stem().unwrap().to_str().unwrap(),
+        account_a.shared_quota.key
+    );
+    let _account_b =
+        crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCOUNT_ID", "locator-codex-account-b");
+    let account_b = DeepSeekClient::new(&codex).unwrap();
+    let path_b = recovery_receipt_location(&codex).unwrap();
+    assert_eq!(
+        path_b.file_stem().unwrap().to_str().unwrap(),
+        account_b.shared_quota.key
+    );
+    assert_ne!(path_a, path_b);
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+}
+
 fn native_auth_fixture_client(provider: &str, url: &str, key: &str) -> DeepSeekClient {
     let route = crate::config::ProviderConfig {
         api_key: Some(key.into()),
@@ -1188,15 +1281,17 @@ async fn forkguard_rate_limit_auxiliary_apis_publish_distinct_runtime_identities
     let calls = Arc::new(AtomicUsize::new(0));
     let seen_calls = calls.clone();
     Mock::given(method("POST")).respond_with(move |_: &Request| {
-        if seen_calls.fetch_add(1, Ordering::SeqCst) % 2 == 0 {
+        if seen_calls.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
             ResponseTemplate::new(429).insert_header("retry-after", "0")
         } else {
             ResponseTemplate::new(200).set_body_json(serde_json::json!({"choices":[{"message":{"content":"translated"},"text":"completed"}]}))
         }
     }).mount(&server).await;
-    let mut policy = crate::config::RateLimitRetryPolicy::default();
-    policy.initial_delay_secs = 1;
-    policy.max_delay_secs = 1;
+    let policy = crate::config::RateLimitRetryPolicy {
+        initial_delay_secs: 1,
+        max_delay_secs: 1,
+        ..Default::default()
+    };
     let client = DeepSeekClient::new(&Config {
         api_key: Some("owned-auxiliary-key".into()),
         base_url: Some(server.uri()),
