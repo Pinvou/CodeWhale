@@ -61,6 +61,7 @@ function fixture({ clock = Date.now, capabilities = ["encrypted_frames_v1", "tas
     abortHandshakesBySocket: async () => 0,
     verifyResumeToken: () => { throw new Error("unexpected prepare in heartbeat regression"); },
     completeResume: () => { throw new Error("unexpected resume commit in heartbeat regression"); },
+    reportResumeDelivery: () => {},
     isPendingHandshake: () => true,
     abortBySocket: async (input) => {
       leaseAlive = false;
@@ -699,6 +700,7 @@ function leaseManagerStub() {
     setTerminationObserver: () => {},
     verifyResumeToken: () => false,
     completeResume: () => { throw new Error("no fixture lease"); },
+    reportResumeDelivery: () => {},
     acceptCommitment: () => null,
     forwardFinished: () => null,
     acceptReceipt: async () => null,

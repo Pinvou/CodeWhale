@@ -129,6 +129,8 @@ export class ControllerResumeHooks {
       typeof leaseManager.verifyResumeToken !== "function"
       || typeof leaseManager.completeResume !== "function"
       || typeof leaseManager.terminateLease !== "function"
+      || typeof leaseManager.lease !== "function"
+      || typeof leaseManager.reportResumeDelivery !== "function"
     )) {
       fail("controller_resume_config_invalid");
     }

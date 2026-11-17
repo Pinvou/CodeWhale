@@ -14,6 +14,36 @@ const CAPABILITIES = Object.freeze([
 ]);
 const ZERO_NONCE = "AAAAAAAAAAAAAAAAAAAAAA==";
 
+for (const required of ["lease", "reportResumeDelivery"]) {
+  test(`resume constructor rejects a missing or non-callable ${required} before accepting injected dependencies`, () => {
+    for (const invalid of [undefined, null, "not-a-function"]) {
+      let calls = 0;
+      const method = () => { calls += 1; };
+      const manager = {
+        verifyResumeToken: method, completeResume: method, terminateLease: method,
+        lease: method, reportResumeDelivery: method,
+        [required]: invalid,
+      };
+      assert.throws(() => new ControllerResumeHooks({ leaseManager: manager }), {
+        name: "ControllerResumeHookError", code: "controller_resume_config_invalid",
+      });
+      assert.equal(calls, 0, "invalid configuration must not invoke a lease operation");
+    }
+  });
+}
+
+test("resume constructor preserves the optional manager and accepts the complete injected contract without invoking it", () => {
+  assert.doesNotThrow(() => new ControllerResumeHooks());
+  assert.doesNotThrow(() => new ControllerResumeHooks({ leaseManager: null }));
+  let calls = 0;
+  const method = () => { calls += 1; };
+  assert.doesNotThrow(() => new ControllerResumeHooks({ leaseManager: {
+    verifyResumeToken: method, completeResume: method, terminateLease: method,
+    lease: method, reportResumeDelivery: method,
+  } }));
+  assert.equal(calls, 0);
+});
+
 function publicKey() {
   return crypto.generateKeyPairSync("x25519").publicKey.export({ type: "spki", format: "der" })
     .subarray(-32).toString("base64");
