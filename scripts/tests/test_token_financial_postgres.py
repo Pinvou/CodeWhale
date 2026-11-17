@@ -16,7 +16,7 @@ SPEC.loader.exec_module(RUNNER)
 
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
-EXPECTED_RETAINED_ROOT_COUNT = 80
+EXPECTED_RETAINED_ROOT_COUNT = 81
 
 
 CHECKPOINT_LEAF_ROOTS = {
@@ -1443,6 +1443,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestOrganizationOriginalOwnerCancellationPublicPostgres",
     "TestRuntimeProtocolPublicationPublicPostgres",
             "TestReconciliationEvidenceMatchesPublicSchema",
+            "TestReconciliationSequentialClaimsPublicPostgres",
             "TestReplayRetentionBoundedCleanupPublicPostgres",
             "TestDispatchCircuitReadOnlyRecoveryPublicPostgres",
             "TestDispatchCircuitOpenAfterAdmissionNeverBecomesProbePostgres",
@@ -1453,6 +1454,26 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         for name in required:
             with self.subTest(name=name), self.assertRaises(RuntimeError):
                 RUNNER.verify_results([event for event in self.events() if event["Test"] != name])
+
+    def test_expired_hold_budget_and_healthy_progress_cases_are_required(self):
+        root = "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True,
+                   "children_required": {root}}
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        RUNNER.verify_results(events, {root}, **options)
+        for child in ("first-RPC-release-crash-keeps-durable-intent",
+                      "slow-proof-exhaustion-persists-backoff-and-next-healthy-progress"):
+            name = root + "/" + child
+            with self.subTest(child=child), self.assertRaises(RuntimeError):
+                RUNNER.verify_results([event for event in events if event.get("Test") != name], {root}, **options)
+        for action in ("skip", "fail"):
+            with self.subTest(action=action), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(events + [{"Action": action, "Package": RUNNER.BILLING_PACKAGE, "Test": root}], {root}, **options)
 
     def test_zero_cases_is_not_success(self):
         with self.assertRaises(RuntimeError):
