@@ -7,11 +7,30 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { RelayStateStore } from "../relay-state-store.js";
+import { RelayStateStore, verifyWindowsAncestors, verifyWindowsPath, protectWindowsPath } from "../relay-state-store.js";
 import { RELAY_CONTROLLER_GUARD_FILENAME, RelayStateGuard } from "../relay-state-guard.js";
 import { WINDOWS_ACL_VERIFY_SCRIPT, buildGuardJournalAclScript } from "../windows-guard-acl.js";
 
 const childFile = fileURLToPath(new URL("./fixtures/controller-guard-child.mjs", import.meta.url));
+
+if (process.platform === "win32") test("native ACL diagnostics cannot change success or accept a missing target", async t => {
+  const directory = await fs.mkdtemp(join(tmpdir(), "pinvou-acl-observer-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const target = join(directory, "owned-file");
+  await fs.writeFile(target, "fixture");
+  await protectWindowsPath(target, "file");
+  const phases = [];
+  await verifyWindowsPath(target, "file", { onDiagnostic(phase) {
+    phases.push(phase);
+    throw new Error("observer failure must not replace native result");
+  } });
+  assert.deepEqual(phases, ["checks_completed"]);
+  const failures = [];
+  await assert.rejects(verifyWindowsPath(join(directory, "missing"), "file", {
+    onDiagnostic: phase => failures.push(phase),
+  }));
+  assert.deepEqual(failures, ["identity_resolved"]);
+});
 
 test("guard journal ACL script fails closed when either reviewed template anchor drifts", () => {
   const inherited = "if (-not $acl.AreAccessRulesProtected) { throw 'ACL inheritance enabled' }";
@@ -29,6 +48,68 @@ if ($allowed -notcontains $owner) { throw 'unexpected ACL owner' }`;
 const security = process.platform === "win32" ? {
   protectPath: async () => {}, verifyPath: async () => {}, verifyAncestors: async () => {},
 } : {};
+
+test("bootstrap backup-only crash recovers only the empty initial state under the normal guard", async t => {
+  const f = await fixture(t);
+  const crashed = f.child("exit-before-state-primary");
+  assert.deepEqual(await crashed.exited, { code: 84, signal: null }, "must reach the exact primary publication boundary");
+  await assert.rejects(fs.stat(f.statePath), { code: "ENOENT" });
+  const backup = await fs.readFile(`${f.statePath}.bak`);
+  assert.deepEqual(JSON.parse(backup), {
+    schema: "pinvou-relay-controller-state", version: 1, revision: "0", namespaces: {},
+  });
+  const recovered = await f.open();
+  assert.deepEqual(recovered.readNamespace("guard_test"), { store_revision: "0", namespace_revision: "0", value: null });
+  assert.deepEqual(await fs.readFile(`${f.statePath}.bak`), backup, "recovery must preserve its original evidence");
+  assert.deepEqual(await fs.readFile(f.statePath), backup);
+  const contender = f.child();
+  assert.deepEqual(await contender.next(), { event: "error", code: "relay_state_locked" });
+  await contender.exited;
+  await recovered.compareAndSwap("guard_test", "0", { commits: 1 });
+  await recovered.close();
+  const restarted = await f.open();
+  assert.equal(restarted.readNamespace("guard_test").store_revision, "1");
+  assert.deepEqual(restarted.readNamespace("guard_test").value, { commits: 1 });
+});
+
+test("bootstrap recovery preserves backup and releases custody after a primary publication failure", async t => {
+  const f = await fixture(t);
+  const original = await f.open();
+  await original.close();
+  const backup = await fs.readFile(`${f.statePath}.bak`);
+  await fs.unlink(f.statePath);
+  let failedPublications = 0;
+  await assert.rejects(f.open({ fs: { ...fs, async rename(source, target) {
+    if (target === f.statePath) {
+      failedPublications += 1;
+      throw Object.assign(Error("injected bootstrap recovery write failure"), { code: "EIO" });
+    }
+    return fs.rename(source, target);
+  } } }));
+  assert.equal(failedPublications, 1, "must exercise the recovery's real primary publication failure");
+  await assert.rejects(fs.stat(f.statePath), { code: "ENOENT" });
+  assert.deepEqual(await fs.readFile(`${f.statePath}.bak`), backup);
+  const recovered = await f.open();
+  assert.equal(recovered.readNamespace("guard_test").store_revision, "0");
+});
+
+test("missing primary rejects later empty revisions, nonempty zero revisions, migrations and future backups", async t => {
+  for (const kind of ["later-empty", "zero-nonempty", "legacy", "future"]) {
+    const f = await fixture(t);
+    await (await f.open()).close();
+    const candidate = JSON.parse(await fs.readFile(`${f.statePath}.bak`, "utf8"));
+    if (kind === "later-empty") candidate.revision = "1";
+    if (kind === "zero-nonempty") candidate.namespaces = { guard_test: { revision: "0", value: { grants_access: true } } };
+    if (kind === "legacy") { candidate.version = 0; candidate.revision = 0; candidate.namespaces = []; }
+    if (kind === "future") { candidate.version = 2; candidate.future = { authorization: "unknown" }; }
+    await fs.writeFile(`${f.statePath}.bak`, JSON.stringify(candidate));
+    await fs.unlink(f.statePath);
+    const evidence = await fs.readFile(`${f.statePath}.bak`);
+    await assert.rejects(f.open(), { code: kind === "future" ? "relay_state_unsupported" : "relay_state_unavailable" });
+    await assert.rejects(fs.stat(f.statePath), { code: "ENOENT" });
+    assert.deepEqual(await fs.readFile(`${f.statePath}.bak`), evidence);
+  }
+});
 async function expectBootstrapFault(child, phase) {
   const expected = { "before-guard-protect": 81, "before-seed-commit": 82, "after-seed-commit": 83 }[phase];
   assert.ok(expected, "known bootstrap fault phase required");
@@ -190,7 +271,11 @@ async function fixture(t) {
       return `guard-test-process:${pid}`;
     }, ...security };
   async function open(overrides = {}) {
-    const store = await openGuardStore(t, { ...options, ...overrides });
+    const store = await openGuardStore(t, { ...options, ...overrides,
+      onNativeDiagnostic: event => t.diagnostic(`controller_guard_acl_phase ${JSON.stringify({
+        ...event, sequence: ++nativeAclSequence,
+      })}`),
+    });
     stores.push(store);
     return store;
   }
@@ -221,6 +306,8 @@ async function fixture(t) {
   }
   return { directory, statePath, options, open, child };
 }
+
+let nativeAclSequence = 0;
 
 test("controller guard excludes another process before a stale reclaimer may rename", async t => {
   const f = await fixture(t);
@@ -390,7 +477,11 @@ test("controller guard native exit before protecting its new inode recovers thro
     assert.equal(metadata.matches_creator_default, true);
     assert.notEqual(metadata.token_owner, "other");
   }
-  const native = { protectPath: undefined, verifyPath: undefined, verifyAncestors: undefined };
+  const native = { protectPath: undefined,
+    verifyPath: undefined,
+    verifyAncestors: process.platform === "win32" ? paths => verifyWindowsAncestors(paths, {
+      onDiagnostic: phase => t.diagnostic(`controller_guard_ancestor_phase ${JSON.stringify({ phase })}`),
+    }) : undefined };
   const restored = await f.open(native);
   await restored.compareAndSwap("guard_test", "0", { commits: 1 });
   await restored.close();

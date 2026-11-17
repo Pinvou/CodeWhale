@@ -71,17 +71,25 @@ try {
   stage = 'owned_canonical';
   if (canonical !== temporary) throw new Error();
   stage = 'child_spawn';
+  const expectedTests = [
+    'Windows state directory and every durable/lock file have protected DACLs',
+    'offline recovery CLI archives originals and restores only a verified staged backup',
+  ];
   const result = spawnSync(process.execPath, [
     '--test', '--test-reporter=tap', '--test-concurrency=1',
-    '--test-name-pattern=^Windows state directory and every durable/lock file have protected DACLs$',
+    `--test-name-pattern=^(${expectedTests.join('|')})$`,
     'test/enrollment-registry.test.js',
   ], { cwd: fileURLToPath(new URL('../remote-control-relay/', import.meta.url)),
     env: { ...process.env, TEMP: temporary, TMP: temporary },
     encoding: 'utf8', windowsHide: true, maxBuffer: 1024 * 1024 });
   process.stdout.write(result.stdout || '');
   process.stderr.write(result.stderr || '');
-  if (result.status !== 0 || !/^# tests 1\r?$/m.test(result.stdout || '')
-    || !/^# pass 1\r?$/m.test(result.stdout || '') || !/^# fail 0\r?$/m.test(result.stdout || '')
+  const passedNames = [...(result.stdout || '').matchAll(/^ok \d+ - (.+)\r?$/gm)]
+    .map((match) => match[1].trim());
+  if (result.status !== 0 || !/^# tests 2\r?$/m.test(result.stdout || '')
+    || !/^# pass 2\r?$/m.test(result.stdout || '') || !/^# fail 0\r?$/m.test(result.stdout || '')
+    || passedNames.length !== expectedTests.length
+    || expectedTests.some((name) => passedNames.filter((actual) => actual === name).length !== 1)
     || !/^# skipped 0\r?$/m.test(result.stdout || '')) {
     console.error('windows_relay_dacl_qualification_failed');
     process.exitCode = 1;
