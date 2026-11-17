@@ -388,7 +388,8 @@ test('cleanup_required 且有更新时主按钮是「继续清理」而非「更
   assert.equal(
     ui.container.querySelectorAll('[data-testid="model-store-detail-action-update"]').length, 0,
     '组合态主按钮不得是「更新脚本」（清理优先于更新）');
-  // 更新脚本应作为次要按钮仍可达
+  // 更新脚本作为次要动作收在「更多」菜单里（11-16 反馈③），开菜单后仍可达
+  await ui.click('[data-testid="model-store-detail-more"]');
   const updateSecondary = ui.container.querySelector('[data-testid="model-store-detail-secondary-update"]');
   assert.ok(updateSecondary, '组合态「更新脚本」作为次要按钮仍可达');
 });

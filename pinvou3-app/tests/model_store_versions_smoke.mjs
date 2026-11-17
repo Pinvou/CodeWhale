@@ -567,9 +567,11 @@ try {
       bs: { savedModels: [{ id: 'isolated-linked-row', model_store_card_id: record.card_id, base_url: 'http://127.0.0.1:8911/v1' }] },
     }));
   });
-  // 合并后卸载入口在详情弹窗（PR 重设计）。
+  // 合并后卸载入口在详情弹窗（PR 重设计）；部分态下收在「更多」菜单里。
   await page.waitForSelector('[data-testid="model-store-open-detail"]');
   await page.click('[data-testid="model-store-open-detail"]');
+  const more = await page.$('[data-testid="model-store-detail-more"]');
+  if (more) await page.click('[data-testid="model-store-detail-more"]');
   await page.waitForSelector('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
   await page.click('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
   await page.waitForSelector('[data-testid="model-store-uninstall-keep"]');
@@ -741,6 +743,9 @@ try {
   const beginForceRemove = async (cardId) => {
     // 合并后行卡无卸载按钮：先开该卡详情，再走弹窗卸载入口。
     await page.click(`[data-card-id="${cardId}"] [data-testid="model-store-open-detail"]`);
+    // 卸载在部分态下是收进「更多」菜单的次要动作（11-16 反馈③）：先开菜单。
+    const more = await page.$('[data-testid="model-store-detail-more"]');
+    if (more) await page.click('[data-testid="model-store-detail-more"]');
     await page.waitForSelector('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
     await page.click('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
     await page.waitForSelector('[data-testid="model-store-uninstall-keep"]');

@@ -88,6 +88,8 @@ export async function exerciseLatestLinkedCleanup(page) {
     // 卸载按钮按状态二选一，两者都汇到同一条确认流。
     await page.waitForSelector('[data-testid="model-store-open-detail"]');
     await page.click('[data-testid="model-store-open-detail"]');
+    const more = await page.$('[data-testid="model-store-detail-more"]');
+    if (more) await page.click('[data-testid="model-store-detail-more"]');
     await page.waitForSelector('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
     await page.click('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
     await page.waitForSelector('[data-testid="model-store-uninstall-keep"]');
