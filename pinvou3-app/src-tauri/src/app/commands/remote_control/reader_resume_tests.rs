@@ -300,6 +300,11 @@ fn real_relay_manager_routes_controller_lane_outage_signal() {
 }
 
 #[test]
+fn real_reader_reservation_retries_preserve_single_handshake_and_deadline() {
+    run_isolated_reader(false, false, false, Some("reservation-replay"));
+}
+
+#[test]
 fn real_worker_final_admission_preserves_timeout_and_signed_deadline() {
     run_isolated_reader(false, false, true, None);
 }
@@ -374,6 +379,9 @@ fn run_isolated_reader(
     // A separate process owns Tauri's global runtime and path/env overrides.
     // Never alter the test runner's home or share its live managed states.
     let name = match owner_case {
+        Some("reservation-replay") => {
+            "real_reader_reservation_retries_preserve_single_handshake_and_deadline"
+        }
         Some("disconnect") => "real_reader_old_received_disconnect_cannot_mutate_successor",
         Some("joined") => "real_reader_old_received_joined_cannot_install_or_clear_successor",
         Some("activation") => "real_reader_resume_activation_holds_lifecycle_owner_commit",
