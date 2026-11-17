@@ -2,8 +2,10 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/google/uuid"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +18,23 @@ type f04ExpiryClient struct {
 	calls              int
 	mu                 sync.Mutex
 	cancelAfterRelease context.CancelFunc
+}
+
+type slowExpiryProofClient struct {
+	*f04ExpiryClient
+	slowUsage uuid.UUID
+	identity  ExpiredHoldIdentity
+	exhausted bool
+}
+
+func (c *slowExpiryProofClient) FenceExpiredHold(ctx context.Context, identity ExpiredHoldIdentity) (ExpiredHoldProof, error) {
+	if identity.UsageRequestID != c.slowUsage {
+		return c.f04ExpiryClient.FenceExpiredHold(ctx, identity)
+	}
+	c.identity = identity
+	<-ctx.Done()
+	c.exhausted = errors.Is(ctx.Err(), context.DeadlineExceeded)
+	return ExpiredHoldProof{}, ctx.Err()
 }
 
 func (c *f04ExpiryClient) FenceExpiredHold(ctx context.Context, i ExpiredHoldIdentity) (ExpiredHoldProof, error) {
@@ -134,6 +153,61 @@ func TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease(t *testing.T) {
 		}
 		if err = r.pool.QueryRow(ctx, `SELECT h.status,x.state,w.reserved_microcredits FROM usage_holds h JOIN usage_hold_expiry_recovery x ON x.hold_id=h.id JOIN wallets w ON w.id=h.wallet_id WHERE h.id=$1`, fresh.ID).Scan(&status, &state, &reserved); err != nil || status != "RELEASED" || state != "COMPLETED" || reserved != 0 {
 			t.Fatal("first RPC crash did not resume", status, state, reserved, err)
+		}
+	})
+	t.Run("slow-proof-exhaustion-persists-backoff-and-next-healthy-progress", func(t *testing.T) {
+		slowUsage, healthyUsage := uuid.New(), uuid.New()
+		slow, err := r.Reserve(ctx, slowUsage, order.WalletID, 100, nil, time.Now().UTC().Add(time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		healthy, err := r.Reserve(ctx, healthyUsage, order.WalletID, 100, nil, time.Now().UTC().Add(time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.pool.Exec(ctx, `UPDATE usage_holds SET expires_at=clock_timestamp()-CASE WHEN id=$1 THEN interval '2 minutes' ELSE interval '1 minute' END WHERE id=ANY($2::uuid[])`, slow.ID, []uuid.UUID{slow.ID, healthy.ID}); err != nil {
+			t.Fatal(err)
+		}
+		before, err := r.GetWallet(ctx, order.WalletID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proof := &slowExpiryProofClient{f04ExpiryClient: &f04ExpiryClient{repository: r}, slowUsage: slowUsage}
+		bounded := NewExpiredHoldRecoveryWorker(r, proof, time.Minute)
+		started := time.Now()
+		if err := bounded.RunOnceLimit(ctx, 1); !errors.Is(err, context.DeadlineExceeded) || !proof.exhausted {
+			t.Fatal("controlled evidence did not exhaust the original item budget", err)
+		}
+		t.Logf("original five-second item budget exhausted in %s", time.Since(started))
+		after, err := r.GetWallet(ctx, order.WalletID)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatal("unproven slow evidence changed the wallet", err)
+		}
+		var pending string
+		var noProof, backoff bool
+		var raw []byte
+		if err := r.pool.QueryRow(ctx, `SELECT state,proof IS NULL,next_attempt_at>clock_timestamp()+interval '50 seconds',identity FROM usage_hold_expiry_recovery WHERE hold_id=$1`, slow.ID).Scan(&pending, &noProof, &backoff, &raw); err != nil || pending != "MANUAL_REVIEW" || !noProof || !backoff {
+			t.Fatal("exhausted RPC lost bounded persistent backoff", pending, noProof, backoff, err)
+		}
+		var persisted ExpiredHoldIdentity
+		if json.Unmarshal(raw, &persisted) != nil || !persisted.Matches(proof.identity) || persisted.UsageRequestID != slowUsage || persisted.HoldID != slow.ID || persisted.WalletID != order.WalletID || persisted.MaxMicrocredits != 100 {
+			t.Fatal("persistent retry changed the original hold identity")
+		}
+		if err := bounded.RunOnceLimit(ctx, 1); err != nil {
+			t.Fatal("later healthy candidate did not advance", err)
+		}
+		if proof.calls != 1 {
+			t.Fatal("slow candidate consumed the next finite batch")
+		}
+		if err := r.pool.QueryRow(ctx, `SELECT h.status,x.state FROM usage_holds h JOIN usage_hold_expiry_recovery x ON x.hold_id=h.id WHERE h.id=$1`, healthy.ID).Scan(&status, &state); err != nil || status != "RELEASED" || state != "COMPLETED" {
+			t.Fatal("healthy original did not complete with proof", status, state, err)
+		}
+		if err := r.pool.QueryRow(ctx, `SELECT status FROM usage_holds WHERE id=$1`, slow.ID).Scan(&status); err != nil || status != "ACTIVE" {
+			t.Fatal("slow unproven hold was released", status, err)
+		}
+		final, err := r.GetWallet(ctx, order.WalletID)
+		if err != nil || final.ReservedMicrocredits != before.ReservedMicrocredits-100 || final.AvailableMicrocredits != before.AvailableMicrocredits+100 {
+			t.Fatal("healthy release did not preserve remaining reservation", final, err)
 		}
 	})
 }

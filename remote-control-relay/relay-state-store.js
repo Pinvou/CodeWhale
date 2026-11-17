@@ -641,6 +641,16 @@ export class RelayStateStore {
         }
         return;
       }
+      if (primary.kind === "missing" && backup.kind === "valid" && !backup.migrated
+        && backup.state.revision === "0" && Object.keys(backup.state.namespaces).length === 0) {
+        // Only the current writer's exact empty bootstrap has no preceding
+        // commit and no authorization to activate. Every namespace CAS advances
+        // the store revision. Never generalize this to a staged normal commit,
+        // an older-format migration, or an empty later revision.
+        this.#state = backup.state;
+        await this.#legacyAliasGuardedWrite(this.#path, serializeState(backup.state, this.#maxBytes));
+        return;
+      }
       if (primary.kind === "invalid" && backup.kind === "valid" && !backup.migrated) {
         this.#state = backup.state;
         await this.#legacyAliasGuardedWrite(this.#path, serializeState(backup.state, this.#maxBytes));
@@ -692,9 +702,7 @@ export class RelayStateStore {
     const archiveRoot = resolve(evidence.archiveRoot ?? dirname(directory));
     if (pathWithin(archiveRoot, directory)) fail("relay_state_recovery_archive_root_invalid");
     const archiveRootSnapshot = await this.#validatePathAncestors(archiveRoot, true);
-    if (process.platform !== "win32" || evidence.archiveRoot !== undefined) {
-      await this.#verifyFilesystemPath(archiveRoot, "directory");
-    }
+    await this.#verifyFilesystemPath(archiveRoot, "directory");
     const archive = join(archiveRoot,
       `controller-recovery-${this.#randomBytes(8).toString("hex")}`);
     await this.#assertAncestorSnapshot();

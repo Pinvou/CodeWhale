@@ -88,7 +88,7 @@ func registrationBonusCheckpointSnapshot(t *testing.T, r *PostgresRepository) st
 }
 
 func TestRegistrationBonusEligibilityCheckpointPostgresIntegration(t *testing.T) {
-	r, snapshotAt := registrationBonusCheckpoint(t)
+	r, snapshotAt := registrationBonusCheckpoint(t, 0)
 	ctx := context.Background()
 	before := registrationBonusCheckpointSnapshot(t, r)
 	for _, keyID := range []string{"different-key", "checkpoint-key"} {
@@ -177,7 +177,7 @@ func TestRegistrationBonusCheckpointForeignFactsPostgresIntegration(t *testing.T
 		t.Run(map[bool]string{false: "unbound-existing-facts", true: "foreign-key-before-finalize"}[bound], func(t *testing.T) {
 			var r *PostgresRepository
 			if bound {
-				r, _ = registrationBonusCheckpoint(t)
+				r, _ = registrationBonusCheckpoint(t, 0)
 			} else {
 				r = retainedWalletFenceActors(t).repository(t)
 				if err := r.ConfigureRegistrationBonusFingerprint("checkpoint-key", bytes.Repeat([]byte{0x51}, 32)); err != nil {

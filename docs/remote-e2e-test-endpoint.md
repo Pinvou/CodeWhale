@@ -29,7 +29,9 @@ ENABLE_DESKTOP_CONTROLLER=1 bash scripts/deploy-remote-relay-test.sh
 
 ## 发布与回滚
 
-先构建当前 base 的共享 React UI，运行本地测试，再用 CLI 验证 index、base、startup、module 引用与真实资源边界。完整根目录 JS 模块、manifest、schema 和 Web dist 一起归档；暂存验证使用本次上传的 ESM manifest，缺失资源失败退出。
+先构建当前 base 的共享 React UI，运行本地测试，再用 CLI 验证 index、base、startup、module 引用与真实资源边界。这是 `remote-control-relay/verify-web-dist.js` 的离线防错预检：只检查 index 及其直接 script/link 的 src/href、base 和资源 realpath/stat 边界；不解析 JavaScript import 图，不覆盖传递依赖或懒加载 chunk，不验证内容 hash，也不是全部运行资源或防篡改证明。真实浏览器加载、发布产物完整性与实际部署验收仍须各自取证。
+
+完整根目录 JS 模块、manifest、schema 和 Web dist 一起归档；暂存验证使用本次上传的 ESM manifest，缺失资源失败退出。
 
 Relay 先暂存解包、装依赖才替换目录；新版本健康失败或公网验证失败回滚 Relay 侧并非零退出。nginx 与 sshd 分别使用暂存、原子替换、验证和局部回滚；跨主机失败需按阶段排查，可重跑收敛。默认执行 npm test / Web 构建，仅已有对应实际证据时允许显式 skip。
 

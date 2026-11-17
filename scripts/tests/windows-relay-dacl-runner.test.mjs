@@ -6,6 +6,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const runner = new URL('../run-windows-relay-dacl.mjs', import.meta.url).href;
+const validNativeTap = 'ok 1 - Windows state directory and every durable/lock file have protected DACLs\n'
+  + 'ok 2 - offline recovery CLI archives originals and restores only a verified staged backup\n'
+  + '# tests 2\n# pass 2\n# fail 0\n# skipped 0\n';
 function invoke(platform, result, { temporary, verifyFails = false, verifyFailureAt,
   failure = {}, spawnThrows = false, accessorMode, verifierOutput = 'private-path-token-sentinel', successVerifierOutput } = {}) {
   const originalTemporary = temporary || tmpdir();
@@ -70,11 +73,15 @@ function invoke(platform, result, { temporary, verifyFails = false, verifyFailur
 
 // These are runner decision tests; mocked TAP cannot qualify real permissions.
 test('native qualification refuses non-Windows, no selected case, skip, and subprocess failure', () => {
-  const valid = '# tests 1\n# pass 1\n# fail 0\n# skipped 0\n';
+  const valid = validNativeTap;
   assert.equal(invoke('linux', { status: 0, stdout: valid }).status, 1);
   for (const result of [
     { status: 0, stdout: '# tests 0\n# pass 0\n# fail 0\n# skipped 0\n' },
     { status: 0, stdout: '# tests 1\n# pass 0\n# fail 0\n# skipped 1\n' },
+    { status: 0, stdout: '# tests 2\n# pass 2\n# fail 0\n# skipped 0\n' },
+    { status: 0, stdout: valid.replace('offline recovery CLI archives originals and restores only a verified staged backup',
+      'Windows state directory and every durable/lock file have protected DACLs') },
+    { status: 0, stdout: valid.replace('offline recovery CLI archives originals and restores only a verified staged backup', 'unrelated case') },
     { status: 1, stdout: valid },
     { status: null, stdout: valid },
   ]) {
@@ -90,7 +97,7 @@ test('native qualification refuses non-Windows, no selected case, skip, and subp
 });
 
 test('failure diagnostics identify bounded stages without exception payloads', () => {
-  const valid = { status: 0, stdout: '# tests 1\n# pass 1\n# fail 0\n# skipped 0\n' };
+  const valid = { status: 0, stdout: validNativeTap };
   for (const [options, expected] of [
     [{ verifyFailureAt: 1, failure: { code: 'ETIMEDOUT', errno: -110, killed: true, signal: 'SIGTERM' } },
       { stage: 'base_reparse', code: 'ETIMEDOUT', verifier_phase: 'unknown', errno: -110, killed: true, signal: 'SIGTERM' }],
@@ -171,7 +178,7 @@ test('unsafe original temporary ancestors fail before starting the qualification
   await symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir');
   await writeFile(file, 'fixture');
   for (const options of [{ temporary: link }, { temporary: file }, { temporary: target, verifyFails: true }]) {
-    const result = invoke('win32', { status: 0, stdout: '# tests 1\n# pass 1\n# fail 0\n# skipped 0\n' }, options);
+    const result = invoke('win32', { status: 0, stdout: validNativeTap }, options);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /windows_relay_dacl_temporary_unsafe/);
     assert.doesNotMatch(result.stdout, /child_called/);

@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { once } from "node:events";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import {
   ENROLLMENT_NAMESPACE,
@@ -19,6 +20,8 @@ import {
 import {
   RELAY_CONTROLLER_STATE_SCHEMA,
   RelayStateStore,
+  protectWindowsPath,
+  verifyWindowsPath,
 } from "../relay-state-store.js";
 
 const HMAC_KEY = "test-only-hmac-key-material-32-bytes-minimum";
@@ -707,16 +710,19 @@ test("offline recovery archives the exact interrupted pair and preserves committ
   await rejectsCode(restored.authorizeWebRegistration({ endpointId: "staged-enrollment", accessToken: SECOND_CREDENTIAL }), "enrollment_required");
 });
 
-async function interruptedRecovery(t, stateDirectory) {
+async function interruptedRecovery(t, stateDirectory = "controller", { nativeSecurity = false } = {}) {
   const statePath = await temporaryState(t, stateDirectory);
   const backupPath = `${statePath}.bak`;
-  const options = { statePath, legacyStatePath: legacyStatePath(statePath), ...testSecurityOptions(),
+  const options = { statePath, legacyStatePath: legacyStatePath(statePath), ...(nativeSecurity ? {} : testSecurityOptions()),
     processIdentity: async (pid) => `test-process:${pid}` };
   let failPrimary = false;
-  const store = await openStateStore(statePath, { fs: { ...fs, async rename(source, target) {
+  const openOptions = { ...options, fs: { ...fs, async rename(source, target) {
     if (failPrimary && target === statePath) throw Object.assign(new Error("interrupted primary"), { code: "EIO" });
     return fs.rename(source, target);
-  } } });
+  } } };
+  const store = nativeSecurity
+    ? await openDaclQualificationStore(t, openOptions)
+    : await RelayStateStore.open(openOptions);
   resourcesFor(t).stores.push(store);
   await store.compareAndSwap("recovery_test", "0", { committed: true });
   const primary = await fs.readFile(statePath);
@@ -729,6 +735,103 @@ async function interruptedRecovery(t, stateDirectory) {
     primarySha256: digest(primary), backupSha256: digest(staged) };
   return { options, statePath, backupPath, primary, staged, evidence };
 }
+
+async function recoveryCli(statePath, argv) {
+  const options = {
+    env: { ...process.env, PINVOU_REMOTE_CONTROLLER_STATE_PATH: statePath,
+      PINVOU_REMOTE_STATE_PATH: legacyStatePath(statePath) },
+    encoding: "utf8", windowsHide: true, timeout: 60_000, maxBuffer: 64 * 1024,
+  };
+  const command = [fileURLToPath(new URL("../recover-controller-state.js", import.meta.url)), ...argv];
+  try {
+    const result = await execFileAsync(process.execPath, command, options);
+    return { exit: 0, ...result };
+  } catch (error) {
+    return { exit: Number.isInteger(error.code) ? error.code : null,
+      stdout: String(error.stdout ?? ""), stderr: String(error.stderr ?? "") };
+  }
+}
+
+test("offline recovery CLI help and invalid arguments are safe and do not open a store", async (t) => {
+  const statePath = await temporaryState(t);
+  const parent = path.dirname(path.dirname(statePath));
+  const help = await recoveryCli(statePath, ["--help"]);
+  assert.equal(help.exit, 0, "help must succeed without recovery");
+  for (const flag of ["--confirmed-primary-revision", "--primary-sha256", "--staged-backup-sha256", "--archive-root"]) {
+    assert.ok(help.stdout.includes(flag), "help must describe each recovery input");
+  }
+  for (const [argv, expected] of [
+    [["--PRIVATE_OPTION_SENTINEL=PRIVATE_VALUE_SENTINEL"], "ERR_PARSE_ARGS_UNKNOWN_OPTION"],
+    [["--primary-sha256"], "ERR_PARSE_ARGS_INVALID_OPTION_VALUE"],
+  ]) {
+    const result = await recoveryCli(statePath, argv);
+    assert.equal(result.exit, 1);
+    assert.ok(result.stderr.split(/\r?\n/u).includes("relay_state_recovery_failed"));
+    const line = result.stderr.split(/\r?\n/u).find((value) => value.startsWith("{"));
+    assert.ok(line, "argument rejection must include closed diagnostic fields");
+    const diagnostic = JSON.parse(line);
+    assert.equal(diagnostic.stage, "arguments");
+    assert.equal(diagnostic.code, expected);
+    assert.equal(diagnostic.help, "node recover-controller-state.js --help");
+    assert.equal(result.stderr.includes("PRIVATE_OPTION_SENTINEL"), false);
+    assert.equal(result.stderr.includes("PRIVATE_VALUE_SENTINEL"), false);
+  }
+  assert.deepEqual(await fs.readdir(parent), [], "help/parse failures must not create state or locks");
+});
+
+test("offline recovery CLI archives originals and restores only a verified staged backup", async (t) => {
+  const value = await interruptedRecovery(t, "controller", { nativeSecurity: true });
+  const parent = path.dirname(path.dirname(value.statePath));
+  if (process.platform === "win32") {
+    // A freshly created caller parent inherits its DACL; state setup protects
+    // only its dedicated child. Establish the negative fixture independently.
+    await assert.rejects(verifyWindowsPath(parent, "directory"));
+  } else {
+    await fs.chmod(parent, 0o755);
+  }
+  const args = ["--confirmed-primary-revision", value.evidence.primaryRevision,
+    "--primary-sha256", value.evidence.primarySha256,
+    "--staged-backup-sha256", value.evidence.backupSha256];
+  for (const rootArgs of [[], ["--archive-root", parent]]) {
+    const rejected = await recoveryCli(value.statePath, [...args, ...rootArgs]);
+    assert.equal(rejected.exit, 1, "default and explicit non-private roots must both be rejected");
+    assert.ok(rejected.stderr.split(/\r?\n/u).includes(process.platform === "win32"
+      ? "relay_state_acl_unverified" : "relay_state_permissions_unsafe"));
+    assert.deepEqual(await fs.readFile(value.statePath), value.primary);
+    assert.deepEqual(await fs.readFile(value.backupPath), value.staged);
+    assert.equal((await fs.readdir(parent)).some((name) => name.startsWith("controller-recovery-")), false);
+  }
+  const archiveRoot = path.join(parent, "private-archive-root");
+  await fs.mkdir(archiveRoot, { mode: 0o700 });
+  if (process.platform === "win32") await protectWindowsPath(archiveRoot, "directory");
+  const identity = await fs.stat(value.statePath, { bigint: true });
+  const recovered = await recoveryCli(value.statePath, [...args, "--archive-root", archiveRoot]);
+  assert.equal(recovered.exit, 0, "valid CLI recovery must succeed through default OS protection");
+  const result = JSON.parse(recovered.stdout);
+  assert.equal(result.revision, value.evidence.primaryRevision);
+  assert.equal(path.dirname(result.archive), archiveRoot);
+  assert.deepEqual(await fs.readFile(path.join(result.archive, "primary.json")), value.primary);
+  assert.deepEqual(await fs.readFile(path.join(result.archive, "backup.json")), value.staged);
+  assert.deepEqual(await fs.readFile(value.statePath), value.primary);
+  assert.deepEqual(await fs.readFile(value.backupPath), value.primary);
+  const after = await fs.stat(value.statePath, { bigint: true });
+  assert.equal(after.dev, identity.dev);
+  assert.equal(after.ino, identity.ino);
+  if (process.platform === "win32") {
+    await assertPrivateWindowsAcls(t, [archiveRoot, result.archive,
+      path.join(result.archive, "primary.json"), path.join(result.archive, "backup.json"),
+      value.statePath, value.backupPath]);
+  } else {
+    for (const directory of [archiveRoot, result.archive]) assert.equal((await fs.stat(directory)).mode & 0o777, 0o700);
+    for (const file of [path.join(result.archive, "primary.json"), path.join(result.archive, "backup.json")]) {
+      assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+    }
+  }
+  const reopened = await RelayStateStore.open(value.options);
+  resourcesFor(t).stores.push(reopened);
+  assert.equal(reopened.readNamespace("recovery_test").value.committed, true);
+  await reopened.close();
+});
 
 test("offline recovery bounds archive names for long valid state directories", {
   skip: process.platform === "win32",
@@ -1863,21 +1966,15 @@ test("POSIX setup changes only its dedicated child directory", {
   assert.equal((await fs.stat(path.dirname(statePath))).mode & 0o777, 0o700);
 });
 
-test("Windows state directory and every durable/lock file have protected DACLs", {
-  skip: process.platform !== "win32",
-}, async (t) => {
-  const statePath = await temporaryState(t);
-  const store = await openDaclQualificationStore(t, {
-    statePath,
-    legacyStatePath: legacyStatePath(statePath),
-    processIdentity: async (pid) => `acl-test-process:${pid}`,
-  });
+async function assertPrivateWindowsAcls(t, paths) {
   const inspectScript = `
     $ErrorActionPreference = 'Stop'
     $result = @()
-    $index = 0
+    $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $expectedSids = @($currentSid, 'S-1-5-18', 'S-1-5-32-544' | Microsoft.PowerShell.Utility\\Sort-Object -Unique)
     foreach ($target in ($env:PINVOU_ACL_PATHS -split '\\|')) {
       $acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $target
+      $item = Microsoft.PowerShell.Management\\Get-Item -LiteralPath $target -Force
       $sids = @($acl.Access | Microsoft.PowerShell.Core\\ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Microsoft.PowerShell.Utility\\Sort-Object -Unique)
       $ownerAccount = Microsoft.PowerShell.Utility\\New-Object System.Security.Principal.NTAccount -ArgumentList $acl.Owner
       $ownerSid = $ownerAccount.Translate([System.Security.Principal.SecurityIdentifier]).Value
@@ -1885,22 +1982,15 @@ test("Windows state directory and every durable/lock file have protected DACLs",
       foreach ($rule in @($acl.Access)) {
         if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { $validRules = $false }
         if (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { $validRules = $false }
-        $expectedInheritance = if ($index -eq 0) { [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' } else { [System.Security.AccessControl.InheritanceFlags]::None }
+        $expectedInheritance = if ($item.PSIsContainer) { [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' } else { [System.Security.AccessControl.InheritanceFlags]::None }
         if ($rule.InheritanceFlags -ne $expectedInheritance) { $validRules = $false }
+        if ($rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None) { $validRules = $false }
       }
-      $result += [pscustomobject]@{ protected = $acl.AreAccessRulesProtected; owner = $ownerSid; sids = $sids; count = @($acl.Access).Count; valid_rules = $validRules }
-      $index += 1
+      $privatePrincipals = @($sids).Count -eq @($expectedSids).Count -and @($sids | Microsoft.PowerShell.Core\\Where-Object { $_ -notin $expectedSids }).Count -eq 0
+      $result += [pscustomobject]@{ protected = $acl.AreAccessRulesProtected; owner_is_current = $ownerSid -eq $currentSid; private_principals = $privatePrincipals; unique_rules = @($acl.Access).Count -eq $sids.Count; valid_rules = $validRules }
     }
     [Console]::Out.Write(($result | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress))
   `;
-  const paths = [
-    path.dirname(statePath),
-    path.join(path.dirname(statePath), ".pinvou-controller-state-directory"),
-    statePath,
-    `${statePath}.bak`,
-    lockPath(statePath),
-    path.join(path.dirname(statePath), ".pinvou-controller-state.guard"),
-  ];
   const inspector = windowsDaclInspectorConfiguration(paths.join("|"));
   const { stdout } = await executeDaclInspector(t, inspector.executable, [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -1915,12 +2005,31 @@ test("Windows state directory and every durable/lock file have protected DACLs",
   assert.equal(results.length, paths.length);
   for (const result of results) {
     assert.equal(result.protected, true);
-    assert.equal(result.count, result.sids.length);
+    assert.equal(result.unique_rules, true);
     assert.equal(result.valid_rules, true);
-    assert.ok(result.sids.includes(result.owner));
-    assert.ok(result.sids.includes("S-1-5-18"));
-    assert.ok(result.sids.includes("S-1-5-32-544"));
+    assert.equal(result.owner_is_current, true);
+    assert.equal(result.private_principals, true);
   }
+}
+
+test("Windows state directory and every durable/lock file have protected DACLs", {
+  skip: process.platform !== "win32",
+}, async (t) => {
+  const statePath = await temporaryState(t);
+  const store = await openDaclQualificationStore(t, {
+    statePath,
+    legacyStatePath: legacyStatePath(statePath),
+    processIdentity: async (pid) => `acl-test-process:${pid}`,
+  });
+  resourcesFor(t).stores.push(store);
+  await assertPrivateWindowsAcls(t, [
+    path.dirname(statePath),
+    path.join(path.dirname(statePath), ".pinvou-controller-state-directory"),
+    statePath,
+    `${statePath}.bak`,
+    lockPath(statePath),
+    path.join(path.dirname(statePath), ".pinvou-controller-state.guard"),
+  ]);
   await store.close();
 });
 
@@ -2549,6 +2658,70 @@ test("a failure after staging backup cannot silently authorize after restart", a
     store_revision: "0", namespace_revision: "0", value: null,
   });
   assert.deepEqual(await fs.readFile(statePath), committedPrimary);
+});
+
+test("empty bootstrap recovery denies registration until an explicit durable enrollment", async t => {
+  const statePath = await temporaryState(t);
+  const fault = { ...fs, async rename(source, target) {
+    if (target === statePath) throw Object.assign(Error("injected first primary publication failure"), { code: "EIO" });
+    return fs.rename(source, target);
+  } };
+  await rejectsCode(openStateStore(statePath, { fs: fault }), "relay_state_persist_failed");
+  await assert.rejects(fs.stat(statePath), { code: "ENOENT" });
+  const backup = await fs.readFile(`${statePath}.bak`);
+  const store = await openStateStore(statePath);
+  resourcesFor(t).stores.push(store);
+  assert.deepEqual(await fs.readFile(statePath), backup);
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), backup);
+  const registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  const request = { endpointId: "bootstrap-endpoint", accessToken: FIRST_CREDENTIAL, desktopSecret: SECOND_CREDENTIAL };
+  await rejectsCode(registry.authorizeWebRegistration(request), "enrollment_required");
+  await rejectsCode(registry.authorizePairingRegistration(request), "enrollment_required");
+  await rejectsCode(registry.authorizeDesktopRegistration(request), "enrollment_required");
+  await registry.enroll({ endpointId: request.endpointId, credential: FIRST_CREDENTIAL, desktopCredential: SECOND_CREDENTIAL });
+  assert.equal((await registry.authorizeDesktopRegistration(request)).status, "active");
+  await store.close();
+  const restarted = await openStateStore(statePath);
+  resourcesFor(t).stores.push(restarted);
+  const next = EnrollmentRegistry.open({ stateStore: restarted, config: configForState(statePath) });
+  assert.equal((await next.authorizeDesktopRegistration(request)).status, "active");
+});
+
+test("missing primary never promotes staged enrollment and preserves prior committed authorization evidence", async t => {
+  const statePath = await temporaryState(t);
+  let primaryWrites = 0;
+  const fault = { ...fs, async rename(source, target) {
+    if (target === statePath && ++primaryWrites === 3) {
+      throw Object.assign(Error("injected enrollment primary publication failure"), { code: "EIO" });
+    }
+    return fs.rename(source, target);
+  } };
+  const store = await openStateStore(statePath, { fs: fault });
+  resourcesFor(t).stores.push(store);
+  const registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  await registry.enroll({ endpointId: "bootstrap-committed", credential: FIRST_CREDENTIAL });
+  const committed = await fs.readFile(statePath);
+  await rejectsCode(registry.enroll({ endpointId: "bootstrap-uncommitted", credential: SECOND_CREDENTIAL }), "enrollment_registry_unavailable");
+  await store.close();
+  const staged = await fs.readFile(`${statePath}.bak`);
+  assert.equal(JSON.parse(staged).namespaces[ENROLLMENT_NAMESPACE].value.entries.length, 2);
+  await fs.unlink(statePath);
+  // A faulty implementation/negative control may unexpectedly open the store.
+  // Register it before the rejection assertion so that failure still closes it.
+  await rejectsCode(openStateStore(statePath).then(unexpected => {
+    resourcesFor(t).stores.push(unexpected);
+  }), "relay_state_unavailable");
+  await assert.rejects(fs.stat(statePath), { code: "ENOENT" });
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), staged);
+  // Test-only offline restoration has exact evidence of the last successful
+  // primary. Production never chooses or promotes this staged backup.
+  await fs.writeFile(statePath, committed, { mode: 0o600 });
+  await fs.writeFile(`${statePath}.bak`, committed);
+  const restored = await openStateStore(statePath);
+  resourcesFor(t).stores.push(restored);
+  const next = EnrollmentRegistry.open({ stateStore: restored, config: configForState(statePath) });
+  assert.equal((await next.authorizeWebRegistration({ endpointId: "bootstrap-committed", accessToken: FIRST_CREDENTIAL })).status, "active");
+  await rejectsCode(next.authorizeWebRegistration({ endpointId: "bootstrap-uncommitted", accessToken: SECOND_CREDENTIAL }), "enrollment_required");
 });
 
 test("a damaged or mismatched backup prevents authorization", async (t) => {
