@@ -1100,9 +1100,59 @@ test("registry write retains typed validation and capacity failures", async (t) 
   };
   const bounded = EnrollmentRegistry.open({ stateStore: boundedStore, config: configForState(statePath) });
   await rejectsCode(bounded.enroll({ endpointId: "new-endpoint", credential: FIRST_CREDENTIAL }),
-    "enrollment_registry_capacity_reached");
+    "enrollment_capacity_reached");
   assert.equal(writes, 0);
   assert.equal(bounded.getStatus("endpoint-000000").revision, "1");
+});
+
+test("capacity expansion preserves revoked enrollment across restart and backup restore", async (t) => {
+  const { registry, store, statePath } = await openRegistry(t, {
+    env: { PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES: "1" },
+  });
+  await registry.enroll({ endpointId: "capacity-retired", credential: FIRST_CREDENTIAL });
+  const beforeRevoke = registry.exportSnapshot().registry;
+  await rejectsCode(registry.enroll({ endpointId: "capacity-new", credential: SECOND_CREDENTIAL }),
+    "enrollment_capacity_reached");
+  await registry.revoke({ endpointId: "capacity-retired", expectedEndpointRevision: "1" });
+  const revoked = registry.exportSnapshot();
+  await registry.revoke({ endpointId: "capacity-retired", expectedEndpointRevision: "1" });
+  assert.deepEqual(registry.exportSnapshot(), revoked);
+  await rejectsCode(registry.importSnapshot({ snapshot: beforeRevoke, expectedNamespaceRevision: revoked.namespace_revision }),
+    "enrollment_restore_revocation_conflict");
+  assert.throws(() => registry.previewAtomicBatch({ operations: [{
+    operation: "restore", snapshot: beforeRevoke, expected_namespace_revision: revoked.namespace_revision,
+  }] }), { code: "enrollment_restore_revocation_conflict" });
+  await store.close();
+  const expandedStore = await openStateStore(statePath, { maxBytes: 32 * 1024 * 1024 });
+  resourcesFor(t).stores.push(expandedStore);
+  const expanded = EnrollmentRegistry.open({ stateStore: expandedStore, config: configForState(statePath, {
+    PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES: "2", PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES: "33554432",
+  }) });
+  assert.equal(expandedStore.readCapacity().max_bytes, 32 * 1024 * 1024);
+  await rejectsCode(expanded.authorizeWebRegistration({ endpointId: "capacity-retired", accessToken: FIRST_CREDENTIAL }),
+    "endpoint_revoked");
+  await rejectsCode(expanded.enroll({ endpointId: "capacity-retired", credential: SECOND_CREDENTIAL }), "endpoint_revoked");
+  const restored = await expanded.importSnapshot({ snapshot: revoked.registry, expectedNamespaceRevision: revoked.namespace_revision });
+  assert.equal(restored.registry.entries[0].status, "revoked");
+  await expanded.enroll({ endpointId: "capacity-new", credential: SECOND_CREDENTIAL });
+  assert.equal(expanded.getStatus("capacity-new").status, "active");
+});
+
+test("shared byte capacity cannot report an unpersisted revocation as successful", async (t) => {
+  const { store, statePath, registry } = await openRegistry(t, { storeOptions: { maxBytes: 1024 } });
+  await registry.enroll({ endpointId: "capacity-revoke", credential: FIRST_CREDENTIAL });
+  const remaining = 1024 - store.readCapacity().serialized_bytes;
+  // Count the actual CAS framing, then fill the remaining budget exactly.
+  await store.compareAndSwap("fill", "0", { payload: "" });
+  const available = 1024 - store.readCapacity().serialized_bytes;
+  assert.ok(available < remaining && available > 0);
+  await store.compareAndSwap("fill", "1", { payload: "x".repeat(available) });
+  const committed = await fs.readFile(statePath);
+  await rejectsCode(registry.revoke({ endpointId: "capacity-revoke", expectedEndpointRevision: "1" }),
+    "enrollment_revocation_capacity_reached");
+  assert.deepEqual(await fs.readFile(statePath), committed);
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), committed);
+  assert.equal(registry.getStatus("capacity-revoke").status, "active");
 });
 
 test("extended v1 owner locks are never stolen even when the owner is live or dead", async (t) => {

@@ -547,6 +547,7 @@ export class RelayStateStore {
   #processReserved = false;
   #legacyStatePath;
   #maxBytes;
+  #capacityWarning = false;
   #randomBytes;
   #sleep;
   #processIdentity;
@@ -639,6 +640,7 @@ export class RelayStateStore {
           await this.#persist(primary.state);
           return;
         }
+        this.#reportCapacity(serializeState(primary.state, this.#maxBytes));
         return;
       }
       if (primary.kind === "missing" && backup.kind === "valid" && !backup.migrated
@@ -654,6 +656,7 @@ export class RelayStateStore {
       if (primary.kind === "invalid" && backup.kind === "valid" && !backup.migrated) {
         this.#state = backup.state;
         await this.#legacyAliasGuardedWrite(this.#path, serializeState(backup.state, this.#maxBytes));
+        this.#reportCapacity(serializeState(backup.state, this.#maxBytes));
         return;
       }
       fail("relay_state_unavailable");
@@ -1538,6 +1541,20 @@ export class RelayStateStore {
       this.#degraded = true;
       fail("relay_state_persist_failed", error);
     }
+    this.#reportCapacity(contents);
+  }
+
+  #reportCapacity(contents) {
+    // Every namespace shares these bytes. Observing only enrollment writes
+    // misses pairing growth; telemetry must never change a committed result.
+    try {
+      const bytes = Buffer.byteLength(contents);
+      if (this.#capacityWarning || bytes < Math.ceil(this.#maxBytes * 0.8)) return;
+      this.#capacityWarning = true;
+      console.warn("[relay-capacity] controller_state", JSON.stringify({
+        serialized_bytes: bytes, max_bytes: this.#maxBytes,
+      }));
+    } catch {}
   }
 
   #assertReady() {
