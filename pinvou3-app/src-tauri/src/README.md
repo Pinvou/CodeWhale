@@ -83,7 +83,7 @@ ACP 远程 code 回合在 `codex_acp/remote_ownership.rs` 持有独占预留。�
 远程结束会退休该 ACP 实例，持久会话、工作区及配置保留，后续调用按正常流程恢复；
 因此后续回合可能冷启动。普通本地回合仅增加实际 prompt 存活记账，不改变既有
 watchdog/Stop 策略。退休关闭宿主连接及其直接子进程，不等于完整 provider/后代
-进程树已终止或 join；该底座局限仍按 Issue #254 跟进。
+进程树已终止或 join；该底座局限仍按 [Pinvou/pinvou-agent#254](https://github.com/Pinvou/pinvou-agent/issues/254) 跟进。
 
 ## 共享子进程的终止边界
 

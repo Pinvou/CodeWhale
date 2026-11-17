@@ -63,6 +63,44 @@ this table provide Account capacity inputs. Database storage grows with retained
 history. Unknown cases cannot be evicted to create capacity. Manual disposition
 still requires authoritative evidence and the existing authorization policy.
 
+### Legacy UNKNOWN capacity and cutover headroom
+
+Legacy UNKNOWN includes profile changes already cancelled by Account closure when
+an old revocation-start marker exists but Account has no confirmed ACK. The
+migration retains this uncertainty. Cancellation prevents a new dispatch, but
+does not prove an earlier provider call had no effect; only a still-RESERVED
+receipt can be sealed as NOT_DISPATCHED by closure.
+
+These cancelled UNKNOWN rows continue to count against
+`PROFILE_REVOCATION_CAPACITY`. Current code provides no automatic expiry,
+eviction, confirmation or capacity-release path for UNKNOWN, including this
+stopped subset. Accumulated legacy rows can keep capacity occupied indefinitely
+and eventually block new first attempts. This is an explicit conservative
+availability limit, not a retryable dispatch backlog.
+
+Before reopening profile ingress after cutover, authorized operators must
+inventory this subset and all other unresolved receipts, compare them with the
+configured capacity, record the aggregate results and decide whether the
+deployment has acceptable headroom. Run this read-only inventory on the Account
+database under the authorized operational actor; it contains no subject or
+provider payload:
+
+```sql
+SELECT r.state,p.status,count(*) AS receipt_count
+FROM public.profile_session_revocation_receipts r
+JOIN public.profile_change_requests p ON p.id=r.operation_id
+WHERE r.state IN ('RESERVED','DISPATCHED','UNKNOWN')
+GROUP BY r.state,p.status
+ORDER BY r.state,p.status;
+```
+
+If capacity cannot safely admit new work, keep admission backpressure and escalate
+for a separately authorized, audited disposition design backed by authoritative
+operation evidence. Do not delete UNKNOWN, clear old markers, manufacture ACKs,
+change their state to reclaim capacity, or re-dispatch a cancelled operation.
+This PR does not provide that disposition tool; changing capacity limits alone
+is not proof that uncertainty is resolved.
+
 ## Upgrade and rollback
 
 Block profile ingress, stop all Account profile workers and drain Identity profile

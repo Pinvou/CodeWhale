@@ -713,6 +713,12 @@ const profileSMSDeliveryLease = 30 * time.Second
 // while only FAILED/EXPIRED delivery may be replaced by a fresh captcha-bound
 // challenge.
 func (r *PostgresRepository) ReserveProfileSMSChallenge(ctx context.Context, id, userID, captchaID uuid.UUID, offset int, candidate SMSChallenge) (SMSChallenge, error) {
+	return retrySMSAdmission(ctx, func() (SMSChallenge, error) {
+		return r.reserveProfileSMSChallenge(ctx, id, userID, captchaID, offset, candidate)
+	})
+}
+
+func (r *PostgresRepository) reserveProfileSMSChallenge(ctx context.Context, id, userID, captchaID uuid.UUID, offset int, candidate SMSChallenge) (SMSChallenge, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return SMSChallenge{}, err

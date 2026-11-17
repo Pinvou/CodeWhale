@@ -16,7 +16,6 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/profilerevocation"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -245,17 +244,9 @@ func TestProfileRevocationDurableAdmissionRuntimePostgres(t *testing.T) {
 		if err = repository.pool.QueryRow(ctx, receiptSnapshot).Scan(&beforeDown); err != nil {
 			t.Fatal(err)
 		}
-		migrationConnection, err := repository.pool.Acquire(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		err = accountschema.DownOne(ctx, migrationConnection.Conn(), installed)
-		migrations.Unlock(ctx, migrationConnection.Conn())
-		migrationConnection.Release()
-		var refused *pgconn.PgError
-		if !errors.As(err, &refused) || refused.Code != "55000" {
-			t.Fatal("public receipt rollback was not refused", err)
-		}
+		// Exercise the exact published historical guard; DownOne selects the
+		// latest installed migration and cannot target this older version.
+		assertHistoricalRollbackRefusal(t, repository, installed, 900019, "55000", "profile session revocation receipts are forward-only")
 		if err = repository.pool.QueryRow(ctx, receiptSnapshot).Scan(&afterDown); err != nil || beforeDown != afterDown {
 			t.Fatal("refused rollback changed receipt or ledger facts", err)
 		}
