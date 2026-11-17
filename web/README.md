@@ -6,6 +6,11 @@ Next.js 15 (App Router) + Tailwind, deployed to Cloudflare Workers via [`@openne
 
 ## Local dev
 
+Requires Node `^22.12.0`, `^24.0.0`, or `>=26` — Vitest 5.1's supported
+range, declared in [`package.json`](package.json) `engines` so a
+mismatching local Node warns at install time instead of failing inside
+the test toolchain. CI runs Node 22.
+
 ```bash
 cd web
 npm install
