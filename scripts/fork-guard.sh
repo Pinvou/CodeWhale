@@ -477,6 +477,14 @@ fingerprints=(
   "APP|2000-step budget behavior regression       |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn engine_config_defaults_to_unified_step_budget_and_respects_override"
   "APP|chainable panic-hook registry module       |pinvou3-app/src-tauri/src/core/panic_hooks.rs|pub(crate) fn chain("
   "APP|worker panic redaction behavior regression |pinvou3-app/src-tauri/src/features/computer_use/backend.rs|fn worker_thread_panics_are_redacted_and_other_panics_forwarded"
+  # 定时会话 EngineCumulative 令牌核算内核（登记于 docs/fork-modifications.md §11）：
+  # 第一轮 Rust 死代码清扫已把单变体前身与管道移除一次，本 PR 随 #865 回流恢复；
+  # 变体在生产者接线（应用侧后续 PR）落地前仍仅由测试构造，属 tests-only 面。
+  # 回归测试沿用共享测试名（刻意不加 forkguard_ 前缀）。这些指纹把内核、共享
+  # 生存期编码与测试存在性拉进亚秒层——后续清扫或对齐同步无声移除它们时在此变红。
+  "APP|scheduled EngineCumulative accounting variant         |pinvou3-app/src-tauri/src/features/sessions/scheduled.rs|EngineCumulative {"
+  "APP|shared scheduled lifetime-total encoding              |pinvou3-app/src-tauri/src/features/sessions/retention.rs|fn scheduled_lifetime_total(base_total_tokens: u64, engine_total_tokens: u64) -> u64"
+  "APP|scheduled token-accounting contract regression       |pinvou3-app/src-tauri/src/features/sessions/tests.rs|fn scheduled_engine_token_accounting_preserves_persisted_totals_across_restarts"
 )
 
 for fp in "${fingerprints[@]}"; do
