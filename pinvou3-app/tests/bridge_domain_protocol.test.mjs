@@ -311,7 +311,9 @@ const expectedProtocolHashes = {
   // inherits main's Windows progress event and installation lifecycle.
   // Guarded store deletion, endpoint-conditional deletion and models:changed are retained; list_models
   // uses the shared loader so cross-cluster reads share one ordering boundary.
-  settings: 'c10e8fae21066d9b5c57f21d1b213734983dd9375c295e77fac5ac6b85cb14d6',
+  // Recomputed for the keyless-aware model and tier probes: the form's noAuth
+  // posture is forwarded so saved credentials cannot ride a keyless request.
+  settings: 'fd75c39aadcb8eedba062d1e1cf84a36c7e61cc851701894a9c953df8b394cc6',
   updater: 'cfe92470008c2dade64f891c36a5fa70930478f803d4d2a6d100e68d9c29392b',
   // Voice draft preparation now carries its typed source/model reference;
   // session bindings remain authoritative and the command set is unchanged.
@@ -355,9 +357,8 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // get_session_pinvou_reviews / resolveMemoryCandidate 的 invoke(command, args)
 // 参数化入口），合计 74 个签名。
 // kb_model_cancel 回流：共享知识模型 helper 新增取消命令，合计 75 个签名。
-// 社区 #841 回流：评审快照串行链在 record 时捕获 owning sid，避免排队写漂到
-// 切换后的会话；并集后按当前共享桥接面重算协议指纹。
-const expectedSharedBaseHash = '704c9375f0cc90d0a94c64c186ccaff688d193c155df7d6f6596de50bf3a7d44';
+// kb_model_cancel/评审快照串行链 + keyless posture 合流后按并集共享桥接面重算。
+const expectedSharedBaseHash = 'ab2837e52ee67d0d65c7e92617c5a5c6f7365bf61ed6e6960a23e6bec29a645e';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),

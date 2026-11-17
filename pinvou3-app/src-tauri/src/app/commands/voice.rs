@@ -741,16 +741,22 @@ async fn call_voice_postprocess_model(
     let max_tokens = voice_postprocess_max_tokens(mode, retry);
     let mut body = voice_postprocess_request_body(model_name, &system, &user, max_tokens);
     apply_voice_reasoning_controls(&mut body, preset, &bridge.provider(), &base_url, model_name);
-    let request = crate::core::model_endpoint::with_opencode_session_header(
+    let mut request = crate::core::model_endpoint::with_opencode_session_header(
         client.post(format!(
             "{}/chat/completions",
             base_url.trim_end_matches('/')
         )),
         &base_url,
         bridge.opencode_conversation_key("voice-postprocess"),
-    )
-    .bearer_auth(bridge.api_key())
-    .json(&body);
+    );
+    // A keyless-declared endpoint receives no Authorization header at all —
+    // an empty `Bearer ` would contradict the toggle's "no credentials are
+    // sent" contract (keyed records keep the bearer; undeclared empty-key
+    // records keep the historical empty-bearer shape).
+    if !bridge.effective_model_declares_no_auth() {
+        request = request.bearer_auth(bridge.api_key());
+    }
+    let request = request.json(&body);
     // One ID per actual generation. The proxy reuses it for transport/401
     // retries; a content retry changes facts and therefore enters here anew.
     let request = match bridge
