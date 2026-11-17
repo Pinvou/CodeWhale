@@ -1177,6 +1177,7 @@ let internalRequestSeq = 0;
 const internalRequests = new Map();
 const discardedInternalRequestIds = new Set();
 const managedToolRequestIds = new Set();
+const queuedManagedProxyRequests = new Set();
 const cancelledProxyRequestIds = new Set();
 const externalToInternalRequestIds = new Map();
 const MANAGED_UPSTREAM_SETTLEMENT_GRACE_MS = 5_000;
@@ -1312,8 +1313,14 @@ function queueProxyLine(line) {
     return;
   }
   managedToolRequestIds.add(msg.id);
+  const queuedRequest = { id: msg.id, rejected: false };
+  queuedManagedProxyRequests.add(queuedRequest);
   proxyQueue = proxyQueue
     .then(async () => {
+      // Shutdown can reject work that has never entered routing independently
+      // of the active operation's genuine upstream/host cleanup barrier.
+      if (queuedRequest.rejected) return;
+      queuedManagedProxyRequests.delete(queuedRequest);
       try {
         if (shuttingDown) throw new Error(WRAPPER_SHUTTING_DOWN_ERROR);
         throwIfProxyRequestCancelled(msg.id);
@@ -2528,26 +2535,43 @@ function gracefulShutdown(
   if (shutdownPromise) return shutdownPromise;
   shuttingDown = true;
   state = 'stopping';
-  if (cancelAcceptedRequests) {
-    // A caller disconnect/signal abandons every request already accepted from
-    // stdin before an awaited startup/queue can make further progress.
-    // Internal upstream crashes deliberately do not enter this branch: their
-    // claimed request must still receive the structured commit-unknown result.
-    for (const requestId of hostCoreRequestIds) cancelledIds.add(requestId);
-    for (const raw of bufferedLines.snapshot()) {
-      try {
-        const message = JSON.parse(raw);
-        if (message?.id != null) cancelledIds.add(message.id);
-      } catch {
-        // Malformed buffered input has no executable request identity.
+  // Protocol output can synchronously fail while rejecting queued work and
+  // re-enter shutdown. Publish its one shared barrier before those callbacks.
+  let finishShutdown;
+  let failShutdown;
+  shutdownPromise = new Promise((resolve, reject) => {
+    finishShutdown = resolve;
+    failShutdown = reject;
+  });
+  void (async () => {
+    if (cancelAcceptedRequests) {
+      // A caller disconnect/signal abandons every request already accepted from
+      // stdin before an awaited startup/queue can make further progress.
+      // Internal upstream crashes deliberately do not enter this branch: their
+      // claimed request must still receive the structured commit-unknown result.
+      for (const requestId of hostCoreRequestIds) cancelledIds.add(requestId);
+      for (const raw of bufferedLines.snapshot()) {
+        try {
+          const message = JSON.parse(raw);
+          if (message?.id != null) cancelledIds.add(message.id);
+        } catch {
+          // Malformed buffered input has no executable request identity.
+        }
+      }
+      for (const requestId of managedToolRequestIds) {
+        cancelledProxyRequestIds.add(requestId);
+        cancelManagedUpstreamRequest(requestId, reason);
       }
     }
-    for (const requestId of managedToolRequestIds) {
-      cancelledProxyRequestIds.add(requestId);
-      cancelManagedUpstreamRequest(requestId, reason);
+    for (const queuedRequest of queuedManagedProxyRequests) {
+      queuedRequest.rejected = true;
+      if (!cancelledProxyRequestIds.has(queuedRequest.id)) {
+        respondError(queuedRequest.id, WRAPPER_SHUTTING_DOWN_ERROR);
+      }
+      managedToolRequestIds.delete(queuedRequest.id);
+      cancelledProxyRequestIds.delete(queuedRequest.id);
     }
-  }
-  shutdownPromise = (async () => {
+    queuedManagedProxyRequests.clear();
     if (startPromise) {
       try { await startPromise; } catch { /* startup failure is settled below */ }
     }
@@ -2567,7 +2591,7 @@ function gracefulShutdown(
       console.error('[browser-wrapper] failed to flush protocol stdout:', error);
     }
     process.exit(protocolOutput.failure ? 1 : exitCode);
-  })();
+  })().then(finishShutdown, failShutdown);
   return shutdownPromise;
 }
 

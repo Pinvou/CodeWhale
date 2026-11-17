@@ -458,7 +458,7 @@ async function createFakeHost(fixture, options) {
   return createBrowserWrapperHost(fixture, { sessionId: SESSION_ID, sessionToken: SESSION_TOKEN }, options);
 }
 
-function driveWrapper(fixture) {
+function driveWrapper(fixture, { collectResponses = false } = {}) {
   const driver = spawnNdjsonChild({
     args: [WRAPPER, fixture.mcpBin, fixture.portPath],
     env: {
@@ -470,6 +470,7 @@ function driveWrapper(fixture) {
       FAKE_BROWSER_MCP_AUDIT: fixture.auditPath,
     },
     timeoutMs: 15_000,
+    collectResponses,
   });
   return {
     ...driver,
@@ -2103,12 +2104,14 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
   }
 });
 
-test('Windows proxy: cancelled uncooperative dispatch shuts down on the first deadline and rejects queued work', {
+for (const withholdEndReply of [false, true]) {
+test('Windows proxy: cancelled uncooperative dispatch shuts down on the first deadline and rejects queued work'
+  + (withholdEndReply ? ' while the host end reply is withheld' : ''), {
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
   const host = await createFakeHost(fixture);
-  const wrapper = driveWrapper(fixture);
+  const wrapper = driveWrapper(fixture, { collectResponses: withholdEndReply });
   let replacement = null;
   // In this fixture the first tool call includes lazy startup. Allow for a
   // slow handshake followed by a slow post-bind catalog response. The
@@ -2148,21 +2151,47 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
     const listsBeforeQueued = readAudit(fixture.auditPath)
       .filter((entry) => entry.kind === 'tool' && entry.name === 'list_pages').length;
 
+    if (withholdEndReply) await host.deferOperation('end_agent_operation', true);
     wrapper.abandonRequest(inFlight.id);
     const cancelledAt = Date.now();
     wrapper.notify('notifications/cancelled', {
       requestId: inFlight.id,
       reason: 'cancel uncooperative dispatch',
     });
-    const queuedOutcome = await wrapper.request('tools/call', {
+    const queued = wrapper.startRequest('tools/call', {
       name: 'list_pages',
       arguments: {},
     }, {
       label: 'queued list_pages awaiting shutdown rejection',
     });
+    let cancelledQueued = null;
+    if (withholdEndReply) {
+      cancelledQueued = wrapper.startRequest('tools/call', { name: 'list_pages', arguments: {} });
+      wrapper.abandonRequest(cancelledQueued.id);
+      wrapper.notify('notifications/cancelled', { requestId: cancelledQueued.id });
+    }
+    const queuedOutcome = await queued.response;
     const rejectedAt = Date.now();
     assert.match(queuedOutcome.error?.message || '', /browser\/wrapper-shutting-down/,
       JSON.stringify(heldRequestResultDiagnostic(queuedOutcome)));
+
+    if (withholdEndReply) {
+      // Observe the real End request, keeping its reply withheld. A queued
+      // rejection must not wait for this separate cleanup acknowledgement.
+      const directory = join(fixture.root, 'host-requests');
+      await waitUntil(async () => readdirSync(directory).some(name => {
+        if (!name.endsWith('.json')) return false;
+        const raw = readPendingHostRequest(join(directory, name));
+        return raw != null && JSON.parse(raw).operation === 'end_agent_operation';
+      }), 'cancelled dispatch did not publish its exact host End request');
+      assert.equal((await host.snapshot()).operationCalls.get('end_agent_operation') || 0,
+        before.end, 'withheld End must not be reported as acknowledged');
+      assert.equal(wrapper.child.exitCode, null, 'wrapper must retain its host cleanup barrier');
+      assert.equal(wrapper.child.signalCode, null, 'wrapper must remain live until host cleanup');
+      const late = await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+      assert.match(late.error?.message || '', /browser\/wrapper-shutting-down/);
+      await host.deferOperation('end_agent_operation', false);
+    }
 
     if (wrapper.child.exitCode == null && wrapper.child.signalCode == null) {
       await Promise.race([
@@ -2171,6 +2200,12 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
       ]);
     }
     const shutdownElapsedMs = rejectedAt - cancelledAt;
+    if (withholdEndReply) {
+      assert.equal(wrapper.responses.filter(response => response.id === queued.id).length, 1,
+        'queue draining must not respond again after host End');
+      assert.equal(wrapper.responses.filter(response => response.id === cancelledQueued.id).length, 0,
+        'cancelled queued work must remain abandoned');
+    }
     // Reject delivery that takes a full additional 5s grace window even if
     // the response arrives within the driver's 15s observation budget.
     assert.ok(
@@ -2210,6 +2245,11 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
     fixture.primaryErrors = [error];
     throw error;
   } finally {
-    await cleanupFixture(fixture, host, wrapper, replacement);
+    try {
+      if (withholdEndReply) await host.deferOperation('end_agent_operation', false);
+    } finally {
+      await cleanupFixture(fixture, host, wrapper, replacement);
+    }
   }
 });
+}
