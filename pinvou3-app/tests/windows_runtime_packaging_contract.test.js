@@ -966,8 +966,10 @@ assert.match(windowsBuildJob, /npm run runtime:windows:onnx-smoke/);
 // invocation (node --test would drop the flag and skip silently forever).
 const windowsInitStep = windowsBuildJob.indexOf("npm run runtime:windows:init");
 const windowsStageStep = windowsBuildJob.indexOf("npm run runtime:windows:stage");
+// 2026-11-18 勘误：release job 已从 npm 别名改为直调 node（--require-staged-runtime
+// 旗标必须直达 argv，npm run 包装会丢——与下方别名钉互为表里：别名也要保持直调）。
 const windowsInstallerTestStep = windowsBuildJob.indexOf(
-  "npm run test:windows-runtime-installer",
+  "node tests/windows_runtime_installer_integration.test.js --require-staged-runtime",
 );
 assert.ok(
   windowsStageStep > windowsInitStep,
