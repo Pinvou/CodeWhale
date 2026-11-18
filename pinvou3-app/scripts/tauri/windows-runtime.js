@@ -171,15 +171,14 @@ function stageWindowsOnnxRuntime({
   if (child.error) throw child.error;
   if (child.status !== 0) {
     throw new Error(
-      `Windows ONNX Runtime staging failed (exit ${child.status ?? "unknown"}); run npm run runtime:windows:init:onnx first`,
+      `Windows ONNX Runtime staging 失败（退出码 ${child.status ?? "unknown"}）；请先在 pinvou3-app 运行 npm run runtime:windows:init:onnx`,
     );
   }
-
   const descriptor = JSON.parse(
     fs.readFileSync(WINDOWS_ONNX_DEV_DESCRIPTOR_PATH, "utf8"),
   );
   if (descriptor.schemaVersion !== 1 || descriptor.target !== "windows-x86_64") {
-    throw new Error("Unsupported Windows ONNX development descriptor");
+    throw new Error("Windows ONNX development descriptor 版本或目标平台不受支持");
   }
   const onnxRuntimeDylib = resolveDescriptorPath(
     descriptor.onnxRuntimeDylib,
@@ -189,7 +188,7 @@ function stageWindowsOnnxRuntime({
   const item = fs.statSync(onnxRuntimeDylib);
   const sha256 = crypto.createHash("sha256").update(fs.readFileSync(onnxRuntimeDylib)).digest("hex");
   if (item.size !== descriptor.bytes || sha256 !== descriptor.sha256) {
-    throw new Error("Windows ONNX development descriptor fingerprint mismatch");
+    throw new Error("Windows ONNX development descriptor 指纹不匹配");
   }
   return { descriptorPath: WINDOWS_ONNX_DEV_DESCRIPTOR_PATH, onnxRuntimeDylib };
 }
@@ -201,6 +200,7 @@ module.exports = {
   WINDOWS_ONNX_DEV_DESCRIPTOR_PATH,
   cleanupLegacyWindowsNodeStaging,
   describeWindowsRuntime,
+  resolveDescriptorPath,
   stageWindowsOnnxRuntime,
   stageWindowsRuntime,
 };

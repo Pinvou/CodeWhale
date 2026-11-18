@@ -5,7 +5,7 @@ import { Worker, MessageChannel, isMainThread, workerData } from 'node:worker_th
 import { createServer } from './http-fixture.mjs';
 import { fixtureScope } from './fixture-scope.mjs';
 
-const progressPhases = ['starting', 'idle', 'scan', 'read', 'write', 'control', 'cdp', 'failed', 'exists', 'directory', 'audit'];
+const progressPhases = ['starting', 'idle', 'scan', 'read', 'write', 'control', 'cdp', 'failed', 'exists', 'directory', 'audit', 'native-readdir'];
 const inputReplySlot = 3;
 let workerProgress;
 async function waitForBarrier(shared) {
@@ -133,6 +133,9 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
       // metadata call. The optional test barrier models a pending directory
       // read without consuming a worker thread or changing lease deadlines.
       await waitForBarrier(requestReadBarrier);
+      // Separate the intentional barrier from actual filesystem completion.
+      // The observer remains able to read this while that I/O is pending.
+      progress('native-readdir');
       const names = await readdir(requestDirectory);
       progress('scan');
       for (const name of names) {

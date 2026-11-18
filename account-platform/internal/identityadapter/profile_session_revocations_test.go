@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/profilerevocation"
 	"github.com/google/uuid"
 )
 
@@ -27,7 +28,58 @@ func (d *profileRevocationDirectoryFake) RevokeSessions(context.Context, string)
 	}
 	return nil
 }
-func profileRevocationService(t *testing.T, d *profileRevocationDirectoryFake) *Service {
+
+type profileAuthorityReceipt struct {
+	subject string
+	state   string
+	token   uuid.UUID
+}
+
+// This test authority survives adapter reconstruction. The Account integration
+// root separately exercises the real durable admission and SQL state machine.
+type profileAuthorityFake struct {
+	mu       sync.Mutex
+	receipts map[uuid.UUID]profileAuthorityReceipt
+}
+
+func newProfileAuthority(id uuid.UUID) *profileAuthorityFake {
+	return &profileAuthorityFake{receipts: map[uuid.UUID]profileAuthorityReceipt{id: {subject: "subject", state: "RESERVED"}}}
+}
+
+func (a *profileAuthorityFake) ClaimProfileRevocation(_ context.Context, command profilerevocation.Command) (profilerevocation.Result, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	receipt, ok := a.receipts[command.OperationID]
+	if !ok {
+		return profilerevocation.Result{}, profilerevocation.ErrUnconfirmed
+	}
+	if receipt.subject != command.Subject {
+		return profilerevocation.Result{}, profilerevocation.ErrConflict
+	}
+	if receipt.state == "CONFIRMED" {
+		return profilerevocation.Result{State: "CONFIRMED"}, nil
+	}
+	if receipt.state != "RESERVED" || command.ReplayOnly {
+		return profilerevocation.Result{}, profilerevocation.ErrUnconfirmed
+	}
+	receipt.state, receipt.token = "DISPATCHED", command.DispatchToken
+	a.receipts[command.OperationID] = receipt
+	return profilerevocation.Result{State: "DISPATCH"}, nil
+}
+
+func (a *profileAuthorityFake) ConfirmProfileRevocation(_ context.Context, command profilerevocation.Command) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	receipt := a.receipts[command.OperationID]
+	if receipt.subject != command.Subject || receipt.token != command.DispatchToken {
+		return profilerevocation.ErrUnconfirmed
+	}
+	receipt.state = "CONFIRMED"
+	a.receipts[command.OperationID] = receipt
+	return nil
+}
+
+func profileRevocationService(t *testing.T, d *profileRevocationDirectoryFake, authority *profileAuthorityFake) *Service {
 	t.Helper()
 	t.Setenv("APP_ENV", "test")
 	vault, err := NewPasswordVault([]byte(strings.Repeat("k", 32)), d)
@@ -38,10 +90,15 @@ func profileRevocationService(t *testing.T, d *profileRevocationDirectoryFake) *
 	if err != nil {
 		t.Fatal(err)
 	}
+	if authority != nil {
+		if _, err = s.WithProfileRevocationAuthority(authority); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return s
 }
 func callProfileRevocation(s *Service, subject string, id uuid.UUID, first bool) int {
-	b, _ := json.Marshal(map[string]any{"operation_id": id, "first_attempt": first})
+	b, _ := json.Marshal(map[string]any{"operation_id": id, "first_attempt": first, "receipt_protocol": 2})
 	r := httptest.NewRequest(http.MethodPost, "/internal/v1/users/"+subject+"/profile-revocations", strings.NewReader(string(b)))
 	r.Header.Set("Authorization", "Bearer controlled-profile-service-token")
 	w := httptest.NewRecorder()
@@ -51,8 +108,9 @@ func callProfileRevocation(s *Service, subject string, id uuid.UUID, first bool)
 func TestProfileSessionRevocationReceipts(t *testing.T) {
 	t.Run("confirmed-concurrent-replay-one-provider-effect", func(t *testing.T) {
 		d := &profileRevocationDirectoryFake{}
-		s := profileRevocationService(t, d)
 		id := uuid.New()
+		authority := newProfileAuthority(id)
+		s := profileRevocationService(t, d, authority)
 		if got := callProfileRevocation(s, "subject", id, true); got != 204 {
 			t.Fatal(got)
 		}
@@ -77,8 +135,12 @@ func TestProfileSessionRevocationReceipts(t *testing.T) {
 	for _, mode := range []string{"unknown-ack", "restart", "missing"} {
 		t.Run(mode, func(t *testing.T) {
 			d := &profileRevocationDirectoryFake{unknown: mode == "unknown-ack"}
-			s := profileRevocationService(t, d)
 			id := uuid.New()
+			authority := newProfileAuthority(id)
+			if mode == "missing" {
+				delete(authority.receipts, id)
+			}
+			s := profileRevocationService(t, d, authority)
 			if mode != "missing" {
 				want := 204
 				if mode == "unknown-ack" {
@@ -89,11 +151,15 @@ func TestProfileSessionRevocationReceipts(t *testing.T) {
 				}
 			}
 			if mode == "restart" {
-				s = profileRevocationService(t, d)
+				s = profileRevocationService(t, d, authority)
 			}
 			before := d.calls.Load()
 			for range 3 {
-				if got := callProfileRevocation(s, "subject", id, false); got != 503 {
+				want := 503
+				if mode == "restart" {
+					want = 204
+				}
+				if got := callProfileRevocation(s, "subject", id, false); got != want {
 					t.Fatal("unproven retry accepted", got)
 				}
 			}
@@ -104,7 +170,7 @@ func TestProfileSessionRevocationReceipts(t *testing.T) {
 	}
 	t.Run("required-command-and-authentication", func(t *testing.T) {
 		d := &profileRevocationDirectoryFake{}
-		s := profileRevocationService(t, d)
+		s := profileRevocationService(t, d, nil)
 		for _, body := range []string{"", `{}`, `{"operation_id":"` + uuid.NewString() + `"}`, `{"first_attempt":true}`, `{"operation_id":"` + uuid.NewString() + `","first_attempt":null}`} {
 			r := httptest.NewRequest(http.MethodPost, "/internal/v1/users/subject/profile-revocations", strings.NewReader(body))
 			r.Header.Set("Authorization", "Bearer controlled-profile-service-token")
@@ -126,9 +192,10 @@ func TestProfileSessionRevocationCancelledBeforeDispatchCanResume(t *testing.T) 
 	d := &profileRevocationDirectoryFake{}
 	v := newProfileSessionRevocations(d)
 	id := uuid.New()
+	v.authority = newProfileAuthority(id)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := v.revoke(ctx, id, "subject", true); !errors.Is(err, context.Canceled) {
+	if err := v.revoke(ctx, id, "subject", false); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
 	if d.calls.Load() != 0 {

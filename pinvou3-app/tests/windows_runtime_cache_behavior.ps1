@@ -274,6 +274,27 @@ try {
   Write-TestFile -Path $runtimeExecutablePath -Content "executable"
   Write-TestFile -Path $runtimeDependencyPath -Content "abc"
 
+  # Mirror the production regression: the node component's bundled npm
+  # node_modules tree exceeds MAX_PATH (260) under the self-hosted
+  # windows-heavy workspace roots. Fixture files must be created through the
+  # \\?\ namespace — the plain provider cmdlets cannot create past-MAX_PATH
+  # paths — and the deep file joins the fixture BEFORE the trusted manifest
+  # is captured, so every staging/reuse assertion below walks it for real.
+  $deepRelativeSegments = @(
+    "maxpath-depth-01-longest",
+    "maxpath-depth-02-longest",
+    "maxpath-depth-03-longest",
+    "maxpath-depth-04-longest",
+    "maxpath-depth-05-longest",
+    "maxpath-depth-06-longest",
+    "maxpath-depth-07-longest"
+  )
+  $deepRelativePath = (@("expanded", "node") + $deepRelativeSegments + @("deep.js")) -join "/"
+  $deepFilePath = Join-Path $stagingRoot ($deepRelativePath.Replace('/', '\'))
+  [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath (Split-Path -Parent $deepFilePath)))
+  [System.IO.File]::WriteAllText((Get-ExtendedPath $deepFilePath), "max-path deep content", [System.Text.Encoding]::UTF8)
+  Assert-True -Condition ($deepFilePath.Length -gt 260) -Message "max-path fixture must exceed MAX_PATH to be meaningful (was $($deepFilePath.Length) chars)"
+
   Write-TauriOverlay -StageId $stageId
 
   # The overlay is consumed by build.js and the NSIS staging script; pin its
@@ -332,6 +353,7 @@ try {
   $stagedPaths = @(Get-StagedRelativePaths -Root $stagingRoot)
   Assert-True -Condition ($stagedPaths -contains "expanded/poppler/nested/.verified-lock") -Message "nested .verified-lock files must remain in the complete staged-file set"
   Assert-True -Condition ($stagedPaths -contains "expanded/poppler/nested/.stage-manifest.json") -Message "nested .stage-manifest.json files must remain in the complete staged-file set"
+  Assert-True -Condition ($stagedPaths -contains $deepRelativePath) -Message "the past-MAX_PATH staged file must be enumerated by the long-path walk"
   Assert-True -Condition (-not (Test-FixtureStageReusable -Manifest $manifest)) -Message "unexpected nested metadata-named files must invalidate the cache"
   Remove-Item -LiteralPath $nestedMarkerPath -Force
   Remove-Item -LiteralPath $nestedManifestPath -Force
@@ -353,6 +375,213 @@ try {
   Assert-True -Condition (-not (Test-StagedFilesAgainstTrustedManifest -Root $stagingRoot -TrustedEntries $caseVariantTrustedEntries)) -Message "case-insensitive duplicate trusted paths must be rejected"
   $escapingEntry = [pscustomobject]@{ path = "../escape.dll"; bytes = 0; sha256 = ("0" * 64) }
   Assert-True -Condition (-not (Test-StagedFilesAgainstTrustedManifest -Root $stagingRoot -TrustedEntries @($escapingEntry))) -Message "trusted paths escaping the staging root must be rejected"
+
+  # Expand-FlattenedRuntime must survive destination trees past MAX_PATH:
+  # the flattened copy arm (robocopy) is what unbreaks the node component on
+  # the self-hosted windows-heavy runners. The zip carries node.exe plus a
+  # deep chain mirroring npm's bundled node_modules: the deep entry itself
+  # lands ~290 chars into TEMP, so extraction goes through the \\?\ long-path
+  # channel, and the flattened destination crosses MAX_PATH for the robocopy
+  # arm — together they exercise the exact production geometry.
+  Add-Type -AssemblyName System.IO.Compression
+  $flatRoot = Join-Path $testRoot "flatten"
+  $flatDestination = Join-Path $testRoot "flatten\expanded\node"
+  # The node-prefixed form is the ZIP ENTRY name only; Expand-FlattenedRuntime
+  # flattens the archive's top-level directory away (node.exe lands at the
+  # destination root), mirroring the production node zip's single top-level
+  # directory.
+  $flatZipEntryDeepPath = (@("node") + $deepRelativeSegments + @("deep.js")) -join "\"
+  $flatZipPath = Join-Path $flatRoot "node-runtime.zip"
+  [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath $flatRoot))
+  $zipStream = [System.IO.File]::Create($flatZipPath)
+  $zipArchive = [System.IO.Compression.ZipArchive]::new($zipStream, [System.IO.Compression.ZipArchiveMode]::Create)
+  try {
+    foreach ($zipEntry in @(
+      [pscustomobject]@{ path = "node/node.exe"; content = "node exe stub" },
+      [pscustomobject]@{ path = ($flatZipEntryDeepPath.Replace('\', '/')); content = "flattened deep payload" }
+    )) {
+      $entry = $zipArchive.CreateEntry($zipEntry.path)
+      $entryWriter = [System.IO.StreamWriter]::new($entry.Open())
+      try {
+        $entryWriter.Write($zipEntry.content)
+      } finally {
+        $entryWriter.Dispose()
+      }
+    }
+  } finally {
+    $zipArchive.Dispose()
+    $zipStream.Dispose()
+  }
+  Expand-FlattenedRuntime -ZipPath $flatZipPath -Destination $flatDestination -RequiredFile "node.exe"
+  # Success-boundary regression (review 5796830161): robocopy reports success
+  # with exit codes 0-7, and the resolver used to leave those codes in
+  # $LASTEXITCODE on the success path. stage-runtime.ps1 and
+  # stage-onnx-runtime.ps1 forward $LASTEXITCODE as their process exit code
+  # ("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"), so a verified staging
+  # still failed the Windows dev/build chain in scripts/tauri/windows-runtime.js.
+  # Every real robocopy arm exercised below must finish at zero.
+  Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "successful flattened runtime expansion (robocopy /E) must leave the process-visible exit code at zero"
+  # Destination-relative path WITHOUT the "node" prefix: the flatten semantics
+  # strip the archive's top-level directory (the same geometry as the real
+  # node-v*-win-x64.zip whose staged manifest puts node.exe at the destination
+  # root).
+  $flatDeepPath = Join-Path $flatDestination ((@($deepRelativeSegments) -join '\') + '\deep.js')
+  Assert-True -Condition ($flatDeepPath.Length -gt 260) -Message "flattened expansion destination must exceed MAX_PATH to exercise robocopy (was $($flatDeepPath.Length) chars)"
+  Assert-True -Condition ([System.IO.File]::ReadAllText((Get-ExtendedPath $flatDeepPath)) -eq "flattened deep payload") -Message "flattened runtime expansion must carry past-MAX_PATH files through robocopy intact"
+  Assert-True -Condition (Test-Path -LiteralPath (Join-Path $flatDestination "node.exe") -PathType Leaf) -Message "flattened runtime expansion must stage the required file at the destination root"
+  Assert-True -Condition (@(Get-ChildItem -LiteralPath $flatDestination -Force).Count -eq 2) -Message "flattened runtime expansion must produce exactly the archive root entries"
+
+  # Assert-ChildPath refuses '..' traversal segments outright (GetFullPath
+  # skips normalization on \\?\ device paths, so an interior '..' would not
+  # collapse before the containment comparison): an archive entry carrying
+  # traversal segments must fail the extraction instead of escaping the
+  # destination.
+  $slipRoot = Join-Path $testRoot "slip"
+  [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath $slipRoot))
+  $slipZipPath = Join-Path $slipRoot "slip.zip"
+  $zipStream = [System.IO.File]::Create($slipZipPath)
+  $zipArchive = [System.IO.Compression.ZipArchive]::new($zipStream, [System.IO.Compression.ZipArchiveMode]::Create)
+  try {
+    $slipEntry = $zipArchive.CreateEntry("node/../../slip-escape.txt")
+    $slipWriter = [System.IO.StreamWriter]::new($slipEntry.Open())
+    try {
+      $slipWriter.Write("slip payload")
+    } finally {
+      $slipWriter.Dispose()
+    }
+  } finally {
+    $zipArchive.Dispose()
+    $zipStream.Dispose()
+  }
+  $slipThrew = $false
+  try {
+    Expand-ZipArchiveLongPath -ZipPath $slipZipPath -Destination $slipRoot
+  } catch {
+    $slipThrew = $true
+  }
+  Assert-True -Condition $slipThrew -Message "an archive entry with traversal segments must fail extraction instead of escaping the destination"
+  Assert-True -Condition (-not (Test-Path -LiteralPath (Join-Path $testRoot "slip-escape.txt"))) -Message "traversal-entry extraction must not write outside the destination root"
+
+  # Remove-TreeLongPath must delete trees holding past-MAX_PATH files and
+  # tolerate a missing target under -MissingOk (the staging finally blocks).
+  $removalRoot = Join-Path $testRoot "removal"
+  $removalDeepPath = Join-Path $removalRoot ((@($deepRelativeSegments) -join '\') + '\deep.js')
+  [void][System.IO.Directory]::CreateDirectory((Get-ExtendedPath (Split-Path -Parent $removalDeepPath)))
+  [System.IO.File]::WriteAllText((Get-ExtendedPath $removalDeepPath), "removal payload", [System.Text.Encoding]::UTF8)
+  Remove-TreeLongPath -Path $removalRoot
+  Assert-True -Condition (-not (Test-Path -LiteralPath $removalRoot)) -Message "long-path cleanup must remove a tree holding past-MAX_PATH files"
+  Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "successful long-path cleanup (robocopy /MIR) must leave the process-visible exit code at zero"
+  Remove-TreeLongPath -Path $removalRoot -MissingOk
+
+  # Robocopy exit codes >= 8 must stay fatal: a PATH-stubbed robocopy that
+  # reports 8 (the same stub technique as the Git failure fixtures above) has
+  # to fail both long-path arms through their real error messages, so the
+  # success-boundary reset cannot swallow genuine robocopy failures.
+  $robocopyStubDirectory = Join-Path $testRoot "robocopy-stub"
+  New-Item -ItemType Directory -Path $robocopyStubDirectory -Force | Out-Null
+  [System.IO.File]::WriteAllText(
+    (Join-Path $robocopyStubDirectory "robocopy.cmd"),
+    # The stub stays silent on stderr: Windows PowerShell 5.1 turns piped
+    # native stderr into ErrorRecord objects and $ErrorActionPreference Stop
+    # would raise NativeCommandError at the robocopy call itself, masking the
+    # exit-code classification this section has to exercise.
+    "@echo off`r`nexit /b 8`r`n",
+    [System.Text.Encoding]::ASCII
+  )
+  # Claim leftover extraction trees by the resolver's own cleanup-failure
+  # record instead of diffing pinvou3-runtime-expand-* names in shared TEMP:
+  # a before/after name diff can swallow a concurrent run's active extraction
+  # tree on a self-hosted runner, while the record names exactly the trees
+  # this run created and failed to clean.
+  $script:RuntimeExpandCleanupFailures = @()
+  $previousRobocopyPath = $env:PATH
+  try {
+    $env:PATH = "$robocopyStubDirectory;$previousRobocopyPath"
+    Assert-True -Condition ((@(Get-Command -Name "robocopy" -CommandType Application -ErrorAction Stop)[0]).Source -like "$robocopyStubDirectory*") -Message "the robocopy failure stub must shadow the real robocopy on PATH"
+    $removalStubRoot = Join-Path $testRoot "removal-stub"
+    New-Item -ItemType Directory -Path (Join-Path $removalStubRoot "payload") -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $removalStubRoot "payload\payload.txt"), "stub payload", [System.Text.Encoding]::UTF8)
+    $mirCleanupThrew = $false
+    try {
+      Remove-TreeLongPath -Path $removalStubRoot
+    } catch {
+      $mirCleanupThrew = $_.Exception.Message -match "Robocopy /MIR cleanup failed with exit code 8"
+    }
+    Assert-True -Condition $mirCleanupThrew -Message "robocopy exit code 8 must fail the /MIR cleanup arm with its real error message"
+    $flattenedCopyThrew = $false
+    try {
+      Expand-FlattenedRuntime -ZipPath $flatZipPath -Destination (Join-Path $testRoot "flatten-stub\expanded\node") -RequiredFile "node.exe"
+    } catch {
+      $flattenedCopyThrew = $_.Exception.Message -match "Robocopy failed with exit code 8"
+    }
+    Assert-True -Condition $flattenedCopyThrew -Message "robocopy exit code 8 must fail the flattened copy arm with its real error message"
+  } finally {
+    $env:PATH = $previousRobocopyPath
+    # Guaranteed claiming: an earlier assertion throwing must not skip the
+    # recorded extraction trees (their deep entries need the long-path arm,
+    # so plain Remove-Item would leave past-MAX_PATH litter behind). The
+    # stub's robocopy would fail every claim, so this runs only after PATH
+    # is restored above.
+    foreach ($expandFailure in @($script:RuntimeExpandCleanupFailures)) {
+      Remove-TreeLongPath -Path $expandFailure.Path -MissingOk
+    }
+  }
+  # The stubbed flattened copy fails inside Expand-FlattenedRuntime, whose
+  # cleanup failures degrade to a loud warning: the finally above already
+  # claimed this run's recorded trees; what remains here is asserting the
+  # recording itself stayed exact and the claiming actually removed them
+  # (the second pass is a no-op under -MissingOk).
+  $expandCleanupFailures = @($script:RuntimeExpandCleanupFailures)
+  Assert-True -Condition ($expandCleanupFailures.Count -ge 1) -Message "the stubbed extraction cleanup failure must be recorded for precise claiming"
+  foreach ($expandFailure in $expandCleanupFailures) {
+    Assert-True -Condition ((Split-Path -Leaf $expandFailure.Path) -like "pinvou3-runtime-expand-*") -Message "recorded extraction cleanup failures must point at pinvou3-runtime-expand-* trees: $($expandFailure.Path)"
+    Remove-TreeLongPath -Path $expandFailure.Path -MissingOk
+    Assert-True -Condition (-not (Test-Path -LiteralPath $expandFailure.Path)) -Message "claiming a recorded extraction tree must actually remove it: $($expandFailure.Path)"
+  }
+
+  # Explicit \\?\-prefixed roots and children must reach containment checks in
+  # the same namespace: GetFullPath keeps the prefix on the root while the
+  # child chain strips it, so an explicitly extended RuntimeRoot used to be
+  # mis-rejected as "outside the expected root" for its own children.
+  $nsRoot = Join-Path $testRoot "ns-unified"
+  $nsChild = Join-Path $nsRoot "child\file.txt"
+  Write-TestFile -Path $nsChild -Content "ns"
+  $nsExtendedRoot = Get-ExtendedPath $nsRoot
+  $nsExtendedChild = Get-ExtendedPath $nsChild
+  $nsAcceptThrew = $false
+  try { Assert-ChildPath -Root $nsExtendedRoot -Path $nsChild } catch { $nsAcceptThrew = $true }
+  Assert-True -Condition (-not $nsAcceptThrew) -Message "an extended RuntimeRoot must not be mis-rejected for a contained plain child"
+  $nsAcceptThrew = $false
+  try { Assert-ChildPath -Root $nsExtendedRoot -Path $nsExtendedChild } catch { $nsAcceptThrew = $true }
+  Assert-True -Condition (-not $nsAcceptThrew) -Message "an extended RuntimeRoot must not be mis-rejected for a contained extended child"
+  $nsOutsidePath = Join-Path $testRoot "ns-outside.txt"
+  $nsRejectThrew = $false
+  try { Assert-ChildPath -Root $nsExtendedRoot -Path $nsOutsidePath } catch { $nsRejectThrew = $_.Exception.Message -match "outside the expected root" }
+  Assert-True -Condition $nsRejectThrew -Message "an extended RuntimeRoot must still reject a path outside it"
+  Assert-True -Condition ((Get-RelativeStagePath -Root $nsExtendedRoot -Path $nsExtendedChild) -eq (Get-RelativeStagePath -Root $nsRoot -Path $nsChild)) -Message "extended and plain root/path pairs must yield the same relative staging path"
+
+  # The staging descriptor key must be the exact slash-joined path: the root
+  # normalization appends the trailing separator through expression
+  # evaluation, because in command parsing mode a bare command call binds the
+  # trailing "+ '\'" as additional arguments (silently absorbed by a simple
+  # function) and the returned key used to gain a leading slash that the Node
+  # descriptor consumer rejects as an absolute path. Pin the production key
+  # shape (Get-RelativeStagePath consumers hand it straight to
+  # scripts/tauri/windows-runtime.js), and pin Assert-ChildPath's containment
+  # boundary, whose root also carries the appended separator: without it the
+  # containment check degrades to a plain prefix match.
+  $relativeRoot = Join-Path $testRoot "relative-key\src-tauri"
+  $relativeChild = Join-Path $relativeRoot "target\windows-runtime\dcde8f01abcd-0123456789ab-onnx-dev\onnxruntime\onnxruntime.dll"
+  Write-TestFile -Path $relativeChild -Content "dylib"
+  $relativeKey = Get-RelativeStagePath -Root $relativeRoot -Path $relativeChild
+  Assert-True -Condition ($relativeKey -eq "target/windows-runtime/dcde8f01abcd-0123456789ab-onnx-dev/onnxruntime/onnxruntime.dll") -Message "the relative staging key must be the exact slash-joined production shape without a leading separator: $relativeKey"
+  $boundaryRoot = Join-Path $testRoot "containment-bound"
+  New-Item -ItemType Directory -Path (Join-Path $boundaryRoot "inner") -Force | Out-Null
+  $boundarySibling = Join-Path (Join-Path $testRoot "containment-boundary") "sibling.txt"
+  Write-TestFile -Path $boundarySibling -Content "sibling"
+  $boundaryThrew = $false
+  try { Assert-ChildPath -Root $boundaryRoot -Path $boundarySibling } catch { $boundaryThrew = $_.Exception.Message -match "outside the expected root" }
+  Assert-True -Condition $boundaryThrew -Message "a sibling directory sharing the root name as a prefix must not pass the containment check"
 
   # Write-Utf8Atomically keeps shared-visibility descriptors continuously
   # present for the unlocked readers in scripts/tauri/windows-runtime.js:
@@ -395,5 +624,8 @@ try {
 
   Write-Host "Windows runtime cache behavior: ok"
 } finally {
-  Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+  # The fixture tree holds past-MAX_PATH files; plain Remove-Item -Recurse
+  # would silently leave deep litter behind on the runner (the resolver's own
+  # cleanup goes through the long-path channel).
+  Remove-TreeLongPath -Path $testRoot -MissingOk
 }
