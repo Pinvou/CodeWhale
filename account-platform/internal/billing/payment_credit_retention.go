@@ -15,7 +15,9 @@ import (
 func (r *PostgresRepository) PurgeExpiredPaymentCreditAttempts(ctx context.Context, authority paymentcredit.RetentionAuthority) error {
 	// This short autocommit read skips existing locks. Exhaust/close it before
 	// any RPC; no Billing transaction or row lock crosses the Account call.
-	rows, err := r.pool.Query(ctx, `SELECT id,payer_user_id,payment_order_id,transaction_digest,facts_digest FROM payment_credit_attempts WHERE state<>'PREPARED' AND account_acknowledged_at IS NOT NULL AND legal_hold=false AND retained_until<=clock_timestamp() AND next_retention_check_at<=clock_timestamp() ORDER BY next_retention_check_at,retained_until,id LIMIT 100 FOR UPDATE SKIP LOCKED`)
+	// Each candidate statement has its own start-time cutoff. The deletion CTE
+	// below takes a fresh cutoff after RPC; write clocks and live guards are unchanged.
+	rows, err := r.pool.Query(ctx, `SELECT id,payer_user_id,payment_order_id,transaction_digest,facts_digest FROM payment_credit_attempts WHERE state<>'PREPARED' AND account_acknowledged_at IS NOT NULL AND legal_hold=false AND retained_until<=statement_timestamp() AND next_retention_check_at<=statement_timestamp() ORDER BY next_retention_check_at,retained_until,id LIMIT 100 FOR UPDATE SKIP LOCKED`)
 	if err != nil {
 		return err
 	}
@@ -62,12 +64,12 @@ func (r *PostgresRepository) PurgeExpiredPaymentCreditAttempts(ctx context.Conte
 	}
 	_, err = r.pool.Exec(ctx, `WITH candidates AS MATERIALIZED(
         SELECT id FROM payment_credit_attempts
-        WHERE id=ANY($2::uuid[]) AND state<>'PREPARED' AND account_acknowledged_at IS NOT NULL AND legal_hold=false AND retained_until<=clock_timestamp() AND next_retention_check_at<=clock_timestamp()
+        WHERE id=ANY($2::uuid[]) AND state<>'PREPARED' AND account_acknowledged_at IS NOT NULL AND legal_hold=false AND retained_until<=statement_timestamp() AND next_retention_check_at<=statement_timestamp()
         ORDER BY retained_until,id LIMIT 100 FOR UPDATE SKIP LOCKED
     ), removed AS (
         DELETE FROM payment_credit_attempts record USING candidates candidate WHERE record.id=candidate.id RETURNING record.retained_until
     ), proof_candidates AS MATERIALIZED(
-        SELECT id FROM payment_credit_retention_batches WHERE legal_hold=false AND retained_until<=clock_timestamp()
+        SELECT id FROM payment_credit_retention_batches WHERE legal_hold=false AND retained_until<=statement_timestamp()
         ORDER BY retained_until,id LIMIT 100 FOR UPDATE SKIP LOCKED
     ), removed_proofs AS (
         DELETE FROM payment_credit_retention_batches proof USING proof_candidates candidate WHERE proof.id=candidate.id RETURNING proof.completed_at

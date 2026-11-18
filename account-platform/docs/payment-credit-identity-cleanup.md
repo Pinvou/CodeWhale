@@ -17,6 +17,8 @@ Account 的事务和用户锁不跨 Billing 结果核实 RPC。实际新增入�
 
 新增准入与核实凭据按资金审计三年留存，覆盖最终结果和首次两端确认的完整期限。保全、未决或未完成两端确认的记录继续保留；普通运行日志按原九十天规则。到期的允许清理记录由有界任务在三十天窗口内处理，每批最多一百条并跳过被锁记录。Billing 每批先对最多一百条本地已知终态、已确认、到期且无保全的候选做 Account 最终确认核对；Account 无最终确认或依赖未知时继续保留并持久延后五分钟，后续到期记录可继续处理。查询结束并释放本地数据库锁后才调用 Account；再次删除仍检查本地期限和保全。Account 返回的 `RETENTION_RETAIN/RETENTION_RELEASE` 只用于该清理步骤，不能授予资金或推断未知付款终态。Account 记录若已按本地完整确认守卫到期清理，Billing 可完成自己的已知终态清理。每次非空清理在同一数据库语句内保存汇总证明（策略版本、时间范围、数量、结果），不保存主体、订单、外部引用或被清除正文；证明写入失败则删除也回滚。证明自身三年留存并受相同保全和有界清理约束，空批次不新增证明。重放不会刷新审计期限。清理不会删除不可变主体 ID、改写原账本或把未决付款变成失败。所有备份、保全审批及相关原始财务证据继续遵守 NFR-13/NFR-38；本批不等于完整隐私销毁或现场恢复验收。
 
+到期候选以每条 SQL 开始时的数据库时点 `statement_timestamp()` 为截止值；语句执行期间才到期的记录留到下一既有 tick。Account 记录与汇总证明、Billing 初始候选与汇总证明均采用这一边界。Billing 完成 Account RPC 后的删除语句取得自己的新截止值，不沿用 RPC 前的时点；原实时删除守卫、保全、两端确认、三年保留期、实际写入时钟及五分钟重排保持不变。该调整避免逐行移动到期边界，不表示已经证明历史规模性能改善。
+
 装配需在 Account 侧仅向 Billing 的真实 workload 授予 `internal.account.payment-credit.admit`（准入及只读最终确认核对）；Billing 侧仅向 Account 授予 `internal.billing.payment-credit.resolve`，该权限覆盖结果核实与确认。沿用已有 workload 身份凭证、网络边界及 `ACCOUNT_HTTP_URL` / `BILLING_HTTP_URL`。Compose model-token 和 Helm 的对应规则随代码更新。生产 compose.signup 的 ACCOUNT_WORKLOAD_RULES_JSON / BILLING_WORKLOAD_RULES_JSON 是运维提供的完整规则覆盖，部署前必须同步上述调用方专属权限；不能只更新基础模板。
 
 部署制品已统一将成功顺序固化为 Billing → Account：开发 Compose 与生产 personal 基础将 `account-migrate` 依赖于 `billing-migrate` 的 `service_completed_successfully`；生产 overlays 保留该依赖。Billing 未完成或失败时，Account 迁移不得开始。Helm 的 pre-install/pre-upgrade migration hooks 依次使用 Billing `-30`、Account `-20`、Token `-10`，原 service-account/后续 bootstrap 次序不变。配置预检检查该顺序，但 render/config contract 通过不等于真实迁移或部署成功。

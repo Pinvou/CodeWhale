@@ -89,6 +89,7 @@ func TestPaymentCreditRetentionPublicPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer br.Close()
+	assertPaymentCreditScanContract(t, ctx, ac, bc)
 	user, order := uuid.New(), uuid.New()
 	now := time.Now().UTC()
 	if _, err = ac.Exec(ctx, `WITH capability AS(SELECT set_config('pinvou.registration_bonus_capable','1',true)) INSERT INTO users(id,status,user_code,username,created_at,updated_at) SELECT $1,'ACTIVE',generate_unique_user_code(),$2,$3,$3 FROM capability`, user, "ret_"+strings.ReplaceAll(user.String(), "-", "")[:16], now); err != nil {

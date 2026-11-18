@@ -190,15 +190,17 @@ func (r *PostgresRepository) RunPaymentCreditRecovery(ctx context.Context, resol
 
 // PurgeExpiredPaymentCreditAdmissions keeps deletion and content-free proof in one statement.
 // The proof table has its own bounded expiry; idle ticks create no audit rows.
+// Due candidates use the start of this SQL statement. Rows becoming due during
+// the scan wait for the next existing tick; write and deletion-guard clocks stay live.
 func (r *PostgresRepository) PurgeExpiredPaymentCreditAdmissions(ctx context.Context) error {
 	_, err := r.pool.Exec(ctx, `WITH candidates AS MATERIALIZED(
         SELECT id FROM account_payment_credit_admissions
-        WHERE state<>'PENDING' AND billing_acknowledged_at IS NOT NULL AND legal_hold=false AND retained_until<=clock_timestamp()
+        WHERE state<>'PENDING' AND billing_acknowledged_at IS NOT NULL AND legal_hold=false AND retained_until<=statement_timestamp()
         ORDER BY retained_until,id LIMIT 100 FOR UPDATE SKIP LOCKED
     ), removed AS (
         DELETE FROM account_payment_credit_admissions record USING candidates candidate WHERE record.id=candidate.id RETURNING record.retained_until
     ), proof_candidates AS MATERIALIZED(
-        SELECT id FROM account_payment_credit_retention_batches WHERE legal_hold=false AND retained_until<=clock_timestamp()
+        SELECT id FROM account_payment_credit_retention_batches WHERE legal_hold=false AND retained_until<=statement_timestamp()
         ORDER BY retained_until,id LIMIT 100 FOR UPDATE SKIP LOCKED
     ), removed_proofs AS (
         DELETE FROM account_payment_credit_retention_batches proof USING proof_candidates candidate WHERE proof.id=candidate.id RETURNING proof.completed_at
