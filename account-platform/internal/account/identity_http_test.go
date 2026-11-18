@@ -5,10 +5,36 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/google/uuid"
 )
+
+func TestProfileRevocationV2IsRejectedByLegacyDecoderBeforeDispatch(t *testing.T) {
+	var dispatched atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var legacy struct {
+			OperationID  uuid.UUID `json:"operation_id"`
+			FirstAttempt *bool     `json:"first_attempt"`
+		}
+		if api.DecodeJSON(w, request, &legacy) != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		dispatched.Store(true)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	client, err := NewHTTPIdentityProvisioner(server.URL, "controlled-profile-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = client.RevokeProfileSessions(context.Background(), "subject", uuid.New(), true); err == nil || dispatched.Load() {
+		t.Fatal("new durable grant reached a legacy provider dispatch", err)
+	}
+}
 
 func TestIdentityProvisionerPreservesPasswordPolicyErrors(t *testing.T) {
 	tests := []struct {

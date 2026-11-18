@@ -127,8 +127,8 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`, controlledUsage).Sca
 		t.Fatal("denied rollback changed persistent facts", err)
 	}
 	var retainedVersions []int64
-	if err = connection.QueryRow(ctx, `SELECT array_agg(version ORDER BY version) FROM schema_migrations WHERE version<>900008`).Scan(&retainedVersions); err != nil {
-		t.Fatal(err)
+	if err = connection.QueryRow(ctx, `SELECT array_agg(version ORDER BY version) FROM schema_migrations WHERE version<>900008`).Scan(&retainedVersions); err != nil || len(retainedVersions) == 0 {
+		t.Fatal("capture historical predecessor versions", err)
 	}
 	var retained string
 	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900008`).Scan(&retained); err != nil {

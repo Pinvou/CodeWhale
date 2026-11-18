@@ -112,8 +112,24 @@ type Repository interface {
 	ListCandidates(context.Context, string, string) ([]Candidate, error)
 	CredentialSecret(context.Context, uuid.UUID, uuid.UUID) (Credential, []byte, error)
 	GetUsage(context.Context, uuid.UUID) (UsageRequest, error)
+	GetUsageStreamState(context.Context, uuid.UUID) (UsageStreamState, error)
 	Ping(context.Context) error
 	Close()
+}
+
+// UsageStreamState contains only the facts polled between persisted SSE frames.
+type UsageStreamState struct {
+	Status         string
+	DeliveryStatus string
+}
+
+func (r *PostgresRepository) GetUsageStreamState(ctx context.Context, usageID uuid.UUID) (UsageStreamState, error) {
+	var state UsageStreamState
+	err := r.pool.QueryRow(ctx, `SELECT status,delivery_status FROM usage_requests WHERE id=$1`, usageID).Scan(&state.Status, &state.DeliveryStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return UsageStreamState{}, ErrNotFound
+	}
+	return state, err
 }
 
 func (r *PostgresRepository) GetUsage(ctx context.Context, usageID uuid.UUID) (UsageRequest, error) {

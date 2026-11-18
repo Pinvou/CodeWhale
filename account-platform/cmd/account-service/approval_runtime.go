@@ -52,6 +52,7 @@ func configureApprovals(ctx context.Context, repository *account.PostgresReposit
 	return []accountBackgroundTask{
 		{"approval-expiry", account.NewApprovalExpiryWorker(repository, time.Minute).Run},
 		{"approval-pagination-cleanup", account.NewApprovalPaginationCleanupWorker(repository, time.Minute).Run},
+		{"approval-delivery-terminal-recovery", account.NewApprovalDeliveryTerminalRecoveryWorker(repository, time.Minute).Run},
 		{"manual-review-sla", account.NewManualReviewSLAWorker(repository, schedule, time.Minute).Run},
 	}, nil
 }
