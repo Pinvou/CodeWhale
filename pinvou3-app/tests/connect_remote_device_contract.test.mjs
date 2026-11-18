@@ -254,7 +254,6 @@ test('the shell separates hiding the page section from disconnecting', () => {
   assert.ok(shell.includes("event.key === 'Escape'"));
   assert.ok(shell.includes('previousFocus?.isConnected'));
   assert.ok(main.includes('role="dialog" aria-modal="true"'));
-  assert.ok(main.includes('.then(opened => { if (!opened) setRemoteConversationOpen(true); })'));
   assert.ok(shell.includes('motion-reduce:transition-none'));
   assert.ok(form.includes('motion-reduce:transition-none'));
   assert.ok(shell.includes('forced-colors:border'));
@@ -262,6 +261,35 @@ test('the shell separates hiding the page section from disconnecting', () => {
   assert.match(shell, /if \(!bridge\?\.available \|\| !bridge\.desktopRemoteControl \|\| !onRequestDisconnect\) \{[\s\S]*?setError\('errorUnsupported'\)/);
   assert.match(panel, /if \(!bridge\.available \|\| !bridge\.desktopRemoteControl\) \{[\s\S]*?setDisconnectError\('errorUnsupported'\)/);
   assert.ok(main.includes("failure.code = 'desktop_remote_control_unsupported'"));
+});
+
+test('the actual settings fallback only opens the captured connection', async () => {
+  const body = main.match(/onRemoteConversationOpen=\{\(\) => \{([\s\S]*?)\n\s*\}\}\s*\n\s*onRemoteConnected=/)?.[1];
+  assert.ok(body, 'the real settings open handler must be selected');
+  for (const outcome of ['missing', 'rejected', 'opened']) {
+    for (const replaced of [false, true]) {
+      const bsRef = { current: { controllerConnection: { connectionId: 'original' } } };
+      const opened = [];
+      let finish;
+      const pending = new Promise((resolve, reject) => {
+        finish = () => outcome === 'rejected' ? reject(new Error('controlled host failure'))
+          : resolve(outcome === 'opened');
+      });
+      const open = vm.runInNewContext(`() => {${body}}`, { bsRef,
+        openCurrentRemoteProxy: () => pending,
+        setRemoteConversationOpen: value => opened.push(value) });
+      const result = open();
+      if (replaced) bsRef.current.controllerConnection = { connectionId: 'successor' };
+      finish();
+      await result;
+      assert.deepEqual(opened, !replaced && outcome !== 'opened' ? [true] : []);
+      // The same callback can still open the newly current connection next time.
+      if (outcome !== 'opened') {
+        await open();
+        assert.equal(opened.at(-1), true);
+      }
+    }
+  }
 });
 
 test('an IME composition invalidates pending async paste before any change event', async () => {

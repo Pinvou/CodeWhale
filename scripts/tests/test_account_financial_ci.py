@@ -68,7 +68,7 @@ class FinancialCIMatrixTests(unittest.TestCase):
         services = lambda text: text.split('    services:\n', 1)[1].split('    steps:\n', 1)[0]
         self.assertEqual(re.findall(r'^      ([\w-]+):$', services(core), re.M),
                          ['portal-redis', 'audit-export-postgres', 'existing-broker-postgres'])
-        self.assertEqual(re.findall(r'^      ([\w-]+):$', services(financial), re.M), ['financial-postgres'])
+        self.assertEqual(re.findall(r'^      ([\w-]+):$', services(financial), re.M), ['financial-postgres', 'financial-owner-account-postgres', 'financial-owner-wallet-postgres'])
         self.assertEqual(re.findall(r'^      ([\w-]+):$', services(closure), re.M), ['financial-postgres'])
         self.assertIn('    needs: changes\n', financial)
         self.assertNotIn('needs: account-platform-test', financial)
@@ -78,7 +78,7 @@ class FinancialCIMatrixTests(unittest.TestCase):
         self.assertIn('ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}', financial)
         for key in ('url', 'port', 'system', 'directory'):
             self.assertIn('${{ steps.account-pg.outputs.financial_' + key + ' }}', financial)
-        for text, profile in ((core, 'core'), (financial, 'financial'), (closure, 'closure')):
+        for text, profile in ((core, 'core'), (financial, '"$PINVOU_ACCOUNT_PG_PROFILE"'), (closure, 'closure')):
             self.assertIn('scripts/account-ci-postgres.py --profile ' + profile, text)
             self.assertIn('--profile ' + profile + (' --with-portal-redis' if profile == 'core' else '') + ' --stop-owned-services', text)
             stop = text.index('      - name: Stop owned temporary PostgreSQL services')
@@ -89,7 +89,8 @@ class FinancialCIMatrixTests(unittest.TestCase):
             self.assertIn('      CGO_ENABLED: "1"\n', text)
         for option in ('--rm', '--cpus 2', '--memory 1g', '--memory-swap 1g'):
             self.assertIn('          ' + option + '\n', financial)
-        self.assertEqual(financial.count('"127.0.0.1::5432"'), 1)
+        self.assertEqual(financial.count('"127.0.0.1::5432"'), 3)
+        self.assertEqual(financial.count("matrix.group == 'owners' && 'mirror.gcr.io/library/postgres"), 2)
 
     def test_actual_go_node_consumers_have_locked_dependencies_before_execution(self):
         def assert_preparation(workflow):
@@ -144,6 +145,7 @@ class FinancialCIMatrixTests(unittest.TestCase):
                 'set -euo pipefail',
                 'python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py',
                 'python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py',
+                'python3 -m unittest discover -s scripts/tests -p test_financial_owners.py',
                 'policy_python="${{ steps.financial-policy-python.outputs.python-path }}"',
                 'policy_library="$(dirname "$(dirname "$policy_python")")/lib"',
                 'python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-policy-process.json" -- env "LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$policy_python" -m unittest discover -s scripts/tests -p test_account_financial_ci.py',

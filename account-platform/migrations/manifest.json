@@ -1142,6 +1142,16 @@
         "file": "900022_approval_unstarted_grants.up.sql",
         "version": 900022,
         "sha256": "bb646987572a659091d293bdf781a39874e82d16aadd8346d9d740da7298fd10"
+      },
+      {
+        "file": "900026_approval_delivery_terminal_recovery.down.sql",
+        "version": 900026,
+        "sha256": "6c27277197eea78b54e959bbf48793cf0dad004f6b1f19336076481b8475660c"
+      },
+      {
+        "file": "900026_approval_delivery_terminal_recovery.up.sql",
+        "version": 900026,
+        "sha256": "aa4dd01995ecc0fe9bcc8ede004404e83ebca986d527131d914663eb189d3860"
       }
     ],
     "billing": [
@@ -2788,6 +2798,16 @@
         "file": "900009_governance_usage_resource_indexes.up.sql",
         "version": 900009,
         "sha256": "6ba3fb063eb36f50888456cb0c665ac6828dca795bce295a44997c1ecd3ccaad"
+      },
+      {
+        "file": "900011_outbox_publication_generation.down.sql",
+        "version": 900011,
+        "sha256": "bf0f689c2b1fca5c836a53dca77d163d79c4667d6782a0fa12a1b4a797fe9836"
+      },
+      {
+        "file": "900011_outbox_publication_generation.up.sql",
+        "version": 900011,
+        "sha256": "b100fa80e195e33883bcd75053691bc7c405babf67c595566559e04350c51348"
       }
     ]
   }
