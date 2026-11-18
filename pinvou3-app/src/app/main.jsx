@@ -1801,12 +1801,10 @@ const App = () => {
         title: (!session.title || isDefaultChatTitle(session.title))
           ? t.newChat
           : session.title,
-        subtitle: session.workspace_kind === 'project'
-          ? workspaceDisplayName(session.workspace_path)
-          : t.uiCodex.temporarySession,
         date: formatSessionDate(session.updated_at || session.created_at, language),
         updatedAt: session.updated_at || session.created_at || '',
         workspacePath: session.workspace_path || '',
+        // 行是单行:文件夹归属由「项目」视图的分组组头表达,不再逐项标注。
         workspaceKind: session.workspace_kind || '',
         // §6 keychain snapshot for the "view workspace" menu entry (same
         // cwd-first shape as the chat lane's workspaceRoots).
@@ -1858,7 +1856,7 @@ const App = () => {
           return {
             id: run.sessionId,
             title,
-            date: formatSessionDate(run.scheduledFor || run.createdAt, language),
+            date: `${scheduledRunLabel(run.status)} · ${formatSessionDate(run.scheduledFor || run.createdAt, language)}`,
             updatedAt: run.createdAt || run.scheduledFor || '',
             pinned: !!run.pinned,
             pinnedAt: run.pinnedAt || '',
@@ -1888,7 +1886,7 @@ const App = () => {
           : chat.title;
           return Object.assign({}, chat, {
             title,
-            subtitle: `${scheduledRunLabel(run.status)} · ${formatSessionDate(run.scheduledFor || run.createdAt, language)}`,
+            date: `${scheduledRunLabel(run.status)} · ${formatSessionDate(run.scheduledFor || run.createdAt, language)}`,
             leadingIcon: (
               <span className="relative inline-flex h-5 w-5 items-center justify-center">
               <Clock size={18} />
@@ -4794,7 +4792,7 @@ const App = () => {
                 遮住下滑的列表项,避免首项与上方 nav 贴死("重合")。 */}
             {isSidebarOpen && (
               <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-3 flex flex-col">
-                <div data-testid="sidebar-recents" className="pt-5 pb-2 max-sm:pt-2">
+                <div data-testid="sidebar-recents" className="pt-3 pb-2 max-sm:pt-2">
                   <div ref={taskFilterRef} className="relative mb-2">
                     {/* 第一行:「任务列表」标题 + 查看全部/筛选按钮;
                         第二行:全部/项目 胶囊 + 一键折叠(分组)按钮。
@@ -4923,7 +4921,7 @@ const App = () => {
                       </div>
                     )}
                   </div>
-                  <div className="space-y-1">
+                  <div className="space-y-0.5">
                     {sidebarCodeListActive ? (
                       (sidebarFolderPinned.length > 0 || sidebarFolderGroups.length > 0) ? (
                         <>
@@ -4963,7 +4961,7 @@ const App = () => {
                                   onDropActive={(active) => setDropTargetGroupKey(active ? group.key : null)}
                                 /></Suspense>
                                 {isOpen && (
-                                  <div className="mt-1 space-y-0.5">
+                                  <div className="space-y-0.5">
                                     {group.rows.map(renderSidebarTaskItem)}
                                   </div>
                                 )}
@@ -5000,7 +4998,7 @@ const App = () => {
                             <ChevronDown size={14} className={`shrink-0 transition-transform ${isOpen ? '' : '-rotate-90'}`} />
                           </button>
                           {isOpen && (
-                            <div className="mt-1 space-y-0.5">
+                            <div className="space-y-0.5">
                               {group.rows.map(renderSidebarTaskItem)}
                             </div>
                           )}
