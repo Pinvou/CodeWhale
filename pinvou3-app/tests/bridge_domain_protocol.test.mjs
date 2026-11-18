@@ -343,7 +343,8 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // T0-b 重算：helpers 新增 3 个 invoke 面（get_session_persona_events /
 // get_session_pinvou_reviews / resolveMemoryCandidate 的 invoke(command, args)
 // 参数化入口），合计 74 个签名。
-const expectedSharedBaseHash = 'f92d9e73a2ed12655bf7516b894c7d3283b5634cd1774e933320ed122d889013';
+// kb_model_cancel 回流：共享知识模型 helper 新增取消命令，合计 75 个签名。
+const expectedSharedBaseHash = 'da3b8334d74117e2d1c1d6ba80df6fb8780915c6b9a8dca75e90682dea343398';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),
