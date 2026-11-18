@@ -877,6 +877,11 @@ def _with_verified_reuse_guard(value, name):
 
 GATE_JOB_LEVEL_IFS = {name: _with_verified_reuse_guard(value, name) if name not in {'merge-authored-audit', 'fast-gate', 'commit-message', 'changes', 'backflow-portability', 'required-gate'} else value for name, value in GATE_JOB_LEVEL_IFS.items()}
 
+# Frontend setup artifact gate: frontend-test / frontend-browser-test 追加
+# needs.frontend-setup.result == 'success' 尾卫,setup 失败时消费者显式跳过,
+# 不再空跑后死于工件缺失(与 pr-check.yml 的 job 级 if 逐字一致)。
+GATE_JOB_LEVEL_IFS = {name: (value.removesuffix(" }}") + " && needs['frontend-setup'].result == 'success' }}") if name in {'frontend-test', 'frontend-browser-test'} else value for name, value in GATE_JOB_LEVEL_IFS.items()}
+
 
 class CiGatePolicyTests(unittest.TestCase):
     @classmethod
@@ -1168,10 +1173,24 @@ class CiGatePolicyTests(unittest.TestCase):
             self.assertIn('node-version: "24"', job)
             if job_name == "frontend-test":
                 self.assertIn("working-directory: pinvou3-app", job)
+                # Setup 工件化(2026-11-16 调查:三次 vite build ×5 → ×1):
+                # 构建产物在 frontend-setup 一次完成,frontend-test 经 needs
+                # 消费产物工件;npm ci 保留在本 job(网络绑定、CPU 占用低,
+                # 156MB node_modules 包在自建机上行实测 stall 至死,产物小件
+                # 才是链路扛得动的体积)。双向钉住防解线:消费方必须 needs
+                # frontend-setup、本 job 安装先于 npm test,setup 安装先于 build。
+                self.assertRegex(job, r"(?m)^    needs: \[changes, frontend-setup\]$")
                 install = _step_named(job, "安装前端依赖")
                 self.assertIn("run: npm ci --prefer-offline --no-audit", install)
                 self.assertNotRegex(install, r"(?m)^        (?:if|continue-on-error):")
                 self.assertLess(job.index(install), job.index(step))
+                setup_job = _without_inline_comments(
+                    _extract_job_block(self.pr_workflow, "frontend-setup")
+                )
+                self.assertIn("working-directory: pinvou3-app", setup_job)
+                setup_install = _step_named(setup_job, "安装前端依赖")
+                self.assertIn("run: npm ci --prefer-offline --no-audit", setup_install)
+                self.assertLess(setup_job.index(setup_install), setup_job.index("npm run build:ui"))
                 for name in ("personal", "models", "invocation"):
                     source = f"account-platform/deploy/production/compose.{name}.yaml"
                     self.assertIn(source, entries)
@@ -1481,7 +1500,7 @@ python3() { fixture_mock python3 "$@"; }
         )
         self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/admin.html", paths))
         self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/assets/admin.js", paths))
-        frontend = self.pr_workflow.split("\n  frontend-test:", maxsplit=1)[1].split(
+        frontend = self.pr_workflow.split("\n  frontend-setup:", maxsplit=1)[1].split(
             "\n  relay-test:", maxsplit=1
         )[0]
         gate = frontend.split("      - name: Verify embedded Account Portal assets are current", maxsplit=1)[1].split(
@@ -4378,6 +4397,11 @@ python3() { fixture_mock python3 "$@"; }
         self.assertGreaterEqual(len(linux_jobs), 10)
         for job in linux_jobs:
             job_name = job.strip().split(":", maxsplit=1)[0]
+            # runner-pool-guard 是唯一故意跑在托管 ubuntu-22.04 的元门禁:它
+            # 校验的对象正是池 vars,不能依赖它们(2026-11-16 调查的显式失败
+            # 化改造);纯 env 检查无重任务,无需 zram,按名豁免。
+            if job_name == "runner-pool-guard":
+                continue
             # Round-11 review: judge the contract on EXECUTABLE lines only —
             # a commented-out step otherwise satisfies every assertIn below
             # while the job actually runs on stock memory.
@@ -5299,6 +5323,7 @@ python3() { fixture_mock python3 "$@"; }
             windows_codex_filter,
         )
         self.assertIn("browser_wrapper_lazy.test.mjs", windows_codex_filter)
+        self.assertIn("browser-wrapper-host-control.test.mjs", windows_codex_filter)
 
         windows_job = self.pr_workflow.split(
             "\n  windows-codex-runtime-test:", maxsplit=1
@@ -5307,7 +5332,9 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn("runs-on: windows-latest", windows_job)
         self.assertIn("Windows browser wrapper lifecycle regression", windows_job)
         self.assertIn(
-            "node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs",
+            "node --test --test-concurrency=1 "
+            "pinvou3-app/tests/browser-wrapper-host-control.test.mjs "
+            "pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs",
             windows_job,
         )
         self.assertIn(

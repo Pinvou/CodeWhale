@@ -7,6 +7,9 @@ use tokio::net::TcpListener;
 #[path = "behavior_telemetry/shell_producer_tests.rs"]
 pub(crate) mod shell_producer;
 
+#[path = "behavior_telemetry/model_producer_tests.rs"]
+mod model_producer;
+
 #[path = "behavior_telemetry/install_tests.rs"]
 mod install;
 
@@ -1180,6 +1183,74 @@ fn diagnostic_failed_stream_is_not_discarded_as_a_user_cancellation() {
 }
 
 #[test]
+fn diagnostic_eof_uses_the_error_source_and_preserves_process_facts() {
+    let _home = TestHome::new();
+    let runtime = test_runtime("http://localhost:1");
+    let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
+    for (index, error) in [
+        "bash: -c: line 2: syntax error: unexpected end of file PRIVATE_COMMAND",
+        "bash: -c: line 1: unexpected EOF while looking for matching quote PRIVATE_COMMAND",
+        "decoder: unexpected end of input PRIVATE_COMMAND",
+    ]
+    .iter()
+    .enumerate()
+    {
+        for (metadata, expected) in [
+            (None, "tool_failed"),
+            (
+                Some(json!({"status":"Failed", "exit_code":2})),
+                "process_failed",
+            ),
+            (
+                Some(json!({"status":"TimedOut", "exit_code":1})),
+                "request_timeout",
+            ),
+            (
+                Some(json!({"sandbox_denied":true,"exit_code":1})),
+                "permission_denied",
+            ),
+        ] {
+            let event = BehaviorEvent::new("tool_call_completed")
+                .session(format!("eof_tool_session_{index}"))
+                .turn("eof_tool_turn")
+                .string("operation_id", "eof_tool_operation")
+                .integer("attempt_index", 1)
+                .tool("shell", "bash", "cli")
+                .success(false)
+                .integer("duration_ms", 1)
+                .string("error_category", error_category(Some(error)))
+                .diagnostic_error(error, "tool_result")
+                .diagnostic_tool_metadata(metadata.as_ref());
+            telemetry.track(event);
+            let outbox = telemetry.outbox.lock().unwrap();
+            let event = &outbox.records.last().unwrap().event;
+            assert_eq!(event["diagnostic_code"], expected);
+            assert_eq!(event["diagnostic_component"], "tool");
+            assert_eq!(event["diagnostic_site"], "tool_result");
+            assert_eq!(
+                event.get("diagnostic_exit_code"),
+                metadata.as_ref().and_then(|value| value.get("exit_code"))
+            );
+            assert!(
+                !serde_json::to_string(event)
+                    .unwrap()
+                    .contains("PRIVATE_COMMAND")
+            );
+        }
+        // Merely naming a collection site never proves model provenance.
+        for site in ["assistant_error", "acp_error"] {
+            let event = diagnostic_failure(&format!("eof_local_{index}_{site}"), "local_turn")
+                .diagnostic_error(error, site);
+            assert_eq!(event.diagnostic_hint.as_ref().unwrap().code, "unknown");
+        }
+        let lifecycle = BehaviorEvent::new("tool_install_completed")
+            .success(false)
+            .diagnostic_error(error, "lifecycle");
+        assert_eq!(lifecycle.diagnostic_hint.as_ref().unwrap().code, "unknown");
+    }
+}
+
+#[test]
 fn diagnostic_late_terminal_cannot_write_a_successor_context() {
     fn submit(t: &BehaviorTelemetry, lease: &CollectionLease, session: &str) -> TaskAttempt {
         let attempt = TaskAttempt {
@@ -1221,12 +1292,14 @@ fn diagnostic_late_terminal_cannot_write_a_successor_context() {
             events::task_fields(BehaviorEvent::new("task_admitted"), session, attempt).turn(turn);
         diagnostics::enrich(t, &mut event, lease);
     }
-    fn model_failure(
+    fn terminal_failure(
         t: &BehaviorTelemetry,
         lease: &CollectionLease,
         session: &str,
         attempt: &TaskAttempt,
         turn: &str,
+        expected_code: &str,
+        expected_site: &str,
     ) {
         let mut event = events::task_fields(BehaviorEvent::new("task_finished"), session, attempt)
             .turn(turn)
@@ -1234,19 +1307,45 @@ fn diagnostic_late_terminal_cannot_write_a_successor_context() {
             .integer("duration_ms", 1)
             .string("error_category", "model_error");
         diagnostics::enrich(t, &mut event, lease);
-        assert_eq!(event.fields["diagnostic_code"], "stream_unexpected_eof");
+        assert_eq!(event.fields["diagnostic_code"], expected_code);
+        assert_eq!(event.fields["diagnostic_site"], expected_site);
     }
     let _home = TestHome::new();
     let runtime = test_runtime("http://localhost:1");
     let telemetry = test_telemetry(runtime.clone(), heartbeat_state(&runtime));
     let lease = telemetry.current_lease().unwrap();
-    for source in [false, true] {
+    for (source, expected_code, expected_site) in [
+        (
+            FailureSource::Model,
+            "stream_unexpected_eof",
+            "assistant_error",
+        ),
+        (
+            FailureSource::AcpPrompt,
+            "stream_unexpected_eof",
+            "acp_error",
+        ),
+        (
+            FailureSource::AssistantRuntime,
+            "unknown",
+            "assistant_error",
+        ),
+        (FailureSource::AcpRuntime, "unknown", "acp_error"),
+    ] {
         for accepted in [false, true] {
             let session = format!("successor_{}_{}", source as u8, accepted);
             let mut old = submit(&telemetry, &lease, &session);
             admit(&telemetry, &lease, &session, &mut old, "old_turn");
             telemetry.capture_failure_context(&session, "old_turn", "unexpected EOF", source);
-            model_failure(&telemetry, &lease, &session, &old, "old_turn");
+            terminal_failure(
+                &telemetry,
+                &lease,
+                &session,
+                &old,
+                "old_turn",
+                expected_code,
+                expected_site,
+            );
 
             // Real task-state/field shapes, in the reachable race order:
             // new submission -> history copy -> old terminal resumes.
@@ -1288,7 +1387,15 @@ fn diagnostic_late_terminal_cannot_write_a_successor_context() {
                 admit(&telemetry, &lease, &session, &mut next, "new_turn");
             }
             telemetry.capture_failure_context(&session, "new_turn", "unexpected EOF", source);
-            model_failure(&telemetry, &lease, &session, &next, "new_turn");
+            terminal_failure(
+                &telemetry,
+                &lease,
+                &session,
+                &next,
+                "new_turn",
+                expected_code,
+                expected_site,
+            );
             // Real legacy-cache deserialization remains supported, but a
             // missing submission marker cannot authorize a model source.
             let mut saved = serde_json::to_value(&*telemetry.diagnostics.lock().unwrap()).unwrap();
@@ -1306,7 +1413,15 @@ fn diagnostic_late_terminal_cannot_write_a_successor_context() {
             assert!(legacy["contexts"][&session]["code"].is_null());
             *telemetry.diagnostics.lock().unwrap() = serde_json::from_value(saved).unwrap();
             telemetry.capture_failure_context(&session, "new_turn", "unexpected EOF", source);
-            model_failure(&telemetry, &lease, &session, &next, "new_turn");
+            terminal_failure(
+                &telemetry,
+                &lease,
+                &session,
+                &next,
+                "new_turn",
+                expected_code,
+                expected_site,
+            );
         }
     }
 }

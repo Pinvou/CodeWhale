@@ -26,6 +26,7 @@ SOURCE_PATHS = (
     'pinvou3-app/src-tauri/resources/common/config',
     'pinvou3-app/src-tauri/resources/platforms/windows/chrome-devtools-mcp',
     'pinvou3-app/tests/codex_acp_windows_runtime_smoke.js',
+    'pinvou3-app/tests/helpers/claude-acp-startup-probe.cjs',
 )
 
 
