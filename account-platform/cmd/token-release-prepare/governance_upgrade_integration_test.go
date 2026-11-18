@@ -122,7 +122,9 @@ func testGovernanceExpansionPostgres(t *testing.T, ctx context.Context, admin *p
 	// Transition the old published evidence to SAFE without altering either
 	// digest, its approved role set, or any previously recorded transition.
 	exec(rootToken, `SET ROLE token_schema_owner; INSERT INTO public.outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at) VALUES('22222222-2222-4222-8222-222222222222','token.usage-reconciliation.retry.v1','22222222-2222-4222-8222-222222222222',1,'{"fixture_history":true}','upgrade-fixture',clock_timestamp()); UPDATE public.token_command_governance_activation SET state='SAFE_ROLLBACK',epoch=2,operator_id='fixture',reason='old published release enters SAFE',request_id='33333333-3333-4333-8333-333333333333',updated_at=clock_timestamp() WHERE singleton; RESET ROLE`)
-	rootToken.Close(context.Background())
+	if err := closeManagedFixtureConnection(ctx, admin, rootToken); err != nil {
+		t.Fatal(err)
+	}
 	migratorConfig := tokenConfig.Copy()
 	migratorConfig.User = "token_migrator"
 	request := token.GovernanceTransitionRequest{ExpectedState: "SAFE_ROLLBACK", ExpectedEpoch: 2, TargetState: "ACTIVE", OperatorID: "fixture", Reason: "explicit verified lifecycle policy upgrade", RequestID: uuid.New(), ApprovedRuntimeRoles: newRoles, PolicyUpgrade: approvalpolicy.LifecyclePolicySetUpgradeV1}
@@ -219,11 +221,18 @@ func testGovernanceExpansionPostgres(t *testing.T, ctx context.Context, admin *p
 			t.Fatal("other fixture DBA session remains")
 		}
 	}
-	t.Run("same-request-recovery-cas-audit-and-original-result", func(t *testing.T) {
-		tokenPool.Close()
+	if !t.Run("same-request-recovery-cas-audit-and-original-result", func(t *testing.T) {
+		if err := closeManagedFixtureSinglePool(ctx, admin, tokenPool); err != nil {
+			t.Fatal(err)
+		}
 		runGovernanceExpansionWrapper(t, ctx, migratorConfig, accountConfig, request, true)
 		tokenPool = openPool(migratorConfig)
-		defer tokenPool.Close()
+		replacement := tokenPool
+		defer func() {
+			if err := closeManagedFixtureSinglePool(ctx, admin, replacement); err != nil {
+				t.Error(err)
+			}
+		}()
 		value, err := token.CheckOrTransitionTokenGovernance(ctx, tokenPool, nil, token.GovernanceTransitionRequest{RequestID: request.RequestID})
 		if err != nil || value.State != "ACTIVE" || value.Epoch != 3 {
 			t.Fatalf("controlled expansion failed: %v", err)
@@ -239,10 +248,10 @@ func testGovernanceExpansionPostgres(t *testing.T, ctx context.Context, admin *p
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer tx.Rollback(context.Background())
 		if _, err := tx.Exec(ctx, "SET LOCAL ROLE token_schema_owner"); err != nil {
 			t.Fatal(err)
 		}
-		defer tx.Rollback(context.Background())
 		var preserved bool
 		if err := tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM public.token_command_governance_transitions)=3 AND (SELECT count(*) FROM public.token_command_governance_transitions WHERE epoch IN(1,2) AND policy_set_digest='f2b71d1b118a69974dad6154dcd50dd1ec06f36c20f8c1cf4316ecd799ab74ee')=2 AND (SELECT count(*) FROM public.outbox_events WHERE event_id='22222222-2222-4222-8222-222222222222')=1`).Scan(&preserved); err != nil {
 			t.Fatalf("trusted audit verification query failed: %v", err)
@@ -256,10 +265,14 @@ func testGovernanceExpansionPostgres(t *testing.T, ctx context.Context, admin *p
 		if !errors.As(err, &pgError) || pgError.Code != "55000" {
 			t.Fatal("historical transition became mutable")
 		}
-	})
+	}) {
+		return
+	}
 	// Complete the same upgraded generation: managed enable must accept the
 	// newly approved roles at ACTIVE/3, install both credentials, authenticate
 	// them, and make the same epoch consumable by a real runtime identity.
+	// The subtest owns and acknowledges its replacement pool before returning.
+	// Preserve the ordinary idempotent close here, without acquiring it again.
 	tokenPool.Close()
 	exec(admin, "ALTER ROLE token_migrator NOLOGIN")
 	for _, role := range newRoles {
