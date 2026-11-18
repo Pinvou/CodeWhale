@@ -8,6 +8,13 @@ const resolutionsByType = {
   REFUND_FAILURE: ['RECONCILE_REFUND', 'DISMISS', 'ESCALATE_FINANCIAL_REPAIR'],
 };
 
-export function paymentAnomalyResolutions(type) {
+export function unmatchedCallbackEvidence(item) {
+  const snapshot = item?.resource_snapshot;
+  return item?.anomaly_type === 'PAYMENT_FACT_CONFLICT' && !item?.payment_order_id &&
+    snapshot?.reason === 'PAYMENT_ORDER_NOT_FOUND' && snapshot?.notification_id ? snapshot : null;
+}
+
+export function paymentAnomalyResolutions(type, item) {
+  if (unmatchedCallbackEvidence(item)) return ['DISMISS'];
   return Object.prototype.hasOwnProperty.call(resolutionsByType, type) ? [...resolutionsByType[type]] : [];
 }

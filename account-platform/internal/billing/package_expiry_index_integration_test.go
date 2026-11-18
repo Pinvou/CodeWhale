@@ -23,6 +23,28 @@ import (
 
 const packageExpiryIndexName = "entitlement_packages_expiry_scan_idx"
 
+// Log only the exact expiry-index root using fixed phase labels and no business data.
+func logPackageExpiryPhase(t *testing.T, ctx context.Context, phase string) {
+	t.Helper()
+	const root = "TestPackageExpiryCrossWalletIndexPostgres"
+	if t.Name() != root && !strings.HasPrefix(t.Name(), root+"/") {
+		return
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Logf("PACKAGE_EXPIRY_PHASE phase=%s deadline=absent", phase)
+		return
+	}
+	remaining := time.Until(deadline)
+	state := "live"
+	if ctx.Err() == context.DeadlineExceeded {
+		state = "deadline"
+	} else if ctx.Err() == context.Canceled {
+		state = "cancelled"
+	}
+	t.Logf("PACKAGE_EXPIRY_PHASE phase=%s elapsed_ms=%d remaining_ms=%d state=%s", phase, (3*time.Minute - remaining).Milliseconds(), remaining.Milliseconds(), state)
+}
+
 // Read the actual candidate statement without changing the production worker
 // for test instrumentation. The expected ordering/result is checked separately.
 func packageExpiryCandidateStatement(t *testing.T) string {
@@ -81,6 +103,11 @@ func packageExpiryFacts(t *testing.T, ctx context.Context, r *PostgresRepository
 // Both paths hash every column of every row and retain all metadata checks.
 func packageExpiryFactsWithOrder(t *testing.T, ctx context.Context, r *PostgresRepository, originalJSONOrder bool) string {
 	t.Helper()
+	phase := "facts.primary"
+	if originalJSONOrder {
+		phase = "facts.reference"
+	}
+	logPackageExpiryPhase(t, ctx, phase+".begin")
 	var facts []string
 	for _, table := range []string{"wallets", "credit_lots", "entitlement_packages", "entitlement_components", "journal_entries", "ledger_postings", "outbox_events", "payment_orders", "payment_transactions"} {
 		var value string
@@ -111,6 +138,7 @@ func packageExpiryFactsWithOrder(t *testing.T, ctx context.Context, r *PostgresR
  pg_has_role('billing_service','billing_schema_owner','MEMBER'),has_schema_privilege('billing_service','public','CREATE'))::text`).Scan(&metadata); err != nil {
 		t.Fatal(err)
 	}
+	logPackageExpiryPhase(t, ctx, phase+".end")
 	return strings.Join(facts, "|") + metadata
 }
 
@@ -239,7 +267,9 @@ func TestPackageExpiryCrossWalletIndexPostgres(t *testing.T) {
 			if _, err = owner.Exec(ctx, `SET ROLE billing_schema_owner`); err != nil {
 				t.Fatal(err)
 			}
+			logPackageExpiryPhase(t, ctx, "history.begin")
 			packageExpiryHistory(t, ctx, owner, base)
+			logPackageExpiryPhase(t, ctx, "history.end")
 			before := packageExpiryFacts(t, ctx, r)
 			// Compare the full seeded carrier with the original query once per
 			// scenario; all later financial/authority checkpoints remain intact.
@@ -305,22 +335,30 @@ func TestPackageExpiryCrossWalletIndexPostgres(t *testing.T) {
 			}
 			now := base.Add(31 * 24 * time.Hour)
 			r.now = func() time.Time { return now }
+			logPackageExpiryPhase(t, ctx, "measure.baseline.begin")
 			packageExpiryMeasure(t, ctx, owner, statement, now, false, packs[0])
+			logPackageExpiryPhase(t, ctx, "measure.baseline.end")
 			packageExpiryIndex(t, ctx, r)
+			logPackageExpiryPhase(t, ctx, "measure.indexed.begin")
 			packageExpiryMeasure(t, ctx, owner, statement, now, true, packs[0])
+			logPackageExpiryPhase(t, ctx, "measure.indexed.end")
 			if packageExpiryFacts(t, ctx, r) != before {
 				t.Fatal("plan probes changed financial or migration facts")
 			}
+			logPackageExpiryPhase(t, ctx, "worker.first.begin")
 			if count, err := r.ExpirePackages(ctx, 1); err != nil || count != 1 {
 				t.Fatal("actual bounded first worker pass", count, err)
 			}
+			logPackageExpiryPhase(t, ctx, "worker.first.end")
 			var first string
 			if err := r.pool.QueryRow(ctx, `SELECT status FROM entitlement_packages WHERE id=$1`, packs[0]).Scan(&first); err != nil || first != "EXPIRED" {
 				t.Fatal("worker ordering", first, err)
 			}
+			logPackageExpiryPhase(t, ctx, "worker.next.begin")
 			if count, err := r.ExpirePackages(ctx, 10); err != nil || count != 2 {
 				t.Fatal("actual next worker pass", count, err)
 			}
+			logPackageExpiryPhase(t, ctx, "worker.next.end")
 			for _, pack := range packs {
 				wallet, err := r.GetWallet(ctx, wallets[pack])
 				if err != nil || wallet.PostedMicrocredits != 0 {
@@ -340,15 +378,19 @@ func TestPackageExpiryCrossWalletIndexPostgres(t *testing.T) {
 				t.Fatal("exact expiry journals", journals, err)
 			}
 			after := packageExpiryFacts(t, ctx, r)
+			logPackageExpiryPhase(t, ctx, "worker.replay.begin")
 			if count, err := r.ExpirePackages(ctx, 10); err != nil || count != 0 || packageExpiryFacts(t, ctx, r) != after {
 				t.Fatal("next tick repeated or revived effects", count, err)
 			}
+			logPackageExpiryPhase(t, ctx, "worker.replay.end")
 			// Typed Down keeps a session lock even when its SQL refuses.
 			// Retire only this owned actor before the independent full-carrier CLI.
 			if err := owner.Close(ctx); err != nil {
 				t.Fatal(err)
 			}
+			logPackageExpiryPhase(t, ctx, "carrier.begin")
 			completeBillingMigrationContract(t, ctx, r, source, staged, product)
+			logPackageExpiryPhase(t, ctx, "carrier.end")
 			packageExpiryIndex(t, ctx, r)
 			t.Logf("PACKAGE_EXPIRY_VERIFIED scenario=%s synthetic_history=100000 cross_wallets=100000 future_active=10000 original_paid_packages=4 expired=3 frozen_preserved=1", scenario)
 		})

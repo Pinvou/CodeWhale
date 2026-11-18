@@ -16,7 +16,7 @@ SPEC.loader.exec_module(RUNNER)
 
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
-EXPECTED_RETAINED_ROOT_COUNT = 84
+EXPECTED_RETAINED_ROOT_COUNT = 87
 
 # Fixed identities independently checked against each actual -run selector.
 EXPECTED_SCHEMA_ROOTS = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestPublishedRollbackPackageIntegrityPostgres"}
@@ -127,6 +127,14 @@ class PostgresQuiescenceTests(unittest.TestCase):
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
+    def test_each_phase_rejects_zero_or_skipped_required_tests(self):
+        for phase in ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"]:
+            for option in ["empty_phase", "skipped_phase"]:
+                with self.subTest(phase=phase, option=option), self.assertRaises(RuntimeError):
+                    self.run_main_fixture(**{option: phase})
+                self.assertEqual(self.fixture_phases[-1], phase)
+
+
     def test_adjustment_proof_rollback_requires_empty_and_retained_public_entries(self):
         root = "TestBillingManualAdjustmentProofRollbackPostgres"
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
@@ -2473,6 +2481,9 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestReconciliationLedgerRepairForcedPeerPostgres",
             "TestReconciliationLedgerRepairPublicPostgres",
             "TestCallbackHTTPAdmissionPersistsPostgres",
+            "TestPaymentNotificationWorkerEscalatesUnmatchedTrustedCallback",
+            "TestPaymentNotificationWorkerKeepsUnverifiedCallbacksOnRetry",
+            "TestPaymentNotificationWorkerRollsBackAndRetriesManualCase",
             "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
             "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
             "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",

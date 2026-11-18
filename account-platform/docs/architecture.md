@@ -182,6 +182,7 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 - `pricing_publish_commands`、`pricing_lifecycle_commands`、`pricing_version_audits`、`pricing_blocks`：发布与撤销/结束的幂等命令、不可变审计和显式阻断窗口。
 - `usage_holds`、`idempotency_records`：预占/结算和通用幂等记录；Hold 冻结请求上下文、协议/公式、估算器、逐单位价格及来源，后续续租、追加预占和结算不重新定价。
 - `payment_orders`、`payment_transactions`、`payment_evidence`、`refunds`、`refund_component_reservations`、`refund_grant_reservations`、`forced_refund_cases`、`payment_notifications`：当前支付和退款模型；订单冻结 Provider ID/版本、商品映射 ID、完整映射、能力声明、实际付款人及受益主体，后续不以新版本重新解释历史订单。一个订单可关联多笔不可变 Provider 支付流水；回调、查询、Provider 账单、关单观察和人工修复先保存原始载荷摘要与快照，再归并流水状态。普通退款以支付流水和权益包为唯一目标，退款预约保存 BASE/BONUS 组成及授予快照；渠道强制退款保存独立外部资金事实并冻结目标权益包，不能覆盖支付成功事实。订单还冻结支付期限、晚到复核边界和最终归档期限。
+  对已有验签来源的回调，若 inbox 第 12 次或之后的处理失败是本地找不到商户订单号，worker 原子地将通知移入 `MANUAL_REVIEW` 并创建一条 `PAYMENT_FACT_CONFLICT` 案件。认领、查证和处理边界见 [F02 支付与退款恢复边界](f02-financial-recovery-contract.md#找不到订单的可信回调)。
 - `manual_review_cases`、`manual_review_case_events`、`manual_review_assignments`：Account、Billing、Token 各自在领域数据库保存形状一致的人工案件投影、不可变时间线和转派证据；共享 `manualreview` 时钟从源案件创建时间冻结 P0/P1 的 7×24 SLA 与 P2 上海工作时 SLA，任何认领、重试或转派都不重置截止时间。生产必须配置有序值班负责人链，逾期 worker 实际更新 `owner_id` 并递增升级级别。Billing 另以 `late_payment_review_cases`、`late_payment_review_evidence` 保存晚到支付复核事实。
 - `provider_bill_imports`、`provider_bill_rows`：不可变账单文件批次和逐行记录；事实盲区可原子停用关联 Provider/商品的新单，但不能直接改写历史能力快照或目录发布事实。
 - `manual_adjustments`、`payment_order_repairs`：运营调整和支付修复。
