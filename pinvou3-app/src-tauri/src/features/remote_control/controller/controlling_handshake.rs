@@ -254,6 +254,21 @@ impl ControllingHandshake {
         Ok(value)
     }
 
+    /// Recognize only a replay of this already authenticated reservation.
+    /// No key, receipt, stage or deadline is created or advanced by this read.
+    pub(crate) fn is_reserved_replay(&self, message: &Value) -> bool {
+        let Some(expected) = self.install_context.as_ref() else {
+            return false;
+        };
+        let Ok(parsed) = parse_controller_pairing_transcript(&message.to_string()) else {
+            return false;
+        };
+        let Ok(candidate) = authenticate_relay_transcript(&self.trust, parsed) else {
+            return false;
+        };
+        expected.same_pairing_reservation(candidate)
+    }
+
     /// 处理 `controller_pairing_reserved`：验签 transcript、派生会话密钥、
     /// 生成 receipt 并返回 `finished_receipt_commit`。
     pub(crate) fn accept_reserved(&mut self, message: &Value) -> Result<Value> {
