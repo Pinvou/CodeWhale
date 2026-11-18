@@ -10,6 +10,7 @@ mod persistence;
 pub(crate) mod projection;
 mod projection_reason;
 mod records;
+mod recovery;
 pub(crate) mod routing;
 pub(crate) mod schema;
 
@@ -58,6 +59,9 @@ pub(crate) struct RemoteProxyState {
     /// for this process. Preserve the original files and durable recovery evidence.
     pub(super) load_failed: bool,
     pub(super) load_failure: Option<RemoteProxyLoadFailure>,
+    /// A store opened before a deliberate quarantine cannot write the active
+    /// file back after another instance has recovered it.
+    pub(super) recovery_epoch: Option<uuid::Uuid>,
     pub(super) archives: archive::ArchiveStore,
     /// Last successfully durable reservation total. Legacy files may exceed
     /// new admission headroom; recovery writes may reduce, never increase it.

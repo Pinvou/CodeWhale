@@ -915,6 +915,7 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
     'desktop_remote_proxy_archive', 'desktop_remote_proxy_archive_candidates', 'desktop_remote_proxy_archive_list',
     'desktop_remote_proxy_history_delete', 'desktop_remote_proxy_history_list',
     'desktop_remote_proxy_history_read', 'desktop_remote_proxy_load_status', 'desktop_remote_proxy_open_live', 'desktop_remote_proxy_quarantine',
+    'desktop_remote_proxy_recover',
     'desktop_remote_set_endpoint_profile',
     'desktop_remote_task_abandon_prepared_a', 'desktop_remote_task_cancel_a',
     'desktop_remote_task_commit_a', 'desktop_remote_task_reserve_a',

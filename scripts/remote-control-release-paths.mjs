@@ -189,7 +189,8 @@ export const PR_RELEASE_CONTRACT_EXTRA_PATHS = Object.freeze([
   "pinvou3-app/tests/knowledge_host_packaging.test.mjs",
   "pinvou3-app/tests/macos_phase2_contract.test.js",
   "pinvou3-app/tests/linux_asr_runtime_packaging.test.js",
-  "pinvou3-app/tests/tauri_effective_config.test.js"
+  "pinvou3-app/tests/tauri_effective_config.test.js",
+  "pinvou3-app/tests/tauri_config_schema.test.js"
 ]);
 
 export const RELEASE_PACKAGES_EXTRA_PATHS = Object.freeze([

@@ -134,6 +134,7 @@ import {
   restoreConversationScrollPosition,
 } from '../conversation/conversation-model.js';
 import { QuestionChoiceCard } from '../conversation/QuestionChoiceCard.jsx';
+import { hasRichTextSelection } from '../conversation/rich-text-selection.js';
 import { buildUserInputAnswers, normalizeElicitationQuestions, normalizeUserInputQuestions } from '../../shared/user-input-shared.js';
 import { PlanLayer, ToolCard, cardBoxCls } from '../tools/tool-renderers.jsx';
 import { cardBtnCls } from '../../shared/card-buttons.mjs';
@@ -2877,6 +2878,7 @@ export function CodexAcpView({
   useEffect(() => {
     const element = scroller.current;
     if (!element) return;
+    if (hasRichTextSelection(element)) return;
     if (autoScrollRef.current) {
       element.scrollTop = element.scrollHeight;
       setShowScrollBottom(false);
