@@ -941,6 +941,8 @@ jobs:
               - 'scripts/run-windows-relay-tools-tests.mjs'
               - 'scripts/windows-relay-tools-test-summary.mjs'
               - 'scripts/windows-relay-tools-preflight.mjs'
+              - 'scripts/ci-fixture-process.py'
+              - 'scripts/tests/test_ci_fixture_process.py'
               - '.github/workflows/pr-check.yml'
             team_relay_hub:
               - 'scripts/ci-npm-audit.py'
@@ -2423,7 +2425,17 @@ jobs:
       - name: 安装 relay 依赖
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
       - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）
-        run: node scripts/run-windows-relay-tools-tests.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs
+      - name: Preserve Windows relay tools process receipt
+        if: always()
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-relay-tools-process.json
+          if-no-files-found: warn
+          retention-days: 7
 
   team-relay-hub-test:
     name: team-relay-hub-test
@@ -2581,6 +2593,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+
+      - name: Preserve Windows release contract process receipts
+        id: windows_release_contract_receipts
+        if: ${{ always() && runner.os == 'Windows' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json
+            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Warn when Windows release contract receipts are unavailable
+        if: ${{ always() && runner.os == 'Windows' && steps.windows_release_contract_receipts.outcome == 'failure' }}
+        run: echo '::warning::Windows release contract receipt upload failed; original receipts remain on the runner. Test and cleanup failures remain failures.'
 
   # pinvou-knowledge 是可单独部署的 crate，必须直接验证自己的默认 feature 图、
   # 测试与部署入口，而不只依赖 Tauri 作为 client-only path dependency 的间接编译。
@@ -4229,12 +4262,52 @@ jobs:
         if: ${{ matrix.phase == 'regression' }}
         run: npm --prefix pinvou3-app run test:windows-static-updater
 
+      - name: Windows atomic fixture Python
+        if: ${{ matrix.phase == 'regression' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Compilation helpers already require Python in this job. Bind the
+          # verified native executable without changing the runner installation.
+          python -X utf8 - <<'PY' >> "$GITHUB_ENV"
+          import ctypes
+          import os
+          import struct
+          import sys
+          if (
+              sys.platform != 'win32'
+              or sys.implementation.name != 'cpython'
+              or sys.version_info < (3, 12)
+              or struct.calcsize('P') != 8
+          ):
+              raise SystemExit('Windows atomic fixtures require native 64-bit CPython 3.12 or newer')
+          executable = sys.executable
+          if (
+              not os.path.isabs(executable)
+              or not os.path.isfile(executable)
+              or any(char in executable for char in '\r\n\0')
+          ):
+              raise SystemExit('Windows atomic fixture Python executable is unavailable')
+          ctypes.WinDLL('kernel32', use_last_error=True)
+          print('Windows atomic fixture Python ' + sys.version.split()[0] + ' (native, 64-bit)', file=sys.stderr)
+          print('PINVOU_WINDOWS_ATOMIC_PYTHON=' + executable)
+          PY
+
+      - name: Initialize Windows atomic resource ledger
+        if: ${{ matrix.phase == 'regression' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"
+          "$python_exe" scripts/ci-resource-ledger.py --init
+
       - name: Windows 原子替换状态机回归
         if: ${{ matrix.phase == 'regression' }}
         shell: bash
         run: |
           set -euo pipefail
           total_started=$SECONDS
+          python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"
           # 直接运行已经由 mt.exe 修补的链接产物。这里不能再次调用 cargo test，
           # 否则 Cargo 可能重链并覆盖 exe，导致 Common-Controls v6 清单丢失。
           test_exe="$(cygpath -u "$PINVOU3_TEST_EXE")"
@@ -4242,6 +4315,10 @@ jobs:
             echo "FAIL: 测试 exe 不存在:$test_exe" >&2
             exit 1
           }
+          test_exe_windows="$(cygpath -w "$test_exe")"
+          ledger="$(cygpath -u "$PINVOU_CI_RESOURCE_LEDGER")"
+          : > "$ledger/atomic-expected.txt"
+          sha256sum "$test_exe"
           cd pinvou3-app/src-tauri
           # 逐过滤器断言至少命中 1 个测试,避免测试改名后过滤器 0 匹配却 exit 0
           # 导致的静默空跑。staging::tests 是 cfg(all(test, windows)) 的传输
@@ -4350,14 +4427,61 @@ jobs:
             'windows_attachment_runtime_stays_security_gated'; do
             index=$((index+1))
             started=$SECONDS
-            "$test_exe" "$filter" --test-threads=1 2>&1 | tee /tmp/windows_regression.log
-            grep -qE 'running [1-9][0-9]* tests?' /tmp/windows_regression.log || {
+            printf 'atomic-%s.json\n' "$index" >> "$ledger/atomic-expected.txt"
+            report="$ledger/atomic-$index.log"
+            receipt="$(cygpath -w "$ledger/atomic-$index.json")"
+            "$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"
+            grep -qE 'running [1-9][0-9]* tests?' "$report" || {
               echo "FAIL: 回归过滤器 '$filter' 匹配 0 个测试(疑似测试改名导致静默空跑)" >&2
               exit 1
             }
             echo "WINDOWS_RUST_TIMING phase=regression step=test-filter-$index elapsed_seconds=$((SECONDS-started)) status=0"
           done
           echo "WINDOWS_RUST_TIMING phase=regression step=regression-filter-suite elapsed_seconds=$((SECONDS-total_started)) status=0"
+
+      - name: Confirm Windows atomic resource retirement
+        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"
+          "$python_exe" - "$PINVOU_CI_RESOURCE_LEDGER" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          root = Path(sys.argv[1])
+          expected = root / 'atomic-expected.txt'
+          if expected.is_symlink() or not expected.is_file() or expected.stat().st_size > 65536:
+              raise SystemExit('Windows atomic receipt inventory unavailable')
+          names = expected.read_text(encoding='utf-8').splitlines()
+          if not names or len(names) != len(set(names)) or any(not re.fullmatch(r'atomic-[1-9][0-9]*\.json', name) for name in names):
+              raise SystemExit('Windows atomic receipt inventory invalid or empty')
+          for name in names:
+              receipt = root / name
+              if receipt.is_symlink() or not receipt.is_file():
+                  raise SystemExit('Windows atomic resource receipt missing: ' + name)
+          PY
+          "$python_exe" scripts/ci-resource-ledger.py --directory "$PINVOU_CI_RESOURCE_LEDGER"
+
+      - name: Windows atomic lifecycle receipts
+        id: windows_atomic_receipts_upload
+        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/atomic-expected.txt
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/ledger.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when Windows atomic receipt delivery fails
+        if: ${{ always() && steps.windows_atomic_receipts_upload.outcome == 'failure' }}
+        shell: bash
+        run: echo '::warning::Windows atomic receipt upload failed; original receipts remain on the runner. Tests and retirement remain mandatory.'
 
       # Round-42 review: the pinvou-cli workspace's own cfg(windows) unit
       # tests previously ran on NO CI leg — the Linux cli-test leg cannot
