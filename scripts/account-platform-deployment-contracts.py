@@ -35,6 +35,40 @@ MANAGED_CONTRACT_ROOTS = {
 }
 
 
+def managed_failure_context(tail):
+    """Select complete original events from this bounded window, never raw slices."""
+    events = []
+    package = "github.com/Pinvou/pinvou3/account-platform/cmd/token-release-prepare"
+    for line in tail.splitlines():
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(event, dict) or event.get("Package") != package:
+            continue
+        name = event.get("Test")
+        if not isinstance(name, str) or not any(name == root or name.startswith(root + "/") for root in MANAGED_CONTRACT_ROOTS):
+            continue
+        action = event.get("Action")
+        if action == "output" and isinstance(event.get("Output"), str):
+            events.append((name, action, line))
+        elif action == "fail" and ("Output" not in event or isinstance(event["Output"], str)):
+            events.append((name, action, line))
+    selected, failed = [], set()
+    for index, (name, action, line) in enumerate(events):
+        if action != "fail" or name in failed:
+            continue
+        # First failure identities retain priority over later parent summaries.
+        failed.add(name)
+        selected += [previous for test, kind, previous in events[:index] if test == name and kind == "output"][-4:]
+        selected.append(line)
+        if len(failed) == 8:
+            break
+    if not selected:
+        return ""
+    return "\nMANAGED_FAILURE_CONTEXT\n" + "\n".join(selected)
+
+
 def run_logged_command(arguments, logfile, *, cwd=None, dependency_preparation=False):
     """Keep the complete private log; emit bounded, redacted failure evidence."""
     try:
@@ -52,10 +86,21 @@ def run_logged_command(arguments, logfile, *, cwd=None, dependency_preparation=F
             boundary = tail_bytes.find(b"\n")
             tail_bytes = tail_bytes[boundary + 1:] if boundary >= 0 else b""
         tail = tail_bytes.decode("utf-8", errors="replace")
+        if logfile.name == "managed.jsonl":
+            tail += managed_failure_context(tail)
         # A caller may configure an authenticated registry or proxy.
+        # Gather every credential first: a shorter environment value must not
+        # break the match for a longer overlapping value.
+        forms = set()
         for name, value in os.environ.items():
             if len(value) >= 4 and re.search(r"TOKEN|PASSWORD|SECRET|CREDENTIAL|API_KEY", name, re.I):
-                tail = tail.replace(value, "[redacted]")
+                forms.update((value, json.dumps(value, ensure_ascii=True)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1]))
+                # GoJSON always escapes U+2028/29, even without HTML escaping.
+                go_json = json.dumps(value, ensure_ascii=False)[1:-1].replace(chr(0x2028), "\\u2028").replace(chr(0x2029), "\\u2029")
+                forms.add(go_json)
+                forms.add(go_json.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
+        for form in sorted(forms, key=len, reverse=True):
+            tail = tail.replace(form, "[redacted]")
         tail = re.sub(r"(?i)\b(?:https?|git\+https?|postgres(?:ql)?)://[^\s<>\"']+", "[URL redacted]", tail)
         tail = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)\S+", r"\1[redacted]", tail)
         tail = re.sub(r"(?i)((?:_authToken|password|token|secret)\s*[:=]\s*)\S+", r"\1[redacted]", tail)

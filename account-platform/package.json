@@ -20,6 +20,7 @@
     "check:production-performance": "node ../scripts/account-platform-performance-gate.mjs --require-evidence",
     "test:auth-business": "node test/integration/auth-business-acceptance.mjs",
     "test:existing-broker": "python3 test/integration/existing-broker-acceptance.py",
+    "test:token-outbox": "python3 test/integration/token-outbox-acceptance.py",
     "prepare:prometheus-fixtures": "node test/integration/prometheus-rule-fixtures.mjs",
     "test:prometheus-rules": "node ../scripts/account-platform-prometheus-rules.mjs",
     "test:closure-contracts": "node --test test/contract/account-closure-saga.test.mjs test/contract/account-closure-cleanup.test.mjs",

@@ -153,3 +153,77 @@ func TestF04InvalidRendererProfileRejectsBeforeArtifacts(t *testing.T) {
 		t.Fatal("invalid renderer profile accepted")
 	}
 }
+
+func TestTokenEventRendererRejectsUnavailableProfileBeforeArtifacts(t *testing.T) {
+	for _, profile := range []string{"personal", "invalid"} {
+		_, err := renderResourcesSelection(func(key string) string {
+			if key != "ACCOUNT_PLATFORM_PROFILE" {
+				t.Fatal("unavailable Token publisher read artifacts", key)
+			}
+			return profile
+		}, false, false, true)
+		if err == nil {
+			t.Fatal("unavailable Token publisher accepted")
+		}
+	}
+}
+
+func TestTokenEventOfflineRendererUsesDedicatedIdentity(t *testing.T) {
+	keys := map[string]string{}
+	for _, role := range []string{"account-outbox-relay", "account-approval-relay", "billing-outbox-relay", "token-outbox-relay", "billing-command-executor", "token-command-executor", "event-resource-operator"} {
+		pair, err := nkeys.CreateUser()
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys[role], err = pair.PublicKey()
+		pair.Wipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	identityDirectory := privateResourceTestDir(t)
+	raw, err := json.Marshal(map[string]any{"version": 2, "purpose": "pinvou-nats-service-identities", "public_keys": keys, "previous_v1_sha256": hex.EncodeToString(make([]byte, 32)), "overlap_expires_at": time.Now().UTC().Add(time.Hour).Truncate(time.Second).Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityFile := filepath.Join(identityDirectory, "current.json")
+	if err := os.WriteFile(identityFile, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(raw)
+	for _, kind := range []string{"fresh", "existing-broker", "refund-upgrade"} {
+		t.Run(kind, func(t *testing.T) {
+			resources := privateResourceTestDir(t)
+			values := map[string]string{"ACCOUNT_PLATFORM_PROFILE": "models", "APPROVAL_RESOURCE_CURRENT_PUBLIC_KEYS_FILE": identityFile, "APPROVAL_RESOURCE_CURRENT_PUBLIC_KEYS_SHA256": hex.EncodeToString(digest[:]), "APPROVAL_RESOURCE_MANIFEST_FILE": filepath.Join(resources, "manifest.json"), "APPROVAL_RESOURCE_CONFIGURATION_FILE": filepath.Join(resources, "authorization.conf")}
+			result, err := renderResourcesSelection(func(key string) string { return values[key] }, kind == "existing-broker", kind == "refund-upgrade", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			configuration, err := os.ReadFile(values["APPROVAL_RESOURCE_CONFIGURATION_FILE"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			actualHash := sha256.Sum256(configuration)
+			if result["configuration_sha256"] != hex.EncodeToString(actualHash[:]) {
+				t.Fatal("written configuration is not the returned digest")
+			}
+			var parsed struct {
+				Authorization struct {
+					Users []struct{ NKey string } `json:"users"`
+				} `json:"authorization"`
+			}
+			if json.Unmarshal(configuration, &parsed) != nil {
+				t.Fatal("invalid public configuration")
+			}
+			publishers := 0
+			for _, user := range parsed.Authorization.Users {
+				if user.NKey == keys["token-outbox-relay"] {
+					publishers++
+				}
+			}
+			if publishers != 1 {
+				t.Fatal("dedicated Token publisher is not mounted exactly once")
+			}
+		})
+	}
+}

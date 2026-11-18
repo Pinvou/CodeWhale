@@ -19,7 +19,12 @@ func renderResources(environment func(string) string, existingBroker bool) (map[
 }
 
 func renderResourcesKind(environment func(string) string, existingBroker, refundUpgrade bool) (map[string]string, error) {
-	if _, err := config.ParseAccountPlatformProfile(environment("ACCOUNT_PLATFORM_PROFILE")); err != nil {
+	return renderResourcesSelection(environment, existingBroker, refundUpgrade, false)
+}
+
+func renderResourcesSelection(environment func(string) string, existingBroker, refundUpgrade, tokenEvents bool) (map[string]string, error) {
+	profile, err := config.ParseAccountPlatformProfile(environment("ACCOUNT_PLATFORM_PROFILE"))
+	if err != nil || (tokenEvents && profile != config.AccountPlatformProfileModels) {
 		return nil, errors.New("PUBLIC_RESOURCE_RENDER_REJECTED")
 	}
 	identity := events.NATSAuthorizationArtifactFiles{CurrentFile: environment("APPROVAL_RESOURCE_CURRENT_PUBLIC_KEYS_FILE"), CurrentSHA256: environment("APPROVAL_RESOURCE_CURRENT_PUBLIC_KEYS_SHA256"), PreviousFile: environment("APPROVAL_RESOURCE_PREVIOUS_PUBLIC_KEYS_FILE"), PreviousSHA256: environment("APPROVAL_RESOURCE_PREVIOUS_PUBLIC_KEYS_SHA256"), PrivateIdentityFiles: []string{environment("NATS_NKEY_SEED_FILE"), environment("NATS_CREDENTIALS_FILE")}}
@@ -31,12 +36,25 @@ func renderResourcesKind(environment func(string) string, existingBroker, refund
 	if manifestPath == configurationPath || validateNewResourcePath(manifestPath, identity) != nil || validateNewResourcePath(configurationPath, identity) != nil {
 		return nil, errors.New("PUBLIC_RESOURCE_OUTPUT_REJECTED")
 	}
-	manifest, configuration, err := identity.ConsumerAuthorizationArtifacts(time.Now().UTC())
-	if existingBroker {
-		manifest, configuration, err = identity.ExistingBrokerAuthorizationArtifacts(time.Now().UTC())
-	}
-	if refundUpgrade {
-		manifest, configuration, err = identity.RefundUpgradeAuthorizationArtifacts(time.Now().UTC())
+	var manifest []byte
+	var configuration events.NATSConsumerAuthorizationRender
+	if tokenEvents {
+		kind := events.TokenOutboxAuthorizationFresh
+		if existingBroker {
+			kind = events.TokenOutboxAuthorizationExistingBroker
+		}
+		if refundUpgrade {
+			kind = events.TokenOutboxAuthorizationRefundUpgrade
+		}
+		manifest, configuration, err = identity.TokenOutboxAuthorizationArtifacts(time.Now().UTC(), kind)
+	} else {
+		manifest, configuration, err = identity.ConsumerAuthorizationArtifacts(time.Now().UTC())
+		if existingBroker {
+			manifest, configuration, err = identity.ExistingBrokerAuthorizationArtifacts(time.Now().UTC())
+		}
+		if refundUpgrade {
+			manifest, configuration, err = identity.RefundUpgradeAuthorizationArtifacts(time.Now().UTC())
+		}
 	}
 	if err != nil {
 		return nil, errors.New("PUBLIC_RESOURCE_RENDER_REJECTED")

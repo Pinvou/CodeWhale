@@ -1,6 +1,8 @@
 {{- if .Values.availability.enabled }}
 {{- $root := . -}}
-{{- range $component := list "account-service" "billing-service" "token-gateway" "token-portal" "new-api" "keycloak" "account-event-relay" "billing-event-relay" }}
+{{- $components := list "account-service" "billing-service" "token-gateway" "token-portal" "new-api" "keycloak" "account-event-relay" "billing-event-relay" -}}
+{{- if .Values.tokenEventRelay.enabled -}}{{- $components = append $components "token-event-relay" -}}{{- end -}}
+{{- range $component := $components }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
