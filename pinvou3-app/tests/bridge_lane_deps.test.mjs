@@ -195,7 +195,10 @@ while ((m = clusterRe.exec(helpers)) !== null) {
 // Combined main adds the two internal-message classifiers; Account retains
 // compactNow. All are local calls without new cluster dependency keys.
 const EXPECTED_SURFACE = {
-  sharedFnCount: 316,
+  // cancelKbModel (kb_model_cancel chain) reads only `invoke`; the sole
+  // consuming cluster (tauriKnowledgeModel) already passes it, so only the
+  // count moves.
+  sharedFnCount: 317,
 };
 
 assert.equal(

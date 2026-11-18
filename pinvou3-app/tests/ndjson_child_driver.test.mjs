@@ -25,7 +25,13 @@ for (const [name, options, expectedLabel] of [
     t.after(confirmedChildStopper(driver.child, stopNdjsonChild));
     assert.deepEqual((await driver.request('ready', { ready: true })).result, { ready: true });
     await assert.rejects(driver.request('hold', {}, options), error => {
-      assert.match(error.message, new RegExp(`^${expectedLabel} timed out after 25ms \\(request \\d+\\); child stderr:`));
+      assert.match(error.message, new RegExp(`^${expectedLabel} timed out after 25ms \\(request \\d+\\); observer:`));
+      const diagnostic = JSON.parse(error.message.match(/; observer: (\{[^\n]+?\}); child stderr:/)[1]);
+      assert.deepEqual(Object.keys(diagnostic).sort(),
+        ['child_exit_code', 'observer_elapsed_ms', 'observer_loop_max_delay_ms']);
+      assert.ok(Number.isSafeInteger(diagnostic.observer_elapsed_ms) && diagnostic.observer_elapsed_ms >= 0);
+      assert.ok(Number.isSafeInteger(diagnostic.observer_loop_max_delay_ms) && diagnostic.observer_loop_max_delay_ms >= 0);
+      assert.equal(diagnostic.child_exit_code, null);
       return true;
     });
     assert.deepEqual((await driver.request('echo', { afterTimeout: true })).result, { afterTimeout: true });

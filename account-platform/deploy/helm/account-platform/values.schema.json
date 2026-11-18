@@ -942,6 +942,11 @@
           "minLength": 1,
           "maxLength": 64
         },
+        "profileRevocationCapacity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
         "walletProvisioningSlaMinutes": {
           "type": "integer",
           "minimum": 1,

@@ -94,6 +94,8 @@ ACCOUNT_REQUIRED = {
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
+    "TestProfileRevocationDurableAdmissionRuntimePostgres",
+    "TestProfileRevocationClosureRuntimePostgres",
     "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
@@ -166,9 +168,6 @@ SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingsch
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
 SCHEMA_REQUIRED = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestBillingManualAdjustmentProofRollbackPostgres"}
-# The long expiry fixture gets a separate package clock; retain every schema root.
-SCHEMA_EXPIRY_REQUIRED = {"TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"}
-SCHEMA_REMAINING_REQUIRED = SCHEMA_REQUIRED - SCHEMA_EXPIRY_REQUIRED
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -303,6 +302,20 @@ BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
     "TestBillingManualAdjustmentProofRollbackPostgres": {
         f"{state}/{entry}" for state in ("empty", "retained-proof") for entry in ("public-api", "actual-cli", "renamed-history-cli")
+    },
+    "TestProfileRevocationDurableAdmissionRuntimePostgres": {
+        "capacity-before-grant-confirmed-replay-and-unknown-retention",
+        "cancel-before-authority-preserves-reservation",
+        "dispatch-token-and-legacy-command-cannot-regrant",
+        "concurrent-global-admission-across-profiles",
+        "legacy-upgrade-preserves-confirmed-and-unknown-receipts",
+        "capacity-public-complete-resumes-original-operation",
+        "lease-expiry-during-global-admission-wait",
+    },
+    "TestProfileRevocationClosureRuntimePostgres": {
+        "reserved-closure-seals-no-dispatch-and-releases-capacity",
+        "confirmed-replays-after-anonymization",
+        "late-confirmation-replays-after-anonymization",
     },
     "TestGovernanceUsageResourcePrechecksPostgres": {
         "all-active-states-preserve-full-facts", "repeated-read-stable-and-read-only",
@@ -740,6 +753,16 @@ def billing_roots(group):
     return billing_partitions(RETAINED_REQUIRED, durations)[group]
 
 
+def schema_batches():
+    # Keep the slow historical-upgrade root intact. New required roots join the
+    # second batch; neither batch may be empty or introduce an unknown root.
+    historical = {"TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"}
+    if not historical < SCHEMA_REQUIRED:
+        raise RuntimeError("owner schema requires two nonempty complete-root batches")
+    return (("owner-schema-legacy-expiry", historical),
+            ("owner-schema", SCHEMA_REQUIRED - historical))
+
+
 def main(*, group="all"):
     if group not in ("all", *GROUPS):
         raise ValueError("unknown financial execution group")
@@ -826,14 +849,15 @@ def main(*, group="all"):
             run_phase("owner-wallet", "./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED, scoped=True)
         finally:
             assert_instance({user})
-        try:
-            run_phase("owner-schema-expiry", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_EXPIRY_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
-        try:
-            run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REMAINING_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
+        # Two sequential test binaries retain their individual 20m deadline;
+        # the schema portion now has an explicit cumulative 40m test budget.
+        # Ordinary cleanup and pristine-instance acknowledgement are mandatory
+        # between the batches, before another fixture may create its actors.
+        for label, required in schema_batches():
+            try:
+                run_phase(label, "./internal/billingschema", SCHEMA_PACKAGE, required, scoped=True)
+            finally:
+                assert_instance({user})
         try:
             run_phase("owner-token-schema", "./internal/tokenschema", TOKEN_SCHEMA_PACKAGE, TOKEN_SCHEMA_REQUIRED, scoped=True)
         finally:
