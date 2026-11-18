@@ -110,12 +110,17 @@ class ReusePlanTests(unittest.TestCase):
         self.assertFalse(PLAN.complete(policies['frontend-test'], {**job, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))
         self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
         job['steps'] = [*job['steps'], {'name': preflight, 'conclusion': 'success'}]
+        # The old REST download cannot witness the new commit/hash verifier.
+        self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+        verified_fetch = 'Fetch verified frontend setup bundle'
+        job['steps'].append({'name': verified_fetch, 'conclusion': 'success'})
         self.assertTrue(PLAN.complete(policies['frontend-test'], {**job, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))
         self.assertTrue(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
         for bad in ('failure', 'skipped', 'missing'):
             broken = copy.deepcopy(job)
-            broken['steps'][-1]['conclusion'] = bad
-            if bad == 'missing': broken['steps'].pop()
+            for step in broken['steps']:
+                if step['name'] == preflight: step['conclusion'] = bad
+            if bad == 'missing': broken['steps'] = [step for step in broken['steps'] if step['name'] != preflight]
             with self.subTest(isolation_preflight=bad):
                 self.assertFalse(PLAN.complete(policy, broken, {}, 'refs/heads/queue', {}))
                 self.assertFalse(PLAN.complete(policies['frontend-test'], {**broken, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))

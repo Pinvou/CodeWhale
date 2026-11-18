@@ -86,6 +86,25 @@ function lineOfOffset(source, offset) {
   return { line, text: source.slice(lineStart, lineEnd) };
 }
 
+// Match lineOfOffset's LF/UTF-16 offset convention without scanning the same
+// source prefix for every AST node in a file with a guarded-API marker.
+function indexedLineNumber(source) {
+  const starts = [0];
+  for (let at = source.indexOf('\n'); at !== -1; at = source.indexOf('\n', at + 1)) {
+    starts.push(at + 1);
+  }
+  return (offset) => {
+    let low = 0;
+    let high = starts.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (starts[middle] <= offset) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  };
+}
+
 // A `safari14-ok` marker on the same line acknowledges a guarded call with a
 // runtime fallback (e.g. `typeof structuredClone === 'function'` + JSON
 // fallback) and suppresses the report, mirroring eslint-disable practice.
@@ -151,6 +170,7 @@ function auditSource(label, code, {
 } = {}) {
   const violations = [];
   const suppressed = suppressedLines(code);
+  const markedLineNumber = suppressed.size > 0 ? indexedLineNumber(code) : null;
   let ast;
   try {
     ast = acorn.parse(code, {
@@ -177,10 +197,9 @@ function auditSource(label, code, {
     return null;
   };
   walk(ast, (node) => {
-    // Minified dist chunks carry no safari14-ok comments, so an empty marker
-    // set skips the per-node line lookup — quadratic on multi-MB chunks and
-    // the audit's dominant cost (minutes) without this guard.
-    if (suppressed.size > 0 && suppressed.has(lineOfOffset(code, node.start).line)) return;
+    // A marked source still visits every node; use its shared line index so
+    // guarded static scripts do not perform a quadratic prefix scan either.
+    if (markedLineNumber && suppressed.has(markedLineNumber(node.start))) return;
     if (node.type === 'Literal' && node.regex) {
       const { pattern, flags } = node.regex;
       for (const message of regexViolations(pattern, flags, `/${pattern.slice(0, 60)}/`)) {

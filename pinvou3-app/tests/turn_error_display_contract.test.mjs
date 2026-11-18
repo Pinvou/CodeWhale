@@ -26,10 +26,30 @@ assert.equal(
   2,
   'displayTurnError must stay a single function so the hook injection is unambiguous',
 );
-const bridgeSource = rawBridgeSource.replace(
-  'function displayTurnError(err)',
-  'window.__displayTurnError = function displayTurnError(err)',
-);
+const bridgeSource = (() => {
+  const injected = rawBridgeSource
+    .replace(
+      'function displayTurnError(err)',
+      'window.__displayTurnError = function displayTurnError(err)',
+    )
+    // Expose the shared-web bt() delegate so the WEB_TURN_ERROR_KEYS
+    // contract can pin each stable code to its exact dict copy per locale.
+    .replace(
+      'function bt(key) { return pinvouSharedweb().bt(key); }',
+      'function bt(key) { return pinvouSharedweb().bt(key); } window.__btForContract = bt;',
+    )
+    // Expose the lane wrapper so the consumer contract below can pin
+    // wireLaneError's fold/concat behavior, not just its table membership.
+    .replace(
+      'function wireLaneError(err, prefixKey)',
+      'window.__wireLaneError = function wireLaneError(err, prefixKey)',
+    );
+  assert.ok(
+    injected.includes('window.__btForContract') && injected.includes('window.__wireLaneError'),
+    'web bridge bt()/wireLaneError source drifted; update the injection anchors',
+  );
+  return injected;
+})();
 
 const storage = new Map();
 const localStorage = {
@@ -327,6 +347,97 @@ for (const [language, { marker, tail }] of Object.entries(LOCALE_MARKERS)) {
       assert.equal(desktopContext.displayDesktopError(input), displayTurnError(input));
     }
   });
+}
+
+// ── WEB_TURN_ERROR_KEYS contract ──────────────────────────────────────
+// Every stable code in the shipped table must resolve to its exact dict
+// copy per locale — never to the raw code (which would otherwise reach the
+// redaction fallback and leak backend internals) — identically for
+// Error-object and plain-string rejections. Mirrors the table in
+// src/platform/web/bridge.js; new codes must land on both sides.
+const btFor = windowObject.__btForContract;
+assert.equal(typeof btFor, 'function', 'bt contract hook must be exposed');
+assert.ok(
+  rawBridgeSource.split('WEB_TURN_ERROR_KEYS').length >= 4,
+  'one code table must serve both consumers (definition + displayTurnError + wireLaneError)',
+);
+const wireLaneError = windowObject.__wireLaneError;
+assert.equal(typeof wireLaneError, 'function', 'wireLaneError contract hook must be exposed');
+// Round-5: pin the wrapper's behavior, not just the table's consumer count —
+// a stable code folds to the full localized sentence; unmapped text keeps the
+// lane prefix copy so download/attachment lanes read like the UI language.
+for (const language of Object.keys(LOCALE_MARKERS)) {
+  await withLanguage(language, () => {
+    assert.equal(
+      wireLaneError(new Error('web_session_chat_failed'), 'openFailed'),
+      btFor('webChatFailed'),
+      `${language}: stable code folds to the full sentence`,
+    );
+    assert.equal(
+      wireLaneError(new Error('boom detail'), 'openFailed'),
+      btFor('openFailed') + 'boom detail',
+      `${language}: unmapped text keeps the lane prefix copy`,
+    );
+  });
+}
+// Consumer wiring pins: each lane catch routes through the wrapper, so
+// reverting any single catch back to bare concatenation turns this leg red
+// (external URL open, artifact open, attachment open, attachment reveal).
+assert.equal(
+  rawBridgeSource.split('wireLaneError(e, "openFailed")').length,
+  5,
+  'four lane catches must go through wireLaneError (split length = sites + 1)',
+);
+assert.ok(
+  rawBridgeSource.includes('addSystemItem(bt("downloadFailed") + displayTurnError(e));'),
+  'download catch must fold stable codes via displayTurnError (open round-9)',
+);
+assert.ok(
+  !rawBridgeSource.includes('bt("downloadFailed") + String('),
+  'download catch must not render raw machine codes',
+);
+const CODE_TABLE = [
+  ['web_session_chat_failed', 'webChatFailed'],
+  ['web_session_create_session_failed', 'webSessionCreateFailed'],
+  ['web_session_turn_in_progress', 'turnAlreadyInProgress'],
+  ['session_revision_conflict', 'editStaleRevision'],
+  ['session_revision_unavailable', 'editRevisionUnavailable'],
+  ['web_artifact_too_large', 'artifactTooLarge'],
+  ['web_artifact_preview_too_large', 'artifactPreviewTooLarge'],
+  ['web_artifact_edit_too_large', 'artifactEditTooLarge'],
+  ['web_artifact_read_failed', 'artifactReadFailed'],
+  ['web_session_read_artifact_chunk_failed', 'artifactReadFailed'],
+  ['web_session_artifact_access_failed', 'artifactReadFailed'],
+  ['web_session_read_conversation_attachment_chunk_failed', 'attachReadFailed'],
+  ['web_session_unavailable', 'webSessionUnavailable'],
+  ['invalid_web_session_id', 'webSessionUnavailable'],
+];
+const locales = ['zh-Hans', 'en', 'ja'];
+const copiesByLocale = new Map();
+for (const language of locales) {
+  await withLanguage(language, () => {
+    for (const [code, key] of CODE_TABLE) {
+      const copy = displayTurnError(new Error(code));
+      assert.equal(copy, btFor(key), `${language}: ${code} must render the ${key} copy`);
+      assert.equal(
+        displayTurnError(code),
+        copy,
+        `${language}: ${code} must localize identically for string rejections`,
+      );
+      assert.ok(!copy.includes(code), `${language}: ${code} raw code must not leak`);
+      copiesByLocale.set(`${key}\u0000${language}`, copy);
+    }
+  });
+}
+// A key that stopped consuming the locale dict (e.g. hardcoded to one
+// language's sentence) would collapse the variants — require cross-locale
+// spread per key so the table cannot silently go mono-lingual.
+for (const key of new Set(CODE_TABLE.map(([, dictKey]) => dictKey))) {
+  const variants = new Set(locales.map((language) => copiesByLocale.get(`${key}\u0000${language}`)));
+  assert.ok(
+    variants.size >= 2,
+    `dict key ${key} must localize across locales (got ${variants.size} distinct copies)`,
+  );
 }
 
 console.log('turn_error_display_contract: ok');
