@@ -169,7 +169,9 @@ pub fn desktop_remote_controller_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::remote_control::controller::controlling::ControllerLease;
+    use crate::features::remote_control::controller::controlling::{
+        ControllerLease, ControllingStatusKind,
+    };
     use crate::features::remote_control::controller::protocol::LeaseContext;
     use crate::features::remote_control::controller::relay_transport::{
         AuthenticatedLease, ControllerRole, transport_channels,
@@ -315,7 +317,7 @@ mod tests {
         assert!(futures_util::poll!(first.as_mut()).is_pending());
         // The first command already retired local authority before waiting.
         // A duplicate owns no socket and therefore completes without a wait.
-        assert_eq!(manager.status().status, ControllingStatusKind::Disconnected);
+        assert_eq!(manager.status().kind(), ControllingStatusKind::Disconnected);
         assert!(manager.live_lease().is_err());
         assert!(matches!(
             futures_util::poll!(second.as_mut()),
@@ -492,7 +494,7 @@ mod tests {
             |_| panic!("cancelled command must not publish"),
         ));
         assert!(futures_util::poll!(disconnect.as_mut()).is_pending());
-        assert_eq!(manager.status().status, ControllingStatusKind::Disconnected);
+        assert_eq!(manager.status().kind(), ControllingStatusKind::Disconnected);
         assert!(
             sessions
                 .state(&session.session_ref, &original.context)
