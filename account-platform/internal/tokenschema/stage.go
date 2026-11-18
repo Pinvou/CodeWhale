@@ -19,6 +19,7 @@ type identity struct{ name, checksum, downChecksum string }
 var installed = map[int64]identity{
 	900010: {name: "emergency_cancellation_retry", checksum: "cf366da4d34621f9728d79e8e30ba8b55940ad254cda7802888b7f9082abc24c", downChecksum: "d61e88656c378b7f06312b9d4db858c64f4a75cfd6e7b63e4259c7b09f2ff86e"},
 	900008: {name: "hold_expiry_dispatch_evidence_index", checksum: "bcae9b81831452a1a1ccfacf9797680feb74b24b246c026bfcd28d9babeb5713", downChecksum: "e27bbbb75e3cf989efdaf8e25b9939ad33ec9252fabdbcd78798fe332fdd60c9"},
+	900011: {name: "outbox_publication_generation", checksum: "b100fa80e195e33883bcd75053691bc7c405babf67c595566559e04350c51348", downChecksum: "bf0f689c2b1fca5c836a53dca77d163d79c4667d6782a0fa12a1b4a797fe9836"},
 	900009: {name: "governance_usage_resource_indexes", checksum: "6ba3fb063eb36f50888456cb0c665ac6828dca795bce295a44997c1ecd3ccaad", downChecksum: "598096cef42942aa7d4950436604e99599edbf5883d9ad9e77d48e8af71f481e"},
 	900006: {name: "replay_cleanup_indexes", checksum: "bf8521c04a898ba68675b828d09ad98afcc86c4b11115530520844dd9a2bae58", downChecksum: "8e61b6454d78cc307b7d060699b9f8f0b936d4fc98aed1c0048536ed525cf17f"},
 	900005: {name: "usage_waiver_intents", checksum: "110f4c6961fa6c213e270e1ee047ffc512233941f374c809474ea16a8eeef2fe", downChecksum: "c3c6638e29d450571d15a3a88254fa116241442dc08e7691e05155fd34c2100c"},

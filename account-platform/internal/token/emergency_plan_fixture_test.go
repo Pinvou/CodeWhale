@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // Resolve only literal/identifier/+ SQL expressions from the actual three
@@ -110,7 +110,7 @@ func assertEmergencyCancellationPlans(t *testing.T, f modelExpiryObservationFixt
 	cfg := f.r.pool.Config().ConnConfig.Copy()
 	cfg.User = "token_migrator"
 	cfg.Password = ""
-	c, err := cifixture.ConnectConfig(f.ctx, cfg)
+	c, err := pgx.ConnectConfig(f.ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

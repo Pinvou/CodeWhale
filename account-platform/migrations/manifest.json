@@ -2798,6 +2798,16 @@
         "file": "900010_emergency_cancellation_retry.up.sql",
         "version": 900010,
         "sha256": "cf366da4d34621f9728d79e8e30ba8b55940ad254cda7802888b7f9082abc24c"
+      },
+      {
+        "file": "900011_outbox_publication_generation.down.sql",
+        "version": 900011,
+        "sha256": "bf0f689c2b1fca5c836a53dca77d163d79c4667d6782a0fa12a1b4a797fe9836"
+      },
+      {
+        "file": "900011_outbox_publication_generation.up.sql",
+        "version": 900011,
+        "sha256": "b100fa80e195e33883bcd75053691bc7c405babf67c595566559e04350c51348"
       }
     ]
   }

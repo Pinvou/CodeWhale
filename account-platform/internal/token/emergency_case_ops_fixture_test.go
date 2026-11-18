@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -34,7 +33,7 @@ func assertEmergencyCaseOnlyOps(t *testing.T, f modelExpiryObservationFixture, c
 	cfg := f.r.pool.Config().ConnConfig.Copy()
 	cfg.User = "token_migrator"
 	cfg.Password = ""
-	operator, err := cifixture.ConnectConfig(f.ctx, cfg)
+	operator, err := pgx.ConnectConfig(f.ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

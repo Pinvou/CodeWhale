@@ -17,7 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func testDispatchIndexPublicRollback(t *testing.T, ctx context.Context, connection *pgx.Conn, config *pgx.ConnConfig, loaded []migrations.Migration, verifyLowerBoundary func()) {
+func testDispatchIndexPublicRollback(t *testing.T, ctx context.Context, connection *pgx.Conn, config *pgx.ConnConfig, loaded []migrations.Migration) {
 	t.Helper()
 	ordered, err := Ordered(loaded)
 	if err != nil {
@@ -105,7 +105,7 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`, controlledUsage).Sca
 	if err = connection.QueryRow(ctx, `SELECT processed,complete FROM public.backfill_usage_history_projection(100)`).Scan(&scanned, &projectionComplete); err != nil || scanned != 1 || !projectionComplete {
 		t.Fatal("scan retained request through the public history worker", scanned, projectionComplete, err)
 	}
-	// Include both historical fixtures before any remaining Down/Up.
+	// Capture every usage row in this independent historical fixture.
 	const dispatchUsageFacts = `SELECT jsonb_agg(to_jsonb(u) ORDER BY id)::text FROM usage_requests u`
 	var allUsageBefore string
 	if err = connection.QueryRow(ctx, dispatchUsageFacts).Scan(&allUsageBefore); err != nil {
@@ -133,8 +133,8 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`, controlledUsage).Sca
 		t.Fatal("denied rollback changed persistent facts", err)
 	}
 	var retainedVersions []int64
-	if err = connection.QueryRow(ctx, `SELECT array_agg(version ORDER BY version) FROM schema_migrations WHERE version<>900008`).Scan(&retainedVersions); err != nil {
-		t.Fatal(err)
+	if err = connection.QueryRow(ctx, `SELECT array_agg(version ORDER BY version) FROM schema_migrations WHERE version<>900008`).Scan(&retainedVersions); err != nil || len(retainedVersions) == 0 {
+		t.Fatal("capture historical predecessor versions", err)
 	}
 	var retained string
 	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900008`).Scan(&retained); err != nil {
@@ -152,10 +152,9 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`, controlledUsage).Sca
 	if err = connection.QueryRow(ctx, evidenceSnapshot).Scan(&current); err != nil || current != retainedEvidence {
 		t.Fatal("controlled rollback changed retained cancellation evidence", err)
 	}
-	// Old public index rollbacks run before the new forward-only migration.
-	// Full public Up then reaches the new guard at its actual highest head.
+	// Full public Up installs all pending migrations. The exact retry fence is
+	// checked in its own historical fixture before the later publication head.
 	run("token_gateway", "up")
-	verifyLowerBoundary()
 	if err = connection.QueryRow(ctx, snapshot).Scan(&after); err != nil {
 		t.Fatal(err)
 	}
