@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
     "TestEmergencyCancellationDurableRetryPostgres",
+    "TestGovernanceUsageResourcePrechecksPostgres",
     "TestEmergencyCancellationWorkerDiagnosticsPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
@@ -52,6 +53,7 @@ REQUIRED = {
     "TestOrganizationModelPolicyPublicPostgres",
     "TestContextEligibilityUsesCurrentScopedProductionRoutes",
     "TestReconciliationEvidenceMatchesPublicSchema",
+    "TestReconciliationSequentialClaimsPublicPostgres",
     "TestF05DispatchLeaseLifecycle",
     "TestF05IncompleteUpstreamErrorReplayPublicPostgres",
     "TestF05MissingReferenceDeadlineFundsPublicPostgres",
@@ -138,6 +140,7 @@ ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
     "TestEmergencyCancellationDurableRetryPostgres",
+    "TestGovernanceUsageResourcePrechecksPostgres",
     "TestOrganizationModelPolicyPublicPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
@@ -205,6 +208,7 @@ REFUND_REQUIRED = {
 RETAINED_REQUIRED = {
     "TestRetainedOrganizationOrderHistoryPagination",
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
+    "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease",
     "TestExpiredHoldProofRetryDiagnosticsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
     "TestEscalatedForcedRefundWalletLockOrderPostgres",
@@ -228,6 +232,7 @@ RETAINED_REQUIRED = {
     "TestReconciliationLedgerRepairPublicPostgres",
     "TestCallbackHTTPAdmissionPersistsPostgres",
     "TestDirectPaymentRepairCommandReceiptPostgres",
+    "TestEscalatedPaymentFinancialCompletionPostgres",
     "TestLatePaymentQueryCommandPostgres",
     "TestLatePaymentQueryClientHTTPPostgres",
     "TestLatePaymentArchiveCommandReplayPostgres",
@@ -297,6 +302,21 @@ EXACT_REQUIRED_CHILDREN = {
     "TestBillingManualAdjustmentProofRollbackPostgres": {
         f"{state}/{entry}" for state in ("empty", "retained-proof") for entry in ("public-api", "actual-cli", "renamed-history-cli")
     },
+    "TestGovernanceUsageResourcePrechecksPostgres": {
+        "all-active-states-preserve-full-facts", "repeated-read-stable-and-read-only",
+        "historical-only-preserves-other-dependencies",
+    },
+    "TestEscalatedPaymentFinancialCompletionPostgres": {
+        "lost-ack-replays-exact-committed-result",
+        "concurrent-reviewers-complete-once",
+        "actual-full-refund-receipt", "confirmation-audit-failure-rolls-back",
+        "payment-repair-late", "payment-repair-duplicate",
+        "no-effect-failed-evidence", "no-effect-legacy-order-only",
+        "new-payment-evidence-keeps-blocked",
+        "conflicting-original-amount", "conflicting-original-currency",
+        "conflicting-original-customer", "conflicting-original-sku",
+        "conflicting-original-channel",
+    },
     "TestProviderQuotaConcurrentBoundary": {"migration-round-trip", "send", "verify", "login-registration", "login-profile"},
     "TestProviderHealthReadFailurePostgres": {"discovery", "latest-five", "failure-rate"},
     "TestApprovalPaginationSourcePostgres": {
@@ -318,6 +338,10 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestOrganizationStartupDiagnosticsPostgres": {
         "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease": {
+        "first-RPC-release-crash-keeps-durable-intent",
+        "slow-proof-exhaustion-persists-backoff-and-next-healthy-progress",
     },
     "TestBillingHistoricalStateRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
@@ -409,6 +433,8 @@ EXACT_REQUIRED_CHILDREN = {
         "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",
         "installed-f07-36-upgrade", "installed-pre-runtime-37-upgrade",
         "installed-pre-cleanup-39-upgrade",
+        "installed-pre-governance-index-40-upgrade",
+        "installed-pre-governance-index-40-upgrade/governance-index-public-cli-rollback",
         "installed-pre-dispatch-index-40-upgrade",
         "installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip",
         "installed-pre-emergency-retry-40-upgrade",

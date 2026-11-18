@@ -764,6 +764,7 @@ func (r *PostgresRepository) CatalogRollbackImpact(ctx context.Context, sourceVe
 		LEFT JOIN routing_policies route ON route.model_id=identity.id OR route.model IN (identity.id::text,identity.upstream_model_ref)
 		LEFT JOIN route_provisionings provision ON provision.model_id=identity.id
 		LEFT JOIN usage_requests request ON request.model_id=identity.id
+		 AND request.execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING')
 		WHERE identity.id=ANY($1::uuid[])`, ids).Scan(&dependencies.Routes, &dependencies.HealthyRoutes, &dependencies.Provisionings, &dependencies.ReadyProvisionings, &dependencies.ActiveLeases, &dependencies.InflightRequests, &dependencies.ActiveSessions); err != nil {
 		return ImpactLocalEvidence{}, err
 	}
