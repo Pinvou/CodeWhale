@@ -481,7 +481,10 @@ fn authenticated_resume_publishes_once_with_raw_identity_and_shared_serde_shape(
             shared_fixture(&states[0], "controllerReconnecting");
             shared_fixture(&states[1], "controllerConnected");
             assert!(!f.business.is_suspended());
-            f.business.with_active(&f.lease.context, || Ok(())).unwrap();
+            assert!(
+                !f.business.is_installed(),
+                "keeper input ended after successful resume; terminal exit retires the slot"
+            );
             assert_eq!(
                 *telemetry.lock().unwrap(),
                 [

@@ -265,6 +265,16 @@ impl RemoteDispatchService {
         Ok(cleaned)
     }
 
+    pub(crate) fn with_remote_history_recovery<T, E>(
+        &self,
+        recover: impl FnOnce(&SessionStore) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let mut ephemeral = self.ephemeral.lock();
+        let recovered = recover(&self.store)?;
+        ephemeral.clear();
+        Ok(recovered)
+    }
+
     pub(crate) fn reserve_new(
         &self,
         mut request: RemoteDispatchRequest,
