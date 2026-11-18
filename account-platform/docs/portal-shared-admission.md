@@ -27,11 +27,40 @@
 
 运维盘点涉及 `SCAN`、`TYPE`、`TIME`、`PEXPIRETIME`，以及 `portal:transient-capacity:v1:*` 下的哈希/有序集合元数据写入。Redis 的全局枚举权限不能按键前缀隔离，因此只交给已有受控运维身份；不把它附加到生产 Portal 角色。检查前缀固定为 `portal:flow:*`、`portal:session-handoff:*`，不读取或导出其中的凭据正文。
 
+上述 `token-portal` 是本地构建的二进制名。发布镜像为 scratch，实际入口是 `/service`，没有 shell，也没有名为 `token-portal` 的 PATH 命令。运行一次性运维容器时，将 `capacity-inventory`（或 `capacity-inventory --apply --timeout=5m`）作为同一发布镜像的入口参数；由部署系统注入运维身份的 `REDIS_URL`、容器内的 `REDIS_CA_FILE` 和对应只读 CA 挂载，并接入已有受控网络。例如 `docker run --rm --network <受控网络> --env REDIS_URL --env REDIS_CA_FILE <同一发布镜像> capacity-inventory`；尖括号需替换，TLS 站点还须配置上述 CA 挂载。`--env REDIS_URL` 从当前受控环境取值，不把连接串写进 argv。只读检查现有容器也可调用其 `/service capacity-inventory`，但它仍使用该容器的运行身份，不能代替运维身份执行首次盘点。
+
 原对象没有 TTL、类型不符、元数据损坏、权限不足、OOM 或单页异常大时，盘点失败并保留原对象，不伪造 ready。先根据受控备份/来源核查错误对象；没有明确授权和事实依据时不得删对象、补造日期或缩短原 TTL。旧对象多于新容量时如实全部计入，新创建等待自然到期或正常消费释放。
+
+### 安全诊断和元数据完整性
+
+CLI 失败退出非零，只输出固定原因、`component`（flow/session-handoff/unknown）和 `stage`（prepare/inspect/inventory/arguments）；`--apply` 失败时不会伪造成功 JSON。worker 使用同样的安全分类；同一连续故障的每组原因/类别/阶段最多每分钟记录一次，恢复后的新故障立即可见。Redis 客户端自身诊断也仅保留固定事件，最多每分钟一次，不输出原始格式串、异常、地址、票据或凭据。HTTP 错误体继续保持既定通用错误。
+
+| 固定原因 | 处置方向 |
+| --- | --- |
+| `PORTAL_INVENTORY_OPERATIONS_REQUIRED` / `PORTAL_INVENTORY_PREPARING` | 使用已授权运维身份盘点，或在原预算内继续未完成的盘点；不要给运行角色增加 SCAN |
+| `PORTAL_ADMISSION_COMMANDS_REQUIRED` / `PORTAL_INVENTORY_AUTHENTICATION_FAILED` | 核对运维凭据及本节命令权限；不打印凭据 |
+| `PORTAL_TRANSIENT_TTL_REQUIRED` / `PORTAL_ADMISSION_STATE_INVALID` | 在受控环境核查原对象类型/原生 TTL 及元数据类型，根据可信来源处置；不自动删除或补 TTL |
+| `PORTAL_INVENTORY_PAGE_TOO_LARGE` | 保留当前游标与原对象，安排受控盘点；COUNT 是提示，重复调用不保证缩小同一页 |
+| `PORTAL_INVENTORY_REDIS_OOM` | 恢复 Redis 物理容量，保持 noeviction，不删除活动票据腾空间 |
+| `PORTAL_INVENTORY_CONFIGURATION_INVALID` / `PORTAL_INVENTORY_ARGUMENTS_INVALID` | 核对连接/TLS 配置或命令预算/参数 |
+| `PORTAL_INVENTORY_REDIS_UNAVAILABLE` / `PORTAL_INVENTORY_TIMEOUT` / `PORTAL_INVENTORY_CANCELED` | 核实依赖与预算后明确再次调用；盘点沿已提交游标继续，不重做一次性消费 |
+| `PORTAL_CAPACITY_INVENTORY_FAILED` | 未分类故障；保留非零状态，在受控环境进一步诊断，不导出原始异常或敏感数据 |
+
+两个原票据前缀、两个容量有序集合和两个 inventory 哈希必须按同一个一致性快照备份/恢复。`ready=1` 只表示曾完成一次扫描，不会持续证明索引完整；`--apply` 会跳过已有 ready 的类别。因此不得只恢复原票据、只删除索引、或把 ready/count 输出当作完整性校验。全部票据自然到期后索引正常消失不属于损坏。
+
+运维需配置元数据偏差巡检与告警：通过受控身份按固定原票据前缀分批 SCAN，在 Redis 侧用 TYPE、PEXPIRETIME、TIME 与对应 ZSCORE 检查仍有效的原对象是否具有同一到期时间的索引成员，只返回检查/不匹配数量，不导出票据 key/id 或正文。缺成员、截止时间不同或类型异常均应告警并阻止继续按旧 ready 判断安全；运行角色不获得此枚举能力。本 PR 不提供自动巡检调度或自动修复。只读 `HMGET <对应inventory键> ready cursor` 可定位进度，但零计数或总数相等均不能代替上述逐项一致性核查；在线检查存在到期/消费交错，修复前必须完成下述停排空核实。
+
+发现部分元数据丢失/损坏后：
+
+1. 停止并排空全部 Portal 生产者和消费者，确认外部交换/在途写入已结束。至少等待最后一次准入产生的 2 分钟 handoff 预留自然到期；无法确认在途状态时保持停止，不删除未知对象。
+2. 在受控身份下核对并保留原对象及备份。仅在已确认元数据需要重建时，单次显式删除以下四个元数据键，再执行上述发布镜像的 `capacity-inventory --apply --timeout=5m`：`DEL portal:transient-capacity:v1:flow portal:transient-capacity:v1:flow:inventory portal:transient-capacity:v1:session-handoff portal:transient-capacity:v1:session-handoff:inventory`。此受控重建需要运维身份的 DEL 权限，不增加运行角色权限，不使用通配符，不删除原票据或全库。
+3. 检查两个 ready 都为 true、偏差核查无异常后再启动副本。若失败，保持停止，依据安全分类修正原因后继续；不要重启旧写方或伪造 ready。正常中断续盘不需要执行 DEL。
+
+inventory 哈希没有 TTL。版本回退同样先停排空全部新实例；旧写方可能生成未计数对象，之后重新升级时必须按上述受控重建流程处理，不能沿用旧 ready。不要以清理 inventory 为由删除原票据或整个 Redis 数据库。
 
 ## 拒绝、未知结果和继续操作
 
-确定额度或容量不足返回 429、`RATE_LIMITED` 和向上取整的 `Retry-After`（1–600 秒）；有效期、一次性凭据和既有浏览器会话不因该拒绝被改写。消费者在领取前检查操作配额，额度恢复后可在原有效期内重试原票据。Redis 依赖故障、策略冲突或未完成盘点返回 503；仅盘点未完成的路径附带 1 秒重试提示。
+确定额度或容量不足返回 429、`RATE_LIMITED` 和向上取整的 `Retry-After`（1–600 秒）；有效期、一次性凭据和既有浏览器会话不因该拒绝被改写。消费者在领取前检查操作配额，额度恢复后可在原有效期内重试原票据。Redis 依赖故障、策略冲突或未完成盘点返回 503；在操作准入阶段发现盘点未完成时附带 1 秒重试提示，后续保存/预留路径的存储错误不承诺此响应头。
 
 handoff 创建在 Account/IdP 调用前预留容量。未完成调用最多占用 2 分钟预留槽；正常失败主动释放。成功写入的票据保持至原到期或一次性消费，迟到清理和未知成功写入不能释放其占位。后台进程取消时清理有独立的 3 秒预算；崩溃遗留预留自然到期。
 

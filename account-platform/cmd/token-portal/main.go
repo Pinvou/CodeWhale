@@ -21,12 +21,17 @@ import (
 )
 
 func main() {
+	configurePortalRedisLogging()
 	if len(os.Args) > 1 {
 		if os.Args[1] != "capacity-inventory" {
 			log.Fatal("TOKEN_PORTAL_COMMAND_INVALID")
 		}
 		if err := runCapacityInventory(os.Args[2:], os.Stdout); err != nil {
-			log.Fatal("PORTAL_CAPACITY_INVENTORY_FAILED")
+			d := portal.DescribeCapacityInventoryError(err)
+			if errors.Is(err, errCapacityInventoryArguments) {
+				d.Code, d.Stage = "PORTAL_INVENTORY_ARGUMENTS_INVALID", "arguments"
+			}
+			log.Fatal(d.Code, " component=", d.Component, " stage=", d.Stage)
 		}
 		return
 	}

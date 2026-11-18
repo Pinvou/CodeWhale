@@ -3,7 +3,6 @@ package portal
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"time"
 )
 
@@ -14,10 +13,11 @@ func (s *RedisStore) RunTransientInventory(ctx context.Context) {
 }
 
 func runTransientInventory(ctx context.Context, prepare func(context.Context, transientKind) error) {
+	var reported inventoryFailureReporter
 	for ctx.Err() == nil {
 		ready, err := transientInventoryPass(ctx, prepare)
-		if err != nil && ctx.Err() == nil {
-			slog.ErrorContext(ctx, "portal_capacity_inventory_failed", "error_code", "PORTAL_CAPACITY_INVENTORY_FAILED")
+		if ctx.Err() == nil {
+			reported.report(ctx, err, time.Now())
 		}
 		pause := 10 * time.Millisecond
 		if ready || err != nil {
@@ -78,10 +78,10 @@ if redis.call('HGET', KEYS[2], 'ready')=='1' then ready=1 end
 return {ready,redis.call('ZCOUNT', KEYS[1], '('..tostring(now), '+inf')}
 `, []string{transientIndex(k), transientInventory(k)}).Int64Slice()
 		if e != nil {
-			return out, e
+			return out, &capacityInventoryError{kind: k, stage: "inspect", err: e}
 		}
 		if len(values) != 2 {
-			return out, ErrAdmissionUnavailable
+			return out, &capacityInventoryError{kind: k, stage: "inspect", err: ErrAdmissionUnavailable}
 		}
 		if i == 0 {
 			out.FlowReady = values[0] == 1
@@ -108,7 +108,7 @@ func transientInventoryPass(ctx context.Context, prepare func(context.Context, t
 			if err == nil {
 				ready[i] = true
 			} else if !errors.Is(err, ErrCapacityPreparing) {
-				return false, err
+				return false, &capacityInventoryError{kind: k, stage: "prepare", err: err}
 			}
 		}
 		if ready[0] && ready[1] {

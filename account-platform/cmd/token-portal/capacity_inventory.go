@@ -13,6 +13,8 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/portal"
 )
 
+var errCapacityInventoryArguments = errors.New("invalid inventory command arguments")
+
 // An explicit one-shot command in the shipped Portal binary; no IdP secret or
 // HTTP service startup is needed. Its default is read-only inspection.
 func runCapacityInventory(args []string, output io.Writer) error {
@@ -25,10 +27,10 @@ func runCapacityInventory(args []string, output io.Writer) error {
 			_, e := fmt.Fprintln(output, "token-portal capacity-inventory [--apply] [--timeout=5m]\nUses REDIS_URL and optional REDIS_CA_FILE; default is read-only inspection.")
 			return e
 		}
-		return errors.New("invalid inventory command")
+		return errCapacityInventoryArguments
 	}
 	if flags.NArg() != 0 || *timeout <= 0 || *timeout > 30*time.Minute {
-		return errors.New("invalid inventory budget or arguments")
+		return errCapacityInventoryArguments
 	}
 	store, err := portal.NewRedisStoreWithCA(os.Getenv("REDIS_URL"), os.Getenv("REDIS_CA_FILE"))
 	if err != nil {
