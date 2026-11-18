@@ -1133,6 +1133,7 @@ const openChatExternalUrl = (url) => {
       const [remoteTransfer, setRemoteTransfer] = useState(null);
       const [remoteTransferGuard] = useState(createRemoteTransferGuard);
       const [remotePermissions, setRemotePermissions] = useState([]);
+      const [remotePermissionRefreshRevision, setRemotePermissionRefreshRevision] = useState(0);
       const [remoteArtifacts, setRemoteArtifacts] = useState([]);
       const [remoteArtifactPreview, setRemoteArtifactPreview] = useState(null);
       const [remoteActionError, setRemoteActionError] = useState(null);
@@ -1302,6 +1303,17 @@ const openChatExternalUrl = (url) => {
           : null,
         [activeSessionId, remoteChatActive, remoteProxyHistory, scopedRemoteConnection],
       );
+      const remotePermissionOwner = remoteModelBindingKey && currentRemoteTaskId
+        ? JSON.stringify([remoteModelBindingKey, currentRemoteTaskId]) : '';
+      const remotePermissionOwnerRef = useRef(remotePermissionOwner);
+      // eslint-disable-next-line react-hooks/refs -- async reads refresh only the current lease/task owner
+      remotePermissionOwnerRef.current = remotePermissionOwner;
+      useEffect(() => {
+        remotePermissionOwnerRef.current = remotePermissionOwner;
+        return () => {
+          if (remotePermissionOwnerRef.current === remotePermissionOwner) remotePermissionOwnerRef.current = '';
+        };
+      }, [remotePermissionOwner]);
       const remoteModelListingRequestIdentity = remoteBinding ? remoteSendIdentity : '';
       const [remoteModelsForBinding, setRemoteModelsForBinding] = useState({ key: '', models: [] });
       const [remoteModelSelection, setRemoteModelSelection] = useState({ key: '', modelId: '' });
@@ -1408,7 +1420,8 @@ const openChatExternalUrl = (url) => {
           if (!cancelled) setRemoteActionError(remoteActionFailureCode(failure));
         });
         return () => { cancelled = true; };
-      }, [remoteModelBindingKey, currentRemoteTaskId, remotePermissionPollRevision]);
+      }, [remoteModelBindingKey, currentRemoteTaskId, remotePermissionPollRevision,
+        scopedRemoteConnection?.capabilityRevision, remotePermissionRefreshRevision]);
       const controlledLinkReady = !!(
         controlledChatActive
         && controlledSession.sessionId
@@ -3380,6 +3393,11 @@ const openChatExternalUrl = (url) => {
             remoteBinding.localSessionId, remoteBinding.remoteRef, permission.taskId,
             permission.permissionRequestId, decision,
           );
+          // A renewed capability snapshot retires action UI ownership, but a
+          // successful decision still needs a fresh read for this exact task.
+          if (remotePermissionOwner && remotePermissionOwnerRef.current === remotePermissionOwner) {
+            setRemotePermissionRefreshRevision(current => current + 1);
+          }
           if (isCurrentRemoteAction(operation)) {
             setRemotePermissions(current => current.filter(item => item.permissionRequestId !== permission.permissionRequestId));
           }

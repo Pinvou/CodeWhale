@@ -22,7 +22,7 @@ func TestUsageWaiverStaticValidationPrecedesDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"waiver-up", "waiver-forged-checksum", "waiver-down", "026-body", "026-checksum", "026-name", "missing-026"} {
+	for _, kind := range []string{"waiver-up", "waiver-forged-checksum", "waiver-down", "026-body", "026-checksum", "026-name", "026-down", "missing-026"} {
 		t.Run(kind, func(t *testing.T) {
 			input := append([]migrations.Migration(nil), loaded...)
 			for i := range input {
@@ -45,6 +45,8 @@ func TestUsageWaiverStaticValidationPrecedesDatabase(t *testing.T) {
 						input[i].Checksum = strings.Repeat("a", 64)
 					case "026-name":
 						input[i].Name = "unrelated"
+					case "026-down":
+						input[i].DownSQL = "SELECT 'changed rollback';"
 					}
 				}
 			}
@@ -229,6 +231,22 @@ func TestUsageWaiverHistoricalSchemaPostgres(t *testing.T) {
 			original26 := stageValue(t, ctx, c, `SELECT to_jsonb(s)::text FROM schema_migrations s WHERE version=26`)
 			beforeShape := stageShape(t, ctx, c)
 			beforeLedger := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`)
+			changedDown := append([]migrations.Migration(nil), loaded...)
+			for i := range changedDown {
+				if changedDown[i].Version == 26 {
+					changedDown[i].DownSQL = "SELECT 'changed published rollback';"
+				}
+			}
+			if kind == "old-LF" || kind == "old-CRLF" {
+				t.Run("changed-current-down-before-up", func(t *testing.T) {
+					if err := Up(ctx, c, changedDown); err == nil || !strings.Contains(err.Error(), "rollback differs from published package") {
+						t.Fatal("history conversion erased the delivered rollback identity before Up", err)
+					}
+					if beforeShape != stageShape(t, ctx, c) || beforeLedger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`) || originalData != data() {
+						t.Fatal("rejected rollback package changed history or financial facts")
+					}
+				})
+			}
 			err = Up(ctx, c, loaded)
 			if kind == "unknown-checksum" || kind == "wrong-legacy-shape" {
 				if err == nil {
@@ -248,6 +266,15 @@ func TestUsageWaiverHistoricalSchemaPostgres(t *testing.T) {
 			if _, err := VerifyApplied(ctx, c, loaded); err != nil {
 				t.Fatal("known fixed026 exact Billing history rejected", err)
 			}
+			t.Run("changed-current-down-before-verify", func(t *testing.T) {
+				before := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`)
+				if _, err := VerifyApplied(ctx, c, changedDown); err == nil || !strings.Contains(err.Error(), "rollback differs from published package") {
+					t.Fatal("history conversion erased the delivered rollback identity before Verify", err)
+				}
+				if before != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`) || originalData != data() {
+					t.Fatal("rejected verification changed history or financial facts")
+				}
+			})
 			if _, err := migrations.VerifyApplied(ctx, c, loaded); err == nil {
 				t.Fatal("generic verifier was relaxed for alternative026")
 			}

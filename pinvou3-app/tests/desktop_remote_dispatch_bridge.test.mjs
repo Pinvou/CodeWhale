@@ -1113,22 +1113,22 @@ test('permission mirror drops reversed reads and every changed lease or controll
   // Finish the bridge's automatic startup status read before issuing actions.
   await feature.controllerStatus();
   const body = (id, task = 'task-1') => ({ permissions: [{ permission_request_id: id, task_id: task, state: 'pending' }] });
-  // main coalesces an identical in-flight action. The latest mirror reader
-  // owns its shared result; the earlier reader must still be retired.
+  // A refresh owns a new RPC even when an earlier identical read is in flight.
+  // Its newer snapshot must win independently of response order.
   const sharedOld = feature.permissionList('remote-1', 'ref-1', 'task-1');
   const sharedFresh = feature.permissionList('remote-1', 'ref-1', 'task-1');
-  assert.equal(reads.length, 1);
-  reads[0](body('shared'));
-  assert.equal((await sharedOld).length, 0);
+  assert.equal(reads.length, 2);
+  reads[1](body('shared'));
   assert.equal((await sharedFresh)[0].permissionRequestId, 'shared');
-  // Distinct task intents produce independent RPCs, so they can really finish
-  // in reverse order without disabling main's in-flight coalescing.
+  reads[0](body('obsolete'));
+  assert.equal((await sharedOld).length, 0);
+  // Task ownership remains independent of the read's flight identity.
   const old = feature.permissionList('remote-1', 'ref-1', 'task-old');
   const fresh = feature.permissionList('remote-1', 'ref-1', 'task-1');
-  assert.equal(reads.length, 3);
-  reads[2](body('fresh'));
+  assert.equal(reads.length, 4);
+  reads[3](body('fresh'));
   await fresh;
-  reads[1](body('old', 'task-old'));
+  reads[2](body('old', 'task-old'));
   assert.equal((await old).length, 0);
   assert.equal(state.desktopRemoteControl.remotePermissions[0].permissionRequestId, 'fresh');
   for (const key of ['connectionId', 'controllerLeaseId', 'leaseEpoch', 'relayEpoch', 'generation', 'sessionRef', 'capabilityRevision', 'status', 'intent']) {
@@ -1147,6 +1147,48 @@ test('permission mirror drops reversed reads and every changed lease or controll
   assert.equal((await stoppedRead).length, 0);
   assert.equal(state.desktopRemoteControl.remotePermissions[0].permissionRequestId, 'fresh');
 
+});
+
+test('failed read-only permission refreshes release slots after one bounded retry', async () => {
+  let succeed = false;
+  let requests = 0;
+  const requestIds = [];
+  const { feature } = installFeature((command, args) => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    requests += 1;
+    requestIds.push(args.requestId);
+    return succeed ? Promise.resolve({ permissions: [{ permission_request_id: 'current', task_id: 'task-1', state: 'pending' }] })
+      : Promise.reject(new Error('result_unknown'));
+  });
+  await feature.controllerStatus();
+  for (let i = 0; i < 128; i += 1) {
+    await assert.rejects(feature.permissionList('remote-1', 'ref-1', 'task-1'), { code: 'result_unknown' });
+    assert.equal(requestIds[i * 2], requestIds[i * 2 + 1], 'one read retains its ID during retry');
+  }
+  assert.equal(new Set(requestIds).size, 128, 'each later refresh asks for a fresh snapshot');
+  assert.equal(requests, 256, 'each failed read retries at most once');
+  succeed = true;
+  assert.equal((await feature.permissionList('remote-1', 'ref-1', 'task-1'))[0].permissionRequestId, 'current');
+  assert.equal(requests, 257, 'read failures do not consume mutation receipt capacity');
+});
+
+test('an uncertain permission read followed by another failure does not retain a slot', async () => {
+  let succeed = false;
+  let requests = 0;
+  const { feature } = installFeature(command => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    requests += 1;
+    if (succeed) return Promise.resolve({ permissions: [] });
+    return Promise.reject(new Error(requests % 2 ? 'result_unknown' : 'remote_action_invalid'));
+  });
+  await feature.controllerStatus();
+  for (let i = 0; i < 128; i += 1) {
+    await assert.rejects(feature.permissionList('remote-1', 'ref-1', 'task-1'), { code: 'remote_action_invalid' });
+  }
+  assert.equal(requests, 256);
+  succeed = true;
+  assert.equal((await feature.permissionList('remote-1', 'ref-1', 'task-1')).length, 0);
+  assert.equal(requests, 257);
 });
 
 test('decision acknowledgement invalidates an older pending read and cannot remove a successor mirror', async () => {
@@ -1335,7 +1377,7 @@ test('a late unknown reply from a retired lease cannot fence the new lease', asy
   assert.equal((await begin()).transferId, 'new-transfer');
 });
 
-test('remote actions reuse one request id across uncertain retry and later reconciliation', async () => {
+test('mutating remote actions reuse one request id across uncertain retry and later reconciliation', async () => {
   let attempts = 0;
   const { feature, calls } = installFeature((command) => {
     if (command !== 'desktop_remote_action_a') return undefined;
@@ -1345,13 +1387,13 @@ test('remote actions reuse one request id across uncertain retry and later recon
       error.code = 'result_unknown';
       return Promise.reject(error);
     }
-    return Promise.resolve({ permissions: [] });
+    return Promise.resolve({ ok: true });
   });
   await assert.rejects(
-    feature.permissionList('remote-local-1', 'opaque-ref-1', 'task-1'),
+    feature.permissionDecide('remote-local-1', 'opaque-ref-1', 'task-1', 'approval-1', 'allow'),
     error => error.code === 'result_unknown' && typeof error.requestId === 'string',
   );
-  await feature.permissionList('remote-local-1', 'opaque-ref-1', 'task-1');
+  await feature.permissionDecide('remote-local-1', 'opaque-ref-1', 'task-1', 'approval-1', 'allow');
   const actionCalls = calls.filter(call => call.command === 'desktop_remote_action_a');
   assert.equal(actionCalls.length, 3);
   assert.equal(new Set(actionCalls.map(call => call.args.requestId)).size, 1);

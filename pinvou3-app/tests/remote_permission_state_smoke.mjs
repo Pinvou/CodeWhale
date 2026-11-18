@@ -55,6 +55,8 @@ try {
         assert.equal(intent.permissionRequestId, entry.permission_request_id);
         assert.equal(intent.decision, 'allow');
         await page.evaluate(() => window.dispatchFixture.permissionRequests[1].resolve({ ok: true }));
+        await page.waitForFunction(() => window.dispatchFixture.permissionRequests.length === 3);
+        await page.evaluate(() => window.dispatchFixture.permissionRequests[2].resolve({ permissions: [] }));
         await page.waitForFunction(() => !document.querySelector('[role="alert"][data-coordination-id]'));
       } else {
         assert.equal(result.buttons, 0);
@@ -64,6 +66,54 @@ try {
       }
       assert.deepEqual(errors, []);
     }
+  }
+  const successor = { ...producer.permissions[0], permission_request_id: 'approval-successor' };
+  for (const trigger of ['journal', 'renewal']) {
+    await load('zh');
+    await supply(0, producer.permissions[0]);
+    await page.click('[data-testid="chat-remote-permission-allow"]');
+    await page.waitForFunction(() => window.dispatchFixture.permissionRequests.length === 2);
+    await page.evaluate(({ trigger, successor }) => {
+      if (trigger === 'journal') window.dispatchFixture.projectPendingApproval(successor);
+      else window.dispatchFixture.renewPermissionCapability();
+    }, { trigger, successor });
+    await page.waitForFunction(() => window.dispatchFixture.permissionRequests.length === 3);
+    await page.evaluate(() => window.dispatchFixture.permissionRequests[1].resolve({ ok: true }));
+    await page.waitForFunction(() => window.dispatchFixture.permissionRequests.length === 4);
+    const ids = await page.evaluate(() => window.dispatchFixture.permissionRequests.slice(2).map(item => item.args.requestId));
+    assert.notEqual(ids[0], ids[1], `${trigger}: post-ack refresh uses a new RPC`);
+    await page.evaluate(({ trigger, pending, successor }) => {
+      // A renewed snapshot can still have read the old pending card before
+      // the decision committed; a successor journal is already post-commit.
+      window.dispatchFixture.permissionRequests[2].resolve({ permissions: [trigger === 'renewal' ? pending : successor] });
+    }, { trigger, pending: producer.permissions[0], successor });
+    await supply(3, successor);
+    assert.equal(await page.evaluate(() => document.querySelectorAll('[data-testid="chat-remote-permission-allow"]').length), 1);
+    assert.equal(await page.evaluate(() => window.dispatchFixture.permissionState.desktopRemoteControl.remotePermissions[0].permissionRequestId), successor.permission_request_id);
+    assert.deepEqual(errors, []);
+  }
+  await load('zh');
+  await page.evaluate(() => window.dispatchFixture.renewPermissionCapability());
+  await page.waitForFunction(() => window.dispatchFixture.permissionRequests.length === 2);
+  await supply(1, successor);
+  await page.evaluate(entry => window.dispatchFixture.permissionRequests[0].resolve({ permissions: [entry] }), producer.permissions[1]);
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  assert.equal(await page.evaluate(() => window.dispatchFixture.permissionState.desktopRemoteControl.remotePermissions[0].permissionRequestId), successor.permission_request_id);
+  for (const leave of ['lease', 'unmount']) {
+    await load('zh');
+    await supply(0, producer.permissions[0]);
+    await page.click('[data-testid="chat-remote-permission-allow"]');
+    await page.waitForFunction(() => window.dispatchFixture.permissionRequests.length === 2);
+    if (leave === 'lease') {
+      await page.evaluate(() => window.dispatchFixture.select('remote-a', 2));
+      await page.waitForFunction(() => window.dispatchFixture.permissionRequests.length === 3);
+      await supply(2, successor);
+    } else await page.evaluate(() => window.dispatchFixture.unmount());
+    await page.evaluate(() => window.dispatchFixture.permissionRequests[1].resolve({ ok: true }));
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(await page.evaluate(() => window.dispatchFixture.permissionRequests.length), leave === 'lease' ? 3 : 2,
+      `${leave}: old acknowledgement cannot refresh another owner`);
+    assert.deepEqual(errors, []);
   }
   await load('zh');
   await page.evaluate(() => window.dispatchFixture.select('remote-a', 2));
@@ -78,7 +128,7 @@ try {
   assert.equal(retained.mirror[0].state, 'pending');
   assert.equal(retained.allowButtons, 1, 'late old-lease read cannot replace successor card');
   assert.deepEqual(errors, []);
-  console.log('remote_permission_state_smoke: actual Rust projections through desktop bridge to mounted ChatView; 3 languages, decisions, late lease response passed');
+  console.log('remote_permission_state_smoke: Rust projections through desktop bridge to mounted ChatView; 3 languages, successor refresh, capability renewal and stale owners passed');
 } finally {
   if (browser) await browser.close();
   if (vite) await vite.close();

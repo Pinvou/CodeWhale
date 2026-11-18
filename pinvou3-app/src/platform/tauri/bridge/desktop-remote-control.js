@@ -1312,7 +1312,7 @@
         ? JSON.stringify(parts) : "";
     }
 
-    function invokeRemoteAction(localSessionId, remoteRef, intent, suppliedRequestId, retryUncertain) {
+    function invokeRemoteAction(localSessionId, remoteRef, intent, suppliedRequestId, retryUncertain, independentRead) {
       ensureAvailable();
       if (!requiredOpaqueId(localSessionId) || !requiredOpaqueId(remoteRef)) {
         return Promise.reject(invalidTaskIntent());
@@ -1321,6 +1321,8 @@
         return Promise.reject(invalidTaskIntent());
       }
       var key = remoteActionKey(localSessionId, remoteRef, intent);
+      // A refresh after a decision must not inherit an earlier read's snapshot.
+      if (intent.operation === "permission_list" && independentRead) key += "|read:" + independentRead;
       var actionLease = attachmentLeaseKey();
       if (actionLease && actionLedger.lease && actionLease !== actionLedger.lease) {
         actionLedger.entries = Object.create(null);
@@ -1362,6 +1364,9 @@
           } else if (error.authoritative || !entry.unknown) {
             forgetAction(key, entry);
           }
+          // A read has no mutation receipt to retain, including an uncertain
+          // first attempt followed by a different, non-authoritative failure.
+          if (intent.operation === "permission_list" && independentRead) forgetAction(key, entry);
           throw error;
         });
       }
@@ -1381,7 +1386,7 @@
       permissionMirrorOwner = JSON.stringify([localSessionId, remoteRef, taskId]);
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "permission_list", taskId: taskId,
-      }).then(function (body) {
+      }, null, undefined, intent).then(function (body) {
         if (intent !== permissionMirrorIntent || terminal !== controllerTerminalSequence
           || !sameControllerView(before, current())) return [];
         var permissions = body && body.permissions;

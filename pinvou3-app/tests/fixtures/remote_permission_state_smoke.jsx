@@ -142,6 +142,20 @@ function App() {
   fixture.current = selected;
   permissionState.desktopRemoteControl = { ...permissionState.desktopRemoteControl, controllerConnection: selected.connection };
   fixture.select = (...args) => setSelected(session(...args));
+  fixture.projectPendingApproval = entry => {
+    const sequence = selected.history.entries.at(-1).sequence + 1;
+    const history = { ...selected.history, entries: [...selected.history.entries, {
+      journalEpoch: 'epoch-wait', sequence, eventId: `permission-pending-${sequence}`,
+      taskId: entry.task_id, kind: 'approval', body: JSON.stringify({
+        status: 'pending', operation_type: entry.operation_type,
+        risk_level: entry.risk_level, target_scope: entry.target_scope,
+      }),
+    }] };
+    setSelected({ ...selected, history, bs: { ...selected.bs, remoteProxyHistory: history } });
+  };
+  fixture.renewPermissionCapability = () => setSelected(session(selected.id,
+    selected.connection.leaseEpoch, selected.connection.capabilityRevision + 1,
+    selected.connection.generation));
   fixture.selectExpired = (...args) => {
     const expired = session(...args);
     expired.capabilities.expiresAtMs = Date.now() - 1;

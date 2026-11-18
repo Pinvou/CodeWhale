@@ -90,6 +90,9 @@ func knownLegacyWaiverHistory(ctx context.Context, q walletReceiptHistoryQueryer
 // Validate delivered mainline SQL before consulting installed history. The
 // adapter may replace026 only after its original delivery has been verified.
 func validateUsageWaiverHistoryDelivery(input []migrations.Migration) error {
+	if err := migrations.VerifyPublishedRollbackPackage(input); err != nil {
+		return err
+	}
 	found, requires026 := false, false
 	for _, m := range input {
 		if m.Version == usageWaiverVersion {

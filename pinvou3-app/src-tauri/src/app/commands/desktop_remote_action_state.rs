@@ -38,9 +38,10 @@ impl From<&'static str> for ActionIdentityError {
     }
 }
 
-/// Native ownership survives WebView/bridge replacement. Dropping an awaiting
-/// command proves no remote outcome: keep its identity until authenticated
-/// settlement or an authoritative lease transition.
+/// Mutation ownership survives WebView/bridge replacement. Dropping an awaiting
+/// mutation proves no remote outcome: keep its identity until authenticated
+/// settlement or an authoritative lease transition. Permission-list reads own
+/// only an in-flight slot; a later request ID must obtain a fresh snapshot.
 pub(crate) struct ActionIdentityReservation {
     state: Arc<DesktopRemoteActionState>,
     key: String,
@@ -48,6 +49,7 @@ pub(crate) struct ActionIdentityReservation {
     attempt: Arc<()>,
     was_new: bool,
     dispatched: AtomicBool,
+    permission_read: bool,
 }
 
 impl ActionIdentityReservation {
@@ -61,7 +63,7 @@ impl ActionIdentityReservation {
             .get(&self.key)
             .is_some_and(|entry| Arc::ptr_eq(&entry.attempt, &self.attempt))
         {
-            if authoritative {
+            if authoritative || self.permission_read {
                 inner.identities.remove(&self.key);
             } else if let Some(entry) = inner.identities.get_mut(&self.key) {
                 entry.busy = false;
@@ -120,7 +122,8 @@ impl DesktopRemoteActionState {
     ) -> Result<ActionIdentityReservation, ActionIdentityError> {
         // Hash the exact canonical typed intent; never retain attachment bytes
         // or credentials in a second cache. Include task/chunk fields via body.
-        let encoded = serde_json::to_vec(&json!([
+        let permission_read = operation == "permission_list";
+        let identity = json!([
             local_session_id,
             remote_ref,
             live.peer_id,
@@ -131,8 +134,15 @@ impl DesktopRemoteActionState {
             live.generation,
             operation,
             body
-        ]))
-        .map_err(|_| "remote_action_invalid")?;
+        ]);
+        // Preserve mutation correlation exactly; distinct logical reads must
+        // not inherit an older busy reservation or an unknown snapshot ID.
+        let identity = if permission_read {
+            json!([identity, proposed_id])
+        } else {
+            identity
+        };
+        let encoded = serde_json::to_vec(&identity).map_err(|_| "remote_action_invalid")?;
         let key = Sha256::digest(&encoded)
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -186,6 +196,7 @@ impl DesktopRemoteActionState {
             attempt,
             was_new,
             dispatched: AtomicBool::new(false),
+            permission_read,
         })
     }
 
@@ -573,6 +584,173 @@ mod identity_tests {
     ) -> Result<ActionIdentityReservation, &'static str> {
         state.reserve_identity("local", "remote", live, "permission_decide",
             &json!({"task_id":format!("task-{task}"),"permission_request_id":"permission","decision":"allow"}), id).map_err(|error| error.code)
+    }
+
+    #[test]
+    fn permission_reads_use_distinct_ids_and_late_guards_preserve_new_attempts() {
+        let state = Arc::new(DesktopRemoteActionState::default());
+        let context = live();
+        let body = json!({"task_id":"task"});
+        let first = state
+            .reserve_identity(
+                "local",
+                "remote",
+                &context,
+                "permission_list",
+                &body,
+                "before",
+            )
+            .unwrap();
+        first.mark_dispatched();
+        let second = state
+            .reserve_identity(
+                "local",
+                "remote",
+                &context,
+                "permission_list",
+                &body,
+                "after",
+            )
+            .unwrap();
+        second.mark_dispatched();
+        assert_eq!(first.request_id, "before");
+        assert_eq!(second.request_id, "after");
+        assert!(matches!(
+            state.reserve_identity(
+                "local",
+                "remote",
+                &context,
+                "permission_list",
+                &body,
+                "before"
+            ),
+            Err(ActionIdentityError {
+                code: "remote_action_capacity",
+                ..
+            })
+        ));
+        first.settle(false);
+        let retry = state
+            .reserve_identity(
+                "local",
+                "remote",
+                &context,
+                "permission_list",
+                &body,
+                "before",
+            )
+            .unwrap();
+        retry.mark_dispatched();
+        drop(first);
+        assert!(matches!(
+            state.reserve_identity(
+                "local",
+                "remote",
+                &context,
+                "permission_list",
+                &body,
+                "before"
+            ),
+            Err(ActionIdentityError {
+                code: "remote_action_capacity",
+                ..
+            })
+        ));
+        drop(retry);
+        drop(second);
+        assert!(state.inner.lock().identities.is_empty());
+    }
+
+    #[test]
+    fn failed_permission_reads_release_slots_without_retiring_unknown_mutations() {
+        let state = Arc::new(DesktopRemoteActionState::default());
+        let context = live();
+        let mutation = reserve(&state, &context, 0, "unknown-mutation").unwrap();
+        mutation.mark_dispatched();
+        drop(mutation);
+        for index in 0..MAX_ACTION_IDENTITIES * 2 {
+            let read = state
+                .reserve_identity(
+                    "local",
+                    "remote",
+                    &context,
+                    "permission_list",
+                    &json!({"task_id":"task"}),
+                    &format!("read-{index}"),
+                )
+                .unwrap();
+            read.mark_dispatched();
+            drop(read);
+            assert_eq!(state.inner.lock().identities.len(), 1);
+        }
+        let retry = reserve(&state, &context, 0, "new-renderer").unwrap();
+        assert_eq!(retry.request_id, "unknown-mutation");
+        retry.settle(true);
+        assert!(state.inner.lock().identities.is_empty());
+    }
+
+    #[test]
+    fn permission_reads_keep_capacity_and_cannot_alias_a_mutation_request_id() {
+        let state = Arc::new(DesktopRemoteActionState::default());
+        let context = live();
+        let mutation = reserve(&state, &context, 0, "mutation").unwrap();
+        mutation.mark_dispatched();
+        drop(mutation);
+        let body = json!({"task_id":"task"});
+        assert!(matches!(
+            state.reserve_identity(
+                "local",
+                "remote",
+                &context,
+                "permission_list",
+                &body,
+                "mutation"
+            ),
+            Err(ActionIdentityError {
+                code: "remote_action_invalid",
+                ..
+            })
+        ));
+        let reads = (0..MAX_ACTION_IDENTITIES - 1)
+            .map(|index| {
+                let read = state
+                    .reserve_identity(
+                        "local",
+                        "remote",
+                        &context,
+                        "permission_list",
+                        &body,
+                        &format!("read-{index}"),
+                    )
+                    .unwrap();
+                read.mark_dispatched();
+                read
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            state.reserve_identity(
+                "local",
+                "remote",
+                &context,
+                "permission_list",
+                &body,
+                "overflow"
+            ),
+            Err(ActionIdentityError {
+                code: "remote_action_capacity",
+                ..
+            })
+        ));
+        assert!(matches!(
+            reserve(&state, &context, 1, "new-mutation"),
+            Err("remote_action_capacity")
+        ));
+        drop(reads);
+        assert_eq!(state.inner.lock().identities.len(), 1);
+        let retry = reserve(&state, &context, 0, "new-renderer").unwrap();
+        assert_eq!(retry.request_id, "mutation");
+        retry.settle(true);
+        assert!(state.inner.lock().identities.is_empty());
     }
 
     #[test]
