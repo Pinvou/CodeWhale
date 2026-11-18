@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 export function spawnNdjsonChild({
@@ -43,6 +44,9 @@ export function spawnNdjsonChild({
     lastStdoutAgeMs: lastStdoutAt === null ? null : performance.now() - lastStdoutAt,
     pendingRequests: pending.size,
   });
+  const observerDelay = monitorEventLoopDelay({ resolution: 20 });
+  observerDelay.enable();
+  child.once('close', () => observerDelay.disable());
 
   child.stderr?.on('data', (chunk) => { stderrBytes += chunk.length; stderrOutput += chunk; });
   child.stdout.on('data', (chunk) => {
@@ -80,7 +84,12 @@ export function spawnNdjsonChild({
         const observation = { ...diagnostic(), deadlineMs: requestTimeoutMs, observedMs,
           timerDelayMs: Math.max(0, observedMs - requestTimeoutMs),
           observerProcessCpuMs: (cpu.user + cpu.system) / 1000 };
-        const error = new Error(`${label} timed out after ${requestTimeoutMs}ms (request ${id}); child stderr: ${stderrOutput}; observation: ${JSON.stringify(observation)}`);
+        const observer = JSON.stringify({
+          observer_elapsed_ms: Math.round(observedMs),
+          observer_loop_max_delay_ms: Math.round(observerDelay.max / 1e6),
+          child_exit_code: child.exitCode,
+        });
+        const error = new Error(`${label} timed out after ${requestTimeoutMs}ms (request ${id}); observer: ${observer}; child stderr: ${stderrOutput}; observation: ${JSON.stringify(observation)}`);
         error.childDiagnostic = observation;
         reject(error);
       }, requestTimeoutMs);

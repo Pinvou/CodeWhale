@@ -19,7 +19,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 import { spawnNdjsonChild, stopNdjsonChild } from './helpers/ndjson-child-driver.mjs';
 import { cleanupBrowserFixture, confirmedChildStopper, confirmedProcessExited, readPendingHostRequest } from './helpers/browser-wrapper-fixture-cleanup.mjs';
-import { heldRequestResultDiagnostic } from './helpers/browser-wrapper-held-result.mjs';
+import { heldRequestResultDiagnostic, heldRequestAuthorizationDiagnostic } from './helpers/browser-wrapper-held-result.mjs';
 
 const WRAPPER = fileURLToPath(new URL(
   '../src-tauri/resources/common/bundle/mcp-servers/browser-wrapper.mjs',
@@ -458,7 +458,7 @@ async function createFakeHost(fixture, options) {
   return createBrowserWrapperHost(fixture, { sessionId: SESSION_ID, sessionToken: SESSION_TOKEN }, options);
 }
 
-function driveWrapper(fixture) {
+function driveWrapper(fixture, { collectResponses = false } = {}) {
   const driver = spawnNdjsonChild({
     args: [WRAPPER, fixture.mcpBin, fixture.portPath],
     env: {
@@ -468,8 +468,10 @@ function driveWrapper(fixture) {
       FAKE_BROWSER_WORKSPACE: fixture.workspacePath,
       FAKE_BROWSER_MCP_MODE: fixture.modePath,
       FAKE_BROWSER_MCP_AUDIT: fixture.auditPath,
+      PINVOU3_BROWSER_LIFECYCLE_DIAGNOSTICS: '1',
     },
     timeoutMs: 15_000,
+    collectResponses,
   });
   return {
     ...driver,
@@ -1263,6 +1265,8 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
   const wrapper = driveWrapper(fixture);
   let settled = false;
   let pending;
+  const startedAt = performance.now();
+  const stages = { prepareObservedMs: null, holdReturnedMs: null, releaseAcknowledgedMs: null };
   try {
     await host.deferOperation('prepare', true);
     pending = initializeWorkspace(wrapper, 'windows-first-workspace-setup-test').then(
@@ -1275,9 +1279,17 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
       const raw = readPendingHostRequest(join(requests, name));
       return raw !== null && JSON.parse(raw).operation === 'prepare';
     }), 'initial setup did not publish prepare');
+    stages.prepareObservedMs = Math.round(performance.now() - startedAt);
+    const heldAt = performance.now();
+    console.error('[browser-prepare-observer]', JSON.stringify({ phase: 'prepare-seen' }));
     await sleep(16_000);
+    console.error('[browser-prepare-observer]', JSON.stringify({
+      phase: 'prepare-release', held_ms: Math.round(performance.now() - heldAt),
+    }));
+    stages.holdReturnedMs = Math.round(performance.now() - startedAt);
     assert.equal(settled, false, 'setup must not inherit the shorter mutation observer');
     await host.deferOperation('prepare', false);
+    stages.releaseAcknowledgedMs = Math.round(performance.now() - startedAt);
     const outcome = await pending;
     assert.ifError(outcome.error);
     assert.equal(outcome.response.result.structuredContent.pages[0].id, 1);
@@ -1288,6 +1300,18 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
     assert.ok(Number.isSafeInteger(diagnostic.sequence) && diagnostic.sequence > 0);
     assert.ok(Number.isSafeInteger(diagnostic.ageMs) && diagnostic.ageMs >= 0);
   } catch (error) {
+    // Keep failure evidence bounded and synthetic: elapsed times belong to this
+    // observer only; flags report fixed log markers, not a proven host cause.
+    // Never include raw stderr, session IDs, URLs or filesystem paths.
+    const stderr = wrapper.stderrText();
+    console.error('[browser-first-workspace-setup-diagnostic]', JSON.stringify({
+      ...stages,
+      elapsedMs: Math.round(performance.now() - startedAt),
+      prepareFailureReported: stderr.includes('On-demand WebView2 startup request failed:'),
+      prepareDeadlineReported: stderr.includes('On-demand WebView2 startup request failed: browser/host-request-timeout: prepare exceeded 25000ms'),
+      upstreamStartReported: stderr.includes('Starting chrome-devtools-mcp:'),
+      upstreamBoundReported: stderr.includes('Bound conversation browser page:'),
+    }));
     fixture.primaryErrors = [error];
     throw error;
   } finally {
@@ -1517,7 +1541,8 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
         ),
         request.then((response) => assert.fail(
           'tool completed before its release barrier: ' +
-          JSON.stringify(heldRequestResultDiagnostic(response)),
+          JSON.stringify({ ...heldRequestResultDiagnostic(response),
+            authorization: heldRequestAuthorizationDiagnostic(response) }),
         )),
       ]);
       assert.equal(
@@ -2110,12 +2135,14 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
   }
 });
 
-test('Windows proxy: cancelled uncooperative dispatch shuts down on the first deadline and rejects queued work', {
+for (const withholdEndReply of [false, true]) {
+test('Windows proxy: cancelled uncooperative dispatch shuts down on the first deadline and rejects queued work'
+  + (withholdEndReply ? ' while the host end reply is withheld' : ''), {
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
   const host = await createFakeHost(fixture);
-  const wrapper = driveWrapper(fixture);
+  const wrapper = driveWrapper(fixture, { collectResponses: withholdEndReply });
   let replacement = null;
   // In this fixture the first tool call includes lazy startup. Allow for a
   // slow handshake followed by a slow post-bind catalog response. The
@@ -2155,21 +2182,47 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
     const listsBeforeQueued = readAudit(fixture.auditPath)
       .filter((entry) => entry.kind === 'tool' && entry.name === 'list_pages').length;
 
+    if (withholdEndReply) await host.deferOperation('end_agent_operation', true);
     wrapper.abandonRequest(inFlight.id);
     const cancelledAt = Date.now();
     wrapper.notify('notifications/cancelled', {
       requestId: inFlight.id,
       reason: 'cancel uncooperative dispatch',
     });
-    const queuedOutcome = await wrapper.request('tools/call', {
+    const queued = wrapper.startRequest('tools/call', {
       name: 'list_pages',
       arguments: {},
     }, {
       label: 'queued list_pages awaiting shutdown rejection',
     });
+    let cancelledQueued = null;
+    if (withholdEndReply) {
+      cancelledQueued = wrapper.startRequest('tools/call', { name: 'list_pages', arguments: {} });
+      wrapper.abandonRequest(cancelledQueued.id);
+      wrapper.notify('notifications/cancelled', { requestId: cancelledQueued.id });
+    }
+    const queuedOutcome = await queued.response;
     const rejectedAt = Date.now();
     assert.match(queuedOutcome.error?.message || '', /browser\/wrapper-shutting-down/,
       JSON.stringify(heldRequestResultDiagnostic(queuedOutcome)));
+
+    if (withholdEndReply) {
+      // Observe the real End request, keeping its reply withheld. A queued
+      // rejection must not wait for this separate cleanup acknowledgement.
+      const directory = join(fixture.root, 'host-requests');
+      await waitUntil(async () => readdirSync(directory).some(name => {
+        if (!name.endsWith('.json')) return false;
+        const raw = readPendingHostRequest(join(directory, name));
+        return raw != null && JSON.parse(raw).operation === 'end_agent_operation';
+      }), 'cancelled dispatch did not publish its exact host End request');
+      assert.equal((await host.snapshot()).operationCalls.get('end_agent_operation') || 0,
+        before.end, 'withheld End must not be reported as acknowledged');
+      assert.equal(wrapper.child.exitCode, null, 'wrapper must retain its host cleanup barrier');
+      assert.equal(wrapper.child.signalCode, null, 'wrapper must remain live until host cleanup');
+      const late = await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+      assert.match(late.error?.message || '', /browser\/wrapper-shutting-down/);
+      await host.deferOperation('end_agent_operation', false);
+    }
 
     if (wrapper.child.exitCode == null && wrapper.child.signalCode == null) {
       await Promise.race([
@@ -2178,6 +2231,12 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
       ]);
     }
     const shutdownElapsedMs = rejectedAt - cancelledAt;
+    if (withholdEndReply) {
+      assert.equal(wrapper.responses.filter(response => response.id === queued.id).length, 1,
+        'queue draining must not respond again after host End');
+      assert.equal(wrapper.responses.filter(response => response.id === cancelledQueued.id).length, 0,
+        'cancelled queued work must remain abandoned');
+    }
     // Reject delivery that takes a full additional 5s grace window even if
     // the response arrives within the driver's 15s observation budget.
     assert.ok(
@@ -2217,6 +2276,11 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
     fixture.primaryErrors = [error];
     throw error;
   } finally {
-    await cleanupFixture(fixture, host, wrapper, replacement);
+    try {
+      if (withholdEndReply) await host.deferOperation('end_agent_operation', false);
+    } finally {
+      await cleanupFixture(fixture, host, wrapper, replacement);
+    }
   }
 });
+}

@@ -33,6 +33,20 @@ class OwnersTests(unittest.TestCase):
         self.assertEqual(len(phases), len(set(phases)))
         self.assertEqual(sum(len(roots) for roots in OWNER.REQUIRED.values()), 72)
 
+    def test_schema_split_preserves_each_named_phase_and_all_original_roots(self):
+        self.assertEqual(set(OWNER.REQUIRED), set(OWNER.FIN['OWNER_ORDER']))
+        for label, key in (
+            ('owner-account', 'ACCOUNT_REQUIRED'), ('owner-wallet', 'OWNER_REQUIRED'),
+            ('owner-token-schema', 'TOKEN_SCHEMA_REQUIRED'),
+            ('owner-provisioning', 'PROVISIONING_REQUIRED'),
+            ('lifecycle-reconciliation', 'LIFECYCLE_RECONCILIATION_REQUIRED'),
+        ):
+            self.assertEqual(OWNER.REQUIRED[label], OWNER.FIN[key], label)
+        first, second = (OWNER.REQUIRED[label] for label in OWNER.LANES['schema'])
+        self.assertFalse(first & second)
+        self.assertEqual(first | second, OWNER.FIN['SCHEMA_REQUIRED'])
+        self.assertEqual(first, {'TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres'})
+
     def test_shared_or_missing_service_identity_is_rejected_before_workers(self):
         good = self.services()
         self.assertEqual(set(OWNER.service_bindings(json.dumps(good))), set(OWNER.LANES))

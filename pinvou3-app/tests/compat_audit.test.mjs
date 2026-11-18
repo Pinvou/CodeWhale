@@ -32,6 +32,24 @@ const noWebDist = path.join(appRoot, '.compat-test-no-web-dist');
 const hermeticAudit = (options = {}) => runAudit({ distDir: noDesktopDist, webDistDir: noWebDist, ...options });
 const { browserslistToTargets, transform: transformCss } = createRequire(import.meta.url)('lightningcss');
 
+test('guarded API lines keep LF offsets across CRLF and Unicode separators', () => {
+  const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'compat-audit-lines-'));
+  try {
+    fs.mkdirSync(path.join(distDir, 'assets'));
+    fs.writeFileSync(path.join(distDir, 'assets', 'guarded.js'), [
+      'const label = "😀\u2028continued"; structuredClone({}); // safari14-ok',
+      'structuredClone({});',
+      '[1].findLast(value => value);',
+    ].join('\r\n'));
+    const violations = hermeticAudit({ distDir });
+    assert.equal(violations.length, 2, JSON.stringify(violations));
+    assert.match(violations[0], /^dist:guarded\.js:2: structuredClone/);
+    assert.match(violations[1], /^dist:guarded\.js:3: \.findLast\(\)/);
+  } finally {
+    fs.rmSync(distDir, { recursive: true, force: true });
+  }
+});
+
 test('static runtime scripts and HTML inline scripts stay within the Safari 14 baseline', () => {
   assert.deepEqual(hermeticAudit(), []);
 });

@@ -19,9 +19,16 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 FIN = runpy.run_path(str(ROOT / "scripts/test-token-financial-postgres.py"))
 LANES = FIN["OWNER_LANES"]
-REQUIRED = dict(zip(FIN["OWNER_ORDER"], (FIN[key] for key in (
-    "ACCOUNT_REQUIRED", "OWNER_REQUIRED", "SCHEMA_REQUIRED", "TOKEN_SCHEMA_REQUIRED",
-    "PROVISIONING_REQUIRED", "LIFECYCLE_RECONCILIATION_REQUIRED"))))
+# Map by phase identity: main's schema partition adds a phase without changing
+# the original root sets or shifting another lane's coverage requirement.
+REQUIRED = {
+    "owner-account": FIN["ACCOUNT_REQUIRED"],
+    "owner-wallet": FIN["OWNER_REQUIRED"],
+    "owner-token-schema": FIN["TOKEN_SCHEMA_REQUIRED"],
+    "owner-provisioning": FIN["PROVISIONING_REQUIRED"],
+    "lifecycle-reconciliation": FIN["LIFECYCLE_RECONCILIATION_REQUIRED"],
+    **dict(FIN["schema_batches"]()),
+}
 OUTPUT_LOCK = threading.Lock()
 
 
@@ -179,7 +186,7 @@ def main():
             except Exception as error:
                 results.append({"lane": lane, "exit_code": -1, "error_class": type(error).__name__})
     summary = {"schema": 1, **plan, "seconds": time.monotonic() - started, "results": results,
-               "coverage": "all six original owners phases; race and required child-case gates unchanged"}
+               "coverage": "all original owners roots across seven phases; race and required child-case gates unchanged"}
     # .json is reserved for resource ownership leases in this directory.
     (ledger / "owners-summary.txt").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print("Owners result: " + json.dumps(summary), flush=True)

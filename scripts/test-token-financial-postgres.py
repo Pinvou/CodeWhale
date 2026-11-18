@@ -710,9 +710,9 @@ GROUPS = ("owners", "token", *BILLING_GROUPS)
 OWNER_LANES = {
     "account": ("owner-account", "lifecycle-reconciliation"),
     "wallet": ("owner-wallet", "owner-token-schema", "owner-provisioning"),
-    "schema": ("owner-schema",),
+    "schema": ("owner-schema-legacy-expiry", "owner-schema"),
 }
-OWNER_ORDER = ("owner-account", "owner-wallet", "owner-schema", "owner-token-schema",
+OWNER_ORDER = ("owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema",
                "owner-provisioning", "lifecycle-reconciliation")
 EXACT_REQUIRED_CHILDREN["TestOwnerWalletTemplateScopePostgres"] = {
     "first", "first/case-a", "first/case-b", "second", "second/case-a", "second/case-b",
@@ -808,6 +808,16 @@ def phase_timing(label, seconds, events, code, *, started_epoch=None):
         target.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def schema_batches():
+    # Keep the slow historical-upgrade root intact. New required roots join the
+    # second batch; neither batch may be empty or introduce an unknown root.
+    historical = {"TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"}
+    if not historical < SCHEMA_REQUIRED:
+        raise RuntimeError("owner schema requires two nonempty complete-root batches")
+    return (("owner-schema-legacy-expiry", historical),
+            ("owner-schema", SCHEMA_REQUIRED - historical))
+
+
 def main(*, group="all", verify_fixture_cache=False, owner_lane=None):
     if group not in ("all", *GROUPS):
         raise ValueError("unknown financial execution group")
@@ -901,11 +911,14 @@ def main(*, group="all", verify_fixture_cache=False, owner_lane=None):
         phases = {
             "owner-account": ("./internal/account", ACCOUNT_PACKAGE, ACCOUNT_REQUIRED),
             "owner-wallet": ("./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED),
-            "owner-schema": ("./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED),
             "owner-token-schema": ("./internal/tokenschema", TOKEN_SCHEMA_PACKAGE, TOKEN_SCHEMA_REQUIRED),
             "owner-provisioning": ("./internal/token", TOKEN_PACKAGE, PROVISIONING_REQUIRED),
             "lifecycle-reconciliation": ("./internal/account", ACCOUNT_PACKAGE, LIFECYCLE_RECONCILIATION_REQUIRED),
         }
+        # Preserve main's complete-root schema batches inside the isolated schema lane.
+        # Each batch keeps its own 20m bound and mandatory pristine-instance check.
+        phases.update({label: ("./internal/billingschema", SCHEMA_PACKAGE, required)
+                       for label, required in schema_batches()})
         if owner_lane == "wallet" and verify_fixture_cache:
             try:
                 run_phase("owner-wallet-scope-isolation", "./internal/billing", BILLING_PACKAGE,
