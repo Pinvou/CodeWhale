@@ -95,7 +95,7 @@
 
 ### 2026-11-15 公开维护头对齐（#157，随来源 PR #875 合入主线；父仓 PR #2395 同步消费同一头）
 
-- 公共 CI 的 `verify-public-submodule.sh` 仍严格要求父仓 gitlink 等于 `pinjou3-clean`。公开维护分支以一个未签署 squash 提交推进到 `687358f7`（#157）后，按既定过渡规则只更新消费点，保留 r3 标签及全部门禁；维护基线 `8e8d52fdb` 仍是新头祖先，公开维护头门禁继续生效。
+- 公共 CI 的 `verify-public-submodule.sh` 仍严格要求父仓 gitlink 等于 `pinvou3-clean`。公开维护分支以一个未签署 squash 提交推进到 `687358f7`（#157）后，按既定过渡规则只更新消费点，保留 r3 标签及全部门禁；维护基线 `8e8d52fdb` 仍是新头祖先，公开维护头门禁继续生效。
 - #157 `687358f7e` 归入 T2：一方 session-reader 只读读取面分类修复——`mcp_session-reader_read_session` 与 `mcp_session-reader_list_sessions` 以精确工具名加入引擎只读辅助名单（`is_mcp_read_helper`），按 ReadOnly/Auto/eager 分类而非保守的 `[Network, RequiresApproval]` 默认。服务端契约（游标分页、仅已完成回合、逐条截断、跨 session 前缀拒绝）使其真只读；此前被误分类为需审批的网络工具，导致 Plan 钉死的 aux lane 唯一工具即此读取时在执行前死锁。前缀冒名（如 `mcp_session-reader_read_session_export`）与其余 MCP 工具仍留在需审批侧。回归由 `registry/tests.rs` 扩展两个既有测试（`mcp_read_helpers_remain_auto_and_eagerly_loaded`、`mcp_actions_require_approval_with_exact_helper_matching`）的表驱动数据条目覆盖（+23 行，无既有行为改写，无新增 `forkguard_*` 行为名，登记数仍 301）。
 - guard 同步：登记头 `8e8d52fdb`→`687358f7`、提交数 99→100、注释更新（随来源 PR #875 落地）；父仓 PR #2395 同步批补强：第 1 层新增两条源码指纹（`"mcp_session-reader_read_session"` 与 `"mcp_session-reader_list_sessions"`，钉 `registry.rs` 的精确名匹配分支）；第 2 层新增按名执行上述两个既有测试的 pinned runner（要求恰 1 passed，改名或删除即响红而非静默 no-op）。#157 无 DCO 签署，并入未签署 squash 例外清单。
 - 父仓同步 gitlink 与 guard 登记及补强条目；不触及 Cargo manifest 或锁文件，无需重生成依赖锁；不修改底座源码、公开维护分支或不可变 r3 标签。
@@ -103,7 +103,7 @@
 
 ### 2026-11-14 公开维护头对齐（#156，随来源 PR #850）
 
-- 公共 CI 的 `verify-public-submodule.sh` 仍严格要求父仓 gitlink 等于 `pinjou3-clean`。公开维护分支以一个已签署提交推进后，本批只按既定过渡规则更新消费点，保留 r3 标签及全部门禁；维护基线 `6f7a3a748` 仍是新头祖先，公开维护头门禁继续生效。
+- 公共 CI 的 `verify-public-submodule.sh` 仍严格要求父仓 gitlink 等于 `pinvou3-clean`。公开维护分支以一个已签署提交推进后，本批只按既定过渡规则更新消费点，保留 r3 标签及全部门禁；维护基线 `6f7a3a748` 仍是新头祖先，公开维护头门禁继续生效。
 - #156 `8e8d52fdb` 归入 T2：rustc/clippy 1.100 stable（2026-11-09 发布）新 lint 的五处等价改写，无行为变化——terminal 探针测试的 `map_err(|err| io::Error::other(err.to_string()))` 在 never 类型稳定后对 `Infallible`（ratatui 0.30 `with_options` 返回 `Result<_, B::Error>`、`TestBackend::Error` 不可 inhabitable）被 `unreachable_code` 证明为死代码，改为 `map_err(io::Error::other)` 直传（类型转换 load-bearing，保留）；`fleet/manager.rs`、subagent coord ledger 与 `tui/auto_review.rs` 三处 needless_bool 收尾表达式化；`tui/transcript/tests.rs` 两处 needless_range_loop 改 `per_cell[..3].iter().enumerate()`。对照纯净 `6f7a3a748` 以 1.99.1 复跑同款命令确认五处恰为 1.100 新增；all-targets 严格面遗留的既有债务（2 处 collapsible_if 与 `cargo doc -Dwarnings` 的 rustdoc 私有链接）在 1.99.1 下同样存在，本批未触碰。首次由父仓 Windows 回归腿（codewhale-tui lib test 编译）暴露。
 - 随来源 PR #850 补强 #148 todo schema 的守护：在既有两条测试名指纹（仅钉源文本）之上，新增两条 schema 字面量指纹（`"required": ["content"]` 与 Defaults to pending 描述行），guard 第 2 层新增按名执行 `todo_item_status_is_optional_with_a_pending_default` 与 `work_update_treats_a_missing_status_as_pending` 的 pinned runner（要求恰 1 passed，改名或删除即响红而非静默 no-op）。
 - 父仓同步 gitlink、guard 登记头/提交数（98→99）与注释；不触及 Cargo manifest 或锁文件（#152 批的依赖升级与 renormalization 已随 2026-11-10 对齐消费），无需重生成依赖锁；不修改底座源码、公开维护分支或不可变 r3 标签。
