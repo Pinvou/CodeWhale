@@ -3668,6 +3668,7 @@ python3() { fixture_mock python3 "$@"; }
         reviewed_diagnostics = (
             "Upload frontend setup bundle",
             "PR test success proof transport",
+            "Gate test resource lifecycle receipts",
             "Windows 测试二进制导入诊断",
             "Test resource lifecycle receipts",
             "Browser shard resource lifecycle receipts",
@@ -3739,6 +3740,19 @@ python3() { fixture_mock python3 "$@"; }
             '      - name: Require frontend setup bundle upload\n        if: ${{ always() && !cancelled() }}\n        shell: bash\n        env:\n          FRONTEND_TRANSPORT: ${{ steps.frontend_bundle.outputs.transport }}\n          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}\n          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}\n          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n        run: |\n          set -euo pipefail\n          case "$FRONTEND_TRANSPORT:$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in\n            github:success:skipped|github:failure:success) ;;\n            lan:skipped:skipped) ;;\n            *) echo \'::error::Frontend setup bundle upload did not complete successfully.\' >&2; exit 1 ;;\n          esac\n          if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then\n            echo \'::error::Frontend setup bundle is missing or empty.\' >&2\n            exit 1\n          fi',
         )
         # All other COE occurrences retain the original exact diagnostic contracts.
+        gate_diagnostic = _step_named(_extract_job_block(body, 'fast-gate'), 'Gate test resource lifecycle receipts')
+        self.assertEqual(gate_diagnostic.rstrip(), textwrap.indent(textwrap.dedent("""\
+            - name: Gate test resource lifecycle receipts
+              if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+              timeout-minutes: 3
+              continue-on-error: true
+              uses: actions/upload-artifact@v7
+              with:
+                name: gate-resource-lifecycle-${{ github.run_attempt }}
+                path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                if-no-files-found: error
+                retention-days: 7
+        """).rstrip(), '      '))
         diagnostic_job = _extract_job_block(body, 'windows-rust-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Windows 测试二进制导入诊断\n.*?(?=^      - |\Z)", diagnostic_job
@@ -3902,6 +3916,13 @@ python3() { fixture_mock python3 "$@"; }
                 1,
             ),
         }
+        gate_upload = _step_named(_extract_job_block(original, 'fast-gate'), 'Gate test resource lifecycle receipts')
+        gate_without_exemption = original.replace(gate_upload, gate_upload.replace('        continue-on-error: true\n', '', 1), 1)
+        mutations['move gate diagnostic exemption to full test discovery'] = gate_without_exemption.replace(
+            '      - name: Gate policy test suite (scripts/tests)\n',
+            '      - name: Gate policy test suite (scripts/tests)\n        continue-on-error: true\n', 1)
+        mutations['turn gate diagnostic upload into a command'] = original.replace(
+            gate_upload, gate_upload.replace('uses: actions/upload-artifact@v7', 'run: exit 37', 1), 1)
         atomic = _step_named(
             _extract_job_block(original, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
         )
@@ -7074,7 +7095,7 @@ exit 0
         env = dict(os.environ)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         env["REPAIR_TEST_STATE"] = str(self.state)
-        env["PINVOU3_CI_DPKG_UPDATES_DIR"] = str(self.updates)
+        env["PINVOU3_CI_DPKG_UPDATES_DIR"] = self.updates.as_posix()
         env.pop("GITHUB_ACTIONS", None)
         # 行为夹具必须走 hosted 主路径:生产脚本在 RUNNER_ENVIRONMENT=self-hosted
         # 时于 repair/trap 安装前安全早退(保留管理员预置内存),该早退本身
@@ -7153,6 +7174,30 @@ exit 0
         calls = self._configure_calls()
         self.assertEqual(len(calls), 1, calls)
         self.assertIn("dpkg admin state repaired (configure attempt 1)", proc.stdout)
+
+
+class FrontendCacheFixtureOwnershipTests(unittest.TestCase):
+    def test_cache_contracts_are_discovered_once_inside_the_owned_gate_scope(self):
+        job = _extract_job_block(PR_WORKFLOW.read_text(encoding='utf-8'), 'fast-gate')
+        step = _step_named(job, 'Gate policy test suite (scripts/tests)')
+        command = '\n'.join(_step_run_lines(step)).strip()
+        self.assertRegex(command, r'^python3 scripts/ci-fixture-process\.py --receipt "\$PINVOU_CI_RESOURCE_LEDGER/gate-policy\.json" -- python3 -m unittest discover -s scripts/tests -p \'test_\*\.py\' -v$')
+        for name in ['test_ci_frontend_bundle.py', 'test_ci_frontend_cache_server.py',
+                     'test_ci_transfer_deadline.py', 'test_ci_frontend_checkout.py', 'test_ci_npm_audit.py']:
+            self.assertTrue((ROOT / 'scripts/tests' / name).is_file())
+            self.assertTrue(fnmatchcase(name, 'test_*.py'))
+        self.assertNotIn('Verified frontend bundle cache contracts', job, 'avoid a second unowned execution of the same fixtures')
+        initialize = _step_named(job, 'Initialize gate test resource ledger')
+        self.assertEqual('\n'.join(_step_run_lines(initialize)).strip(), 'python3 scripts/ci-resource-ledger.py --init')
+        self.assertLess(job.index(initialize), job.index(step))
+        retirement = _step_named(job, 'Confirm gate test resource retirement')
+        self.assertIn("always() && env.PINVOU_CI_RESOURCE_LEDGER != ''", retirement)
+        self.assertEqual('\n'.join(_step_run_lines(retirement)).strip(), 'python3 scripts/ci-resource-ledger.py --recover')
+        self.assertNotIn('continue-on-error', retirement)
+        upload = _step_named(job, 'Gate test resource lifecycle receipts')
+        self.assertIn('always()', upload)
+        self.assertIn('timeout-minutes: 3', upload)
+        self.assertIn('continue-on-error: true', upload)
 
 
 if __name__ == "__main__":

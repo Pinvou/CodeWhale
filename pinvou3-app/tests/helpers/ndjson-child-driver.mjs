@@ -10,6 +10,7 @@ export function spawnNdjsonChild({
   collectResponses = false,
   unrefTimeout = false,
 }) {
+  const startedAt = performance.now();
   const child = spawn(process.execPath, args, {
     stdio: ['pipe', 'pipe', stderr === 'inherit' ? 'inherit' : 'pipe'],
     env,
@@ -19,12 +20,38 @@ export function spawnNdjsonChild({
   let nextId = 1;
   const pending = new Map();
   const responses = [];
+  let spawnedAt = null;
+  let exitedAt = null;
+  let closedAt = null;
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  let lastStdoutAt = null;
+  child.once('spawn', () => { spawnedAt = performance.now(); });
+  child.once('exit', () => { exitedAt = performance.now(); });
+  child.once('close', () => { closedAt = performance.now(); });
+  // Counters and lifecycle only: never serialize protocol messages or env.
+  const diagnostic = () => ({
+    pid: child.pid ?? null,
+    spawned: spawnedAt !== null,
+    spawnElapsedMs: spawnedAt === null ? null : spawnedAt - startedAt,
+    ageMs: performance.now() - startedAt,
+    exited: exitedAt !== null,
+    closed: closedAt !== null,
+    exitCode: child.exitCode,
+    signalCode: child.signalCode,
+    stdoutBytes,
+    stderrBytes: child.stderr ? stderrBytes : null,
+    lastStdoutAgeMs: lastStdoutAt === null ? null : performance.now() - lastStdoutAt,
+    pendingRequests: pending.size,
+  });
   const observerDelay = monitorEventLoopDelay({ resolution: 20 });
   observerDelay.enable();
   child.once('close', () => observerDelay.disable());
 
-  child.stderr?.on('data', (chunk) => { stderrOutput += chunk; });
+  child.stderr?.on('data', (chunk) => { stderrBytes += chunk.length; stderrOutput += chunk; });
   child.stdout.on('data', (chunk) => {
+    stdoutBytes += chunk.length;
+    lastStdoutAt = performance.now();
     stdout += chunk;
     let newline;
     while ((newline = stdout.indexOf('\n')) >= 0) {
@@ -47,16 +74,24 @@ export function spawnNdjsonChild({
     const { timeoutMs: requestTimeoutMs = timeoutMs, label = method } =
       typeof options === 'number' ? { timeoutMs: options } : options ?? {};
     const id = nextId++;
-    const startedAt = performance.now();
+    const requestedAt = performance.now();
+    const cpuAtRequest = process.cpuUsage();
     const response = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         if (!pending.delete(id)) return;
-        const diagnostic = JSON.stringify({
-          observer_elapsed_ms: Math.round(performance.now() - startedAt),
+        const cpu = process.cpuUsage(cpuAtRequest);
+        const observedMs = performance.now() - requestedAt;
+        const observation = { ...diagnostic(), deadlineMs: requestTimeoutMs, observedMs,
+          timerDelayMs: Math.max(0, observedMs - requestTimeoutMs),
+          observerProcessCpuMs: (cpu.user + cpu.system) / 1000 };
+        const observer = JSON.stringify({
+          observer_elapsed_ms: Math.round(observedMs),
           observer_loop_max_delay_ms: Math.round(observerDelay.max / 1e6),
           child_exit_code: child.exitCode,
         });
-        reject(new Error(`${label} timed out after ${requestTimeoutMs}ms (request ${id}); observer: ${diagnostic}; child stderr: ${stderrOutput}`));
+        const error = new Error(`${label} timed out after ${requestTimeoutMs}ms (request ${id}); observer: ${observer}; child stderr: ${stderrOutput}; observation: ${JSON.stringify(observation)}`);
+        error.childDiagnostic = observation;
+        reject(error);
       }, requestTimeoutMs);
       if (unrefTimeout) timeout.unref();
       pending.set(id, { resolve, timeout });
@@ -69,6 +104,7 @@ export function spawnNdjsonChild({
     child,
     responses,
     stderrText: () => stderrOutput,
+    diagnostic,
     send,
     notify(method, params = {}) {
       send({ jsonrpc: '2.0', method, params });

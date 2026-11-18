@@ -81,6 +81,8 @@ func seedOrganizationEvidence(t *testing.T, ctx context.Context, r *PostgresRepo
 	}
 }
 
+const organizationEvidenceTruncateMigrationVersion int64 = 900015
+
 func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 	f := retainedWalletFenceActors(t)
 	for _, scenario := range []string{"fresh-install", "retained-upgrade"} {
@@ -93,7 +95,7 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 				initial = func(ctx context.Context, connection *pgx.Conn, loaded []migrations.Migration) error {
 					old := make([]migrations.Migration, 0, len(loaded)-1)
 					for _, m := range loaded {
-						if m.Version != 900015 {
+						if m.Version != organizationEvidenceTruncateMigrationVersion {
 							old = append(old, m)
 						}
 					}
@@ -119,7 +121,7 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 			}
 			// This test owns the 900015 release's forward-only statement guard.
 			// Later reversible index migrations must not mask that exact Down.
-			r := f.repositoryThroughVersion(t, 900015, initial)
+			r := f.repositoryThroughVersion(t, organizationEvidenceTruncateMigrationVersion, initial)
 			if scenario == "fresh-install" {
 				replay = seedOrganizationEvidence(t, ctx, r)
 				before = organizationEvidenceFacts(t, ctx, r)
@@ -163,7 +165,7 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 				}
 			})
 			t.Run("forward-only-public-down", func(t *testing.T) {
-				loaded, err := migrations.Load("../../migrations/account")
+				loaded, err := accountMigrationsThrough(organizationEvidenceTruncateMigrationVersion)
 				if err != nil {
 					t.Fatal(err)
 				}
