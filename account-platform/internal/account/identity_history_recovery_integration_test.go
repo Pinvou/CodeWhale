@@ -547,6 +547,11 @@ func assertHistoricalForwardOnlyMigration(t *testing.T, r *PostgresRepository, i
 
 func assertHistoricalRollbackRefusal(t *testing.T, r *PostgresRepository, installed []migrations.Migration, version int64, sqlstate, message string) {
 	t.Helper()
+	assertHistoricalRollbackRefusalContext(t, context.Background(), r, installed, version, sqlstate, message)
+}
+
+func assertHistoricalRollbackRefusalContext(t *testing.T, ctx context.Context, r *PostgresRepository, installed []migrations.Migration, version int64, sqlstate, message string) {
+	t.Helper()
 	var downSQL string
 	for _, migration := range installed {
 		if migration.Version == version {
@@ -556,7 +561,6 @@ func assertHistoricalRollbackRefusal(t *testing.T, r *PostgresRepository, instal
 	if strings.TrimSpace(downSQL) == "" {
 		t.Fatal("historical rollback SQL missing", version)
 	}
-	ctx := context.Background()
 	cfg := r.pool.Config().ConnConfig.Copy()
 	cfg.User = "account_migrator"
 	cfg.Password = ""
