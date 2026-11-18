@@ -519,7 +519,19 @@ pub fn is_parallel_readonly_command(command: &str) -> bool {
 /// posture. Keys on the arity-aware canonical form, the literal-program
 /// hardener, the env-prefix rejection, and the per-command option tables.
 fn readonly_tokens_admitted(trimmed: &str) -> bool {
-    let tokens = shell_words(trimmed);
+    readonly_tokens_admitted_tokens(shell_words(trimmed))
+}
+
+/// The token-level core of [`readonly_tokens_admitted`]: classification over
+/// an already-parsed argv vector. The git family re-dispatches through this
+/// core after stripping its global preamble, because joining the parsed
+/// tokens back into a string and re-tokenizing would lose quoting — a quoted
+/// value carrying whitespace or a `--` separator spells a different argv
+/// after that round trip, and the option table would then judge a terminator
+/// the executed vector does not contain, admitting a later output-writing
+/// option as a plain in-workspace operand while it stays operative on the
+/// wire.
+fn readonly_tokens_admitted_tokens(tokens: Vec<String>) -> bool {
     let Some(start) = primary_token_index(&tokens) else {
         return false;
     };
@@ -741,6 +753,37 @@ pub(crate) fn command_reaches_github_readonly(command: &str) -> bool {
             .flat_map(|segment| readonly_pipeline_stages(segment))
             .any(is_github_readonly_stage)
     })
+}
+
+/// Whether one pipeline stage is an npm registry metadata read
+/// (`npm view|show|info`): the family contacts the package registry with a
+/// bare package argument — no URL-bearing field — so the URL-shaped network
+/// scan cannot see it, and a network-denied child's gate needs this shape
+/// predicate to cover the family's inherent reach.
+fn is_npm_registry_readonly_stage(stage: &str) -> bool {
+    let tokens = shell_words(stage.trim());
+    matches!(tokens.first().map(String::as_str), Some("npm"))
+        && matches!(
+            tokens.get(1).map(String::as_str),
+            Some("view" | "show" | "info")
+        )
+}
+
+/// The complete admitted-command network classification for the read-only
+/// shell lane: every admitted family whose execution reaches the network —
+/// the GitHub CLI reads and the npm registry metadata reads. Child network
+/// gates consult this one predicate (never a narrower one) so a family's
+/// inherent reach cannot slip past a guard that only recognizes URL
+/// spellings or one family's shape.
+#[must_use]
+pub(crate) fn command_reaches_network_readonly(command: &str) -> bool {
+    command_reaches_github_readonly(command)
+        || readonly_sequence_segments(command).is_some_and(|segments| {
+            segments
+                .iter()
+                .flat_map(|segment| readonly_pipeline_stages(segment))
+                .any(is_npm_registry_readonly_stage)
+        })
 }
 
 /// How a sequence segment is joined to its predecessor. The distinction is
@@ -1102,9 +1145,13 @@ fn is_agent_readonly_git(tokens: &[String]) -> bool {
     }
     // Re-enter the parallel option tables with the preamble stripped so
     // `git -C dir log --oneline -n 5` is judged as `git log --oneline -n 5`.
+    // The token vector is classified DIRECTLY — joining it back into a
+    // string would re-tokenize quoted values (a quoted `--` inside an
+    // option value becomes a live terminator on the reparse, shifting the
+    // option/operand boundary behind what git actually executes).
     let mut reduced = vec![tokens[0].clone()];
     reduced.extend(rest.iter().cloned());
-    readonly_tokens_admitted(&reduced.join(" "))
+    readonly_tokens_admitted_tokens(reduced)
 }
 
 /// Classify an attached-value token `--flag=value`: read-only exactly when
@@ -3967,6 +4014,54 @@ mod tests {
                 "{command} must stay refused by the grammar"
             );
         }
+    }
+
+    /// The complete network classification adds the npm registry metadata
+    /// family — the one admitted family whose reach carries no URL-bearing
+    /// field, so the URL-shaped scan cannot cover it.
+    #[test]
+    fn command_reaches_network_readonly_covers_the_npm_registry_family() {
+        for command in [
+            "npm view codewhale version",
+            "npm show codewhale",
+            "pwd; npm info x | wc -l",
+            "gh repo view; npm view x",
+        ] {
+            assert!(
+                command_reaches_network_readonly(command),
+                "{command} reaches the package registry through an admitted read"
+            );
+        }
+        for command in [
+            "npm --version",
+            "npm run test",
+            "cat package.json | wc -l",
+            "git status",
+        ] {
+            assert!(
+                !command_reaches_network_readonly(command),
+                "{command} is local work and must not be recognized as network reach"
+            );
+        }
+    }
+
+    /// The git family classifies the EXACT token vector execution uses:
+    /// joining the parsed tokens back into a string and re-tokenizing
+    /// misreads a quoted value carrying `--` — the reparse sees an option
+    /// terminator the executed argv does not contain, so an output-writing
+    /// option after it passes admission as a plain in-workspace operand
+    /// while staying operative on the wire.
+    #[test]
+    fn agent_readonly_git_judges_the_executed_token_vector_not_a_reparse() {
+        assert!(!is_agent_readonly_shell_command(
+            "git diff --diff-filter \"a -- x\" --output=y"
+        ));
+        // The same quoted value without the output-writing option stays
+        // admitted: `--diff-filter` consumes it on the real vector and
+        // nothing follows.
+        assert!(is_agent_readonly_shell_command(
+            "git diff --diff-filter \"a -- x\""
+        ));
     }
 
     #[test]

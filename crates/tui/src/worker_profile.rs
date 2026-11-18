@@ -284,6 +284,22 @@ impl WorkerRuntimeProfile {
     /// The child keeps its own requested role, model route, and
     /// foreground/background preference (these don't grant capability), but its
     /// provider falls back to the parent's when unset.
+    /// Conservative migration for a preserved legacy record: schema-1
+    /// persistence carried no explicit-origin field, so a saved profile
+    /// whose `explicit_denied_tools` deserialized to the default empty set
+    /// proves nothing about where its `denied_tools` entries came from.
+    /// When such a profile replaces a freshly stamped runtime on resume,
+    /// every ambiguous entry is treated as operator-explicit — the bounded
+    /// read-only bash carve-out may override the automatic role clamps,
+    /// never an untraceable restriction. Records that already carry explicit
+    /// entries (fresh dual-stamped saves) pass through unchanged.
+    pub fn with_ambiguous_denies_treated_explicit(mut self) -> Self {
+        if self.explicit_denied_tools.is_empty() && !self.denied_tools.is_empty() {
+            self.explicit_denied_tools = self.denied_tools.clone();
+        }
+        self
+    }
+
     #[must_use]
     pub fn derive_child(&self, requested: &WorkerRuntimeProfile) -> WorkerRuntimeProfile {
         let permissions = self.permissions.intersect(requested.permissions);
@@ -413,6 +429,38 @@ mod tests {
         // Even though the child asks for everything, the read-only parent wins.
         let got = parent.intersect(greedy_child);
         assert_eq!(got, PermissionSet::read_only());
+    }
+
+    /// The conservative migration for preserved legacy records: a schema
+    /// without the explicit-origin field leaves `explicit_denied_tools`
+    /// empty while the operator's rules still sit in the mixed
+    /// `denied_tools`, and the bounded read-only bash carve-out consults
+    /// exactly that explicit set — so an ambiguous profile migrates every
+    /// entry to explicit, and a fresh dual-stamped record passes through
+    /// untouched.
+    #[test]
+    fn ambiguous_legacy_denies_migrate_to_explicit() {
+        let mut legacy = WorkerRuntimeProfile::for_role(FleetRole::Verifier);
+        legacy.denied_tools = vec!["exec_shell".to_string(), "bash".to_string()];
+        legacy.explicit_denied_tools.clear();
+        let migrated = legacy.with_ambiguous_denies_treated_explicit();
+        assert!(
+            migrated
+                .explicit_denied_tools
+                .contains(&"exec_shell".to_string())
+                && migrated.explicit_denied_tools.contains(&"bash".to_string()),
+            "every ambiguous entry must land in the explicit set: {:?}",
+            migrated.explicit_denied_tools
+        );
+
+        // A fresh dual-stamped record (explicit entries already present) is
+        // not rewritten by the migration.
+        let fresh = WorkerRuntimeProfile::for_role(FleetRole::Verifier);
+        let untouched = fresh.clone().with_ambiguous_denies_treated_explicit();
+        assert_eq!(
+            untouched.explicit_denied_tools, fresh.explicit_denied_tools,
+            "a record carrying explicit provenance passes through unchanged"
+        );
     }
 
     #[test]
