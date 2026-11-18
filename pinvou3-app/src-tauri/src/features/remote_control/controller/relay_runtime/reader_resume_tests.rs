@@ -1,6 +1,7 @@
 //! Windows-only real Wry/RelayClient/manager/worker wiring regression.
-//! Relay/A wire inputs are simulated with real authenticated fixtures. No
-//! renderer, real provider, external host, or production deployment is involved.
+//! Resume tests simulate Relay/A wire inputs with authenticated fixtures. The
+//! reservation replay submodule instead uses the real JS Relay producer/router.
+//! No renderer, real provider, external host, or deployment is involved.
 // architecture-guard: allow-target-cfg -- Test-only real Windows controlled-device Wry host: no cross-OS GUI/unsupported adapter is simulated; the whole module is excluded outside Windows.
 // architecture-guard: allow-reader-test-host-type -- Windows test-only real reader regression accepts AppHandle from the app-owned Wry factory; no host construction or event/command API exception.
 #![cfg(all(test, target_os = "windows"))]
@@ -13,6 +14,9 @@ pub(super) type Socket = WebSocketStream<TcpStream>;
 
 #[path = "reader_resume_tests/journal_owner_tests.rs"]
 pub(crate) mod journal_owner_tests;
+
+#[path = "reader_resume_tests/reservation_replay_tests.rs"]
+pub(crate) mod reservation_replay_tests;
 
 #[path = "reader_resume_tests/prepare_requeue_tests.rs"]
 mod prepare_requeue_tests;
@@ -305,6 +309,45 @@ pub(crate) async fn resume_round_trip<T>(
     }
     // App owns host construction. Keep its guard alive through all readers.
     let (handle, _host) = build_host();
+    if std::env::var("PINVOU_READER_OWNER_CASE").as_deref() == Ok("reservation-replay") {
+        let manager = handle.state::<ControlledDeviceManager>();
+        let operation = manager.start(None, Vec::new()).unwrap();
+        let now = controlled_monotonic_millis();
+        manager
+            .complete_registration(
+                operation.clone(),
+                ControlledRegistration {
+                    pairing_code: "2345678".into(),
+                    sealed_code_b64: "sealed".into(),
+                    expires_at_ms: now + 30_000,
+                },
+                now,
+            )
+            .unwrap();
+        let relay = RemoteControlManager::new(handle.clone());
+        let channel = relay
+            .start_controller_relay(operation.generation())
+            .await
+            .unwrap();
+        let worker = ControlledRelayWorker {
+            transport_owner: None,
+            app: handle.clone(),
+            relay,
+            operation,
+            code_wrap: CodeWrapKeyPair::generate().unwrap(),
+            handshake: Some(HandshakeKeyPair::generate().unwrap()),
+            channel,
+            business: std::sync::Arc::new(NoBusiness),
+            action_results: std::sync::Arc::new(RemoteActionResultCache::default()),
+            business_epoch: std::sync::Arc::new(AtomicU64::new(0)),
+            processed_frames: None,
+            before_frame_effect: None,
+            activation_probe: None,
+            evidence_hooks: None,
+        };
+        reservation_replay_tests::round_trip(worker, &listener).await;
+        return;
+    }
     if std::env::var("PINVOU_READER_FINAL_ADMISSION_SCENARIO").as_deref() == Ok("1") {
         let manager = handle.state::<ControlledDeviceManager>();
         // The app factory manages this exact Relay and registers the production
