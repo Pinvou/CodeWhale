@@ -37,9 +37,14 @@ const productionCleanup = `$cleanupNode=@($ast.FindAll({param($n)$n -is [Managem
 
 for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : ['pwsh']) {
   test(`production completion marker serializes the authenticated interval [${shell}]`, () => {
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "pinvou-completion-"));
+    // Delete only this parent-owned fixture after the producer shell exits.
+    let primaryError;
+    let bodyFailed = false;
+    try {
     // Execute the actual producer block and artifact registration, without SSH,
     // a signer or deployment. The validator suite separately checks signatures.
-    const script = `$ErrorActionPreference='Stop';
+      const script = `$ErrorActionPreference='Stop';
       if($env:PINVOU_TEST_FOREIGN_MODULE_PATH -and (@($env:PSModulePath -split [IO.Path]::PathSeparator) -contains $env:PINVOU_TEST_FOREIGN_MODULE_PATH)){throw 'foreign-module-path-inherited'};
       if($env:OS -eq 'Windows_NT'){Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force};
       ${productionAst}
@@ -51,8 +56,7 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
       $end=$source.IndexOf('foreach ($artifact in $artifacts)', $start);
       if($start -lt 0 -or $end -lt 0){throw 'completion-block-missing'};
       $emit=[scriptblock]::Create($source.Substring($start,$end-$start));
-      $evidenceRoot=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-completion-'+[Guid]::NewGuid().ToString('N'));
-      try {
+      $evidenceRoot=${quote(evidenceRoot)};
         New-Item -ItemType Directory -Path (Join-Path $evidenceRoot 'gates') -Force | Out-Null;
         $artifacts=[Collections.Generic.List[object]]::new();$actualHead='${'b'.repeat(40)}';$runNonce='${'d'.repeat(64)}';
         $TimestampFormat='yyyy-MM-ddTHH:mm:ss.fffZ';$runStartedAt=[DateTime]::UtcNow.ToString($TimestampFormat);
@@ -67,14 +71,30 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
         $runClock=[pscustomobject]@{ElapsedMilliseconds=[long]7200001};$runClock|Add-Member ScriptMethod Stop {};
         $count=$artifacts.Count;try{. $emit;throw 'overlong-run-accepted'}catch{if($_.Exception.Message -cne 'e2e_run_duration_invalid'){throw}};
         if($artifacts.Count -ne $count){throw 'overlong-run-published'}
-      } finally {if(Test-Path -LiteralPath $evidenceRoot){Remove-Item -LiteralPath $evidenceRoot -Recurse -Force}}`;
-    const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {env: shellEnv, encoding: 'utf8', timeout: 30000});
-    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
-    const actual = JSON.parse(result.stdout);
-    const marker = JSON.parse(Buffer.from(actual.marker_base64, 'base64').toString('utf8'));
-    assert.equal(marker.started_at, actual.started_at);
-    assert.equal(marker.finished_at, actual.finished_at);
-    assert.equal(actual.interval_sha256, crypto.createHash('sha256').update(JSON.stringify(actual.interval)).digest('hex'));
+        # A deliberately caught rejection must not become the shell exit status.
+        exit 0;
+        `;
+      const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {env: shellEnv, encoding: 'utf8', timeout: 30000});
+      assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+      const actual = JSON.parse(result.stdout);
+      const marker = JSON.parse(Buffer.from(actual.marker_base64, 'base64').toString('utf8'));
+      assert.equal(marker.started_at, actual.started_at);
+      assert.equal(marker.finished_at, actual.finished_at);
+      assert.equal(actual.interval_sha256, crypto.createHash('sha256').update(JSON.stringify(actual.interval)).digest('hex'));
+    } catch (error) {
+      bodyFailed = true;
+      primaryError = error;
+      throw error;
+    } finally {
+      try {
+        rmSync(evidenceRoot, { recursive: true, force: true });
+      } catch (cleanupError) {
+        if (bodyFailed) {
+          throw new AggregateError([primaryError, cleanupError], "completion fixture body and cleanup failed");
+        }
+        throw cleanupError;
+      }
+    }
   });
 }
 
