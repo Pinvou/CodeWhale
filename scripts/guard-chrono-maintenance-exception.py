@@ -4,7 +4,10 @@
 from datetime import date, datetime, timezone
 from pathlib import Path
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    sys.exit("chrono exception guard requires Python 3.11+ (tomllib)")
 
 
 ADVISORY = "RUSTSEC-2026-0543"
@@ -13,6 +16,7 @@ LOCKFILES = (
     "pinvou-knowledge/Cargo.lock",
     "pinvou3-app/src-tauri/Cargo.lock",
     "pinvou-cli/Cargo.lock",
+    "pinvou3-app/src-tauri/tests/controller-crypto-harness/Cargo.lock",
 )
 POLICY = "pinvou3-app/src-tauri/deny.toml"
 VERSION = "0.4.45"
@@ -39,13 +43,23 @@ def validate_repository(root, today=None):
     if today >= EXPIRES:
         raise GuardError(f"{ADVISORY} exception expired at {EXPIRES} 00:00 UTC; migrate chrono and remove it")
     policy = read_toml(root, POLICY).get("advisories", {})
+    if not isinstance(policy, dict):
+        raise GuardError("invalid advisory policy table")
+    if type(policy.get("version")) is not int or policy["version"] != 2:
+        raise GuardError("expected reviewed advisory policy format 2")
     ignores = policy.get("ignore", [])
     if not isinstance(ignores, list):
         raise GuardError("invalid advisory ignore list")
-    ids = [item if isinstance(item, str) else item.get("id")
-           if isinstance(item, dict) else None for item in ignores]
-    if ids.count(ADVISORY) != 1:
-        raise GuardError("expected exactly one reviewed chrono advisory exception; remove guard together with exception after migration")
+    for item in ignores:
+        if isinstance(item, str):
+            continue
+        if (not isinstance(item, dict) or set(item) - {"id", "reason"}
+                or not isinstance(item.get("id"), str)
+                or ("reason" in item and not isinstance(item["reason"], str))):
+            raise GuardError("invalid advisory ignore entry; expected id and optional string reason")
+    ids = [item if isinstance(item, str) else item["id"] for item in ignores]
+    if ids != [ADVISORY]:
+        raise GuardError("expected only the reviewed chrono advisory exception; remove guard together with exception after migration")
     if (policy.get("unmaintained") != "workspace"
             or policy.get("unsound") != "workspace"
             or policy.get("yanked") != "deny"
@@ -54,8 +68,10 @@ def validate_repository(root, today=None):
     for relative in LOCKFILES:
         lock = read_toml(root, relative)
         packages = lock.get("package")
-        if lock.get("version") != 4 or not isinstance(packages, list) or not all(isinstance(p, dict) for p in packages):
-            raise GuardError(f"{relative}: invalid lockfile inventory")
+        if type(lock.get("version")) is not int or lock["version"] != 4:
+            raise GuardError(f"{relative}: unsupported lockfile format")
+        if not isinstance(packages, list) or not all(isinstance(p, dict) for p in packages):
+            raise GuardError(f"{relative}: invalid package inventory")
         chrono = [p for p in packages if p.get("name") == "chrono"]
         if (len(chrono) != 1 or chrono[0].get("version") != VERSION
                 or chrono[0].get("source") != SOURCE
