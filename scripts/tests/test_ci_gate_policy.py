@@ -3719,6 +3719,12 @@ python3() { fixture_mock python3 "$@"; }
                 "step, not another step that moved under it",
             )
         # This is recovery, not an unbounded advisory transport exception.
+        # The primary upload runs only on the github transport (the lan
+        # transport serves the bundle from its own cache), may fail exactly
+        # once and is then retried with overwrite; the mandatory reducer below
+        # accepts exactly github:success:skipped, github:failure:success and
+        # lan:skipped:skipped plus a nonempty bundle, so the artifact always
+        # ends up uploaded or lan-available and can never silently vanish.
         frontend_setup = _extract_job_block(body, 'frontend-setup')
         self.assertEqual(
             _step_named(frontend_setup, 'Upload frontend setup bundle').rstrip(),
@@ -3948,6 +3954,37 @@ python3() { fixture_mock python3 "$@"; }
                 atomic_without_exemption + f'      - {first_line}\n{remaining}        continue-on-error: true\n',
                 1,
             )
+        # 前端 setup 上传恢复并集的负例:传输门、重试触发或 Require 硬门
+        # (结局白名单含 lan 分支、空包兜底)任一弱化都必须让上方 pin 变红,
+        # 否则工件可能在 github 上传与 lan 缓存之外静默消失。
+        frontend_primary_gate = (
+            "        id: frontend_setup_upload\n"
+            "        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n"
+            "        continue-on-error: true\n"
+        )
+        frontend_require_start = "      - name: Require frontend setup bundle upload\n"
+        frontend_require_block = frontend_require_start + original.split(
+            frontend_require_start, maxsplit=1
+        )[1].split("\n  frontend-test:", maxsplit=1)[0]
+        for label, old, new in (
+            ('frontend primary loses transport gate', frontend_primary_gate,
+             "        id: frontend_setup_upload\n        continue-on-error: true\n"),
+            ('frontend primary loses continue-on-error', frontend_primary_gate,
+             "        id: frontend_setup_upload\n        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n"),
+            ('frontend retry trigger drifts to failure()',
+             "        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}",
+             '        if: failure()'),
+            ('frontend require gate deleted', frontend_require_block, ''),
+            ('frontend require gate weakened to success()',
+             frontend_require_start + "        if: ${{ always() && !cancelled() }}",
+             frontend_require_start + "        if: ${{ success() }}"),
+            ('frontend lan arm rejects lan availability', 'lan:skipped:skipped) ;;',
+             'lan:skipped:skipped) error ;;'),
+            ('frontend require gate accepts empty bundle',
+             'if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then',
+             'if [[ ! -e "$FRONTEND_SETUP_BUNDLE" ]]; then'),
+        ):
+            mutations[label] = original.replace(old, new, 1)
         try:
             self.test_no_job_level_continue_on_error_disarms_a_gate_job()
             for label, mutant in mutations.items():

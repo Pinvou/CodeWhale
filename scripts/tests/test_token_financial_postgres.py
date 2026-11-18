@@ -1943,6 +1943,22 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         ):
             self.assertEqual(self.fixture_commands[self.fixture_phases.index(phase)][-1], package)
 
+    def test_schema_restoration_is_required_between_batches_and_before_later_phases(self):
+        # Restored review pin (lane L-2477-C): the merge-up dropped the
+        # author's test_schema_restoration_is_required_before_retained_bootstrap
+        # as subsumed by this main test, but this test itself had not been
+        # retained, leaving schema_leftover/schema_leftover_phase with no
+        # caller. Restore main's test so a leftover schema relation still
+        # fails closed between the two batches and before later phases.
+        for phase, expected in (
+            ("owner-schema-legacy-expiry", ["owner-account", "owner-wallet", "owner-schema-legacy-expiry"]),
+            ("owner-schema", ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema"]),
+        ):
+            with self.subTest(phase=phase), self.assertRaises(RuntimeError):
+                self.run_main_fixture(schema_leftover_phase=phase)
+            self.assertEqual(self.fixture_writes, [])
+            self.assertEqual(self.fixture_phases, expected)
+
     def test_unknown_provider_api_and_append_migration_roots_are_mandatory(self):
         self.run_main_fixture()
         for phase, root, roots, package in (
