@@ -3659,10 +3659,11 @@ python3() { fixture_mock python3 "$@"; }
             "'success' to required-gate, so the whole compile/test leg becomes "
             "advisory while the required check stays green",
         )
-        # These reviewed diagnostic-only steps cannot suppress a compiler,
-        # test or cleanup failure. Artifact transport is bounded separately;
-        # adding another advisory step still requires explicit review here.
+        # Reviewed diagnostics and the provisional frontend upload cannot
+        # suppress compiler, test or cleanup failures. The upload is accepted
+        # only with its exact retry and mandatory hard reducer below.
         reviewed_diagnostics = (
+            "Upload frontend setup bundle",
             "PR test success proof transport",
             "Windows 测试二进制导入诊断",
             "Test resource lifecycle receipts",
@@ -3676,7 +3677,7 @@ python3() { fixture_mock python3 "$@"; }
         self.assertEqual(
             len(step_level),
             len(reviewed_diagnostics),
-            "only reviewed diagnostic steps may opt out of blocking; "
+            "only reviewed diagnostic or strictly recovered upload steps may be provisional; "
             f"found {len(step_level)} continue-on-error settings: {step_level}",
         )
         for name in reviewed_diagnostics:
@@ -3689,6 +3690,21 @@ python3() { fixture_mock python3 "$@"; }
                 "continue-on-error belongs only to the reviewed diagnostic "
                 "step, not another step that moved under it",
             )
+        # This is recovery, not an unbounded advisory transport exception.
+        frontend_setup = _extract_job_block(body, 'frontend-setup')
+        self.assertEqual(
+            _step_named(frontend_setup, 'Upload frontend setup bundle').rstrip(),
+            '      - name: Upload frontend setup bundle\n        id: frontend_setup_upload\n        continue-on-error: true\n        uses: actions/upload-artifact@v7\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1',
+        )
+        self.assertEqual(
+            _step_named(frontend_setup, 'Upload frontend setup bundle (retry)').rstrip(),
+            "      - name: Upload frontend setup bundle (retry)\n        id: frontend_setup_upload_retry\n        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}\n        uses: actions/upload-artifact@v7\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1\n          overwrite: true",
+        )
+        self.assertEqual(
+            _step_named(frontend_setup, 'Require frontend setup bundle upload').rstrip(),
+            '      - name: Require frontend setup bundle upload\n        if: ${{ always() && !cancelled() }}\n        shell: bash\n        env:\n          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}\n          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}\n          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n        run: |\n          set -euo pipefail\n          case "$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in\n            success:skipped|failure:success) ;;\n            *) echo \'::error::Frontend setup bundle upload did not complete successfully.\' >&2; exit 1 ;;\n          esac\n          if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then\n            echo \'::error::Frontend setup bundle is missing or empty.\' >&2\n            exit 1\n          fi',
+        )
+        # All other COE occurrences retain the original exact diagnostic contracts.
         diagnostic_job = _extract_job_block(body, 'windows-rust-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Windows 测试二进制导入诊断\n.*?(?=^      - |\Z)", diagnostic_job

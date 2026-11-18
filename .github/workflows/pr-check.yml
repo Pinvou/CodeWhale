@@ -1331,6 +1331,8 @@ jobs:
           du -h "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
 
       - name: Upload frontend setup bundle
+        id: frontend_setup_upload
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: frontend-setup-bundle
@@ -1342,7 +1344,8 @@ jobs:
       # 自建机上行到 GitHub 工件存储实测偶发 stall(见上方 Pack 注释的 run 证据),
       # 上传动作无内建重试;主上传失败时以 overwrite 重建同名工件,自动补试一次。
       - name: Upload frontend setup bundle (retry)
-        if: ${{ failure() }}
+        id: frontend_setup_upload_retry
+        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}
         uses: actions/upload-artifact@v7
         with:
           name: frontend-setup-bundle
@@ -1351,6 +1354,24 @@ jobs:
           # 同 run 内消费,最小保留。
           retention-days: 1
           overwrite: true
+
+      - name: Require frontend setup bundle upload
+        if: ${{ always() && !cancelled() }}
+        shell: bash
+        env:
+          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}
+          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}
+          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
+        run: |
+          set -euo pipefail
+          case "$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in
+            success:skipped|failure:success) ;;
+            *) echo '::error::Frontend setup bundle upload did not complete successfully.' >&2; exit 1 ;;
+          esac
+          if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then
+            echo '::error::Frontend setup bundle is missing or empty.' >&2
+            exit 1
+          fi
 
   frontend-test:
     name: frontend-test
