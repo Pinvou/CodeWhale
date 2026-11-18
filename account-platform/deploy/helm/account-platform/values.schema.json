@@ -211,6 +211,7 @@
       "additionalProperties": false,
       "properties": {
         "walletProvisioningPolicyVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "profileRevocationCapacity": { "type": "integer", "minimum": 1, "maximum": 1000000 },
           "walletProvisioningSlaMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 },
           "commerceProviderId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$" },
           "commerceAdapterVersion": { "type": "string", "minLength": 1, "maxLength": 80 },

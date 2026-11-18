@@ -292,6 +292,9 @@ func (s *ProfileChangeService) resume(ctx context.Context, change ProfileChange)
 	if change.SessionsRevokedAt == nil {
 		first, err := s.store.StartProfileSessionRevocation(ctx, change.ID)
 		if err != nil {
+			if errors.Is(err, ErrProfileSessionRevocationCapacity) {
+				recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.ScheduleProfileChangeRetry(context.WithoutCancel(ctx), change.ID, "SESSION_REVOCATION_CAPACITY"))
+			}
 			return change, err
 		}
 		if err := s.identities.RevokeProfileSessions(ctx, change.IdentitySubject, change.ID, first); err != nil {

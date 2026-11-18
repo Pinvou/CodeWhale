@@ -143,6 +143,7 @@ sms:
   httpEndpoint: ""
 
 account:
+  profileRevocationCapacity: 4096
   walletProvisioningPolicyVersion: wallet-provisioning-v1
   walletProvisioningSlaMinutes: 15
   commerceProviderId: h3c_mall
