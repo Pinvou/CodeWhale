@@ -211,8 +211,14 @@ GRANT account_service TO account_migrator`); err != nil {
 		changed.DownSQL = "SELECT 1;" // Controlled bad source, never frozen repository SQL.
 		directory := f08IdentitySources(t, []migrations.Migration{changed})
 		output, err := f08IdentityCLI(t, ctx, databaseURL, directory)
-		if err == nil || !strings.Contains(output, "MIGRATION_EXECUTION_FAILED") || f08IdentitySnapshot(t, ctx, connection) != before {
-			t.Fatal("actual Account CLI bypassed its dedicated source guard", err, output)
+		// Published rollback validation rejects this source during Load,
+		// before database connection or domain execution. Check effects
+		// independently so an unexpected error cannot skip the snapshot.
+		if f08IdentitySnapshot(t, ctx, connection) != before {
+			t.Fatal("invalid published Account source changed retained facts")
+		}
+		if err == nil || !strings.Contains(output, "MIGRATION_SOURCE_INVALID") {
+			t.Fatal("actual Account CLI did not reject the published source before execution", err, output)
 		}
 	})
 	t.Run("mixed-domains-reject-before-writes", func(t *testing.T) {
