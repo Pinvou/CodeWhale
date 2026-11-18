@@ -7559,7 +7559,9 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             message: "enabled, but the strict tool pipeline only acts on official \
                       DeepSeek-family https endpoints (the api.deepseeki.com legacy \
                       compat host is also recognized); this custom endpoint keeps its \
-                      tools unreshaped and `tool_choice` falls back to `auto`"
+                      tools unreshaped and `tool_choice` falls back to `auto` \
+                      (omitted on thinking-enabled requests, where the chat dialect \
+                      suppresses it)"
                 .to_string(),
             recommended_base_url: None,
         };
@@ -7620,18 +7622,23 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
                 function_strict_sent: false,
                 // Only the flag is stripped here: the route gate is in scope,
                 // so the strict reshaping still applies and `tool_choice`
-                // stays `required` — the message must say so or the user
-                // reads this verdict as "strict semantics are fully off".
+                // follows the chat dialect — sent as `required` unless the
+                // thinking suppression omits it. The message must say so or
+                // the user reads this verdict as "strict semantics are
+                // fully off".
                 message: "enabled, but function.strict is stripped for this non-beta DeepSeek \
                           endpoint; the strict schema reshaping still applies and \
-                          `tool_choice` stays `required`"
+                          `tool_choice` stays `required` (omitted on thinking-enabled \
+                          requests, where the chat dialect suppresses it)"
                     .to_string(),
                 recommended_base_url: Some(recommended.to_string()),
             }
         }
         // Official host, non-canonical path (the Anthropic-family endpoint,
         // /v2, ...): the gate acts here — schemas are reshaped and
-        // `tool_choice:"required"` is sent — and the client keeps the strict
+        // `tool_choice` follows the dialect (`required` on the chat wire
+        // unless the thinking suppression omits it, mapped per the
+        // Anthropic dialect otherwise) — and the client keeps the strict
         // flag on official paths it does not canonicalize.
         None => DoctorStrictToolModeStatus {
             enabled: true,
@@ -14126,6 +14133,14 @@ mod doctor_endpoint_tests {
         // `required`, or the user reads it as "strict semantics fully off".
         assert!(status.message.contains("reshaping still applies"));
         assert!(status.message.contains("`tool_choice` stays `required`"));
+        // The claim is wire-honest: the chat dialect omits the key on
+        // thinking-enabled requests (`should_send_tool_choice_for_chat`),
+        // so the message must not read as an unconditional guarantee.
+        assert!(
+            status
+                .message
+                .contains("omitted on thinking-enabled requests")
+        );
         assert_eq!(
             status.recommended_base_url.as_deref(),
             Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL)
@@ -14180,6 +14195,13 @@ mod doctor_endpoint_tests {
             status
                 .message
                 .contains("`tool_choice` falls back to `auto`")
+        );
+        // Same wire honesty as the `fallback_non_beta` arm: the family
+        // provider's thinking suppression omits the key entirely.
+        assert!(
+            status
+                .message
+                .contains("omitted on thinking-enabled requests")
         );
     }
 

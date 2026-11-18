@@ -3218,10 +3218,10 @@ fn deepseek_base_url_supports_strict_tools(base_url: &str) -> bool {
     // The canonical URL sets are shared with the doctor's classifier and
     // the beta routing (`config::DEEPSEEK_CANONICAL_*`), so the strip set
     // cannot drift from the surfaces that report on it. Only the beta
-    // endpoints document strict mode; everywhere else the flag is stripped
-    // (including non-canonical official paths — but the strict gate only
-    // ever sets the flag on those when the reshaped wire keeps it, which
-    // the doctor's `official_route` verdict reports faithfully).
+    // endpoints document strict mode, so the strip fires on canonical
+    // non-beta URLs only. Official paths outside the canonical sets keep
+    // the flag the route gate set, and the doctor's `official_route`
+    // verdict reports the flag as sent there.
     let trimmed = base_url.trim_end_matches('/').to_ascii_lowercase();
     let is_beta = crate::config::DEEPSEEK_CANONICAL_BETA_URLS.contains(&trimmed.as_str());
     let is_canonical_deepseek =
