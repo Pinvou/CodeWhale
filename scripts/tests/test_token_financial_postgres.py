@@ -1588,7 +1588,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             len(RUNNER.REQUIRED) + sum(len(RUNNER.EXACT_REQUIRED_CHILDREN.get(root, ())) for root in RUNNER.REQUIRED),
         )
 
-    def run_main_fixture(self, *, group="all", existing_roles=False, user_objects=False, leftover=False,
+    def run_main_fixture(self, *, group="all", owner_lane=None, existing_roles=False, user_objects=False, leftover=False,
                          owner_leftover=False, account_leftover=False, schema_leftover=False, provisioning_leftover=False, active_client=False, external_dependency=False,
                          go_fail_phase=None, empty_phase=None, skipped_phase=None, missing_token_children=False, platform_role_evidence=None):
         writes, commands, phases, trace = [], [], [], []
@@ -1748,7 +1748,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 patch.object(RUNNER, "run_go_phase", side_effect=lambda command, env: run(command, env=env)), \
                 patch.object(RUNNER, "require_exclusive_instance", side_effect=observation), contextlib.redirect_stdout(io.StringIO()):
             try:
-                RUNNER.main(group=group)
+                RUNNER.main(group=group, owner_lane=owner_lane)
             finally:
                 self.fixture_writes = writes
                 self.fixture_commands = commands
@@ -1791,6 +1791,18 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         with patch.object(RUNNER.subprocess, "run") as run, self.assertRaisesRegex(ValueError, "^unknown financial execution group$"):
             RUNNER.main(group="billing-4")
         run.assert_not_called()
+
+    def test_owner_lanes_execute_all_original_phases_without_bootstrapping_shared_actors(self):
+        completed = []
+        for lane, expected in RUNNER.OWNER_LANES.items():
+            self.run_main_fixture(group="owners", owner_lane=lane)
+            self.assertEqual(self.fixture_phases, list(expected))
+            self.assertEqual(self.fixture_writes, [])
+            completed.extend(self.fixture_phases)
+            for phase in expected:
+                with self.subTest(lane=lane, phase=phase), self.assertRaises(RuntimeError):
+                    self.run_main_fixture(group="owners", owner_lane=lane, skipped_phase=phase)
+        self.assertCountEqual(completed, RUNNER.OWNER_ORDER)
 
     def test_existing_roles_prevent_bootstrap(self):
         with self.assertRaises(RuntimeError):

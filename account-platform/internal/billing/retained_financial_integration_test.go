@@ -118,7 +118,7 @@ func retainedFinanceRepositoryWithBudgets(t *testing.T, workloadBudget, cleanupB
 		return c, nil
 	}
 	database := "retained_finance_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	fixtureDatabase, prepared, err := retainedBillingTemplates.Create(ctx, control, database, "billing_schema_owner", key, func(ctx context.Context, name string) error {
+	fixtureDatabase, prepared, err := walletTemplates(t).Create(ctx, control, database, "billing_schema_owner", key, func(ctx context.Context, name string) error {
 		c, err := open(ctx, name, true)
 		if c != nil {
 			c.Close(context.Background())

@@ -707,6 +707,16 @@ def require_exclusive_instance(query, databases, roles, *, timeout_seconds=15, n
 
 BILLING_GROUPS = tuple(f"billing-{index}" for index in range(4))
 GROUPS = ("owners", "token", *BILLING_GROUPS)
+OWNER_LANES = {
+    "account": ("owner-account", "lifecycle-reconciliation"),
+    "wallet": ("owner-wallet", "owner-token-schema", "owner-provisioning"),
+    "schema": ("owner-schema",),
+}
+OWNER_ORDER = ("owner-account", "owner-wallet", "owner-schema", "owner-token-schema",
+               "owner-provisioning", "lifecycle-reconciliation")
+EXACT_REQUIRED_CHILDREN["TestOwnerWalletTemplateScopePostgres"] = {
+    "first", "first/case-a", "first/case-b", "second", "second/case-a", "second/case-b",
+}
 EXACT_REQUIRED_CHILDREN["TestDatabaseTemplateIsolationPostgres"] = {
     "private-data-schema-and-frozen-source", "failed-preparation-never-becomes-hit",
     "disabled-path-keeps-empty-create",
@@ -798,9 +808,11 @@ def phase_timing(label, seconds, events, code, *, started_epoch=None):
         target.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def main(*, group="all", verify_fixture_cache=False):
+def main(*, group="all", verify_fixture_cache=False, owner_lane=None):
     if group not in ("all", *GROUPS):
         raise ValueError("unknown financial execution group")
+    if owner_lane is not None and (group != "owners" or owner_lane not in OWNER_LANES):
+        raise ValueError("owner lane requires the owners group")
     raw = local_database_url(os.environ.get("PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL", ""))
     psql = os.environ.get("PINVOU_ACCOUNT_TEST_PSQL", "psql")
     go = os.environ.get("PINVOU_ACCOUNT_TEST_GO", "go")
@@ -831,6 +843,7 @@ def main(*, group="all", verify_fixture_cache=False):
         # Only these phases own stable outer Billing actors. In owners phases,
         # absent-actor fixtures must retire their local snapshots before roles.
         env["PINVOU_CI_RETAINED_BILLING_TEMPLATES"] = "1" if label in {"retained-billing", "retained-token"} else "0"
+        env["PINVOU_CI_OWNER_WALLET_TEMPLATES"] = "1" if label in {"owner-wallet", "owner-wallet-scope-isolation"} else "0"
         # Nested Go consumers inherit the same race/build contract as this phase.
         env["GOFLAGS"] = " ".join(filter(None, (env.get("GOFLAGS", ""), "-race -tags=nomsgpack -mod=readonly")))
         if target == "./internal/account":
@@ -885,32 +898,25 @@ def main(*, group="all", verify_fixture_cache=False):
     if group in ("all", "owners"):
         # Each existing owner fixture requires its own absent actors. Restoration
         # is checked between every phase, before any next fixture can write.
-        try:
-            run_phase("owner-account", "./internal/account", ACCOUNT_PACKAGE, ACCOUNT_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
-        try:
-            run_phase("owner-wallet", "./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
-        try:
-            run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
-        try:
-            run_phase("owner-token-schema", "./internal/tokenschema", TOKEN_SCHEMA_PACKAGE, TOKEN_SCHEMA_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
-        try:
-            run_phase("owner-provisioning", "./internal/token", TOKEN_PACKAGE, PROVISIONING_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
-
-        try:
-            run_phase("lifecycle-reconciliation", "./internal/account", ACCOUNT_PACKAGE,
-                      LIFECYCLE_RECONCILIATION_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
+        phases = {
+            "owner-account": ("./internal/account", ACCOUNT_PACKAGE, ACCOUNT_REQUIRED),
+            "owner-wallet": ("./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED),
+            "owner-schema": ("./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED),
+            "owner-token-schema": ("./internal/tokenschema", TOKEN_SCHEMA_PACKAGE, TOKEN_SCHEMA_REQUIRED),
+            "owner-provisioning": ("./internal/token", TOKEN_PACKAGE, PROVISIONING_REQUIRED),
+            "lifecycle-reconciliation": ("./internal/account", ACCOUNT_PACKAGE, LIFECYCLE_RECONCILIATION_REQUIRED),
+        }
+        if owner_lane == "wallet" and verify_fixture_cache:
+            try:
+                run_phase("owner-wallet-scope-isolation", "./internal/billing", BILLING_PACKAGE,
+                          {"TestOwnerWalletTemplateScopePostgres"}, scoped=True)
+            finally:
+                assert_instance({user})
+        for label in OWNER_LANES[owner_lane] if owner_lane else OWNER_ORDER:
+            try:
+                run_phase(label, *phases[label], scoped=True)
+            finally:
+                assert_instance({user})
 
         if group == "owners":
             return
@@ -951,5 +957,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--group", choices=("all", *GROUPS), default="all")
     parser.add_argument("--verify-fixture-cache", action="store_true")
+    parser.add_argument("--owner-lane", choices=tuple(OWNER_LANES))
     args = parser.parse_args()
-    main(group=args.group, verify_fixture_cache=args.verify_fixture_cache)
+    if args.owner_lane:
+        # Affinity is inherited by Go, Node and CLI grandchildren. It limits
+        # only this worker tree, never the Runner or another job's processes.
+        cpus = json.loads(os.environ["PINVOU_CI_OWNER_CPU_SET"])
+        if (not isinstance(cpus, list) or not 1 <= len(cpus) <= 2
+                or any(type(cpu) is not int for cpu in cpus)
+                or len(set(cpus)) != len(cpus) or not set(cpus) <= os.sched_getaffinity(0)):
+            raise ValueError("invalid owner worker CPU affinity")
+        os.sched_setaffinity(0, cpus)
+        if os.sched_getaffinity(0) != set(cpus):
+            raise RuntimeError("owner worker CPU affinity was not applied")
+    if args.group == "owners" and not args.owner_lane and os.environ.get("PINVOU_CI_OWNER_PARALLEL") == "1":
+        import runpy
+        runpy.run_path(str(ROOT / "scripts/test-financial-owners.py"))["main"]()
+    else:
+        main(group=args.group, verify_fixture_cache=args.verify_fixture_cache, owner_lane=args.owner_lane)

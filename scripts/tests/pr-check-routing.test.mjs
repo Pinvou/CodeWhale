@@ -580,7 +580,18 @@ function assertFiniteFinancialPGSetup(job) {
     "          --rm", "          --cpus 2", "          --memory 1g", "          --memory-swap 1g",
     "          --health-cmd \"pg_isready -U postgres -d postgres\"",
     "          --health-interval 5s", "          --health-timeout 5s", "          --health-retries 12",
+    ...["account", "wallet"].flatMap(lane => [
+      `      financial-owner-${lane}-postgres:`,
+      "        # Empty image disables these extra services for the other five Jobs.",
+      "        image: ${{ matrix.group == 'owners' && 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea' || '' }}",
+      "        env:", "          POSTGRES_HOST_AUTH_METHOD: trust", "          POSTGRES_DB: postgres",
+      "        ports:", '          - "127.0.0.1::5432"', "        options: >-",
+      "          --rm", "          --cpus 1", "          --memory 1g", "          --memory-swap 1g",
+      '          --health-cmd "pg_isready -U postgres -d postgres"',
+      "          --health-interval 5s", "          --health-timeout 5s", "          --health-retries 12",
+    ]),
   ].join("\n"));
+  assert.match(text, /^      PINVOU_ACCOUNT_PG_PROFILE: \$\{\{ matrix.group == 'owners' && 'owners' \|\| 'financial' \}\}$/m);
   const guard = namedStep(text, "Verify complete financial CI group selection");
   assert.deepEqual(stepRun(text, "Verify complete financial CI group selection").trim().split("\n"),
     ["set -euo pipefail", "python3 scripts/check-account-financial-ci.py"]);
@@ -589,12 +600,14 @@ function assertFiniteFinancialPGSetup(job) {
   assert.equal(preflight.trimEnd(), [
     `      - name: ${pgPreflightStepName}`, "        id: account-pg", "        env:",
     "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "        run: |",
-    "          set -euo pipefail", "          python3 scripts/account-ci-postgres.py --profile financial",
+    "          set -euo pipefail", '          python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE"' ,
   ].join("\n"));
   const execute = namedStep(text, "Run isolated financial group");
   assert.equal(execute.trimEnd(), [
     "      - name: Run isolated financial group", "        shell: bash", "        env:",
     "          ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}",
+    "          PINVOU_CI_OWNER_PARALLEL: ${{ matrix.group == 'owners' && '1' || '0' }}",
+    "          ACCOUNT_FINANCIAL_OWNER_SERVICES: ${{ steps.account-pg.outputs.owners_services }}",
     '          PINVOU_CI_FIXTURE_TEMPLATES: "1"',
     '          PINVOU_CI_FIXTURE_TIMING: "1"',
     "          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
@@ -606,7 +619,7 @@ function assertFiniteFinancialPGSetup(job) {
   assert.equal(stop.trimEnd(), [
     `      - name: ${pgStopStepName}`, "        if: ${{ always() }}", "        env:",
     "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "        run: |",
-    "          python3 scripts/account-ci-postgres.py --profile financial --stop-owned-services",
+    '          python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE" --stop-owned-services' ,
   ].join("\n"));
   const retirement = namedStep(text, "Confirm Account test resource retirement");
   assert.deepEqual([...retirement.matchAll(/^        if: (.+)$/gm)].map(match => match[1]),
@@ -632,7 +645,11 @@ test("independent financial services reject identity, profile and retirement mut
   for (const [before, after] of [
     ['"127.0.0.1::5432"', '"5432:5432"'],
     ["          --rm\n", ""], ["          --cpus 2", "          --cpus 4"],
-    ["--profile financial", "--profile core"],
+    ['--profile "$PINVOU_ACCOUNT_PG_PROFILE"', '--profile core'],
+    ["matrix.group == 'owners' && 'owners' || 'financial'", "'financial'"],
+    ["          --cpus 1", "          --cpus 2"],
+    ["matrix.group == 'owners' && 'mirror.gcr.io/library/postgres", "matrix.group != 'owners' && 'mirror.gcr.io/library/postgres"],
+    ["outputs.owners_services", "outputs.financial_services"],
     ['ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}', 'ACCOUNT_CI_SERVICES: ${{ toJSON(needs.other.outputs.services) }}'],
     ['ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}', 'ACCOUNT_FINANCIAL_GROUP: all'],
     ['outputs.financial_url', 'outputs.unrelated_url'],
@@ -640,7 +657,7 @@ test("independent financial services reject identity, profile and retirement mut
     ['outputs.financial_system', 'outputs.unrelated_system'],
     ['outputs.financial_directory', 'outputs.unrelated_directory'],
     ['-- python3 scripts/test-token-financial-postgres.py', '-- python3 scripts/test-token-financial-postgres.py || true'],
-    ['python3 scripts/account-ci-postgres.py --profile financial --stop-owned-services', 'true'],
+    ['python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE" --stop-owned-services', 'true'],
     ['python3 scripts/ci-resource-ledger.py --recover', 'true'],
     ["      CGO_ENABLED: \"1\"", "      CGO_ENABLED: \"0\""],
   ]) {
@@ -1172,6 +1189,7 @@ test("Keycloak contract gate invokes the existing suite and propagates failure",
 test("Token financial PostgreSQL gate is required and cannot swallow a failed runner", () => {
   const paths = filterPaths(workflow, "account_platform");
   for (const path of ["scripts/test-token-financial-postgres.py", "scripts/test-financial-parallel.py",
+    "scripts/test-financial-owners.py", "scripts/tests/test_financial_owners.py",
     "scripts/tests/test_financial_parallel.py", "scripts/tests/test_token_financial_postgres.py",
     "scripts/check-account-financial-ci.py", "scripts/tests/test_account_financial_ci.py"]) {
     assert.ok(paths.includes(path));
@@ -1186,7 +1204,7 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
       const mock = `python3() { case "$*" in *check-account-financial-ci.py*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *account-ci-postgres.py*) ${failedPhase === "postgres" ? "return 7" : "return 0"};; *ci-fixture-process.py*) ${failedPhase === "group" ? "return 7" : "return 0"};; *) return 99;; esac; }; export -f python3;\n`;
       const result = spawnSync(bash, ["-e", "-c", mock + run], {
         encoding: "utf8", timeout: 30_000, windowsHide: true,
-        env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: directory, ACCOUNT_FINANCIAL_GROUP: "token" },
+        env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: directory, ACCOUNT_FINANCIAL_GROUP: "token", PINVOU_ACCOUNT_PG_PROFILE: "financial" },
       });
       assert.equal(result.status, failedPhase === "none" ? 0 : 7,
         `${failedPhase} must preserve the selected gate result: ${result.stderr}`);
