@@ -7622,29 +7622,56 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
     // resolves to the Responses endpoint ships `"strict": false` per tool
     // and `tool_choice: "auto"` regardless of which official URL serves it,
     // so the reshaping applies with no enforcement. The dialect is
-    // model-driven, not URL-driven — no base-URL recommendation changes it.
+    // model-driven, not URL-driven — but the remedy is not: switching the
+    // model alone sends the flag only where the chat wire keeps it, so on
+    // a canonical non-beta endpoint (the strip set) the remedy must name
+    // the beta URL too or it lands the user straight back in
+    // `fallback_non_beta`. On a canonical beta URL — and on a
+    // non-canonical official path, which no strip touches — the model
+    // switch alone suffices.
     if target.endpoint_key.as_deref() == Some("responses") {
+        let remedy = if known_deepseek_base_url_kind(&target.base_url)
+            == Some(DeepSeekBaseUrlKind::NonBeta)
+        {
+            "pick a model that resolves to the chat-completions surface and \
+             point the route at the beta endpoint \
+             (https://api.deepseek.com/beta) to send the flag"
+        } else {
+            "pick a model that resolves to the chat-completions surface \
+             to send the flag"
+        };
         return DoctorStrictToolModeStatus {
             enabled: true,
             status: "responses_dialect",
             function_strict_sent: false,
-            message: "enabled, but this route's model resolves to the Responses dialect, \
-                      whose wire sends `strict: false` and `tool_choice: \"auto\"`; schemas \
-                      are still reshaped for the strict contract, but no strict enforcement \
-                      is sent — pick a model that resolves to the chat-completions surface \
-                      to send the flag"
-                .to_string(),
+            message: format!(
+                "enabled, but this route's model resolves to the Responses dialect, \
+                 whose wire sends `strict: false` and `tool_choice: \"auto\"`; schemas \
+                 are still reshaped for the strict contract, but no strict enforcement \
+                 is sent — {remedy}"
+            ),
             recommended_base_url: None,
         };
     }
     match known_deepseek_base_url_kind(&target.base_url) {
-        Some(DeepSeekBaseUrlKind::Beta) => DoctorStrictToolModeStatus {
-            enabled: true,
-            status: "ready",
-            function_strict_sent: true,
-            message: "enabled; DeepSeek strict schemas use the beta endpoint".to_string(),
-            recommended_base_url: None,
-        },
+        Some(DeepSeekBaseUrlKind::Beta) => {
+            // The arm is family-chat by construction (the Anthropic and
+            // Responses dialects returned above), so the thinking
+            // suppression disclosure is unconditional here — the same
+            // sentence the `fallback_non_beta`/`custom_endpoint` arms
+            // carry; staying silent would read as an unconditional
+            // `tool_choice` guarantee those arms no longer make.
+            DoctorStrictToolModeStatus {
+                enabled: true,
+                status: "ready",
+                function_strict_sent: true,
+                message: "enabled; DeepSeek strict schemas use the beta endpoint; \
+                          `tool_choice` stays `required` (omitted on thinking-enabled \
+                          requests, where the chat dialect suppresses it)"
+                    .to_string(),
+                recommended_base_url: None,
+            }
+        }
         Some(DeepSeekBaseUrlKind::NonBeta) => {
             let recommended = recommended_strict_base_url(config, &target.base_url);
             DoctorStrictToolModeStatus {
@@ -7670,7 +7697,9 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
         // wire unless the thinking suppression omits it — and the client
         // keeps the strict flag on official paths it does not
         // canonicalize. (The Anthropic-family provider returned above, so
-        // this arm only serves the chat dialect.)
+        // this arm only serves the chat dialect.) The suppression
+        // disclosure is unconditional for the same reason the `ready`
+        // arm's is: family-chat by construction here.
         None => DoctorStrictToolModeStatus {
             enabled: true,
             status: "official_route",
@@ -7678,7 +7707,10 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             // "DeepSeek-family": the arm also covers the legacy
             // `api.deepseeki.com` compat host, which is recognized but not
             // official (docs/REBRAND.md).
-            message: "enabled; the strict tool pipeline acts on this DeepSeek-family route"
+            message: "enabled; the strict tool pipeline acts on this \
+                      DeepSeek-family route; `tool_choice` stays `required` \
+                      (omitted on thinking-enabled requests, where the chat \
+                      dialect suppresses it)"
                 .to_string(),
             recommended_base_url: None,
         },
@@ -14131,6 +14163,15 @@ mod doctor_endpoint_tests {
         assert_eq!(status.status, "ready");
         assert!(status.function_strict_sent);
         assert!(status.message.contains("beta endpoint"));
+        // The arm is family-chat by construction, so the thinking-enabled
+        // `tool_choice` omission is unconditional here — the message must
+        // carry the same disclosure the sibling `fallback_non_beta` /
+        // `custom_endpoint` arms carry.
+        assert!(
+            status
+                .message
+                .contains("omitted on thinking-enabled requests")
+        );
         assert!(status.recommended_base_url.is_none());
     }
 
@@ -14413,6 +14454,14 @@ mod doctor_endpoint_tests {
         // api.deepseeki.com compat host, which is recognized but not
         // official (docs/REBRAND.md).
         assert!(status.message.contains("DeepSeek-family route"));
+        // Family-chat by construction here, so the thinking-enabled
+        // `tool_choice` omission disclosure is unconditional — the same
+        // sentence the `ready`/`fallback_non_beta` arms carry.
+        assert!(
+            status
+                .message
+                .contains("omitted on thinking-enabled requests")
+        );
         assert!(status.recommended_base_url.is_none());
     }
 
@@ -14496,10 +14545,46 @@ mod doctor_endpoint_tests {
         assert_eq!(status.status, "responses_dialect");
         assert!(!status.function_strict_sent);
         assert!(status.message.contains("Responses dialect"));
+        // On a canonical beta URL the model switch alone sends the flag
+        // (the strip never touches beta), so the remedy names no URL.
+        assert!(!status.message.contains("beta endpoint ("));
         assert!(status.recommended_base_url.is_none());
         let report = doctor_strict_tool_mode_report_json(&status);
         assert_eq!(report["status"], "responses_dialect");
         assert_eq!(report["function_strict_sent"], false);
+    }
+
+    #[test]
+    fn strict_tool_mode_doctor_responses_remedy_names_the_beta_url_on_non_beta() {
+        // The remedy is not URL-independent: switching the model alone on a
+        // canonical non-beta endpoint lands the route in
+        // `fallback_non_beta`, where the chat wire still strips the flag —
+        // a self-defeating remedy. The message must name the beta URL too,
+        // while `recommended_base_url` stays withheld (the dialect itself
+        // is model-driven; only the remedy combines both steps).
+        let config = Config {
+            strict_tool_mode: Some(true),
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek: crate::config::ProviderConfig {
+                    base_url: Some("https://api.deepseek.com".to_string()),
+                    model: Some("deepseek-v3".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let status = doctor_strict_tool_mode_status(&config);
+
+        assert_eq!(status.status, "responses_dialect");
+        assert!(
+            status
+                .message
+                .contains("point the route at the beta endpoint")
+        );
+        assert!(status.message.contains("https://api.deepseek.com/beta"));
+        assert!(status.recommended_base_url.is_none());
     }
 
     #[test]
