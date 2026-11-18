@@ -79,10 +79,15 @@ Run additional frontend, Relay, Rust, CodeWhale, or platform checks when relevan
 
 The retained Token financial phase has a 40-minute Go test-binary timeout,
 including the complete selected package. Retained Billing keeps its 75-minute
-budget and other financial phases keep 20 minutes. Compilation, startup and
-ownership checks are outside these test-binary budgets; the Account job retains
-its existing outer limit. Increasing the Token budget does not accelerate tests
-or relax required roots, subcases, race detection or resource retirement.
+budget and other financial test binaries keep 20 minutes. Within the existing
+owners job, Billing schema contracts run as two sequential binaries: the complete
+LegacyExpiry historical-upgrade root, then all remaining required schema roots.
+Each keeps its 20-minute limit, making the schema portion's cumulative test budget
+40 minutes instead of 20. Compilation, startup and ownership checks are outside
+these test-binary budgets; the Account job retains its existing outer limit.
+Each batch must restore the pristine instance before the next can run. No roots,
+subcases, race detection, actor checks or ordinary resource-retirement gates are
+removed, and the existing job groups and runner concurrency are unchanged.
 
 When a change regenerates a `package-lock.json`, regenerate against the official
 registry (`https://registry.npmjs.org/`): a mirror configured in a local npmrc is
