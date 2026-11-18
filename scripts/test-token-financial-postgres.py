@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestGovernanceUsageResourcePrechecksPostgres",
     "TestEmergencyCancellationWorkerDiagnosticsPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
@@ -139,6 +140,7 @@ ACCOUNT_LEAF_REQUIRED = {
 ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestGovernanceUsageResourcePrechecksPostgres",
     "TestOrganizationModelPolicyPublicPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
@@ -314,6 +316,10 @@ EXACT_REQUIRED_CHILDREN = {
         "confirmed-replays-after-anonymization",
         "late-confirmation-replays-after-anonymization",
     },
+    "TestGovernanceUsageResourcePrechecksPostgres": {
+        "all-active-states-preserve-full-facts", "repeated-read-stable-and-read-only",
+        "historical-only-preserves-other-dependencies",
+    },
     "TestEscalatedPaymentFinancialCompletionPostgres": {
         "lost-ack-replays-exact-committed-result",
         "concurrent-reviewers-complete-once",
@@ -436,6 +442,8 @@ EXACT_REQUIRED_CHILDREN = {
         "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",
         "installed-f07-36-upgrade", "installed-pre-runtime-37-upgrade",
         "installed-pre-cleanup-39-upgrade",
+        "installed-pre-governance-index-40-upgrade",
+        "installed-pre-governance-index-40-upgrade/governance-index-public-cli-rollback",
         "installed-pre-dispatch-index-40-upgrade",
         "installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip",
     },
