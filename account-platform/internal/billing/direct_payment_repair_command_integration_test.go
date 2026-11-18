@@ -277,8 +277,10 @@ func TestDirectPaymentRepairCommandReceiptPostgres(t *testing.T) {
 	})
 	t.Run("runtime-immutable-command-and-exact-prefix-down", func(t *testing.T) {
 		r, ctx := retainedFinanceRepository(t, 900031)
-		c, order, _ := directRepairFixture(t, r, ctx)
-		if _, err := c.RepairReviewedOrder(ctx, order.ID, uuid.New(), "controlled retained direct command", "direct-down-"+uuid.NewString()); err != nil {
+		c, order, historicalProvider := directRepairHistoricalFixtureBefore900046(t, r, ctx)
+		actor, reason, key := uuid.New(), "controlled retained direct command", "direct-down-"+uuid.NewString()
+		originalReceipt, err := c.RepairReviewedOrder(ctx, order.ID, actor, reason, key)
+		if err != nil {
 			t.Fatal(err)
 		}
 		before := directRepairFacts(t, r, ctx)
@@ -349,12 +351,16 @@ func TestDirectPaymentRepairCommandReceiptPostgres(t *testing.T) {
 		if _, err := billingschema.VerifyApplied(ctx, connection, prefix); err != nil {
 			t.Fatal("rejected down changed prefix identity", err)
 		}
+		queryUpgrade := freezeHistoricalQueryUpgrade(t, ctx, r)
 		if err := billingschema.Up(ctx, connection, loaded); err != nil {
 			t.Fatal("full current Up after exact direct prefix", err)
 		}
 		if _, err := billingschema.VerifyApplied(ctx, connection, loaded); err != nil {
 			t.Fatal("full current migration identity", err)
 		}
+		queryUpgrade.assertAfter(t, ctx, r)
+		assertHistoricalQueryFinancialSnapshot(t, before, directRepairFacts(t, r, ctx), "payment_orders")
+		fullFacts := directRepairFacts(t, r, ctx)
 		var fullLedger string
 		if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&fullLedger); err != nil {
 			t.Fatal(err)
@@ -365,8 +371,41 @@ func TestDirectPaymentRepairCommandReceiptPostgres(t *testing.T) {
 		if _, err := billingschema.VerifyApplied(ctx, connection, loaded); err != nil {
 			t.Fatal("full replay identity", err)
 		}
-		if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&after); err != nil || after != fullLedger || marker() != beforeMarker || directRepairFacts(t, r, ctx) != before {
+		if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&after); err != nil || after != fullLedger || marker() != beforeMarker || directRepairFacts(t, r, ctx) != fullFacts {
 			t.Fatal("full Up/replay changed migration ledger, marker/ACL or financial facts", err)
+		}
+		oldGets := historicalProvider.gets.Load()
+		replay, err := c.RepairReviewedOrder(ctx, order.ID, actor, reason, key)
+		originalACK, _ := json.Marshal(originalReceipt)
+		replayedACK, _ := json.Marshal(replay)
+		if err != nil || !bytes.Equal(originalACK, replayedACK) || historicalProvider.gets.Load() != oldGets || directRepairFacts(t, r, ctx) != fullFacts {
+			t.Fatal("complete upgrade lost the original historical command ACK", err)
+		}
+		// Only after the complete carrier, exercise the real current public query
+		// generation and repair on a distinct order. No old-schema writer shim is
+		// used here, and no current-query metadata is excluded from its snapshots.
+		current, currentOrder, currentProvider := directRepairFixture(t, r, ctx)
+		var currentQuery bool
+		if err := r.pool.QueryRow(ctx, `SELECT archive_query_generation IS NOT NULL AND archive_query_authoritative_unpaid IS FALSE FROM payment_orders WHERE id=$1`, currentOrder.ID).Scan(&currentQuery); err != nil || !currentQuery {
+			t.Fatal("current public query did not publish its own generation facts after migration", err)
+		}
+		currentActor, currentKey, currentReason := uuid.New(), "post-upgrade-direct-"+uuid.NewString(), "controlled current-schema repair"
+		getsBefore := currentProvider.gets.Load()
+		firstCurrent, err := current.RepairReviewedOrder(ctx, currentOrder.ID, currentActor, currentReason, currentKey)
+		if err != nil || firstCurrent.FulfillmentStatus != "CREDITED" || currentProvider.gets.Load() != getsBefore+1 {
+			t.Fatal("current repair did not preserve its strong provider/payment path", err)
+		}
+		var commands, repairs, packages int
+		var posted int64
+		if err := r.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM payment_order_repair_commands WHERE payment_order_id=$1),(SELECT count(*) FROM payment_order_repairs WHERE payment_order_id=$1),(SELECT count(*) FROM entitlement_packages p JOIN payment_transactions tx ON tx.id=p.source_payment_transaction_id WHERE tx.payment_order_id=$1),posted_microcredits FROM wallets WHERE id=$2`, currentOrder.ID, currentOrder.WalletID).Scan(&commands, &repairs, &packages, &posted); err != nil || commands != 1 || repairs != 1 || packages != 1 || posted != currentOrder.CreditMicrocredits {
+			t.Fatal("current repair duplicated or lost original financial effects", err)
+		}
+		currentFacts := directRepairFacts(t, r, ctx)
+		currentReplay, err := current.RepairReviewedOrder(ctx, currentOrder.ID, currentActor, currentReason, currentKey)
+		currentACK, _ := json.Marshal(firstCurrent)
+		currentAgain, _ := json.Marshal(currentReplay)
+		if err != nil || !bytes.Equal(currentACK, currentAgain) || directRepairFacts(t, r, ctx) != currentFacts || currentProvider.gets.Load() != getsBefore+1 {
+			t.Fatal("current generation/repair ACK did not replay exactly once", err)
 		}
 	})
 }

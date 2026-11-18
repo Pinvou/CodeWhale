@@ -286,15 +286,16 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 				}
 				assertLaterRefusal(admissionPrefix, 900038, "manual admission facts cannot be rolled back; restore a compatible application version")
 				// Retain the complete current upgrade and replay independently.
+				queryUpgrade := freezeHistoricalQueryUpgrade(t, ctx, r)
 				if err := billingschema.Up(ctx, operator, all); err != nil {
 					t.Fatal("official complete forward upgrade", err)
 				}
 				if _, err := billingschema.VerifyApplied(ctx, operator, all); err != nil {
 					t.Fatal("verify complete forward upgrade", err)
 				}
-				if financialFacts() != before {
-					t.Fatal("complete forward upgrade changed original financial facts")
-				}
+				queryUpgrade.assertAfter(t, ctx, r)
+				assertHistoricalQueryFinancialSnapshot(t, before, financialFacts(), "orders")
+				fullFinancialFacts := financialFacts()
 				if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerBefore); err != nil {
 					t.Fatal(err)
 				}
@@ -305,7 +306,7 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 					t.Fatal("verify complete forward replay", err)
 				}
 				migrations.Unlock(ctx, operator)
-				if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerAfter); err != nil || ledgerAfter != ledgerBefore || financialFacts() != before || reviewFacts() != originalReviews {
+				if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledgerAfter); err != nil || ledgerAfter != ledgerBefore || financialFacts() != fullFinancialFacts || reviewFacts() != originalReviews {
 					t.Fatal("complete upgrade replay changed migration ledger or funds", err)
 				}
 				var retained int

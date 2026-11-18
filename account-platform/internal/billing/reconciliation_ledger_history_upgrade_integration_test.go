@@ -171,13 +171,31 @@ func TestLedgerRepairProofHistoricalUpgradePostgres(t *testing.T) {
 	}
 	// The 900032 rollback contract is checked at its own historical boundary;
 	// subsequent public migrations must still install without changing funds/ACL.
+	queryUpgrade := freezeHistoricalQueryUpgrade(t, ctx, r)
 	if err = billingschema.Up(ctx, operator, all); err != nil {
 		t.Fatal("install later public migrations", err)
 	}
 	if _, err = billingschema.VerifyApplied(ctx, operator, all); err != nil {
 		t.Fatal("verify later public migrations", err)
 	}
-	if snapshot() != factBefore || acl() != aclBefore {
-		t.Fatal("later migrations changed historical financial facts or runtime permissions")
+	queryUpgrade.assertAfter(t, ctx, r)
+	assertHistoricalQueryFinancialSnapshot(t, factBefore, snapshot(), "orders")
+	if acl() != aclBefore {
+		t.Fatal("later migrations changed original runtime permissions")
+	}
+	// The newly installed NULL columns and identities are part of the complete
+	// replay baseline; they are never excluded from ordinary current snapshots.
+	fullFacts := snapshot()
+	if err = r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledger); err != nil {
+		t.Fatal(err)
+	}
+	if err = billingschema.Up(ctx, operator, all); err != nil {
+		t.Fatal("replay complete public migrations", err)
+	}
+	if _, err = billingschema.VerifyApplied(ctx, operator, all); err != nil {
+		t.Fatal("verify complete replay", err)
+	}
+	if err = r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&after); err != nil || after != ledger || snapshot() != fullFacts || acl() != aclBefore {
+		t.Fatal("complete replay changed original or newly installed facts/identity/ACL", err)
 	}
 }
