@@ -294,11 +294,24 @@ for (const settingsI18nSource of settingsI18nSources) {
     'the keyless toggle must actually flip the noAuth state on click',
   );
   // Same caliber for the port row: the row can render correctly while its
-  // onChange silently stops rewriting the URL — pin the wiring itself.
+  // onChange silently detaches from the URL — pin the draft/commit wiring
+  // itself. Typing must buffer into the draft (never rewrite base_url on
+  // input: WHATWG default-port normalization eats mid-typed ports like
+  // 8080/4430, review zhuowp 2026-11-18 P2); blur and Enter commit.
   assert.match(
     settingsViewSource,
-    /onChange: e => handleBaseUrlPortChange\(e\.target\.value\)/,
-    'the port row must actually rewrite the URL through handleBaseUrlPortChange on input',
+    /onChange: e => \{ setBaseUrlPortDraft\(e\.target\.value\); validateBaseUrlPortDraft\(e\.target\.value\); \}/,
+    'the port row must buffer keystrokes into the draft and validate without rewriting base_url on input',
+  );
+  assert.match(
+    settingsViewSource,
+    /onBlur: commitBaseUrlPortDraft/,
+    'the port row must commit the draft to base_url on blur',
+  );
+  assert.match(
+    settingsViewSource,
+    /onKeyDown: e => \{ if \(e\.key === 'Enter'\) e\.currentTarget\.blur\(\); \}/,
+    'the port row must commit the draft on Enter via blur',
   );
   assert.match(
     settingsViewSource,

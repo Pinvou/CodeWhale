@@ -428,6 +428,12 @@ function hasStoredCredential(record) {
       const [noAuth, setNoAuth] = useState(!initial.__new && initial.preset !== 'local_vllm' && initial.provider_kind !== PROVIDER_KIND_CODING_PLAN && initial.auth_mode === 'none');
       // 端口输入框（base_url 行内）的行内校验错误；与 localPortError（检测框）独立。
       const [baseUrlPortError, setBaseUrlPortError] = useState(null);
+      // 端口框编辑草稿：null = 未在编辑（回显 base_url 派生值）。编辑期间逐键只更新
+      // 草稿并即时校验，blur/Enter 才提交到 base_url —— WHATWG 默认端口归一化会把
+      // 中间输入（http 下打到 "80"、https 下打到 "443"）瞬间归一成空串再回显，逐键
+      // 改写 base_url 会让 8080/4430 这类常用端口无法连续键入（review zhuowp
+      // 2026-11-18 P2：端口框无法逐键输入常用端口）。
+      const [baseUrlPortDraft, setBaseUrlPortDraft] = useState(null);
       const [localKeyEnabled, setLocalKeyEnabled] = useState(!initial.__new && initial.preset === 'local_vllm' && !!initial.has_secret);
       const [pickerOpen, setPickerOpen] = useState(!!initial.__new && initial.preset !== 'local_vllm');
       const [pickerTab, setPickerTab] = useState(initial.__scope === 'local' ? 'local' : 'cloud');
@@ -596,31 +602,40 @@ function hasStoredCredential(record) {
         }
       }
       // base_url 的显式端口（无显式端口 = ''，即走 scheme 默认）。
-      // 端口框输入 → 原位改写 base_url 的端口（保留 scheme/host/path）。
-      // 校验口径与本地检测端口框一致：空串 = 移除显式端口（走 scheme 默认）；
-      // 非纯数字或超出 1-65535（含 0）只报错不改 URL，输入框值始终由 base_url
-      // 派生，因此非法输入会被弹回上一个合法值。
-      function handleBaseUrlPortChange(raw) {
+      // 编辑期（草稿非空）：逐键只更新草稿并按同一口径即时校验（空串合法 =
+      // 移除显式端口走 scheme 默认；非纯数字或超出 1-65535 含 0 报错），不触碰
+      // base_url。提交期（blur/Enter）：草稿合法才原位改写 base_url 的端口
+      // （保留 scheme/host/path）；非法提交保留草稿文本与错误提示等待修正，
+      // 不把输入弹回旧值 —— 逐键改写会被 WHATWG 默认端口归一化破坏中间输入
+      // （review zhuowp 2026-11-18 P2）。
+      function validateBaseUrlPortDraft(raw) {
         const trimmed = raw.trim();
         if (trimmed === '') {
-          const parsed = parseHttpUrl(baseUrl);
-          if (!parsed) return;
-          parsed.port = '';
           setBaseUrlPortError(null);
-          handleBaseUrlChange(serializeParsedBaseUrl(parsed));
-          return;
+          return true;
         }
-        const port = /^\d+$/.test(trimmed) ? Number(trimmed) : NaN;
+        const port = /^\d+$/.test(trimmed) ? Number(trimmed) : NaN; // eslint-disable-line sonarjs/concise-regex -- keep [^0-9] literal instead of \D; readability first
         if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
           setBaseUrlPortError(settingsCopy.localPortInvalid);
-          return;
+          return false;
         }
+        setBaseUrlPortError(null);
+        return true;
+      }
+      function commitBaseUrlPortDraft() {
+        if (baseUrlPortDraft === null) return;
+        const raw = baseUrlPortDraft;
+        if (!validateBaseUrlPortDraft(raw)) return;
+        setBaseUrlPortDraft(null);
         const parsed = parseHttpUrl(baseUrl);
         if (!parsed) return;
-        parsed.port = String(port);
-        setBaseUrlPortError(null);
+        const trimmed = raw.trim();
+        parsed.port = trimmed === '' ? '' : String(Number(trimmed));
         handleBaseUrlChange(serializeParsedBaseUrl(parsed));
       }
+      // base_url 在编辑之外被改动（预设切换、表单重置等）时，草稿失去意义，
+      // 丢弃并回到派生回显。
+      useEffect(() => { setBaseUrlPortDraft(null); }, [baseUrl, preset]);
       // URL API 的 toString 在空路径时补一个尾斜杠；只剥这个补出来的斜杠，
       // 不顺手动用户自己写的路径尾斜杠（如 .../v1/ —— 与直接编辑 URL 行的
       // 行为一致，手动输入不归一化）。裸主机（pathname === '/'）上用户自己
@@ -1081,13 +1096,15 @@ function hasStoredCredential(record) {
           </>
         );
       };
-      const renderInlineField = ({ label, value, onChange, placeholder, type = 'text', trailing, readOnly = false, testId, inputMode, spellCheck }) => (
+      const renderInlineField = ({ label, value, onChange, placeholder, type = 'text', trailing, readOnly = false, testId, inputMode, spellCheck, onBlur, onKeyDown }) => (
         <div className={`min-h-[54px] flex items-center gap-3 px-4 py-2.5 border-b last:border-b-0 ${formDivider}`}>
           <label className={`shrink-0 text-[14px] leading-5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>{label}</label>
           <input
             type={type}
             value={value}
             onChange={onChange}
+            onBlur={onBlur}
+            onKeyDown={onKeyDown}
             readOnly={readOnly}
             placeholder={placeholder}
             data-testid={testId}
@@ -1560,13 +1577,16 @@ function hasStoredCredential(record) {
                         失效 → 编辑 URL 打错字，settings_ui_smoke 的 Tachyon
                         档位钉即此），独立行让 URL 行保持与既有表单一致的 DOM
                         契约。URL 不可解析（非 http/https）时只读，值由 baseUrl
-                        派生；清空 = 移除显式端口（走 scheme 默认）。显式写默认
-                        端口（https 443 / http 80）会被 WHATWG URL 规范化丢弃
+                        派生；编辑走草稿态（逐键不回写 base_url，blur/Enter 提交，
+                        见 baseUrlPortDraft 注释），提交后显式写默认端口
+                        （https 443 / http 80）会被 WHATWG URL 规范化丢弃
                         （等价 URL），端口框随之回显为空，属预期行为。 */}
                     {showBaseUrlField && renderInlineField({
                       label: settingsCopy.localPortLabel,
-                      value: parsedBaseUrl ? (parsedBaseUrl.port || '') : '',
-                      onChange: e => handleBaseUrlPortChange(e.target.value),
+                      value: baseUrlPortDraft !== null ? baseUrlPortDraft : (parsedBaseUrl ? (parsedBaseUrl.port || '') : ''),
+                      onChange: e => { setBaseUrlPortDraft(e.target.value); validateBaseUrlPortDraft(e.target.value); },
+                      onBlur: commitBaseUrlPortDraft,
+                      onKeyDown: e => { if (e.key === 'Enter') e.currentTarget.blur(); },
                       placeholder: settingsCopy.localPortPlaceholder,
                       testId: 'model-form-base-url-port',
                       inputMode: 'numeric',

@@ -2052,16 +2052,33 @@ impl Pinvou3Bridge {
             // probe pipeline returned 400); at runtime it is used per the fact
             // that it was actually selected; a text model configured as a
             // vision model is blocked by the frontend probe gate.
-            let declares_no_auth = Self::model_declares_no_auth(vision);
-            let api_key = if declares_no_auth {
-                String::new()
-            } else {
-                runtime_vision
-                    .and_then(|_| self.runtime_vision_credential.as_ref())
-                    .map(|credential| credential.expose_api_key().to_owned())
-                    .unwrap_or_else(|| Self::api_key_for_saved_model(vision))
-            };
-            if api_key.trim().is_empty() && !declares_no_auth {
+            // Keyless (auth_mode="none") vision models are NOT registered into
+            // the Chat-only image_analyze tool: `VisionModelConfig` carries no
+            // auth semantics, and the tool's lane (CodeWhale tui
+            // vision/tools.rs) unconditionally attaches
+            // `Authorization: Bearer <key>`, so a keyless registration would
+            // ship a malformed empty Bearer on every real image call even
+            // though the capability probe (its own client, no auth header)
+            // succeeds. Explicitly unsupported here instead of silently
+            // borrowing the main lane's keyless filtering; the wire-level fix
+            // belongs in the CodeWhale base (an auth field on
+            // `VisionModelConfig` plus a header skip), tracked upstream
+            // (review zhuowp 2026-11-18 P2). Main-lane image input for the
+            // same model is unaffected: it follows the main protocol client.
+            if Self::model_declares_no_auth(vision) {
+                eprintln!(
+                    "[pinvou3-app] vision model {} is keyless (auth_mode=none); \
+                     the Chat-only image_analyze tool cannot express keyless auth yet, \
+                     image_analyze disabled",
+                    vision.id
+                );
+                return None;
+            }
+            let api_key = runtime_vision
+                .and_then(|_| self.runtime_vision_credential.as_ref())
+                .map(|credential| credential.expose_api_key().to_owned())
+                .unwrap_or_else(|| Self::api_key_for_saved_model(vision));
+            if api_key.trim().is_empty() {
                 eprintln!(
                     "[pinvou3-app] vision model {} has no usable credential; \
                      image_analyze disabled",
@@ -6697,11 +6714,16 @@ mod tests {
         assert!(no_key.resolve_vision_model_config().is_none());
     }
 
-    /// auth_mode="none" 的视觉模型适用 rule-1 的免鉴权豁免:无凭据也不降级
-    /// image_analyze(免鉴权端点本就不需要凭据),且与主路由同口径跳过凭据
-    /// 读取——即使记录上残留明文 key 也不下发。
+    /// auth_mode="none" 的视觉模型不注册进 Chat-only image_analyze 工具：
+    /// `VisionModelConfig` 不携带鉴权语义，工具链（CodeWhale tui
+    /// vision/tools.rs）无条件附加 `Authorization: Bearer <key>`，注册免鉴权
+    /// 视觉模型会在每次真实图像调用上发出空 Bearer（能力探测用的是无鉴权
+    /// 头的独立客户端，探测成功不等于真实调用可用；review zhuowp
+    /// 2026-11-18 P2）。即使记录残留明文 key 也按免鉴权口径读取为空 → 显式
+    /// 不支持并停用 image_analyze，而不是静默发出残缺头；wire 级修复属
+    /// CodeWhale 基座（VisionModelConfig 鉴权字段 + 头跳过），走上游。
     #[test]
-    fn vision_config_keeps_keyless_declared_model_registered() {
+    fn vision_config_gates_keyless_declared_model_out_of_the_chat_tool() {
         let mut bridge = fixture_bridge();
         set_active_model(
             &mut bridge,
@@ -6714,13 +6736,9 @@ mod tests {
         bridge.prefs.advanced.saved_models[0].vision_model_id = Some("vision-keyless".to_string());
         bridge.prefs.advanced.saved_models[1].auth_mode = Some("none".to_string());
 
-        let config = bridge
-            .resolve_vision_model_config()
-            .expect("免鉴权声明必须让视觉模型保持注册(不降级 image_analyze)");
-        assert_eq!(
-            config.api_key.as_deref(),
-            Some(""),
-            "免鉴权视觉模型不得下发任何凭据(即使记录残留明文 key)"
+        assert!(
+            bridge.resolve_vision_model_config().is_none(),
+            "免鉴权视觉模型不得注册进无法表达免鉴权的 image_analyze 工具"
         );
     }
 
