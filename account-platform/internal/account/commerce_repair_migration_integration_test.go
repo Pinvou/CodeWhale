@@ -106,6 +106,22 @@ func TestCommerceManualCompletionMigrationPostgres(t *testing.T) {
 				t.Fatal(err)
 			}
 			if scenario == "late-catalog-collision-rolls-back" {
+				// Up commits one migration at a time. Install the real public
+				// predecessors before measuring only 900025's failed transaction.
+				// The other scenario still upgrades directly from 900015 via all.
+				var predecessors []migrations.Migration
+				for _, migration := range all {
+					if migration.Version < guard.Version {
+						predecessors = append(predecessors, migration)
+					}
+				}
+				if err = accountschema.Up(ctx, connection, predecessors); err != nil {
+					t.Fatal("public completion predecessors", err)
+				}
+				if facts() != before {
+					t.Fatal("predecessors rewrote original synchronization or identity facts")
+				}
+				oldLedger = ledger()
 				// Controlled catalog collision occurs after the new DDL in the
 				// published migration, not a hand-built substitute schema.
 				if _, err = r.pool.Exec(ctx, `INSERT INTO permissions(code,scope,description) VALUES('platform.commerce.repairs.read','PLATFORM','owned migration fault')`); err != nil {
@@ -138,16 +154,24 @@ AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='public.commerce_custo
 			if _, err = approvalpolicy.VerifyPolicySet(ctx, r.pool); err != nil {
 				t.Fatal("original Billing/Token governance policies changed", err)
 			}
-			for _,command:=range []string{"ACCOUNT_COMMERCE_REPAIR_QUARANTINE","ACCOUNT_COMMERCE_REPAIR_OBSERVE","ACCOUNT_COMMERCE_REPAIR_CONFIRM"} {
-				policy,e:=approvalpolicy.Lookup(command);if e!=nil{t.Fatal(e)}
-				fields,e:=json.Marshal(policy.CriticalResourceFields);if e!=nil{t.Fatal(e)}
+			for _, command := range []string{"ACCOUNT_COMMERCE_REPAIR_QUARANTINE", "ACCOUNT_COMMERCE_REPAIR_OBSERVE", "ACCOUNT_COMMERCE_REPAIR_CONFIRM"} {
+				policy, e := approvalpolicy.Lookup(command)
+				if e != nil {
+					t.Fatal(e)
+				}
+				fields, e := json.Marshal(policy.CriticalResourceFields)
+				if e != nil {
+					t.Fatal(e)
+				}
 				var matches bool
-				e=r.pool.QueryRow(ctx,`SELECT policy_version=$2 AND approval_mode=$3 AND requester_permission=$4
+				e = r.pool.QueryRow(ctx, `SELECT policy_version=$2 AND approval_mode=$3 AND requester_permission=$4
 AND coalesce(approver_permission,'')=$5 AND risk_class=$6 AND approval_count=$7 AND self_approval_forbidden=$8
 AND snapshot_schema_version=$9 AND critical_resource_fields=$10::jsonb
 AND expires_after=($11::bigint*interval '1 microsecond') AND execution_window=($12::bigint*interval '1 microsecond') AND executor_identity=$13
-FROM approval_command_policies WHERE command_type=$1 ORDER BY policy_version DESC LIMIT 1`,command,policy.PolicyVersion,string(policy.Mode),policy.RequesterPermission,policy.ApproverPermission,policy.RiskClass,policy.ApprovalCount,policy.SelfApprovalForbidden,policy.SnapshotSchemaVersion,fields,policy.ExpiresAfter.Microseconds(),policy.ExecutionWindow.Microseconds(),policy.ExecutorIdentity).Scan(&matches)
-				if e!=nil || !matches{t.Fatal("new management route policy differs from public seed",command,e)}
+FROM approval_command_policies WHERE command_type=$1 ORDER BY policy_version DESC LIMIT 1`, command, policy.PolicyVersion, string(policy.Mode), policy.RequesterPermission, policy.ApproverPermission, policy.RiskClass, policy.ApprovalCount, policy.SelfApprovalForbidden, policy.SnapshotSchemaVersion, fields, policy.ExpiresAfter.Microseconds(), policy.ExecutionWindow.Microseconds(), policy.ExecutorIdentity).Scan(&matches)
+				if e != nil || !matches {
+					t.Fatal("new management route policy differs from public seed", command, e)
+				}
 			}
 			if facts() != before {
 				t.Fatal("upgrade rewrote original synchronization or identity facts")
