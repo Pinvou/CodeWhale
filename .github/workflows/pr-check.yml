@@ -1541,7 +1541,9 @@ jobs:
     needs: [changes, frontend-setup]
     # Each shard runs on the shared tested tree artifact and owns its fixtures.
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) && needs['frontend-setup'].result == 'success' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    # Browser shards share the heavy pool so CPU-bound smoke suites can use
+    # its larger per-runner quota; all four shards retain independent fixtures.
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     strategy:
       fail-fast: false
