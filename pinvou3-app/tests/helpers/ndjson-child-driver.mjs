@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 export function spawnNdjsonChild({
@@ -18,6 +19,9 @@ export function spawnNdjsonChild({
   let nextId = 1;
   const pending = new Map();
   const responses = [];
+  const observerDelay = monitorEventLoopDelay({ resolution: 20 });
+  observerDelay.enable();
+  child.once('close', () => observerDelay.disable());
 
   child.stderr?.on('data', (chunk) => { stderrOutput += chunk; });
   child.stdout.on('data', (chunk) => {
@@ -43,10 +47,16 @@ export function spawnNdjsonChild({
     const { timeoutMs: requestTimeoutMs = timeoutMs, label = method } =
       typeof options === 'number' ? { timeoutMs: options } : options ?? {};
     const id = nextId++;
+    const startedAt = performance.now();
     const response = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         if (!pending.delete(id)) return;
-        reject(new Error(`${label} timed out after ${requestTimeoutMs}ms (request ${id}); child stderr: ${stderrOutput}`));
+        const diagnostic = JSON.stringify({
+          observer_elapsed_ms: Math.round(performance.now() - startedAt),
+          observer_loop_max_delay_ms: Math.round(observerDelay.max / 1e6),
+          child_exit_code: child.exitCode,
+        });
+        reject(new Error(`${label} timed out after ${requestTimeoutMs}ms (request ${id}); observer: ${diagnostic}; child stderr: ${stderrOutput}`));
       }, requestTimeoutMs);
       if (unrefTimeout) timeout.unref();
       pending.set(id, { resolve, timeout });
