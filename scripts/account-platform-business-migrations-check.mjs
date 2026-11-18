@@ -65,10 +65,17 @@ export function checkRuntimeDatabases(all, inventory, render) {
   const identities = {
     'account-service': ['account', 'account_service'], 'account-event-relay': ['account', 'account_service'],
     'billing-service': ['billing', 'billing_service'], 'billing-event-relay': ['billing', 'billing_service'],
+    'token-event-relay': ['token', 'token_gateway'],
     'token-gateway': ['token', 'token_gateway'], 'token-credential-portal': ['token', 'token_gateway'],
   };
   for (const workload of all) {
-    const name = workload.kind === 'compose' ? workload.id : workload.service.name;
+    // Helm main relay containers share one binary/container name. Resolve the
+    // domain from the component only for that main container; init containers
+    // must not accidentally become SQL consumers of their parent component.
+    const name = workload.kind === 'compose' ? workload.id
+      : workload.service.name === 'event-relay'
+        ? workload.resource.spec.template.metadata.labels['app.kubernetes.io/component']
+        : workload.service.name;
     const identity = identities[name];
     if (!identity) continue;
     // Only the current personal Compose Token facade is a non-SQL process.

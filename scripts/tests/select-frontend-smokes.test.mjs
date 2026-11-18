@@ -10,6 +10,20 @@ import {
 const labels = (items) => items.map(({ kind, target }) => `${kind}:${target}`);
 const fullLabels = labels(FULL_FRONTEND_SMOKES);
 
+test('shared bundle delivery changes select all smokes even beside a targeted feature', () => {
+  for (const path of [
+    'scripts/ci-frontend-bundle.py', 'scripts/ci-frontend-cache-server.py',
+    'scripts/lib/ci_frontend_cache.py', 'scripts/tests/test_ci_frontend_bundle.py',
+    'scripts/tests/test_ci_frontend_cache_server.py', 'scripts/tests/test_ci_frontend_checkout.py',
+    'scripts/lib/ci_transfer_deadline.py', 'scripts/tests/test_ci_transfer_deadline.py',
+  ]) {
+    const feature = 'pinvou3-app/src/features/pet/PetView.jsx';
+    for (const paths of [[path], [path, feature], [feature, path]]) {
+      assert.deepEqual(labels(selectFrontendSmokes(paths)), fullLabels, paths.join(', '));
+    }
+  }
+});
+
 test("remote download budget browser runs for production, test and full-suite paths", () => {
   const target = "node:tests/remote_download_budget_smoke.mjs";
   for (const paths of [["pinvou3-app/src/features/remote-control/remote-file-transfer.mjs"],

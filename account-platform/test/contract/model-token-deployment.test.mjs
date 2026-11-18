@@ -416,7 +416,7 @@ test('new Helm settings and gates are closed typed inputs and default off', asyn
   const roles = structuredClone(values); roles.tokenCredentialPortal.egressCidrs = ['0.0.0.0/0']; assert.equal(valid(roles), false);
 });
 
-test('Helm declarations retain image pull credentials, isolated control Job and two ordinary relay sources', async () => {
+test('Helm declarations retain two default relay sources and an explicit Token publisher', async () => {
   const workloads = await read('deploy/helm/account-platform/templates/token-governed-workloads.yaml');
   const network = await read('deploy/helm/account-platform/templates/networkpolicies.yaml');
   const helpers = await read('deploy/helm/account-platform/templates/_token-governance.tpl');
@@ -430,8 +430,10 @@ test('Helm declarations retain image pull credentials, isolated control Job and 
   assert.match(helpers, /ne \$issuer.scheme "https"/);
   assert.match(helpers, /or .Values.nats.enabled \(not \(hasPrefix "tls:\/\/" .Values.dependencies.natsUrl\)\)/);
   assert.match(helpers, /Credential Portal origin does not match/);
-  assert.match(relay, /range \$source := list "account" "billing"/);
-  assert.match(relay, /key: \{\{ printf "%s-service-database-url" \$source/);
+  assert.match(relay, /\$sources := list "account" "billing"/);
+  assert.match(relay, /if .Values.tokenEventRelay.enabled[\s\S]*append \$sources "token"/);
+  assert.match(relay, /range \$source := \$sources/);
+  assert.match(relay, /key: \{\{ if eq \$source "token" \}\}token-event-relay-database-url\{\{ else \}\}\{\{ printf "%s-service-database-url" \$source/);
   assert.doesNotMatch(relay, /tokenGateway\.runtimeSecret|token-gateway-database-url/);
 });
 
@@ -557,14 +559,14 @@ test('Billing Compose, Helm and production templates preserve exact least-privil
   assert.throws(() => billingRulesFromHelmTemplate(source.replace('"service" "account-service" "permissions" (list "internal.billing.wallet.ensure"', '"service" "token-portal" "permissions" (list "internal.billing.wallet.ensure"')));
 });
 
-test('normalized deployment and NATS checks reject a retired ordinary Token relay without relaxing live identities', () => {
+test('normalized deployment rejects a cloned Token identity and retains the legacy Compose retirement boundary', () => {
   const resources = helmFixture();
   assert.equal(checkGovernedHelmResources(resources).deployment_status, 'NOT_DEPLOYED');
   const retired = structuredClone(resources.find(item => item.kind === 'Deployment' && item.metadata.name === 'account-event-relay'));
   retired.metadata.name = 'token-event-relay';
   retired.spec.template.metadata.labels['app.kubernetes.io/component'] = 'token-event-relay';
   resources.push(retired);
-  assert.throws(() => checkGovernedHelmResources(resources), /retired_ordinary_relay/);
+  assert.throws(() => checkGovernedHelmResources(resources), /token_relay_config|nats_/);
   for (const config of [composeFixture(), nativeNATSFixture()]) {
     assert.equal(checkGovernedComposeConfiguration(config).deployment_status, 'NOT_DEPLOYED');
     config.services['token-event-relay'] = structuredClone(config.services['account-event-relay']);

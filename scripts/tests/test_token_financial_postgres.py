@@ -19,6 +19,10 @@ SPEC.loader.exec_module(RUNNER)
 EXPECTED_RETAINED_ROOT_COUNT = 90
 EXPECTED_SCHEMA_ROOT_COUNT = 19
 
+# Fixed identities independently checked against each actual -run selector.
+EXPECTED_SCHEMA_ROOTS = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres"}
+EXPECTED_SCHEMA_EXPIRY_ROOT = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
+
 
 CHECKPOINT_LEAF_ROOTS = {
     "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
@@ -362,6 +366,34 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 RUNNER.verify_results(invalid, {root}, **options)
 
 
+    def test_terminal_recovery_requires_public_account_root_and_every_child(self):
+        root = "TestApprovalDeliveryTerminalRecoveryPostgres"
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertIn(root, RUNNER.ACCOUNT_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        expected = {
+            "public-migration-rollback-and-upgrade",
+            "ack-success-terminal-write-failure-worker-and-redelivery",
+            "bounded-batches-replay-and-negative-states",
+            "locked-row-and-concurrent-workers-then-next-pass",
+            "permission-fault-zero-effect-and-restoration",
+            "batch-sql-failure-is-atomic-and-next-call-recovers",
+            "populated-rollback-retains-frozen-and-terminal-history",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in (
+                [e for e in events if e.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
     def test_registration_outbox_index_requires_both_actual_install_shapes(self):
         root="TestRegistrationOutboxAggregateLookupPostgres"
         self.assertIn(root,RUNNER.ACCOUNT_REQUIRED)
@@ -575,11 +607,12 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
-    def test_token_public_upgrade_phase_requires_retained_pre_cleanup_stage(self):
+    def test_token_public_upgrade_phase_requires_retained_cleanup_and_publication_stages(self):
         root = "TestManagementPublicMigrationInstallation"
         self.assertEqual(RUNNER.TOKEN_SCHEMA_REQUIRED, {root})
         self.assertIn("installed-pre-dispatch-index-40-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
         self.assertIn("installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip", RUNNER.EXACT_REQUIRED_CHILDREN[root])
+        self.assertIn("installed-pre-publication-41-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
         self.run_main_fixture()
         index = self.fixture_phases.index("owner-token-schema")
         command = self.fixture_commands[index]
@@ -1818,11 +1851,13 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             len(RUNNER.REQUIRED) + sum(len(RUNNER.EXACT_REQUIRED_CHILDREN.get(root, ())) for root in RUNNER.REQUIRED),
         )
 
-    def run_main_fixture(self, *, group="all", existing_roles=False, user_objects=False, leftover=False,
+    def run_main_fixture(self, *, group="all", owner_lane=None, existing_roles=False, user_objects=False, leftover=False,
                          owner_leftover=False, account_leftover=False, schema_leftover=False, schema_leftover_phase=None, provisioning_leftover=False, active_client=False, external_dependency=False,
-                         go_fail_phase=None, empty_phase=None, skipped_phase=None, missing_token_children=False, platform_role_evidence=None):
+                         go_fail_phase=None, empty_phase=None, skipped_phase=None, missing_token_children=False, platform_role_evidence=None,
+                         schema_missing_children_phase=None, schema_fail_event_phase=None, schema_residual_phase=None):
         writes, commands, phases, trace = [], [], [], []
-        state = {"bootstrapped": False, "account_done": False, "owner_done": False, "schema_done": False, "provisioning_done": False, "retained_done": False}
+        schema_observations = []
+        state = {"bootstrapped": False, "account_done": False, "owner_done": False, "schema_done": False, "provisioning_done": False, "retained_done": False, "schema_phase": None, "schema_pending_observation": None}
 
         def run(argv, **kwargs):
             if argv[0] == "go":
@@ -1861,7 +1896,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     package = RUNNER.SCHEMA_PACKAGE
                     self.assertFalse(state["bootstrapped"])
                     state["schema_done"] = True
-                    state["schema_phase"] = phase
+                    state["schema_phase"] = state["schema_pending_observation"] = phase
                 else:
                     phase, required, package = "retained-billing", RUNNER.billing_roots(group), RUNNER.BILLING_PACKAGE
                     self.assertTrue(state["bootstrapped"])
@@ -1912,6 +1947,10 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                         events.append({"Action": "skip", "Package": package, "Test": name + ("/actual" if platform_role_evidence == "skipped-child" else "")})
                     else:
                         raise AssertionError("unknown platform role evidence mutation")
+                if schema_missing_children_phase == phase:
+                    events = [event for event in events if "/" not in event.get("Test", "")]
+                if schema_fail_event_phase == phase:
+                    events.append({"Action": "fail", "Package": package, "Test": sorted(required)[0] + "/actual"})
                 if empty_phase == phase:
                     events = [{"Action": "pass", "Package": package}]
                 if skipped_phase == phase:
@@ -1930,10 +1969,15 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 state["bootstrapped"] = False
                 value = ""
             elif sql == RUNNER.INSTANCE_SNAPSHOT_SQL:
+                if state["schema_pending_observation"] is not None:
+                    schema_observations.append(state["schema_pending_observation"])
+                    state["schema_pending_observation"] = None
                 databases = ["postgres", "template0", "template1"]
                 if leftover and state["retained_done"]:
                     databases.append("unknown_fixture")
                 roles = {"postgres"}
+                if schema_residual_phase is not None and state["schema_phase"] == schema_residual_phase:
+                    roles.add("billing_schema_owner")
                 if existing_roles:
                     roles.add("existing_runtime")
                 elif account_leftover and state["account_done"]:
@@ -1984,14 +2028,16 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "PINVOU_TEST_SCHEMA_DATABASE_URL": "must-not-reach-tests",
             "GOFLAGS": "-trimpath",
         }, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run), \
+                patch.object(RUNNER, "run_go_phase", side_effect=lambda command, env: run(command, env=env)), \
                 patch.object(RUNNER, "require_exclusive_instance", side_effect=observation), contextlib.redirect_stdout(io.StringIO()):
             try:
-                RUNNER.main(group=group)
+                RUNNER.main(group=group, owner_lane=owner_lane)
             finally:
                 self.fixture_writes = writes
                 self.fixture_commands = commands
                 self.fixture_phases = phases
                 self.fixture_trace = trace
+                self.fixture_schema_observations = schema_observations
 
     def test_parallel_groups_preserve_complete_contract_and_exclusive_cleanup(self):
         phases = []
@@ -2029,6 +2075,18 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         with patch.object(RUNNER.subprocess, "run") as run, self.assertRaisesRegex(ValueError, "^unknown financial execution group$"):
             RUNNER.main(group="billing-4")
         run.assert_not_called()
+
+    def test_owner_lanes_execute_all_original_phases_without_bootstrapping_shared_actors(self):
+        completed = []
+        for lane, expected in RUNNER.OWNER_LANES.items():
+            self.run_main_fixture(group="owners", owner_lane=lane)
+            self.assertEqual(self.fixture_phases, list(expected))
+            self.assertEqual(self.fixture_writes, [])
+            completed.extend(self.fixture_phases)
+            for phase in expected:
+                with self.subTest(lane=lane, phase=phase), self.assertRaises(RuntimeError):
+                    self.run_main_fixture(group="owners", owner_lane=lane, skipped_phase=phase)
+        self.assertCountEqual(completed, RUNNER.OWNER_ORDER)
 
     def test_existing_roles_prevent_bootstrap(self):
         with self.assertRaises(RuntimeError):
@@ -2176,6 +2234,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_account_phase_requires_real_cas_lifecycle_and_review_governance_roots(self):
         self.assertEqual(RUNNER.ACCOUNT_REQUIRED, {
             "TestOrganizationStartupDiagnosticsPostgres",
+            "TestApprovalDeliveryTerminalRecoveryPostgres",
             "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
             "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
             "TestF06OrganizationStatusProjectionVersionPublicPostgres",
@@ -2423,6 +2482,46 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 self.run_main_fixture(go_fail_phase=phase)
             self.assertEqual(self.fixture_phases, expected)
             self.assertEqual(self.fixture_writes, [] if phase in {"owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation"} else ["create", "drop"])
+
+    def test_schema_phase_partition_preserves_all_fixed_identities_and_boundaries(self):
+        self.assertEqual(len(EXPECTED_SCHEMA_ROOTS), 19)
+        self.assertEqual(RUNNER.SCHEMA_REQUIRED, EXPECTED_SCHEMA_ROOTS)
+        for group in ("owners", "all"):
+            with self.subTest(group=group):
+                self.run_main_fixture(group=group)
+                selected = []
+                for phase, expected in (
+                    ("owner-schema-legacy-expiry", {EXPECTED_SCHEMA_EXPIRY_ROOT}),
+                    ("owner-schema", EXPECTED_SCHEMA_ROOTS - {EXPECTED_SCHEMA_EXPIRY_ROOT}),
+                ):
+                    self.assertEqual(self.fixture_phases.count(phase), 1)
+                    command = self.fixture_commands[self.fixture_phases.index(phase)]
+                    selection = command[command.index("-run") + 1]
+                    actual = {root for root in EXPECTED_SCHEMA_ROOTS if re.fullmatch(selection, root)}
+                    self.assertEqual(actual, expected)
+                    self.assertEqual(command[-1], "./internal/billingschema")
+                    self.assertEqual([arg for arg in command if arg.startswith("-timeout=")], ["-timeout=20m"])
+                    selected.append(actual)
+                self.assertEqual([len(roots) for roots in selected], [1, 18])
+                self.assertFalse(selected[0] & selected[1])
+                self.assertEqual(selected[0] | selected[1], EXPECTED_SCHEMA_ROOTS)
+                self.assertEqual(sum(map(len, selected)), len(EXPECTED_SCHEMA_ROOTS))
+                self.assertLess(self.fixture_phases.index("owner-schema-legacy-expiry"), self.fixture_phases.index("owner-schema"))
+                self.assertEqual(self.fixture_schema_observations, ["owner-schema-legacy-expiry", "owner-schema"])
+
+    def test_each_schema_phase_requires_evidence_and_restoration_before_next_phase(self):
+        for group in ("owners", "all"):
+            for phase in ("owner-schema-legacy-expiry", "owner-schema"):
+                expected = ["owner-account", "owner-wallet", "owner-schema-legacy-expiry"]
+                if phase == "owner-schema":
+                    expected.append(phase)
+                for option in ("go_fail_phase", "empty_phase", "skipped_phase", "schema_missing_children_phase",
+                               "schema_fail_event_phase", "schema_residual_phase"):
+                    with self.subTest(group=group, phase=phase, option=option), self.assertRaises(RuntimeError):
+                        self.run_main_fixture(group=group, **{option: phase})
+                    self.assertEqual(self.fixture_phases, expected)
+                    self.assertEqual(self.fixture_writes, [])
+                    self.assertEqual(self.fixture_schema_observations, expected[2:])
 
     def test_each_phase_rejects_zero_or_skipped_required_tests(self):
         for phase in ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"]:
