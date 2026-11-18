@@ -28,7 +28,7 @@ class FinancialTimingTests(unittest.TestCase):
         events = [{"Action": "pass", "Test": "Root", "Elapsed": 12},
                   {"Action": "pass", "Test": "Root/child", "Elapsed": 11},
                   {"Action": "skip", "Test": "NotExecuted"},
-                  {"Action": "start", "Time": "1970-01-01T00:01:42Z"},
+                  {"Action": "start", "Time": "1970-01-01T00:01:42.123456789Z"},
                   {"Action": "pass", "Elapsed": 12},
                   {"Action": "output", "Output": '[ci-fixture-timing] {"operation":"template-clone","seconds":0.2}\n'},
                   {"Action": "output", "Output": '[ci-fixture-template] {"prepared":1,"reused":3,"remaining":0}\n'}]
@@ -38,7 +38,7 @@ class FinancialTimingTests(unittest.TestCase):
         self.assertEqual(receipt["root_passes"], ["Root"])
         self.assertEqual(receipt["slow_roots"], [{"test": "Root", "seconds": 12}])
         self.assertEqual(receipt["exit_code"], 7)
-        self.assertEqual(receipt["pre_test_seconds"], 2)
+        self.assertAlmostEqual(receipt["pre_test_seconds"], 2.123456, places=6)
         self.assertEqual(receipt["package_elapsed_seconds"], 12)
         self.assertEqual(receipt["fixture_operations"]["template-clone"], {"count": 1, "seconds": 0.2})
         self.assertEqual(receipt["templates"], {"prepared": 1, "reused": 3, "remaining": 0})

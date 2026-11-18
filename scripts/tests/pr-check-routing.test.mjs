@@ -595,10 +595,12 @@ function assertFiniteFinancialPGSetup(job) {
   assert.equal(execute.trimEnd(), [
     "      - name: Run isolated financial group", "        shell: bash", "        env:",
     "          ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}",
+    '          PINVOU_CI_FIXTURE_TEMPLATES: "1"',
+    '          PINVOU_CI_FIXTURE_TIMING: "1"',
     "          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
     ...pgIdentityEnvironment("financial").map(value => `          ${value}`),
     "        run: |", "          set -euo pipefail",
-    '          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP"',
+    '          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP" --verify-fixture-cache',
   ].join("\n"));
   const stop = namedStep(text, pgStopStepName);
   assert.equal(stop.trimEnd(), [

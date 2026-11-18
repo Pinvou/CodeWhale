@@ -13,6 +13,7 @@ from datetime import datetime
 import json
 import math
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -768,7 +769,10 @@ def phase_timing(label, seconds, events, code, *, started_epoch=None):
     packages = [event for event in events if event.get("Action") == "pass" and not event.get("Test")]
     profile["package_elapsed_seconds"] = sum(event.get("Elapsed", 0) for event in packages)
     if starts and started_epoch is not None:
-        profile["pre_test_seconds"] = max(0, datetime.fromisoformat(starts[0]["Time"].replace("Z", "+00:00")).timestamp() - started_epoch)
+        # Go emits RFC3339Nano. Python 3.10 accepts only microsecond precision;
+        # truncate the diagnostic timestamp without changing test deadlines.
+        timestamp = re.sub(r"(\.\d{6})\d+", r"\1", starts[0]["Time"]).replace("Z", "+00:00")
+        profile["pre_test_seconds"] = max(0, datetime.fromisoformat(timestamp).timestamp() - started_epoch)
     operations = {}
     snapshots = {"prepared": 0, "reused": 0, "remaining": 0}
     for event in events:
