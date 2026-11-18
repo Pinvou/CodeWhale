@@ -1249,7 +1249,7 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 	terminalObserved := false
 	background := context.WithoutCancel(r.Context())
 	terminal := func() bool {
-		current, err := s.repository.GetUsage(background, usageID)
+		current, err := s.repository.GetUsageStreamState(background, usageID)
 		return err == nil && (current.Status == "COMMITTED" || current.Status == "RELEASED")
 	}
 	persistNumeric := func(parsed Usage) {
@@ -1318,7 +1318,7 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 			}
 			lastSequence = sequence
 			if deliveryReady() {
-				current, stateErr := s.repository.GetUsage(context.WithoutCancel(r.Context()), usageID)
+				current, stateErr := s.repository.GetUsageStreamState(context.WithoutCancel(r.Context()), usageID)
 				if stateErr == nil && current.DeliveryStatus == "USER_STOPPED" {
 					deliveryConnected = false
 				}

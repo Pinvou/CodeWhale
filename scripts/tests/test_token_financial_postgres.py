@@ -146,40 +146,21 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
-    def test_profile_revocation_requires_every_durable_admission_child(self):
-        root = "TestProfileRevocationDurableAdmissionRuntimePostgres"
-        children = {
-            "capacity-before-grant-confirmed-replay-and-unknown-retention",
-            "cancel-before-authority-preserves-reservation",
-            "dispatch-token-and-legacy-command-cannot-regrant",
-            "concurrent-global-admission-across-profiles",
-            "legacy-upgrade-preserves-confirmed-and-unknown-receipts",
-            "capacity-public-complete-resumes-original-operation",
-            "lease-expiry-during-global-admission-wait",
-        }
-        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+    def test_stream_state_polling_requires_public_delivery_and_replay_children(self):
+        root = "TestStreamStatePollingPublicPostgres"
+        children = {"complete", "cancel", "disconnect",
+                    "complete/concurrent-last-event-id-public-replay", "disconnect/concurrent-last-event-id-public-replay",
+                    "external-committed", "external-released"}
+        self.assertIn(root, RUNNER.REQUIRED)
+        self.assertIn(root, RUNNER.TOKEN_CHILD_REQUIRED)
         self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
-        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
-        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        events = self.events({root}, RUNNER.TOKEN_PACKAGE, children=True)
+        options = {"package": RUNNER.TOKEN_PACKAGE, "require_children": True, "exact_roots": True}
         RUNNER.verify_results(events, {root}, **options)
         for child in children:
             for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
-                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
-                with self.subTest(child=child), self.assertRaises(RuntimeError):
-                    RUNNER.verify_results(invalid, {root}, **options)
-
-    def test_profile_revocation_requires_every_closure_child(self):
-        root = "TestProfileRevocationClosureRuntimePostgres"
-        children = {"reserved-closure-seals-no-dispatch-and-releases-capacity",
-                    "confirmed-replays-after-anonymization", "late-confirmation-replays-after-anonymization"}
-        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
-        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
-        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
-        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
-        RUNNER.verify_results(events, {root}, **options)
-        for child in children:
-            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
-                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
+                            events + [{"Action": "skip", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}],
+                            events + [{"Action": "fail", "Package": RUNNER.TOKEN_PACKAGE, "Test": root + "/" + child}]):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
@@ -2206,7 +2187,31 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_actual_main_requires_token_waiver_children(self):
         self.assertEqual(
             RUNNER.TOKEN_CHILD_REQUIRED,
-            {"TestGovernanceUsageResourcePrechecksPostgres", "TestOrganizationModelPolicyPublicPostgres", "TestEmergencyCancellationClaimOwnershipPostgres", "TestEmergencyCancellationRequestLocksClaimPostgres", "TestUserUnusedIntentCancellationOwnerPostgres", "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres", "TestPendingUnusedExpiryCancellationOwnerPostgres", "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres", "TestRemoteModelCancellationOwnerLoopTransport", "TestLocalModelCancellationHandshakeHTTP", "TestLifecycleForceCancelApprovalPostgres", "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres", "TestCancellationReceivedReadRechecksReservationPostgres", "TestCancellationFirstUserPreservesConfirmedReceiptPostgres", "TestModelTerminalObservationPreservesExpiryProofPostgres", "TestModelTerminalObservationRejectsUntrustedEvidencePostgres", "TestUsageWaiverCoordinatorRecoveryPostgres", "TestPersonalZeroBudgetCancellationAndExpiryPostgres", "TestCredentialRotationWindowReceiptPostgres", "TestCredentialFailurePersistenceBoundariesPostgres", "TestCircuitFailureBeforeDispatchPostgres", "TestPreparationFailurePreservesAcceptedUsagePostgres"},
+            {
+                "TestCancellationFirstUserPreservesConfirmedReceiptPostgres",
+                "TestCancellationReceivedReadRechecksReservationPostgres",
+                "TestCircuitFailureBeforeDispatchPostgres",
+                "TestCredentialFailurePersistenceBoundariesPostgres",
+                "TestCredentialRotationWindowReceiptPostgres",
+                "TestEmergencyCancellationClaimOwnershipPostgres",
+                "TestEmergencyCancellationRequestLocksClaimPostgres",
+                "TestGovernanceUsageResourcePrechecksPostgres",
+                "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres",
+                "TestLifecycleForceCancelApprovalPostgres",
+                "TestLocalModelCancellationHandshakeHTTP",
+                "TestModelTerminalObservationPreservesExpiryProofPostgres",
+                "TestModelTerminalObservationRejectsUntrustedEvidencePostgres",
+                "TestOrganizationModelPolicyPublicPostgres",
+                "TestPendingUnusedExpiryCancellationOwnerPostgres",
+                "TestPendingUnusedExpiryLegacyCancellationFallbackPostgres",
+                "TestPendingUnusedExpiryRejectsInvalidProofTimestampPostgres",
+                "TestPersonalZeroBudgetCancellationAndExpiryPostgres",
+                "TestPreparationFailurePreservesAcceptedUsagePostgres",
+                "TestRemoteModelCancellationOwnerLoopTransport",
+                "TestStreamStatePollingPublicPostgres",
+                "TestUsageWaiverCoordinatorRecoveryPostgres",
+                "TestUserUnusedIntentCancellationOwnerPostgres",
+            },
         )
         with self.assertRaisesRegex(RuntimeError, "no completed child"):
             self.run_main_fixture(missing_token_children=True)
@@ -2823,6 +2828,43 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         missing = [event for event in events if event.get("Test") != root + "/current-query-real-producer/older-SUCCESS-cannot-cover-newer-CLOSED"]
         with self.assertRaises(RuntimeError):
             RUNNER.verify_results(missing, {root}, **options)
+
+    def test_profile_revocation_requires_every_closure_child(self):
+        root = "TestProfileRevocationClosureRuntimePostgres"
+        children = {"reserved-closure-seals-no-dispatch-and-releases-capacity",
+                    "confirmed-replays-after-anonymization", "late-confirmation-replays-after-anonymization"}
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_profile_revocation_requires_every_durable_admission_child(self):
+        root = "TestProfileRevocationDurableAdmissionRuntimePostgres"
+        children = {
+            "capacity-before-grant-confirmed-replay-and-unknown-retention",
+            "cancel-before-authority-preserves-reservation",
+            "dispatch-token-and-legacy-command-cannot-regrant",
+            "concurrent-global-admission-across-profiles",
+            "legacy-upgrade-preserves-confirmed-and-unknown-receipts",
+            "capacity-public-complete-resumes-original-operation",
+            "lease-expiry-during-global-admission-wait",
+        }
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
 
     def test_schema_restoration_is_required_before_retained_bootstrap(self):
         with self.assertRaises(RuntimeError):

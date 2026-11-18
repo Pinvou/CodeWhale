@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createBrowserWrapperHost } from './helpers/browser-wrapper-host-fixture.mjs';
+import { observeBrowserPreparePhases } from './helpers/browser-prepare-phase-observer.mjs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1267,6 +1268,7 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
   let pending;
   const startedAt = performance.now();
   const stages = { prepareObservedMs: null, holdReturnedMs: null, releaseAcknowledgedMs: null };
+  const prepareObserver = observeBrowserPreparePhases(host, { enabled: true });
   try {
     await host.deferOperation('prepare', true);
     pending = initializeWorkspace(wrapper, 'windows-first-workspace-setup-test').then(
@@ -1312,9 +1314,15 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
       upstreamStartReported: stderr.includes('Starting chrome-devtools-mcp:'),
       upstreamBoundReported: stderr.includes('Bound conversation browser page:'),
     }));
+    // Read-only, bounded observations: never replace the original failure.
+    try {
+      prepareObserver.stop();
+      console.error('[browser-prepare-phase-observer]', JSON.stringify(prepareObserver.snapshot()));
+    } catch { /* diagnostic output must not replace the primary failure */ }
     fixture.primaryErrors = [error];
     throw error;
   } finally {
+    prepareObserver.stop();
     try { await host.deferOperation('prepare', false); }
     catch (error) { (fixture.primaryErrors ||= []).push(error); }
     await cleanupFixture(fixture, host, wrapper);

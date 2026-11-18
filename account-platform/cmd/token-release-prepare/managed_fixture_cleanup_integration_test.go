@@ -281,4 +281,7 @@ func TestManagedFixtureDatabaseCleanupPostgres(t *testing.T) {
 			t.Fatal("partial setup left an owned database", err)
 		}
 	})
+	t.Run("owned-client-handoff", func(t *testing.T) {
+		testManagedFixtureConnectionHandoff(t, ctx, config, admin, database)
+	})
 }
