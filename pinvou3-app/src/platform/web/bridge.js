@@ -5684,11 +5684,23 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
   async function loadModels() { return pinvouSharedweb().loadModels(); }
   // model 对象字段须是 snake_case(SavedModel serde):
   // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
- async function saveModel(model) {
+ async function saveModel(model, options) {
+   // options.deferRefresh (round-1 review M9, same semantics as the tauri
+   // lane): the batch add-all loop skips the per-row reload tail and the
+   // caller refreshes once via reloadSavedModels(). Default keeps the
+   // save-then-refresh chain single-row callers rely on.
    await invoke("save_model", { model: model });
+   if (options && options.deferRefresh) return;
    await loadModels();
    await loadEffectiveModelConfig();
  }
+// Post-batch refresh twin of saveModel's reload tail (round-1 review M9):
+// the web save chain reloads models + effective config, so the batch refresh
+// runs exactly those two loaders once for the whole confirmed add-all batch.
+async function reloadSavedModels() {
+  await loadModels();
+  await loadEffectiveModelConfig();
+}
 async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKey(id); }
  async function deleteModel(id) {
    await invoke("delete_model", { id: id });
@@ -5783,6 +5795,9 @@ async function testModelConnection(baseUrl, apiKey, modelId) { return pinvouShar
   // 测试图片输入能力(设计 §7.3):用当前表单的 model/base_url/key 发一张内置纯色图,
   // 仅由模型编辑弹窗主动点击触发,无任何启动/定时自动测试。
 async function testImageInputCapability(model, baseUrl, apiKey, modelId) { return pinvouSharedweb().testImageInputCapability(model, baseUrl, apiKey, modelId); }
+// 端点模型自动发现(冻结契约 §2.5):probe_endpoint_models。失败必须 reject
+// 穿透(web 白名单未放行/老桌面),由 SettingsView 归一为三语提示。
+async function probeEndpointModels(request) { return pinvouSharedweb().probeEndpointModels(request); }
   async function probeLocalServerKind(baseUrl, apiKey, modelId) {
     // 本地/内网 OpenAI 兼容端点的服务类型探测（vllm/ollama/lmstudio/generic）。
     // Rust 侧按 base_url TTL 缓存；命令失败（web 白名单不含该命令/老版本桌面）
@@ -7961,12 +7976,14 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     loadEffectiveModelConfig: loadEffectiveModelConfig,
    loadModels: loadModels,
    saveModel: saveModel,
+   reloadSavedModels: reloadSavedModels,
    revealModelApiKey: revealModelApiKey,
    deleteModel: deleteModel,
    deleteModelIfStoreLink: deleteModelIfStoreLink,
    deleteModelIfMatches: deleteModelIfMatches,
     getImageInputCapability: getImageInputCapability,
     testImageInputCapability: testImageInputCapability,
+    probeEndpointModels: probeEndpointModels,
     setActiveModel: setActiveModel,
     loadSessionModel: loadSessionModel,
     switchModel: switchModel,
