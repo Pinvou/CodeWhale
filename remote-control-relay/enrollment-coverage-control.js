@@ -1,8 +1,9 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import { EnrollmentMigrationHandler } from "./enrollment-migration-handler.js";
-import { ENROLLMENT_NAMESPACE, SELF_REGISTRATION_LIMITS, loadEnrollmentRegistryConfig,
+import { ENROLLMENT_NAMESPACE, SELF_REGISTRATION_LIMITS, DEFAULT_MAX_ENROLLMENT_ENTRIES, loadEnrollmentRegistryConfig,
   enrollmentKeyringFingerprint, enrollmentKeyringUsesKey } from "./enrollment-registry.js";
+import { DEFAULT_MAX_RELAY_CONTROLLER_STATE_BYTES } from "./relay-state-store.js";
 import { isEnrollmentEndpointIdentifier } from "./identifier-contract.js";
 import { isExampleHmacKey } from "./hmac-key-config.js";
 
@@ -61,9 +62,15 @@ function storeBinding(env, key) {
   // The disabled/default policy keeps the released v1 binding byte-for-byte.
   // An enabled anonymous registration policy must change the attested binding.
   const { self_registration, ...legacyConfig } = config;
+  const { max_entries, controller_state_max_bytes, ...releasedConfig } = legacyConfig;
+  // Default budgets were implicit in released v1. Keep that binding, including
+  // explicitly configured defaults; retain both budget fields for custom limits.
+  const capacityConfig = max_entries === DEFAULT_MAX_ENROLLMENT_ENTRIES
+    && controller_state_max_bytes === DEFAULT_MAX_RELAY_CONTROLLER_STATE_BYTES
+    ? releasedConfig : legacyConfig;
   const boundConfig = self_registration
-    ? { ...legacyConfig, self_registration: true, self_registration_limits: SELF_REGISTRATION_LIMITS }
-    : legacyConfig;
+    ? { ...capacityConfig, self_registration: true, self_registration_limits: SELF_REGISTRATION_LIMITS }
+    : capacityConfig;
   // Bind the configured store, deployment policy and credential key material
   // without putting paths, keys or endpoint identities on the control wire.
   return mac(key, "store", Buffer.from(JSON.stringify({ config: boundConfig,

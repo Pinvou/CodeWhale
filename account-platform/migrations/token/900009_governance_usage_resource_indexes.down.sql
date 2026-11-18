@@ -1,0 +1,2 @@
+DROP INDEX public.usage_governance_model_idx;
+DROP INDEX public.usage_governance_account_credential_idx;

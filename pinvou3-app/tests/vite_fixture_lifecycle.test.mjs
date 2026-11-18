@@ -5,10 +5,116 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { createServer } from './helpers/vite-fixture.mjs';
+import { createServer, prepareFixtureModules } from './helpers/vite-fixture.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const config = { root, configFile: false, logLevel: 'error', optimizeDeps: { noDiscovery: true } };
+
+test('module readiness includes a delayed static dependency before a browser case starts', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-vite-module-crawl-'));
+  fs.writeFileSync(path.join(directory, 'entry.js'), "import {value} from './dependency.js'; export {value};");
+  fs.writeFileSync(path.join(directory, 'dependency.js'), 'export const value = 1;');
+  let dependencyTransformed = false;
+  const server = await createServer({ ...config, root: directory, plugins: [{
+    name: 'controlled-delayed-dependency',
+    async transform(_code, id) {
+      if (id.endsWith('/dependency.js')) {
+        await new Promise(resolve => setTimeout(resolve, 80));
+        dependencyTransformed = true;
+      }
+    },
+  }], server: { middlewareMode: true } });
+  try {
+    await prepareFixtureModules(server, ['/entry.js']);
+    assert.equal(dependencyTransformed, true, 'listener/entry readiness alone is insufficient');
+    assert.ok((await server.environments.client.moduleGraph.getModuleByUrl('/dependency.js')).transformResult);
+    await assert.rejects(prepareFixtureModules(server, ['/absent.js']), /Failed to load url|does not exist/u);
+  } finally { await server.close(); fs.rmSync(directory, { recursive: true }); }
+});
+
+test('module readiness waits for later entries after Vite first crawl has settled', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-vite-later-crawl-'));
+  fs.writeFileSync(path.join(directory, 'early.js'), 'export const early = true;');
+  fs.writeFileSync(path.join(directory, 'late.js'), "import './dependency.js'; export const late = true;");
+  fs.writeFileSync(path.join(directory, 'dependency.js'), 'export const dependency = true;');
+  let dependencyTransformed = false;
+  const server = await createServer({ ...config, root: directory, plugins: [{
+    name: 'controlled-later-static-dependency',
+    async transform(_code, id) {
+      if (id.endsWith('/dependency.js')) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        dependencyTransformed = true;
+      }
+    },
+  }], server: { middlewareMode: true } });
+  try {
+    await prepareFixtureModules(server, ['/early.js']);
+    // Vite resolves this once. It is no longer a barrier for the new graph.
+    await server.environments.client.waitForRequestsIdle();
+    await prepareFixtureModules(server, ['/late.js']);
+    assert.equal(dependencyTransformed, true, 'a settled initial crawl must not report later imports ready');
+  } finally { await server.close(); fs.rmSync(directory, { recursive: true }); }
+});
+
+test('later static preparation handles re-exports and cycles without loading lazy branches', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-vite-static-graph-'));
+  fs.writeFileSync(path.join(directory, 'early.js'), 'export const early = true;');
+  fs.writeFileSync(path.join(directory, 'entry.js'), "import './cycle.js'; export { value } from './shared.js'; export const lazy = () => import('./lazy.js');");
+  fs.writeFileSync(path.join(directory, 'cycle.js'), "import './entry.js'; import './shared.js';");
+  fs.writeFileSync(path.join(directory, 'shared.js'), 'export const value = 1;');
+  fs.writeFileSync(path.join(directory, 'lazy.js'), 'export const lazy = true;');
+  const transformed = new Set();
+  const server = await createServer({ ...config, root: directory, plugins: [{
+    name: 'controlled-static-graph',
+    async transform(_code, id) {
+      if (id.endsWith('/shared.js')) await new Promise(resolve => setTimeout(resolve, 80));
+      transformed.add(path.basename(id));
+    },
+  }], server: { middlewareMode: true } });
+  try {
+    await prepareFixtureModules(server, ['/early.js']);
+    await prepareFixtureModules(server, ['/entry.js']);
+    assert.ok(['entry.js', 'cycle.js', 'shared.js'].every(name => transformed.has(name)));
+    assert.equal(transformed.has('lazy.js'), false, 'setup must not execute or eagerly prepare a case-triggered lazy import');
+  } finally { await server.close(); fs.rmSync(directory, { recursive: true }); }
+});
+
+test('a later deep static transform failure remains a setup failure', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-vite-static-error-'));
+  fs.writeFileSync(path.join(directory, 'early.js'), 'export const early = true;');
+  fs.writeFileSync(path.join(directory, 'entry.js'), "import './dependency.js';");
+  fs.writeFileSync(path.join(directory, 'dependency.js'), 'export const value = 1;');
+  const server = await createServer({ ...config, root: directory, logLevel: 'silent', plugins: [{
+    name: 'controlled-late-static-failure',
+    async transform(_code, id) {
+      if (id.endsWith('/dependency.js')) {
+        await new Promise(resolve => setTimeout(resolve, 80));
+        throw new Error('controlled late static transform failure');
+      }
+    },
+  }], server: { middlewareMode: true } });
+  try {
+    await prepareFixtureModules(server, ['/early.js']);
+    await assert.rejects(prepareFixtureModules(server, ['/entry.js']), /controlled late static transform failure/u);
+  } finally { await server.close(); fs.rmSync(directory, { recursive: true }); }
+});
+
+test('module setup propagates failure, enforces one bounded deadline and never retries', async () => {
+  const failure = new Error('controlled fixture transform failure');
+  let calls = 0;
+  const server = { environments: { client: {
+    transformRequest() { calls++; throw failure; },
+    waitForRequestsIdle() { throw new Error('must not report readiness after a failed transform'); },
+  } } };
+  await assert.rejects(prepareFixtureModules(server, ['/entry.js']), error => error === failure);
+  assert.equal(calls, 1);
+  server.environments.client.transformRequest = async () => ({ code: 'entry' });
+  server.environments.client.waitForRequestsIdle = () => new Promise(() => {});
+  await assert.rejects(prepareFixtureModules(server, ['/entry.js'], { timeoutMs: 20 }), /setup budget exceeded/u);
+  for (const entry of ['https://example.org/x.js', '//example.org/x.js', '/../x.js', '/x.js?fetch']) {
+    await assert.rejects(prepareFixtureModules(server, [entry]), /root-relative paths/u);
+  }
+});
 
 test('two middleware fixtures have private optimizer output and no default WebSocket listener', async () => {
   const servers = [];
