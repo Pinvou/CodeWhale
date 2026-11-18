@@ -376,6 +376,19 @@ try {
     if (choices.length) { await page.select('article select', choices[0]); await page.type('article textarea', 'Controlled anomaly resolution reason'); await page.evaluate(() => [...document.querySelectorAll('article button')].find(item => item.textContent === window.f02.languageCopy().resolve).click()); await page.waitForFunction(() => window.f02.anomalyResolved); await settled(); assert.equal(await page.evaluate(() => JSON.parse(window.f02.calls.find(item => item.url.endsWith('/resolve')).body).resolution), choices[0]); }
     else assert.ok(await page.evaluate(() => [...document.querySelectorAll('article button')].find(item => item.textContent === window.f02.languageCopy().resolve).disabled));
   });
+  await caseRun('Unmatched callback review shows lookup facts and excludes financial escalation', async () => {
+    await fresh('admin');
+    await page.evaluate(() => { window.f02.unmatchedCallback = { reason: 'PAYMENT_ORDER_NOT_FOUND', notification_id: 'fixture-notification', provider_id: 'fixture-provider', provider_version: 'v1', channel: 'ALIPAY', merchant_order_no: 'fixture-merchant-order', channel_transaction_id: 'fixture-channel-transaction', provider_order_reference: 'fixture-provider-order' }; });
+    await click('resolve'); await settled(); await click('details'); await page.waitForSelector('article dl'); await settled();
+    for (const language of ['zh', 'en', 'ja']) {
+      await page.select('[aria-label=fixture-language]', language);
+      await page.waitForFunction(() => document.querySelector('article')?.textContent.includes(window.f02.languageCopy().unmatchedCallbackHelp));
+      const facts = await page.$$eval('article dl dd', elements => elements.map(element => element.textContent));
+      assert.deepEqual(facts, ['fixture-notification', 'fixture-provider / v1', 'ALIPAY', 'fixture-merchant-order', 'fixture-channel-transaction', 'fixture-provider-order']);
+      assert.deepEqual(await page.$$eval('article select option', elements => elements.map(element => element.value)), ['', 'DISMISS']);
+    }
+  });
+
   await caseRun('Unknown anomaly resolution retains original decision and invocation after changing language', async () => {
     await fresh('admin'); await page.evaluate(() => { window.f02.anomalyType = 'ILLEGAL_TRANSITION'; window.f02.unknownAnomaly = true; }); await click('resolve'); await settled(); await click('details'); await page.waitForSelector('article textarea'); await settled();
     await page.select('article select', 'CONFIRM_PROVIDER_FAILED'); await page.type('article textarea', 'Controlled provider failure evidence'); await page.evaluate(() => [...document.querySelectorAll('article button')].find(item => item.textContent === window.f02.languageCopy().resolve).click()); await page.waitForSelector('[role=alert]'); await settled();

@@ -22,6 +22,7 @@ func TestProfileChangeChallengeErrorsStayActionable(t *testing.T) {
 		status int
 		code   string
 	}{
+		{name: "revocation admission", err: ErrProfileSessionRevocationCapacity, status: http.StatusServiceUnavailable, code: "PROFILE_REVOCATION_CAPACITY"},
 		{name: "captcha", err: ErrCaptchaInvalid, status: http.StatusBadRequest, code: "CAPTCHA_INVALID"},
 		{name: "sms provider", err: errors.Join(ErrSMSUnavailable, errors.New("provider rejected request")), status: http.StatusServiceUnavailable, code: "SMS_UNAVAILABLE"},
 		{name: "expired password reference", err: ErrPasswordReferenceInvalid, status: http.StatusGone, code: "PASSWORD_REFERENCE_INVALID"},
