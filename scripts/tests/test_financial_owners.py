@@ -31,7 +31,14 @@ class OwnersTests(unittest.TestCase):
         phases = [label for labels in OWNER.LANES.values() for label in labels]
         self.assertCountEqual(phases, OWNER.FIN['OWNER_ORDER'])
         self.assertEqual(len(phases), len(set(phases)))
-        self.assertEqual(sum(len(roots) for roots in OWNER.REQUIRED.values()), 72)
+        # The mandatory source lists grow with main. Check the complete
+        # declared contract rather than pinning yesterday's number of roots.
+        expected_count = sum(len(OWNER.FIN[key]) for key in (
+            'ACCOUNT_REQUIRED', 'OWNER_REQUIRED', 'SCHEMA_REQUIRED',
+            'TOKEN_SCHEMA_REQUIRED', 'PROVISIONING_REQUIRED',
+            'LIFECYCLE_RECONCILIATION_REQUIRED',
+        ))
+        self.assertEqual(sum(len(roots) for roots in OWNER.REQUIRED.values()), expected_count)
 
     def test_schema_split_preserves_each_named_phase_and_all_original_roots(self):
         self.assertEqual(set(OWNER.REQUIRED), set(OWNER.FIN['OWNER_ORDER']))
@@ -154,6 +161,21 @@ class OwnersTests(unittest.TestCase):
                     else:
                         with self.assertRaises(RuntimeError):
                             OWNER.verify_lane(lane, directory)
+
+    def test_new_required_root_must_have_evidence_before_lane_can_pass(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            _, target = self.lane_evidence(directory, 'account')
+            root = 'TestFutureRequiredAccountContract'
+            required = OWNER.REQUIRED['owner-account'] | {root}
+            with patch.dict(OWNER.REQUIRED, {'owner-account': required}):
+                with self.assertRaisesRegex(RuntimeError, 'coverage or snapshot retirement'):
+                    OWNER.verify_lane('account', directory)
+                path = target / 'financial-phase-owner-account.txt'
+                profile = json.loads(path.read_text())
+                profile['root_passes'].append(root)
+                path.write_text(json.dumps(profile))
+                OWNER.verify_lane('account', directory)
 
     def test_new_scope_probe_requires_every_original_root_boundary_and_child(self):
         root = 'TestOwnerWalletTemplateScopePostgres'
