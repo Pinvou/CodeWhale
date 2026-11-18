@@ -98,7 +98,7 @@ real snapshot-isolation probe before their contracts. Unconfirmed preparation,
 changed source identity/owner, writable source, cleanup failure or a skipped
 probe remains a failure. Local runs retain the original empty-create setup by
 default. Set `PINVOU_CI_FIXTURE_TIMING=1` to report bounded setup/cleanup costs;
-financial phases stream their original output and store timing/root-pass receipts
+financial phases stream their original output and store timing/root-pass diagnostics
 in the existing lifecycle artifact for before/after comparison.
 
 When a change regenerates a `package-lock.json`, regenerate against the official

@@ -792,7 +792,9 @@ def phase_timing(label, seconds, events, code, *, started_epoch=None):
     print("Financial timing: " + json.dumps(profile, ensure_ascii=False), flush=True)
     directory = os.environ.get("PINVOU_CI_RESOURCE_LEDGER")
     if directory:
-        target = Path(directory) / ("financial-phase-" + label + ".json")
+        # Every .json in the ledger is an ownership lease. Diagnostics must
+        # not masquerade as leases or weaken the existing retirement guard.
+        target = Path(directory) / ("financial-phase-" + label + ".txt")
         target.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 

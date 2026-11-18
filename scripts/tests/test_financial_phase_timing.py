@@ -16,6 +16,22 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class FinancialTimingTests(unittest.TestCase):
+    def test_timing_survives_real_process_and_resource_retirement_guards(self):
+        scripts = Path(__file__).resolve().parents[1]
+        child = "import runpy;runpy.run_path(" + repr(str(scripts / "test-token-financial-postgres.py")) + ")[\"phase_timing\"](\"probe\",1,[],0)"
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / "process.json"
+            result = subprocess.run([sys.executable, str(scripts / "ci-fixture-process.py"),
+                                     "--receipt", str(receipt), "--", sys.executable, "-c", child],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            value = json.loads(receipt.read_text())
+            self.assertEqual(value["state"], "released")
+            self.assertFalse(value["cleanup_failed"])
+            check = subprocess.run([sys.executable, str(scripts / "ci-resource-ledger.py"),
+                                    "--directory", directory], capture_output=True, text=True, timeout=10)
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+
     def test_stream_preserves_failure_and_json_evidence(self):
         command = [sys.executable, "-c", "import sys;print('{\"Action\":\"run\",\"Test\":\"Root\"}',flush=True);print('compiler detail',file=sys.stderr,flush=True);sys.exit(7)"]
         with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -34,7 +50,12 @@ class FinancialTimingTests(unittest.TestCase):
                   {"Action": "output", "Output": '[ci-fixture-template] {"prepared":1,"reused":3,"remaining":0}\n'}]
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"PINVOU_CI_RESOURCE_LEDGER": directory}, clear=True), contextlib.redirect_stdout(io.StringIO()):
             RUNNER.phase_timing("owner-schema", 13, events, 7, started_epoch=100)
-            receipt = json.loads((Path(directory) / "financial-phase-owner-schema.json").read_text())
+            receipt = json.loads((Path(directory) / "financial-phase-owner-schema.txt").read_text())
+            ledger_spec = importlib.util.spec_from_file_location("financial_ledger", Path(__file__).resolve().parents[1] / "ci-resource-ledger.py")
+            ledger = importlib.util.module_from_spec(ledger_spec)
+            ledger_spec.loader.exec_module(ledger)
+            self.assertTrue(ledger.inspect([Path(directory)])["clean"])
+            self.assertEqual(list(Path(directory).glob("*.json")), [])
         self.assertEqual(receipt["root_passes"], ["Root"])
         self.assertEqual(receipt["slow_roots"], [{"test": "Root", "seconds": 12}])
         self.assertEqual(receipt["exit_code"], 7)
