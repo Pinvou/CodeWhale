@@ -30,6 +30,15 @@ fn fixture_wall_clock_millis() -> u64 {
         .unwrap()
 }
 
+fn preconnect_stage(stage: &str) {
+    // Test-only phase names and process-relative time, never wire contents,
+    // endpoint URLs, generation identifiers, pairing codes, or credentials.
+    eprintln!(
+        "READER_PRECONNECT stage={stage} elapsed_ms={}",
+        controlled_monotonic_millis()
+    );
+}
+
 // Reusing a registered endpoint enqueues its transport setup acknowledgement
 // before application frames. Skip only that known frame, and leave the final
 // Joined receipt as the channel's last authenticated receipt.
@@ -451,7 +460,14 @@ pub(crate) async fn resume_round_trip<T>(
     }
     // App owns host construction. Keep its guard alive through all readers.
     observe_final_admission(FinalAdmissionScope::None, FinalAdmissionPhase::HostBuild);
+    let preconnect = std::env::var("PINVOU_READER_PRECONNECT_SCENARIO").as_deref() == Ok("1");
+    if preconnect {
+        preconnect_stage("host_build_begin");
+    }
     let (handle, _host) = build_host();
+    if preconnect {
+        preconnect_stage("host_build_complete");
+    }
     observe_final_admission(FinalAdmissionScope::None, FinalAdmissionPhase::HostReady);
     if std::env::var("PINVOU_READER_OWNER_CASE").as_deref() == Ok("reservation-replay") {
         let manager = handle.state::<ControlledDeviceManager>();
@@ -877,13 +893,14 @@ pub(crate) async fn resume_round_trip<T>(
         observe_final_admission(FinalAdmissionScope::Final, FinalAdmissionPhase::Done);
         return;
     }
-    if std::env::var("PINVOU_READER_PRECONNECT_SCENARIO").as_deref() == Ok("1") {
+    if preconnect {
         let manager = handle.state::<ControlledDeviceManager>();
         let relay = RemoteControlManager::new(handle.clone());
         // Exercise the actual retry loop and real RelayClient disconnects.
         // The simulated peer seals valid wire input with the Rust protocol
         // primitive; this does not run the JS Relay or its persistent store.
         let mut socket = Some({
+            preconnect_stage("registration_begin");
             let manager = handle.state::<ControlledDeviceManager>();
             let operation = manager.start(None, Vec::new()).unwrap();
             let channel = relay
@@ -913,18 +930,24 @@ pub(crate) async fn resume_round_trip<T>(
                 let status = worker.register_pairing().await;
                 (worker, status)
             });
+            preconnect_stage("initial_socket_accept_begin");
             let mut socket = accept(&listener).await;
+            preconnect_stage("initial_socket_accepted");
             registered(&mut socket).await;
             let first = receive(&mut socket, "desktop_pairing_register").await;
+            preconnect_stage("initial_registration_received");
             let after_first_send = controlled_monotonic_millis();
             let mut last = first.clone();
-            for _ in 0..2 {
+            for retry in 0..2 {
                 // A real WebSocket close reaches the production reader, which sends
                 // its retryable disconnect notification to this worker's channel.
                 socket.close(None).await.unwrap();
+                preconnect_stage(&format!("retry_{retry}_accept_begin"));
                 socket = accept(&listener).await;
+                preconnect_stage(&format!("retry_{retry}_socket_accepted"));
                 registered(&mut socket).await;
                 last = receive(&mut socket, "desktop_pairing_register").await;
+                preconnect_stage(&format!("retry_{retry}_registration_received"));
                 assert_eq!(
                     last, first,
                     "retries must reuse the same registration and keys"
@@ -956,6 +979,7 @@ pub(crate) async fn resume_round_trip<T>(
                 .unwrap()
                 .unwrap();
             let status = status.unwrap();
+            preconnect_stage("registration_complete");
             assert_eq!(status.kind(), ControlledStatusKind::WaitingForPairing);
             assert_eq!(
                 serde_json::to_value(status).unwrap()["pairingCode"],
@@ -981,6 +1005,7 @@ pub(crate) async fn resume_round_trip<T>(
             worker: None,
         };
         for scenario in 0..3 {
+            preconnect_stage(&format!("scenario_{scenario}_begin"));
             let diagnostic_path =
                 crate::platform::paths::pinvou3_home().join("logs/remote-control.log");
             let diagnostic_start = std::fs::read(&diagnostic_path)
@@ -1049,6 +1074,7 @@ pub(crate) async fn resume_round_trip<T>(
                 evidence_hooks: None,
             };
             owned.worker = Some(tokio::spawn(worker.serve()));
+            preconnect_stage(&format!("scenario_{scenario}_worker_started"));
             let socket = socket.as_mut().unwrap();
             if scenario != 0 {
                 let sent_at_b = controlled_monotonic_millis();
@@ -1059,6 +1085,7 @@ pub(crate) async fn resume_round_trip<T>(
                     ControlledStatusKind::HandshakePending
                 );
                 let b_commit = receive(socket, "finished_receipt_commit").await;
+                preconnect_stage(&format!("scenario_{scenario}_commit_received"));
                 assert_eq!(
                     manager.status().kind(),
                     ControlledStatusKind::HandshakePending
@@ -1085,6 +1112,7 @@ pub(crate) async fn resume_round_trip<T>(
                 }
             }
             // No status poll/reaper drives expiration: the actual socket/worker does.
+            preconnect_stage(&format!("scenario_{scenario}_expiry_wait"));
             tokio::time::timeout(
                 Duration::from_secs(if scenario == 0 { 3 } else { 23 }),
                 owned.worker.take().unwrap(),
@@ -1092,6 +1120,7 @@ pub(crate) async fn resume_round_trip<T>(
             .await
             .unwrap()
             .unwrap();
+            preconnect_stage(&format!("scenario_{scenario}_worker_complete"));
             let status = manager.status();
             assert_eq!(status.kind(), ControlledStatusKind::Error);
             let status = serde_json::to_value(status).unwrap();
@@ -1125,6 +1154,7 @@ pub(crate) async fn resume_round_trip<T>(
         );
         manager.stop();
         relay.shutdown_loopback_test_endpoint();
+        preconnect_stage("complete");
         return;
     }
     let owner_case = std::env::var("PINVOU_READER_OWNER_CASE").ok();
