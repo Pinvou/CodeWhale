@@ -512,6 +512,10 @@ async function initializeWorkspace(wrapper, clientName) {
 async function cleanupFixture(fixture, host, ...wrappers) {
   if (fixture.primaryErrors?.length) {
     console.error('[browser-host-fixture-diagnostic]', JSON.stringify(host.diagnostic()));
+    console.error('[browser-wrapper-fixture-diagnostic]', JSON.stringify(
+      wrappers.filter(Boolean).map(wrapper => wrapper.diagnostic()),
+    ));
+    const auditReadStarted = performance.now();
     try {
       const audit = readAudit(fixture.auditPath).slice(-40).map(({ kind, name, pid, at }) =>
         ({ kind, name, pid, at }));
@@ -519,6 +523,9 @@ async function cleanupFixture(fixture, host, ...wrappers) {
     } catch {
       console.error('[browser-upstream-fixture-events]', JSON.stringify({ unavailable: true }));
     }
+    console.error('[browser-fixture-fs-diagnostic]', JSON.stringify({
+      operation: 'audit-read', elapsedMs: performance.now() - auditReadStarted,
+    }));
     try {
       const observed = await host.snapshot();
       console.error('[browser-host-fixture-events]', JSON.stringify({
