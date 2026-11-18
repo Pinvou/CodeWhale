@@ -13,6 +13,25 @@ PLAN = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(PLAN)
 
 
 class ReusePlanTests(unittest.TestCase):
+    def test_browser_heavy_override_matches_real_workflow_and_rejects_other_pool(self):
+        policies = PLAN.catalog((ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8'))
+        browser = ['self-hosted', 'Linux', 'browser-heavy']
+        generic = ['self-hosted', 'Linux', 'heavy']
+        configuration = {'PINVOU_LINUX_BROWSER_HEAVY_RUNNER': json.dumps(browser),
+                         'PINVOU_LINUX_HEAVY_RUNNER': json.dumps(generic)}
+        for name in ['frontend-test', 'frontend-browser-test']:
+            policy = policies[name]
+            rows = PLAN.matrix_rows(policy, configuration)
+            with self.subTest(job=name):
+                self.assertTrue(all(PLAN.labels(policy, row, configuration) == browser for row in rows))
+                jobs = [self.successful_job(policy, row, browser) for row in rows]
+                self.assertTrue(PLAN.complete_group(policy, jobs, {}, 'refs/heads/queue', configuration))
+                wrong = [self.successful_job(policy, row, generic) for row in rows]
+                self.assertFalse(PLAN.complete_group(policy, wrong, {}, 'refs/heads/queue', configuration))
+                self.assertTrue(all(PLAN.labels(policy, row, {'PINVOU_LINUX_HEAVY_RUNNER': json.dumps(generic)}) == generic
+                                    for row in rows))
+                self.assertTrue(all(PLAN.labels(policy, row, {}) == ['ubuntu-22.04'] for row in rows))
+
     def trusted_runner_plans(self):
         for filename, allowed in (('pr-check.yml', None), ('rustc-wrapper-smoke.yml', {'smoke'})):
             source = (ROOT/'.github/workflows'/filename).read_text(encoding='utf-8')

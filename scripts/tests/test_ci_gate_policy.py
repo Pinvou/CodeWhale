@@ -3662,6 +3662,7 @@ python3() { fixture_mock python3 "$@"; }
         # adding another advisory step still requires explicit review here.
         reviewed_diagnostics = (
             "PR test success proof transport",
+            "Gate test resource lifecycle receipts",
             "Windows 测试二进制导入诊断",
             "Test resource lifecycle receipts",
             "Browser shard resource lifecycle receipts",
@@ -3687,6 +3688,19 @@ python3() { fixture_mock python3 "$@"; }
                 "continue-on-error belongs only to the reviewed diagnostic "
                 "step, not another step that moved under it",
             )
+        gate_diagnostic = _step_named(_extract_job_block(body, 'fast-gate'), 'Gate test resource lifecycle receipts')
+        self.assertEqual(gate_diagnostic.rstrip(), textwrap.indent(textwrap.dedent("""\
+            - name: Gate test resource lifecycle receipts
+              if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+              timeout-minutes: 3
+              continue-on-error: true
+              uses: actions/upload-artifact@v7
+              with:
+                name: gate-resource-lifecycle-${{ github.run_attempt }}
+                path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                if-no-files-found: error
+                retention-days: 7
+        """).rstrip(), '      '))
         diagnostic_job = _extract_job_block(body, 'windows-rust-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Windows 测试二进制导入诊断\n.*?(?=^      - |\Z)", diagnostic_job
@@ -3830,6 +3844,13 @@ python3() { fixture_mock python3 "$@"; }
                 1,
             ),
         }
+        gate_upload = _step_named(_extract_job_block(original, 'fast-gate'), 'Gate test resource lifecycle receipts')
+        gate_without_exemption = original.replace(gate_upload, gate_upload.replace('        continue-on-error: true\n', '', 1), 1)
+        mutations['move gate diagnostic exemption to full test discovery'] = gate_without_exemption.replace(
+            '      - name: Gate policy test suite (scripts/tests)\n',
+            '      - name: Gate policy test suite (scripts/tests)\n        continue-on-error: true\n', 1)
+        mutations['turn gate diagnostic upload into a command'] = original.replace(
+            gate_upload, gate_upload.replace('uses: actions/upload-artifact@v7', 'run: exit 37', 1), 1)
         for first_line, remaining in (
             ("run: exit 37", "        name: Required business command\n"),
             ("id: business_guard", '        name: Required business command\n        "run": exit 37\n'),
@@ -7016,6 +7037,30 @@ exit 0
         calls = self._configure_calls()
         self.assertEqual(len(calls), 1, calls)
         self.assertIn("dpkg admin state repaired (configure attempt 1)", proc.stdout)
+
+
+class FrontendCacheFixtureOwnershipTests(unittest.TestCase):
+    def test_cache_contracts_are_discovered_once_inside_the_owned_gate_scope(self):
+        job = _extract_job_block(PR_WORKFLOW.read_text(encoding='utf-8'), 'fast-gate')
+        step = _step_named(job, 'Gate policy test suite (scripts/tests)')
+        command = '\n'.join(_step_run_lines(step)).strip()
+        self.assertRegex(command, r'^python3 scripts/ci-fixture-process\.py --receipt "\$PINVOU_CI_RESOURCE_LEDGER/gate-policy\.json" -- python3 -m unittest discover -s scripts/tests -p \'test_\*\.py\' -v$')
+        for name in ['test_ci_frontend_bundle.py', 'test_ci_frontend_cache_server.py',
+                     'test_ci_transfer_deadline.py', 'test_ci_frontend_checkout.py', 'test_ci_npm_audit.py']:
+            self.assertTrue((ROOT / 'scripts/tests' / name).is_file())
+            self.assertTrue(fnmatchcase(name, 'test_*.py'))
+        self.assertNotIn('Verified frontend bundle cache contracts', job, 'avoid a second unowned execution of the same fixtures')
+        initialize = _step_named(job, 'Initialize gate test resource ledger')
+        self.assertEqual('\n'.join(_step_run_lines(initialize)).strip(), 'python3 scripts/ci-resource-ledger.py --init')
+        self.assertLess(job.index(initialize), job.index(step))
+        retirement = _step_named(job, 'Confirm gate test resource retirement')
+        self.assertIn("always() && env.PINVOU_CI_RESOURCE_LEDGER != ''", retirement)
+        self.assertEqual('\n'.join(_step_run_lines(retirement)).strip(), 'python3 scripts/ci-resource-ledger.py --recover')
+        self.assertNotIn('continue-on-error', retirement)
+        upload = _step_named(job, 'Gate test resource lifecycle receipts')
+        self.assertIn('always()', upload)
+        self.assertIn('timeout-minutes: 3', upload)
+        self.assertIn('continue-on-error: true', upload)
 
 
 if __name__ == "__main__":

@@ -829,8 +829,11 @@ jobs:
               - 'scripts/ci-frontend-bundle.py'
               - 'scripts/ci-frontend-cache-server.py'
               - 'scripts/lib/ci_frontend_cache.py'
+              - 'scripts/lib/ci_transfer_deadline.py'
               - 'scripts/tests/test_ci_frontend_bundle.py'
+              - 'scripts/tests/test_ci_frontend_cache_server.py'
               - 'scripts/tests/test_ci_frontend_checkout.py'
+              - 'scripts/tests/test_ci_transfer_deadline.py'
               - 'scripts/ci-test-reuse.py'
               - 'scripts/ci-reuse-policy.py'
               - 'scripts/tests/test_ci_reuse_policy.py'
@@ -1162,11 +1165,6 @@ jobs:
       # The binary is downloaded from the pinned release tag and verified
       # against the release checksums.txt digest, so CI executes no mutable
       # installer code and a tampered artifact fails the gate here.
-      - name: Verified frontend bundle cache contracts
-        run: |
-          python3 -m unittest discover -s scripts/tests -p test_ci_frontend_bundle.py -v
-          python3 -m unittest discover -s scripts/tests -p test_ci_frontend_checkout.py -v
-
       - name: workflow lint (actionlint)
         run: |
           curl --retry 3 -fsSL -o actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
@@ -1231,8 +1229,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Initialize gate test resource ledger
+        run: python3 scripts/ci-resource-ledger.py --init
+
+      # Full discovery includes cache server/deadline/checkout/npm contracts;
+      # run them once, inside the same owned process tree as the other guards.
       - name: Gate policy test suite (scripts/tests)
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+        run: python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/gate-policy.json" -- python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
       - name: Expiring chrono maintenance exception
         run: python3 scripts/guard-chrono-maintenance-exception.py
@@ -1268,6 +1271,21 @@ jobs:
       - name: 内置 MCP 协议与产物契约
         if: ${{ steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000)) }}
         run: python3 scripts/mcp-server-contract-smoke.py
+
+      - name: Confirm gate test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        run: python3 scripts/ci-resource-ledger.py --recover
+
+      - name: Gate test resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-resource-lifecycle-${{ github.run_attempt }}
+          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
+          retention-days: 7
 
   # Setup 工件化(2026-11-16 调查结论:3 台宿主共置算力摊薄是失败主机理,#2641
   # 后 frontend-test + 4 个 browser 分片各自重复三次 vite build,构建期满核

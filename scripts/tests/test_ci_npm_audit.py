@@ -1,10 +1,15 @@
 import importlib.util
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
+import socket
 import sys
 import time
+import tempfile
+import threading
 import unittest
 
 SPEC = importlib.util.spec_from_file_location('ci_npm_audit', Path(__file__).resolve().parents[1] / 'ci-npm-audit.py')
@@ -58,6 +63,19 @@ class AuditTests(unittest.TestCase):
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(sleeps, [])
 
+    def test_real_npm_http_error_shape_retries_only_explicit_transient_statuses(self):
+        for code in [408, 429, 500, 502, 503, 504]:
+            with self.subTest(code=code):
+                payload = {'statusCode': code, 'error': {'summary': '', 'detail': ''}}
+                status, calls, _, sleeps = self.exercise([(1, json.dumps(payload)), (0, report())])
+                self.assertEqual((status, len(calls), sleeps), (0, 2, [1]))
+        for code in [400, 401, 403, 404, 501, True, '503', None]:
+            with self.subTest(code=code):
+                payload = {'statusCode': code, 'error': {'summary': '', 'detail': 'private'}}
+                status, calls, logs, sleeps = self.exercise([(1, json.dumps(payload))])
+                self.assertEqual((status, len(calls), sleeps), (1, 1, []))
+                self.assertNotIn('private', '\n'.join(logs))
+
     def test_low_findings_keep_the_existing_high_severity_threshold(self):
         self.assertEqual(self.exercise([(0, report(low=2, moderate=1))])[0], 0)
 
@@ -103,6 +121,78 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(len(calls), 1)
         self.assertLessEqual(calls[0][2], 20)
+
+    def test_real_npm_cli_recovers_from_registry_http_errors(self):
+        node, npm = shutil.which('node'), shutil.which('npm')
+        if not node or not npm:
+            self.skipTest('real npm wire test requires Node/npm; the Linux CI entrypoints provide both')
+        candidates = [Path(npm).resolve(), Path(node).parent / 'node_modules/npm/bin/npm-cli.js']
+        cli = next((path for path in candidates if path.name == 'npm-cli.js' and path.is_file()), None)
+        if cli is None:
+            self.fail('cannot locate the installed npm CLI for the real producer test')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = {'name': 'audit-wire-fixture', 'version': '1.0.0', 'dependencies': {'is-number': '7.0.0'}}
+            (root / 'package.json').write_text(json.dumps(package))
+            (root / 'package-lock.json').write_text(json.dumps({
+                **package, 'lockfileVersion': 3, 'packages': {'': package,
+                'node_modules/is-number': {'version': '7.0.0'}}}))
+            (root / 'empty.npmrc').write_text('')
+            for status in [429, 503, 'reset', 'timeout']:
+                calls = []
+                invocations = []
+                release = threading.Event()
+                class Registry(BaseHTTPRequestHandler):
+                    def do_POST(self):
+                        calls.append((len(invocations), self.path))
+                        self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                        first_attempt = len(invocations) == 1
+                        # npm 10 may fall back from bulk to quick within the
+                        # same invocation. The entire first attempt is faulty;
+                        # only a fresh CLI attempt receives a healthy bulk map.
+                        if first_attempt and status == 'reset':
+                            self.connection.shutdown(socket.SHUT_RDWR)
+                            self.connection.close()
+                            return
+                        if first_attempt and status == 'timeout':
+                            release.wait(5)
+                            return
+                        body = b'{"error":"temporary"}' if first_attempt else b'{}'
+                        self.send_response(status if first_attempt else 200)
+                        self.send_header('Content-Length', str(len(body)))
+                        self.send_header('Content-Type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(body)
+                    def log_message(self, *args):
+                        pass
+                registry = ThreadingHTTPServer(('127.0.0.1', 0), Registry)
+                thread = threading.Thread(target=registry.serve_forever, daemon=True)
+                thread.start()
+                def run(command, environment, timeout):
+                    invocations.append(command)
+                    # Only the external registry/config are replaced. Real npm
+                    # produces JSON and the actual wrapper decides recovery.
+                    arguments = [f'--registry=http://127.0.0.1:{registry.server_port}'
+                                 if arg.startswith('--registry=') else arg for arg in command[1:]]
+                    arguments += ['--package-lock-only', f'--cache={root / "cache"}',
+                                  f'--userconfig={root / "empty.npmrc"}', f'--globalconfig={root / "global.npmrc"}']
+                    if status == 'timeout':
+                        arguments += ['--fetch-timeout=200']
+                    environment = {key: value for key, value in environment.items() if 'proxy' not in key.lower()}
+                    result = subprocess.run([node, str(cli), *arguments], env=environment,
+                                            capture_output=True, text=True, timeout=timeout)
+                    return result.returncode, result.stdout
+                try:
+                    self.assertEqual(AUDIT.audit(root, run=run, emit=lambda line: None), 0, f'fault={status}')
+                    self.assertEqual(len(invocations), 2, f'{status}: one fresh CLI recovery attempt')
+                    self.assertEqual(calls[-1], (2, '/-/npm/v1/security/advisories/bulk'))
+                    self.assertTrue(all(path in ('/-/npm/v1/security/advisories/bulk', '/-/npm/v1/security/audits/quick')
+                                        for _, path in calls), 'audit fixture never installs or downloads packages')
+                finally:
+                    release.set()
+                    registry.shutdown()
+                    registry.server_close()
+                    thread.join(timeout=3)
 
     @unittest.skipIf(os.name == 'nt', 'CI entrypoints run on Linux')
     def test_a_timed_out_attempt_retires_its_descendants(self):
