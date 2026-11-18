@@ -79,10 +79,15 @@ Run additional frontend, Relay, Rust, CodeWhale, or platform checks when relevan
 
 The retained Token financial phase has a 40-minute Go test-binary timeout,
 including the complete selected package. Retained Billing keeps its 75-minute
-budget and other financial phases keep 20 minutes. Compilation, startup and
-ownership checks are outside these test-binary budgets; the Account job retains
-its existing outer limit. Increasing the Token budget does not accelerate tests
-or relax required roots, subcases, race detection or resource retirement.
+budget and other financial test binaries keep 20 minutes. Within the existing
+owners job, Billing schema contracts run as two sequential binaries: the complete
+LegacyExpiry historical-upgrade root, then all remaining required schema roots.
+Each keeps its 20-minute limit, making the schema portion's cumulative test budget
+40 minutes instead of 20. Compilation, startup and ownership checks are outside
+these test-binary budgets; the Account job retains its existing outer limit.
+Each batch must restore the pristine instance before the next can run. No roots,
+subcases, race detection, actor checks or ordinary resource-retirement gates are
+removed, and the existing job groups and runner concurrency are unchanged.
 
 When a change regenerates a `package-lock.json`, regenerate against the official
 registry (`https://registry.npmjs.org/`): a mirror configured in a local npmrc is
@@ -176,6 +181,15 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   a private temporary directory. A killed Linux controller can be recovered only
   by the registered scope marker, UID, cgroup and pidfd identity. No PID/name
   sweep or shared Runner Job Object is used.
+  The Windows atomic regression suite runs each original patched-executable
+  filter in an independent scope and retains attempted-receipt inventory even
+  on failure. Its capture-retention fixtures hand off the child's creation
+  identity before launcher exit and verify the same kernel object's exit;
+  a `finished` phase marker alone is not resource retirement.
+  This Windows atomic chain validates the job's existing native 64-bit CPython
+  (3.12 or newer) and binds its absolute executable for initialization, each
+  filter and retirement. Missing or incompatible interpreters fail before the
+  ledger starts; this fixture setup does not install or reconfigure system Python.
 - Node test Workers register with the shared fixture scope as `worker` resources.
   Configuration changes require acknowledgement, and snapshots come from the
   worker that owns the state. Close the owned listeners and observe Worker exit
