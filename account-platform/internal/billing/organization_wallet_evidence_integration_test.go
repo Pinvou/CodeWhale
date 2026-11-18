@@ -53,6 +53,7 @@ func f06WalletActors(t *testing.T) {
 			}
 		}
 	})
+	registerOwnerWalletTemplates(t)
 }
 
 func TestF06OrganizationWalletRequiresLifecycleEvidence(t *testing.T) {

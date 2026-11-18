@@ -1,0 +1,41 @@
+# Optional models overlay. Apply only after reviewing the corresponding
+# render[-existing-broker|-refund-upgrade]-token-events broker authorization.
+name: pinvou-personal
+services:
+  token-event-relay:
+    image: ${EVENT_RELAY_IMAGE:?set reviewed same-source event relay image}
+    pull_policy: never
+    user: "65532:65532"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 96
+    ulimits: {core: {soft: 0, hard: 0}}
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700"]
+    logging: {driver: local, options: {max-size: "10m", max-file: "3"}}
+    env_file:
+      - {path: "${TOKEN_RELAY_PRIVATE_ENV_FILE:?set only Token outbox relay DSN file}", required: true, format: raw}
+    environment:
+      APP_ENV: production
+      EVENT_SOURCE: token
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:?set independently verified HTTPS OTLP endpoint}
+      SSL_CERT_FILE: /run/pinvou/trust/ca.crt
+      HEALTHCHECK_URL: http://127.0.0.1:9090/health/ready
+      PGPASSFILE: /run/pinvou/database/pgpass
+      NATS_URL: ${NATS_URL:?set verified TLS NATS endpoint}
+      NATS_CA_FILE: /run/pinvou/trust/ca.crt
+      NATS_NKEY_SEED_FILE: /run/pinvou/nats/nkey.seed
+      TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE: /run/pinvou/token-relay-identities/current.json
+      TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256: ${APPROVAL_PUBLIC_KEYS_SHA256:?set independently trusted v2 public identity SHA256}
+    volumes:
+      - {type: bind, source: "${INFRA_CA_DIRECTORY:?set independently verified CA directory}", target: /run/pinvou/trust, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${TOKEN_RELAY_DATABASE_DIRECTORY:?set only Token relay pgpass directory}", target: /run/pinvou/database, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${TOKEN_RELAY_NATS_DIRECTORY:?set only Token publisher NKey directory}", target: /run/pinvou/nats, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: "${APPROVAL_PUBLIC_IDENTITY_DIRECTORY:?set verified public identity-only directory}", target: /run/pinvou/token-relay-identities, read_only: true, bind: {create_host_path: false}}
+    healthcheck: {test: [CMD, /healthcheck], interval: 10s, timeout: 3s, start_period: 20s, retries: 6}
+    depends_on:
+      token-migrate: {condition: service_completed_successfully}
+    networks: [backend]

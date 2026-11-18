@@ -104,6 +104,7 @@ func databaseCluster(ctx context.Context, c *pgx.Conn, name string) (databaseKey
 // remain unchanged. A failed/ambiguous creation is retained as an unconfirmed
 // receipt, never silently promoted to a resource we may delete.
 func CreateDatabase(ctx context.Context, c *pgx.Conn, name, statement string) (*Database, error) {
+	defer Measure("database-create")()
 	prefix := "CREATE DATABASE " + pgx.Identifier{name}.Sanitize()
 	if !strings.HasPrefix(statement, prefix) || (len(statement) > len(prefix) && statement[len(prefix)] != ' ') || strings.Contains(statement, ";") {
 		return nil, ErrDatabaseIdentity
@@ -206,6 +207,7 @@ func waitDatabase(ctx context.Context, c *pgx.Conn, name string, lease *Database
 // stricter role/dependency/name fences. Repeated cleanup of a confirmed absent
 // resource is idempotent, but a same-name replacement is never adopted.
 func DropDatabase(ctx context.Context, c *pgx.Conn, receipt *Database, owners ...string) (pgconn.CommandTag, error) {
+	defer Measure("database-retire")()
 	if receipt == nil {
 		return pgconn.CommandTag{}, ErrDatabaseUnregistered
 	}

@@ -366,11 +366,14 @@ jobs:
               - 'scripts/check-recharge-product-document-baseline.mjs'
               - 'scripts/account-ci-postgres.py'
               - 'scripts/tests/test_account_ci_postgres.py'
+              - 'scripts/tests/test_token_outbox_acceptance.py'
               - 'scripts/account-financial-test-durations.json'
               - 'scripts/test-financial-parallel.py'
+              - 'scripts/test-financial-owners.py'
               - 'scripts/check-account-financial-ci.py'
               - 'scripts/tests/test_account_financial_ci.py'
               - 'scripts/tests/test_financial_parallel.py'
+              - 'scripts/tests/test_financial_owners.py'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
               - 'scripts/test-account-closure-postgres.py'
@@ -1781,9 +1784,44 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      financial-owner-account-postgres:
+        # Empty image disables these extra services for the other five Jobs.
+        image: ${{ matrix.group == 'owners' && 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea' || '' }}
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 1
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-owner-wallet-postgres:
+        # Empty image disables these extra services for the other five Jobs.
+        image: ${{ matrix.group == 'owners' && 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea' || '' }}
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 1
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       GOTOOLCHAIN: local
       CGO_ENABLED: "1"
+      PINVOU_ACCOUNT_PG_PROFILE: ${{ matrix.group == 'owners' && 'owners' || 'financial' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -1834,26 +1872,30 @@ jobs:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
           set -euo pipefail
-          python3 scripts/account-ci-postgres.py --profile financial
+          python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE"
 
       - name: Run isolated financial group
         shell: bash
         env:
           ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}
+          PINVOU_CI_OWNER_PARALLEL: ${{ matrix.group == 'owners' && '1' || '0' }}
+          ACCOUNT_FINANCIAL_OWNER_SERVICES: ${{ steps.account-pg.outputs.owners_services }}
+          PINVOU_CI_FIXTURE_TEMPLATES: "1"
+          PINVOU_CI_FIXTURE_TIMING: "1"
           PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
           PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
           PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
           PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
         run: |
           set -euo pipefail
-          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP"
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP" --verify-fixture-cache
 
       - name: Stop owned temporary PostgreSQL services
         if: ${{ always() }}
         env:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
-          python3 scripts/account-ci-postgres.py --profile financial --stop-owned-services
+          python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE" --stop-owned-services
 
       - name: Confirm Account test resource retirement
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -2173,6 +2215,24 @@ jobs:
           export PINVOU_TEST_NATS_SERVER_BINARY="$RUNNER_TEMP/pinvou-test-nats-server"
           npm --prefix account-platform run test:existing-broker
 
+      - name: Token outbox publication on owned PostgreSQL and TLS NATS
+        timeout-minutes: 4
+        shell: bash
+        env:
+          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.broker_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.broker_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.broker_directory }}
+          PINVOU_TEST_NATS_SERVER_BINARY: ${{ runner.temp }}/pinvou-test-nats-server
+        run: |
+          set -euo pipefail
+          # Reuse only the preceding step's pinned executable; the test starts
+          # its own TLS broker and applies public Token migrations. The shared
+          # supervisor owns the complete Python/Go/NATS process tree, including
+          # panic, timeout and cancellation; always-run ledger recovery verifies it.
+          python3 -m unittest discover -s scripts/tests -p test_token_outbox_acceptance.py
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/token-outbox-process.json" -- npm --prefix account-platform run test:token-outbox
+
       - name: Audit export finite PostgreSQL rollback and persisted boundaries
         working-directory: account-platform
         env:
@@ -2233,6 +2293,7 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
           python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
+          python3 -m unittest discover -s scripts/tests -p test_financial_owners.py
           policy_python="${{ steps.financial-policy-python.outputs.python-path }}"
           policy_library="$(dirname "$(dirname "$policy_python")")/lib"
           python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-policy-process.json" -- env "LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$policy_python" -m unittest discover -s scripts/tests -p test_account_financial_ci.py
