@@ -3722,7 +3722,7 @@ python3() { fixture_mock python3 "$@"; }
         frontend_setup = _extract_job_block(body, 'frontend-setup')
         self.assertEqual(
             _step_named(frontend_setup, 'Upload frontend setup bundle').rstrip(),
-            '      - name: Upload frontend setup bundle\n        id: frontend_setup_upload\n        continue-on-error: true\n        uses: actions/upload-artifact@v7\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1',
+            "      - name: Upload frontend setup bundle\n        id: frontend_setup_upload\n        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n        continue-on-error: true\n        uses: actions/upload-artifact@v7\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1",
         )
         self.assertEqual(
             _step_named(frontend_setup, 'Upload frontend setup bundle (retry)').rstrip(),
@@ -3730,7 +3730,7 @@ python3() { fixture_mock python3 "$@"; }
         )
         self.assertEqual(
             _step_named(frontend_setup, 'Require frontend setup bundle upload').rstrip(),
-            '      - name: Require frontend setup bundle upload\n        if: ${{ always() && !cancelled() }}\n        shell: bash\n        env:\n          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}\n          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}\n          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n        run: |\n          set -euo pipefail\n          case "$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in\n            success:skipped|failure:success) ;;\n            *) echo \'::error::Frontend setup bundle upload did not complete successfully.\' >&2; exit 1 ;;\n          esac\n          if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then\n            echo \'::error::Frontend setup bundle is missing or empty.\' >&2\n            exit 1\n          fi',
+            '      - name: Require frontend setup bundle upload\n        if: ${{ always() && !cancelled() }}\n        shell: bash\n        env:\n          FRONTEND_TRANSPORT: ${{ steps.frontend_bundle.outputs.transport }}\n          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}\n          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}\n          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n        run: |\n          set -euo pipefail\n          case "$FRONTEND_TRANSPORT:$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in\n            github:success:skipped|github:failure:success) ;;\n            lan:skipped:skipped) ;;\n            *) echo \'::error::Frontend setup bundle upload did not complete successfully.\' >&2; exit 1 ;;\n          esac\n          if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then\n            echo \'::error::Frontend setup bundle is missing or empty.\' >&2\n            exit 1\n          fi',
         )
         # All other COE occurrences retain the original exact diagnostic contracts.
         diagnostic_job = _extract_job_block(body, 'windows-rust-test')

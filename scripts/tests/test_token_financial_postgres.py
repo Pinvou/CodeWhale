@@ -2332,6 +2332,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     self.assertEqual(self.fixture_phases, expected)
                     self.assertEqual(self.fixture_writes, [])
 
+        for phase in ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"]:
             for option in ["empty_phase", "skipped_phase"]:
                 with self.subTest(phase=phase, option=option), self.assertRaises(RuntimeError):
                     self.run_main_fixture(**{option: phase})
