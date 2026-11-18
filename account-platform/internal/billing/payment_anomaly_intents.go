@@ -57,6 +57,14 @@ func (r *PostgresRepository) PreparePaymentAnomalyResolution(ctx context.Context
 	if item.Status == "RESOLVED" || !validPaymentAnomalyResolution(item.AnomalyType, resolution, anomalyResolutionFinancialStatus(resolution)) {
 		return PaymentAnomalyCase{}, false, ErrConflict
 	}
+	if resolution == "ESCALATE_FINANCIAL_REPAIR" && item.AnomalyType == "PAYMENT_FACT_CONFLICT" && item.PaymentOrderID == nil {
+		var snapshot unmatchedPaymentNotificationSnapshot
+		if json.Unmarshal(item.ResourceSnapshot, &snapshot) == nil && snapshot.Reason == unmatchedPaymentNotificationReason && snapshot.NotificationID != uuid.Nil {
+			// This notification has no verified order or transaction to hand to
+			// financial repair. Preserve the open review and its original facts.
+			return PaymentAnomalyCase{}, false, ErrConflict
+		}
+	}
 	if item.OwnerID == nil || *item.OwnerID != actorID {
 		return PaymentAnomalyCase{}, false, ErrConflict
 	}
