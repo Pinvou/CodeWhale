@@ -351,28 +351,49 @@ fn run_isolated_reader(
                 .build()
                 .unwrap()
         };
+        use crate::features::remote_control::controller::relay_runtime::reader_resume_tests as reader_fixture;
+        let final_admission_observer = final_admission
+            .then(|| std::sync::Arc::new(reader_fixture::FinalAdmissionObservation::new()));
         runtime.block_on(async {
-            tokio::time::timeout(Duration::from_secs(if concurrent_race { 40 } else { child_budget }),
-                crate::features::remote_control::controller::relay_runtime::reader_resume_tests::resume_round_trip(|| {
-                    let mut context = crate::build_tauri_context();
-                    context.config_mut().app.windows.clear();
-                    let app = tauri::Builder::default().any_thread()
-                        .manage(crate::features::remote_control::controller::controlled::ControlledDeviceManager::default())
-                        .manage(crate::features::remote_control::controller::encrypted_lane::ControlledLaneState::default())
-                        .manage(crate::features::remote_control::controller::relay_runtime::ControlledOutboundState::default())
-                        .build(context).unwrap();
-                    if final_admission {
-                        let handle = app.handle().clone();
-                        handle.manage(crate::features::remote_control::RemoteControlManager::new(handle.clone()));
-                        let cleanup: std::sync::Arc<dyn crate::features::remote_control::controller::controlled::ControlledCleanupSink> = std::sync::Arc::new(super::super::desktop_remote_controller_business::DesktopControlledCleanup::new(handle.clone()));
-                        handle.state::<crate::features::remote_control::controller::controlled::ControlledDeviceManager>()
-                            .register_cleanup_sink(cleanup.clone());
-                        handle.manage(cleanup);
-                    }
-                    (app.handle().clone(), app)
-                }, retire_endpoint))
-                .await
-                .unwrap();
+            let build_host = || {
+                let mut context = crate::build_tauri_context();
+                context.config_mut().app.windows.clear();
+                let app = tauri::Builder::default().any_thread()
+                    .manage(crate::features::remote_control::controller::controlled::ControlledDeviceManager::default())
+                    .manage(crate::features::remote_control::controller::encrypted_lane::ControlledLaneState::default())
+                    .manage(crate::features::remote_control::controller::relay_runtime::ControlledOutboundState::default())
+                    .build(context).unwrap();
+                if final_admission {
+                    let handle = app.handle().clone();
+                    handle.manage(crate::features::remote_control::RemoteControlManager::new(handle.clone()));
+                    let cleanup: std::sync::Arc<dyn crate::features::remote_control::controller::controlled::ControlledCleanupSink> = std::sync::Arc::new(super::super::desktop_remote_controller_business::DesktopControlledCleanup::new(handle.clone()));
+                    handle.state::<crate::features::remote_control::controller::controlled::ControlledDeviceManager>()
+                        .register_cleanup_sink(cleanup.clone());
+                    handle.manage(cleanup);
+                }
+                (app.handle().clone(), app)
+
+            };
+            let result = if let Some(observer) = final_admission_observer.as_ref() {
+                tokio::time::timeout(
+                    Duration::from_secs(if concurrent_race { 40 } else { child_budget }),
+                    reader_fixture::with_final_admission_observation(
+                        observer.clone(),
+                        reader_fixture::resume_round_trip(build_host, retire_endpoint),
+                    ),
+                ).await
+            } else {
+                tokio::time::timeout(
+                    Duration::from_secs(if concurrent_race { 40 } else { child_budget }),
+                    reader_fixture::resume_round_trip(build_host, retire_endpoint),
+                ).await
+            };
+            if result.is_err() {
+                if let Some(observer) = final_admission_observer.as_ref() {
+                    observer.report_timeout();
+                }
+            }
+            result.unwrap();
         });
         return;
     }

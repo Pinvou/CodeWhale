@@ -89,7 +89,7 @@ test('literal task registries cannot mutate identities or escape through writabl
 test('Account approval worker producer returns only its direct literal registry', async () => {
   const source = 'account-platform/cmd/account-service/approval_runtime.go';
   const text = await readFile(new URL('../../cmd/account-service/approval_runtime.go', import.meta.url), 'utf8');
-  assert.equal(authorizationTasks(source, text).length, 3);
+  assert.equal(authorizationTasks(source, text).length, 4);
   const start = 'return []accountBackgroundTask{', end = '\n\t}, nil';
   assert.ok(text.includes(start) && text.includes(end));
   for (const replacement of [
@@ -155,7 +155,7 @@ test('supervised Account catalog identities remain exact and required', async ()
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
   for (const [file, names] of [
     ['main.go', ['mobile-retention', 'audit-export', 'wallet-provisioning', 'role-binding-expiry', 'account-closure', 'profile-change', 'registration-recovery', 'commerce-customer-sync']],
-    ['approval_runtime.go', ['approval-expiry', 'approval-pagination-cleanup', 'manual-review-sla']],
+    ['approval_runtime.go', ['approval-expiry', 'approval-pagination-cleanup', 'approval-delivery-terminal-recovery', 'manual-review-sla']],
   ]) {
     const source = `account-platform/cmd/account-service/${file}`;
     const text = await readFile(new URL(`../../cmd/account-service/${file}`, import.meta.url), 'utf8');
@@ -208,8 +208,8 @@ test('authorization release gate classifies every HTTP task event callback and C
   ]);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
-  // The existing complete graph includes the reconciliation repair-context GET.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 419, tasks: 32, events: 18, cli: 28 });
+  // Preserve the independently declared entrypoints of both parents.
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 421, tasks: 33, events: 18, cli: 28 });
 });
 
 test('existing grant inventory CLI retains its bounded read-only Account identity', async () => {
@@ -368,6 +368,10 @@ test('usage waiver restores one human audit-only command and two distinct worklo
 test('history recovery routes retain exact workload permissions and handlers without human fallback', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
   const expected = [
+    {source: 'account-platform/internal/account/service.go', receiver: 'internal', method: 'POST',
+      path: '/profile-revocation-receipts/claim', permission: 'internal.account.profile-revocation.claim', handler: 'claimProfileRevocation'},
+    {source: 'account-platform/internal/account/service.go', receiver: 'internal', method: 'POST',
+      path: '/profile-revocation-receipts/confirm', permission: 'internal.account.profile-revocation.confirm', handler: 'confirmProfileRevocation'},
     {source: 'account-platform/internal/identityadapter/service.go', receiver: 'internal', method: 'POST',
       path: '/users/:subject/profile-revocations', permission: 'internal.identity.sessions.revoke', handler: 'revokeProfileSessions'},
     {source: 'account-platform/internal/billing/service.go', receiver: 'protected', method: 'POST',
