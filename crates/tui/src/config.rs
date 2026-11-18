@@ -1011,8 +1011,9 @@ pub fn route_is_official_deepseek_family(provider: ApiProvider, base_url: &str) 
 /// The canonical official DeepSeek beta endpoints, lowercase with any
 /// trailing `/` trimmed: where the wire keeps the `function.strict` flag
 /// (the chat strip), where the request is routed to
-/// `beta/chat/completions` (`client.rs`), and where the doctor reports
-/// the beta verdict — one constant so the three lists cannot drift.
+/// `beta/chat/completions` (`client.rs`), where the Responses dialect
+/// resolves its URL (`client.rs`), and where the doctor reports the beta
+/// verdict — one constant so the four consumers cannot drift.
 pub const DEEPSEEK_CANONICAL_BETA_URLS: &[&str] = &[
     "https://api.deepseek.com/beta",
     "https://api.deepseeki.com/beta",

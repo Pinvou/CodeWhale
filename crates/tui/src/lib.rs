@@ -7561,15 +7561,22 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
                 recommended_base_url: None,
             };
         }
-        // The thinking suppression is family-gated
-        // (`should_send_tool_choice_for_chat` omits the key only for
-        // Deepseek/DeepseekCN chat requests), so the parenthetical is
-        // wire-honest only for a family provider on a custom URL; for any
-        // other provider — the common occupant of this arm — `auto` is
-        // always sent and the parenthetical would claim an omission that
-        // never happens.
+        // The thinking suppression is family-gated on the route's CHAT
+        // SHAPE (`should_send_tool_choice_for_chat` omits the key only for
+        // chat payloads speaking the Deepseek/DeepseekCN dialect), not on
+        // the route's provider typing alone: a DS4-local custom route
+        // speaks the DeepSeek dialect, so for it the parenthetical is
+        // wire-true even though `api_provider()` is `Custom`; for any
+        // other non-family provider — the common occupant of this arm —
+        // `auto` is always sent and the parenthetical would claim an
+        // omission that never happens.
         let tool_choice_clause = if matches!(
-            config.api_provider(),
+            crate::client::chat_shape_provider_for(
+                config.api_provider(),
+                &config.provider_identity_for(config.api_provider()),
+                &target.base_url,
+                &target.model,
+            ),
             crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN
         ) {
             "`tool_choice` falls back to `auto` (omitted on thinking-enabled \
@@ -14254,6 +14261,46 @@ mod doctor_endpoint_tests {
             "`tool_choice` falls back to `auto` (omitted on \
                            thinking-enabled requests"
         ));
+    }
+
+    #[test]
+    fn strict_tool_mode_doctor_discloses_thinking_suppression_for_the_ds4_chat_shape() {
+        // The wire's tool_choice suppression keys on the route's chat
+        // SHAPE, not its provider typing alone: a DS4-local custom route
+        // speaks the DeepSeek dialect (`chat_shape_provider_for`), so on
+        // thinking-enabled requests the key is omitted — this arm must
+        // disclose that here too, exactly where a provider-typed condition
+        // would claim an always-sent `auto` that never happens. The
+        // `[providers.ds4]` table entry is what makes `api_provider()`
+        // resolve to `Custom` in the first place.
+        let config = Config {
+            provider: Some("ds4".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom: std::collections::HashMap::from([(
+                    "ds4".to_string(),
+                    crate::config::ProviderConfig {
+                        base_url: Some("http://127.0.0.1:8000/v1".to_string()),
+                        model: Some("deepseek-v4-flash".to_string()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            strict_tool_mode: Some(true),
+            ..Default::default()
+        };
+
+        let status = doctor_strict_tool_mode_status(&config);
+
+        assert_eq!(status.status, "custom_endpoint");
+        assert!(!status.function_strict_sent);
+        assert!(
+            status
+                .message
+                .contains("omitted on thinking-enabled requests"),
+            "the DS4 chat shape suppresses `tool_choice`: {}",
+            status.message
+        );
     }
 
     #[test]

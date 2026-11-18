@@ -1146,6 +1146,35 @@ fn add_extra_root_certs(
     builder
 }
 
+/// The provider whose chat dialect a route's payload actually speaks for
+/// `model`: DS4 is configured as a named custom route so its endpoint and
+/// billing identity remain exact, but its chat payload deliberately speaks
+/// the first-party DeepSeek reasoning/tool dialect that DS4 implements —
+/// so the shape, not the route's provider typing alone, decides the chat
+/// body and the `tool_choice` suppression
+/// (`should_send_tool_choice_for_chat`). Free-standing so the strict-mode
+/// doctor can quote the same predicate the wire applies to the resolved
+/// route (the client method feeds from the identical config accessors).
+pub(crate) fn chat_shape_provider_for(
+    api_provider: ApiProvider,
+    provider_identity: &str,
+    base_url: &str,
+    model: &str,
+) -> ApiProvider {
+    if api_provider == ApiProvider::Custom
+        && provider_identity.eq_ignore_ascii_case("ds4")
+        && crate::config::base_url_uses_local_host(base_url)
+        && matches!(
+            model.trim().to_ascii_lowercase().as_str(),
+            "deepseek-v4-flash" | "deepseek-v4-pro"
+        )
+    {
+        ApiProvider::Deepseek
+    } else {
+        api_provider
+    }
+}
+
 impl DeepSeekClient {
     fn is_local_ds4_model(&self, model: &str) -> bool {
         self.api_provider == ApiProvider::Custom
@@ -1161,11 +1190,12 @@ impl DeepSeekClient {
     /// identity remain exact, but its chat payload deliberately speaks the
     /// first-party DeepSeek reasoning/tool dialect that DS4 implements.
     fn chat_shape_provider(&self, model: &str) -> ApiProvider {
-        if self.is_local_ds4_model(model) {
-            ApiProvider::Deepseek
-        } else {
-            self.api_provider
-        }
+        chat_shape_provider_for(
+            self.api_provider,
+            &self.provider_identity,
+            &self.base_url,
+            model,
+        )
     }
 
     /// Create a DeepSeek client from CLI configuration.
