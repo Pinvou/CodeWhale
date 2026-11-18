@@ -826,6 +826,11 @@ jobs:
               - 'pinvou3-app/eslint.config.mjs'
               - '.github/workflows/pr-check.yml'
             frontend:
+              - 'scripts/ci-frontend-bundle.py'
+              - 'scripts/ci-frontend-cache-server.py'
+              - 'scripts/lib/ci_frontend_cache.py'
+              - 'scripts/tests/test_ci_frontend_bundle.py'
+              - 'scripts/tests/test_ci_frontend_checkout.py'
               - 'scripts/ci-test-reuse.py'
               - 'scripts/ci-reuse-policy.py'
               - 'scripts/tests/test_ci_reuse_policy.py'
@@ -937,10 +942,14 @@ jobs:
               - 'scripts/tests/test_ci_fixture_process.py'
               - '.github/workflows/pr-check.yml'
             team_relay_hub:
+              - 'scripts/ci-npm-audit.py'
+              - 'scripts/tests/test_ci_npm_audit.py'
               - 'team-relay-hub/**'
               - 'docs/team-relay/migrations/**'
               - '.github/workflows/pr-check.yml'
             update_release_console:
+              - 'scripts/ci-npm-audit.py'
+              - 'scripts/tests/test_ci_npm_audit.py'
               - 'update-release-console/**'
               - 'scripts/ci-update-release-console-container.sh'
               - 'deploy/nginx-pinvou3-updates.conf'
@@ -1155,6 +1164,11 @@ jobs:
       # The binary is downloaded from the pinned release tag and verified
       # against the release checksums.txt digest, so CI executes no mutable
       # installer code and a tampered artifact fails the gate here.
+      - name: Verified frontend bundle cache contracts
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_ci_frontend_bundle.py -v
+          python3 -m unittest discover -s scripts/tests -p test_ci_frontend_checkout.py -v
+
       - name: workflow lint (actionlint)
         run: |
           curl --retry 3 -fsSL -o actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
@@ -1271,6 +1285,11 @@ jobs:
   frontend-setup:
     name: frontend-setup
     needs: changes
+    outputs:
+      commit: ${{ steps.frontend_bundle.outputs.commit }}
+      sha256: ${{ steps.frontend_bundle.outputs.sha256 }}
+      size: ${{ steps.frontend_bundle.outputs.size }}
+      transport: ${{ steps.frontend_bundle.outputs.transport }}
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test') && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # npm ci(app) + 三次 vite build + 小件打包上传;30min 含冷缓存与慢 registry 余量。
@@ -1332,7 +1351,14 @@ jobs:
             pinvou3-app/dist remote-control-relay/web/dist
           du -h "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
 
+      - name: Publish verified frontend setup bundle
+        id: frontend_bundle
+        env:
+          PINVOU_FRONTEND_CACHE_URL: ${{ vars.PINVOU_FRONTEND_CACHE_URL }}
+        run: python3 ../scripts/ci-frontend-bundle.py publish --bundle "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
+
       - name: Upload frontend setup bundle
+        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}
         uses: actions/upload-artifact@v7
         with:
           name: frontend-setup-bundle
@@ -1344,7 +1370,7 @@ jobs:
       # 自建机上行到 GitHub 工件存储实测偶发 stall(见上方 Pack 注释的 run 证据),
       # 上传动作无内建重试;主上传失败时以 overwrite 重建同名工件,自动补试一次。
       - name: Upload frontend setup bundle (retry)
-        if: ${{ failure() }}
+        if: ${{ failure() && steps.frontend_bundle.outputs.transport == 'github' }}
         uses: actions/upload-artifact@v7
         with:
           name: frontend-setup-bundle
@@ -1362,7 +1388,7 @@ jobs:
     # Draft/Ready quality, builds and logic. Ready/queue browser smokes run
     # independently below, without waiting for this job's ~17-minute logic suite.
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) && needs['frontend-setup'].result == 'success' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_BROWSER_HEAVY_RUNNER || vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     defaults:
       run:
@@ -1370,7 +1396,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
@@ -1414,50 +1440,25 @@ jobs:
       # 实测 tar.gz 19MB),跳过本 job 原先重复的三次 vite build;测试行为零
       # 变化。走 REST zip 通道(download-artifact@v8 的 results blob 通道在本
       # 池实测 hang,见 frontend-setup 注释),小件上传/下载均实测可行。
-      - name: Download frontend setup bundle (REST)
+      - name: Fetch verified frontend setup bundle
         env:
+          PINVOU_FRONTEND_CACHE_URL: ${{ vars.PINVOU_FRONTEND_CACHE_URL }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          listing="$RUNNER_TEMP/frontend-setup-artifacts.json"
-          # 工件列表存在最终一致窗口(上传完成 ≠ 列表可见),对「列表获取 + 工件
-          # 查找」做有界轮询;耗尽后显式报错退出,而非裸 StopIteration。
-          bundle_id=""
-          for _ in 1 2 3 4 5; do
-            if curl -sfSL --retry 3 --max-time 120 -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$listing"; then
-              bundle_id="$(python3 -c 'import json,sys; ids=[a["id"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == "frontend-setup-bundle"]; print(ids[0] if ids else "")' "$listing")"
-            fi
-            [[ -n "$bundle_id" ]] && break
-            echo "frontend setup 工件尚未在列表可见,25s 后重试"
-            sleep 25
-          done
-          [[ -n "$bundle_id" ]] || { echo "::error::frontend setup 工件缺失;请重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
-          code=000
-          for _ in 1 2 3 4 5; do
-            code="$(curl -sSL --max-time 900 -w '%{http_code}' -o "$RUNNER_TEMP/frontend-setup-bundle.zip" \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$bundle_id/zip" || echo 000)"
-            [[ "$code" == 200 ]] && break
-            echo "artifact zip 下载 http $code,60s 后重试"
-            sleep 60
-          done
-          [[ "$code" == 200 ]] || { echo "::error::frontend setup 工件 REST 下载失败(http $code);重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
-          python3 -m zipfile -e "$RUNNER_TEMP/frontend-setup-bundle.zip" "$RUNNER_TEMP/frontend-setup-bundle"
-          test -f "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz"
+        run: >-
+          python3 ../scripts/ci-frontend-bundle.py fetch
+          --commit "${{ needs.frontend-setup.outputs.commit }}"
+          --sha256 "${{ needs.frontend-setup.outputs.sha256 }}"
+          --size "${{ needs.frontend-setup.outputs.size }}"
+          --transport "${{ needs.frontend-setup.outputs.transport }}"
+          --output "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
 
       - name: Unpack frontend setup bundle
-        run: |
-          tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
-          # tar 保留 frontend-setup 构建时点的旧 mtime;消费方 checkout 的 src
-          # 更新,会误触 ui_test_server 的 assertFreshBuild「UI build is stale」
-          # 守卫(它按 mtime 判断陈旧)。工件化流程中新鲜度由构造保证(prepare
-          # 从同一 tested tree 构建),touch 对齐 mtime 恢复守卫本意。
-          find dist ../remote-control-relay/web/dist -exec touch {} +
-          # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。注意本 job
-          # 的 run 默认工作目录是 pinvou3-app,校验路径须相对它解析。
-          test -f dist/index.html
-          test -f ../remote-control-relay/web/dist/index.html
+        run: >-
+          python3 ../scripts/ci-frontend-bundle.py unpack
+          --commit "${{ needs.frontend-setup.outputs.commit }}"
+          --sha256 "${{ needs.frontend-setup.outputs.sha256 }}"
+          --bundle "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
+          --workspace "$GITHUB_WORKSPACE"
 
       - name: ESLint (含 pet 缺失项,现已全覆盖)
         # Official 的存量 warning 仍可由本地 lint 完整查看；CI 只打印会阻断的
@@ -1543,7 +1544,9 @@ jobs:
     needs: [changes, frontend-setup]
     # Each shard runs on the shared tested tree artifact and owns its fixtures.
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) && needs['frontend-setup'].result == 'success' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    # Browser shards share the heavy pool so CPU-bound smoke suites can use
+    # its larger per-runner quota; all four shards retain independent fixtures.
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_BROWSER_HEAVY_RUNNER || vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -1556,7 +1559,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          # The tested PR merge and its two parents are sufficient for selection.
+          fetch-depth: 2
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
@@ -1599,50 +1603,25 @@ jobs:
       # 跳过每分片重复的三次 vite build;各分片解包独立副本,分片间无可变共享
       # 状态;dist/CHROME/工作目录与原 setup 一致。走 REST zip 通道(通道实测
       # 证据见 frontend-setup 注释)。
-      - name: Download frontend setup bundle (REST)
+      - name: Fetch verified frontend setup bundle
         env:
+          PINVOU_FRONTEND_CACHE_URL: ${{ vars.PINVOU_FRONTEND_CACHE_URL }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          listing="$RUNNER_TEMP/frontend-setup-artifacts.json"
-          # 工件列表存在最终一致窗口(上传完成 ≠ 列表可见),对「列表获取 + 工件
-          # 查找」做有界轮询;耗尽后显式报错退出,而非裸 StopIteration。
-          bundle_id=""
-          for _ in 1 2 3 4 5; do
-            if curl -sfSL --retry 3 --max-time 120 -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$listing"; then
-              bundle_id="$(python3 -c 'import json,sys; ids=[a["id"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == "frontend-setup-bundle"]; print(ids[0] if ids else "")' "$listing")"
-            fi
-            [[ -n "$bundle_id" ]] && break
-            echo "frontend setup 工件尚未在列表可见,25s 后重试"
-            sleep 25
-          done
-          [[ -n "$bundle_id" ]] || { echo "::error::frontend setup 工件缺失;请重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
-          code=000
-          for _ in 1 2 3 4 5; do
-            code="$(curl -sSL --max-time 900 -w '%{http_code}' -o "$RUNNER_TEMP/frontend-setup-bundle.zip" \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$bundle_id/zip" || echo 000)"
-            [[ "$code" == 200 ]] && break
-            echo "artifact zip 下载 http $code,60s 后重试"
-            sleep 60
-          done
-          [[ "$code" == 200 ]] || { echo "::error::frontend setup 工件 REST 下载失败(http $code);重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
-          python3 -m zipfile -e "$RUNNER_TEMP/frontend-setup-bundle.zip" "$RUNNER_TEMP/frontend-setup-bundle"
-          test -f "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz"
+        run: >-
+          python3 ../scripts/ci-frontend-bundle.py fetch
+          --commit "${{ needs.frontend-setup.outputs.commit }}"
+          --sha256 "${{ needs.frontend-setup.outputs.sha256 }}"
+          --size "${{ needs.frontend-setup.outputs.size }}"
+          --transport "${{ needs.frontend-setup.outputs.transport }}"
+          --output "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
 
       - name: Unpack frontend setup bundle
-        run: |
-          tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
-          # tar 保留 frontend-setup 构建时点的旧 mtime;消费方 checkout 的 src
-          # 更新,会误触 ui_test_server 的 assertFreshBuild「UI build is stale」
-          # 守卫(它按 mtime 判断陈旧)。工件化流程中新鲜度由构造保证(prepare
-          # 从同一 tested tree 构建),touch 对齐 mtime 恢复守卫本意。
-          find dist ../remote-control-relay/web/dist -exec touch {} +
-          # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。注意本 job
-          # 的 run 默认工作目录是 pinvou3-app,校验路径须相对它解析。
-          test -f dist/index.html
-          test -f ../remote-control-relay/web/dist/index.html
+        run: >-
+          python3 ../scripts/ci-frontend-bundle.py unpack
+          --commit "${{ needs.frontend-setup.outputs.commit }}"
+          --sha256 "${{ needs.frontend-setup.outputs.sha256 }}"
+          --bundle "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
+          --workspace "$GITHUB_WORKSPACE"
 
       - name: 准备浏览器
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
@@ -1688,6 +1667,12 @@ jobs:
           PINVOU_WEBUI_SKIP_BUILD: "1"
         run: |
           set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ && "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          # A queue batch can place the immutable base outside the shallow graph.
+          if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          fi
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
             | node ../scripts/run-frontend-smokes.mjs --selected --shard "${{ matrix.shard }}/4" --isolate-network
@@ -2478,7 +2463,7 @@ jobs:
         run: npm --prefix team-relay-hub test
 
       - name: Hub 依赖审计
-        run: npm --prefix team-relay-hub audit --registry=https://registry.npmjs.org --audit-level=high
+        run: python3 scripts/ci-npm-audit.py --prefix team-relay-hub
 
   update-release-console-test:
     name: update-release-console-test (Node ${{ matrix.node-version }})
@@ -2511,7 +2496,7 @@ jobs:
         run: npm --prefix update-release-console test
 
       - name: 发布台依赖审计
-        run: npm --prefix update-release-console audit --registry=https://registry.npmjs.org --audit-level=high
+        run: python3 scripts/ci-npm-audit.py --prefix update-release-console
 
       - name: 发布台容器与 Compose 配置校验
         if: ${{ matrix.node-version == '20' }}

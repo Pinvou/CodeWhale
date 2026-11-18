@@ -2032,8 +2032,7 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn("npm --prefix team-relay-hub ci", hub_job)
         self.assertIn("npm --prefix team-relay-hub test", hub_job)
         self.assertIn(
-            "npm --prefix team-relay-hub audit "
-            "--registry=https://registry.npmjs.org --audit-level=high",
+            "python3 scripts/ci-npm-audit.py --prefix team-relay-hub",
             hub_job,
         )
 
@@ -2049,8 +2048,7 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn('node-version: ["20", "24"]', console_job)
         self.assertIn("node-version: ${{ matrix.node-version }}", console_job)
         self.assertIn(
-            "npm --prefix update-release-console audit "
-            "--registry=https://registry.npmjs.org --audit-level=high",
+            "python3 scripts/ci-npm-audit.py --prefix update-release-console",
             console_job,
         )
         self.assertIn("bash scripts/ci-update-release-console-container.sh", console_job)
