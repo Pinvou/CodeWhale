@@ -263,7 +263,16 @@ impl ToolRegistry {
             .filter(|tool| tool.model_visible())
             .filter(|tool| {
                 read_only_authority.is_none_or(|authority| {
-                    readonly_evidence_tool(tool.as_ref())
+                    // The classifier-bounded probe lane is an evidence tool,
+                    // but a worker whose envelope grants no shell authority
+                    // refuses every bash call at dispatch
+                    // (`enforce_tool_authority` demands
+                    // `ToolShellAuthority::ReadOnly`); listing it would
+                    // advertise a surface the worker can never use.
+                    let evidence = readonly_evidence_tool(tool.as_ref())
+                        && !(matches!(tool.name(), "bash" | "Bash")
+                            && authority.shell != super::spec::ToolShellAuthority::ReadOnly);
+                    evidence
                         || (tool.name() == "Run"
                             && authority.verification
                                 == super::spec::ToolVerificationAuthority::Bounded)
@@ -570,10 +579,12 @@ fn enforce_tool_authority(
                     authority.owner
                 )));
             }
+            // Per stage, like the execution seam's network guard: a compound
+            // or glob-bearing gh read reaches the network like a bare one.
             let networked_read = input
                 .get("command")
                 .and_then(Value::as_str)
-                .is_some_and(crate::command_safety::is_github_readonly_command);
+                .is_some_and(crate::command_safety::command_reaches_github_readonly);
             if networked_read && authority.network_access != Some(true) {
                 return Err(ToolError::permission_denied(format!(
                     "worker '{}' cannot use read-only GitHub CLI access: its machine-readable authority envelope does not grant network access",
