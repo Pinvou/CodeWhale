@@ -104,9 +104,11 @@ effect here per that rule: it is **frozen-prefix-compatible**. The removal
 note appended to a tool's description is a deterministic pure function of the
 pinned catalog and the route, so on a stable strict route the tools bytes are
 identical every step; the shaping runs on a per-request clone and never
-mutates the registry. A route flip (provider or `base_url` change) re-pins as
-a declared `change:provider`/`change:route` header change, not undeclared
-drift.
+mutates the registry. A provider change re-pins as a declared
+`change:provider` header change, and a token-budget change as `change:route`.
+A `base_url`-only flip is not a declared header field today: it surfaces as
+undeclared drift unless another pending change masks it, so when moving
+endpoints prefer a change the header set can name.
 
 ## Permissions fragment budget compatibility
 
