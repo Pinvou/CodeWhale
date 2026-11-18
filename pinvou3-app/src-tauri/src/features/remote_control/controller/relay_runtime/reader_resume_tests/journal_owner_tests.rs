@@ -9,7 +9,164 @@ use crate::features::remote_control::controller::test_support::{
     hex_lower, joined_message, pairing_fixture,
 };
 use ring::signature::KeyPair as _;
+use std::io::Write as _;
 use std::sync::{Arc, mpsc};
+
+#[derive(Default)]
+struct DiagnosticState {
+    old_generation: String,
+    successor_generation: String,
+    events: u32,
+    omitted: u32,
+    successor_terminal_seen: bool,
+}
+
+pub(crate) struct JournalOwnerDiagnostics {
+    started: std::time::Instant,
+    state: parking_lot::Mutex<DiagnosticState>,
+}
+
+impl JournalOwnerDiagnostics {
+    pub(crate) const EVENT_NAME: &'static str = super::super::CONTROLLED_STATUS_EVENT;
+
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            state: parking_lot::Mutex::new(DiagnosticState::default()),
+        }
+    }
+
+    fn remember(&self, successor: bool, generation: &str) {
+        let mut state = self.state.lock();
+        if successor {
+            state.successor_generation = generation.to_owned();
+        } else {
+            state.old_generation = generation.to_owned();
+        }
+    }
+
+    fn generation_label(state: &DiagnosticState, generation: Option<&str>) -> &'static str {
+        match generation {
+            None => "none",
+            Some(value) if !value.is_empty() && value == state.old_generation => "old",
+            Some(value) if !value.is_empty() && value == state.successor_generation => "successor",
+            Some(_) => "other",
+        }
+    }
+
+    fn bounded(value: Option<&str>, allowed: &[&'static str]) -> &'static str {
+        allowed
+            .iter()
+            .copied()
+            .find(|candidate| Some(*candidate) == value)
+            .unwrap_or(if value.is_none() { "none" } else { "other" })
+    }
+
+    fn projection(payload: &Value) -> (&'static str, &'static str) {
+        let phase = Self::bounded(
+            payload["status"].as_str(),
+            &[
+                "disabled",
+                "registering",
+                "waiting_for_pairing",
+                "pairing_reserved",
+                "handshake_pending",
+                "connected",
+                "reconnecting",
+                "resume_provisional",
+                "resume_activated_pending_liveness",
+                "retiring_generation",
+                "stopping",
+                "stopped",
+                "error",
+            ],
+        );
+        // Never print an arbitrary error, generation, identifier or status
+        // payload. Unknown reasons remain a fixed category, not filtered text.
+        let reason = Self::bounded(
+            payload["errorCode"].as_str(),
+            &[
+                "desktop_relay_retired",
+                "peer_unavailable",
+                "invalid_message",
+                "desktop_remote_not_connected",
+                "desktop_remote_pairing_expired",
+                "desktop_remote_handshake_timeout",
+                "desktop_remote_watchdog_expired",
+                "desktop_remote_endpoint_retired",
+                "desktop_controller_relay_disabled",
+                "controller_send_backpressure",
+                "relay_unavailable",
+                "remote_generation_stale",
+                "lease_expired",
+            ],
+        );
+        (phase, reason)
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis().min(70_000) as u64
+    }
+
+    fn write(record: &Value) {
+        // Optional diagnostics must not replace the original test outcome.
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "[journal-owner-diagnostic] {record}"
+        );
+    }
+
+    pub(crate) fn event(&self, raw: &str) {
+        let payload: Value = if raw.len() <= 16 * 1024 {
+            serde_json::from_str(raw).unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
+        let (phase, reason) = Self::projection(&payload);
+        let record = {
+            let mut state = self.state.lock();
+            let generation = Self::generation_label(&state, payload["generation"].as_str());
+            let first_successor_terminal = generation == "successor"
+                && matches!(phase, "disabled" | "stopping" | "stopped" | "error")
+                && !state.successor_terminal_seen;
+            state.successor_terminal_seen |= first_successor_terminal;
+            if state.events >= 32 && !first_successor_terminal {
+                state.omitted = state.omitted.saturating_add(1);
+                return;
+            }
+            state.events += 1;
+            json!({"source":"status_event", "sequence":state.events,
+                "elapsed_ms":self.elapsed_ms(), "generation":generation,
+                "phase":phase, "reason":reason, "omitted":state.omitted})
+        };
+        // This is published-event observation order, not an atomic history of
+        // manager mutations on all runtime threads.
+        Self::write(&record);
+    }
+
+    fn snapshot(&self, stage: &'static str, manager: &ControlledDeviceManager, lane: &Connected) {
+        let payload = serde_json::to_value(manager.status()).unwrap_or(Value::Null);
+        let (phase, reason) = Self::projection(&payload);
+        let generation = Self::generation_label(&self.state.lock(), payload["generation"].as_str());
+        // Separate read-only observations do not pin or renew a lease, and are
+        // deliberately not presented as one atomic admission decision.
+        let live_matches = manager
+            .live_runtime_context()
+            .ok()
+            .map(|(lease, _)| lease == lane.lease);
+        let journal_matches = manager
+            .local_journal_context()
+            .ok()
+            .map(|(lease, _)| lease == lane.lease);
+        let deadline_expired = manager
+            .watchdog_deadline_for_test()
+            .map(|deadline| controlled_monotonic_millis() >= deadline);
+        Self::write(&json!({"source":stage, "elapsed_ms":self.elapsed_ms(),
+            "generation":generation, "phase":phase, "reason":reason,
+            "live_matches":live_matches, "journal_matches":journal_matches,
+            "watchdog_deadline_expired":deadline_expired, "worker_finished":lane.worker.is_finished()}));
+    }
+}
 
 pub(crate) struct JournalReplayBarrier {
     armed: std::sync::atomic::AtomicBool,
@@ -59,10 +216,13 @@ async fn connect(
     relay: &RemoteControlManager,
     listener: &TcpListener,
     business: Arc<dyn ControlledBusinessPort>,
+    diagnostics: &JournalOwnerDiagnostics,
+    successor: bool,
 ) -> Connected {
     let manager = handle.state::<ControlledDeviceManager>();
     manager.stop();
     let operation = manager.start(None, Vec::new()).unwrap();
+    diagnostics.remember(successor, operation.generation());
     let mut fixture = pairing_fixture("relay-journal-owner");
     unsafe {
         std::env::set_var("PINVOU_REMOTE_RELAY_SIGNING_KEY_ID", &fixture.relay.key_id);
@@ -190,6 +350,7 @@ fn replay_request(lane: &Connected, session: &str, epoch: &str) -> Value {
 pub(crate) async fn journal_owner_round_trip<T>(
     build_host: impl FnOnce(
         Arc<JournalReplayBarrier>,
+        Arc<JournalOwnerDiagnostics>,
     ) -> (AppHandle, Arc<dyn ControlledBusinessPort>, T),
     prepare_session: impl Fn(&AppHandle, &LeaseContext, &str) -> String,
 ) {
@@ -211,13 +372,24 @@ pub(crate) async fn journal_owner_round_trip<T>(
         release: std::sync::Mutex::new(release_rx),
         outcome: outcome_tx,
     });
-    let (handle, business, _host) = build_host(barrier.clone());
+    let diagnostics = Arc::new(JournalOwnerDiagnostics::new());
+    let (handle, business, _host) = build_host(barrier.clone(), Arc::clone(&diagnostics));
     let manager = handle.state::<ControlledDeviceManager>();
     let relay = RemoteControlManager::new(handle.clone());
-    let mut old = connect(&handle, &relay, &listener, business.clone()).await;
+    let mut old = connect(
+        &handle,
+        &relay,
+        &listener,
+        business.clone(),
+        &diagnostics,
+        false,
+    )
+    .await;
+    diagnostics.snapshot("old_authenticated", &manager, &old);
     let journal = manager.journal();
     let (_, old_owner) = manager.local_journal_context().unwrap();
     let old_session = prepare_session(&handle, &old.lease, "remote-owner-old");
+    diagnostics.snapshot("old_session_ready", &manager, &old);
     journal
         .append_for_owner(
             &old_owner,
@@ -294,10 +466,15 @@ pub(crate) async fn journal_owner_round_trip<T>(
             .unwrap();
     }
     eprintln!("journal owner fixture: 66 lifecycle rotations complete");
-    let mut current = connect(&handle, &relay, &listener, business).await;
+    let mut current = connect(&handle, &relay, &listener, business, &diagnostics, true).await;
+    diagnostics.snapshot("successor_authenticated", &manager, &current);
     eprintln!("journal owner fixture: successor authenticated");
     let current_session = prepare_session(&handle, &current.lease, "remote-owner-current");
-    let (_, owner) = manager.local_journal_context().unwrap();
+    diagnostics.snapshot("successor_session_ready", &manager, &current);
+    let (_, owner) = manager.local_journal_context().unwrap_or_else(|error| {
+        diagnostics.snapshot("successor_context_error", &manager, &current);
+        panic!("successor journal context unavailable: {error:?}");
+    });
     journal
         .append_for_owner(
             &owner,
