@@ -9,9 +9,11 @@ the three Billing deployment actors are bootstrapped here, using their existing
 privilege contract. This runner must never accept a deployed database URL.
 """
 import argparse
+from datetime import datetime
 import json
 import math
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -82,6 +84,7 @@ ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
 LIFECYCLE_RECONCILIATION_REQUIRED = {"TestLifecycleV3ApprovalReconciliationPostgres"}
 ACCOUNT_REQUIRED = {
     "TestOrganizationStartupDiagnosticsPostgres",
+    "TestApprovalDeliveryTerminalRecoveryPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
@@ -350,6 +353,15 @@ EXACT_REQUIRED_CHILDREN = {
     "TestOrphanPaidOrderIndexPublicMigration": {
         "fresh-failure-atomicity-and-retry",
         "populated-upgrade-replay-and-own-ddl-rollback",
+    },
+    "TestApprovalDeliveryTerminalRecoveryPostgres": {
+        "public-migration-rollback-and-upgrade",
+        "ack-success-terminal-write-failure-worker-and-redelivery",
+        "bounded-batches-replay-and-negative-states",
+        "locked-row-and-concurrent-workers-then-next-pass",
+        "permission-fault-zero-effect-and-restoration",
+        "batch-sql-failure-is-atomic-and-next-call-recovers",
+        "populated-rollback-retains-frozen-and-terminal-history",
     },
     "TestPackageExpiryCrossWalletIndexPostgres": {"fresh-install", "retained-upgrade"},
     "TestRegistrationOutboxAggregateLookupPostgres": {"fresh-install", "retained-upgrade"},
@@ -741,6 +753,20 @@ def require_exclusive_instance(query, databases, roles, *, timeout_seconds=15, n
 
 BILLING_GROUPS = tuple(f"billing-{index}" for index in range(4))
 GROUPS = ("owners", "token", *BILLING_GROUPS)
+OWNER_LANES = {
+    "account": ("owner-ledger", "owner-account", "lifecycle-reconciliation"),
+    "wallet": ("owner-wallet", "owner-token-schema", "owner-provisioning"),
+    "schema": ("owner-schema-legacy-expiry", "owner-schema"),
+}
+OWNER_ORDER = ("owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema",
+               "owner-provisioning", "lifecycle-reconciliation")
+EXACT_REQUIRED_CHILDREN["TestOwnerWalletTemplateScopePostgres"] = {
+    "first", "first/case-a", "first/case-b", "second", "second/case-a", "second/case-b",
+}
+EXACT_REQUIRED_CHILDREN["TestDatabaseTemplateIsolationPostgres"] = {
+    "private-data-schema-and-frozen-source", "failed-preparation-never-becomes-hit",
+    "disabled-path-keeps-empty-create",
+}
 
 
 def billing_partitions(roots, durations):
@@ -770,6 +796,64 @@ def billing_roots(group):
     return billing_partitions(RETAINED_REQUIRED, durations)[group]
 
 
+def run_go_phase(command, *, env):
+    """Stream the original output while retaining JSON evidence for the gate."""
+    output = []
+    with subprocess.Popen(command, cwd=ROOT / "account-platform", env=env,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, encoding="utf-8") as process:
+        for line in process.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if line.startswith("{"):
+                output.append(line)
+        code = process.wait()
+    return subprocess.CompletedProcess(command, code, "".join(output), "")
+
+
+def phase_timing(label, seconds, events, code, *, started_epoch=None):
+    roots = [event for event in events if event.get("Action") == "pass"
+             and event.get("Test") and "/" not in event["Test"]]
+    profile = {
+        "schema": 1, "phase": label, "elapsed_seconds": seconds, "exit_code": code,
+        "cache_enabled": os.environ.get("PINVOU_CI_FIXTURE_TEMPLATES") == "1",
+        "root_passes": sorted(event["Test"] for event in roots),
+        "slow_roots": [{"test": event["Test"], "seconds": event.get("Elapsed", 0)}
+                       for event in sorted(roots, key=lambda event: event.get("Elapsed", 0), reverse=True)[:15]],
+    }
+    starts = [event for event in events if event.get("Action") == "start" and event.get("Time")]
+    packages = [event for event in events if event.get("Action") == "pass" and not event.get("Test")]
+    profile["package_elapsed_seconds"] = sum(event.get("Elapsed", 0) for event in packages)
+    if starts and started_epoch is not None:
+        # Go emits RFC3339Nano. Python 3.10 accepts only microsecond precision;
+        # truncate the diagnostic timestamp without changing test deadlines.
+        timestamp = re.sub(r"(\.\d{6})\d+", r"\1", starts[0]["Time"]).replace("Z", "+00:00")
+        profile["pre_test_seconds"] = max(0, datetime.fromisoformat(timestamp).timestamp() - started_epoch)
+    operations = {}
+    snapshots = {"prepared": 0, "reused": 0, "remaining": 0}
+    for event in events:
+        for line in event.get("Output", "").splitlines():
+            if line.startswith("[ci-fixture-timing] "):
+                timing = json.loads(line[len("[ci-fixture-timing] "):])
+                value = operations.setdefault(timing["operation"], {"count": 0, "seconds": 0})
+                value["count"] += 1
+                value["seconds"] += timing["seconds"]
+            if line.startswith("[ci-fixture-template] "):
+                counts = json.loads(line[len("[ci-fixture-template] "):])
+                for name in snapshots:
+                    snapshots[name] += counts[name]
+    profile["fixture_operations"] = operations
+    profile["templates"] = snapshots
+    profile["timing_note"] = "template-clone includes database-create; template-prepare includes migration-initialize; operation totals overlap"
+    print("Financial timing: " + json.dumps(profile, ensure_ascii=False), flush=True)
+    directory = os.environ.get("PINVOU_CI_RESOURCE_LEDGER")
+    if directory:
+        # Every .json in the ledger is an ownership lease. Diagnostics must
+        # not masquerade as leases or weaken the existing retirement guard.
+        target = Path(directory) / ("financial-phase-" + label + ".txt")
+        target.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def schema_batches():
     # Keep the slow historical-upgrade root intact. New required roots join the
     # second batch; neither batch may be empty or introduce an unknown root.
@@ -780,9 +864,11 @@ def schema_batches():
             ("owner-schema", SCHEMA_REQUIRED - historical))
 
 
-def main(*, group="all"):
+def main(*, group="all", verify_fixture_cache=False, owner_lane=None):
     if group not in ("all", *GROUPS):
         raise ValueError("unknown financial execution group")
+    if owner_lane is not None and (group != "owners" or owner_lane not in OWNER_LANES):
+        raise ValueError("owner lane requires the owners group")
     raw = local_database_url(os.environ.get("PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL", ""))
     psql = os.environ.get("PINVOU_ACCOUNT_TEST_PSQL", "psql")
     go = os.environ.get("PINVOU_ACCOUNT_TEST_GO", "go")
@@ -810,6 +896,10 @@ def main(*, group="all"):
 
     def run_phase(label, target, package, required, *, scoped=False):
         env = {key: value for key, value in os.environ.items() if not key.startswith("PINVOU_TEST_")}
+        # Only these phases own stable outer Billing actors. In owners phases,
+        # absent-actor fixtures must retire their local snapshots before roles.
+        env["PINVOU_CI_RETAINED_BILLING_TEMPLATES"] = "1" if label in {"retained-billing", "retained-token"} else "0"
+        env["PINVOU_CI_OWNER_WALLET_TEMPLATES"] = "1" if label in {"owner-wallet", "owner-wallet-scope-isolation"} else "0"
         # Nested Go consumers inherit the same race/build contract as this phase.
         env["GOFLAGS"] = " ".join(filter(None, (env.get("GOFLAGS", ""), "-race -tags=nomsgpack -mod=readonly")))
         if target == "./internal/account":
@@ -843,56 +933,50 @@ def main(*, group="all"):
             command += ["-skip", "^(" + "|".join(sorted(PROVISIONING_REQUIRED)) + ")$"]
         command.append(target)
         print(f"Financial phase: {label}", flush=True)
-        result = subprocess.run(command, cwd=ROOT / "account-platform", env=env,
-                                capture_output=True, text=True, encoding="utf-8", check=False)
-        # Preserve real phase output even when Go failed, skipped or was truncated.
-        sys.stdout.write(result.stdout)
-        sys.stderr.write(result.stderr)
+        started = time.monotonic()
+        started_epoch = time.time()
+        result = run_go_phase(command, env=env)
+        events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+        phase_timing(label, time.monotonic() - started, events, result.returncode, started_epoch=started_epoch)
         if result.returncode:
             raise RuntimeError("Go financial phase failed: " + label)
-        count = verify_results([json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")],
+        count = verify_results(events,
                                required, package=package, require_children=scoped or label == "retained-token", exact_roots=scoped,
                                children_required=ACCOUNT_CHILD_REQUIRED if label == "owner-account" else TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED & required if label == "retained-billing" else None)
         print(f"Financial phase {label}: {count} named passes; all {len(required)} required roots completed", flush=True)
 
+    if verify_fixture_cache:
+        run_phase("fixture-template-isolation", "./internal/cifixture",
+                  "github.com/Pinvou/pinvou3/account-platform/internal/cifixture",
+                  {"TestDatabaseTemplateIsolationPostgres"}, scoped=True)
+        assert_instance({user})
+
     if group in ("all", "owners"):
         # Each existing owner fixture requires its own absent actors. Restoration
         # is checked between every phase, before any next fixture can write.
-        try:
-            run_phase("owner-ledger", "./internal/platform/migrations", MIGRATIONS_PACKAGE, MIGRATIONS_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
-        try:
-            run_phase("owner-account", "./internal/account", ACCOUNT_PACKAGE, ACCOUNT_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
-        try:
-            run_phase("owner-wallet", "./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
-        # Two sequential test binaries retain their individual 20m deadline;
-        # the schema portion now has an explicit cumulative 40m test budget.
-        # Ordinary cleanup and pristine-instance acknowledgement are mandatory
-        # between the batches, before another fixture may create its actors.
-        for label, required in schema_batches():
+        phases = {
+            "owner-ledger": ("./internal/platform/migrations", MIGRATIONS_PACKAGE, MIGRATIONS_REQUIRED),
+            "owner-account": ("./internal/account", ACCOUNT_PACKAGE, ACCOUNT_REQUIRED),
+            "owner-wallet": ("./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED),
+            "owner-token-schema": ("./internal/tokenschema", TOKEN_SCHEMA_PACKAGE, TOKEN_SCHEMA_REQUIRED),
+            "owner-provisioning": ("./internal/token", TOKEN_PACKAGE, PROVISIONING_REQUIRED),
+            "lifecycle-reconciliation": ("./internal/account", ACCOUNT_PACKAGE, LIFECYCLE_RECONCILIATION_REQUIRED),
+        }
+        # Preserve main's complete-root schema batches inside the isolated schema lane.
+        # Each batch keeps its own 20m bound and mandatory pristine-instance check.
+        phases.update({label: ("./internal/billingschema", SCHEMA_PACKAGE, required)
+                       for label, required in schema_batches()})
+        if owner_lane == "wallet" and verify_fixture_cache:
             try:
-                run_phase(label, "./internal/billingschema", SCHEMA_PACKAGE, required, scoped=True)
+                run_phase("owner-wallet-scope-isolation", "./internal/billing", BILLING_PACKAGE,
+                          {"TestOwnerWalletTemplateScopePostgres"}, scoped=True)
             finally:
                 assert_instance({user})
-        try:
-            run_phase("owner-token-schema", "./internal/tokenschema", TOKEN_SCHEMA_PACKAGE, TOKEN_SCHEMA_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
-        try:
-            run_phase("owner-provisioning", "./internal/token", TOKEN_PACKAGE, PROVISIONING_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
-
-        try:
-            run_phase("lifecycle-reconciliation", "./internal/account", ACCOUNT_PACKAGE,
-                      LIFECYCLE_RECONCILIATION_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
+        for label in OWNER_LANES[owner_lane] if owner_lane else OWNER_ORDER:
+            try:
+                run_phase(label, *phases[label], scoped=True)
+            finally:
+                assert_instance({user})
 
         if group == "owners":
             return
@@ -932,4 +1016,22 @@ COMMIT;
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--group", choices=("all", *GROUPS), default="all")
-    main(group=parser.parse_args().group)
+    parser.add_argument("--verify-fixture-cache", action="store_true")
+    parser.add_argument("--owner-lane", choices=tuple(OWNER_LANES))
+    args = parser.parse_args()
+    if args.owner_lane:
+        # Affinity is inherited by Go, Node and CLI grandchildren. It limits
+        # only this worker tree, never the Runner or another job's processes.
+        cpus = json.loads(os.environ["PINVOU_CI_OWNER_CPU_SET"])
+        if (not isinstance(cpus, list) or not 1 <= len(cpus) <= 2
+                or any(type(cpu) is not int for cpu in cpus)
+                or len(set(cpus)) != len(cpus) or not set(cpus) <= os.sched_getaffinity(0)):
+            raise ValueError("invalid owner worker CPU affinity")
+        os.sched_setaffinity(0, cpus)
+        if os.sched_getaffinity(0) != set(cpus):
+            raise RuntimeError("owner worker CPU affinity was not applied")
+    if args.group == "owners" and not args.owner_lane and os.environ.get("PINVOU_CI_OWNER_PARALLEL") == "1":
+        import runpy
+        runpy.run_path(str(ROOT / "scripts/test-financial-owners.py"))["main"]()
+    else:
+        main(group=args.group, verify_fixture_cache=args.verify_fixture_cache, owner_lane=args.owner_lane)

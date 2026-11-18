@@ -232,6 +232,34 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 RUNNER.verify_results(invalid, {root}, **options)
 
 
+    def test_terminal_recovery_requires_public_account_root_and_every_child(self):
+        root = "TestApprovalDeliveryTerminalRecoveryPostgres"
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertIn(root, RUNNER.ACCOUNT_CHILD_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        expected = {
+            "public-migration-rollback-and-upgrade",
+            "ack-success-terminal-write-failure-worker-and-redelivery",
+            "bounded-batches-replay-and-negative-states",
+            "locked-row-and-concurrent-workers-then-next-pass",
+            "permission-fault-zero-effect-and-restoration",
+            "batch-sql-failure-is-atomic-and-next-call-recovers",
+            "populated-rollback-retains-frozen-and-terminal-history",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in expected:
+            for invalid in (
+                [e for e in events if e.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
     def test_registration_outbox_index_requires_both_actual_install_shapes(self):
         root="TestRegistrationOutboxAggregateLookupPostgres"
         self.assertIn(root,RUNNER.ACCOUNT_REQUIRED)
@@ -1702,7 +1730,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             len(RUNNER.REQUIRED) + sum(len(RUNNER.EXACT_REQUIRED_CHILDREN.get(root, ())) for root in RUNNER.REQUIRED),
         )
 
-    def run_main_fixture(self, *, group="all", existing_roles=False, user_objects=False, leftover=False,
+    def run_main_fixture(self, *, group="all", owner_lane=None, existing_roles=False, user_objects=False, leftover=False,
                          owner_leftover=False, account_leftover=False, schema_leftover=False, schema_leftover_phase=None, provisioning_leftover=False, active_client=False, external_dependency=False,
                          go_fail_phase=None, empty_phase=None, skipped_phase=None, missing_token_children=False, platform_role_evidence=None,
                          schema_missing_children_phase=None, schema_fail_event_phase=None, schema_residual_phase=None):
@@ -1882,9 +1910,10 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "PINVOU_TEST_SCHEMA_DATABASE_URL": "must-not-reach-tests",
             "GOFLAGS": "-trimpath",
         }, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run), \
+                patch.object(RUNNER, "run_go_phase", side_effect=lambda command, env: run(command, env=env)), \
                 patch.object(RUNNER, "require_exclusive_instance", side_effect=observation), contextlib.redirect_stdout(io.StringIO()):
             try:
-                RUNNER.main(group=group)
+                RUNNER.main(group=group, owner_lane=owner_lane)
             finally:
                 self.fixture_writes = writes
                 self.fixture_commands = commands
@@ -1928,6 +1957,18 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         with patch.object(RUNNER.subprocess, "run") as run, self.assertRaisesRegex(ValueError, "^unknown financial execution group$"):
             RUNNER.main(group="billing-4")
         run.assert_not_called()
+
+    def test_owner_lanes_execute_all_original_phases_without_bootstrapping_shared_actors(self):
+        completed = []
+        for lane, expected in RUNNER.OWNER_LANES.items():
+            self.run_main_fixture(group="owners", owner_lane=lane)
+            self.assertEqual(self.fixture_phases, list(expected))
+            self.assertEqual(self.fixture_writes, [])
+            completed.extend(self.fixture_phases)
+            for phase in expected:
+                with self.subTest(lane=lane, phase=phase), self.assertRaises(RuntimeError):
+                    self.run_main_fixture(group="owners", owner_lane=lane, skipped_phase=phase)
+        self.assertCountEqual(completed, RUNNER.OWNER_ORDER)
 
     def test_existing_roles_prevent_bootstrap(self):
         with self.assertRaises(RuntimeError):
@@ -2072,6 +2113,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_account_phase_requires_real_cas_lifecycle_and_review_governance_roots(self):
         self.assertEqual(RUNNER.ACCOUNT_REQUIRED, {
             "TestOrganizationStartupDiagnosticsPostgres",
+            "TestApprovalDeliveryTerminalRecoveryPostgres",
             "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
             "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
             "TestF06OrganizationStatusProjectionVersionPublicPostgres",
