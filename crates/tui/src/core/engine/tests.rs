@@ -36821,7 +36821,12 @@ fn strict_census_removed_any_property(
         }
     }
     for (key, before_value) in before_obj {
-        if matches!(key.as_str(), "enum" | "const" | "default" | "examples") {
+        // Literal values ship byte-for-byte, so they are data, not
+        // removals — the same literal family the production walkers skip.
+        if matches!(
+            key.as_str(),
+            "enum" | "const" | "default" | "examples" | "example"
+        ) {
             continue;
         }
         let Some(after_value) = after_obj.get(key) else {

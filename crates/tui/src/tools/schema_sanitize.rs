@@ -172,7 +172,8 @@ pub(crate) const STRICT_REMOVAL_CONTEXT_NOTES: &[(&str, &str)] = &[
     (
         "remember",
         "In strict mode only `append` is available: `revise` and `retire` \
-         require `replaces`/`evidence`, which the strict schema no longer accepts.",
+         require `replaces`/`evidence`, and the workspace `scope` is dropped \
+         so capture is global-only — the strict schema no longer accepts them.",
     ),
     (
         "bash",
@@ -218,11 +219,16 @@ pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
             all_strict = false;
             continue;
         }
-        if strict_schema_supported(&tool.input_schema) {
+        // Judge and normalize in one pass: the gate returns the enforced
+        // clone it approved, so the shape that ships IS the shape the gate
+        // judged. The pipeline used to run sanitize+enforce a second time
+        // on the real schema, recomputing byte-identical output per tool
+        // per request.
+        if let Some((normalized, removed_optionals)) = strict_schema_supported(&tool.input_schema) {
             // Count the hybrid-map narrowings on the authored shape before
             // the enforce pass overwrites them, so the note can say so.
             let narrowed_maps = count_strict_map_narrowings(&tool.input_schema, true);
-            let removed_optionals = sanitize_for_strict(&mut tool.input_schema);
+            tool.input_schema = normalized;
             if !removed_optionals.is_empty() || narrowed_maps > 0 {
                 let note = strict_removal_note(&removed_optionals, narrowed_maps);
                 let context = STRICT_REMOVAL_CONTEXT_NOTES
@@ -272,11 +278,20 @@ fn strict_removal_note(removed: &[String], narrowed_maps: usize) -> String {
                 // Control characters are neutralized to spaces alongside the
                 // backtick-to-apostrophe swap: a name carrying a newline
                 // would otherwise split the code span across lines and forge
-                // follow-on sentences inside this note.
+                // follow-on sentences inside this note. The Unicode line and
+                // paragraph separators (U+2028/U+2029) are not `is_control`
+                // but render as line breaks too, so they go through the
+                // same map.
                 let truncated: String = name
                     .chars()
                     .take(STRICT_NOTE_MAX_NAME_CHARS)
-                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .map(|c| {
+                        if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                            ' '
+                        } else {
+                            c
+                        }
+                    })
                     .collect();
                 format!("`{}`", truncated.replace('`', "'"))
             })
@@ -339,7 +354,7 @@ fn count_strict_map_narrowings(schema: &Value, ships: bool) -> usize {
     {
         count += 1;
     }
-    let required: std::collections::HashSet<String> = required_names(obj).into_iter().collect();
+    let required = required_name_set(obj);
     for (key, value) in obj {
         match key.as_str() {
             "properties" | "$defs" | "definitions" | "$def" => {
@@ -441,9 +456,23 @@ pub fn sanitize_for_responses(schema: &mut Value) -> Option<String> {
     combine_constraint_notes(constraint_note, dependent_note)
 }
 
-fn strict_schema_supported(schema: &Value) -> bool {
+/// Judge whether a tool's schema can serve the strict flag, and hand back
+/// the normalized shape that would ship together with the optional
+/// property names the enforce pass removed (sorted, deduplicated). `None`
+/// fails the tool closed: it ships its authored schema with no strict
+/// flag. The gate judges a normalized clone and returns that clone, so the
+/// caller ships exactly the shape that was judged — "the gate judges the
+/// shape that ships" holds by construction instead of by determinism.
+fn strict_schema_supported(schema: &Value) -> Option<(Value, Vec<String>)> {
     let mut normalized = schema.clone();
     sanitize(&mut normalized);
+    // The strict server resolves `$ref` against the schema it receives; a
+    // dangling reference — or an external one it cannot fetch — turns
+    // every call into the documented server error under a strict flag,
+    // where the same tool ships usable and non-strict.
+    if has_unresolvable_ref(&normalized, &normalized) {
+        return None;
+    }
     // The enforce pass strips some constraints before the compatibility
     // gate below can judge them: a null `const` (dropped outright) and a
     // schema-form draft-7 `dependencies` table (dropped with the name-table
@@ -452,14 +481,15 @@ fn strict_schema_supported(schema: &Value) -> bool {
     // optional-removal in view — an occurrence under an optional property
     // is moot because the removal takes the whole property.
     if has_unrepresentable_stripped_constraint(&normalized, true) {
-        return false;
+        return None;
     }
     // Gate the shape that would actually ship: the enforce pass removes
     // optional properties, so a null-carrying shape under an optional
     // property is faithfully represented by that removal and no longer
     // forces the tool non-strict, while the same shape under a required
     // property still does.
-    enforce_strict_subset(&mut normalized, &mut Vec::new());
+    let mut removed_optionals = Vec::new();
+    enforce_strict_subset(&mut normalized, &mut removed_optionals);
     // The strict documents describe `parameters` as an object schema, so
     // only an object root can serve a strict flag. A root that is not a
     // map at all (`{"type":"string"}`, a literal) or a map that declares
@@ -469,11 +499,9 @@ fn strict_schema_supported(schema: &Value) -> bool {
     // A typeless node carrying a non-`false` `additionalProperties` is
     // not normalized into an object at all and keeps the authored
     // keyword — caught by the detector above.
-    let Some(root) = normalized.as_object() else {
-        return false;
-    };
+    let root = normalized.as_object()?;
     if !is_object_schema(root) {
-        return false;
+        return None;
     }
     // A root whose enforced property set is empty cannot serve a strict
     // flag: `properties: {}` beside `additionalProperties: false` is
@@ -491,9 +519,14 @@ fn strict_schema_supported(schema: &Value) -> bool {
         .and_then(Value::as_object)
         .is_none_or(Map::is_empty)
     {
-        return false;
+        return None;
     }
-    !has_strict_incompatible_composition(&normalized, true)
+    if has_strict_incompatible_composition(&normalized, true) {
+        return None;
+    }
+    removed_optionals.sort();
+    removed_optionals.dedup();
+    Some((normalized, removed_optionals))
 }
 
 /// Detect the constraints the enforce pass strips before the compatibility
@@ -540,7 +573,7 @@ fn has_unrepresentable_stripped_constraint(schema: &Value, ships: bool) -> bool 
     }
     // A set, not a Vec: this walker runs per property name, and a Vec scan
     // would make each name cost the whole `required` list.
-    let required: std::collections::HashSet<String> = required_names(obj).into_iter().collect();
+    let required = required_name_set(obj);
     for (key, value) in obj {
         match key.as_str() {
             "properties" | "$defs" | "definitions" | "$def" => {
@@ -567,6 +600,13 @@ fn has_unrepresentable_stripped_constraint(schema: &Value, ships: bool) -> bool 
                 }
             }
             "enum" | "const" | "default" | "examples" | "example" => {}
+            // Stripped-subtree skip, mirroring the narrowing counter and
+            // the composition gate: `patternProperties`/`dependencies` are
+            // deleted wholesale by the enforce pass and a schema-form
+            // `additionalProperties` is overwritten with `false` on object
+            // schemas, so constraints under those keys ship in no form and
+            // must not fail the tool closed here.
+            "additionalProperties" | "patternProperties" | "dependencies" => {}
             _ => {
                 if has_unrepresentable_stripped_constraint(value, ships) {
                     return true;
@@ -621,19 +661,37 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         // The documented subset's union mechanism is `anyOf`; a `type` array
         // is a draft-4-style union the documents never describe, and `null`
         // is not a supported type anywhere — neither bare nor as an array
-        // member. Either shape cannot be represented faithfully under a
-        // strict flag.
+        // member. A `type` that is neither a string nor an array — a
+        // number, boolean, or object junk value — is a form the documents
+        // never describe and would ship verbatim under a strict flag.
         match obj.get("type") {
             Some(Value::String(schema_type)) if schema_type == "null" => return true,
             Some(Value::Array(_)) => return true,
+            // Non-null strings fall through: they are the supported
+            // spellings.
+            Some(value) if !value.is_string() => return true,
             _ => {}
         }
-        // An enum or const that accepts null is a required nullable wearing
-        // another keyword: the property must be sent and can be null.
+        // An `enum` ships its members verbatim, so it must be an array: a
+        // non-array junk value would ship as the keyword itself. An enum or
+        // const that accepts null is a required nullable wearing another
+        // keyword: the property must be sent and can be null.
+        if obj.get("enum").is_some_and(|members| !members.is_array()) {
+            return true;
+        }
         if obj
             .get("enum")
             .and_then(Value::as_array)
             .is_some_and(|members| members.iter().any(Value::is_null))
+        {
+            return true;
+        }
+        // A malformed `anyOf` — a map or scalar instead of the branch
+        // array — is likewise a keyword the documents never describe in
+        // that shape. (`oneOf`/`allOf` already fail above on presence.)
+        if obj
+            .get("anyOf")
+            .is_some_and(|branches| !branches.is_array())
         {
             return true;
         }
@@ -656,10 +714,12 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         {
             return true;
         }
-        if obj
-            .get("items")
-            .is_some_and(|items| matches!(items, Value::Array(_) | Value::Bool(_)))
-        {
+        // `items` ships as a schema map (recursed below). The tuple-form
+        // array and both draft boolean schemas fail closed — `items: false`
+        // is actively tightening, so silently ignoring it would have
+        // widened the shipped contract — and scalar junk (`42`, `"x"`,
+        // `null`) is a form the documents never describe.
+        if obj.get("items").is_some_and(|items| !items.is_object()) {
             return true;
         }
         // A nested object left with no properties by the optional-removal
@@ -682,6 +742,34 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         {
             return true;
         }
+        // A map that declares no shape at all — no `type`, `properties`,
+        // `items`, `enum`/`const`, composition, or `$ref` — accepts any
+        // JSON value (`{}` is the degenerate case; annotation-only maps
+        // like `{"title": …}` escape the same way). In a name-map position
+        // that is a required property or definition the strict documents
+        // never type: the same class rounds 7–8 fail closed in branch
+        // position (`is_schema_shaped_branch`) and at the root (the root
+        // rules above), and the optional-position case needs no rule here
+        // because the removal pass has already taken those properties
+        // away. This check runs on the enforced clone, so it judges only
+        // shapes that ship.
+        if !is_root
+            && ![
+                "type",
+                "properties",
+                "items",
+                "enum",
+                "const",
+                "anyOf",
+                "oneOf",
+                "allOf",
+                "$ref",
+            ]
+            .iter()
+            .any(|key| obj.contains_key(*key))
+        {
+            return true;
+        }
         // Walk children like the sibling walkers do: `properties`,
         // `$defs`, `definitions`, and `$def` map names to schemas, and
         // `enum`/`const`/`default`/`examples`/`example` hold literal values — only
@@ -693,25 +781,41 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         for (key, value) in obj {
             match key.as_str() {
                 "properties" | "$defs" | "definitions" | "$def" => {
-                    if let Some(named_schemas) = value.as_object() {
-                        // A named schema must be a JSON map. A draft-6
-                        // boolean schema (`false` is actively tightening —
-                        // a required property that can take no value), an
-                        // array, or any other non-map junk is a form the
-                        // strict documents never describe, so it fails
-                        // closed like the boolean `anyOf` branches and
-                        // boolean `items` above. The enforce pass has
-                        // already removed optional properties, so every
-                        // entry that survives here ships.
-                        if named_schemas.values().any(|named_schema| {
-                            !named_schema.is_object()
-                                || has_strict_incompatible_composition(named_schema, false)
-                        }) {
-                            return true;
-                        }
+                    // A name-map container must itself be a JSON map: a
+                    // `"$defs": true` (or any other non-map junk) container
+                    // slipped past every walker's `as_object()` and shipped
+                    // verbatim under a strict flag. A non-map `properties`
+                    // needs no check here — the enforce pass replaces it
+                    // with an empty map and the empty-shape rules fire —
+                    // but these three containers have no such
+                    // normalization.
+                    let Some(named_schemas) = value.as_object() else {
+                        return true;
+                    };
+                    // A named schema must be a JSON map. A draft-6
+                    // boolean schema (`false` is actively tightening —
+                    // a required property that can take no value), an
+                    // array, or any other non-map junk is a form the
+                    // strict documents never describe, so it fails
+                    // closed like the boolean `anyOf` branches and
+                    // boolean `items` above. The enforce pass has
+                    // already removed optional properties, so every
+                    // entry that survives here ships.
+                    if named_schemas.values().any(|named_schema| {
+                        !named_schema.is_object()
+                            || has_strict_incompatible_composition(named_schema, false)
+                    }) {
+                        return true;
                     }
                 }
                 "enum" | "const" | "default" | "examples" | "example" => {}
+                // No ships-nowhere skip for `patternProperties`/
+                // `dependencies`/schema-form `additionalProperties` here:
+                // this gate judges the enforced clone, where the strip has
+                // already deleted the first two wholesale and the object
+                // rules have overwritten the third with `false` — the
+                // keys never reach this loop (the pre-strip detector is
+                // where the live ships-nowhere skip lives).
                 _ => {
                     if has_strict_incompatible_composition(value, false) {
                         return true;
@@ -736,26 +840,42 @@ fn collapse_nullable_unions(schema: &mut Value) {
         return;
     };
     for key in ["anyOf", "oneOf"] {
-        let members: Vec<Value> = match obj.get(key).and_then(|v| v.as_array()) {
-            Some(arr) => arr.clone(),
-            None => continue,
-        };
-        let (nulls, nons): (Vec<_>, Vec<_>) = members.into_iter().partition(is_null_type);
-        if nulls.len() == 1 && nons.len() == 1 {
-            // `nullable` is only meaningful when it annotates a concrete
-            // schema type. Collapsing `$ref | null` or another untyped branch
-            // would manufacture an annotation-only schema and lose the
-            // terminating union needed by MFJS reference validation.
-            let has_concrete_non_null_type = nons[0]
-                .as_object()
-                .and_then(|branch| branch.get("type"))
-                .and_then(Value::as_str)
-                .is_some_and(|schema_type| schema_type != "null");
-            if !has_concrete_non_null_type {
-                continue;
+        // Inspect the branches by reference: the pass runs twice per tool
+        // per request (gate walk + in-place walk), and cloning the whole
+        // branch array just to count null members cloned subtrees the
+        // collapse would never touch. Only the surviving branch is cloned,
+        // and only when the collapse actually fires.
+        let collapse = match obj.get(key).and_then(Value::as_array) {
+            Some(arr) if arr.len() == 2 => {
+                let (a, b) = (&arr[0], &arr[1]);
+                let pair = match (is_null_type(a), is_null_type(b)) {
+                    (true, false) => Some((a, b)),
+                    (false, true) => Some((b, a)),
+                    _ => None,
+                };
+                pair.and_then(|(_, survivor)| {
+                    // `nullable` is only meaningful when it annotates a
+                    // concrete schema type. Collapsing `$ref | null` or
+                    // another untyped branch would manufacture an
+                    // annotation-only schema and lose the terminating
+                    // union needed by MFJS reference validation.
+                    let has_concrete_non_null_type = survivor
+                        .as_object()
+                        .and_then(|branch| branch.get("type"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|schema_type| schema_type != "null");
+                    if has_concrete_non_null_type {
+                        Some(survivor.clone())
+                    } else {
+                        None
+                    }
+                })
             }
+            _ => None,
+        };
+        if let Some(survivor) = collapse {
             obj.remove(key);
-            if let Value::Object(non_obj) = nons.into_iter().next().unwrap() {
+            if let Value::Object(non_obj) = survivor {
                 for (k, v) in non_obj {
                     if k != "type" || v != "null" {
                         obj.insert(k, v);
@@ -776,13 +896,13 @@ fn is_null_type(v: &Value) -> bool {
 
 /// Whether an `anyOf` branch is a schema the strict documents describe: a
 /// typed schema (`{"type": ...}`, including a nested definition reference),
-/// a property map (the object rules apply to it), or an enum-only schema
-/// (`enum` is in the documented subset — the branch recursion judges its
-/// members like any schema, so a null member still fails closed). Maps that
-/// declare no shape at all (`{}`, annotation-only maps), boolean schemas,
-/// literal `null`s, and arrays are forms the contract never describes —
-/// callers fail them closed rather than ship them verbatim under a strict
-/// flag.
+/// a property map (the object rules apply to it), an enum-only schema, or a
+/// const-only schema (`enum` and `const` are both in the documented subset
+/// — the branch recursion judges them like any schema, so a null enum
+/// member or null const still fails closed). Maps that declare no shape at
+/// all (`{}`, annotation-only maps), boolean schemas, literal `null`s, and
+/// arrays are forms the contract never describes — callers fail them
+/// closed rather than ship them verbatim under a strict flag.
 fn is_schema_shaped_branch(branch: &Value) -> bool {
     match branch {
         Value::Object(obj) => {
@@ -790,9 +910,64 @@ fn is_schema_shaped_branch(branch: &Value) -> bool {
                 || obj.contains_key("properties")
                 || obj.contains_key("$ref")
                 || obj.contains_key("enum")
+                || obj.contains_key("const")
         }
         _ => false,
     }
+}
+
+/// Whether every `$ref` in the schema resolves inside the document. The
+/// strict server resolves references against the schema it receives; a
+/// dangling reference — or an external one it cannot fetch — turns every
+/// call into the documented server error under a strict flag, where the
+/// same tool ships usable and non-strict, so an unresolvable reference
+/// fails the tool closed. Literal-keyword values are skipped: an
+/// `enum`/`const`/`default` member that happens to be shaped like a
+/// `{"$ref": …}` object is data, not a reference to resolve.
+fn has_unresolvable_ref(schema: &Value, root: &Value) -> bool {
+    let Some(obj) = schema.as_object() else {
+        return schema
+            .as_array()
+            .is_some_and(|values| values.iter().any(|value| has_unresolvable_ref(value, root)));
+    };
+    if let Some(reference) = obj.get("$ref").and_then(Value::as_str)
+        && resolve_local_ref(root, reference).is_none()
+    {
+        return true;
+    }
+    for (key, value) in obj {
+        match key.as_str() {
+            "enum" | "const" | "default" | "examples" | "example" => {}
+            _ => {
+                if has_unresolvable_ref(value, root) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Resolve a JSON-pointer `$ref` against the schema root. Only `#…`
+/// references can resolve inside the shipped document — any other target
+/// (`https://…`, a sibling file) is unresolvable here and would be for the
+/// server too. Returns `None` when the pointer does not resolve.
+fn resolve_local_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    let fragment = reference.strip_prefix('#')?;
+    if fragment.is_empty() {
+        return Some(root);
+    }
+    let mut target = root;
+    for raw_token in fragment.strip_prefix('/').unwrap_or(fragment).split('/') {
+        // JSON-pointer escapes: `~1` encodes `/`, `~0` encodes `~`.
+        let token = raw_token.replace("~1", "/").replace("~0", "~");
+        target = match target {
+            Value::Array(values) => token.parse::<usize>().ok().and_then(|i| values.get(i))?,
+            Value::Object(map) => map.get(token.as_str())?,
+            _ => return None,
+        };
+    }
+    Some(target)
 }
 
 /// Bare `{"type": "object"}` (no `properties`, no `additionalProperties`)
@@ -868,8 +1043,7 @@ fn enforce_strict_subset(schema: &mut Value, removed_optionals: &mut Vec<String>
         if is_object_schema(obj) {
             // A set, not a Vec: the membership test runs once per property,
             // and a Vec scan would make each property cost the whole list.
-            let originally_required: std::collections::HashSet<String> =
-                required_names(obj).into_iter().collect();
+            let originally_required = required_name_set(obj);
             let properties = ensure_properties_object(obj);
             // The strict contract is "every property is required". A property
             // the tool left optional would have to carry `nullable: true` to
@@ -889,7 +1063,10 @@ fn enforce_strict_subset(schema: &mut Value, removed_optionals: &mut Vec<String>
                     false
                 }
             });
-            removed_here.sort();
+            // No per-node sort: both collectors (`sanitize_for_strict` and
+            // the gate in `strict_schema_supported`) sort and deduplicate
+            // the accumulated names before anyone reads them, so this
+            // would be dead O(K log K) work per object node.
             removed_optionals.extend(removed_here);
             let mut remaining: Vec<String> = properties.keys().cloned().collect();
             remaining.sort();
@@ -1025,6 +1202,12 @@ fn required_names(obj: &Map<String, Value>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The walker-side form of [`required_names`]: every member test in the
+/// strict walkers is a hash lookup, not a scan over the `required` list.
+fn required_name_set(obj: &Map<String, Value>) -> std::collections::HashSet<String> {
+    required_names(obj).into_iter().collect()
 }
 
 fn merge_root_composition_properties(obj: &mut Map<String, Value>) {
@@ -1193,9 +1376,9 @@ mod tests {
         });
         let mut schema = original.clone();
         sanitize(&mut schema);
-        // Multi-typed anyOf should collapse to single element after
-        // recursive walk — but here neither is null so the collapse
-        // doesn't trigger. The anyOf array itself remains.
+        // The collapse fires only on exactly one null-type branch beside
+        // exactly one non-null branch; neither branch here is null, so the
+        // union survives the walk intact.
         assert!(schema.get("anyOf").is_some());
     }
 
@@ -1582,6 +1765,11 @@ mod tests {
                         }
                     }
                 }),
+                // tools[2] has no root `required`, so its root property set
+                // empties under the enforce pass and the ROOT-empty rule
+                // fails it closed — not the nested-`oneOf` composition arm
+                // its fixture shape suggests (that arm is pinned by the
+                // required-nested-composition tests).
             ),
         ];
 
@@ -2809,10 +2997,15 @@ mod tests {
     }
 
     #[test]
-    fn strict_mode_strips_unsupported_bounds_from_typeless_nodes() {
+    fn strict_mode_fails_closed_on_typeless_bounds_only_properties() {
         // The strict documents name the length and item-count bounds
-        // "Unsupported parameters" without qualifying placement: a typeless
-        // node implying the bound shipped it verbatim under a strict flag.
+        // "Unsupported parameters" without qualifying placement, and the
+        // strip removes them wherever they appear (the typed-node strip is
+        // pinned on the sanitize path above). A REQUIRED property carrying
+        // only bounds declares no type at all, though: the shapeless rule
+        // fails such a tool closed — the bounds never reach a wire under a
+        // strict flag, so this test pins the fail-closed outcome the
+        // former strips-from-typeless-nodes behavior used to pin.
         let mut tools = vec![test_tool(
             "check",
             json!({
@@ -2824,20 +3017,23 @@ mod tests {
             }),
         )];
 
-        assert!(prepare_tools_for_strict_mode(&mut tools));
-        let value = &tools[0].input_schema["properties"]["value"];
-        assert!(value.get("minLength").is_none(), "{value}");
-        assert!(value.get("maxLength").is_none(), "{value}");
-        assert!(value.get("minItems").is_none(), "{value}");
-        assert!(value.get("maxItems").is_none(), "{value}");
+        assert!(!prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, None);
+        assert!(
+            tools[0].input_schema["properties"]["value"]
+                .get("minLength")
+                .is_some(),
+            "the authored schema ships unchanged"
+        );
     }
 
     #[test]
     fn strict_mode_drops_non_string_format_values() {
         // Only the five documented string formats are supported; a
-        // non-string `format` is malformed in its own right and shipped
-        // verbatim under a strict flag before the strip required a string
-        // to match against the documented set.
+        // non-string `format` is malformed in its own right. On a typed
+        // node the strip drops it (pinned on the sanitize path); on a
+        // REQUIRED property carrying only the format — no type anywhere —
+        // the shapeless rule fails the tool closed instead.
         let mut tools = vec![test_tool(
             "check",
             json!({
@@ -2849,11 +3045,13 @@ mod tests {
             }),
         )];
 
-        assert!(prepare_tools_for_strict_mode(&mut tools));
+        assert!(!prepare_tools_for_strict_mode(&mut tools));
+        assert_eq!(tools[0].strict, None);
         assert!(
             tools[0].input_schema["properties"]["value"]
                 .get("format")
-                .is_none()
+                .is_some(),
+            "the authored schema ships unchanged"
         );
     }
 
@@ -3777,6 +3975,444 @@ mod tests {
             note.as_deref(),
             Some("Exactly one of these parameter groups must be provided: `a` + `b` | `c`.")
         );
+    }
+
+    // ---- round-10 fix wave pins ----
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_required_shapeless_property() {
+        // `{}` accepts any JSON value — including null — and a typeless
+        // schema appears nowhere in the documented subset. The identical
+        // shape fails closed in branch position and at the root; a
+        // required property position is the same class.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "data": {}},
+                "required": ["id", "data"]
+            }),
+        );
+        let original = tool.input_schema.clone();
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, original);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_required_annotation_only_property() {
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"opts": {"title": "Options"}},
+                "required": ["opts"]
+            }),
+        );
+        let original = tool.input_schema.clone();
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, original);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_non_map_defs_container() {
+        // A non-map name-map container slipped past every walker's
+        // `as_object()` and would ship verbatim under a strict flag.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+                "$defs": true
+            }),
+        );
+        let original = tool.input_schema.clone();
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, original);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_non_string_type_value() {
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": 42,
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"]
+            }),
+        );
+        let original = tool.input_schema.clone();
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, original);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_non_array_enum() {
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"v": {"enum": "junk"}},
+                "required": ["v"]
+            }),
+        );
+        let original = tool.input_schema.clone();
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, original);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_scalar_junk_items() {
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"list": {"type": "array", "items": 42}},
+                "required": ["list"]
+            }),
+        );
+        let original = tool.input_schema.clone();
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, original);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_map_form_anyof() {
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"v": {"anyOf": {"type": "string"}}},
+                "required": ["v"]
+            }),
+        );
+        let original = tool.input_schema.clone();
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, original);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_dangling_ref() {
+        // The strict server resolves `$ref` against the schema it
+        // receives; a dangling reference turns every call into the
+        // documented server error under a strict flag, where the same
+        // tool ships usable and non-strict.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"data": {"$ref": "#/$defs/nope"}},
+                "required": ["data"]
+            }),
+        );
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_an_external_ref() {
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"data": {"$ref": "https://example.com/schema.json"}},
+                "required": ["data"]
+            }),
+        );
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_resolvable_ref() {
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"data": {"$ref": "#/$defs/fine"}},
+                "required": ["data"],
+                "$defs": {"fine": {"type": "string"}}
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_keeps_tools_whose_stripped_subtrees_carry_gated_shapes() {
+        // `patternProperties` is deleted wholesale by the enforce pass, so
+        // a gated shape (a null `const`, the detector's own vocabulary)
+        // inside it ships in no form and must not fail the tool closed —
+        // the same ships-nowhere skip the narrowing counter applies, now
+        // on the pre-strip detector too (the gate never sees the key: the
+        // strip has already removed it from the enforced clone).
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+                "patternProperties": {"^x$": {"const": null}}
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+        assert!(
+            tool.input_schema.get("patternProperties").is_none(),
+            "the strip still deletes the keyword wholesale"
+        );
+    }
+
+    #[test]
+    fn strict_mode_keeps_const_only_anyof_branches() {
+        // `const` is in the documented subset (number/integer), so a
+        // const-only branch keeps shipping like an enum-only branch; a
+        // null const branch still fails closed via the branch recursion.
+        let mut keeps = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"v": {"anyOf": [{"const": 3}, {"type": "string"}]}},
+                "required": ["v"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut keeps
+        )));
+        assert_eq!(keeps.strict, Some(true));
+
+        let mut fails = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"v": {"anyOf": [{"const": null}, {"type": "string"}]}},
+                "required": ["v"]
+            }),
+        );
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut fails
+        )));
+        assert_eq!(fails.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_ships_the_gate_normalized_shape() {
+        // The pipeline ships the gate's normalized clone, so the shipped
+        // schema must be byte-identical to running the transforms on the
+        // authored shape — the invariant the restructure makes true by
+        // construction.
+        let authored = json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "extra": {"type": "number"},
+                "nested": {"type": "object", "properties": {"x": {"type": "boolean"}}}
+            },
+            "required": ["id"]
+        });
+        let mut tool = test_tool("probe", authored.clone());
+        prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool));
+        assert_eq!(tool.strict, Some(true));
+
+        let mut reference = authored;
+        let removed = sanitize_for_strict(&mut reference);
+        assert_eq!(tool.input_schema, reference);
+        assert_eq!(removed.len(), 2);
+        assert_eq!(removed, ["extra", "nested"]);
+    }
+
+    #[test]
+    fn strict_mode_notes_neutralize_unicode_line_separators() {
+        // U+2028/U+2029 are not `is_control()` but render as line breaks,
+        // so a schema-controlled name carrying one must not split the
+        // code span.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "bad\u{2028}name": {"type": "string"}
+                },
+                "required": ["id"]
+            }),
+        );
+        prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool));
+        assert_eq!(tool.strict, Some(true));
+        assert!(
+            !tool.description.contains('\u{2028}'),
+            "the note must not carry a raw line separator: {}",
+            tool.description
+        );
+        assert!(tool.description.contains("`bad name`"));
+    }
+
+    #[test]
+    fn strict_mode_note_singularizes_the_remainder_clause() {
+        // 21 optional properties → 20 shown, remainder exactly 1: the
+        // singular clause is the branch the plural pin never exercised.
+        let mut properties = Map::new();
+        properties.insert("keep".into(), json!({"type": "string"}));
+        for i in 0..21 {
+            properties.insert(format!("extra{i}"), json!({"type": "string"}));
+        }
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": properties,
+                "required": ["keep"]
+            }),
+        );
+        prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool));
+        assert_eq!(tool.strict, Some(true));
+        assert!(
+            tool.description.contains("(and 1 more removed parameter)"),
+            "the singular remainder clause must render: {}",
+            tool.description
+        );
+        assert!(!tool.description.contains("more removed parameters"));
+    }
+
+    #[test]
+    fn strict_sanitize_lands_object_and_array_consts_on_the_enum() {
+        // The documents show string enum members, so landing a non-numeric
+        // const on `enum` is deliberate but not purely conservative for
+        // every member type — pin all the shapes the string/bool pins
+        // leave out.
+        let mut object_const = json!({
+            "type": "object",
+            "properties": {"v": {"const": {"a": 1}}},
+            "required": ["v"]
+        });
+        sanitize_for_strict(&mut object_const);
+        assert_eq!(object_const["properties"]["v"]["enum"], json!([{"a": 1}]));
+        assert!(object_const["properties"]["v"].get("const").is_none());
+
+        let mut array_const = json!({
+            "type": "object",
+            "properties": {"v": {"const": [1, 2]}},
+            "required": ["v"]
+        });
+        sanitize_for_strict(&mut array_const);
+        assert_eq!(array_const["properties"]["v"]["enum"], json!([[1, 2]]));
+        assert!(array_const["properties"]["v"].get("const").is_none());
+    }
+
+    #[test]
+    fn strict_mode_keeps_examples_and_example_values_byte_for_byte() {
+        // `examples`/`example` joined the literal-key family in all five
+        // walkers; pin the data-not-schema line in both directions like
+        // the enum/default pins.
+        let authored = json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "opts": {
+                    "type": "object",
+                    "properties": {"x": {"type": "string"}},
+                    "required": ["x"],
+                    "examples": [{"x": {"type": "object"}}],
+                    "example": {"properties": {"not": "a schema"}}
+                }
+            },
+            "required": ["id", "opts"],
+            "examples": [{"id": "a", "opts": {"x": "b"}}]
+        });
+        let mut tool = test_tool("probe", authored.clone());
+        prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool));
+        assert_eq!(tool.strict, Some(true));
+        // The literal values survive the strict transforms byte-for-byte,
+        // including schema-shaped members that would be corrupted if the
+        // walkers treated them as schemas.
+        assert_eq!(tool.input_schema["examples"], authored["examples"]);
+        assert_eq!(
+            tool.input_schema["properties"]["opts"]["examples"],
+            authored["properties"]["opts"]["examples"]
+        );
+        assert_eq!(
+            tool.input_schema["properties"]["opts"]["example"],
+            authored["properties"]["opts"]["example"]
+        );
+
+        let mut generic = authored;
+        sanitize(&mut generic);
+        assert_eq!(
+            generic["examples"],
+            json!([{"id": "a", "opts": {"x": "b"}}])
+        );
+        assert_eq!(
+            generic["properties"]["opts"]["example"],
+            json!({"properties": {"not": "a schema"}})
+        );
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_unusable_tools_by_name() {
+        // The name list lives in the pipeline's own file; the census pins
+        // live next to the tools' real schemas. Pin the branch here too so
+        // the file's own mutation story does not depend on other files.
+        for (name, schema) in [
+            (
+                "update_goal",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "status": {"enum": ["complete", "blocked"]},
+                        "evidence": {"type": "string"}
+                    },
+                    "required": ["status"]
+                }),
+            ),
+            (
+                "send_later",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"enum": ["schedule", "read"]},
+                        "message": {"type": "string"},
+                        "trigger_id": {"type": "string"}
+                    },
+                    "required": ["action"]
+                }),
+            ),
+        ] {
+            let mut tool = test_tool(name, schema);
+            assert!(
+                !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+                "{name} must fail closed by name"
+            );
+            assert_eq!(tool.strict, None, "{name} must ship no strict flag");
+        }
     }
 }
 
