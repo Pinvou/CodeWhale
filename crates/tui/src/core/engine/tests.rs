@@ -36597,7 +36597,7 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
     // Per-tool runtime contracts (a tool whose `execute` demands
     // schema-optional parameters on every call) are pinned by the per-tool
     // census tests beside their definitions (`update_goal`, `send_later`,
-    // `agents/message`, `agents/followup`), not here.
+    // `agents/message`, `agents/followup`, `Web`), not here.
     let _env_lock = lock_test_env();
     let tmp = tempdir().expect("tempdir");
     let home = tmp.path().join("home");
@@ -36675,10 +36675,15 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
     );
     let mut processed = original.clone();
     // This assert is a direction tripwire, not a invariant of the contract:
-    // it holds because `update_goal`/`send_later`/`agents/*`/`Web` are on
-    // the catalog and fail closed by name. If the catalog ever becomes
-    // fully strict-representable (or those tools leave the surface), this
-    // line inverts — update it deliberately rather than loosening it.
+    // it holds because `update_goal`/`send_later`/`Web` are on the
+    // catalog and fail closed by name (`update_goal` alone holds it —
+    // goal_state always registers). The `agents/message`/`agents/followup`
+    // list entries are defensive: those tools are model-hidden and never
+    // reach `to_api_tools`, so their names match nothing here; their
+    // contracts are pinned in subagent/coord.rs and the set pin in
+    // schema_sanitize.rs. If the catalog ever becomes fully
+    // strict-representable (or those tools leave the surface), this line
+    // inverts — update it deliberately rather than loosening it.
     assert!(
         !crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut processed),
         "the built-in catalog contains tools the strict pipeline fails closed \
@@ -36686,13 +36691,14 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
     );
     // Wholesale gate failure must not pass by making every check below
     // vacuous: at minimum the context-note tools (git, lsp, bash, remember,
-    // plus pandoc where the binary exists) ship strict.
+    // retrieve_tool_result — plus pandoc where the binary exists) ship
+    // strict.
     let strict_count = processed
         .iter()
         .filter(|tool| tool.strict == Some(true))
         .count();
     assert!(
-        strict_count >= 4,
+        strict_count >= 5,
         "only {strict_count} tools shipped strict — the gate is failing the \
          catalog closed wholesale"
     );
@@ -36754,7 +36760,14 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
             .iter()
             .map(|(name, _)| *name)
             .collect::<Vec<_>>(),
-        ["Git", "lsp", "pandoc_convert", "remember", "bash"],
+        [
+            "Git",
+            "lsp",
+            "pandoc_convert",
+            "remember",
+            "bash",
+            "retrieve_tool_result"
+        ],
         "STRICT_REMOVAL_CONTEXT_NOTES drifted from the census manifest — \
          add the tool here AND a context-note entry in the constant, with \
          the runtime contract cited at the schema"
@@ -36827,11 +36840,10 @@ fn strict_census_removed_any_property(
     }
     for (key, before_value) in before_obj {
         // Literal values ship byte-for-byte, so they are data, not
-        // removals — the same literal family the production walkers skip.
-        if matches!(
-            key.as_str(),
-            "enum" | "const" | "default" | "examples" | "example"
-        ) {
+        // removals — the production constant, not a hand copy: the
+        // hand-copied invariant class is exactly what the constant
+        // exists to retire.
+        if crate::tools::schema_sanitize::STRICT_LITERAL_KEYS.contains(&key.as_str()) {
             continue;
         }
         let Some(after_value) = after_obj.get(key) else {

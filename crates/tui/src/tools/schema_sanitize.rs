@@ -23,7 +23,9 @@ use crate::models::Tool;
 /// - Collapse `{"anyOf":[X, {"type":"null"}]}` → `X ∪ {"nullable": true}`
 /// - Inject `"properties": {}` on bare-object schemas
 /// - Prune dangling `required` entries
-/// - Collapse single-element `oneOf` / `allOf`
+/// - Collapse key-complementary single-element `oneOf` / `allOf` / `anyOf`
+///   (a colliding or non-object branch keeps its keyword — see
+///   `collapse_single_element_unions`)
 /// - Walk recursively through all subschemas
 pub fn sanitize(schema: &mut Value) {
     sanitize_inner(schema, false);
@@ -75,8 +77,6 @@ fn sanitize_inner(schema: &mut Value, inside_literal: bool) {
 
 /// The tools the strict pipeline fails closed by name: no schema-level
 /// analysis available to the reshaping can see this breakage — the schema
-/// Tools the strict pipeline fails closed by name because no schema-level
-/// analysis available to the reshaping can see the breakage: the schema
 /// advertises one discriminating parameter as the only required property
 /// while `execute` demands sibling parameters the schema leaves optional,
 /// so after the optional-removal pass the tool ships `strict: true`
@@ -85,8 +85,9 @@ fn sanitize_inner(schema: &mut Value, inside_literal: bool) {
 /// `update_goal` runtime-requires `evidence` and `verification` for
 /// `status: "complete"`, `blocker` for `"blocked"`, `verification` for
 /// `"not_achieved"`, and `advisory` for `"advisory"` (`tools/goal.rs`);
-/// `send_later` runtime-requires `message` for `action: "schedule"` and
-/// `trigger_id` for `"read"`/`"cancel"` (`tools/send_later.rs`) — its
+/// `send_later` runtime-requires `message` — plus one of
+/// `delay_minutes`/`fire_at` — for `action: "schedule"`, and `trigger_id`
+/// for `"read"`/`"cancel"` (`tools/send_later.rs`) — its
 /// `"list"` action still works, but the tool's titular action is dead;
 /// `agents/message` and `agents/followup` runtime-require a target
 /// (`agent_id`/`name`, `tools/subagent/coord.rs`) for every call;
@@ -156,6 +157,13 @@ pub(crate) const STRICT_REMOVAL_CONTEXT_NOTES: &[(&str, &str)] = &[
          `sandbox_permissions` and `justification` are no longer accepted, \
          so a sandbox-denied command cannot be escalated.",
     ),
+    (
+        "retrieve_tool_result",
+        "In strict mode retrieval is summary-only: `mode`, `query`, and the \
+         line/byte selectors are no longer accepted, so the `metadata`, \
+         `head`, `tail`, `lines`, `query`, and offset `bytes` modes are \
+         unreachable.",
+    ),
 ];
 
 /// Cap for the removal note. Names are schema-controlled (hostile MCP
@@ -195,8 +203,11 @@ const STRICT_NAME_MAP_KEYS: &[&str] = &["properties", "$defs", "definitions", "$
 /// The literal-keyword keys whose values are DATA (enum members, defaults,
 /// examples), not schemas. Shared by every walker alongside
 /// [`STRICT_NAME_MAP_KEYS`] for the same drift reasons, and pinned the
-/// same way.
-const STRICT_LITERAL_KEYS: &[&str] = &["enum", "const", "default", "examples", "example"];
+/// same way. `pub(crate)` so the census helper in `core/engine/tests.rs`
+/// consumes the same copy instead of hand-rolling the list — the
+/// hand-copied invariant class this constant exists to retire.
+pub(crate) const STRICT_LITERAL_KEYS: &[&str] =
+    &["enum", "const", "default", "examples", "example"];
 
 /// Prepare a complete active tool set for DeepSeek strict function-calling.
 ///
@@ -295,10 +306,8 @@ fn strict_removal_note(removed: &[String], narrowed_maps: usize) -> String {
     // The removal sentence only renders when something was actually
     // removed: a narrowing-only tool (hybrid `additionalProperties` beside
     // named properties, nothing optional) must not claim removals that did
-    // not happen. Names are backticked (they are schema-controlled and
-    // must read as data, not prose), individually truncated, and capped in
-    // count — a hostile schema may carry arbitrarily many long names, and
-    // this text ships on every request. A backtick inside a name is
+    // not happen. The name quoting/truncation/cap contract lives in the
+    // doc comment above; a backtick inside a name is additionally
     // replaced with an apostrophe so it cannot break out of the code span.
     let mut note = String::new();
     if !removed.is_empty() {
@@ -310,15 +319,12 @@ fn strict_removal_note(removed: &[String], narrowed_maps: usize) -> String {
                 // Control characters are neutralized to spaces alongside the
                 // backtick-to-apostrophe swap: a name carrying a newline
                 // would otherwise split the code span across lines and forge
-                // follow-on sentences inside this note. The Unicode line and
-                // paragraph separators (U+2028/U+2029) are not `is_control`
-                // but render as line breaks too, so they go through the
-                // same map.
+                // follow-on sentences inside this note.
                 let truncated: String = name
                     .chars()
                     .take(STRICT_NOTE_MAX_NAME_CHARS)
                     .map(|c| {
-                        if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
+                        if c.is_control() || is_line_or_bidi_separator(c) {
                             ' '
                         } else {
                             c
@@ -352,6 +358,20 @@ fn strict_removal_note(removed: &[String], narrowed_maps: usize) -> String {
         ));
     }
     note
+}
+
+/// Line/paragraph separators and the bidi format characters: U+2028/U+2029
+/// render as line breaks without being `char::is_control`, and the
+/// direction marks (LRM/RLM U+200E/U+200F, the explicit embedding controls
+/// U+202A–U+202E, the isolates U+2066–U+2069) visually reorder the
+/// surrounding text — a hostile name carrying one could split the code
+/// span or flip the note's reading direction while the characters
+/// themselves stay invisible. They neutralize to spaces alongside the
+/// control-character map.
+fn is_line_or_bidi_separator(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}')
+        || ('\u{202A}'..='\u{202E}').contains(&c)
+        || ('\u{2066}'..='\u{2069}').contains(&c)
 }
 
 /// Count object schemas that carry named properties beside a schema-form or
@@ -571,14 +591,15 @@ fn strict_schema_supported(schema: &Value) -> Option<(Value, Vec<String>)> {
 }
 
 /// Detect the constraints the enforce pass strips before the compatibility
-/// gate can judge them. `ships` reports whether the node survives the
-/// optional-removal pass — only then does its constraint still reach the
-/// wire. A null `const` is a required nullable wearing another keyword, and
-/// a schema-form `dependencies` value is semantically `dependentSchemas`
-/// (which the gate fails closed), so its draft-7 spelling fails closed too
-/// rather than shipping strict with the cross-schema requirement silently
-/// gone; the name-table form is `dependentRequired`, whose strip only
-/// widens and stays a strip.
+/// gate can judge them — and the constraints the shared `sanitize` pass
+/// collapses away before either pass runs. `ships` reports whether the
+/// node survives the optional-removal pass — only then does its
+/// constraint still reach the wire. A null `const` is a required nullable
+/// wearing another keyword, and a schema-form `dependencies` value is
+/// semantically `dependentSchemas` (which the gate fails closed), so its
+/// draft-7 spelling fails closed too rather than shipping strict with the
+/// cross-schema requirement silently gone; the name-table form is
+/// `dependentRequired`, whose strip only widens and stays a strip.
 fn has_unrepresentable_stripped_constraint(schema: &Value, ships: bool) -> bool {
     let Some(obj) = schema.as_object() else {
         return schema.as_array().is_some_and(|values| {
@@ -720,10 +741,34 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         match obj.get("type") {
             Some(Value::String(schema_type)) if schema_type == "null" => return true,
             Some(Value::Array(_)) => return true,
-            // Non-null strings fall through: they are the supported
-            // spellings.
+            // Non-null strings fall through unjudged: the gate cannot
+            // enumerate the spellings the server accepts, so an
+            // undocumented one ships rather than being guessed at (the
+            // const/enum cross-checks below treat unknown spellings as
+            // compatible for the same reason).
             Some(value) if !value.is_string() => return true,
             _ => {}
+        }
+        // A node the object rules treat as an object (a `properties` map)
+        // whose declared `type` names anything but `object` ships a
+        // self-contradictory shape under a strict flag: the enforce pass
+        // injects `required`/`additionalProperties` semantics that belong
+        // to an object the `type` says cannot exist (`{"type":"string", …}`
+        // cannot carry properties), so every strict call rejects whatever
+        // the model sends — the silent-400 class this pipeline fails
+        // closed everywhere else. Valid JSON Schema ignores
+        // non-applicable keywords; the strict documents never describe
+        // the combination, and the node one keyword away
+        // (`type: "object"`) is the shape the object rules already serve.
+        // A properties-bearing map with no `type` needs no arm here: the
+        // enforce pass names `type: "object"` on it before this gate runs.
+        if is_object_schema(obj)
+            && obj
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|spelling| spelling != "object")
+        {
+            return true;
         }
         // An `enum` ships its members verbatim, so it must be an array: a
         // non-array junk value would ship as the keyword itself. An enum or
@@ -750,17 +795,74 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         {
             return true;
         }
+        // An `enum` whose members all violate the node's declared type
+        // (`{"type": "string", "enum": [1, 2]}`) accepts no value — the
+        // same no-satisfiable-value class as an empty `enum`: `type` and
+        // `enum` are independent assertions and both must hold. A single
+        // compatible member keeps the tool strict (the half-satisfiable
+        // form is the author's sloppiness, not a wire the model cannot
+        // use). This runs on the enforced clone, so it also judges the
+        // enum the const→enum landing produces — `{"type":"number",
+        // "const":"x"}` used to land as `enum: ["x"]` and launder the
+        // conflict past the const arm below, which only ever sees the
+        // numeric consts the landing left in place.
+        if let (Some(members), Some(schema_type)) = (
+            obj.get("enum").and_then(Value::as_array),
+            obj.get("type").and_then(Value::as_str),
+        ) && !members
+            .iter()
+            .any(|member| value_satisfies_declared_type(member, schema_type))
+        {
+            return true;
+        }
         // A `const` whose value cannot satisfy the node's declared type
         // (`{"type": "string", "const": 42}`) makes the property
         // unsatisfiable — the same no-satisfiable-value class as an empty
         // `enum`. Only the single-string `type` form is cross-checked: the
-        // array form already fails closed above, and an unknown spelling
-        // is the type junk arm's business.
+        // array form already fails closed above. A non-numeric `const` is
+        // landed onto `enum` by the strip pass before this gate runs, so
+        // the conflicting non-numeric forms arrive here as enum members
+        // and are caught by the enum arm above; an unknown `type` spelling
+        // is treated as compatible rather than guessed at (see the
+        // helper).
         if let (Some(const_value), Some(schema_type)) =
             (obj.get("const"), obj.get("type").and_then(Value::as_str))
-            && !const_is_compatible_with_type(const_value, schema_type)
+            && !value_satisfies_declared_type(const_value, schema_type)
         {
             return true;
+        }
+        // Documented numeric bounds that mutually admit no value are the
+        // same no-satisfiable-value class: `minimum: 10` beside
+        // `maximum: 5`, either exclusive spelling crossing the opposing
+        // bound, and `multipleOf: 0` (no number is a multiple of zero).
+        // Only nodes whose declared single-string type is number/integer
+        // are judged — bounds constrain numbers only, so a string-typed
+        // node carrying contradictory bounds is still satisfied by every
+        // string, and the array/junk `type` forms already failed above.
+        // The finer integer-vs-fractional intersections (`minimum: 10`
+        // beside `maximum: 10.5` under `integer`) are not chased here.
+        if matches!(
+            obj.get("type").and_then(Value::as_str),
+            Some("number") | Some("integer")
+        ) {
+            let minimum = obj.get("minimum").and_then(Value::as_f64);
+            let exclusive_minimum = obj.get("exclusiveMinimum").and_then(Value::as_f64);
+            let maximum = obj.get("maximum").and_then(Value::as_f64);
+            let exclusive_maximum = obj.get("exclusiveMaximum").and_then(Value::as_f64);
+            let crossed = match (minimum, exclusive_minimum, maximum, exclusive_maximum) {
+                (Some(min), _, Some(max), _) if min > max => true,
+                (Some(min), _, _, Some(max)) if min >= max => true,
+                (_, Some(excl_min), Some(max), _) if excl_min >= max => true,
+                (_, Some(excl_min), _, Some(excl_max)) if excl_min >= excl_max => true,
+                _ => false,
+            };
+            let zero_multiple = obj
+                .get("multipleOf")
+                .and_then(Value::as_f64)
+                .is_some_and(|multiple| multiple == 0.0);
+            if crossed || zero_multiple {
+                return true;
+            }
         }
         // A malformed `anyOf` — a map or scalar instead of the branch
         // array — is likewise a keyword the documents never describe in
@@ -976,20 +1078,14 @@ fn is_null_type(v: &Value) -> bool {
         == Some("null")
 }
 
-/// Whether an `anyOf` branch is a schema the strict documents describe: a
-/// typed schema (`{"type": ...}`, including a nested definition reference),
-/// a property map (the object rules apply to it), an enum-only schema, or a
-/// const-only schema (`enum` and `const` are both in the documented subset
-/// — the branch recursion judges them like any schema, so a null enum
-/// member or null const still fails closed). Maps that declare no shape at
-/// all (`{}`, annotation-only maps), boolean schemas, literal `null`s, and
-/// arrays are forms the contract never describes — callers fail them
-/// closed rather than ship them verbatim under a strict flag.
 /// Whether `value` can satisfy a schema whose single-string `type` is
-/// `schema_type`. Fails a `const` that can never match its own declared
-/// type closed; unknown spellings are not this check's business — the
-/// type junk arm already fails those closed.
-fn const_is_compatible_with_type(value: &Value, schema_type: &str) -> bool {
+/// `schema_type`. Shared by the const arm and the enum-member arm of the
+/// compatibility gate. Unknown spellings are treated as compatible (the
+/// value ships): the type junk arm only fails non-string junk and the
+/// `null` literal, and this cross-check does not guess which undocumented
+/// spellings a server might accept — the same line the type junk arm's
+/// own comment draws.
+fn value_satisfies_declared_type(value: &Value, schema_type: &str) -> bool {
     match schema_type {
         "string" => value.is_string(),
         "number" => value.is_number(),
@@ -1001,6 +1097,17 @@ fn const_is_compatible_with_type(value: &Value, schema_type: &str) -> bool {
     }
 }
 
+/// Whether an `anyOf` branch is a schema the strict documents describe: a
+/// typed schema (`{"type": ...}`, including a nested definition reference
+/// and a properties-only branch, which arrives typed because the enforce
+/// pass names `type: "object"` on every properties-bearing map before
+/// this check runs), an enum-only schema, or a const-only schema (`enum`
+/// and `const` are both in the documented subset — the branch recursion
+/// judges them like any schema, so a null enum member or null const still
+/// fails closed). Maps that declare no shape at all (`{}`, annotation-only
+/// maps), boolean schemas, literal `null`s, and arrays are forms the
+/// contract never describes — callers fail them closed rather than ship
+/// them verbatim under a strict flag.
 fn is_schema_shaped_branch(branch: &Value) -> bool {
     match branch {
         Value::Object(obj) => {
@@ -1043,7 +1150,10 @@ fn has_unresolvable_ref(schema: &Value, root: &Value) -> bool {
         let Some(pointer) = reference.as_str() else {
             return true;
         };
-        if resolve_local_ref(root, pointer).is_none() {
+        // A chain of references must terminate: every hop can resolve
+        // while the chain as a whole never expands to a schema, and the
+        // documented server error is the outcome either way.
+        if !ref_chain_terminates(root, pointer) {
             return true;
         }
     }
@@ -1055,13 +1165,12 @@ fn has_unresolvable_ref(schema: &Value, root: &Value) -> bool {
             // fired at this name position too and let a dangling reference
             // ship under a strict flag — the round-8 bug class, recurred
             // in the newest walker.
-            if let Some(named_schemas) = value.as_object() {
-                if named_schemas
+            if value.as_object().is_some_and(|named_schemas| {
+                named_schemas
                     .values()
                     .any(|named_schema| has_unresolvable_ref(named_schema, root))
-                {
-                    return true;
-                }
+            }) {
+                return true;
             }
         } else if STRICT_LITERAL_KEYS.contains(&key.as_str()) {
             // Literal-keyword values are data: an enum member shaped like a
@@ -1080,9 +1189,47 @@ fn has_unresolvable_ref(schema: &Value, root: &Value) -> bool {
 /// is not a pointer (a plain-name `#foo`) resolves to nothing, exactly as
 /// an RFC 6901 resolver treats it. Pointer resolution itself — including
 /// the `~0`/`~1` escapes — is `serde_json`'s own (`Value::pointer`), the
-/// same implementation `resolve_mfjs_reference` uses.
+/// same implementation `resolve_mfjs_reference` uses, with one RFC-6901
+/// strictness gate in front: `Value::pointer` leniently leaves an invalid
+/// escape (`~2`) as literal text and matches the key, where a strict
+/// resolver rejects the pointer outright — so an invalid-escape pointer,
+/// strictly less resolvable than the dangling string reference that
+/// already fails closed, fails closed here too. A key legitimately
+/// containing a literal `~` is addressed with the `~0` encoding, which
+/// decodes normally.
 fn resolve_local_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
-    root.pointer(reference.strip_prefix('#')?)
+    let pointer = reference.strip_prefix('#')?;
+    let bytes = pointer.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'~' && !matches!(bytes.get(index + 1), Some(b'0' | b'1')) {
+            return None;
+        }
+    }
+    root.pointer(pointer)
+}
+
+/// Whether following a `$ref` chain terminates at a schema that is not
+/// itself a reference. A chain that loops (`#/$defs/a` → `#/$defs/b` →
+/// `#/$defs/a`) resolves at every hop yet no validator can expand it —
+/// the same file's Kimi machinery rejects such chains
+/// (`CyclicRootReference`/`NonTerminatingReference`) — so the strict gate
+/// fails them closed rather than shipping a schema whose resolution the
+/// server cannot complete. A dangling link fails here too; the visited
+/// set is keyed on the reference string, so a diamond (two references
+/// reaching one definition) stays fine.
+fn ref_chain_terminates(root: &Value, start: &str) -> bool {
+    let mut visited = std::collections::HashSet::new();
+    let mut current = Some(start);
+    while let Some(reference) = current {
+        if !visited.insert(reference.to_string()) {
+            return false;
+        }
+        let Some(target) = resolve_local_ref(root, reference) else {
+            return false;
+        };
+        current = target.get("$ref").and_then(Value::as_str);
+    }
+    true
 }
 
 /// Bare `{"type": "object"}` (no `properties`, no `additionalProperties`)
@@ -1128,10 +1275,26 @@ fn prune_dangling_required(schema: &mut Value) {
     }
 }
 
-/// Collapse `{"oneOf": [X]}` → X, same for `allOf`.
+/// Collapse `{"oneOf": [X]}` → X, same for `allOf` — but only when the
+/// merge is key-complementary.
 ///
 /// Single-element unions are semantically equivalent to the element itself;
-/// DeepSeek's strict validator doesn't always flatten them.
+/// DeepSeek's strict validator doesn't always flatten them. The merge used
+/// to be first-wins, which silently dropped one side of a key collision:
+/// `allOf:[{"required":["b"]}]` beside `required:["a"]` collapsed to
+/// `required:["a"]`, inverting the authored AND-constraint (the optional-
+/// removal pass then stripped `b`, and the removal note told the model
+/// never to send exactly what the runtime demanded), and a single branch
+/// that was not an object vanished with its keyword — `allOf:[false]`,
+/// intentionally unsatisfiable, widened to anything. The collapse now
+/// keeps the composition keyword whenever it would lose information: a
+/// branch key that collides with a different parent value, or a
+/// non-object single branch. Consumers that cannot represent the keyword
+/// fail it closed downstream (the strict gate rejects `oneOf`/`allOf` on
+/// presence and shape-checks `anyOf` branches); consumers that can — the
+/// general JSON Schema endpoints — keep the authored constraint. A branch
+/// that only introduces keys the parent lacks (or repeats them with equal
+/// values) merges losslessly exactly as before.
 fn collapse_single_element_unions(schema: &mut Value) {
     let Some(obj) = schema.as_object_mut() else {
         return;
@@ -1141,13 +1304,20 @@ fn collapse_single_element_unions(schema: &mut Value) {
             Some(arr) if arr.len() == 1 => arr[0].clone(),
             _ => continue,
         };
+        let Some(inner) = single.as_object() else {
+            // A non-object single branch merges nothing: keeping the
+            // keyword keeps the authored constraint.
+            continue;
+        };
+        let collides = inner
+            .iter()
+            .any(|(k, v)| obj.get(k).is_some_and(|parent| parent != v));
+        if collides {
+            continue;
+        }
         obj.remove(key);
-        if let Value::Object(inner) = single {
-            for (k, v) in inner {
-                if !obj.contains_key(&k) {
-                    obj.insert(k, v);
-                }
-            }
+        for (k, v) in inner {
+            obj.insert(k.clone(), v.clone());
         }
     }
 }
@@ -1261,18 +1431,32 @@ fn strip_unsupported_strict_keywords(obj: &mut Map<String, Value>) {
     obj.remove("maxContains");
     // The strict documents support `const` for number/integer schemas only.
     // A non-numeric const moves onto the documented `enum` keyword with its
-    // value as the single member; a numeric const stays put, and a non-numeric
-    // const beside an existing enum yields to it. A `const: null` is dropped
-    // outright — null is not a supported type, and landing it on `enum` would
-    // ship a null member (the compatibility gate already fails a tool closed
-    // for a null const; this is the defense for direct `sanitize_for_strict`
-    // calls). `default` stays verbatim (the documents show it, and list no
-    // ban).
+    // value as the single member; a numeric const stays put — unless a
+    // disjoint enum would make the pair unsatisfiable, in which case it
+    // yields to the enum (the compatibility gate's const arm cross-checks
+    // only `type`, so `{"type":"integer","enum":[1,2],"const":3}` would
+    // otherwise ship a schema no value satisfies). An enum that contains
+    // the const keeps it verbatim: both keywords agree and the shipped
+    // intersection is faithful. A non-numeric const beside an existing
+    // enum yields the same way — the accepted values widen to the whole
+    // enum even when the const disagreed, the deliberate disclosed
+    // widening (every documented alternative is worse). A `const: null` is
+    // dropped outright — null is not a supported type, and landing it on
+    // `enum` would ship a null member (the compatibility gate already
+    // fails a tool closed for a null const; this is the defense for direct
+    // `sanitize_for_strict` calls). `default` stays verbatim (the
+    // documents show it, and list no ban).
     if let Some(const_value) = obj.remove("const")
         && !const_value.is_null()
     {
         if const_value.is_number() {
-            obj.insert("const".into(), const_value);
+            let disjoint = obj
+                .get("enum")
+                .and_then(Value::as_array)
+                .is_some_and(|members| !members.contains(&const_value));
+            if !disjoint {
+                obj.insert("const".into(), const_value);
+            }
         } else if !obj.contains_key("enum") {
             obj.insert("enum".into(), Value::Array(vec![const_value]));
         }
@@ -4934,8 +5118,400 @@ mod tests {
         )));
         assert_eq!(tool.strict, Some(true));
     }
-}
 
+    #[test]
+    fn strict_mode_fails_closed_on_an_enum_whose_members_violate_its_type() {
+        // `type` and `enum` are independent assertions both must hold:
+        // `{"type": "string", "enum": [1, 2]}` accepts no value, the same
+        // no-satisfiable-value class as an empty `enum`. The gate's
+        // empty-enum and null-member arms once left this shape shipping
+        // verbatim. Running on the enforced clone also closes the
+        // const→enum laundering: `{"type":"number","const":"x"}` lands as
+        // `enum: ["x"]` and would have carried the conflict past the
+        // const-vs-type arm, which only ever sees the numeric consts the
+        // landing leaves in place.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"mode": {"type": "string", "enum": [1, 2]}},
+                "required": ["mode"]
+            }),
+        );
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(
+            tool.input_schema,
+            test_tool(
+                "probe",
+                json!({
+                    "type": "object",
+                    "properties": {"mode": {"type": "string", "enum": [1, 2]}},
+                    "required": ["mode"]
+                })
+            )
+            .input_schema,
+            "a fail-closed tool ships its authored schema"
+        );
+
+        // The landed twin fails the same way: the strip converts the
+        // non-numeric const into the enum before the gate runs.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"level": {"type": "number", "const": "high"}},
+                "required": ["level"]
+            }),
+        );
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+
+        // Keep-side: one compatible member keeps the tool strict (the
+        // half-satisfiable form is the author's sloppiness, not a wire the
+        // model cannot use), and the enum ships verbatim.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "integer", "enum": [1, "x"]}},
+                "required": ["id"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+        assert_eq!(
+            tool.input_schema["properties"]["id"]["enum"],
+            json!([1, "x"])
+        );
+    }
+
+    #[test]
+    fn strict_mode_yields_a_disjoint_numeric_const_to_its_enum() {
+        // A numeric const kept beside a disjoint enum ships a schema no
+        // value satisfies (`const: 3` ∧ `enum: [1, 2]`), and the gate's
+        // const arm cannot see the conflict — it cross-checks only
+        // `type`. The disjoint form yields to the enum in the strip pass,
+        // the same disclosed widening as the non-numeric yield; the enum
+        // alone is perfectly satisfiable, so failing the tool closed
+        // would retire a usable wire.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "integer", "enum": [1, 2], "const": 3}},
+                "required": ["id"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+        let shipped = &tool.input_schema["properties"]["id"];
+        assert!(shipped.get("const").is_none(), "the disjoint const yields");
+        assert_eq!(shipped["enum"], json!([1, 2]));
+
+        // Keep-side: an enum that contains the const keeps it verbatim —
+        // both keywords agree and the shipped intersection is faithful.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "integer", "enum": [1, 2], "const": 1}},
+                "required": ["id"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+        let shipped = &tool.input_schema["properties"]["id"];
+        assert_eq!(shipped["const"], json!(1));
+        assert_eq!(shipped["enum"], json!([1, 2]));
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_properties_map_with_a_non_object_type() {
+        // The object rules treat a `properties` map as an object and
+        // inject `required`/`additionalProperties` — semantics that belong
+        // to an object the declared `type` says cannot exist
+        // (`{"type":"string", …}` cannot carry properties), so every
+        // strict call rejects whatever the model sends. Valid JSON Schema
+        // ignores non-applicable keywords; the strict documents never
+        // describe the combination, and the node one keyword away
+        // (`type: "object"`) is the shape the object rules already serve.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"m": {
+                    "type": "string",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["a"]
+                }},
+                "required": ["m"]
+            }),
+        );
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+
+        // Keep-side: the same node typed `object` is the shape the object
+        // rules serve and keeps strict mode.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"m": {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                    "required": ["a"]
+                }},
+                "required": ["m"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_single_element_composition_collision() {
+        // The single-element collapse merges first-wins inside `sanitize`,
+        // before the gate runs: a branch key whose value differs from the
+        // parent's same key is silently dropped, so the authored AND-
+        // constraint inverts — `required:["a"]` survives, `b` stops being
+        // required, the removal pass strips it, and the note tells the
+        // model never to send exactly what the runtime demands. The
+        // pre-strip detector fails the collision closed on the sanitized
+        // shape instead.
+        let authored = json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "required": ["a"],
+            "allOf": [{"required": ["b"]}]
+        });
+        let mut tool = test_tool("probe", authored.clone());
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+
+        // A single branch that is not an object merges nothing: the
+        // keyword disappears with it and `allOf:[false]` — intentionally
+        // unsatisfiable — would have widened to anything.
+        let authored = json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "required": ["a"],
+            "allOf": [false]
+        });
+        let mut tool = test_tool("probe", authored.clone());
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_lossless_single_element_composition() {
+        // A single branch that only introduces keys the parent lacks (or
+        // repeats them with equal values) merges losslessly and keeps
+        // shipping — the collision arm must not over-fail the
+        // complementary form.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"],
+                "allOf": [{"default": "annotated"}]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_contradictory_numeric_bounds() {
+        // Documented numeric bounds that mutually admit no value are the
+        // no-satisfiable-value class: each pairing below leaves no number
+        // that satisfies both keywords, and `multipleOf: 0` admits no
+        // number at all. A satisfiable bound keeps shipping (the last
+        // fixture).
+        let fixtures = [
+            json!({"type": "integer", "minimum": 10, "maximum": 5}),
+            json!({"type": "integer", "minimum": 5, "exclusiveMaximum": 5}),
+            json!({"type": "number", "exclusiveMinimum": 5, "maximum": 5}),
+            json!({"type": "number", "exclusiveMinimum": 5, "exclusiveMaximum": 5}),
+            json!({"type": "number", "multipleOf": 0}),
+        ];
+        for fixture in fixtures {
+            let mut tool = test_tool(
+                "probe",
+                json!({
+                    "type": "object",
+                    "properties": {"n": fixture},
+                    "required": ["n"]
+                }),
+            );
+            assert!(
+                !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+                "contradictory bounds must fail closed: {:?}",
+                tool.input_schema["properties"]["n"]
+            );
+            assert_eq!(tool.strict, None);
+        }
+        // Keep-side: satisfiable bounds keep shipping verbatim.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"n": {"type": "integer", "minimum": 1, "maximum": 10}},
+                "required": ["n"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_cyclic_ref_chain() {
+        // A reference chain that loops resolves at every hop yet no
+        // validator can expand it — the documented server error under a
+        // strict flag. The same file's Kimi machinery rejects such chains
+        // (`CyclicRootReference`/`NonTerminatingReference`), so the strict
+        // gate fails them closed too, in both the self-loop and the
+        // mutual form.
+        let authored = json!({
+            "type": "object",
+            "properties": {"x": {"$ref": "#/$defs/a"}},
+            "required": ["x"],
+            "$defs": {"a": {"$ref": "#/$defs/a"}}
+        });
+        let mut tool = test_tool("probe", authored.clone());
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+
+        let authored = json!({
+            "type": "object",
+            "properties": {"x": {"$ref": "#/$defs/a"}},
+            "required": ["x"],
+            "$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"$ref": "#/$defs/a"}}
+        });
+        let mut tool = test_tool("probe", authored.clone());
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+
+        // Keep-side: a chain that terminates at a concrete schema keeps
+        // shipping, and a diamond (two references reaching one
+        // definition) is not a cycle.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "x": {"$ref": "#/$defs/a"},
+                    "y": {"$ref": "#/$defs/b"}
+                },
+                "required": ["x", "y"],
+                "$defs": {
+                    "a": {"$ref": "#/$defs/concrete"},
+                    "b": {"$ref": "#/$defs/concrete"},
+                    "concrete": {"type": "string"}
+                }
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_an_invalid_pointer_escape() {
+        // RFC 6901 allows only `~0`/`~1`; `Value::pointer` leniently
+        // leaves `~2` as literal text and matches the key, where a strict
+        // resolver rejects the pointer outright — so a definition
+        // literally named `~2x` referenced as `~2x` once shipped strict
+        // with a pointer the server cannot resolve. The invalid escape
+        // fails closed now; the `~0` encoding of the same key still
+        // resolves.
+        let authored = json!({
+            "type": "object",
+            "properties": {"x": {"$ref": "#/$defs/~2x"}},
+            "required": ["x"],
+            "$defs": {"~2x": {"type": "string"}}
+        });
+        let mut tool = test_tool("probe", authored.clone());
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"x": {"$ref": "#/$defs/~02x"}},
+                "required": ["x"],
+                "$defs": {"~2x": {"type": "string"}}
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_removal_note_neutralizes_bidi_and_line_separators() {
+        // The line/paragraph separators and the bidi direction marks are
+        // not `char::is_control` but render as breaks or visually reorder
+        // the surrounding text — a hostile name carrying one could split
+        // the code span or flip the note's reading direction while staying
+        // invisible. They neutralize to spaces alongside the control
+        // characters.
+        let note = strict_removal_note(
+            &[
+                "a\u{202A}b".to_string(),
+                "c\u{2028}d\u{2029}e\u{200F}f".to_string(),
+            ],
+            0,
+        );
+        assert!(
+            note.contains("`a b`"),
+            "embedding control neutralized: {note}"
+        );
+        assert!(note.contains("`c d e f`"), "separators neutralized: {note}");
+        assert!(!note.contains('\u{202A}'));
+        assert!(!note.contains('\u{200F}'));
+    }
+}
 /// Normalize a tool's function schema for Kimi / Moonshot API compatibility.
 ///
 /// Kimi's API enforces stricter JSON Schema validation: when a schema uses

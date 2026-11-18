@@ -1685,4 +1685,67 @@ mod tests {
     fn scopeguard_for_test(prior: Option<PathBuf>) -> ArtifactRootGuard {
         ArtifactRootGuard { prior }
     }
+
+    /// The real schema through the real pipeline: every parameter except
+    /// `ref` is optional, so the strict pass removes all of them and the
+    /// tool ships `strict: true` able only to summarize — six of seven
+    /// modes (`metadata`, `head`, `tail`, `lines`, `query`, and offset
+    /// `bytes`) become unreachable while the generic removal note tells
+    /// the model never to send exactly the parameters that select and
+    /// feed them. The per-tool contract is the
+    /// `STRICT_REMOVAL_CONTEXT_NOTES` entry (schema_sanitize.rs): this
+    /// pin keeps the schema shape and the note sentence honest, and the
+    /// census manifest pin (core/engine/tests.rs) keeps the entry
+    /// itself from being deleted.
+    #[test]
+    fn strict_mode_keeps_retrieval_strict_with_its_summary_only_note() {
+        let tool = RetrieveToolResultTool;
+        let schema = tool.input_schema();
+        assert_eq!(schema["required"], json!(["ref"]));
+        assert!(schema["properties"]["mode"].is_object());
+        assert!(schema["properties"]["query"].is_object());
+        assert!(schema["properties"]["lines"].is_object());
+
+        let mut tools = vec![crate::models::Tool {
+            tool_type: None,
+            name: tool.name().to_string(),
+            description: tool.description().to_string(),
+            input_schema: schema.clone(),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }];
+
+        assert!(
+            crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools),
+            "retrieve_tool_result keeps strict mode: the `ref`+summary path              stays fully functional"
+        );
+        let shipped = &tools[0];
+        assert_eq!(shipped.strict, Some(true));
+        let shipped_properties = shipped
+            .input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("the shipped schema carries a properties map");
+        assert_eq!(
+            shipped_properties.keys().collect::<Vec<_>>(),
+            vec!["ref"],
+            "strict ships `ref` alone; every mode-selecting parameter is removed"
+        );
+        let (_, note) = crate::tools::schema_sanitize::STRICT_REMOVAL_CONTEXT_NOTES
+            .iter()
+            .find(|(name, _)| *name == "retrieve_tool_result")
+            .expect("the context-note entry must exist — a deletion turns                      the census manifest and this expect red together");
+        assert!(
+            shipped.description.contains(note),
+            "the context note must render verbatim; got: {}",
+            shipped.description
+        );
+        assert!(
+            !shipped.description.contains("`mode` must not be sent"),
+            "the generic removal note lists removed names, so `mode` appears              there; the context sentence is what names the capability loss"
+        );
+    }
 }

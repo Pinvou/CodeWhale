@@ -262,9 +262,13 @@ mod tests {
         // removal note tells the model never to send exactly the values
         // every action needs — the update_goal/send_later class. The
         // pipeline fails the tool closed by name
-        // (`STRICT_UNUSABLE_TOOLS`); this census test feeds the real
-        // schema through the pipeline so the list and the schema cannot
-        // drift apart.
+        // (`STRICT_UNUSABLE_TOOLS`). Honesty note: this census test alone
+        // does not BIND the list entry — the schema's own `oneOf` fails
+        // the shape gate regardless of the name list, so deleting `Web`
+        // from the constant leaves this test green; the entry's real
+        // binding is the literal membership pin in schema_sanitize.rs.
+        // What this test does pin is the runtime-contract evidence: the
+        // schema shape this entry's justification cites.
         let tool = WebTool::new("Web");
         let schema = tool.input_schema();
         assert_eq!(schema["required"], json!(["action"]));
