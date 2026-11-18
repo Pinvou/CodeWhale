@@ -37,12 +37,14 @@ const productionCleanup = `$cleanupNode=@($ast.FindAll({param($n)$n -is [Managem
 
 for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : ['pwsh']) {
   test(`production completion marker serializes the authenticated interval [${shell}]`, () => {
-    // Execute the actual producer block and artifact registration, without SSH,
-    // a signer or deployment. The validator suite separately checks signatures.
     const evidenceRoot = mkdtempSync(join(tmpdir(), "pinvou-completion-"));
     const evidenceIdentity = lstatSync(evidenceRoot);
+    // Delete only this parent-owned fixture after the producer shell exits.
     let primaryError;
+    let bodyFailed = false;
     try {
+    // Execute the actual producer block and artifact registration, without SSH,
+    // a signer or deployment. The validator suite separately checks signatures.
       const script = `$ErrorActionPreference='Stop';
       if($env:PINVOU_TEST_FOREIGN_MODULE_PATH -and (@($env:PSModulePath -split [IO.Path]::PathSeparator) -contains $env:PINVOU_TEST_FOREIGN_MODULE_PATH)){throw 'foreign-module-path-inherited'};
       if($env:OS -eq 'Windows_NT'){Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force};
@@ -70,9 +72,9 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
         $runClock=[pscustomobject]@{ElapsedMilliseconds=[long]7200001};$runClock|Add-Member ScriptMethod Stop {};
         $count=$artifacts.Count;try{. $emit;throw 'overlong-run-accepted'}catch{if($_.Exception.Message -cne 'e2e_run_duration_invalid'){throw}};
         if($artifacts.Count -ne $count){throw 'overlong-run-published'}
-        # The expected overlong exception must not become the -Command exit status.
-        exit 0
-      `;
+        # A deliberately caught rejection must not become the shell exit status.
+        exit 0;
+        `;
       const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {env: shellEnv, encoding: 'utf8', timeout: 30000});
       assert.equal(result.status, 0, result.error?.message ?? result.stderr);
       const actual = JSON.parse(result.stdout);
@@ -81,6 +83,7 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
       assert.equal(marker.finished_at, actual.finished_at);
       assert.equal(actual.interval_sha256, crypto.createHash('sha256').update(JSON.stringify(actual.interval)).digest('hex'));
     } catch (error) {
+      bodyFailed = true;
       primaryError = error;
       throw error;
     } finally {
@@ -94,7 +97,7 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
         rmSync(evidenceRoot, { recursive: true });
         assert.equal(existsSync(evidenceRoot), false, "completion root must be retired");
       } catch (cleanupError) {
-        if (primaryError) {
+        if (bodyFailed) {
           throw new AggregateError([primaryError, cleanupError], "completion verification and cleanup failed", { cause: primaryError });
         }
         throw cleanupError;

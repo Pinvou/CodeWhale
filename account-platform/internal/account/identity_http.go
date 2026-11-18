@@ -48,7 +48,7 @@ func (p *HTTPIdentityProvisioner) ResetPassword(ctx context.Context, subject str
 }
 
 func (p *HTTPIdentityProvisioner) RevokeProfileSessions(ctx context.Context, subject string, operationID uuid.UUID, firstAttempt bool) error {
-	return p.request(ctx, http.MethodPost, "/internal/v1/users/"+url.PathEscape(subject)+"/profile-revocations", map[string]any{"operation_id": operationID, "first_attempt": firstAttempt}, nil)
+	return p.request(ctx, http.MethodPost, "/internal/v1/users/"+url.PathEscape(subject)+"/profile-revocations", map[string]any{"operation_id": operationID, "first_attempt": firstAttempt, "receipt_protocol": 2}, nil)
 }
 
 func (p *HTTPIdentityProvisioner) RevokeSessions(ctx context.Context, subject string) error {
