@@ -3,9 +3,11 @@ package billingschema
 import (
 	"context"
 	"errors"
+	"github.com/Pinvou/pinvou3/account-platform/internal/account"
 	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcredit"
 	"github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -128,12 +130,56 @@ func TestClosurePrivatePublicCombination(t *testing.T) {
 		}
 		ledger := stageValue(t, ctx, upgradedAccount, `SELECT jsonb_agg(to_jsonb(entry) ORDER BY version)::text FROM schema_migrations entry`)
 		shape := stageShape(t, ctx, upgradedAccount)
-		var fenceError *pgconn.PgError
-		if downErr := migrations.DownOne(ctx, upgradedAccount, am); !errors.As(downErr, &fenceError) || fenceError.Code != "55000" || fenceError.Message != "payment credit closure fence is forward-only; preserve pending and resolved outcomes" {
-			t.Fatal("current closure payment fence rollback was not rejected", downErr)
+		// A full current carrier may have a later forward-only head. Exercise
+		// 900016 independently without deleting history or crossing that head.
+		fence := f.database(t, ctx, "account", "account_service")
+		var fenceCarrier []migrations.Migration
+		for _, migration := range am {
+			if migration.Version <= 900016 {
+				fenceCarrier = append(fenceCarrier, migration)
+			}
 		}
-		if ledger != stageValue(t, ctx, upgradedAccount, `SELECT jsonb_agg(to_jsonb(entry) ORDER BY version)::text FROM schema_migrations entry`) || shape != stageShape(t, ctx, upgradedAccount) {
-			t.Fatal("rejected payment fence rollback changed migration history or schema")
+		if err := accountschema.Up(ctx, fence, fenceCarrier); err != nil {
+			t.Fatal("historical payment fence public Up", err)
+		}
+		if _, err := migrations.VerifyApplied(ctx, fence, fenceCarrier); err != nil {
+			t.Fatal("historical payment fence carrier", err)
+		}
+		if _, err := fence.Exec(ctx, strings.ReplaceAll(strings.ReplaceAll(stageAccountSeed, "payload,trace_id,occurred_at,next_attempt_at", "payload,trace_id,occurred_at"), "'owned','2026-01-01','2026-01-01');", "'owned','2026-01-01');")); err != nil {
+			t.Fatal("historical payment fence retained data", err)
+		}
+		admissions, err := account.NewPostgresRepository(ctx, f.serviceURL(t, fence, "account_service"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer admissions.Close()
+		input := paymentcredit.Request{ID: uuid.New(), UserID: uuid.MustParse("11111111-1111-4111-8111-111111111111"), OrderID: uuid.New(), TransactionDigest: paymentcredit.Digest([]byte("owned-fence-transaction")), FactsDigest: paymentcredit.Digest([]byte("owned-fence-facts"))}
+		if decision, err := admissions.AdmitPaymentCredit(ctx, input); err != nil || !decision.Matches(input) || decision.State != "ADMITTED" {
+			t.Fatal("historical payment fence needs a real retained admission", err)
+		}
+		var session, actor, head string
+		if err := fence.QueryRow(ctx, `SELECT session_user,current_user,(SELECT version::text||':'||name FROM schema_migrations ORDER BY version DESC LIMIT 1)`).Scan(&session, &actor, &head); err != nil || session != "account_migrator" || actor != "account_service" || head != "900016:payment_credit_closure_fence" {
+			t.Fatal("historical payment fence target/actor mismatch", head, err)
+		}
+		fenceLedger := stageValue(t, ctx, fence, `SELECT jsonb_agg(to_jsonb(entry) ORDER BY version)::text FROM schema_migrations entry`)
+		fenceFacts, fenceShape := closureAccountTableFacts(t, ctx, fence), stageShape(t, ctx, fence)
+		var fenceError *pgconn.PgError
+		if downErr := accountschema.DownOne(ctx, fence, fenceCarrier); !errors.As(downErr, &fenceError) || fenceError.Code != "55000" || fenceError.Message != "payment credit closure fence is forward-only; preserve pending and resolved outcomes" {
+			t.Fatal("historical payment fence rollback was not rejected", downErr)
+		}
+		if _, err := migrations.VerifyApplied(ctx, fence, fenceCarrier); err != nil {
+			t.Fatal("refused payment fence changed carrier identity", err)
+		}
+		if fenceLedger != stageValue(t, ctx, fence, `SELECT jsonb_agg(to_jsonb(entry) ORDER BY version)::text FROM schema_migrations entry`) || fenceFacts != closureAccountTableFacts(t, ctx, fence) || fenceShape != stageShape(t, ctx, fence) {
+			t.Fatal("rejected payment fence rollback changed facts, history or schema")
+		}
+		if err := migrations.Unlock(ctx, fence); err != nil {
+			t.Fatal("historical payment fence lock cleanup", err)
+		}
+		// Keep the full current installation and its retained facts independent
+		// of the historical refusal; no newer migration was rolled back.
+		if ledger != stageValue(t, ctx, upgradedAccount, `SELECT jsonb_agg(to_jsonb(entry) ORDER BY version)::text FROM schema_migrations entry`) || shape != stageShape(t, ctx, upgradedAccount) || accountData != stageAccountFacts(t, ctx, upgradedAccount) {
+			t.Fatal("historical refusal changed the complete current Account fixture")
 		}
 		migrations.Unlock(ctx, upgradedAccount)
 		upgradedBilling := f.database(t, ctx, "billing", "billing_schema_owner")
@@ -289,4 +335,61 @@ func TestClosurePrivatePublicCombination(t *testing.T) {
 	if e != nil {
 		t.Fatal("actual closure child failed; immutable log retained")
 	}
+}
+
+// Snapshot every retained Account table, including admission/closure receipts
+// and full ledger rows. Ordering by the complete JSON row retains duplicates.
+func closureAccountTableFacts(t *testing.T, ctx context.Context, c *pgx.Conn) string {
+	t.Helper()
+	rows, err := c.Query(ctx, `SELECT n.nspname,c.relname,pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('public','account_approval_control','account_approval_authorization') AND c.relkind IN ('r','p') ORDER BY n.nspname,c.relname`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tables [][3]string
+	for rows.Next() {
+		var table [3]string
+		if err := rows.Scan(&table[0], &table[1], &table[2]); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		tables = append(tables, table)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	var facts strings.Builder
+	for _, table := range tables {
+		name := pgx.Identifier{table[0], table[1]}.Sanitize()
+		// Runtime cannot read private authorization tables. The original
+		// migration session already holds SET permission for these owners;
+		// use read-only diagnostic transactions, never grant new authority.
+		if table[2] != "account_service" && table[2] != "account_approval_control_owner" && table[2] != "account_approval_authorization_owner" {
+			t.Fatal("unexpected owner in historical Account facts", table[2])
+		}
+		var canSet bool
+		if err := c.QueryRow(ctx, `SELECT pg_has_role(session_user,$1,'SET')`, table[2]).Scan(&canSet); err != nil || !canSet {
+			t.Fatal("historical facts require the existing migration membership", table[2], err)
+		}
+		var value string
+		if err := func() (err error) {
+			tx, err := c.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+			if err != nil {
+				return err
+			}
+			defer func() { err = errors.Join(err, tx.Rollback(ctx)) }()
+			if _, err = tx.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{table[2]}.Sanitize()); err != nil {
+				return err
+			}
+			return tx.QueryRow(ctx, "SELECT COALESCE(jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text),'[]'::jsonb)::text FROM "+name+" f").Scan(&value)
+		}(); err != nil {
+			t.Fatal("read retained historical Account facts", err)
+		}
+		facts.WriteString(name + ":" + value + "\n")
+	}
+	var session, actor string
+	if err := c.QueryRow(ctx, `SELECT session_user,current_user`).Scan(&session, &actor); err != nil || session != "account_migrator" || actor != "account_service" {
+		t.Fatal("historical facts observation did not restore the Down actor", err)
+	}
+	return facts.String()
 }

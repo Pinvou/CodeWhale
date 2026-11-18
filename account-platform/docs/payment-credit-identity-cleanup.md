@@ -19,11 +19,17 @@ Account 的事务和用户锁不跨 Billing 结果核实 RPC。实际新增入�
 
 装配需在 Account 侧仅向 Billing 的真实 workload 授予 `internal.account.payment-credit.admit`（准入及只读最终确认核对）；Billing 侧仅向 Account 授予 `internal.billing.payment-credit.resolve`，该权限覆盖结果核实与确认。沿用已有 workload 身份凭证、网络边界及 `ACCOUNT_HTTP_URL` / `BILLING_HTTP_URL`。Compose model-token 和 Helm 的对应规则随代码更新。生产 compose.signup 的 ACCOUNT_WORKLOAD_RULES_JSON / BILLING_WORKLOAD_RULES_JSON 是运维提供的完整规则覆盖，部署前必须同步上述调用方专属权限；不能只更新基础模板。
 
+部署制品已统一将成功顺序固化为 Billing → Account：开发 Compose 与生产 personal 基础将 `account-migrate` 依赖于 `billing-migrate` 的 `service_completed_successfully`；生产 overlays 保留该依赖。Billing 未完成或失败时，Account 迁移不得开始。Helm 的 pre-install/pre-upgrade migration hooks 依次使用 Billing `-30`、Account `-20`、Token `-10`，原 service-account/后续 bootstrap 次序不变。配置预检检查该顺序，但 render/config contract 通过不等于真实迁移或部署成功。
+
 滚动升级先安装 Billing `900039` 数据库资金守卫，再安装 Account `000095`、注销谱系之后的 `900016` 及准入/恢复入口，最后启用新 Billing writer。`000095` 可用于尚未安装注销表的历史库；完整安装必须继续执行注销谱系和 `900016`，不能将这一历史前缀视为已具备注销围栏。新旧代码并存时，保留数据库围栏；旧 writer 的新资金写入会拒绝，应通过原订单和回执核实恢复。应用回退保留这些 forward-only 数据库迁移，不能通过回滚、删除未决准入或手改 `APPLIED` 解除资金围栏。首次安装使用相同固定版本的代码与完整原迁移包。
 
 运维核查先按原订单、付款证据和 attempt ID 关联两端事实。`PENDING` 或未确认记录由原恢复任务核实；持续未决转入现有人工案件，记录责任人与保全复核依据。仅查询状态和重试原操作；不要按时间、读不到记录或投递次数推定资金效果，不手工放行身份清理。
 
 本地验证包括真实三域公开迁移/运行角色的受控付款窗口、F12 原审批与消费者、匿名主体禁止新效果及旧成功回执重放、响应丢失/事务回滚/锁等待/确认重试、保全及到期清理、迁移篡改与回滚拒绝。受控提供方和历史状态夹具的边界应在每份证据中注明；它们不等于真实供应商、Keycloak、NATS 或部署现场验收。
+
+当前 binary 的新增付款资金修复要求先完成本版本完整 Billing 公开迁移，再使用真实 Account 准入；缺少 `payment_credit_attempts` 不授权退回旧资金路径。用户已确认以线上只读观测的 Account 最高 `900014`、Billing 最高 `900038` 为升级边界参考，先成功迁移 Billing，再迁移 Account。最高版本/少量表观测不证明完整线上迁移成员或 checksum；受控回归使用明确的公开迁移集合，不能声称重建了线上数据库。
+
+F12 将历史索引与当前 API 验收分开：原 `900016`→`900017` 用例保留精确历史公开集合、真实历史资金效果产生的源行、10,000 条约束有效的索引数据、Seq Scan→真实索引、原成功回执及 forward-only 拒绝；历史写方仅在 `_test.go` 中使用冻结原实现，并先验证精确公开账本和表边界，不进入发布 binary。完整升级后使用当前真实 F12 API 读取旧回执；另以公开 Billing `900038` 集合建立原资金回执和待修订单，真实升级完整 carrier，再由当前 F12 修复入口验证新资金准入、原事实不变和精确幂等回读。Billing-only 用例明确控制 Account 答复，不冒称真实跨域鉴权或恢复；Account `900014`→完整集合及真实 Account 往返由跨域回归单独验收。以上是源码中的验收设计，是否通过须绑定实际执行证据。
 
 历史财务测试仅在明确的公开 `900031`/`900032` 前缀使用冻结的测试写方；当前 schema 继续走真实 Billing 准入与资金守卫。四个 Billing F09 命名文件子进程显式包含当前及历史夹具依赖，并按实际 Go 平台和构建标签选择生产源码。手工构造的错误分配夹具在原事务中准备真实 `PREPARED`、执行原资金 SQL 后标记 `APPLIED`；仅 Account 准入答复受控，原金额、分配、事务及断言不变。这些特殊历史数据夹具不代表完整现代付款写方、结果核实和 Account 恢复往返的验证。
 

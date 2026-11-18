@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestGovernanceUsageResourcePrechecksPostgres",
     "TestEmergencyCancellationWorkerDiagnosticsPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
@@ -51,6 +52,7 @@ REQUIRED = {
     "TestOrganizationModelPolicyPublicPostgres",
     "TestContextEligibilityUsesCurrentScopedProductionRoutes",
     "TestReconciliationEvidenceMatchesPublicSchema",
+    "TestReconciliationSequentialClaimsPublicPostgres",
     "TestF05DispatchLeaseLifecycle",
     "TestF05IncompleteUpstreamErrorReplayPublicPostgres",
     "TestF05MissingReferenceDeadlineFundsPublicPostgres",
@@ -88,6 +90,7 @@ ACCOUNT_REQUIRED = {
     "TestF06OrganizationDeletionVersionAndTerminalScope",
     "TestF06Review5566377593PublicPostgres",
     "TestOrganizationEvidenceTruncatePublicPostgres",
+    "TestProviderQuotaConcurrentBoundary",
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
@@ -135,6 +138,7 @@ ACCOUNT_LEAF_REQUIRED = {
 ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestGovernanceUsageResourcePrechecksPostgres",
     "TestOrganizationModelPolicyPublicPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
     "TestEmergencyCancellationRequestLocksClaimPostgres",
@@ -161,8 +165,13 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {"TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestF09EntitlementPackageIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestManualRetentionHistoricalHardeningPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditRetentionPublicPostgres", "TestReconciliationFairRetryRegisteredIdentity", "TestTokenWalletReceiptSchemaPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingManualAdjustmentProofRollbackPostgres"}
-SCHEMA_CHILD_REQUIRED = set(SCHEMA_REQUIRED)
+SCHEMA_REQUIRED = {"TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestF09EntitlementPackageIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestManualRetentionHistoricalHardeningPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditRetentionPublicPostgres", "TestReconciliationFairRetryRegisteredIdentity", "TestTokenWalletReceiptSchemaPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingManualAdjustmentProofRollbackPostgres"}
+F12_UPGRADE_PARENT = "TestPaymentCreditF12DeployedCarriersUpgradePostgres"
+F12_UPGRADE_CHILD = "TestF12PaymentCreditUpgradeChildPostgres"
+F12_UPGRADE_MARKER = "PINVOU_F12_UPGRADE_PHASE_RESULT "
+# This parent verifies two exact child processes, not t.Run subcases. Its
+# phase evidence is required separately below; every old subcase stays required.
+SCHEMA_CHILD_REQUIRED = SCHEMA_REQUIRED - {F12_UPGRADE_PARENT}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -201,8 +210,11 @@ REFUND_REQUIRED = {
     "TestRefundOriginalUnknownSuccessQueriesAndSettlesOrdinaryGrantsPostgres",
 }
 RETAINED_REQUIRED = {
+    "TestF12PaymentRepairOrderLookupPostgres",
+    "TestF12PaymentRepairDeployedBaselineUpgradePostgres",
     "TestRetainedOrganizationOrderHistoryPagination",
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
+    "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease",
     "TestExpiredHoldProofRetryDiagnosticsPostgres",
     "TestEscalatedForcedRefundRequiresSecondActorAndReplays",
     "TestEscalatedForcedRefundWalletLockOrderPostgres",
@@ -228,6 +240,7 @@ RETAINED_REQUIRED = {
     "TestDirectPaymentRepairCommandReceiptPostgres",
     "TestPaymentCreditJournalAdmissionGuardPostgres",
     "TestPaymentCreditResolverIntegrityPostgres",
+    "TestEscalatedPaymentFinancialCompletionPostgres",
     "TestLatePaymentQueryCommandPostgres",
     "TestLatePaymentQueryClientHTTPPostgres",
     "TestLatePaymentArchiveCommandReplayPostgres",
@@ -266,6 +279,8 @@ RETAINED_REQUIRED = {
 # These exact roots are named leaves. Every other retained root must still
 # produce completed child-case evidence, not just a parent PASS.
 BILLING_LEAF_REQUIRED = {
+    "TestF12PaymentRepairOrderLookupPostgres",
+    "TestF12PaymentRepairDeployedBaselineUpgradePostgres",
     "TestExpirePendingManualProductAdmissionsReleasesFingerprintSlot",
     "TestProductAdmissionMaterialStorePostgres",
     "TestProductAdmissionMaterialPurgePostgres",
@@ -310,6 +325,22 @@ EXACT_REQUIRED_CHILDREN = {
         "pre-admission-fixture-rejects-current-schema",
         "runtime-immutable-command-and-exact-prefix-down",
     },
+    "TestGovernanceUsageResourcePrechecksPostgres": {
+        "all-active-states-preserve-full-facts", "repeated-read-stable-and-read-only",
+        "historical-only-preserves-other-dependencies",
+    },
+    "TestEscalatedPaymentFinancialCompletionPostgres": {
+        "lost-ack-replays-exact-committed-result",
+        "concurrent-reviewers-complete-once",
+        "actual-full-refund-receipt", "confirmation-audit-failure-rolls-back",
+        "payment-repair-late", "payment-repair-duplicate",
+        "no-effect-failed-evidence", "no-effect-legacy-order-only",
+        "new-payment-evidence-keeps-blocked",
+        "conflicting-original-amount", "conflicting-original-currency",
+        "conflicting-original-customer", "conflicting-original-sku",
+        "conflicting-original-channel",
+    },
+    "TestProviderQuotaConcurrentBoundary": {"migration-round-trip", "send", "verify", "login-registration", "login-profile"},
     "TestProviderHealthReadFailurePostgres": {"discovery", "latest-five", "failure-rate"},
     "TestApprovalPaginationSourcePostgres": {
         "registered-replicas-use-distinct-admitted-client-keys",
@@ -342,6 +373,10 @@ EXACT_REQUIRED_CHILDREN = {
         "wrong-resolution-identity-retains-pending-then-valid-tick-recovers",
         "unconfigured-authority-retains-manual-payment-without-bypass",
         "pending-subject-dml-and-closed-admission-boundaries",
+    },
+    "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease": {
+        "first-RPC-release-crash-keeps-durable-intent",
+        "slow-proof-exhaustion-persists-backoff-and-next-healthy-progress",
     },
     "TestBillingHistoricalStateRollbackPostgres": {
         f"version{version}/seeded={seeded}{suffix}"
@@ -428,6 +463,8 @@ EXACT_REQUIRED_CHILDREN = {
         "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",
         "installed-f07-36-upgrade", "installed-pre-runtime-37-upgrade",
         "installed-pre-cleanup-39-upgrade",
+        "installed-pre-governance-index-40-upgrade",
+        "installed-pre-governance-index-40-upgrade/governance-index-public-cli-rollback",
         "installed-pre-dispatch-index-40-upgrade",
         "installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip",
     },
@@ -569,17 +606,67 @@ def local_database_url(raw):
     return raw
 
 
+def f12_upgrade_phase(event):
+    """Accept only the real schema parent's validated, secret-free summary."""
+    if (event.get("Action") != "output" or event.get("Package") != SCHEMA_PACKAGE
+            or event.get("Test") != F12_UPGRADE_PARENT):
+        raise RuntimeError("F12 upgrade phase evidence has the wrong owner")
+
+    def unique_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate field")
+            result[key] = value
+        return result
+
+    output = event["Output"]
+    phases = []
+    for line in output.splitlines():
+        if F12_UPGRADE_MARKER not in line:
+            continue
+        try:
+            value = json.loads(line.split(F12_UPGRADE_MARKER, 1)[1], object_pairs_hook=unique_fields)
+        except (ValueError, TypeError):
+            raise RuntimeError("invalid F12 upgrade phase evidence") from None
+        if (not isinstance(value, dict)
+                or set(value) != {"schema", "phase", "root", "package", "runs", "passes", "package_pass", "skips"}
+                or type(value["schema"]) is not int or value["schema"] != 1
+                or type(value["phase"]) is not str or value["phase"] not in {"historical", "current"}
+                or value["root"] != F12_UPGRADE_CHILD or value["package"] != BILLING_PACKAGE
+                or type(value["runs"]) is not int or value["runs"] != 1
+                or type(value["passes"]) is not int or value["passes"] != 1
+                or value["package_pass"] is not True
+                or type(value["skips"]) is not int or value["skips"] != 0):
+            raise RuntimeError("invalid F12 upgrade phase evidence")
+        phases.append(value["phase"])
+    return phases
+
+
 def verify_results(events, required=None, *, package=None, require_children=False, exact_roots=False, children_required=None):
     required = REQUIRED if required is None else required
     started, passed = set(), set()
     children = set()
     passed_children = set()
     package_passed = False
+    f12_phases = set()
+    f12_root_actions = {"run": 0, "pass": 0}
     count = 0
     for event in events:
         name = event.get("Test", "")
         root = name.split("/", 1)[0]
         action = event.get("Action")
+        if F12_UPGRADE_PARENT in required:
+            if action == "skip" and event.get("Package") == SCHEMA_PACKAGE:
+                raise RuntimeError("F12 upgrade schema package or contract skipped")
+            if name == F12_UPGRADE_PARENT and action in f12_root_actions:
+                f12_root_actions[action] += 1
+            output = event.get("Output", "")
+            if isinstance(output, str) and F12_UPGRADE_MARKER in output:
+                for phase in f12_upgrade_phase(event):
+                    if phase in f12_phases:
+                        raise RuntimeError("duplicate F12 upgrade phase evidence")
+                    f12_phases.add(phase)
         if action == "fail":
             raise RuntimeError("Go financial contract failed")
         if package is not None and name and event.get("Package") != package:
@@ -611,6 +698,10 @@ def verify_results(events, required=None, *, package=None, require_children=Fals
                 raise RuntimeError("required financial contract subcases did not complete: " + ", ".join(sorted(missing)))
     if package is not None and not package_passed:
         raise RuntimeError("financial package did not complete successfully")
+    if F12_UPGRADE_PARENT in required and (
+            package != SCHEMA_PACKAGE or f12_phases != {"historical", "current"}
+            or f12_root_actions != {"run": 1, "pass": 1}):
+        raise RuntimeError("F12 upgrade requires both exact child phases and parent completion")
     return count
 
 

@@ -24,6 +24,40 @@ async function fixtureCase(t, kind, profile, name, action, settings = {}) {
   await t.test(name, () => { const f = currentRenderFixture(kind, profile, settings); try { action(f); } finally { f.dispose(); } });
 }
 
+// Real renderer output is the baseline. Mutate both in-memory views solely to
+// reach the semantic consumer past the separately-tested source-binding fence.
+for (const [kind, profile, options] of [['compose', 'personal', compose], ['compose', 'models', compose], ['helm', 'models', helm]]) {
+  test(`${kind} ${profile} migrations require Billing success before Account`, options, async t => {
+    await fixtureCase(t, kind, profile, 'actual current ordered migration configuration', f => {
+      assert.equal(checkBusinessMigrations(f.render, f.inventory).decision, 'MIGRATION_CONFIG_VALID');
+      const mutations = kind === 'compose' ? [
+        source => { delete source.services['account-migrate'].depends_on['billing-migrate']; },
+        source => { source.services['account-migrate'].depends_on['billing-migrate'].condition = 'service_started'; },
+        source => { source.services['account-migrate'].depends_on['billing-migrate'].required = false; },
+        source => { source.services['billing-migrate'].depends_on = { ...source.services['billing-migrate'].depends_on, 'account-migrate': { condition: 'service_completed_successfully' } }; },
+      ] : [
+        source => {
+          for (const resource of source) {
+            const component = resource.spec?.template?.metadata?.labels?.['app.kubernetes.io/component'];
+            if (component === 'migrate-account') resource.metadata.annotations['helm.sh/hook-weight'] = '-30';
+            if (component === 'migrate-billing') resource.metadata.annotations['helm.sh/hook-weight'] = '-20';
+          }
+        },
+        source => {
+          for (const resource of source) if (['migrate-account', 'migrate-billing'].includes(resource.spec?.template?.metadata?.labels?.['app.kubernetes.io/component'])) {
+            resource.metadata.annotations['helm.sh/hook-weight'] = '-20';
+          }
+        },
+      ];
+      for (const mutate of mutations) {
+        const render = structuredClone(f.render);
+        mutate(render.config); mutate(render.template);
+        assert.throws(() => checkBusinessMigrations(render, f.inventory), /production_render_migration_order/);
+      }
+    });
+  });
+}
+
 test('production render parser rejects ambiguous documents and keeps libpq password escapes', () => {
   assert.throws(() => parseHelmRender('apiVersion: v1\nkind: Secret\nkind: Pod\n'), /production_render_yaml_invalid/);
   assert.throws(() => parseHelmRender('apiVersion: v1\nkind: ConfigMap\nmetadata: {name: same}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: same}\n'), /production_render_resource_duplicate/);

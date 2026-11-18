@@ -1,7 +1,9 @@
 # cargo-deny 配置 —— pinvou3-app/src-tauri
 # 用法:先在仓库根运行 `python3 scripts/guard-webpki-roots-exception.py`，
-# 成功后再运行 cargo deny。裸 cargo-deny 不执行图守卫，不能替代组合检查。
-# Python 3.11+；完整本地命令与变更控制边界见 docs/webpki-roots-exception.md。
+# 再运行 `python3 scripts/guard-chrono-maintenance-exception.py`，成功后再运行 cargo deny。
+# 裸 cargo-deny 不执行图/到期守卫，不能替代组合检查。
+# Python 3.11+；本地命令与边界见 docs/webpki-roots-exception.md
+# 及 docs/chrono-maintenance-exception.md。
 # 四类检查:advisories(RUSTSEC 漏洞)、licenses(开源合规)、bans(重复 crate / 禁用 crate)、
 # sources(只允许 crates.io + 本地 path 依赖)。
 
@@ -15,6 +17,11 @@ version = 2
 # 真漏洞(anyhow RUSTSEC-2026-0190、crossbeam-epoch RUSTSEC-2026-0204)已通过 cargo update
 # 修掉(anyhow 1.0.104 / crossbeam-epoch 0.9.20),不再命中。
 ignore = [
+    # Maintenance-only exception approved 2026-11-17, expires 2026-12-17 00:00 UTC.
+    # All four locks are guarded at chrono 0.4.45 (source + checksum included).
+    # Other advisories still block in the two CI-audited dependency graphs.
+    # Remove this entry and its guard when migrating; see docs/chrono-maintenance-exception.md.
+    "RUSTSEC-2026-0543",
     # RUSTSEC-2026-0381 now explicitly excludes the 0.26.11 compatibility
     # wrapper. Keep it scanned normally: no ID ignore, including for older
     # 0.26.x packages or affected 1.x root data. The mandatory lock guard
@@ -42,7 +49,7 @@ ignore = [
 # unmaintained 保留 "workspace":父 crate 依赖图比子模块深
 # (子模块 + Tauri GTK3/glib + fastembed),实测 unmaintained="all" 会命中 gtk-rs GTK3、
 # glib VariantStrIter(unsound)、number_prefix、proc-macro-error、unic-* 等良性/上游锁定
-# 的条目并 fail CI。这些非本仓可修(等 tauri/gtk-rs 升级),"workspace" 仅报 workspace crate,
+# 的条目并 fail CI。这些非本仓可修(等 tauri/gtk-rs 升级),"workspace" 限定 workspace 成员的直接依赖,
 # 把噪声挡在 CI 之外;真漏洞仍由上面的 ignore 显式管理 + cargo update 修复。
 unmaintained = "workspace"
 # unsound 是独立的 informational 类别,cargo-deny 0.20 默认同为 "workspace";
@@ -56,8 +63,8 @@ unsound = "workspace"
 # so yanked releases are denied again. Reassess immediately if an advisory
 # affects the pinned version.
 yanked = "deny"
-# 未命中的 advisory 例外仍须报错；当前无 ID 级豁免，避免旧例外在依赖
-# 退出漏洞链后继续残留。后续新增例外也必须随其依赖图重新评估。
+# 未命中的 advisory 例外仍须报错，避免单项临时维护提示例外在依赖
+# 移除后继续残留。后续新增例外也必须随其依赖图重新评估。
 unused-ignored-advisory = "deny"
 
 [licenses]

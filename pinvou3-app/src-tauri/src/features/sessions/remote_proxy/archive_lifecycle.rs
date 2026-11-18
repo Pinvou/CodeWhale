@@ -7,7 +7,9 @@ impl super::super::SessionStore {
     /// cache contents and must not cross the WebView boundary.
     pub(crate) fn remote_proxy_load_failure_code(&self) -> Option<&'static str> {
         use super::RemoteProxyLoadFailure;
-        match self.remote_proxies.lock().load_failure {
+        let state = self.remote_proxies.lock();
+        match state.load_failure {
+            None if state.load_failed => Some("remote_proxy_archive_unavailable"),
             None => None,
             Some(RemoteProxyLoadFailure::Unreadable) => Some("remote_proxy_unreadable"),
             Some(RemoteProxyLoadFailure::Oversized) => Some("remote_proxy_oversized"),

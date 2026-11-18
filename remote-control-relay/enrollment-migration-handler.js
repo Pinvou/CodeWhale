@@ -310,6 +310,7 @@ export async function restoreEnrollmentBackup({ registry, backup, requestId: sta
     });
   } catch (error) {
     if (["migration_request_conflict", "migration_restore_revision_conflict", "migration_restore_fence_missing",
+      "enrollment_restore_revocation_conflict",
       "enrollment_revision_conflict", "migration_request_capacity_reached", "migration_request_key_unavailable"].includes(error?.code)) {
       fail(error.code, error);
     }

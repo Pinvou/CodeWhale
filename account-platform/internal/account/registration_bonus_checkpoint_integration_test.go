@@ -13,6 +13,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -88,7 +89,7 @@ func registrationBonusCheckpointSnapshot(t *testing.T, r *PostgresRepository) st
 }
 
 func TestRegistrationBonusEligibilityCheckpointPostgresIntegration(t *testing.T) {
-	r, snapshotAt := registrationBonusCheckpoint(t)
+	r, snapshotAt := registrationBonusCheckpoint(t, 0)
 	ctx := context.Background()
 	before := registrationBonusCheckpointSnapshot(t, r)
 	for _, keyID := range []string{"different-key", "checkpoint-key"} {
@@ -177,7 +178,7 @@ func TestRegistrationBonusCheckpointForeignFactsPostgresIntegration(t *testing.T
 		t.Run(map[bool]string{false: "unbound-existing-facts", true: "foreign-key-before-finalize"}[bound], func(t *testing.T) {
 			var r *PostgresRepository
 			if bound {
-				r, _ = registrationBonusCheckpoint(t)
+				r, _ = registrationBonusCheckpoint(t, 0)
 			} else {
 				r = retainedWalletFenceActors(t).repository(t)
 				if err := r.ConfigureRegistrationBonusFingerprint("checkpoint-key", bytes.Repeat([]byte{0x51}, 32)); err != nil {
@@ -255,8 +256,27 @@ func TestRegistrationBonusCheckpointGuardsPostgresIntegration(t *testing.T) {
 	// This guard release refuses at its forward-only head. Exercise the
 	// original checkpoint guard independently so that refusal cannot mask it.
 	assertHistoricalRollbackRefusal(t, r, loaded, 900014, "P0001", "registration bonus eligibility facts exist; destructive rollback is forbidden")
-	if err = accountschema.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "payment credit closure fence is forward-only; preserve pending and resolved outcomes") {
+	if _, err := migrations.VerifyApplied(ctx, connection, loaded); err != nil {
+		t.Fatal("checkpoint guard release identity", err)
+	}
+	var head, session, actor string
+	if err := connection.QueryRow(ctx, `SELECT session_user,current_user,(SELECT version::text||':'||name FROM schema_migrations ORDER BY version DESC LIMIT 1)`).Scan(&session, &actor, &head); err != nil || session != "account_migrator" || actor != "account_service" || head != "900015:organization_evidence_truncate_guards" {
+		t.Fatal("checkpoint guard rollback target changed", head, err)
+	}
+	var ledger string
+	if err := connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&ledger); err != nil {
+		t.Fatal(err)
+	}
+	var refusal *pgconn.PgError
+	if err = accountschema.DownOne(ctx, connection, loaded); !errors.As(err, &refusal) || refusal.Code != "55000" || refusal.Message != "organization evidence truncate protection is forward-only" {
 		t.Fatalf("public down discarded a committed checkpoint: %v", err)
+	}
+	var afterLedger string
+	if err := connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&afterLedger); err != nil || afterLedger != ledger {
+		t.Fatal("rejected checkpoint guard rollback changed history", err)
+	}
+	if _, err := migrations.VerifyApplied(ctx, connection, loaded); err != nil {
+		t.Fatal("rejected checkpoint guard rollback changed carrier identity", err)
 	}
 	if registrationBonusCheckpointSnapshot(t, r) != before {
 		t.Fatal("rejected rollback changed checkpoint or facts")

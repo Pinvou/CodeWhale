@@ -58,6 +58,9 @@ services:
     environment:
       PINVOU_DEPLOYMENT_ENVIRONMENT: production-new
       PGPASSFILE: /run/pinvou/database/pgpass
+    depends_on:
+      billing-migrate:
+        condition: service_completed_successfully
   billing-migrate:
     <<: *runtime
     image: ${MIGRATE_IMAGE:?set same-source F01 migration image}

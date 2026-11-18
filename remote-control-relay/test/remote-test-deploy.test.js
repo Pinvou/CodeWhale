@@ -178,6 +178,7 @@ test("remote-test archive uses the script's actual complete runtime module selec
     "the explicitly selected schema module must appear exactly once");
   const files = new Set(entries);
   assert.ok(files.has("extra module.js"));
+  assert.ok(files.has("recover-controller-state.js"));
   for (const file of readdirSync(relayDir).filter((entry) => entry.endsWith(".js"))) {
     assert.ok(files.has(file), `runtime module missing from actual archive: ${file}`);
   }

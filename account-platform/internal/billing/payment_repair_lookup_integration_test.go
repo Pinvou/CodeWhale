@@ -2,7 +2,6 @@ package billing
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
@@ -48,55 +47,7 @@ func TestF12PaymentRepairOrderLookupPostgres(t *testing.T) {
 	requestingUserID := uuid.New()
 
 	seed := func(amountFen, credits, basePoints, bonusPoints int64, mergeResult, providerStatus string) (uuid.UUID, uuid.UUID, uuid.UUID) {
-		orderID, walletID, evidenceID := uuid.New(), uuid.New(), uuid.New()
-		walletAccountID := uuid.New()
-		// Package issuance requires the personal wallet owner to be the order
-		// requester.
-		ownerID := uuid.New()
-		product, err := json.Marshal(Product{ProductID: "PAYMENT_REPAIR", AmountFen: amountFen, CreditMicrocredits: credits,
-			BasePoints: basePoints, BonusPoints: bonusPoints, Currency: "CNY", PlanName: "Repair"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, `INSERT INTO wallets(id,owner_type,owner_id,status,posted_microcredits,version,created_at,updated_at)
-VALUES($1,'PERSONAL',$2,'ACTIVE',0,1,$3,$3)`, walletID, ownerID, now); err != nil {
-			t.Fatal(err)
-		}
-		// Package issuance posts the wallet leg against the wallet liability
-		// account, exactly as the real fulfillment path requires.
-		if _, err := pool.Exec(ctx, `INSERT INTO ledger_accounts(id,wallet_id,code,account_type,created_at)
-VALUES($1,$2,$3,'WALLET_LIABILITY',$4)`, walletAccountID, walletID, "wallet:"+walletID.String(), now); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, `INSERT INTO payment_orders(id,merchant_order_no,requester_id,payer_user_id,wallet_id,product_id,product_snapshot,channel,
-amount_fen,currency,credit_microcredits,status,fulfillment_status,expires_at,provider_payable_until,late_review_boundary_at,final_archive_eligible_at,
-created_at,updated_at,provider_sku,provider_id,provider_version)
-VALUES($1,$2,$3,$3,$4,'PAYMENT_REPAIR',$5,'ALIPAY',$6,'CNY',$7,'MANUAL_REVIEW','MANUAL_REVIEW',$8,$8,$9,$10,$11,$11,'sku-repair','test-provider','v1')`,
-			orderID, "repair-"+orderID.String(), ownerID, walletID, product, amountFen, credits,
-			now.Add(time.Hour), now.Add(72*time.Hour), now.Add(8*24*time.Hour), now); err != nil {
-			t.Fatal(err)
-		}
-		providerFacts, err := json.Marshal(map[string]any{"external_customer_key": ownerID.String(), "external_sku": "sku-repair"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, `INSERT INTO payment_evidence(id,payment_order_id,evidence_type,provider_id,provider_version,evidence_key,
-merchant_order_no,provider_transaction_id,amount_fen,currency,provider_status,provider_event_at,received_at,payload_digest,payload_snapshot,merge_result)
-VALUES($1,$2,'QUERY','test-provider','v1',$3,$4,$5,$6,'CNY',$7,$8,$8,$9,$11,$10)`,
-			evidenceID, orderID, "query:"+evidenceID.String(), "repair-"+orderID.String(), "trade-"+evidenceID.String(),
-			amountFen, providerStatus, now, strings.Repeat("ab", 32), mergeResult, providerFacts); err != nil {
-			t.Fatal(err)
-		}
-		// The matching success evidence and the MANUAL_REVIEW order state are
-		// produced by a review-required transaction (late or duplicate payment);
-		// the approved repair reuses the existing repair branch on that row.
-		if _, err := pool.Exec(ctx, `INSERT INTO payment_transactions(id,payment_order_id,provider_id,provider_version,channel,
-provider_transaction_id,status,fulfillment_status,amount_fen,currency,source,provider_status,provider_paid_at,verified_at,created_at,updated_at)
-VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED',$4,'CNY','QUERY','PAY_SUCCESS',$5,$5,$5,$5)`,
-			uuid.New(), orderID, "trade-"+evidenceID.String(), amountFen, now); err != nil {
-			t.Fatal(err)
-		}
-		return orderID, walletID, evidenceID
+		return seedF12Repair(t, ctx, repository, now, amountFen, credits, basePoints, bonusPoints, mergeResult, providerStatus)
 	}
 	orderID, walletID, evidenceID := seed(100, 100, 80, 20, "RECORDED", "PAY_SUCCESS")
 	command := PaymentFinancialRepairCommandInput{PaymentOrderID: orderID, PaymentEvidenceID: evidenceID}
@@ -111,9 +62,11 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 	}
 
 	input := PaymentFinancialRepairExecutionInput{ApprovalRequestID: uuid.New(), AuthorizationEventID: uuid.New(), ApprovalEpoch: 2, ApproverUserID: approvingUserID, RequesterUserID: requestingUserID, ExecutionKey: "lookup-seed:" + uuid.NewString(), PolicyVersion: 1, SchemaVersion: 1, ActivationVersion: activationVersion, Command: command, Frozen: PaymentFinancialRepairFrozenFacts{OrderUpdatedAt: plan.OrderUpdatedAt, AmountFen: plan.AmountFen, CreditMicrocredits: plan.CreditMicrocredits, ProviderTransactionID: plan.ProviderTransactionID, WalletID: plan.WalletID, WalletVersion: plan.WalletVersion, AppliedToReceivables: plan.AppliedToReceivables, FactsDigest: plan.FactsDigest}}
-	result, err := coordinator.ApplyPaymentFinancialRepair(ctx, input)
+	// Only this historical seed uses the pinned old writer; it does not
+	// assert new-binary compatibility on an unmigrated schema.
+	result, err := coordinator.applyHistoricalF12PaymentRepair(ctx, input, 900016)
 	if err != nil {
-		t.Fatal("real source repair failed", err)
+		t.Fatal("registered historical source repair failed", err)
 	}
 	var sourcePosted int64
 	if err := pool.QueryRow(ctx, `SELECT posted_microcredits FROM wallets WHERE id=$1`, walletID).Scan(&sourcePosted); err != nil || sourcePosted != 100 {
@@ -226,6 +179,8 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 	if _, err := migrations.VerifyApplied(ctx, operator, historical); err != nil {
 		t.Fatal("refused Down changed ledger", err)
 	}
+	facts := captureF12PaymentFacts(t, ctx, repository, orderID, walletID)
+	beforeCurrent := facts()
 	// Upgrade the intact historical installation to this wave's full schema.
 	// The performance observations above belong only to the F12 history.
 	if err := billingschema.Up(ctx, operator, loaded); err != nil {
@@ -234,5 +189,12 @@ VALUES($1,$2,'test-provider','v1','ALIPAY',$3,'REVIEW_REQUIRED','REVIEW_REQUIRED
 	migrations.Unlock(ctx, operator)
 	if _, err := migrations.VerifyApplied(ctx, operator, loaded); err != nil {
 		t.Fatal("current upgrade ledger verification failed", err)
+	}
+	if facts() != beforeCurrent {
+		t.Fatal("full carrier upgrade changed original historical financial facts")
+	}
+	currentReplay, err := coordinator.ApplyPaymentFinancialRepair(ctx, input)
+	if err != nil || currentReplay != result {
+		t.Fatal("full current carrier changed the original historical repair receipt", err)
 	}
 }

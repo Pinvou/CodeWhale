@@ -81,6 +81,7 @@ class WindowsACPScopeTests(unittest.TestCase):
                 self.assertEqual(sentinel.read_text(encoding='utf-8'), 'unchanged')
 
     def test_workflow_routes_and_uploads_the_supervised_acp_receipt(self):
+        self.assertIn('pinvou3-app/tests/helpers/claude-acp-startup-probe.cjs', SCOPE.SOURCE_PATHS)
         source = (ROOT/'.github/workflows/pr-check.yml').read_text(encoding='utf-8')
         block = source.split('\n  windows-codex-runtime-test:', 1)[1].split('\n  windows-runtime-test:', 1)[0]
         self.assertIn('scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-acp-', block)
@@ -99,6 +100,9 @@ class WindowsACPScopeTests(unittest.TestCase):
         })
         filter_block = source.split('            windows_codex:', 1)[1].split('            windows_runtime:', 1)[0]
         for name in ('scripts/test-windows-acp-runtime.py', 'scripts/tests/test_windows_acp_runtime_scope.py'):
+            self.assertIn("'"+name+"'", filter_block)
+        for name in ('pinvou3-app/tests/helpers/claude-acp-startup-probe.cjs',
+                     'pinvou3-app/tests/claude_acp_startup_probe.test.mjs'):
             self.assertIn("'"+name+"'", filter_block)
 
 
