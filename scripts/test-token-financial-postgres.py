@@ -166,6 +166,9 @@ SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingsch
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
 SCHEMA_REQUIRED = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres"}
+# The long expiry fixture gets a separate package clock; retain every schema root.
+SCHEMA_EXPIRY_REQUIRED = {"TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"}
+SCHEMA_REMAINING_REQUIRED = SCHEMA_REQUIRED - SCHEMA_EXPIRY_REQUIRED
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -813,7 +816,11 @@ def main(*, group="all"):
         finally:
             assert_instance({user})
         try:
-            run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED, scoped=True)
+            run_phase("owner-schema-expiry", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_EXPIRY_REQUIRED, scoped=True)
+        finally:
+            assert_instance({user})
+        try:
+            run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REMAINING_REQUIRED, scoped=True)
         finally:
             assert_instance({user})
         try:
