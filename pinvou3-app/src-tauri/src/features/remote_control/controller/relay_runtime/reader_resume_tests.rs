@@ -280,6 +280,148 @@ async fn current_joined_receipt(
     (driver, incoming)
 }
 
+// Test-only last-boundary observation. No worker hooks, locks, tasks or history.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum FinalAdmissionPhase {
+    ChildStart,
+    HostBuild,
+    HostReady,
+    OperationStart,
+    RelayStart,
+    EndpointAccept,
+    EndpointRegistered,
+    ExpiryCleanup,
+    ChannelClose,
+    StaleCleanup,
+    SendProbe,
+    ReceiveProbe,
+    Stop,
+    PrepareReservation,
+    WorkerStart,
+    SendReservation,
+    ReservationProcessed,
+    ReceiptReceive,
+    WorkerJoin,
+    RejectProbe,
+    JoinedSetup,
+    DeadlineWait,
+    HandshakeComplete,
+    HandshakeFailure,
+    DropWorker,
+    TerminalChecks,
+    Done,
+}
+
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum FinalAdmissionScope {
+    Old,
+    Successor,
+    Case0,
+    Case1,
+    Case2,
+    Case3,
+    Final,
+    None,
+}
+
+pub(crate) struct FinalAdmissionObservation {
+    started: std::time::Instant,
+    // One packed record: elapsed milliseconds, fixed scope, fixed phase.
+    last: std::sync::atomic::AtomicU64,
+}
+
+impl FinalAdmissionObservation {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            last: std::sync::atomic::AtomicU64::new(
+                ((FinalAdmissionScope::None as u64) << 8) | FinalAdmissionPhase::ChildStart as u64,
+            ),
+        }
+    }
+
+    fn enter(&self, scope: FinalAdmissionScope, phase: FinalAdmissionPhase) {
+        let elapsed = self.started.elapsed().as_millis().min(u32::MAX as u128) as u64;
+        self.last.store(
+            (elapsed << 16) | ((scope as u64) << 8) | phase as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub(crate) fn report_timeout(&self) {
+        let last = self.last.load(std::sync::atomic::Ordering::Relaxed);
+        let entered = last >> 16;
+        let phase = match last & 0xff {
+            0 => "child_start",
+            1 => "host_build",
+            2 => "host_ready",
+            3 => "operation_start",
+            4 => "relay_start",
+            5 => "endpoint_accept",
+            6 => "endpoint_registered",
+            7 => "expiry_cleanup",
+            8 => "channel_close",
+            9 => "stale_cleanup",
+            10 => "send_probe",
+            11 => "receive_probe",
+            12 => "stop",
+            13 => "prepare_reservation",
+            14 => "worker_start",
+            15 => "send_reservation",
+            16 => "reservation_processed",
+            17 => "receipt_receive",
+            18 => "worker_join",
+            19 => "reject_probe",
+            20 => "joined_setup",
+            21 => "deadline_wait",
+            22 => "handshake_complete",
+            23 => "handshake_failure",
+            24 => "drop_worker",
+            25 => "terminal_checks",
+            26 => "done",
+            _ => "unavailable",
+        };
+        let scope = match (last >> 8) & 0xff {
+            0 => "old",
+            1 => "successor",
+            2 => "case0",
+            3 => "case1",
+            4 => "case2",
+            5 => "case3",
+            6 => "final",
+            7 => "none",
+            _ => "unavailable",
+        };
+        eprintln!(
+            "READER_FINAL_ADMISSION_DIAGNOSTIC phase={} scope={} entered_elapsed_ms={} entered_remaining_ms={}",
+            phase,
+            scope,
+            entered,
+            65_000u64.saturating_sub(entered)
+        );
+    }
+}
+
+tokio::task_local! {
+    static FINAL_ADMISSION_OBSERVATION: std::sync::Arc<FinalAdmissionObservation>;
+}
+
+// Scope only polls the original test future; no new task or host factory.
+pub(crate) async fn with_final_admission_observation<F>(
+    observer: std::sync::Arc<FinalAdmissionObservation>,
+    future: F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    FINAL_ADMISSION_OBSERVATION.scope(observer, future).await;
+}
+
+fn observe_final_admission(scope: FinalAdmissionScope, phase: FinalAdmissionPhase) {
+    let _ = FINAL_ADMISSION_OBSERVATION.try_with(|observer| observer.enter(scope, phase));
+}
+
 pub(crate) async fn resume_round_trip<T>(
     build_host: impl FnOnce() -> (tauri::AppHandle, T),
     retire_endpoint: bool,
@@ -308,7 +450,9 @@ pub(crate) async fn resume_round_trip<T>(
         );
     }
     // App owns host construction. Keep its guard alive through all readers.
+    observe_final_admission(FinalAdmissionScope::None, FinalAdmissionPhase::HostBuild);
     let (handle, _host) = build_host();
+    observe_final_admission(FinalAdmissionScope::None, FinalAdmissionPhase::HostReady);
     if std::env::var("PINVOU_READER_OWNER_CASE").as_deref() == Ok("reservation-replay") {
         let manager = handle.state::<ControlledDeviceManager>();
         let operation = manager.start(None, Vec::new()).unwrap();
@@ -360,12 +504,25 @@ pub(crate) async fn resume_round_trip<T>(
         };
         // Retain the old channel across production cleanup and successor
         // admission: drop must not be the reason the lane becomes available.
+        observe_final_admission(
+            FinalAdmissionScope::Old,
+            FinalAdmissionPhase::OperationStart,
+        );
         let old = manager.start(None, Vec::new()).unwrap();
+        observe_final_admission(FinalAdmissionScope::Old, FinalAdmissionPhase::RelayStart);
         let mut old_channel = relay
             .start_controller_relay(old.generation())
             .await
             .unwrap();
+        observe_final_admission(
+            FinalAdmissionScope::Old,
+            FinalAdmissionPhase::EndpointAccept,
+        );
         let mut connected = accept(&listener).await;
+        observe_final_admission(
+            FinalAdmissionScope::Old,
+            FinalAdmissionPhase::EndpointRegistered,
+        );
         registered(&mut connected).await;
         let now = controlled_monotonic_millis();
         manager
@@ -384,17 +541,27 @@ pub(crate) async fn resume_round_trip<T>(
             .unwrap()
             .unwrap()
             .deadline_b();
+        observe_final_admission(FinalAdmissionScope::Old, FinalAdmissionPhase::ExpiryCleanup);
         manager.poll_watchdog(deadline).unwrap();
         let status = serde_json::to_value(manager.status()).unwrap();
         assert_eq!(status["errorCode"], "desktop_remote_pairing_expired");
         assert!(manager.current_operation().is_none());
+        observe_final_admission(FinalAdmissionScope::Old, FinalAdmissionPhase::ChannelClose);
         assert!(
             tokio::time::timeout(Duration::from_secs(1), old_channel.recv())
                 .await
                 .unwrap()
                 .is_none()
         );
+        observe_final_admission(
+            FinalAdmissionScope::Successor,
+            FinalAdmissionPhase::OperationStart,
+        );
         let successor = manager.start(None, Vec::new()).unwrap();
+        observe_final_admission(
+            FinalAdmissionScope::Successor,
+            FinalAdmissionPhase::RelayStart,
+        );
         let mut successor_channel = relay
             .start_controller_relay(successor.generation())
             .await
@@ -402,6 +569,10 @@ pub(crate) async fn resume_round_trip<T>(
         drop(old_channel);
         let cleanup =
             handle.state::<std::sync::Arc<dyn super::super::controlled::ControlledCleanupSink>>();
+        observe_final_admission(
+            FinalAdmissionScope::Successor,
+            FinalAdmissionPhase::StaleCleanup,
+        );
         cleanup.cleanup(
             old.generation(),
             super::super::controlled::ControlledCleanupScope {
@@ -413,28 +584,49 @@ pub(crate) async fn resume_round_trip<T>(
             },
         );
         let probe = json!({"v":1,"type":"error","request_id":"cleanup_probe","code":"pairing_code_invalid","message":"cleanup probe"});
+        observe_final_admission(
+            FinalAdmissionScope::Successor,
+            FinalAdmissionPhase::SendProbe,
+        );
         send(&mut connected, &probe).await;
+        observe_final_admission(
+            FinalAdmissionScope::Successor,
+            FinalAdmissionPhase::ReceiveProbe,
+        );
         let received = next_application_frame(&mut successor_channel).await;
         assert_eq!(received, probe);
         assert_eq!(
             manager.current_operation().unwrap().generation(),
             successor.generation()
         );
+        observe_final_admission(FinalAdmissionScope::Successor, FinalAdmissionPhase::Stop);
         manager.stop();
         drop(successor_channel);
         let mut socket = Some(connected);
         for scenario in 0..4 {
+            let diagnostic_scope = match scenario {
+                0 => FinalAdmissionScope::Case0,
+                1 => FinalAdmissionScope::Case1,
+                2 => FinalAdmissionScope::Case2,
+                3 => FinalAdmissionScope::Case3,
+                _ => FinalAdmissionScope::None,
+            };
+            observe_final_admission(diagnostic_scope, FinalAdmissionPhase::OperationStart);
             let operation = manager.start(None, Vec::new()).unwrap();
+            observe_final_admission(diagnostic_scope, FinalAdmissionPhase::RelayStart);
             let channel = relay
                 .start_controller_relay(operation.generation())
                 .await
                 .unwrap();
             owned.generation = operation.generation().into();
             if socket.is_none() {
+                observe_final_admission(diagnostic_scope, FinalAdmissionPhase::EndpointAccept);
                 let mut connected = accept(&listener).await;
+                observe_final_admission(diagnostic_scope, FinalAdmissionPhase::EndpointRegistered);
                 registered(&mut connected).await;
                 socket = Some(connected);
             }
+            observe_final_admission(diagnostic_scope, FinalAdmissionPhase::PrepareReservation);
             let now = controlled_monotonic_millis();
             manager
                 .complete_registration(
@@ -512,9 +704,15 @@ pub(crate) async fn resume_round_trip<T>(
             };
             let socket = socket.as_mut().unwrap();
             if scenario < 2 {
+                observe_final_admission(diagnostic_scope, FinalAdmissionPhase::WorkerStart);
                 owned.worker = Some(tokio::spawn(worker.serve()));
                 let sent_at_b = controlled_monotonic_millis();
+                observe_final_admission(diagnostic_scope, FinalAdmissionPhase::SendReservation);
                 send(socket, &reserved).await;
+                observe_final_admission(
+                    diagnostic_scope,
+                    FinalAdmissionPhase::ReservationProcessed,
+                );
                 processed(&mut processed_rx, &reserved).await;
                 if scenario == 0 {
                     assert_eq!(
@@ -522,6 +720,7 @@ pub(crate) async fn resume_round_trip<T>(
                         ControlledStatusKind::HandshakePending,
                         "authenticated reservation must survive a different Relay wall-clock origin"
                     );
+                    observe_final_admission(diagnostic_scope, FinalAdmissionPhase::ReceiptReceive);
                     receive(socket, "finished_receipt_commit").await;
                     let deadline = manager
                         .preconnect_deadline(&operation)
@@ -534,6 +733,7 @@ pub(crate) async fn resume_round_trip<T>(
                         "local budget is twenty seconds from authenticated receipt, independent of either wire expiry"
                     );
                 }
+                observe_final_admission(diagnostic_scope, FinalAdmissionPhase::WorkerJoin);
                 tokio::time::timeout(
                     Duration::from_secs(if scenario == 0 { 23 } else { 3 }),
                     owned.worker.take().unwrap(),
@@ -552,6 +752,7 @@ pub(crate) async fn resume_round_trip<T>(
                     }
                 );
                 if scenario == 1 {
+                    observe_final_admission(diagnostic_scope, FinalAdmissionPhase::RejectProbe);
                     tokio::time::timeout(Duration::from_millis(100), async {
                         while let Some(Ok(message)) = socket.next().await {
                             match message {
@@ -572,6 +773,7 @@ pub(crate) async fn resume_round_trip<T>(
                     .unwrap_err();
                 }
             } else {
+                observe_final_admission(diagnostic_scope, FinalAdmissionPhase::JoinedSetup);
                 let (mut driver, joined) = current_joined_receipt(
                     socket,
                     &mut worker,
@@ -590,6 +792,7 @@ pub(crate) async fn resume_round_trip<T>(
                     "handshake setup exhausted its local budget"
                 );
                 if scenario == 3 {
+                    observe_final_admission(diagnostic_scope, FinalAdmissionPhase::DeadlineWait);
                     while controlled_monotonic_millis() < deadline {
                         tokio::time::sleep(Duration::from_millis(
                             deadline.saturating_sub(controlled_monotonic_millis()),
@@ -601,12 +804,20 @@ pub(crate) async fn resume_round_trip<T>(
                     let diagnostic_start = std::fs::read(&diagnostic_path)
                         .map(|bytes| bytes.len())
                         .unwrap_or(0);
+                    observe_final_admission(
+                        diagnostic_scope,
+                        FinalAdmissionPhase::HandshakeComplete,
+                    );
                     assert_eq!(
                         worker.complete_handshake(&joined, &mut driver).unwrap_err(),
                         "desktop_remote_handshake_timeout"
                     );
                     // Serve forwards this error to the outer failure helper.
                     // It must not log a second transition after the owner is terminal.
+                    observe_final_admission(
+                        diagnostic_scope,
+                        FinalAdmissionPhase::HandshakeFailure,
+                    );
                     worker.fail_handshake("desktop_remote_handshake_timeout");
                     let diagnostic = std::fs::read_to_string(&diagnostic_path).unwrap();
                     assert_eq!(
@@ -622,11 +833,16 @@ pub(crate) async fn resume_round_trip<T>(
                     assert_eq!(status["errorCode"], "desktop_remote_handshake_timeout");
                     assert!(status.get("pairingCode").is_none());
                 } else {
+                    observe_final_admission(
+                        diagnostic_scope,
+                        FinalAdmissionPhase::HandshakeComplete,
+                    );
                     worker.complete_handshake(&joined, &mut driver).unwrap();
                     assert_eq!(manager.status().kind(), ControlledStatusKind::Connected);
                     assert!(manager.live_lease().is_ok());
                     assert!(handle.state::<ControlledLaneState>().is_installed());
                     assert!(handle.state::<ControlledOutboundState>().sender().is_some());
+                    observe_final_admission(diagnostic_scope, FinalAdmissionPhase::Stop);
                     manager.stop();
                     // Clear this test's installed business state before the
                     // next case; the production sink above retires the Relay.
@@ -635,21 +851,30 @@ pub(crate) async fn resume_round_trip<T>(
                         .state::<ControlledOutboundState>()
                         .clear_owned(&worker.channel.sender());
                 }
+                observe_final_admission(diagnostic_scope, FinalAdmissionPhase::DropWorker);
                 drop(worker);
             }
+            observe_final_admission(diagnostic_scope, FinalAdmissionPhase::TerminalChecks);
             assert!(manager.current_operation().is_none());
             assert!(manager.live_lease().is_err());
             assert!(!handle.state::<ControlledLaneState>().is_installed());
             assert!(handle.state::<ControlledOutboundState>().sender().is_none());
         }
+        observe_final_admission(
+            FinalAdmissionScope::Final,
+            FinalAdmissionPhase::OperationStart,
+        );
         let next = manager.start(None, Vec::new()).unwrap();
+        observe_final_admission(FinalAdmissionScope::Final, FinalAdmissionPhase::RelayStart);
         assert!(
             relay
                 .start_controller_relay(next.generation())
                 .await
                 .is_ok()
         );
+        observe_final_admission(FinalAdmissionScope::Final, FinalAdmissionPhase::Stop);
         manager.stop();
+        observe_final_admission(FinalAdmissionScope::Final, FinalAdmissionPhase::Done);
         return;
     }
     if std::env::var("PINVOU_READER_PRECONNECT_SCENARIO").as_deref() == Ok("1") {
