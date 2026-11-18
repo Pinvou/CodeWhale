@@ -63,6 +63,7 @@
     "src/vendor/**"
   ],
   "paths": {
+    "/src/*": ["./src/*"],
     "/features/device-manager/DeviceManagerView.jsx": ["./src/features/device-manager/DeviceManagerView.jsx"],
     "/features/model-store/ModelStoreOperationResults.jsx": ["./src/features/model-store/ModelStoreOperationResults.jsx"],
     "/features/model-store/operation-results.js": ["./src/features/model-store/operation-results.js"],

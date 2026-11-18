@@ -5,7 +5,7 @@
 //! disconnection.
 
 use super::desktop_remote_state::DesktopRemoteState as State;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager as _};
 
 use crate::features::behavior_telemetry::{RemoteControlEvent, RemoteStage, track_remote_control};
 use crate::features::remote_control::RemoteControlManager;
@@ -108,9 +108,11 @@ pub async fn desktop_remote_controller_disconnect(
     let started = std::time::Instant::now();
     let result = async {
         ensure_supported(&manager)?;
+        let business = app.state::<crate::features::remote_control::controller::encrypted_lane::ControllingLaneState>();
         Ok(disconnect_controller_state(
             &manager,
             &sessions,
+            &business,
             &actions,
             artifacts.downloads(),
             |status| emit_status(&app, status),
@@ -133,28 +135,27 @@ pub async fn desktop_remote_controller_disconnect(
 async fn disconnect_controller_state(
     manager: &ControllingDeviceManager,
     sessions: &ControllingSessionManager,
+    business: &crate::features::remote_control::controller::encrypted_lane::ControllingLaneState,
     actions: &super::desktop_remote_action::DesktopRemoteActionState,
     downloads: &ArtifactDownloads,
     publish: impl FnOnce(&ControllingStatus),
 ) -> ControllingStatus {
-    let mut attempt = manager.begin_disconnect("user_disconnect");
-    if let Some(receipt) = attempt.receipt.take() {
-        // Queue admission is not delivery. Allow the final frame to flush,
-        // while keeping local cleanup authoritative for offline peers.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), receipt).await;
-    }
-    let (status, connection_id, applied) = manager.complete_disconnect(&attempt);
-    if let Some(connection_id) = connection_id {
-        sessions.clear_connection(&connection_id);
-        actions.clear_connection(&connection_id);
-        // A owns this download/index scope. B capture/publication keeps its
-        // existing lifecycle owner.
-        downloads.cleanup_for_connection(&connection_id);
-    }
-    if applied && !manager.publish_disconnect_if_current(&attempt, &status, || publish(&status)) {
+    let disconnect = manager.disconnect_business(sessions, business, |lease| {
+        if let Some(lease) = lease {
+            actions.clear_connection(&lease.connection_id);
+            // A owns this download/index scope. B capture/publication keeps its
+            // existing lifecycle owner.
+            downloads.cleanup_for_connection(&lease.connection_id);
+        }
+    });
+    let projection = disconnect.projection();
+    // Local lease, sessions and keys are already retired. Only the captured
+    // old socket survives this bounded wait, including future cancellation.
+    disconnect.flush().await;
+    if !manager.publish_disconnect_if_current(&projection, || publish(&projection.status)) {
         return manager.status();
     }
-    status
+    projection.status
 }
 
 #[tauri::command]
@@ -211,6 +212,7 @@ mod tests {
     async fn concurrent_disconnect_waits_preserve_all_successor_resources_and_next_connect() {
         let manager = ControllingDeviceManager::default();
         let sessions = ControllingSessionManager::default();
+        let business = crate::features::remote_control::controller::encrypted_lane::ControllingLaneState::default();
         let actions = super::super::desktop_remote_action::DesktopRemoteActionState::default();
         let index = Arc::new(ArtifactIndex::default());
         let downloads =
@@ -305,16 +307,22 @@ mod tests {
             published.fetch_add(1, Ordering::SeqCst);
         };
         let mut first = Box::pin(disconnect_controller_state(
-            &manager, &sessions, &actions, &downloads, publish,
+            &manager, &sessions, &business, &actions, &downloads, publish,
         ));
         let mut second = Box::pin(disconnect_controller_state(
-            &manager, &sessions, &actions, &downloads, publish,
+            &manager, &sessions, &business, &actions, &downloads, publish,
         ));
         assert!(futures_util::poll!(first.as_mut()).is_pending());
-        assert!(futures_util::poll!(second.as_mut()).is_pending());
-        manager
-            .fail_connection(old_operation, "endpoint_offline")
-            .unwrap();
+        // The first command already retired local authority before waiting.
+        // A duplicate owns no socket and therefore completes without a wait.
+        assert_eq!(manager.status().status, ControllingStatusKind::Disconnected);
+        assert!(manager.live_lease().is_err());
+        assert!(matches!(
+            futures_util::poll!(second.as_mut()),
+            std::task::Poll::Ready(_)
+        ));
+        assert_eq!(published.load(Ordering::SeqCst), 1);
+        let published_before_successor = published.load(Ordering::SeqCst);
         let next_operation = manager.connect("3456789").unwrap();
         manager.complete_reserved(next_operation.clone()).unwrap();
         manager
@@ -337,8 +345,11 @@ mod tests {
         manager.replace_transport(next_transport.clone());
         let (next_session, mut next_reply, next_download) =
             add_resources(&successor, "artifact-successor");
-        // Closing the controlled transport releases both real receipt waits.
-        // Both normal command continuations now resume after the successor owns
+        // Dropping the completed duplicate is another old command teardown;
+        // it must not own any successor resource or transport.
+        drop(second);
+        // Closing the controlled transport releases the captured receipt wait.
+        // Its normal command continuation now resumes after the successor owns
         // sessions, pending actions, a live download and its artifact index.
         drop(receiver);
         assert_eq!(
@@ -346,10 +357,9 @@ mod tests {
             "connection-successor"
         );
         assert_eq!(
-            serde_json::to_value(second.await).unwrap()["lease"]["connectionId"],
-            "connection-successor"
+            published.load(Ordering::SeqCst) - published_before_successor,
+            0
         );
-        assert_eq!(published.load(Ordering::SeqCst), 0);
         assert!(old_transport.is_stopped());
         assert!(!next_transport.is_stopped());
         assert!(manager.send_disconnect("transport_probe"));
@@ -406,9 +416,15 @@ mod tests {
                 .is_some()
         );
         assert_eq!(index.len(), 1);
-        disconnect_controller_state(&manager, &sessions, &actions, &downloads, publish).await;
+        disconnect_controller_state(
+            &manager, &sessions, &business, &actions, &downloads, publish,
+        )
+        .await;
         assert!(next_transport.is_stopped());
-        assert_eq!(published.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            published.load(Ordering::SeqCst),
+            published_before_successor + 1
+        );
         assert_eq!(index.len(), 0);
         let third_operation = manager.connect("456789A").unwrap();
         manager.complete_reserved(third_operation.clone()).unwrap();
@@ -425,5 +441,78 @@ mod tests {
     fn controller_command_surface_is_stable_and_contains_no_code_storage() {
         assert_eq!(super::STATUS_EVENT, "desktop-remote-controller-status");
         assert_eq!(super::UNSUPPORTED, "desktop_remote_control_unsupported");
+    }
+
+    #[tokio::test]
+    async fn cancelled_disconnect_helper_keeps_local_retirement_and_allows_next_connect() {
+        let manager = ControllingDeviceManager::default();
+        let sessions = ControllingSessionManager::default();
+        let business = crate::features::remote_control::controller::encrypted_lane::ControllingLaneState::default();
+        let actions = super::super::desktop_remote_action::DesktopRemoteActionState::default();
+        let downloads = ArtifactDownloads::new(
+            Arc::new(TransferRegistry::default()),
+            Arc::new(ArtifactIndex::default()),
+        );
+        let original = lease("connection-cancelled");
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation, original.clone())
+            .unwrap();
+        let (session, _) = sessions
+            .open_with_outcome(
+                None,
+                "Cancelled command",
+                "chat",
+                &original.context,
+                &original.negotiated_capabilities,
+            )
+            .unwrap();
+        let (transport, _receiver) = transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0001",
+            4,
+            2,
+            8192,
+            2048,
+        );
+        transport
+            .install_authenticated_lease(AuthenticatedLease {
+                context: original.context.clone(),
+                negotiated_capabilities: original.negotiated_capabilities.clone(),
+            })
+            .unwrap();
+        manager.replace_transport(transport.clone());
+        let mut disconnect = Box::pin(disconnect_controller_state(
+            &manager,
+            &sessions,
+            &business,
+            &actions,
+            &downloads,
+            |_| panic!("cancelled command must not publish"),
+        ));
+        assert!(futures_util::poll!(disconnect.as_mut()).is_pending());
+        assert_eq!(manager.status().status, ControllingStatusKind::Disconnected);
+        assert!(
+            sessions
+                .state(&session.session_ref, &original.context)
+                .is_err()
+        );
+        assert!(
+            !transport.is_stopped(),
+            "only the final frame is still flushing"
+        );
+        drop(disconnect);
+        assert!(transport.is_stopped());
+        assert!(manager.live_lease().is_err());
+        let next = manager.connect("3456789").unwrap();
+        manager.complete_reserved(next.clone()).unwrap();
+        manager
+            .complete_connected(next, lease("connection-after-cancel"))
+            .unwrap();
+        assert_eq!(
+            manager.live_lease().unwrap().connection_id,
+            "connection-after-cancel"
+        );
     }
 }
