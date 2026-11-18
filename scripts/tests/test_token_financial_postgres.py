@@ -16,7 +16,7 @@ SPEC.loader.exec_module(RUNNER)
 
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
-EXPECTED_RETAINED_ROOT_COUNT = 83
+EXPECTED_RETAINED_ROOT_COUNT = 86
 EXPECTED_SCHEMA_ROOT_COUNT = 16
 
 
@@ -2421,6 +2421,9 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestReconciliationLedgerRepairForcedPeerPostgres",
             "TestReconciliationLedgerRepairPublicPostgres",
             "TestCallbackHTTPAdmissionPersistsPostgres",
+            "TestPaymentNotificationWorkerEscalatesUnmatchedTrustedCallback",
+            "TestPaymentNotificationWorkerKeepsUnverifiedCallbacksOnRetry",
+            "TestPaymentNotificationWorkerRollsBackAndRetriesManualCase",
             "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
             "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
             "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",
