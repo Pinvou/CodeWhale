@@ -84,6 +84,23 @@ ownership checks are outside these test-binary budgets; the Account job retains
 its existing outer limit. Increasing the Token budget does not accelerate tests
 or relax required roots, subcases, race detection or resource retirement.
 
+The six financial Jobs keep the same root selection and race checks. With
+`PINVOU_CI_FIXTURE_TEMPLATES=1`, retained Billing business fixtures may clone a
+process-owned, frozen baseline prepared by the real migration actor. The cache
+key includes complete SQL/checksums, fixture policy, cluster identity, role OIDs,
+attributes and memberships. Every case still owns a new UUID database and an
+opaque cleanup lease. Sources refuse connections and retire before phase-level
+role cleanup. Token's absent-role setup is not shared; historical expiry baselines
+are scoped inside their original actor-owning root, and all 36 upgrade/replay
+cases still run. No cached test success, shared mutable database, forced backend
+termination or durability-setting change is permitted. The six Jobs execute a
+real snapshot-isolation probe before their contracts. Unconfirmed preparation,
+changed source identity/owner, writable source, cleanup failure or a skipped
+probe remains a failure. Local runs retain the original empty-create setup by
+default. Set `PINVOU_CI_FIXTURE_TIMING=1` to report bounded setup/cleanup costs;
+financial phases stream their original output and store timing/root-pass receipts
+in the existing lifecycle artifact for before/after comparison.
+
 When a change regenerates a `package-lock.json`, regenerate against the official
 registry (`https://registry.npmjs.org/`): a mirror configured in a local npmrc is
 copied verbatim into the lock's `resolved` URLs, and

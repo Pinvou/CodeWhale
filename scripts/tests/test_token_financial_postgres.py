@@ -1745,6 +1745,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "PINVOU_TEST_SCHEMA_DATABASE_URL": "must-not-reach-tests",
             "GOFLAGS": "-trimpath",
         }, clear=True), patch.object(RUNNER.subprocess, "run", side_effect=run), \
+                patch.object(RUNNER, "run_go_phase", side_effect=lambda command, env: run(command, env=env)), \
                 patch.object(RUNNER, "require_exclusive_instance", side_effect=observation), contextlib.redirect_stdout(io.StringIO()):
             try:
                 RUNNER.main(group=group)

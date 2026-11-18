@@ -9,6 +9,7 @@ the three Billing deployment actors are bootstrapped here, using their existing
 privilege contract. This runner must never accept a deployed database URL.
 """
 import argparse
+from datetime import datetime
 import json
 import math
 import os
@@ -705,6 +706,10 @@ def require_exclusive_instance(query, databases, roles, *, timeout_seconds=15, n
 
 BILLING_GROUPS = tuple(f"billing-{index}" for index in range(4))
 GROUPS = ("owners", "token", *BILLING_GROUPS)
+EXACT_REQUIRED_CHILDREN["TestDatabaseTemplateIsolationPostgres"] = {
+    "private-data-schema-and-frozen-source", "failed-preparation-never-becomes-hit",
+    "disabled-path-keeps-empty-create",
+}
 
 
 def billing_partitions(roots, durations):
@@ -734,7 +739,60 @@ def billing_roots(group):
     return billing_partitions(RETAINED_REQUIRED, durations)[group]
 
 
-def main(*, group="all"):
+def run_go_phase(command, *, env):
+    """Stream the original output while retaining JSON evidence for the gate."""
+    output = []
+    with subprocess.Popen(command, cwd=ROOT / "account-platform", env=env,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, encoding="utf-8") as process:
+        for line in process.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            if line.startswith("{"):
+                output.append(line)
+        code = process.wait()
+    return subprocess.CompletedProcess(command, code, "".join(output), "")
+
+
+def phase_timing(label, seconds, events, code, *, started_epoch=None):
+    roots = [event for event in events if event.get("Action") == "pass"
+             and event.get("Test") and "/" not in event["Test"]]
+    profile = {
+        "schema": 1, "phase": label, "elapsed_seconds": seconds, "exit_code": code,
+        "cache_enabled": os.environ.get("PINVOU_CI_FIXTURE_TEMPLATES") == "1",
+        "root_passes": sorted(event["Test"] for event in roots),
+        "slow_roots": [{"test": event["Test"], "seconds": event.get("Elapsed", 0)}
+                       for event in sorted(roots, key=lambda event: event.get("Elapsed", 0), reverse=True)[:15]],
+    }
+    starts = [event for event in events if event.get("Action") == "start" and event.get("Time")]
+    packages = [event for event in events if event.get("Action") == "pass" and not event.get("Test")]
+    profile["package_elapsed_seconds"] = sum(event.get("Elapsed", 0) for event in packages)
+    if starts and started_epoch is not None:
+        profile["pre_test_seconds"] = max(0, datetime.fromisoformat(starts[0]["Time"].replace("Z", "+00:00")).timestamp() - started_epoch)
+    operations = {}
+    snapshots = {"prepared": 0, "reused": 0, "remaining": 0}
+    for event in events:
+        for line in event.get("Output", "").splitlines():
+            if line.startswith("[ci-fixture-timing] "):
+                timing = json.loads(line[len("[ci-fixture-timing] "):])
+                value = operations.setdefault(timing["operation"], {"count": 0, "seconds": 0})
+                value["count"] += 1
+                value["seconds"] += timing["seconds"]
+            if line.startswith("[ci-fixture-template] "):
+                counts = json.loads(line[len("[ci-fixture-template] "):])
+                for name in snapshots:
+                    snapshots[name] += counts[name]
+    profile["fixture_operations"] = operations
+    profile["templates"] = snapshots
+    profile["timing_note"] = "template-clone includes database-create; template-prepare includes migration-initialize; operation totals overlap"
+    print("Financial timing: " + json.dumps(profile, ensure_ascii=False), flush=True)
+    directory = os.environ.get("PINVOU_CI_RESOURCE_LEDGER")
+    if directory:
+        target = Path(directory) / ("financial-phase-" + label + ".json")
+        target.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def main(*, group="all", verify_fixture_cache=False):
     if group not in ("all", *GROUPS):
         raise ValueError("unknown financial execution group")
     raw = local_database_url(os.environ.get("PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL", ""))
@@ -764,6 +822,9 @@ def main(*, group="all"):
 
     def run_phase(label, target, package, required, *, scoped=False):
         env = {key: value for key, value in os.environ.items() if not key.startswith("PINVOU_TEST_")}
+        # Only these phases own stable outer Billing actors. In owners phases,
+        # absent-actor fixtures must retire their local snapshots before roles.
+        env["PINVOU_CI_RETAINED_BILLING_TEMPLATES"] = "1" if label in {"retained-billing", "retained-token"} else "0"
         # Nested Go consumers inherit the same race/build contract as this phase.
         env["GOFLAGS"] = " ".join(filter(None, (env.get("GOFLAGS", ""), "-race -tags=nomsgpack -mod=readonly")))
         if target == "./internal/account":
@@ -797,17 +858,23 @@ def main(*, group="all"):
             command += ["-skip", "^(" + "|".join(sorted(PROVISIONING_REQUIRED)) + ")$"]
         command.append(target)
         print(f"Financial phase: {label}", flush=True)
-        result = subprocess.run(command, cwd=ROOT / "account-platform", env=env,
-                                capture_output=True, text=True, encoding="utf-8", check=False)
-        # Preserve real phase output even when Go failed, skipped or was truncated.
-        sys.stdout.write(result.stdout)
-        sys.stderr.write(result.stderr)
+        started = time.monotonic()
+        started_epoch = time.time()
+        result = run_go_phase(command, env=env)
+        events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+        phase_timing(label, time.monotonic() - started, events, result.returncode, started_epoch=started_epoch)
         if result.returncode:
             raise RuntimeError("Go financial phase failed: " + label)
-        count = verify_results([json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")],
+        count = verify_results(events,
                                required, package=package, require_children=scoped or label == "retained-token", exact_roots=scoped,
                                children_required=ACCOUNT_CHILD_REQUIRED if label == "owner-account" else TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED & required if label == "retained-billing" else None)
         print(f"Financial phase {label}: {count} named passes; all {len(required)} required roots completed", flush=True)
+
+    if verify_fixture_cache:
+        run_phase("fixture-template-isolation", "./internal/cifixture",
+                  "github.com/Pinvou/pinvou3/account-platform/internal/cifixture",
+                  {"TestDatabaseTemplateIsolationPostgres"}, scoped=True)
+        assert_instance({user})
 
     if group in ("all", "owners"):
         # Each existing owner fixture requires its own absent actors. Restoration
@@ -877,4 +944,6 @@ COMMIT;
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--group", choices=("all", *GROUPS), default="all")
-    main(group=parser.parse_args().group)
+    parser.add_argument("--verify-fixture-cache", action="store_true")
+    args = parser.parse_args()
+    main(group=args.group, verify_fixture_cache=args.verify_fixture_cache)
