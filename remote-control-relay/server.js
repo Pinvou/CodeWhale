@@ -168,6 +168,7 @@ const MAX_REVOKED_ENDPOINTS = Math.min(
   boundedInteger(process.env.MAX_REVOKED_ENDPOINTS, 100_000, 1, 1_000_000),
   Math.floor(MAX_RELAY_STATE_BYTES / 256),
 );
+let legacyCapacityWarning = false;
 const RELAY_STATE_PATH = resolve(
   process.env.PINVOU_REMOTE_STATE_PATH || resolve(__dirname, "data", "relay-state.json"),
 );
@@ -274,6 +275,7 @@ async function createControllerRuntime() {
   controllerStateStore = await RelayStateStore.open({
     statePath: config.controller_state_path,
     legacyStatePath: config.legacy_web_state_path,
+    maxBytes: config.controller_state_max_bytes,
   });
   try {
     const registry = EnrollmentRegistry.open({ stateStore: controllerStateStore, config });
@@ -351,6 +353,7 @@ async function createControllerRuntime() {
       pairingRegistrationHandler: registration,
       leaseManager: leases,
       send,
+      socketAvailable: (ws) => socketOpen(ws) && !ws.policyClosing,
       resumeHooks,
       audit: controllerAudit,
     });
@@ -712,9 +715,24 @@ function relayStateContents(entries) {
     revoked_endpoints: revoked,
   }, null, 2)}\n`;
   if (Buffer.byteLength(contents) > MAX_RELAY_STATE_BYTES) {
-    throw new Error("relay state exceeds MAX_RELAY_STATE_BYTES");
+    throw Object.assign(new Error("revoked endpoint state capacity reached"), {
+      code: "revoked_endpoint_capacity_reached",
+    });
   }
   return contents;
+}
+
+function reportLegacyRevocationCapacity(entries, bytes) {
+  if (legacyCapacityWarning
+    || (entries < Math.ceil(MAX_REVOKED_ENDPOINTS * 0.8) && bytes < Math.ceil(MAX_RELAY_STATE_BYTES * 0.8))) return;
+  legacyCapacityWarning = true;
+  try {
+    console.warn("[relay-capacity] legacy_revocations", JSON.stringify({
+      entries, max_entries: MAX_REVOKED_ENDPOINTS, serialized_bytes: bytes, max_bytes: MAX_RELAY_STATE_BYTES,
+    }));
+  } catch {
+    // Capacity observation cannot change a committed denial or valid restore.
+  }
 }
 
 async function loadRelayState() {
@@ -758,6 +776,7 @@ async function loadRelayState() {
     }
     revokedEndpoints.set(entry.endpoint_id, revokedAt);
   }
+  reportLegacyRevocationCapacity(revokedEndpoints.size, Buffer.byteLength(contents));
 }
 
 async function syncDirectory(path) {
@@ -791,6 +810,7 @@ async function atomicWriteRelayState(nextState) {
     await rename(temporaryPath, RELAY_STATE_PATH);
     try { await chmod(RELAY_STATE_PATH, 0o600); } catch {}
     await syncDirectory(stateDirectory);
+    return Buffer.byteLength(contents);
   } catch (error) {
     try { await temporaryFile?.close(); } catch {}
     try { await rm(temporaryPath, { force: true }); } catch {}
@@ -812,8 +832,9 @@ function persistRevocation(endpointId) {
     const revokedAt = new Date().toISOString();
     const nextState = new Map(revokedEndpoints);
     nextState.set(endpointId, revokedAt);
-    await atomicWriteRelayState(nextState);
+    const bytes = await atomicWriteRelayState(nextState);
     revokedEndpoints.set(endpointId, revokedAt);
+    reportLegacyRevocationCapacity(revokedEndpoints.size, bytes);
     return revokedAt;
   });
   relayStateMutation = operation.catch(() => {});
@@ -1128,41 +1149,50 @@ async function registerDesktop(ws, msg) {
     return;
   }
 
-  // Apply cheap admission before an anonymous first registration can persist.
-  // Recheck capacity/revocation after the async registry operation as well.
+  // Reserve the negotiated socket's role before any asynchronous enrollment
+  // can create an identity. A conflicting frame must leave the incumbent live.
+  const router = ws.protocol === CONTROLLER_SUBPROTOCOL ? controllerRuntime?.router : null;
+  const releaseRole = router?.reserveControlledRegistration(ws.controllerSocketIdentity, endpointId);
+  if (router && !releaseRole) {
+    send(ws, { v: 2, type: "error", code: "bad_desktop_endpoint_register", message: "bad desktop endpoint registration" });
+    return;
+  }
   let creationAdmitted = false;
   let releaseCreation;
-  if (controllerRuntime?.selfRegistration && !endpoints.has(endpointId)) {
-    pruneExpiredEndpoints();
-    if (revokedEndpoints.has(endpointId)) {
-      rejectSocket(ws, "endpoint_revoked", "endpoint was permanently revoked");
-      return;
-    }
-    const reserved = [...pendingEndpointCreations.keys()].filter(id => !endpoints.has(id)).length;
-    if (!pendingEndpointCreations.has(endpointId) && endpoints.size + reserved >= MAX_ENDPOINTS) {
-      rejectSocket(ws, "endpoint_capacity_reached", "endpoint capacity reached");
-      return;
-    }
-    if (!consumeRateLimit(endpointCreationBuckets, ws.clientIp, ENDPOINT_CREATE_LIMIT, ENDPOINT_CREATE_WINDOW_MS)) {
-      rejectSocket(ws, "endpoint_creation_rate_limited", "endpoint creation rate limited");
-      return;
-    }
-    creationAdmitted = true;
-    pendingEndpointCreations.set(endpointId, (pendingEndpointCreations.get(endpointId) || 0) + 1);
-    releaseCreation = () => {
-      const remaining = pendingEndpointCreations.get(endpointId) - 1;
-      if (remaining === 0) pendingEndpointCreations.delete(endpointId);
-      else pendingEndpointCreations.set(endpointId, remaining);
-    };
-  }
   try {
-    await finishDesktopRegistration(ws, { endpointId, accessToken, desktopSecret, creationAdmitted });
+    // Apply cheap admission before an anonymous first registration can persist.
+    // Recheck capacity/revocation after the async registry operation as well.
+    if (controllerRuntime?.selfRegistration && !endpoints.has(endpointId)) {
+      pruneExpiredEndpoints();
+      if (revokedEndpoints.has(endpointId)) {
+        rejectSocket(ws, "endpoint_revoked", "endpoint was permanently revoked");
+        return;
+      }
+      const reserved = [...pendingEndpointCreations.keys()].filter(id => !endpoints.has(id)).length;
+      if (!pendingEndpointCreations.has(endpointId) && endpoints.size + reserved >= MAX_ENDPOINTS) {
+        rejectSocket(ws, "endpoint_capacity_reached", "endpoint capacity reached");
+        return;
+      }
+      if (!consumeRateLimit(endpointCreationBuckets, ws.clientIp, ENDPOINT_CREATE_LIMIT, ENDPOINT_CREATE_WINDOW_MS)) {
+        rejectSocket(ws, "endpoint_creation_rate_limited", "endpoint creation rate limited");
+        return;
+      }
+      creationAdmitted = true;
+      pendingEndpointCreations.set(endpointId, (pendingEndpointCreations.get(endpointId) || 0) + 1);
+      releaseCreation = () => {
+        const remaining = pendingEndpointCreations.get(endpointId) - 1;
+        if (remaining === 0) pendingEndpointCreations.delete(endpointId);
+        else pendingEndpointCreations.set(endpointId, remaining);
+      };
+    }
+    await finishDesktopRegistration(ws, { endpointId, accessToken, desktopSecret, creationAdmitted, router });
   } finally {
     releaseCreation?.();
+    releaseRole?.();
   }
 }
 
-async function finishDesktopRegistration(ws, { endpointId, accessToken, desktopSecret, creationAdmitted }) {
+async function finishDesktopRegistration(ws, { endpointId, accessToken, desktopSecret, creationAdmitted, router }) {
   if (controllerRuntime) {
     if (controllerRuntime.selfRegistration) ws.registrationPending = true;
     try {
@@ -1182,7 +1212,7 @@ async function finishDesktopRegistration(ws, { endpointId, accessToken, desktopS
 
   // Authentication may yield: another registration can claim this socket, or
   // its close handler can run, before the validated credentials return.
-  if (!socketOpen(ws)) return;
+  if (!socketOpen(ws) || ws.policyClosing) return;
   if (ws.role !== "unknown") {
     rejectSocket(ws, "bad_desktop_endpoint_register", "bad desktop endpoint registration");
     return;
@@ -1219,7 +1249,6 @@ async function finishDesktopRegistration(ws, { endpointId, accessToken, desktopS
       desktop_offline_since: null,
       revoking: false,
     };
-    endpoints.set(endpointId, endpoint);
   } else {
     if (!tokenHashMatches(desktopSecret, endpoint.desktop_secret_hash)) {
       rejectSocket(ws, "invalid_desktop_secret", "invalid desktop secret");
@@ -1229,26 +1258,29 @@ async function finishDesktopRegistration(ws, { endpointId, accessToken, desktopS
       rejectSocket(ws, "invalid_access_token", "invalid access token");
       return;
     }
-    if (socketOpen(endpoint.desktop) && endpoint.desktop !== ws) {
-      send(endpoint.desktop, {
-        v: 2,
-        type: "desktop_endpoint_replaced",
-        endpoint_id: endpointId,
-      });
-      closeSocket(endpoint.desktop, 4001, "desktop endpoint replaced");
-    }
   }
 
-  endpoint.desktop = ws;
-  endpoint.desktop_offline_since = null;
-  authenticateSocket(ws, "desktop", endpointId);
-    if (controllerRuntime && ws.protocol === CONTROLLER_SUBPROTOCOL) {
-    controllerRuntime.router.authenticateControlled({
+  // The authoritative controller role must succeed before the legacy endpoint
+  // is published or its incumbent is notified and disconnected.
+  if (router) {
+    router.authenticateControlled({
       socketIdentity: ws.controllerSocketIdentity,
       endpointId,
       authenticatedContext: Object.freeze({ endpointId, credential: desktopSecret }),
     });
   }
+  if (socketOpen(endpoint.desktop) && endpoint.desktop !== ws) {
+    send(endpoint.desktop, {
+      v: 2,
+      type: "desktop_endpoint_replaced",
+      endpoint_id: endpointId,
+    });
+    closeSocket(endpoint.desktop, 4001, "desktop endpoint replaced");
+  }
+  endpoints.set(endpointId, endpoint);
+  endpoint.desktop = ws;
+  endpoint.desktop_offline_since = null;
+  authenticateSocket(ws, "desktop", endpointId);
   send(ws, {
     v: 2,
     type: "desktop_endpoint_registered",
@@ -1540,9 +1572,9 @@ wss.on("connection", (ws, req) => {
       void controllerRuntime.router.handle({
         socketIdentity: ws.controllerSocketIdentity,
         message: msg,
-      }).then(() => {
-        if (msg.type === "controller_pairing_claim"
-          || (typeof msg.type === "string" && msg.type.startsWith("controller_"))) {
+      }).then((result) => {
+        if (result !== undefined && (msg.type === "controller_pairing_claim"
+          || (typeof msg.type === "string" && msg.type.startsWith("controller_")))) {
           ws.controllerAuthenticated = true;
           clearTimeout(ws.authTimer);
           ws.authTimer = null;

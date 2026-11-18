@@ -1,6 +1,7 @@
 export const financeCopy = {
   zh: {
     statusLanguage: 'zh',
+    completionJournal: '实际账本分录', completionDigest: '资金事实摘要', financialCompletion: '确认财务完成', financialCompletionHelp: '仅核验已完成的资金回执，不新增余额或权益。须由另一名有权限的管理员复核；证据缺失或矛盾时继续阻断。无资金效果将重新查询服务商。', completionProposer: '提案人', completionEvidence: '完成证据', completionReference: '已提交修复或退款回执 ID', proposeFinancialCompletion: '提出财务完成核验', confirmFinancialCompletion: '独立复核并确认完成', completionProofs: { PAYMENT_REPAIR: '付款修复已入账', REFUND: '原交易全额退款已完成', NO_FINANCIAL_EFFECT: '权威失败且无资金效果' },
     qrLoading: "正在加载付款二维码…",
     paymentPreparing: "订单已创建，正在准备付款信息…",
     paymentSlow: "加载时间较长，请稍候。可查询付款结果，请勿重复下单。",
@@ -29,6 +30,7 @@ export const financeCopy = {
   },
   en: {
     statusLanguage: 'en',
+    completionJournal: 'Posted journal entry', completionDigest: 'Financial facts digest', financialCompletion: 'Confirm financial completion', financialCompletionHelp: 'Verify completed financial receipts without adding balance or entitlements. A different authorized administrator must review. Missing or conflicting evidence keeps the block. No-effect review queries the provider again.', completionProposer: 'Proposer', completionEvidence: 'Completion evidence', completionReference: 'Committed repair or refund receipt ID', proposeFinancialCompletion: 'Propose completion review', confirmFinancialCompletion: 'Independently review and confirm', completionProofs: { PAYMENT_REPAIR: 'Payment repair posted', REFUND: 'Original transaction fully refunded', NO_FINANCIAL_EFFECT: 'Authoritative failure with no financial effect' },
     qrLoading: "Loading the payment QR code…",
     paymentPreparing: "Order created. Preparing payment information…",
     paymentSlow: "This is taking longer than usual. You can check payment status; do not create another order.",
@@ -57,6 +59,7 @@ export const financeCopy = {
   },
   ja: {
     statusLanguage: 'ja',
+    completionJournal: '計上済み仕訳', completionDigest: '資金事実のダイジェスト', financialCompletion: '財務処理の完了確認', financialCompletionHelp: '完了済みの資金証跡のみを確認し、残高や利用権は追加しません。別の権限保有管理者による確認が必要です。証拠が不足または矛盾する場合は保留を続けます。資金効果がない場合は決済サービスに再照会します。', completionProposer: '提案者', completionEvidence: '完了証拠', completionReference: '確定済み修復または返金の証跡 ID', proposeFinancialCompletion: '財務完了の確認を提案', confirmFinancialCompletion: '独立して確認し完了を確定', completionProofs: { PAYMENT_REPAIR: '支払い修復の計上済み', REFUND: '元取引の全額返金完了', NO_FINANCIAL_EFFECT: '確定失敗かつ資金効果なし' },
     qrLoading: "支払いQRコードを読み込み中…",
     paymentPreparing: "注文を作成しました。支払い情報を準備中…",
     paymentSlow: "通常より時間がかかっています。支払い結果を確認できます。重複注文は作成しないでください。",

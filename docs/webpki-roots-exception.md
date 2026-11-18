@@ -47,9 +47,9 @@ Draft 且仅改 CLI 路径时，Ready 前不执行该守卫；Ready/Merge Queue 
 时必须停止，不得直接执行下一条或新增全局忽略：
 
 ```sh
-python3 scripts/guard-webpki-roots-exception.py && cargo deny --locked --manifest-path pinvou-knowledge/Cargo.toml --config pinvou3-app/src-tauri/deny.toml check advisories licenses bans sources
-python3 scripts/guard-webpki-roots-exception.py && cargo deny --locked --manifest-path pinvou3-app/src-tauri/Cargo.toml --config pinvou3-app/src-tauri/deny.toml check advisories licenses bans sources
-python3 scripts/guard-webpki-roots-exception.py && cargo deny --locked --manifest-path pinvou-cli/Cargo.toml --config pinvou3-app/src-tauri/deny.toml check advisories licenses bans sources
+python3 scripts/guard-webpki-roots-exception.py && python3 scripts/guard-chrono-maintenance-exception.py && cargo deny --locked --manifest-path pinvou-knowledge/Cargo.toml --config pinvou3-app/src-tauri/deny.toml check advisories licenses bans sources
+python3 scripts/guard-webpki-roots-exception.py && python3 scripts/guard-chrono-maintenance-exception.py && cargo deny --locked --manifest-path pinvou3-app/src-tauri/Cargo.toml --config pinvou3-app/src-tauri/deny.toml check advisories licenses bans sources
+python3 scripts/guard-webpki-roots-exception.py && python3 scripts/guard-chrono-maintenance-exception.py && cargo deny --locked --manifest-path pinvou-cli/Cargo.toml --config pinvou3-app/src-tauri/deny.toml check advisories licenses bans sources
 ```
 
 在不支持 `&&` 的旧 PowerShell 中，先检查守卫的 `$LASTEXITCODE` 为 `0`，再执行

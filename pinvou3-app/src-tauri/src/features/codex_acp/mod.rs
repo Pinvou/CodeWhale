@@ -1498,7 +1498,13 @@ impl AcpSession {
                     Some(cursor) => kimi_failure_after(&cursor).await,
                     None => None,
                 } {
-                    self.settle_turn_once(&turn_id, "Failed", Some(&error), None);
+                    self.settle_turn_once_from_source(
+                        &turn_id,
+                        "Failed",
+                        Some(&error),
+                        None,
+                        crate::features::behavior_telemetry::FailureSource::AcpPrompt,
+                    );
                     return false;
                 }
                 let status = match response.stop_reason {
@@ -1517,7 +1523,13 @@ impl AcpSession {
                 let message = format!("ACP Agent: {error}");
                 if codex_upgrade_required(&message) {
                     return self.bridge.close_runtime_if(|| {
-                        if !self.settle_turn_once(&turn_id, "Failed", Some(&message), None) {
+                        if !self.settle_turn_once_from_source(
+                            &turn_id,
+                            "Failed",
+                            Some(&message),
+                            None,
+                            crate::features::behavior_telemetry::FailureSource::AcpPrompt,
+                        ) {
                             return false;
                         }
                         self.lifecycle.begin_expected_shutdown();
@@ -1526,7 +1538,13 @@ impl AcpSession {
                         true
                     });
                 }
-                self.settle_turn_once(&turn_id, "Failed", Some(&message), None);
+                self.settle_turn_once_from_source(
+                    &turn_id,
+                    "Failed",
+                    Some(&message),
+                    None,
+                    crate::features::behavior_telemetry::FailureSource::AcpPrompt,
+                );
                 false
             }
         }
@@ -1545,11 +1563,33 @@ impl AcpSession {
         error: Option<&str>,
         recovery_reason: Option<&str>,
     ) -> bool {
+        self.settle_turn_once_from_source(
+            turn_id,
+            status,
+            error,
+            recovery_reason,
+            crate::features::behavior_telemetry::FailureSource::AcpRuntime,
+        )
+    }
+
+    fn settle_turn_once_from_source(
+        &self,
+        turn_id: &str,
+        status: &str,
+        error: Option<&str>,
+        recovery_reason: Option<&str>,
+        source: crate::features::behavior_telemetry::FailureSource,
+    ) -> bool {
         self.bridge.settle_runtime_turn(
             &self.busy,
             || {
-                self.bridge
-                    .finish_turn_once(turn_id, status, error, recovery_reason)
+                self.bridge.finish_turn_once_from_source(
+                    turn_id,
+                    status,
+                    error,
+                    recovery_reason,
+                    source,
+                )
             },
             || {
                 crate::features::assistant::timing::finish_turn(
@@ -5515,30 +5555,12 @@ impl AcpPool {
         let (runtime, turn_id) = owners
             .active_runtime(owner)
             .context("remote_permission_binding_stale")?;
-        let key = remote_permission_response_key(&pending, owner, permission_request_id)
-            .context("remote_permission_binding_stale")?;
-        let request = pending
-            .remove(&key)
-            .context("remote_permission_binding_stale")?;
-        let selected = remote_permission_option_id(&request.option_kinds, allow);
-        let (response, option_id, outcome) = if let Some(option_id) = selected {
-            (
-                RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
-                    SelectedPermissionOutcome::new(option_id.clone()),
-                )),
-                Some(option_id),
-                "selected",
-            )
-        } else if !allow {
-            (
-                RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
-                None,
-                "cancelled",
-            )
-        } else {
-            pending.insert(key, request);
-            bail!("remote_permission_allow_option_missing");
-        };
+        let RemotePermissionResolution {
+            request,
+            response,
+            option_id,
+            outcome,
+        } = take_remote_permission_resolution(&mut pending, owner, permission_request_id, allow)?;
         let tool_call_id = request.view.tool_call_id.clone();
         runtime
             .bridge
@@ -7120,6 +7142,54 @@ fn remote_permission_response_key(
         (remote_request_owned_by(request.remote_owner.as_ref(), owner)
             && request.remote_approval_id.as_deref() == Some(approval_id))
         .then(|| key.clone())
+    })
+}
+
+/// The production pending-map operation, inside the caller's active runtime
+/// and turn gates. A controlled ACP fixture can exercise the same consumption
+/// and response selection without launching an external provider.
+struct RemotePermissionResolution {
+    request: PendingPermission,
+    response: RequestPermissionResponse,
+    option_id: Option<String>,
+    outcome: &'static str,
+}
+
+fn take_remote_permission_resolution(
+    pending: &mut HashMap<String, PendingPermission>,
+    owner: &RemotePermissionOwner,
+    approval_id: &str,
+    allow: bool,
+) -> Result<RemotePermissionResolution> {
+    let key = remote_permission_response_key(pending, owner, approval_id)
+        .context("remote_permission_binding_stale")?;
+    let request = pending
+        .remove(&key)
+        .context("remote_permission_binding_stale")?;
+    let selected = remote_permission_option_id(&request.option_kinds, allow);
+    let (response, option_id, outcome) = if let Some(option_id) = selected {
+        (
+            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(option_id.clone()),
+            )),
+            Some(option_id),
+            "selected",
+        )
+    } else if !allow {
+        (
+            RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
+            None,
+            "cancelled",
+        )
+    } else {
+        pending.insert(key, request);
+        bail!("remote_permission_allow_option_missing");
+    };
+    Ok(RemotePermissionResolution {
+        request,
+        response,
+        option_id,
+        outcome,
     })
 }
 

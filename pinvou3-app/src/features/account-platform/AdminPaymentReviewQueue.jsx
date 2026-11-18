@@ -32,6 +32,8 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
   const [reason, setReason] = useState('');
   const [nextReview, setNextReview] = useState('');
   const [resolution, setResolution] = useState('');
+  const [completionProof, setCompletionProof] = useState('PAYMENT_REPAIR');
+  const [completionReference, setCompletionReference] = useState('');
   const [queryConfirmation, setQueryConfirmation] = useState(null);
   const permissions = me.platform_permissions || [];
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
@@ -90,7 +92,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
       if (result?.case?.case_id !== id) throw new Error('INVALID_FINANCE_ACK');
       return result;
     });
-    if (value?.case?.case_id === id) { setDetail(value); setReason(''); setResolution(''); }
+    if (value?.case?.case_id === id) { setDetail(value); setReason(''); setResolution(''); setCompletionProof(value.financial_completion_proofs?.[0]?.proof_kind || 'NO_FINANCIAL_EFFECT'); setCompletionReference(value.financial_completion_proofs?.[0]?.reference_id || ''); }
     return started;
   };
   useEffect(() => {
@@ -106,6 +108,8 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
       case 'archive': return client.archiveLatePaymentReview(facts.id, key, facts.commandProtocol);
       case 'provider-blind': return client.escalateProviderBlind(facts.id, facts.reason, key, facts.commandProtocol);
       case 'resolve': return client.resolvePaymentAnomaly(facts.id, facts.resolution, facts.reason, key);
+      case 'propose-completion': return client.proposePaymentFinancialCompletion(facts.id, facts.proofKind, facts.referenceID, facts.reason, key);
+      case 'confirm-completion': return client.confirmPaymentFinancialCompletion(facts.id, facts.proposalID, facts.reason, key);
       default: throw new Error('INVALID_FINANCE_ACK');
     }
   };
@@ -114,7 +118,7 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
     // Capture the user's local wall time only for a new invocation. Its UTC
     // instant is immutable with the key even if the system time zone changes.
     const scheduleDate = !operation.pendingFacts && action === 'schedule' ? new Date(nextReview) : null;
-    const facts = operation.pendingFacts || { action, id: detail?.case?.case_id, reason: reason.trim(), resolution, nextReview: scheduleDate && Number.isFinite(scheduleDate.getTime()) ? scheduleDate.toISOString() : nextReview, commandProtocol: action === 'schedule' || action === 'provider-blind' || action === 'archive' ? 1 : undefined };
+    const facts = operation.pendingFacts || { action, id: detail?.case?.case_id, reason: reason.trim(), resolution, ...(action === 'propose-completion' ? { proofKind: completionProof, referenceID: completionProof === 'NO_FINANCIAL_EFFECT' ? '' : completionReference.trim() } : {}), ...(action === 'confirm-completion' ? { proposalID: detail?.financial_completion_proposal?.proposal_id } : {}), nextReview: scheduleDate && Number.isFinite(scheduleDate.getTime()) ? scheduleDate.toISOString() : nextReview, commandProtocol: action === 'schedule' || action === 'provider-blind' || action === 'archive' ? 1 : undefined };
     if (!facts.id || (!operation.pendingFacts && action === 'resolve' && !paymentAnomalyResolutions(detail?.case?.anomaly_type).includes(resolution)) || (!operation.unknown && !globalThis.confirm(copy.confirmAction))) return;
     const value = await operation.mutate(facts, async (current, key) => {
       const receipt = await execute(current, key);
@@ -129,6 +133,8 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
   const statuses = anomaly ? ['OPEN', 'RESOLVED'] : ['REVIEW_REQUIRED_LATE_PAYMENT', 'PROVIDER_BLIND', 'ARCHIVED_CONFIRMED_UNPAID', 'RESOLVED_PAID'];
   const active = item && (anomaly ? item.status === 'OPEN' : ['REVIEW_REQUIRED_LATE_PAYMENT', 'PROVIDER_BLIND'].includes(item.review_status));
   const owned = item?.owner_id === me.user_id;
+  const completionEligible = anomaly && item?.status === 'RESOLVED' && item.resolution_code === 'ESCALATE_FINANCIAL_REPAIR' && item.financial_action_status === 'PENDING' && ['DUPLICATE_PAYMENT', 'LATE_PAYMENT_CONFLICT', 'PAYMENT_FACT_CONFLICT', 'ILLEGAL_TRANSITION'].includes(item.anomaly_type);
+  const completionProposal = detail?.financial_completion_proposal;
   const resolutions = paymentAnomalyResolutions(item?.anomaly_type);
   const confirmQuery = () => {
     if (busy || query.retired || (operation.unknown && !legacyQuery) || anomaly || !canQuery || !active || !owned) return;
@@ -193,6 +199,18 @@ export function AdminPaymentReviewQueue({ client, copy, me, anomaly = false, rou
       {canQuery && active && !owned && <button disabled={busy || blocked} onClick={() => void act('claim')}>{copy.claimCase}</button>}
       {owned && active && !anomaly && canQuery && <><button disabled={busy || blocked || query.retired} onClick={confirmQuery}>{copy.query}</button>{(query.unknown || legacyQuery) && <button disabled={busy || query.retired || (operation.unknown && !legacyQuery)} onClick={confirmQuery}>{copy.newQuery}</button>}<label>{copy.nextReview}<input type="datetime-local" value={nextReview} onChange={event => setNextReview(event.target.value)} /></label><button disabled={busy || blocked || !nextReview || !reason.trim()} onClick={() => void act('schedule')}>{copy.schedule}</button><button disabled={busy || blocked || item.review_status !== 'REVIEW_REQUIRED_LATE_PAYMENT'} onClick={() => void act('archive')}>{copy.archive}</button><button disabled={busy || blocked || reason.trim().length < 10} onClick={() => void act('provider-blind')}>{copy.escalate}</button></>}
       {owned && active && anomaly && canRepair && <><label>{copy.resolution}<select value={resolution} onChange={event => setResolution(event.target.value)}><option value="">{copy.resolution}</option>{resolutions.map(value => <option key={value} value={value}>{copy.resolutions[value]}</option>)}</select></label>{resolution === 'RECONCILE_REFUND' && <p>{copy.refundReconcileHelp}</p>}<button disabled={busy || blocked || !resolutions.includes(resolution) || reason.trim().length < 10} onClick={() => void act('resolve')}>{copy.resolve}</button></>}
+      {completionEligible && <section aria-label={copy.financialCompletion}>
+        <h5>{copy.financialCompletion}</h5><p>{copy.financialCompletionHelp}</p>
+        {completionProposal && <div><p>{copy.completionProposer}: <code>{completionProposal.proposer_id}</code></p><p>{copy.completionProofs[completionProposal.facts.proof_kind]} / <code>{completionProposal.proposal_id}</code></p>
+          <dl><dt>{copy.orderID}</dt><dd>{completionProposal.facts.payment_order_id}</dd><dt>{copy.transaction}</dt><dd>{completionProposal.facts.provider_transaction_id || copy.empty}</dd><dt>{copy.amountFen}</dt><dd>{completionProposal.facts.amount_fen} {completionProposal.facts.currency}</dd><dt>{copy.reason}</dt><dd>{completionProposal.reason}</dd></dl>
+          <dl><dt>{copy.completionReference}</dt><dd>{completionProposal.facts.reference_id}</dd><dt>{copy.provider}</dt><dd>{completionProposal.facts.provider_id} / {completionProposal.facts.provider_version}</dd><dt>{copy.package}</dt><dd>{completionProposal.facts.receipt.package_id || copy.empty}</dd><dt>{copy.completionJournal}</dt><dd>{completionProposal.facts.receipt.journal_id || copy.empty}</dd><dt>{copy.completionDigest}</dt><dd><code>{completionProposal.facts.facts_digest}</code></dd></dl>
+          {canRepair && <button disabled={busy || blocked || completionProposal.proposer_id === me.user_id || completionProposal.case_version !== item.version || reason.trim().length < 10} onClick={() => void act('confirm-completion')}>{copy.confirmFinancialCompletion}</button>}
+        </div>}
+        {canRepair && <><label>{copy.completionEvidence}<select disabled={busy || blocked} value={completionProof} onChange={event => { setCompletionProof(event.target.value); setCompletionReference(detail.financial_completion_proofs?.find(value => value.proof_kind === event.target.value)?.reference_id || ''); }}>{Object.entries(copy.completionProofs).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+          {completionProof !== 'NO_FINANCIAL_EFFECT' && <label>{copy.completionReference}<select disabled={busy || blocked} value={completionReference} onChange={event => setCompletionReference(event.target.value)}><option value="">{copy.empty}</option>{(detail.financial_completion_proofs || []).filter(value => value.proof_kind === completionProof).map(value => <option key={value.reference_id} value={value.reference_id}>{value.reference_id} / {value.amount_fen} {value.currency}</option>)}</select></label>}
+          <button disabled={busy || blocked || reason.trim().length < 10 || (completionProof !== 'NO_FINANCIAL_EFFECT' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(completionReference.trim()))} onClick={() => void act('propose-completion')}>{copy.proposeFinancialCompletion}</button>
+        </>}
+      </section>}
       <ul>{(detail.events || []).map(value => <li key={value.event_id || value.id}>{value.event_type} / {value.created_at}</li>)}</ul>
     </article>}
     {queryConfirmation && <LatePaymentQueryConfirmation copy={copy} caseID={queryConfirmation.facts.id}

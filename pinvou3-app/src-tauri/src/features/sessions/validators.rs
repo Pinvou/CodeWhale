@@ -11,8 +11,6 @@ use anyhow::{Result, bail};
 use deepseek_tui::models::SystemPrompt;
 use deepseek_tui::session_manager::SessionManager;
 
-/// 生成 URL-safe session id（短 8 字节 timestamp + nanos hash）。
-/// 上游 `validated_session_path` 只允许 `[A-Za-z0-9_-]`，所以走 base32-like 字符集。
 /// `pub` for the pinvou-cli `projects` family: the rebind orphan probe
 /// validates an id before joining it into a sessions-root path (the same
 /// fail-closed rule the GUI path applies), through the `features::sessions`
@@ -442,6 +440,9 @@ pub(crate) fn scheduled_session_file(manager: &SessionManager, id: &str) -> Resu
     Ok(manager.sessions_dir().join(format!("{id}.json")))
 }
 
+/// Generate a URL-safe session id from wall-clock nanos. Callers must not
+/// persist the result unconditionally: route allocation through the store's
+/// occupancy probe so a clock collision cannot replace a live record.
 pub(crate) fn generate_session_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -479,6 +480,27 @@ mod tests {
                 .to_string(),
             "Invalid scheduled task id 'has space'"
         );
+    }
+
+    #[test]
+    fn bare_generate_session_id_has_no_unwired_production_call_sites() {
+        let scanned = [
+            ("validators.rs", include_str!("validators.rs"), 1usize),
+            ("retention.rs", include_str!("retention.rs"), 1),
+            ("store.rs", include_str!("store.rs"), 0),
+        ];
+        for (name, source, expected) in scanned {
+            let source = source.replace("\r\n", "\n");
+            let production = match source.split_once("#[cfg(test)]\nmod tests") {
+                Some((production, _tests)) => production,
+                None => source.as_str(),
+            };
+            let found = production.matches("generate_session_id(").count();
+            assert_eq!(
+                found, expected,
+                "{name}: bare `generate_session_id(` occurrences in production must stay exactly {expected}; route allocation through SessionStore::generate_unused_session_id[_with]"
+            );
+        }
     }
 
     #[test]

@@ -11,6 +11,7 @@
 use base64::Engine as _;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::crypto::{
@@ -25,6 +26,10 @@ use super::protocol::{
 
 /// 有界错误码：不区分「解密失败/校验失败/代不符」，避免给出可区分信息。
 pub(crate) const ENCRYPTED_FRAME_INVALID: &str = "encrypted_frame_invalid";
+
+#[cfg(test)]
+#[path = "encrypted_lane/retirement_tests.rs"]
+mod retirement_tests;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum LaneFailure {
@@ -48,6 +53,7 @@ impl LaneFailure {
 
 /// 一条会话密钥对应的加密业务通道（一个 lease 一个方向）。
 pub(crate) struct EncryptedLane {
+    installation: Arc<()>,
     role: ControllerRole,
     lease: super::protocol::LeaseContext,
     send: SendCipher,
@@ -80,6 +86,7 @@ impl EncryptedLane {
             .into_role_ciphers(role, binding)
             .map_err(|_| LaneFailure::Invalid)?;
         Ok(Self {
+            installation: Arc::new(()),
             role,
             lease: lease.clone(),
             send: ciphers.send,
@@ -446,6 +453,24 @@ struct LaneStore {
 }
 
 impl LaneStore {
+    fn retirement_identity(&self) -> Option<LaneRetirementIdentity> {
+        self.lane
+            .lock()
+            .as_ref()
+            .map(|lane| LaneRetirementIdentity(lane.installation.clone()))
+    }
+
+    fn retire_if_identity(&self, expected: &LaneRetirementIdentity) {
+        let mut lane = self.lane.lock();
+        if lane
+            .as_ref()
+            .is_some_and(|lane| Arc::ptr_eq(&lane.installation, &expected.0))
+        {
+            *lane = None;
+            self.suspended.store(false, Ordering::SeqCst);
+        }
+    }
+
     /// 安装（或替换）通道：只有完整握手 + 租约安装之后才允许调用。
     pub(crate) fn install(
         &self,
@@ -616,7 +641,7 @@ macro_rules! lane_state {
         #[doc = $doc]
         #[derive(Default)]
         pub(crate) struct $name {
-            store: LaneStore,
+            store: Arc<LaneStore>,
         }
 
         impl $name {
@@ -717,6 +742,16 @@ lane_state!(ControllingLaneState, "A 端（主控）加密业务通道状态。"
 lane_state!(ControlledLaneState, "B 端（被控）加密业务通道状态。");
 
 impl ControllingLaneState {
+    /// A secret-free installation identity, not a lease/session-id comparison.
+    /// The token keeps its allocation alive, so even a same-lease replacement
+    /// cannot be mistaken for the original key slot by delayed cleanup.
+    pub(crate) fn retire_on_exit(&self) -> ControllingLaneRetirement {
+        ControllingLaneRetirement {
+            store: self.store.clone(),
+            identity: self.store.retirement_identity(),
+        }
+    }
+
     pub(crate) fn seal_capability_and_send(
         &self,
         lease: &super::protocol::LeaseContext,
@@ -726,6 +761,21 @@ impl ControllingLaneState {
     ) -> Result<(), String> {
         self.store
             .seal_for_lease_and_send(lease, payload, capabilities, send)
+    }
+}
+
+struct LaneRetirementIdentity(Arc<()>);
+
+pub(crate) struct ControllingLaneRetirement {
+    store: Arc<LaneStore>,
+    identity: Option<LaneRetirementIdentity>,
+}
+
+impl Drop for ControllingLaneRetirement {
+    fn drop(&mut self) {
+        if let Some(identity) = &self.identity {
+            self.store.retire_if_identity(identity);
+        }
     }
 }
 
