@@ -142,6 +142,43 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
+    def test_profile_revocation_requires_every_durable_admission_child(self):
+        root = "TestProfileRevocationDurableAdmissionRuntimePostgres"
+        children = {
+            "capacity-before-grant-confirmed-replay-and-unknown-retention",
+            "cancel-before-authority-preserves-reservation",
+            "dispatch-token-and-legacy-command-cannot-regrant",
+            "concurrent-global-admission-across-profiles",
+            "legacy-upgrade-preserves-confirmed-and-unknown-receipts",
+            "capacity-public-complete-resumes-original-operation",
+            "lease-expiry-during-global-admission-wait",
+        }
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_profile_revocation_requires_every_closure_child(self):
+        root = "TestProfileRevocationClosureRuntimePostgres"
+        children = {"reserved-closure-seals-no-dispatch-and-releases-capacity",
+                    "confirmed-replays-after-anonymization", "late-confirmation-replays-after-anonymization"}
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
     def test_financial_completion_requires_actual_receipts_and_conflict_guards(self):
         root = "TestEscalatedPaymentFinancialCompletionPostgres"
         self.assertIn(root, RUNNER.RETAINED_REQUIRED)
@@ -2004,6 +2041,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestOrdinaryDeadLetterReplayRuntimePostgres",
             "TestIdentityRecoveryClaimsRuntimePostgres",
             "TestProfileSessionRevocationRecoveryRuntimePostgres",
+            "TestProfileRevocationDurableAdmissionRuntimePostgres",
+            "TestProfileRevocationClosureRuntimePostgres",
             "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
             "TestRegistrationIdentityRejectionRuntimePostgres",
