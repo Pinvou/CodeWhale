@@ -26,3 +26,9 @@ python scripts/ci-fixture-process.py --receipt "$env:TEMP/pinvou-acp-exit.json" 
 每次验证使用新的收据名；`--source-ref <40位固定tree>` 用于提交前的固定树验证。
 这项 smoke 证明现有 Node 下的社区版 Bridge 及资源映射，不替代私有 runtime staging、完整安装包
 或现场模型调用验收。生产构建的缓存准备逻辑未在本修复中改变。
+
+Claude 初始化仍以进程启动起算 15 秒，不做预热或重试。仅此 smoke 为 Claude 子进程预加载
+启动观察器，记录模块加载、注册表子进程退出、stdin 监听建立以及 CPU 时间、RSS 和墙钟耗时；
+观察器不替换进程 API、不读取请求或策略内容、不消费 stdin，心跳不会维持进程存活。
+输出限制为 48 条固定阶段元数据，父进程补充 spawn/首次响应耗时及输出字节数；任意上游
+stderr、路径、命令参数和环境值不会进入诊断输出。超时仍失败，外层监督器仍确认后代退出。
