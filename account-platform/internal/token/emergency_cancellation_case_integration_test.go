@@ -74,6 +74,10 @@ func testEmergencyCancellationReviewSeparation(t *testing.T, settle bool) {
 	if err != nil || len(items) != len(ids) || items[0].ResourceID != u.ID || items[0].CaseType != modelEmergencyCancellationReviewCase || items[0].Status != "OPEN" {
 		t.Fatal("operations projection dropped or closed the cancellation review", items, err)
 	}
+	assertEmergencyCaseOnlyOps(t, f, cancellationID, targetID, u.ID)
+	if settle {
+		assertEmergencyCancellationPlans(t, f, u.ID, targetID)
+	}
 }
 
 type emergencyTestReleaseGate struct {

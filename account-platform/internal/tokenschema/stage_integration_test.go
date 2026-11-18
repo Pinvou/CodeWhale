@@ -26,6 +26,7 @@ func TestManagementPublicMigrationInstallation(t *testing.T) {
 	t.Run("installed-f07-36-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 36, false) })
 	t.Run("installed-pre-runtime-37-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 37, false) })
 	t.Run("installed-pre-cleanup-39-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 39, false) })
+	t.Run("installed-published-42-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 42, false) })
 	t.Run("installed-pre-emergency-retry-40-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 40, false) })
 	t.Run("installed-pre-governance-index-40-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 40, false) })
 	t.Run("installed-pre-dispatch-index-40-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 40, false) })
@@ -141,6 +142,12 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if previousStage > 0 {
 		previous := []migrations.Migration{}
 		for _, m := range loaded {
+			if previousStage == 42 {
+				if m.Name != "emergency_cancellation_retry" {
+					previous = append(previous, m)
+				}
+				continue
+			}
 			if previousStage == 39 || previousStage == 40 {
 				// These fixtures are the real predecessors, excluding any later
 				// recovery or index work from the package under test.
@@ -164,7 +171,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		if e != nil || verified.AppliedCount != previousStage {
 			t.Fatal("installed previous stage fixture verification", verified, e)
 		}
-		if previousStage == 40 {
+		if previousStage == 40 || previousStage == 42 {
 			if e = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history`).Scan(&previousRetryHistory); e != nil {
 				t.Fatal(e)
 			}
@@ -276,8 +283,75 @@ VALUES('11111111-1111-4111-8111-111111111116','11111111-1111-4111-8111-111111111
 			}
 		})
 	}
+	if previousStage == 42 {
+		assertPublishedTokenInventory(t, ctx, admin.Config(), config, 900009)
+	}
+	if previousStage == 40 {
+		// Install the published 42-item prefix before its reversible-index round-trip.
+		prefix := []migrations.Migration{}
+		for _, m := range loaded {
+			if m.Name != "emergency_cancellation_retry" {
+				prefix = append(prefix, m)
+			}
+		}
+		if err = migrations.UpWithHooks(ctx, connection, prefix, migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); err != nil {
+			t.Fatal(err)
+		}
+		migrations.Unlock(ctx, connection)
+		retryBoundaryChecked := false
+		t.Run("published-index-cli-round-trip-and-retry-fence", func(t *testing.T) {
+			verifyGovernanceReinstallation := testGovernanceIndexPublicRollback(t, ctx, connection, config.Copy(), loaded)
+			testDispatchIndexPublicRollback(t, ctx, connection, config, loaded, func() {
+				var highest int64
+				if err := connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&highest); err != nil || highest != 900010 {
+					t.Fatal("retry forward-only check requires its exact installed public boundary", highest, err)
+				}
+				var kept string
+				var columns, hardened bool
+				if err = connection.QueryRow(ctx, `SELECT
+ (SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history WHERE version<900010 AND version NOT IN (900008,900009)),
+ (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='public' AND table_name='model_emergency_cancellations' AND column_name IN ('retry_attempts','next_attempt_at')),
+ (SELECT pg_get_userbyid(relowner)='token_schema_owner' FROM pg_class WHERE oid='public.model_emergency_cancellations'::regclass)
+ AND NOT pg_has_role('token_gateway','token_schema_owner','MEMBER')
+ AND NOT has_table_privilege('token_gateway','public.model_emergency_cancellations','TRUNCATE')`).Scan(&kept, &columns, &hardened); err != nil || kept != previousRetryHistory || !columns || !hardened {
+					t.Fatalf("emergency retry upgrade lost history, columns or runtime fence: %v %v %v %v", kept == previousRetryHistory, columns, hardened, err)
+				}
+				const retryLedgerSnapshot = `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history`
+				var retryLedgerBefore, retryLedgerAfter string
+				if err := connection.QueryRow(ctx, retryLedgerSnapshot).Scan(&retryLedgerBefore); err != nil {
+					t.Fatal(err)
+				}
+				migrations.Unlock(ctx, connection)
+				if err = migrations.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "emergency cancellation retry and review history is forward-only") {
+					t.Fatalf("rollback did not reach the retry history guard: %v", err)
+				}
+				// The domain wrapper requires the full current package. At this
+				// deliberate historical boundary, compare every real ledger row;
+				// main's full wrapper still verifies the restored complete package.
+				if err := connection.QueryRow(ctx, retryLedgerSnapshot).Scan(&retryLedgerAfter); err != nil || retryLedgerBefore != retryLedgerAfter {
+					t.Fatal("refused retry rollback changed an installed ledger row", err)
+				}
+				migrations.Unlock(ctx, connection)
+				retryBoundaryChecked = true
+			})
+			if verifyGovernanceReinstallation == nil {
+				t.Fatal("governance rollback phase did not execute")
+			}
+			verifyGovernanceReinstallation(t)
+		})
+		if !retryBoundaryChecked {
+			t.Fatal("public retry forward-only boundary did not execute")
+		}
+	}
 	if err = Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
+	}
+	if previousStage == 42 {
+		var current string
+		if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history WHERE version<900010`).Scan(&current); err != nil || current != previousRetryHistory {
+			t.Fatal("published 42-item ledger changed during appended retry upgrade", err)
+		}
+		assertPublishedTokenInventory(t, ctx, admin.Config(), config, 900010)
 	}
 	if previousAccountFacts != "" {
 		var current string
@@ -323,47 +397,7 @@ WHERE i.indexrelid=to_regclass('public.usage_cancellation_dispatch_fence_idx')
 	// before testing a second independent invocation on this same connection.
 	migrations.Unlock(ctx, connection)
 	probeConfig := config.Copy()
-	if previousStage == 40 {
-		retryBoundaryChecked := false
-		t.Run("dispatch-index-public-cli-round-trip", func(t *testing.T) {
-			testDispatchIndexPublicRollback(t, ctx, connection, config, loaded, func() {
-				var highest int64
-				if err := connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&highest); err != nil || highest != 900007 {
-					t.Fatal("retry forward-only check requires its exact installed public boundary", highest, err)
-				}
-				var kept string
-				var columns, hardened bool
-				if err = connection.QueryRow(ctx, `SELECT
- (SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history WHERE version<900007),
- (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='public' AND table_name='model_emergency_cancellations' AND column_name IN ('retry_attempts','next_attempt_at')),
- (SELECT pg_get_userbyid(relowner)='token_schema_owner' FROM pg_class WHERE oid='public.model_emergency_cancellations'::regclass)
- AND NOT pg_has_role('token_gateway','token_schema_owner','MEMBER')
- AND NOT has_table_privilege('token_gateway','public.model_emergency_cancellations','TRUNCATE')`).Scan(&kept, &columns, &hardened); err != nil || kept != previousRetryHistory || !columns || !hardened {
-					t.Fatalf("emergency retry upgrade lost history, columns or runtime fence: %v %v %v %v", kept == previousRetryHistory, columns, hardened, err)
-				}
-				const retryLedgerSnapshot = `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history`
-				var retryLedgerBefore, retryLedgerAfter string
-				if err := connection.QueryRow(ctx, retryLedgerSnapshot).Scan(&retryLedgerBefore); err != nil {
-					t.Fatal(err)
-				}
-				migrations.Unlock(ctx, connection)
-				if err = migrations.DownOne(ctx, connection, loaded); err == nil || !strings.Contains(err.Error(), "emergency cancellation retry and review history is forward-only") {
-					t.Fatalf("rollback did not reach the retry history guard: %v", err)
-				}
-				// The domain wrapper requires the full current package. At this
-				// deliberate historical boundary, compare every real ledger row;
-				// main's full wrapper still verifies the restored complete package.
-				if err := connection.QueryRow(ctx, retryLedgerSnapshot).Scan(&retryLedgerAfter); err != nil || retryLedgerBefore != retryLedgerAfter {
-					t.Fatal("refused retry rollback changed an installed ledger row", err)
-				}
-				migrations.Unlock(ctx, connection)
-				retryBoundaryChecked = true
-			})
-		})
-		if !retryBoundaryChecked {
-			t.Fatal("public retry forward-only boundary did not execute")
-		}
-	}
+
 	probeConfig.User = admin.Config().User
 	probe, err := connectManagementFixture(t, ctx, probeConfig)
 	if err != nil {
@@ -396,9 +430,6 @@ WHERE i.indexrelid=to_regclass('public.usage_cancellation_dispatch_fence_idx')
 		t.Fatalf("installed lifecycle/replay storage mismatch: readiness=%v usage=%v org=%v unit=%v replay=%v future=%v err=%v", readiness, usageHistory, organization, units, replayFence, futureStorage, err)
 	}
 	migrations.Unlock(ctx, connection)
-	if previousStage == 40 {
-		t.Run("governance-index-public-cli-rollback", func(t *testing.T) { testGovernanceIndexPublicRollback(t, ctx, connection, config.Copy(), loaded) })
-	}
 	config.User = admin.Config().User
 	operator, err := connectManagementFixture(t, ctx, config)
 	if err != nil {

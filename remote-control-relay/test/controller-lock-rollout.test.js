@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { spawnSyncOnce } from "./relay-tools-spawn.mjs";
 
 const relay = dirname(dirname(fileURLToPath(import.meta.url)));
 const helper = join(relay, "scripts", "controller-lock-rollout.sh");
@@ -31,7 +32,7 @@ function bashExecutable() {
 const bash = bashExecutable();
 const capability = "export const RELAY_CONTROLLER_LOCK_PROTOCOL = 2;\n";
 
-async function setup(t) {
+async function setup(t, { execute = spawnSync } = {}) {
   const directory = await fs.realpath(await fs.mkdtemp(join(tmpdir(), "pinvou-lock-rollout-")));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const state = join(directory, "state"), code = join(directory, "code"), backup = join(directory, "backup");
@@ -50,19 +51,11 @@ async function setup(t) {
       else
         controller_lock_before_rollback fixture.service "$2/state" "$2/code"
       fi`;
-    let result;
-    // Windows 自托管 runner 高负载下 bash.exe 孵化/执行可能超过单次预算
-    // （CI 实证 spawnSync ETIMEDOUT，2026-11-14 round-5 与重跑各挂一次不同
-    // 文件）。单次 10s→20s 并对 ETIMEDOUT 定向重试一次；持续挂死仍在
-    // 第二次超时后如实失败。
-    for (let attempt = 0; ; attempt += 1) {
-      result = spawnSync(bash, ["-c", script, "--", helper.replaceAll("\\", "/"),
-        directory.replaceAll("\\", "/"), operation, confirmed], {
-        encoding: "utf8", windowsHide: true, timeout: 20000,
-        env: { ...process.env, MSYS_NO_PATHCONV: "1" },
-      });
-      if (!result.error || result.error.code !== "ETIMEDOUT" || attempt >= 1) break;
-    }
+    const result = spawnSyncOnce(bash, ["-c", script, "--", helper.replaceAll("\\", "/"),
+      directory.replaceAll("\\", "/"), operation, confirmed], {
+      encoding: "utf8", windowsHide: true, timeout: 20000,
+      env: { ...process.env, MSYS_NO_PATHCONV: "1" },
+    }, execute);
     assert.ifError(result.error);
     return result;
   }
@@ -117,4 +110,33 @@ test("lock rollout first deployment handles a missing service without a false st
   const result = f.run("upgrade", "1", { missing: true });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(await f.events(), ["show fixture.service --property=LoadState --value"]);
+});
+
+test("lock rollback preserves a timeout after stopping without replaying the operation", async t => {
+  let calls = 0;
+  const timeout = Object.assign(new Error("controlled ETIMEDOUT after the real helper completed"), { code: "ETIMEDOUT" });
+  const f = await setup(t, { execute(command, args, options) {
+    calls += 1;
+    const result = spawnSync(command, args, options);
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    // Only the transport result is injected; the real Bash helper writes the
+    // original systemctl events before this unknown-outcome result is returned.
+    return { ...result, status: null, error: timeout };
+  } });
+  assert.throws(() => f.run("rollback"), error => error.code === "ERR_ASSERTION" && error.actual === timeout);
+  assert.equal(calls, 1);
+  assert.deepEqual(await f.events(), ["show fixture.service --property=LoadState --value", "stop fixture.service"]);
+});
+
+test("lock rollout preserves a spawn error without starting another attempt", async t => {
+  let calls = 0;
+  const missing = Object.assign(new Error("controlled missing Bash executable"), { code: "ENOENT" });
+  const f = await setup(t, { execute() {
+    calls += 1;
+    return { status: null, error: missing };
+  } });
+  assert.throws(() => f.run("rollback"), error => error.code === "ERR_ASSERTION" && error.actual === missing);
+  assert.equal(calls, 1);
+  await assert.rejects(fs.stat(join(f.directory, "events")), { code: "ENOENT" });
 });

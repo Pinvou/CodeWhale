@@ -2760,16 +2760,6 @@
         "sha256": "bf8521c04a898ba68675b828d09ad98afcc86c4b11115530520844dd9a2bae58"
       },
       {
-        "file": "900007_emergency_cancellation_retry.down.sql",
-        "version": 900007,
-        "sha256": "d61e88656c378b7f06312b9d4db858c64f4a75cfd6e7b63e4259c7b09f2ff86e"
-      },
-      {
-        "file": "900007_emergency_cancellation_retry.up.sql",
-        "version": 900007,
-        "sha256": "0ea53cbbf9cf89b694c02ee90fec301fed8ea0226ec21665123d1158c1671b49"
-      },
-      {
         "file": "900008_hold_expiry_dispatch_evidence_index.down.sql",
         "version": 900008,
         "sha256": "e27bbbb75e3cf989efdaf8e25b9939ad33ec9252fabdbcd78798fe332fdd60c9"
@@ -2788,6 +2778,16 @@
         "file": "900009_governance_usage_resource_indexes.up.sql",
         "version": 900009,
         "sha256": "6ba3fb063eb36f50888456cb0c665ac6828dca795bce295a44997c1ecd3ccaad"
+      },
+      {
+        "file": "900010_emergency_cancellation_retry.down.sql",
+        "version": 900010,
+        "sha256": "d61e88656c378b7f06312b9d4db858c64f4a75cfd6e7b63e4259c7b09f2ff86e"
+      },
+      {
+        "file": "900010_emergency_cancellation_retry.up.sql",
+        "version": 900010,
+        "sha256": "cf366da4d34621f9728d79e8e30ba8b55940ad254cda7802888b7f9082abc24c"
       }
     ]
   }

@@ -17,7 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func testGovernanceIndexPublicRollback(t *testing.T, ctx context.Context, connection *pgx.Conn, config *pgx.ConnConfig, loaded []migrations.Migration) {
+func testGovernanceIndexPublicRollback(t *testing.T, ctx context.Context, connection *pgx.Conn, config *pgx.ConnConfig, loaded []migrations.Migration) func(*testing.T) {
 	t.Helper()
 	ordered, err := Ordered(loaded)
 	if err != nil {
@@ -46,10 +46,19 @@ func testGovernanceIndexPublicRollback(t *testing.T, ctx context.Context, connec
 	if err := connection.QueryRow(ctx, usageSnapshot).Scan(&retainedUsage); err != nil {
 		t.Fatal(err)
 	}
-	assertRetainedUsage := func() {
+	var retainedUsageIDs []uuid.UUID
+	if err = connection.QueryRow(ctx, `SELECT array_agg(id ORDER BY id) FROM usage_requests`).Scan(&retainedUsageIDs); err != nil {
+		t.Fatal(err)
+	}
+	assertRetainedUsage := func(t *testing.T, originalScopeOnly bool) {
 		t.Helper()
 		var current string
-		if err := connection.QueryRow(ctx, usageSnapshot).Scan(&current); err != nil || current != retainedUsage {
+		query, args := usageSnapshot, []any{}
+		if originalScopeOnly {
+			query += " WHERE id=ANY($1::uuid[])"
+			args = append(args, retainedUsageIDs)
+		}
+		if err := connection.QueryRow(ctx, query, args...).Scan(&current); err != nil || current != retainedUsage {
 			t.Fatal("index lifecycle changed retained usage rows", err)
 		}
 	}
@@ -94,7 +103,7 @@ func testGovernanceIndexPublicRollback(t *testing.T, ctx context.Context, connec
 		}
 	}
 	run("token_schema_owner", "down")
-	assertRetainedUsage()
+	assertRetainedUsage(t, false)
 	var removed bool
 	if err = connection.QueryRow(ctx, `SELECT to_regclass('public.usage_governance_account_credential_idx') IS NULL AND to_regclass('public.usage_governance_model_idx') IS NULL AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=900009)`).Scan(&removed); err != nil || !removed {
 		t.Fatal("controlled CLI rollback did not remove exactly the new indexes and identity", err)
@@ -103,18 +112,27 @@ func testGovernanceIndexPublicRollback(t *testing.T, ctx context.Context, connec
 	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&current); err != nil || current != retained {
 		t.Fatal("controlled rollback changed predecessor ledger", err)
 	}
-	run("token_gateway", "up")
-	assertRetainedUsage()
-	if err = connection.QueryRow(ctx, snapshot).Scan(&after); err != nil {
+	// Down 9 must retain 8; only the later combined Down 8/full Up may
+	// legitimately reinstall that index ledger row. Keep both exact snapshots.
+	var stablePredecessor string
+	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version NOT IN (900008,900009,900010)`).Scan(&stablePredecessor); err != nil {
 		t.Fatal(err)
 	}
-	// Ledger installation timestamps legitimately change on re-install. Check
-	// original rows separately and verify every current published SQL identity.
-	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900009`).Scan(&current); err != nil || current != retained {
-		t.Fatal("reinstallation changed predecessor ledger", err)
+	// The following dispatch-index phase performs the one full current CLI Up.
+	return func(t *testing.T) {
+		t.Helper()
+		assertRetainedUsage(t, true)
+		if err = connection.QueryRow(ctx, snapshot).Scan(&after); err != nil {
+			t.Fatal(err)
+		}
+		// Ledger installation timestamps legitimately change on re-install. Check
+		// original rows separately and verify every current published SQL identity.
+		if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version NOT IN (900008,900009,900010)`).Scan(&current); err != nil || current != stablePredecessor {
+			t.Fatal("reinstallation changed predecessor ledger", err)
+		}
+		if _, err = VerifyApplied(ctx, connection, loaded); err != nil {
+			t.Fatal("reinstalled public package failed identity verification", err)
+		}
+		t.Log("token_migrator session: gateway Down denied atomically; owner CLI Down and gateway CLI Up passed")
 	}
-	if _, err = VerifyApplied(ctx, connection, loaded); err != nil {
-		t.Fatal("reinstalled public package failed identity verification", err)
-	}
-	t.Log("token_migrator session: gateway Down denied atomically; owner CLI Down and gateway CLI Up passed")
 }

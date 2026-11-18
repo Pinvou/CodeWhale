@@ -53,9 +53,9 @@ Do not reset the task, run the model again, or release funds based on the
 retry counter. An already started external action may still finish.
 
 Before enabling this worker version, stop old Token gateway workers, apply and
-verify Token migration `900007_emergency_cancellation_retry` with the existing
+verify Token migration `900010_emergency_cancellation_retry` with the existing
 migration identity, then start the new workers. Old workers do not honor the
-new cooldown column. Migration 900007 preserves review evidence and refuses
+new cooldown column. Migration 900010 preserves review evidence and refuses
 Down; recover using a corrected compatible version.
 
 The worker attempts local transport cancellation immediately. When another
@@ -91,3 +91,50 @@ On failure, remain in SAFE and inspect the original operation receipt. Do not
 delete policy3, rewrite a true plan to false, or run its forward-only Down.
 An old binary cannot safely take over writes after v3 effects. Use a corrected
 compatible release and the existing controlled SAFE activation procedure.
+
+
+## Controlled case-only operator closure
+
+After an independently authorized human review, use the shipped
+`ops/close-emergency-cancellation-case.sql` in an approved maintenance
+session authenticated as the existing `token_migrator` login. No runtime API,
+new database grant or task-reset operation is provided. Verify the operator's
+human actor UUID and approval/reason through the existing access-control and
+change-record process; the database login does not establish the human's
+identity. Use a nonblank single-line reason of at most 1000 characters. Do not put credentials, customer content or raw provider responses in
+the reason, terminal transcripts or audit details.
+
+First use the read-only investigation above to bind the exact TOKEN case,
+`MODEL_EMERGENCY_CANCELLATION_REVIEW` type, `USAGE_REQUEST` resource, cancellation
+task and immutable `MANUAL_REVIEW` evidence. Record the case/task/resource/evidence
+UUIDs and the authorized actor/reason in the review record. Then run the carrier
+with psql `-X` and `-v` values for the independently verified `expected_database`, `case_id`, `task_id`, `resource_id`, `evidence_id`,
+`actor_id` and `reason`, using the independently verified target database URL.
+Never copy an arbitrary database name or operator identity from a case payload.
+The script suppresses parameter result display and stops on the first error.
+
+The transaction locks the task before the case, rechecks all bindings, exhausted
+retry budget and exact evidence snapshot, and atomically writes only RESOLVED
+case metadata plus an immutable actor/reason/evidence audit event. Any mismatch,
+runtime login, empty reason or SQL/audit failure aborts the transaction. Inspect
+the committed case and `EMERGENCY_CANCELLATION_CASE_CLOSED` event afterward;
+a repeated command rejects the already-resolved case without another audit.
+If the transaction result is unknown, inspect that exact case/event before any
+retry. Existing Sync/SLA processing must retain the closed case rather than
+recreate it; the original cancellation task stays MANUAL_REVIEW.
+
+Closing this review does not establish supplier cancellation, reset an automatic
+retry, change usage/hold/funds, waive a separate financial case, or authorize a
+new payment or settlement action. Any remaining financial uncertainty follows
+its original independent process and evidence requirements.
+
+The version-matched Account Platform image carries the operator SQL at
+`/ops/close-emergency-cancellation-case.sql`, alongside its complete `/migrations`
+package. Use a DBA-controlled psql client and an exported copy from that exact
+image or the same reviewed source revision; the scratch service image does not
+add a psql executable or execute this file automatically. Appended migration
+900010 also supplies ordered status-filtered work indexes. Their ordinary
+transactional creation needs the existing stopped-worker maintenance window and
+sufficient index space; it is not a live deployment or capacity benchmark.
+
+操作载体在 DO 声明及 ROWTYPE 解析前固定事务内 `search_path=pg_catalog,public,pg_temp`，不继承调用会话中的影子 schema 或临时表优先级。

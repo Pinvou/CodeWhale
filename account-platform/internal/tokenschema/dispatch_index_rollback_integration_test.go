@@ -105,6 +105,12 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`, controlledUsage).Sca
 	if err = connection.QueryRow(ctx, `SELECT processed,complete FROM public.backfill_usage_history_projection(100)`).Scan(&scanned, &projectionComplete); err != nil || scanned != 1 || !projectionComplete {
 		t.Fatal("scan retained request through the public history worker", scanned, projectionComplete, err)
 	}
+	// Include both historical fixtures before any remaining Down/Up.
+	const dispatchUsageFacts = `SELECT jsonb_agg(to_jsonb(u) ORDER BY id)::text FROM usage_requests u`
+	var allUsageBefore string
+	if err = connection.QueryRow(ctx, dispatchUsageFacts).Scan(&allUsageBefore); err != nil {
+		t.Fatal(err)
+	}
 	const evidenceSnapshot = `SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb)::text FROM usage_cancellation_evidence e`
 	var retainedEvidence string
 	if err = connection.QueryRow(ctx, evidenceSnapshot).Scan(&retainedEvidence); err != nil {
@@ -146,15 +152,18 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`, controlledUsage).Sca
 	if err = connection.QueryRow(ctx, evidenceSnapshot).Scan(&current); err != nil || current != retainedEvidence {
 		t.Fatal("controlled rollback changed retained cancellation evidence", err)
 	}
-	// Both release guards run at their real installed head. The callback must
-	// leave all lower ledger/data facts intact before the original full Up.
-	verifyLowerBoundary()
+	// Old public index rollbacks run before the new forward-only migration.
+	// Full public Up then reaches the new guard at its actual highest head.
 	run("token_gateway", "up")
+	verifyLowerBoundary()
 	if err = connection.QueryRow(ctx, snapshot).Scan(&after); err != nil {
 		t.Fatal(err)
 	}
 	if err = connection.QueryRow(ctx, evidenceSnapshot).Scan(&current); err != nil || current != retainedEvidence {
 		t.Fatal("reinstallation changed retained cancellation evidence", err)
+	}
+	if err = connection.QueryRow(ctx, dispatchUsageFacts).Scan(&current); err != nil || current != allUsageBefore {
+		t.Fatal("combined public index lifecycle changed complete usage rows", err)
 	}
 	// Ledger installation timestamps legitimately change on re-install. Check
 	// original rows separately and verify every current published SQL identity.
