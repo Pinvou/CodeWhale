@@ -96,8 +96,12 @@ if (stagedRuntime) {
 
 function initializeClaudeBridge() {
   return new Promise((resolve, reject) => {
+    const started = process.hrtime.bigint();
+    const elapsed = () => Number(process.hrtime.bigint() - started) / 1e6;
     const entrypoint = path.join(WINDOWS_BRIDGE_ROOT, CLAUDE_BRIDGE_ENTRYPOINT);
-    const child = spawn(nodeExecutable, [entrypoint], {
+    const child = spawn(nodeExecutable, [
+      "--require", path.join(__dirname, "helpers", "claude-acp-startup-probe.cjs"), entrypoint,
+    ], {
       cwd: WINDOWS_BRIDGE_ROOT,
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -106,29 +110,61 @@ function initializeClaudeBridge() {
     let settled = false;
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let spawnMs = null;
+    let firstStdoutMs = null;
     const timer = setTimeout(() => {
-      finish(new Error(`Claude ACP initialize 超时: ${stderr.trim()}`));
+      finish(new Error("Claude ACP initialize 超时（15秒；启动阶段见 acp-startup）"));
     }, 15_000);
 
     function finish(error) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // Only metadata emitted by the observer is retained; arbitrary upstream
+      // stderr may contain managed settings and must not enter CI diagnostics.
+      const phases = stderr.split(/\r?\n/u).filter((line) => line.startsWith("[acp-startup] "));
+      for (const line of phases.slice(0, 48)) {
+        try {
+          const source = JSON.parse(line.slice("[acp-startup] ".length));
+          const metadata = {};
+          if (!/^(?:preload|load-start|load-end|registry-start|registry-close|stdin-data-listener|heartbeat)$/u.test(source.phase)) continue;
+          metadata.phase = source.phase;
+          if (["sdk", "managed-policy", "entry"].includes(source.label)) metadata.label = source.label;
+          for (const key of ["elapsed_ms", "cpu_ms", "rss_mib", "duration_ms", "code"]) {
+            if (typeof source[key] === "number" && Number.isFinite(source[key])) metadata[key] = source[key];
+          }
+          console.log(`[acp-startup] ${JSON.stringify(metadata)}`);
+        } catch { /* Partial or unrecognized stderr is not diagnostic metadata. */ }
+      }
+      console.log(`[acp-startup-summary] ${JSON.stringify({
+        elapsed_ms: elapsed(), spawn_ms: spawnMs, first_stdout_ms: firstStdoutMs,
+        stdout_bytes: stdoutBytes, stderr_bytes: stderrBytes, success: !error,
+      })}`);
       child.kill();
       if (error) reject(error);
       else resolve();
     }
 
     child.on("error", finish);
+    child.once("spawn", () => { spawnMs = elapsed(); });
     child.on("exit", (code) => {
       if (!settled) {
-        finish(new Error(`Claude ACP initialize 前退出: code=${code} stderr=${stderr.trim()}`));
+        finish(new Error(`Claude ACP initialize 前退出: code=${code}（启动阶段见 acp-startup）`));
       }
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      stderrBytes += chunk.length;
+      if (stderr.length < 64 * 1024) stderr += chunk.toString().slice(0, 64 * 1024 - stderr.length);
     });
     child.stdout.on("data", (chunk) => {
+      stdoutBytes += chunk.length;
+      firstStdoutMs ??= elapsed();
+      if (stdoutBytes > 1024 * 1024) {
+        finish(new Error("Claude ACP initialize 响应超过1MiB上限"));
+        return;
+      }
       stdout += chunk.toString();
       const lines = stdout.split(/\r?\n/u);
       stdout = lines.pop() || "";
@@ -142,7 +178,8 @@ function initializeClaudeBridge() {
         }
         if (response.id !== 1) continue;
         if (response.error) {
-          finish(new Error(`Claude ACP initialize 失败: ${JSON.stringify(response.error)}`));
+          const code = Number.isSafeInteger(response.error.code) ? response.error.code : "unknown";
+          finish(new Error(`Claude ACP initialize 失败: code=${code}`));
           return;
         }
         try {

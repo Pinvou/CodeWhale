@@ -1447,10 +1447,121 @@ test("a state above the clamped capacity loads and refuses only new revocations"
     await waitForClose(desktop.ws);
     const persisted = JSON.parse(await readFile(statePath, "utf8"));
     assert.equal(persisted.revoked_endpoints.length, 9);
+    assert.match(isolated.errors(), /\[relay-capacity\] legacy_revocations .*"entries":9,"max_entries":8/u);
   } finally {
     await stopRelay(isolated.child);
   }
+  const expanded = await spawnRelay({
+    PINVOU_REMOTE_STATE_PATH: statePath,
+    MAX_RELAY_STATE_BYTES: "4096",
+    MAX_REVOKED_ENDPOINTS: "16",
+  });
+  try {
+    const stale = await openSocket(expanded.wsUrl);
+    const rejected = nextMessage(stale, "error");
+    stale.send(JSON.stringify({
+      v: 2, type: "desktop_endpoint_register", endpoint_id: "clamp3",
+      access_token: "clamped-stale-access-token-000001",
+      desktop_secret: "clamped-stale-desktop-secret-0001",
+    }));
+    assert.equal((await rejected).code, "endpoint_revoked");
+    await waitForClose(stale);
+    const desktop = await registerDesktop("legacy-capacity-expanded", "expanded-access-token-00000000",
+      "expanded-desktop-secret-000000", expanded.wsUrl);
+    const revoked = nextMessage(desktop.ws, "desktop_endpoint_revoked");
+    desktop.ws.send(JSON.stringify({
+      v: 2, type: "desktop_endpoint_revoke", endpoint_id: "legacy-capacity-expanded",
+    }));
+    await revoked;
+    await waitForClose(desktop.ws);
+    const persisted = JSON.parse(await readFile(statePath, "utf8"));
+    assert.equal(persisted.revoked_endpoints.length, 10);
+    for (const entry of entries) assert.deepEqual(
+      persisted.revoked_endpoints.find(candidate => candidate.endpoint_id === entry.endpoint_id), entry,
+    );
+  } finally {
+    await stopRelay(expanded.child);
+  }
 });
+
+for (const [phase, initialCount] of [["commit", 6], ["restore", 7]]) {
+  test(`legacy capacity warning failure preserves ${phase}, teardown and subsequent denial`, { timeout: 30_000 }, async () => {
+    const statePath = join(testRoot, `warning-${phase}-state.json`);
+    const entries = Array.from({ length: initialCount }, (_, index) => ({
+      endpoint_id: `warning_seed_${index}`, revoked_at: "2026-01-01T00:00:00Z",
+    }));
+    await writeFile(statePath, JSON.stringify({ version: 1, revoked_endpoints: entries }));
+    const isolated = await spawnRelay({
+      PINVOU_REMOTE_STATE_PATH: statePath,
+      MAX_RELAY_STATE_BYTES: "2048", // The existing clamp gives eight entries, warning at seven.
+      ENDPOINT_CREATE_LIMIT: "100",
+    }, {
+      preload: new URL("./fixtures/legacy-capacity-warning-sink.js", import.meta.url).href,
+      ipc: true,
+      awaitListening: false, // Retain the child identity even if startup fails.
+    });
+    const sockets = [];
+    const attempts = async () => {
+      const response = waitForRegistrationProbe(isolated.child, "legacy-warning-attempts");
+      isolated.child.send({ type: "read-legacy-warning-attempts" });
+      return (await response).attempts;
+    };
+    try {
+      await waitForOutput(isolated.child, /pinvou remote relay listening/);
+      assert.equal(await attempts(), phase === "restore" ? 1 : 0);
+      const endpointId = `warning_${phase}_accepted`;
+      const access = `warning-${phase}-access-token-at-least-24`;
+      const secret = `warning-${phase}-desktop-secret-at-least-24`;
+      const desktop = await registerDesktop(endpointId, access, secret, isolated.wsUrl);
+      sockets.push(desktop.ws);
+      const connected = nextMessage(desktop.ws, "web_client_connected");
+      const web = await joinWeb(endpointId, access, {}, isolated.wsUrl);
+      sockets.push(web.ws);
+      await connected;
+      const revoked = nextMessage(desktop.ws, "desktop_endpoint_revoked");
+      desktop.ws.send(JSON.stringify({ v: 2, type: "desktop_endpoint_revoke", endpoint_id: endpointId }));
+      assert.equal((await revoked).endpoint_id, endpointId);
+      await Promise.all([waitForClose(desktop.ws), waitForClose(web.ws)]);
+      const health = await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`, { signal: AbortSignal.timeout(3000) });
+      assert.equal(health.status, 200);
+      assert.equal((await health.json()).endpoint_count, 0);
+      assert.equal(await attempts(), 1, "the real warning sink must be attempted once, despite throwing");
+
+      const denied = await openSocket(isolated.wsUrl);
+      sockets.push(denied);
+      const denial = nextMessage(denied, "error");
+      denied.send(JSON.stringify({ v: 2, type: "desktop_endpoint_register", endpoint_id: endpointId,
+        access_token: access, desktop_secret: secret }));
+      assert.equal((await denial).code, "endpoint_revoked");
+      await waitForClose(denied);
+
+      const nextId = `warning_${phase}_next`;
+      const next = await registerDesktop(nextId, `warning-${phase}-next-access-token-000000`,
+        `warning-${phase}-next-desktop-secret-000000`, isolated.wsUrl);
+      sockets.push(next.ws);
+      const result = nextMessage(next.ws, phase === "commit" ? "desktop_endpoint_revoked" : "error");
+      next.ws.send(JSON.stringify({ v: 2, type: "desktop_endpoint_revoke", endpoint_id: nextId }));
+      const reply = await result;
+      if (phase === "commit") assert.equal(reply.endpoint_id, nextId);
+      else assert.equal(reply.code, "revoked_endpoint_capacity_reached", "real capacity rejection must remain distinct");
+      await waitForClose(next.ws);
+      assert.equal(await attempts(), 1, "subsequent operations must retain once-per-owner suppression");
+      const persisted = JSON.parse(await readFile(statePath, "utf8"));
+      assert.equal(persisted.version, 1);
+      assert.equal(persisted.revoked_endpoints.length, 8);
+      for (const entry of entries) assert.deepEqual(
+        persisted.revoked_endpoints.find(candidate => candidate.endpoint_id === entry.endpoint_id), entry,
+      );
+      assert.ok(persisted.revoked_endpoints.some(entry => entry.endpoint_id === endpointId
+        && Number.isFinite(Date.parse(entry.revoked_at))));
+      assert.equal(persisted.revoked_endpoints.some(entry => entry.endpoint_id === nextId), phase === "commit");
+      assert.equal(isolated.errors().includes("revocation_persist_failed"), false);
+    } finally {
+      for (const socket of sockets) closeSocket(socket);
+      await stopRelay(isolated.child);
+    }
+  });
+}
 
 test("forwards payloads larger than the previous 1 MiB limit", async (t) => {
   const endpointId = `endpoint_payload_${Date.now()}`;
@@ -2596,19 +2707,29 @@ test("clamps a sub-floor heartbeat to the five second floor", async (t) => {
   // An empty value parses as 0 (the old parser took its default through the
   // falsy-string branch): measure the cadence between two pings, which is
   // phase-independent (the first ping can land anywhere in the cycle).
+  // The heartbeat timer starts when the relay process boots, so the first
+  // ping lands 0-5 s after the socket opens and the second 5 s later: the
+  // worst case is ~10 s. The deadline leaves several intervals of slack
+  // because CI runners under load (this suite spawns and kills one relay
+  // per test) can delay ticks by seconds; a deadline near the worst case
+  // turned the test flaky on the merge queue.
   const isolated = await spawnRelay({ HEARTBEAT_INTERVAL_MS: "" });
   try {
     const ws = await openSocket(isolated.wsUrl);
     t.after(() => closeSocket(ws));
     const pings = [];
+    const deadline = performance.now();
     ws.on("ping", () => pings.push(performance.now()));
     await new Promise((resolve, reject) => {
       // Both timers must clear on either exit path: an interval left running
       // would hold the test process open after a rejection.
       const timer = setTimeout(() => {
         clearInterval(poll);
-        reject(new Error("heartbeat pings never arrived"));
-      }, 15000);
+        reject(new Error(
+          `expected 2 heartbeat pings within 30 s, saw ${pings.length}`
+          + ` after ${Math.round(performance.now() - deadline)} ms`,
+        ));
+      }, 30000);
       const poll = setInterval(() => {
         if (pings.length >= 2) {
           clearInterval(poll);

@@ -4592,6 +4592,7 @@ function finalizeStreamingReasoning(index) { return pinvouSharedweb().finalizeSt
     if (!item) return false;
     item.text = currentStreamText;
     item.html = renderMarkdown(currentStreamText);
+    item.htmlSource = currentStreamText;
     return true;
   }
   function flushPendingStreamRender() {
@@ -4690,7 +4691,10 @@ function finalizeStreamingReasoning(index) { return pinvouSharedweb().finalizeSt
     var firstDelta = !item;
     if (item) {
       item.text = currentStreamText;
-      if (!item.html) item.html = renderMarkdown(currentStreamText);
+      if (!item.html) {
+        item.html = renderMarkdown(currentStreamText);
+        item.htmlSource = currentStreamText;
+      }
       item.streaming = true;
     } else {
       // New bubble needed (after tool card)
@@ -4700,6 +4704,7 @@ function finalizeStreamingReasoning(index) { return pinvouSharedweb().finalizeSt
         type: "assistant",
         text: currentStreamText,
         html: renderMarkdown(currentStreamText),
+        htmlSource: currentStreamText,
         time: timeStr(),
         streaming: true,
       });
