@@ -53,6 +53,7 @@ func retainedFinanceRepositoryWithBudgets(t *testing.T, workloadBudget, cleanupB
 		t.Skip("PINVOU_TEST_BILLING_DATABASE_URL is required for actual PostgreSQL")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), workloadBudget)
+	logPackageExpiryPhase(t, ctx, "fixture.context.created")
 	t.Cleanup(cancel)
 	control, err := cifixture.Connect(ctx, raw)
 	if err != nil {
@@ -66,8 +67,10 @@ func retainedFinanceRepositoryWithBudgets(t *testing.T, workloadBudget, cleanupB
 		control.Close(context.Background())
 		t.Fatal("new UUID database must not already exist")
 	}
+	logPackageExpiryPhase(t, ctx, "fixture.database.create.begin")
 	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, control, database, "CREATE DATABASE "+quoted+" OWNER billing_schema_owner")
 	fixtureDatabase = fixtureDatabaseCreated
+	logPackageExpiryPhase(t, ctx, "fixture.database.create.returned")
 	if err := creationError; err != nil {
 		control.Close(context.Background())
 		t.Fatal(err)
@@ -118,9 +121,11 @@ func retainedFinanceRepositoryWithBudgets(t *testing.T, workloadBudget, cleanupB
 		}
 		loaded = prefix
 	}
+	logPackageExpiryPhase(t, ctx, "fixture.prefix.up.begin")
 	if err = billingschema.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
+	logPackageExpiryPhase(t, ctx, "fixture.prefix.up.end")
 	// Installation is complete. Retaining its session lock until fixture cleanup
 	// would prevent an independent migration connection from validating recovery.
 	migrations.Unlock(ctx, connection)
