@@ -3204,6 +3204,64 @@ test("survives illegal websocket frames at the receiver and keeps serving", asyn
   }
 });
 
+test("counts exactly two receiver errors and ignores clean closes", async () => {
+  const isolated = await spawnRelay();
+  try {
+    // The survival test above only pins `>= 2` for the frames it sends, so a
+    // regression that double-counts one termination — or that counts clean
+    // closes as receiver errors — stays invisible there. This test replays
+    // the same two pre-auth violations on a fresh relay and pins the healthz
+    // count exactly: one ws 'error' event per terminated socket, and nothing
+    // else feeding the counter.
+
+    // 1. Oversize declared length: masked binary frame announcing 8 MiB
+    //    against the 4 MiB maxPayload; no payload bytes are needed.
+    const oversize = await upgradeRaw(isolated.port);
+    const oversizeFrame = Buffer.alloc(14);
+    oversizeFrame[0] = 0x82; // FIN + binary opcode
+    oversizeFrame[1] = 0x80; // masked, 7-bit length 0 -> 64-bit extended
+    oversizeFrame.writeBigUInt64BE(8n * 1024n * 1024n, 2);
+    crypto.randomBytes(4).copy(oversizeFrame, 10);
+    const oversizeClosed = waitForRawClose(oversize);
+    oversize.write(oversizeFrame);
+    await oversizeClosed;
+
+    // 2. Protocol violation: reserved opcode 3, six bytes, still pre-auth.
+    const reserved = await upgradeRaw(isolated.port);
+    const reservedFrame = Buffer.alloc(6);
+    reservedFrame[0] = 0x83; // FIN + reserved opcode 3
+    reservedFrame[1] = 0x80; // masked, zero length
+    crypto.randomBytes(4).copy(reservedFrame, 2);
+    const reservedClosed = waitForRawClose(reserved);
+    reserved.write(reservedFrame);
+    await reservedClosed;
+
+    const receiverErrorTerminations = async () => {
+      const health = await fetch(`${isolated.httpUrl}/pinvou3/remote/healthz`);
+      assert.equal(health.ok, true);
+      return (await health.json()).receiver_error_terminations;
+    };
+
+    // The increment happens synchronously in the relay's 'error' handler,
+    // before it terminates the socket, so observing the raw close is enough
+    // for the counter to be settled — no wait is needed here.
+    assert.equal(await receiverErrorTerminations(), 2,
+      "each terminated socket must count exactly one receiver error");
+
+    // A normal graceful close must not feed the same counter: open a socket,
+    // close it cleanly, and give the relay a moment to finish the teardown
+    // bookkeeping before re-reading.
+    const clean = await openSocket(isolated.wsUrl);
+    closeSocket(clean);
+    await waitForClose(clean);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(await receiverErrorTerminations(), 2,
+      "a clean close must not count as a receiver error");
+  } finally {
+    await stopRelay(isolated.child);
+  }
+});
+
 test("survives a client RST between the upgrade request and the handshake and keeps serving", async () => {
   // Round-14 honesty correction of the round-12 wording: this is an
   // observation pin, not a pin for the repo's own upgrade-path guard.

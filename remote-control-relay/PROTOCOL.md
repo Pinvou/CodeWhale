@@ -242,6 +242,7 @@ after 5 seconds, so the drain cannot outlive ws's own 30-second close timeout.
 | `bad_message` | The parsed frame is not a JSON object. |
 | `binary_unsupported` | A binary WebSocket frame arrived. |
 | `unsupported_protocol_version` | `v` is missing or is not `2`. |
+| `desktop_controller_unavailable` | A controller v1 frame arrived on a socket that negotiated the controller subprotocol while the desktop controller is not running; the socket is closed and the frame discarded. |
 | `legacy_token_alias_unsupported` | The message carries a legacy top-level `token` or `pairing_token` field. |
 | `authentication_required` | A non-handshake message arrived before authentication completed. |
 | `authentication_timeout` | The socket did not authenticate within the deadline. |
@@ -250,6 +251,21 @@ after 5 seconds, so the drain cannot outlive ws's own 30-second close timeout.
 | `endpoint_creation_rate_limited` | The per-IP endpoint creation rate was exceeded. |
 | `invalid_access_token` | Desktop re-registration whose access token hash does not match the endpoint. |
 | `invalid_desktop_secret` | Desktop re-registration or revoke whose desktop secret hash does not match the endpoint. |
+| `enrollment_required` | Desktop registration found no enrollment registry entry for the endpoint (the same code is also the fallback when an enrollment failure carries no registry code); the endpoint must enroll first. |
+| `endpoint_id_invalid` | A self-registration claim named an endpoint ID outside the native `ep_` form self-registration reserves for freshly enrolled endpoints. |
+| `enrollment_credential_invalid` | Desktop registration whose access credential falls outside the registry's accepted credential byte window (32..4096 UTF-8 bytes) or does not round-trip as UTF-8. |
+| `desktop_credential_invalid` | Desktop registration whose desktop secret fails the same credential validation as the access credential. |
+| `invalid_enrollment_credential` | Desktop registration whose access credential or desktop secret does not match the enrolled digest; self-registration also rejects a desktop secret equal to the access credential. |
+| `desktop_credential_required` | Desktop registration for an enrolled endpoint that has not set a desktop credential yet. |
+| `credential_key_unavailable` | The enrolled credential digest references an HMAC key ID the current deployment no longer trusts. |
+| `enrollment_revision_conflict` | The enrollment compare-and-swap conflicted on every retry because concurrent writers kept changing the registry. |
+| `endpoint_already_enrolled` | A development-TOFU or self-registration claim raced another registration of the same endpoint ID into the registry. |
+| `enrollment_capacity_reached` | Creating a new registry entry would exceed the enrollment registry's entry capacity. |
+| `self_registration_capacity_reached` | A self-registration claim would exceed the entry or byte budget reserved for self-registered endpoints. |
+| `self_registration_capacity_unavailable` | The state store could not report the byte capacity a self-registration claim must reserve before writing. |
+| `enrollment_credential_transport_invalid` | A newly claimed credential exceeds the legacy transport length limit that applies to newly written credential material. |
+| `enrollment_registry_unavailable` | The enrollment state store read or write failed; nothing was enrolled or authenticated. |
+| `enrollment_registry_capacity_reached` | Writing the enrollment registry would exceed the relay state size cap. |
 | `invalid_token` | `web_client_join` whose access token hash does not match the endpoint. |
 | `bad_web_client_join` | Malformed `web_client_join`: invalid `endpoint_id`, missing or oversized access token, or the socket already authenticated. |
 | `endpoint_not_found` | Join, revoke, or forwarded message referenced an endpoint that does not exist. |
@@ -265,6 +281,21 @@ after 5 seconds, so the drain cannot outlive ws's own 30-second close timeout.
 | `revoke_failed` | An unexpected error occurred while processing a revoke. |
 | `connection_initialization_failed` | Attaching a newly opened controller-protocol socket to the message router failed; the socket is closed and nothing was registered on it. |
 | `desktop_registration_failed` | An unexpected error escaped desktop endpoint registration; the requester is closed and nothing was registered. |
+
+Desktop-endpoint registration under the desktop controller authorizes through
+the enrollment registry, and a registry rejection surfaces the registry's own
+snake_case code unchanged as a v2 error frame and closes the socket with
+WebSocket close code 1008; a failure that carries no code falls back to
+`enrollment_required`. The rows above enumerate the codes this path emits,
+including the storage-failure codes; if the enrollment state file stops
+validating between operations, the registry's state-validation codes (the
+`*_malformed` family headed by `enrollment_registry_malformed`) surface
+through the same path. Every such rejection stays auditable through the same
+fixed-line discipline as the other contained socket failures. Note that the
+`receiver_error_terminations` healthz counter bounds receiver-side protocol
+violations from above rather than counting them exactly: ws emits `error`
+from the sender path too, so a write failure on an already-dropping client
+(an RST mid-flush, for example) is counted as well.
 
 Besides reject code 1008, clients observe these WebSocket close codes: `1000`
 when the revoke requester is acknowledged with a normal close ("endpoint
