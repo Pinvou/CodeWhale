@@ -73,36 +73,8 @@ fn sanitize_inner(schema: &mut Value, inside_literal: bool) {
     }
 }
 
-/// Prepare a complete active tool set for DeepSeek strict function-calling.
-///
-/// Each tool is evaluated independently: compatible schemas are sanitized and
-/// marked strict, while incompatible schemas remain unchanged and non-strict.
-/// Optional properties removed to satisfy the strict contract are reported in
-/// the tool description so the model knows not to send them. Returns `true`
-/// only when every tool in the set can use strict mode.
-///
-/// Incompatible includes schemas the documented strict subset cannot
-/// represent faithfully: root alternatives, required nullables (`nullable`
-/// or a null-type union branch — `sanitize` collapses the common `X | null`
-/// union into `nullable: true`, so the keyword is how a required nullable
-/// survives to the gate), null-carrying `type` arrays / `const` / `enum`
-/// members, structural or conditional keywords outside the documented subset
-/// (the same family the Moonshot MFJS path fails closed on), a null `const`
-/// or schema-form `dependencies` table (stripped before the gate could see
-/// them), a non-object schema in a property/definition position (a draft-6
-/// boolean schema — `false` is actively tightening — an array, or any other
-/// non-map junk), and a removal that would leave the tool callable only with
-/// an empty object — an all-optional root, or a nested object whose every
-/// property was optional. Such a tool keeps its original schema and ships
-/// non-strict rather than carrying an undocumented keyword under a strict
-/// flag or advertising parameters it can no longer accept. The gate runs on
-/// the enforced shape, so a null-carrying shape under an *optional* property
-/// is exempt: the removal already represents it faithfully.
-///
-/// Callers gate this pipeline on official DeepSeek-family routes
-/// (`crate::config::route_is_official_deepseek_family`): the reshaping
-/// follows DeepSeek's strict-mode documents and would strip keywords other
-/// providers document (e.g. `minItems`/`maxItems` on OpenAI).
+/// The tools the strict pipeline fails closed by name: no schema-level
+/// analysis available to the reshaping can see this breakage — the schema
 /// Tools the strict pipeline fails closed by name because no schema-level
 /// analysis available to the reshaping can see the breakage: the schema
 /// advertises one discriminating parameter as the only required property
@@ -226,6 +198,36 @@ const STRICT_NAME_MAP_KEYS: &[&str] = &["properties", "$defs", "definitions", "$
 /// same way.
 const STRICT_LITERAL_KEYS: &[&str] = &["enum", "const", "default", "examples", "example"];
 
+/// Prepare a complete active tool set for DeepSeek strict function-calling.
+///
+/// Each tool is evaluated independently: compatible schemas are sanitized and
+/// marked strict, while incompatible schemas remain unchanged and non-strict.
+/// Optional properties removed to satisfy the strict contract are reported in
+/// the tool description so the model knows not to send them. Returns `true`
+/// only when every tool in the set can use strict mode.
+///
+/// Incompatible includes schemas the documented strict subset cannot
+/// represent faithfully: root alternatives, required nullables (`nullable`
+/// or a null-type union branch — `sanitize` collapses the common `X | null`
+/// union into `nullable: true`, so the keyword is how a required nullable
+/// survives to the gate), null-carrying `type` arrays / `const` / `enum`
+/// members, structural or conditional keywords outside the documented subset
+/// (the same family the Moonshot MFJS path fails closed on), a null `const`
+/// or schema-form `dependencies` table (stripped before the gate could see
+/// them), a non-object schema in a property/definition position (a draft-6
+/// boolean schema — `false` is actively tightening — an array, or any other
+/// non-map junk), and a removal that would leave the tool callable only with
+/// an empty object — an all-optional root, or a nested object whose every
+/// property was optional. Such a tool keeps its original schema and ships
+/// non-strict rather than carrying an undocumented keyword under a strict
+/// flag or advertising parameters it can no longer accept. The gate runs on
+/// the enforced shape, so a null-carrying shape under an *optional* property
+/// is exempt: the removal already represents it faithfully.
+///
+/// Callers gate this pipeline on official DeepSeek-family routes
+/// (`crate::config::route_is_official_deepseek_family`): the reshaping
+/// follows DeepSeek's strict-mode documents and would strip keywords other
+/// providers document (e.g. `minItems`/`maxItems` on OpenAI).
 pub fn prepare_tools_for_strict_mode(tools: &mut [Tool]) -> bool {
     let mut all_strict = true;
     for tool in tools {
@@ -344,7 +346,7 @@ fn strict_removal_note(removed: &[String], narrowed_maps: usize) -> String {
             note.push(' ');
         }
         note.push_str(&format!(
-            "Extra-key acceptance (`additionalProperties`) was also narrowed to `false` \
+            "Extra-key acceptance (`additionalProperties`) was narrowed to `false` \
              on {narrowed_maps} object schema{} under the strict contract.",
             if narrowed_maps == 1 { "" } else { "s" }
         ));
@@ -737,6 +739,29 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         {
             return true;
         }
+        // An `enum` with no members can match no value: a required
+        // property carrying it accepts nothing and every strict call
+        // would be the documented server error — the same
+        // no-satisfiable-value class the empty-root rules fail closed.
+        if obj
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+        {
+            return true;
+        }
+        // A `const` whose value cannot satisfy the node's declared type
+        // (`{"type": "string", "const": 42}`) makes the property
+        // unsatisfiable — the same no-satisfiable-value class as an empty
+        // `enum`. Only the single-string `type` form is cross-checked: the
+        // array form already fails closed above, and an unknown spelling
+        // is the type junk arm's business.
+        if let (Some(const_value), Some(schema_type)) =
+            (obj.get("const"), obj.get("type").and_then(Value::as_str))
+            && !const_is_compatible_with_type(const_value, schema_type)
+        {
+            return true;
+        }
         // A malformed `anyOf` — a map or scalar instead of the branch
         // array — is likewise a keyword the documents never describe in
         // that shape. (`oneOf`/`allOf` already fail above on presence.)
@@ -960,11 +985,32 @@ fn is_null_type(v: &Value) -> bool {
 /// all (`{}`, annotation-only maps), boolean schemas, literal `null`s, and
 /// arrays are forms the contract never describes — callers fail them
 /// closed rather than ship them verbatim under a strict flag.
+/// Whether `value` can satisfy a schema whose single-string `type` is
+/// `schema_type`. Fails a `const` that can never match its own declared
+/// type closed; unknown spellings are not this check's business — the
+/// type junk arm already fails those closed.
+fn const_is_compatible_with_type(value: &Value, schema_type: &str) -> bool {
+    match schema_type {
+        "string" => value.is_string(),
+        "number" => value.is_number(),
+        "integer" => value.is_i64() || value.is_u64(),
+        "boolean" => value.is_boolean(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        _ => true,
+    }
+}
+
 fn is_schema_shaped_branch(branch: &Value) -> bool {
     match branch {
         Value::Object(obj) => {
+            // No `properties` arm: the enforce pass names `type: "object"`
+            // on every properties-bearing map before this check runs, so a
+            // properties-only branch arrives shaped through its injected
+            // `type`. The arm was deletable with the whole suite green
+            // until the injection existed — the keep-pin below is what
+            // guards that pairing.
             obj.contains_key("type")
-                || obj.contains_key("properties")
                 || obj.contains_key("$ref")
                 || obj.contains_key("enum")
                 || obj.contains_key("const")
@@ -1002,13 +1048,26 @@ fn has_unresolvable_ref(schema: &Value, root: &Value) -> bool {
         }
     }
     for (key, value) in obj {
-        match key.as_str() {
-            key if STRICT_LITERAL_KEYS.contains(&key) => {}
-            _ => {
-                if has_unresolvable_ref(value, root) {
+        if STRICT_NAME_MAP_KEYS.contains(&key.as_str()) {
+            // Name maps hold schemas keyed by author-chosen names: a
+            // property or definition named `default` is a schema whose
+            // `$ref` must resolve, not literal data. The literal skip once
+            // fired at this name position too and let a dangling reference
+            // ship under a strict flag — the round-8 bug class, recurred
+            // in the newest walker.
+            if let Some(named_schemas) = value.as_object() {
+                if named_schemas
+                    .values()
+                    .any(|named_schema| has_unresolvable_ref(named_schema, root))
+                {
                     return true;
                 }
             }
+        } else if STRICT_LITERAL_KEYS.contains(&key.as_str()) {
+            // Literal-keyword values are data: an enum member shaped like a
+            // `{"$ref": …}` object is a value to ship, not a reference.
+        } else if has_unresolvable_ref(value, root) {
+            return true;
         }
     }
     false
@@ -2791,7 +2850,7 @@ mod tests {
         assert!(
             tools[0]
                 .description
-                .contains("Extra-key acceptance (`additionalProperties`) was also narrowed"),
+                .contains("Extra-key acceptance (`additionalProperties`) was narrowed"),
             "the narrowing is disclosed: {}",
             tools[0].description
         );
@@ -2863,7 +2922,7 @@ mod tests {
         assert!(
             required[0]
                 .description
-                .contains("Extra-key acceptance (`additionalProperties`) was also narrowed"),
+                .contains("Extra-key acceptance (`additionalProperties`) was narrowed"),
             "the same narrowing under a required property ships and is disclosed: {}",
             required[0].description
         );
@@ -4761,6 +4820,119 @@ mod tests {
             );
             assert_eq!(tool.strict, None, "{name} must ship no strict flag");
         }
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_keyword_named_property_ref() {
+        // A property or definition NAMED after a literal keyword is a
+        // schema, not literal data: its `$ref` must resolve like any
+        // other. The literal-key skip once fired at the name position and
+        // shipped a dangling reference under a strict flag — the round-8
+        // walker-alignment class, recurred in the newest walker.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"default": {"$ref": "#/nowhere"}},
+                "required": ["default"]
+            }),
+        );
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"],
+                "$defs": {"const": {"$ref": "#/nowhere"}}
+            }),
+        );
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_an_empty_enum() {
+        // `enum: []` matches nothing: a required property carrying it
+        // accepts no value and every strict call would be the documented
+        // server error — the same no-satisfiable-value class the
+        // empty-root rules fail closed. It once shipped verbatim.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"mode": {"type": "string", "enum": []}},
+                "required": ["mode"]
+            }),
+        );
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_const_conflicting_with_its_type() {
+        // `{"type": "string", "const": 42}` can never match: the property
+        // is unsatisfiable, the same no-satisfiable-value class as an
+        // empty `enum`. The numeric const once stayed put regardless of
+        // the declared type.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string", "const": 42}},
+                "required": ["id"]
+            }),
+        );
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+        // Keep-side: a const that satisfies its declared type keeps
+        // shipping — the documented numeric-const rule is untouched.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "integer", "const": 42}},
+                "required": ["id"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_properties_only_anyof_branch() {
+        // A branch shaped only by `properties` is an object schema in
+        // effect: the enforce pass names `type: "object"` on it and the
+        // branch-shape check admits the typed result. (That check's
+        // `properties` arm used to decide this and had no fixture — it
+        // could be deleted with the whole suite green; the injection now
+        // decides it, and this pin guards the pairing.)
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"mode": {"anyOf": [
+                    {"properties": {"kind": {"type": "string"}}, "required": ["kind"]},
+                    {"type": "string"}
+                ]}},
+                "required": ["mode"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
     }
 }
 
