@@ -209,7 +209,8 @@ test('authorization release gate classifies every HTTP task event callback and C
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
   // The existing complete graph includes the reconciliation repair-context GET.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 417, tasks: 32, events: 18, cli: 28 });
+  // Complete combined graph; keep the real fail-closed discovery checker.
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 419, tasks: 32, events: 18, cli: 28 });
 });
 
 test('existing grant inventory CLI retains its bounded read-only Account identity', async () => {

@@ -232,7 +232,10 @@ const expectedProtocolHashes = {
   // 抑制臂载荷文本漂移。此钉=当前 head 实算值。
   // 合并 main fb01c48b6 重钉：main 侧 Account lifecycle receipts + 流式发布
   // 载荷改动与本分支 r12 收口批叠加，chat 面哈希=合并树实算值。
-  chat: '1e18e33421ccd708e6cf931c8ad7dadfac332ff2fb0d6c130e251bab5618e105',
+  // Stream bubbles now carry htmlSource for native selection provenance.
+  // This additive local state field is inside the hashed delta listener;
+  // invoke payloads and event names are unchanged.
+  chat: '684b43170fd9f7a311b8f2e7d36270a3662324b5875abb77f7c4de2b2e21fa1d',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
