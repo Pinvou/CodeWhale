@@ -53,6 +53,7 @@ func retainedFinanceRepositoryWithBudgets(t *testing.T, workloadBudget, cleanupB
 		t.Skip("PINVOU_TEST_BILLING_DATABASE_URL is required for actual PostgreSQL")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), workloadBudget)
+	logPackageExpiryPhase(t, ctx, "fixture.context.created")
 	t.Cleanup(cancel)
 	control, err := cifixture.Connect(ctx, raw)
 	if err != nil {
@@ -102,7 +103,9 @@ func retainedFinanceRepositoryWithBudgets(t *testing.T, workloadBudget, cleanupB
 			_, err = c.Exec(ctx, `SET ROLE billing_schema_owner; ALTER SCHEMA public OWNER TO billing_schema_owner; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE,CREATE ON SCHEMA public TO billing_service; SET ROLE billing_service`)
 			if err == nil {
 				done := cifixture.Measure("migration-initialize")
+				logPackageExpiryPhase(t, ctx, "fixture.prefix.up.begin")
 				err = billingschema.Up(ctx, c, loaded)
+				logPackageExpiryPhase(t, ctx, "fixture.prefix.up.end")
 				done()
 			}
 		} else {
@@ -113,11 +116,14 @@ func retainedFinanceRepositoryWithBudgets(t *testing.T, workloadBudget, cleanupB
 			return nil, err
 		}
 		if install {
+			// Installation is complete. Retaining its session lock until fixture cleanup
+			// would prevent an independent migration connection from validating recovery.
 			migrations.Unlock(ctx, c)
 		}
 		return c, nil
 	}
 	database := "retained_finance_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	logPackageExpiryPhase(t, ctx, "fixture.database.create.begin")
 	fixtureDatabase, prepared, err := walletTemplates(t).Create(ctx, control, database, "billing_schema_owner", key, func(ctx context.Context, name string) error {
 		c, err := open(ctx, name, true)
 		if c != nil {
@@ -125,6 +131,7 @@ func retainedFinanceRepositoryWithBudgets(t *testing.T, workloadBudget, cleanupB
 		}
 		return err
 	})
+	logPackageExpiryPhase(t, ctx, "fixture.database.create.returned")
 	if err != nil {
 		control.Close(context.Background())
 		t.Fatal(err)
