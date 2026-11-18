@@ -99,7 +99,7 @@ func TestAuthorizationReadinessDoesNotChangeOrdinaryReadiness(t *testing.T) {
 }
 
 func TestOrdinaryRelayRejectsOtherSourcesBeforeDependencies(t *testing.T) {
-	for _, source := range []string{"token", "ACCOUNT", "account,billing"} {
+	for _, source := range []string{"TOKEN", "ACCOUNT", "account,billing", "token.>"} {
 		err := run(context.Background(), func(key string) string {
 			if key == "EVENT_SOURCE" {
 				return source

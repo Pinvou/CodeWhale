@@ -159,10 +159,13 @@ func completeBillingMigrationContract(t *testing.T, ctx context.Context, r *Post
 		}
 		return value
 	}
-	facts := func() string {
-		return providerHealthTableFacts(t, ctx, r, "wallets", "payment_orders", "payment_transactions", "credit_lots", "entitlement_packages", "entitlement_components", "journal_entries", "ledger_postings", "payment_provider_attempts", "payment_provider_health_observations", "payment_stop_loss_evaluations", "payment_stop_loss_evaluation_members", "payment_provider_controls", "outbox_events")
+	facts := func(phase string) string {
+		logPackageExpiryPhase(t, ctx, phase+".begin")
+		value := providerHealthTableFacts(t, ctx, r, "wallets", "payment_orders", "payment_transactions", "credit_lots", "entitlement_packages", "entitlement_components", "journal_entries", "ledger_postings", "payment_provider_attempts", "payment_provider_health_observations", "payment_stop_loss_evaluations", "payment_stop_loss_evaluation_members", "payment_provider_controls", "outbox_events")
+		logPackageExpiryPhase(t, ctx, phase+".end")
+		return value
 	}
-	beforeLedger, beforeFacts := ledger(), facts()
+	beforeLedger, beforeFacts := ledger(), facts("carrier.facts.pre")
 	// Frozen900003 intentionally DROP/CREATEs billing_no_truncate for each
 	// pending migration. Bind original triggers by original tableOID and name,
 	// preserving enabled state plus full function definition and authority.
@@ -203,7 +206,9 @@ func completeBillingMigrationContract(t *testing.T, ctx context.Context, r *Post
 		}
 	}
 	if product != "" {
+		logPackageExpiryPhase(t, ctx, "carrier.cli.up.begin")
 		output, err := providerHealthCLI(ctx, product, r, "billing_migrator", "up")
+		logPackageExpiryPhase(t, ctx, "carrier.cli.up.returned")
 		var evidence struct {
 			Event          string `json:"event"`
 			Domain         string `json:"domain"`
@@ -226,13 +231,15 @@ func completeBillingMigrationContract(t *testing.T, ctx context.Context, r *Post
 	if _, err = connection.Exec(ctx, `SET ROLE billing_service`); err != nil {
 		t.Fatal(err)
 	}
+	logPackageExpiryPhase(t, ctx, "carrier.api.up.begin")
 	if err = billingschema.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
+	logPackageExpiryPhase(t, ctx, "carrier.api.up.end")
 	if _, err = billingschema.VerifyApplied(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
-	afterLedger, afterFacts, afterAuthority := ledger(), facts(), authority()
+	afterLedger, afterFacts, afterAuthority := ledger(), facts("carrier.facts.post"), authority()
 	if afterAuthority != beforeAuthority {
 		var beforeParts, afterParts []json.RawMessage
 		if json.Unmarshal([]byte(beforeAuthority), &beforeParts) != nil || json.Unmarshal([]byte(afterAuthority), &afterParts) != nil {
