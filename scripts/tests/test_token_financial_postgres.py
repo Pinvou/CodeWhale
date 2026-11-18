@@ -23,6 +23,10 @@ EXPECTED_SCHEMA_ROOTS = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePay
 EXPECTED_SCHEMA_EXPIRY_ROOT = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
 EXPECTED_SCHEMA_ROOT_COUNT = 16
 
+# Fixed identities independently checked against each actual -run selector.
+EXPECTED_SCHEMA_ROOTS = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestBillingManualAdjustmentProofRollbackPostgres"}
+EXPECTED_SCHEMA_EXPIRY_ROOT = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
+
 
 CHECKPOINT_LEAF_ROOTS = {
     "TestRegistrationBonusEligibilityCheckpointPostgresIntegration",
@@ -127,13 +131,6 @@ class PostgresQuiescenceTests(unittest.TestCase):
 
 
 class FinancialPostgresRunnerTests(unittest.TestCase):
-    def test_each_phase_rejects_zero_or_skipped_required_tests(self):
-        for phase in ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"]:
-            for option in ["empty_phase", "skipped_phase"]:
-                with self.subTest(phase=phase, option=option), self.assertRaises(RuntimeError):
-                    self.run_main_fixture(**{option: phase})
-                self.assertEqual(self.fixture_phases[-1], phase)
-
 
     def test_adjustment_proof_rollback_requires_empty_and_retained_public_entries(self):
         root = "TestBillingManualAdjustmentProofRollbackPostgres"
@@ -431,11 +428,12 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
-    def test_token_public_upgrade_phase_requires_retained_pre_cleanup_stage(self):
+    def test_token_public_upgrade_phase_requires_retained_cleanup_and_publication_stages(self):
         root = "TestManagementPublicMigrationInstallation"
         self.assertEqual(RUNNER.TOKEN_SCHEMA_REQUIRED, {root})
         self.assertIn("installed-pre-dispatch-index-40-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
         self.assertIn("installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip", RUNNER.EXACT_REQUIRED_CHILDREN[root])
+        self.assertIn("installed-pre-publication-41-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
         self.run_main_fixture()
         index = self.fixture_phases.index("owner-token-schema")
         command = self.fixture_commands[index]
@@ -1740,7 +1738,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     package = RUNNER.SCHEMA_PACKAGE
                     self.assertFalse(state["bootstrapped"])
                     state["schema_done"] = True
-                    state["schema_phase"] = phase
+                    state["schema_phase"] = state["schema_pending_observation"] = phase
                 else:
                     phase, required, package = "retained-billing", RUNNER.billing_roots(group), RUNNER.BILLING_PACKAGE
                     self.assertTrue(state["bootstrapped"])
@@ -1950,6 +1948,14 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             ("retained-token", "./internal/token"), ("retained-billing", "./internal/billing"),
         ):
             self.assertEqual(self.fixture_commands[self.fixture_phases.index(phase)][-1], package)
+        self.assertEqual(self.fixture_commands[0][-1], "./internal/account")
+        self.assertEqual(self.fixture_commands[2][-1], "./internal/billingschema")
+        self.assertEqual(self.fixture_commands[3][-1], "./internal/billingschema")
+        self.assertEqual(self.fixture_commands[4][-1], "./internal/tokenschema")
+        self.assertEqual(self.fixture_commands[5][-1], "./internal/token")
+        self.assertEqual(self.fixture_commands[6][-1], "./internal/account")
+        self.assertEqual(self.fixture_commands[7][-1], "./internal/token")
+        self.assertEqual(self.fixture_commands[8][-1], "./internal/billing")
 
     def test_schema_restoration_is_required_between_batches_and_before_later_phases(self):
         # Restored review pin (lane L-2477-C): the merge-up dropped the
@@ -2342,6 +2348,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 self.assertEqual(selected[0] | selected[1], EXPECTED_SCHEMA_ROOTS)
                 self.assertEqual(sum(map(len, selected)), len(EXPECTED_SCHEMA_ROOTS))
                 self.assertLess(self.fixture_phases.index("owner-schema-legacy-expiry"), self.fixture_phases.index("owner-schema"))
+                self.assertEqual(self.fixture_schema_observations, ["owner-schema-legacy-expiry", "owner-schema"])
 
     def test_each_schema_phase_requires_evidence_and_restoration_before_next_phase(self):
         for group in ("owners", "all"):
@@ -2355,7 +2362,9 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                         self.run_main_fixture(group=group, **{option: phase})
                     self.assertEqual(self.fixture_phases, expected)
                     self.assertEqual(self.fixture_writes, [])
+                    self.assertEqual(self.fixture_schema_observations, expected[2:])
 
+    def test_each_phase_rejects_zero_or_skipped_required_tests(self):
         for phase in ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"]:
             for option in ["empty_phase", "skipped_phase"]:
                 with self.subTest(phase=phase, option=option), self.assertRaises(RuntimeError):

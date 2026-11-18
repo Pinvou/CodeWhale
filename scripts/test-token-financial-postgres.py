@@ -464,8 +464,11 @@ EXACT_REQUIRED_CHILDREN = {
         "installed-pre-cleanup-39-upgrade",
         "installed-pre-governance-index-40-upgrade",
         "installed-pre-governance-index-40-upgrade/governance-index-public-cli-rollback",
+        "installed-governance-before-dispatch-40-upgrade",
+        "installed-governance-before-dispatch-40-upgrade/dispatch-index-public-cli-round-trip",
         "installed-pre-dispatch-index-40-upgrade",
         "installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip",
+        "installed-pre-publication-41-upgrade",
     },
     "TestUserUnusedIntentCancellationOwnerPostgres": {
         "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",

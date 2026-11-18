@@ -186,6 +186,7 @@ function runGoGateFixture(prefix, run, directory) {
 
 const auditPGStepName = "Audit export finite PostgreSQL rollback and persisted boundaries";
 const existingBrokerStepName = "Existing broker compatibility on owned PostgreSQL and TLS NATS";
+const tokenOutboxStepName = "Token outbox publication on owned PostgreSQL and TLS NATS";
 const pgPreflightStepName = "Verify account CI PostgreSQL service isolation";
 const pgStopStepName = "Stop owned temporary PostgreSQL services";
 
@@ -597,7 +598,7 @@ function assertFiniteAuditPGSetup(job) {
     "          python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py",
     "          python3 scripts/account-ci-postgres.py --profile core",
   ].join("\n"));
-  for (const name of [existingBrokerStepName, auditPGStepName]) {
+  for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName]) {
     assert.ok(text.indexOf(preflight) < text.indexOf(namedStep(text, name)),
       `service identity verification must precede ${name}`);
   }
@@ -624,7 +625,7 @@ function assertFiniteAuditPGSetup(job) {
     "        run: |",
     "          python3 scripts/account-ci-postgres.py --profile core --stop-owned-services",
   ].join("\n"));
-  for (const name of [existingBrokerStepName, auditPGStepName]) {
+  for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName]) {
     assert.ok(text.indexOf(namedStep(text, name)) < text.indexOf(stop), "stop must follow database consumers");
   }
   let outsidePGSteps = text.replace(pg, "").replace(preflight, "").replace(stop, "");
@@ -649,6 +650,24 @@ function assertFiniteAuditPGSetup(job) {
     "          npm --prefix account-platform run test:existing-broker",
   ].join("\n"));
   outsidePGSteps = outsidePGSteps.replace(existingBroker, "");
+  const tokenOutbox = namedStep(text, tokenOutboxStepName);
+  assert.equal(tokenOutbox.trimEnd(), [
+    `      - name: ${tokenOutboxStepName}`,
+    "        timeout-minutes: 4", "        shell: bash", "        env:",
+    "          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}",
+    ...pgIdentityEnvironment("broker").map(value => `          ${value}`),
+    "          PINVOU_TEST_NATS_SERVER_BINARY: ${{ runner.temp }}/pinvou-test-nats-server",
+    "        run: |", "          set -euo pipefail",
+    "          # Reuse only the preceding step's pinned executable; the test starts",
+    "          # its own TLS broker and applies public Token migrations. The shared",
+    "          # supervisor owns the complete Python/Go/NATS process tree, including",
+    "          # panic, timeout and cancellation; always-run ledger recovery verifies it.",
+    "          python3 -m unittest discover -s scripts/tests -p test_token_outbox_acceptance.py",
+    '          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/token-outbox-process.json" -- npm --prefix account-platform run test:token-outbox',
+  ].join("\n"));
+  assert.ok(text.indexOf(existingBroker) < text.indexOf(tokenOutbox),
+    "Token outbox must follow the pinned NATS executable verification");
+  outsidePGSteps = outsidePGSteps.replace(tokenOutbox, "");
 
   assert.doesNotMatch(outsidePGSteps, /DATABASE_URL|DATABASE_PROFILE|F17_TEST_|PINVOU_ACCOUNT_CI_PG_|ACCOUNT_CI_SERVICES|ACCOUNT_FINANCIAL_SERVICES/);
   const defaultStep = namedStep(job, goStepName);
@@ -1184,12 +1203,12 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     // original suffix), which would make rejection pass for duplicated steps.
     const mutated = job.replace(step, () => changed);
     assert.equal(namedStep(mutated, name), changed, "mutation must preserve the literal step payload");
-    for (const required of [pgPreflightStepName, auditPGStepName, existingBrokerStepName]) {
+    for (const required of [pgPreflightStepName, auditPGStepName, existingBrokerStepName, tokenOutboxStepName]) {
       namedStep(mutated, required); // Missing/duplicate steps cannot satisfy a negative control.
     }
     assert.throws(() => assertFiniteAuditPGSetup(mutated), expected);
   };
-  for (const [name, service] of [[auditPGStepName, "audit"], [existingBrokerStepName, "broker"]]) {
+  for (const [name, service] of [[auditPGStepName, "audit"], [existingBrokerStepName, "broker"], [tokenOutboxStepName, "broker"]]) {
     const step = namedStep(job, name);
     const miswired = step.replace(`outputs.${service}_url`, "outputs.unrelated_url");
     assert.notEqual(miswired, step, "URL mutation must hit the selected consumer");
@@ -1204,6 +1223,20 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
       step.replace("        run:", () => "        if: ${{ false }}\n        run:"),
       name === auditPGStepName ? /finite audit PostgreSQL gate must execute unconditionally/ : undefined);
   }
+  const tokenOutbox = namedStep(job, tokenOutboxStepName);
+  for (const [before, after] of [
+    ["timeout-minutes: 4", "timeout-minutes: 40"],
+    ["${{ runner.temp }}/pinvou-test-nats-server", "/unverified/nats-server"],
+    ["python3 -m unittest discover -s scripts/tests -p test_token_outbox_acceptance.py", "true"],
+    ["npm --prefix account-platform run test:token-outbox", "npm --prefix account-platform run test:token-outbox || true"],
+    ['python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/token-outbox-process.json" -- ', ""],
+  ]) {
+    rejectStepMutation(tokenOutboxStepName, tokenOutbox, tokenOutbox.replace(before, () => after));
+  }
+  assert.throws(() => assertFiniteAuditPGSetup(job.replace(tokenOutbox, "")));
+  const existingBroker = namedStep(job, existingBrokerStepName);
+  const earlyTokenOutbox = job.replace(tokenOutbox, "").replace(existingBroker, () => tokenOutbox + existingBroker);
+  assert.throws(() => assertFiniteAuditPGSetup(earlyTokenOutbox), /Token outbox must follow/);
   const preflight = namedStep(job, pgPreflightStepName);
   assert.throws(() => assertFiniteAuditPGSetup(job.replace(preflight, "")));
   rejectStepMutation(pgPreflightStepName, preflight,

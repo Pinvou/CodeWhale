@@ -166,7 +166,13 @@ export function checkGovernedHelmResources(items) {
     check((spec.volumes || []).some(volume => volume.projected?.sources?.some(source => source.serviceAccountToken?.audience)), 'workload_identity_missing');
     checkNetworkPolicies(items, item);
   }
-  check(!deployments.some(item => component(item) === 'token-event-relay'), 'retired_ordinary_relay');
+  const tokenRelays = deployments.filter(item => component(item) === 'token-event-relay');
+  check(tokenRelays.length <= 1, 'workload_missing_or_duplicate');
+  if (tokenRelays.length) {
+    const spec = tokenRelays[0].spec.template.spec, value = env(spec.containers[0]);
+    check(value.EVENT_SOURCE === 'token' && value.NATS_URL === eenv.NATS_URL
+      && spec.containers[0].readinessProbe?.httpGet?.path === '/health/ready', 'token_relay_config');
+  }
   const nats = [get('account-service'), get('billing-service'), gateway, get('account-event-relay'), get('billing-event-relay'), executor].map(item => env(item.spec.template.spec.containers[0]));
   check(/^tls:\/\//.test(eenv.NATS_URL) && nats.every(value => value.NATS_URL && value.NATS_URL === eenv.NATS_URL && value.NATS_CREDENTIALS_FILE), 'event_cluster_or_credentials_mismatch');
   const jobs = items.filter(item => item?.kind === 'Job' && component(item) === 'token-governance-check');
