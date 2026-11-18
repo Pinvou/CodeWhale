@@ -296,6 +296,22 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
+  {
+    const receipt = namedStep(jobBlock("fast-gate", text), "Gate test resource lifecycle receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Gate test resource lifecycle receipts",
+      "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: gate-resource-lifecycle-${{ github.run_attempt }}",
+      "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+      "          if-no-files-found: error",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
   for (const [job, name, id, artifact] of [
     ["frontend-test", "Test resource lifecycle receipts", "frontend_receipts_upload", "frontend-resource-lifecycle-${{ github.run_attempt }}"],
     ["frontend-browser-test", "Browser shard resource lifecycle receipts", "browser_receipts_upload", "frontend-browser-${{ matrix.shard }}-resource-lifecycle-${{ github.run_attempt }}"],
@@ -471,6 +487,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     original.replace("  frontend-test:\n", '  frontend-test:\n    ? continue-on-error # label\n    : true\n'),
   ];
   for (const [jobName, stepName] of [
+    ["fast-gate", "Gate test resource lifecycle receipts"],
     ["frontend-test", "Test resource lifecycle receipts"],
     ["frontend-browser-test", "Browser shard resource lifecycle receipts"],
     ["account-platform-test", "Account test resource lifecycle receipts"],
@@ -497,6 +514,24 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     ]) {
       mutants.push(withoutReceiptExemption.replace(receipt.replace("        continue-on-error: true\n", ""),
         `${receipt.replace("        continue-on-error: true\n", "")}      - ${first}\n${rest}        continue-on-error: true\n`));
+    }
+  }
+  const gateReceipt = namedStep(jobBlock("fast-gate", original), "Gate test resource lifecycle receipts");
+  for (const [old, replacement] of [
+    ["if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", "if: always()"],
+    ["${{ env.PINVOU_CI_RESOURCE_LEDGER }}/", "${{ github.workspace }}/**/*"],
+    ["retention-days: 7", "retention-days: 30"],
+    ["        uses: actions/upload-artifact@v7", "        env:\n          UNREVIEWED: yes\n        uses: actions/upload-artifact@v7"],
+  ]) mutants.push(original.replace(gateReceipt, gateReceipt.replace(old, replacement)));
+  mutants.push(original.replace(gateReceipt, gateReceipt + gateReceipt));
+  const frontendForGate = namedStep(jobBlock("frontend-test", original), "Test resource lifecycle receipts");
+  mutants.push(original.replace(gateReceipt, "").replace(frontendForGate, frontendForGate + gateReceipt));
+  const withoutGateExemption = original.replace(gateReceipt, gateReceipt.replace("        continue-on-error: true\n", ""));
+  for (const name of ["Gate policy test suite (scripts/tests)", "Confirm gate test resource retirement"]) {
+    const mandatory = namedStep(jobBlock("fast-gate", original), name);
+    for (const variant of [original, withoutGateExemption]) {
+      mutants.push(variant.replace(mandatory, mandatory.replace("      - name: " + name + "\n",
+        "      - name: " + name + "\n        continue-on-error: true\n")));
     }
   }
   const releaseReceipt = namedStep(jobBlock("release-contract-test", original), "Preserve Windows release contract process receipts");
