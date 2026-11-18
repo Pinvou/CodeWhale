@@ -117,6 +117,9 @@ function pinvouSharedtauriMain() {
       startupLoading: true,
       startupReady: null,
       error: null,
+      // 加载成功即取代既有结局：同步清掉陈旧的「已取消下载」中性提示，
+      // 否则先取消后（自动）加载成功的界面会复现早已过期的取消文案。
+      cancelled: false,
     });
     notify();
     try {
@@ -434,6 +437,7 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
       status: null,       // kb_model_status 返回 { installed, ready, loading, downloading, ... }
       progress: null,     // kb_model:progress 事件 { stage:'download'|'verify'|'prepare'|'done', downloaded, total, ready }
       error: null,
+      cancelled: false,   // 最近一次下载被用户取消（中性态，与 error 互斥）
     },
     scheduledTasks: [],
     selectedScheduledTaskId: null,
@@ -2387,6 +2391,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var appendVoiceText = voiceFeature.appendVoiceText;
   var knowledgeModelFeature = installBridgeFeature("knowledge-model", { state: state, notify: notify, invoke: invoke, listen: listen });
   var downloadKbModel = knowledgeModelFeature.downloadKbModel;
+  var cancelKbModel = knowledgeModelFeature.cancelKbModel;
 
   const projectsFeature = installBridgeFeature("projects", { state, notify, invoke, listen });
   const loadProjects = projectsFeature.loadProjects;
@@ -2654,6 +2659,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
     knowledge: {
       loadKnowledgeEmbedderAfterFirstFrame,
       downloadKbModel,
+      cancelKbModel,
       mountCollection,
       setCollectionEnabled,
       removeCollection,

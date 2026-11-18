@@ -5,6 +5,20 @@ import (
 	"time"
 )
 
+func TestProfileRevocationCapacityConfiguration(t *testing.T) {
+	for _, raw := range []string{"0", "-1", "1000001", "9999999999999999999999999", "invalid"} {
+		if _, err := configuredProfileRevocationCapacity(raw); err == nil {
+			t.Fatalf("invalid receipt capacity accepted %s", raw)
+		}
+	}
+	for raw, expected := range map[string]int{"": 4096, "1": 1, " 4096 ": 4096, "1000000": 1000000} {
+		actual, err := configuredProfileRevocationCapacity(raw)
+		if err != nil || actual != expected {
+			t.Fatalf("capacity=%d expected=%d err=%v", actual, expected, err)
+		}
+	}
+}
+
 func TestWalletSLAConfigurationRejectsOverflowBeforeMultiplication(t *testing.T) {
 	for _, raw := range []string{"307445750", "1441", "0", "-1", "not-an-integer"} {
 		if _, err := configuredWalletSLA(raw); err == nil {

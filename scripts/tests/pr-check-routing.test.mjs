@@ -279,6 +279,22 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
+  {
+    const receipt = namedStep(jobBlock("windows-relay-tools-test", text), "Preserve Windows relay tools process receipt");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Preserve Windows relay tools process receipt",
+      "        if: always()",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: ${{ runner.temp }}/windows-relay-tools-process.json",
+      "          if-no-files-found: warn",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
   for (const [job, name, id, artifact] of [
     ["frontend-test", "Test resource lifecycle receipts", "frontend_receipts_upload", "frontend-resource-lifecycle-${{ github.run_attempt }}"],
     ["frontend-browser-test", "Browser shard resource lifecycle receipts", "browser_receipts_upload", "frontend-browser-${{ matrix.shard }}-resource-lifecycle-${{ github.run_attempt }}"],
@@ -358,24 +374,45 @@ function assertWorkflowFailurePolicy(workflowText) {
     remainder = remainder.replace(receipt, "");
   }
   {
-    const receipt = namedStep(jobBlock("release-contract-test", text), "保留 Windows 发布进程原始回执");
+    const receipt = namedStep(jobBlock("windows-rust-test", text), "Windows atomic lifecycle receipts");
     assert.equal(receipt.trimEnd(), [
-      "      - name: 保留 Windows 发布进程原始回执",
-      "        if: ${{ always() && runner.os == 'Windows' }}",
-      "        continue-on-error: true",
+      "      - name: Windows atomic lifecycle receipts",
+      "        id: windows_atomic_receipts_upload",
+      "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
       "        timeout-minutes: 3",
+      "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
       "        with:",
-      "          name: remote-release-process-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/atomic-expected.txt",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/ledger.txt",
+      "          if-no-files-found: error",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
+    const receipt = namedStep(jobBlock("release-contract-test", text), "Preserve Windows release contract process receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Preserve Windows release contract process receipts",
+      "        id: windows_release_contract_receipts",
+      "        if: ${{ always() && runner.os == 'Windows' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}",
       "          path: |",
       "            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json",
-      "            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/",
+      "            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json",
       "            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json",
-      "            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/",
+      "            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json",
       "            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json",
-      "            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/",
-      "          retention-days: 7",
+      "            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json",
       "          if-no-files-found: warn",
+      "          retention-days: 7",
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
@@ -426,9 +463,13 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   const original = workflow.replaceAll("\r\n", "\n");
   assertWorkflowFailurePolicy(original);
   const windows = namedStep(jobBlock("windows-rust-test", original), "Windows 测试二进制导入诊断");
+  const relayReceipt = namedStep(jobBlock("windows-relay-tools-test", original), "Preserve Windows relay tools process receipt");
   const withoutWindowsExemption = original.replace(windows,
     windows.replace("        continue-on-error: true\n", ""));
   const mutants = [
+    original.replace(relayReceipt, relayReceipt.replace("windows-relay-tools-process.json", "other-process.json")),
+    original.replace("      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n",
+      "      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n        continue-on-error: true\n"),
     original.replace("  frontend-test:\n", "  frontend-test:\n    continue-on-error: true\n"),
     original.replace("  frontend-test:\n", "  frontend-test:\n    'continue-on-error': true\n"),
     original.replace("  windows-rust-test:\n", "  windows-rust-test:\n    continue-on-error: true\n"),
@@ -455,7 +496,9 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     ["account-closure-test", "Account closure resource lifecycle receipts"],
     ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
     ["windows-codex-runtime-test", "Preserve ACP fixture exit receipt"],
-    ["release-contract-test", "保留 Windows 发布进程原始回执"],
+    ["windows-rust-test", "Windows atomic lifecycle receipts"],
+    ["windows-relay-tools-test", "Preserve Windows relay tools process receipt"],
+    ["release-contract-test", "Preserve Windows release contract process receipts"],
     ["relay-test", "保留 Relay 进程作用域原始回执"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
@@ -475,6 +518,43 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
       mutants.push(withoutReceiptExemption.replace(receipt.replace("        continue-on-error: true\n", ""),
         `${receipt.replace("        continue-on-error: true\n", "")}      - ${first}\n${rest}        continue-on-error: true\n`));
     }
+  }
+  const releaseReceipt = namedStep(jobBlock("release-contract-test", original), "Preserve Windows release contract process receipts");
+  for (const [old, replacement] of [
+    ["if: ${{ always() && runner.os == 'Windows' }}", "if: always()"],
+    ["${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json", "${{ runner.temp }}/**/*"],
+    ["retention-days: 7", "retention-days: 30"],
+  ]) mutants.push(original.replace(releaseReceipt, releaseReceipt.replace(old, replacement)));
+  mutants.push(original.replace(releaseReceipt, releaseReceipt + releaseReceipt));
+  const withoutReleaseExemption = original.replace(releaseReceipt, releaseReceipt.replace("        continue-on-error: true\n", ""));
+  for (const name of ["Windows 原生命令退出码回归", "Windows 远控发布与安全契约", "Windows 共享进程监督器兼容回归"]) {
+    const mandatory = namedStep(jobBlock("release-contract-test", original), name);
+    for (const variant of [original, withoutReleaseExemption]) {
+      mutants.push(variant.replace(mandatory, mandatory.replace("      - name: " + name + "\n", "      - name: " + name + "\n        continue-on-error: true\n")));
+    }
+  }
+  const atomicReceipt = namedStep(jobBlock("windows-rust-test", original), "Windows atomic lifecycle receipts");
+  for (const [old, replacement] of [
+    ["id: windows_atomic_receipts_upload", "id: unreviewed_upload"],
+    ["if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", "if: always()"],
+    ["${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json", "${{ github.workspace }}/**/*"],
+    ["retention-days: 7", "retention-days: 30"],
+    ["name: Windows atomic lifecycle receipts", "name: Unreviewed transport"],
+    ["        uses: actions/upload-artifact@v7", "        env:\n          UNREVIEWED: yes\n        uses: actions/upload-artifact@v7"],
+  ]) {
+    mutants.push(original.replace(atomicReceipt, atomicReceipt.replace(old, replacement)));
+  }
+  mutants.push(original.replace(atomicReceipt, atomicReceipt + atomicReceipt));
+  const frontendReceipt = namedStep(jobBlock("frontend-test", original), "Test resource lifecycle receipts");
+  mutants.push(original.replace(atomicReceipt, "").replace(frontendReceipt, frontendReceipt + atomicReceipt));
+  const withoutAtomicExemption = original.replace(atomicReceipt,
+    atomicReceipt.replace("        continue-on-error: true\n", ""));
+  for (const name of ["Windows 原子替换状态机回归", "Confirm Windows atomic resource retirement"]) {
+    const mandatory = namedStep(jobBlock("windows-rust-test", original), name);
+    mutants.push(original.replace(mandatory,
+      mandatory.replace("      - name: " + name + "\n", "      - name: " + name + "\n        continue-on-error: true\n")));
+    mutants.push(withoutAtomicExemption.replace(mandatory,
+      mandatory.replace("      - name: " + name + "\n", "      - name: " + name + "\n        continue-on-error: true\n")));
   }
   for (const mutant of mutants) {
     assert.notEqual(mutant, original, "the counterexample must change the actual workflow");

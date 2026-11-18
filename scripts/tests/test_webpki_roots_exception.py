@@ -345,8 +345,10 @@ class WebpkiCiContractTests(unittest.TestCase):
                     ('account-closure-test', 'Account closure resource lifecycle receipts'),
                     ('windows-codex-runtime-test', 'Preserve browser fixture exit receipts'),
                     ('windows-codex-runtime-test', 'Preserve ACP fixture exit receipt'),
-                    ('relay-test', '保留 Relay 进程作用域原始回执'),
-                    ('release-contract-test', '保留 Windows 发布进程原始回执')]
+                    ('windows-rust-test', 'Windows atomic lifecycle receipts'),
+                    ('windows-relay-tools-test', 'Preserve Windows relay tools process receipt'),
+                    ('release-contract-test', 'Preserve Windows release contract process receipts'),
+                    ('relay-test', '保留 Relay 进程作用域原始回执')]
         self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed) + len(functional))
         for job, name in functional:
             steps = job_block(workflow, job).split('\n      - ')
@@ -370,6 +372,17 @@ class WebpkiCiContractTests(unittest.TestCase):
             block = job_block(workflow, job)
             self.assertNotRegex(block, r'(?m)^    continue-on-error:')
             for step in block.split('\n      - ')[1:]:
+                if job == 'windows-rust-test' and step.startswith('name: Windows 测试二进制导入诊断\n'):
+                    diagnostic = '\n'.join(line for line in step.splitlines()
+                                           if line.strip() and not line.lstrip().startswith('#'))
+                    self.assertEqual(diagnostic, '\n'.join([
+                        'name: Windows 测试二进制导入诊断',
+                        "        if: ${{ matrix.phase == 'regression' }}",
+                        '        continue-on-error: true',
+                        '        shell: pwsh',
+                        '        run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"',
+                    ]))
+                    continue
                 if 'uses: actions/upload-artifact@v7\n' not in step:
                     self.assertNotIn('\n        continue-on-error:', step)
 
@@ -380,8 +393,11 @@ class WebpkiCiContractTests(unittest.TestCase):
                      'Install financial contract dependencies', 'Verify financial contract Node consumers',
                      'Run isolated financial group', 'Stop owned temporary PostgreSQL services',
                      'Windows browser wrapper lifecycle regression', 'Windows browser wrapper lazy regression',
-                     'Windows ACP bridge runtime smoke', 'Relay 与部署脚本回归',
-                     'Windows 远控发布与安全契约', 'Windows 共享进程监督器兼容回归']:
+                     'Windows ACP bridge runtime smoke', 'Windows 原子替换状态机回归',
+                     'Confirm Windows atomic resource retirement',
+                     'Windows PowerShell 5.1 与实际工具回归（禁止跳过）',
+                     'Relay 与部署脚本回归', 'Windows 远控发布与安全契约',
+                     'Windows 共享进程监督器兼容回归']:
             with self.subTest(step=name), self.assertRaises(AssertionError):
                 self.verify_diagnostic_uploads(workflow.replace(
                     f'      - name: {name}\n', f'      - name: {name}\n        continue-on-error: true\n'))
@@ -389,6 +405,11 @@ class WebpkiCiContractTests(unittest.TestCase):
             self.verify_diagnostic_uploads(workflow.replace(
                 '        timeout-minutes: 3\n        continue-on-error: true\n',
                 '        continue-on-error: true\n', 1))
+        diagnostic_command = 'run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"'
+        mutant = workflow.replace(diagnostic_command, 'run: exit 37')
+        self.assertNotEqual(mutant, workflow)
+        with self.assertRaises(AssertionError):
+            self.verify_diagnostic_uploads(mutant)
 
     def test_diagnostic_upload_actions_are_exactly_reviewed(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')

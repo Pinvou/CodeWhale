@@ -360,12 +360,14 @@ nativeReleaseTest("real output faults retain the primary error through the super
   }
 });
 
-test("missing acknowledgement settles at the first bounded cleanup deadline without close", async () => {
+test("validated primary receipts survive a missing close and bounded diagnostic eviction", async () => {
   // No OS child exists in this fault probe. Only spawn and the clock are
   // controlled; execute the actual runner body, including its unchanged 20s
-  // budget, and never synthesize a child close/retirement acknowledgement.
+  // budget, and never emit close. Even a claimed success receipt cannot
+  // independently establish retirement.
   const key = Symbol.for("pinvou.release.runner.clock.probe");
-  for (const mode of ["timeout", "cancelled"]) {
+  for (const mode of ["timeout", "cancelled", "stdout", "stderr"]) {
+   for (const scenario of ["missing", "primary", "wrong-nonce", "invalid-primary", "incomplete", "success"]) {
     let now = 0, next = 0;
     const timers = new Map();
     const kills = [];
@@ -398,16 +400,49 @@ test("missing acknowledgement settles at the first bounded cleanup deadline with
       const abort = new AbortController();
       const result = module.runReleaseProcess(process.execPath, [], { env, timeoutMs: 1000, signal: abort.signal })
         .then(() => ({ success: true }), (error) => ({ error }));
+      const request = JSON.parse(child.stdin.read().toString());
+      if (scenario !== "missing") {
+        const receipt = { nonce: scenario === "wrong-nonce" ? `other-${request.nonce}` : request.nonce,
+          execution_error: null, exit_code: scenario === "success" ? 0 : 86, forced: scenario !== "success",
+          root_exit_code: scenario === "success" ? 0 : scenario === "invalid-primary" ? 24 : 23,
+          primary_exit_code: scenario === "success" ? null : 23,
+          cleanup_confirmed: scenario === "success", reason: null };
+        const line = "PINVOU_RELEASE_PROCESS " + JSON.stringify(receipt);
+        // A partial JSON document must not become evidence. A complete one
+        // is delivered in two chunks, then evicted from the diagnostic ring.
+        child.stderr.write(line.slice(0, -1));
+        assert.equal(child.stdin.writableEnded, false, "a partial receipt must not be acknowledged");
+        if (scenario !== "incomplete") child.stderr.write(line.slice(-1) + "\n");
+        assert.equal(child.stdin.writableEnded, scenario === "primary" || scenario === "success",
+          "only a complete, fully validated correlated receipt may be acknowledged");
+        if (scenario === "primary") {
+          child.stderr.write("PINVOU_RELEASE_PROCESS " + JSON.stringify({ ...receipt,
+            root_exit_code: 24, primary_exit_code: 24 }) + "\n");
+        }
+      }
+      child.stdout.write(Buffer.alloc(65536, 120));
+      child.stderr.write(Buffer.alloc(65536, 120));
+      child.stderr.write("\n");
       if (mode === "cancelled") abort.abort();
-      clock.advance(mode === "cancelled" ? 20000 : 21000);
+      if (mode === "stdout" || mode === "stderr") child[mode].emit("error", new Error("PRIVATE_DIAGNOSTIC_SENTINEL"));
+      clock.advance(mode === "timeout" ? 21000 : 20000);
       const actual = await Promise.race([result, new Promise((resolve) => setImmediate(() => resolve({ unsettled: true })))]);
       assert.equal(actual.unsettled, undefined, "cleanup cannot depend on a missing close event or a later timeout resetting cancellation");
-      assert.equal(actual.error.code, `release_subgate_${mode}`);
+      const primary = scenario === "primary";
+      assert.equal(actual.error.code, primary ? "release_subgate_failed"
+        : mode === "stdout" || mode === "stderr" ? "release_subgate_output_failed" : `release_subgate_${mode}`,
+      `${mode}/${scenario}`);
+      assert.equal(actual.error.exitCode, primary ? 23 : undefined);
       assert.equal(actual.error.cleanupConfirmed, false);
       assert.equal(actual.error.cleanupError, "release_subgate_cleanup_unconfirmed");
       assert.deepEqual(kills, ["SIGKILL"]);
+      assert.equal(timers.size, 0);
+      assert.doesNotMatch(JSON.stringify(actual.error), /PRIVATE_DIAGNOSTIC_SENTINEL/u);
+      child.emit("close", 0);
+      assert.equal(await result, actual, "a late close must not replace the first failure or confirm cleanup");
       assert.ok(child.stdout.destroyed && child.stderr.destroyed && child.stdin.destroyed);
     } finally { delete globalThis[key]; }
+   }
   }
 });
 
@@ -483,11 +518,17 @@ nativeReleaseTest("a successful root cannot hide an unexpected surviving descend
   });
 });
 
-test("release runner pre-start cancellation and invalid budget launch nothing", async () => {
+test("release runner pre-start validation rejects cancellation, budget and environment", async () => {
   await assert.rejects(runReleaseProcess("does-not-exist", [],
     { env, signal: AbortSignal.abort() }), { code: "release_subgate_cancelled" });
   await assert.rejects(runReleaseProcess("does-not-exist", [], { env, timeoutMs: 0 }),
     { code: "release_subgate_timeout_invalid" });
+  await assert.rejects(runReleaseProcess("does-not-exist", []),
+    { code: "release_subgate_environment_missing" });
+  for (const invalid of [{ key: 1 }, { key: "bad\0value" }, { ["bad\0key"]: "value" }]) {
+    await assert.rejects(runReleaseProcess("does-not-exist", [], { env: invalid }),
+      { code: "release_subgate_environment_invalid" });
+  }
 });
 
 nativeReleaseTest("a missing command reports a bounded start failure without a leaked child", async () => {
