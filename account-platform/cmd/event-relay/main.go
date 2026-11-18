@@ -1,4 +1,4 @@
-// event-relay publishes ordinary Account or Billing events. Only Account has
+// event-relay publishes ordinary Account, Billing or Token events. Only Account has
 // the separately credentialed frozen authorization channel.
 package main
 
@@ -22,7 +22,13 @@ import (
 )
 
 func main() {
-	if handled, err := events.PrepareNATSCredentials(os.Args[1:], "account-event-relay", "billing-event-relay", "account-approval-relay"); handled {
+	if handled, err := events.PrepareNATSSeed(os.Args[1:], "token-event-relay"); handled {
+		if err != nil {
+			os.Exit(1)
+		}
+		return
+	}
+	if handled, err := events.PrepareNATSCredentials(os.Args[1:], "account-event-relay", "billing-event-relay", "token-event-relay", "account-approval-relay"); handled {
 		if err != nil {
 			os.Exit(1)
 		}
@@ -64,15 +70,24 @@ func run(ctx context.Context, environment func(string) string, logger *slog.Logg
 	if source == "" {
 		source = "account"
 	}
-	if source != "account" && source != "billing" {
+	if source != "account" && source != "billing" && source != "token" {
 		return errors.New("ACCOUNT_EVENT_SOURCE_REQUIRED")
 	}
 	setup, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	var store *events.PostgresStore
 	var err error
+	seedFile, credentialsFile := environment("NATS_NKEY_SEED_FILE"), environment("NATS_CREDENTIALS_FILE")
+	var expectedPublicKey string
 	if source == "account" {
 		store, err = events.NewPartitionedPostgresStore(setup, environment("DATABASE_URL"), []string{account.ApprovalAuthorizationEventType})
+	} else if source == "token" {
+		identity := events.NATSAuthorizationArtifactFiles{CurrentFile: environment("TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE"), CurrentSHA256: environment("TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256"), PrivateIdentityFiles: []string{seedFile, credentialsFile}}
+		expectedPublicKey, err = identity.TokenOutboxPublicKey(time.Now().UTC())
+		if err != nil {
+			return errors.New("TOKEN_EVENT_IDENTITY_UNAVAILABLE")
+		}
+		store, err = events.NewOwnedPostgresStore(setup, environment("DATABASE_URL"), "token_schema_owner")
 	} else {
 		store, err = events.NewPostgresStore(setup, environment("DATABASE_URL"))
 	}
@@ -84,7 +99,7 @@ func run(ctx context.Context, environment func(string) string, logger *slog.Logg
 	// environment. The separate operator owns stream creation and drift checks.
 	broker, err := events.NewNATSBroker(setup, environment("NATS_URL"), source+"-outbox-relay", events.NATSConfig{
 		Environment: environment("APP_ENV"), ResourceMode: "provisioned", CAFile: environment("NATS_CA_FILE"),
-		SeedFile: environment("NATS_NKEY_SEED_FILE"), CredentialsFile: environment("NATS_CREDENTIALS_FILE"), RequireExplicitAuthentication: true,
+		SeedFile: seedFile, CredentialsFile: credentialsFile, ExpectedPublicKey: expectedPublicKey, RequireExplicitAuthentication: true,
 	})
 	if err != nil {
 		return errors.New("ACCOUNT_EVENT_BROKER_UNAVAILABLE")

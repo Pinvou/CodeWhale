@@ -1114,6 +1114,16 @@
         "sha256": "fb592617070959c695256e4c91528424f88b476b67e87fb005791f545e98defa"
       },
       {
+        "file": "900019_profile_revocation_receipts.down.sql",
+        "version": 900019,
+        "sha256": "a989827ee3e636805bcd96bca7edf922e513bc7991bf21fdfc21b63f22d3d4d8"
+      },
+      {
+        "file": "900019_profile_revocation_receipts.up.sql",
+        "version": 900019,
+        "sha256": "d17ec559d826ed5ed05f65ca573ab748ca9322551ef4593a252f24b655c72fac"
+      },
+      {
         "file": "900020_outbox_aggregate_lookup.down.sql",
         "version": 900020,
         "sha256": "edb996ce80f4cbbdfd1ac3c6ca87a06ba3086743a5a04e8fa0cb35ee2194752a"
@@ -1142,6 +1152,16 @@
         "file": "900022_approval_unstarted_grants.up.sql",
         "version": 900022,
         "sha256": "bb646987572a659091d293bdf781a39874e82d16aadd8346d9d740da7298fd10"
+      },
+      {
+        "file": "900026_approval_delivery_terminal_recovery.down.sql",
+        "version": 900026,
+        "sha256": "6c27277197eea78b54e959bbf48793cf0dad004f6b1f19336076481b8475660c"
+      },
+      {
+        "file": "900026_approval_delivery_terminal_recovery.up.sql",
+        "version": 900026,
+        "sha256": "aa4dd01995ecc0fe9bcc8ede004404e83ebca986d527131d914663eb189d3860"
       }
     ],
     "billing": [
@@ -2808,6 +2828,16 @@
         "file": "900010_outbox_dead_statistics_index.up.sql",
         "version": 900010,
         "sha256": "1d46d336edc90b8e94b45a41034d68e957e798c3c10e2efaf823433ee11112ff"
+      },
+      {
+        "file": "900011_outbox_publication_generation.down.sql",
+        "version": 900011,
+        "sha256": "bf0f689c2b1fca5c836a53dca77d163d79c4667d6782a0fa12a1b4a797fe9836"
+      },
+      {
+        "file": "900011_outbox_publication_generation.up.sql",
+        "version": 900011,
+        "sha256": "b100fa80e195e33883bcd75053691bc7c405babf67c595566559e04350c51348"
       }
     ]
   }

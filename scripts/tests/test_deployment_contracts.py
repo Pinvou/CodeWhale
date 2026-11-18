@@ -320,6 +320,118 @@ printf 'owned consumer marker\\n' > "$cache/profile-$3"
             with self.assertRaises(RuntimeError):
                 verify_results(logfile.read_text(), {"Required"})
 
+    def test_early_go_failure_survives_later_passing_output_without_exposing_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logfile, payload = root / "managed.jsonl", root / "input.jsonl"
+            secret = "fixture-first-assertion-credential"
+            rows = [
+                {"Action": "output", "Package": "fixture/managed", "Test": "TestRequired/early",
+                 "Output": "fixture.go:23: controlled first assertion " + secret + " postgres://fixture:private@localhost/db\n"},
+                {"Action": "fail", "Package": "fixture/managed", "Test": "TestRequired/early"},
+            ]
+            rows += [{"Action": "output", "Package": "fixture/managed", "Test": "TestLater",
+                      "Output": "later passing output " + "x" * 1000} for _ in range(160)]
+            rows += [{"Action": "pass", "Package": "fixture/managed", "Test": "TestLater"},
+                     {"Action": "fail", "Package": "fixture/managed"}]
+            raw = "\n".join(json.dumps(row) for row in rows) + "\n"
+            payload.write_bytes(raw.encode("utf-8"))
+            program = "from pathlib import Path; import sys; sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes()); sys.exit(9)"
+            errors = io.StringIO()
+            with patch.dict(os.environ, {"DATABASE_PASSWORD": secret}), contextlib.redirect_stderr(errors):
+                with self.assertRaisesRegex(RuntimeError, "deployment contract command failed"):
+                    deployment.run_logged_command([sys.executable, "-c", program, str(payload)], logfile)
+            emitted = errors.getvalue()
+            summaries = [json.loads(line.removeprefix("GO_TEST_FAILURE ")) for line in emitted.splitlines()
+                         if line.startswith("GO_TEST_FAILURE ")]
+            self.assertEqual(len(summaries), 1)
+            self.assertEqual(summaries[0]["Test"], "TestRequired/early")
+            self.assertIn("fixture.go:23: controlled first assertion", summaries[0]["Output"])
+            for value in (secret, "fixture:private", "postgres://"):
+                self.assertNotIn(value, emitted)
+            self.assertIn("CONTRACT_COMMAND_FAILED exit=9", emitted)
+            self.assertLessEqual(len(emitted), 41000)
+            self.assertEqual(logfile.read_bytes(), raw.encode())
+
+    def test_go_failure_summary_is_bounded_and_does_not_parse_partial_oversized_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "managed.jsonl"
+            malformed = '{"Action":"fail","Package":"fixture","Test":"NotACompleteEvent","x":"' + "x" * 100000
+            rows = [json.dumps({"Action": "output", "Package": "fixture", "Test": "Test" + str(i),
+                                "Output": "controlled failure " + "界" * 10000}) + "\n" +
+                    json.dumps({"Action": "fail", "Package": "fixture", "Test": "Test" + str(i)})
+                    for i in range(20)]
+            logfile.write_text(malformed + "\n" + "\n".join(rows), encoding="utf-8")
+            summary = deployment.first_go_failures(logfile)
+            self.assertNotIn("NotACompleteEvent", summary)
+            self.assertIn('"Test": "Test0"', summary)
+            self.assertLessEqual(len(summary.encode("ascii")), 16384)
+            self.assertLessEqual(len(summary.splitlines()), 5)
+
+    def test_go_json_escaped_environment_secret_is_redacted_in_summary_and_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            secret = 'fixture-quoted-"credential\\<&>-界\u2028\u2029'
+            def go_escape(value):
+                return (value.replace("<", r"\u003c").replace(">", r"\u003e").replace("&", r"\u0026")
+                        .replace("\u2028", r"\u2028").replace("\u2029", r"\u2029"))
+            for spelling in ("python-unicode", "python-ascii", "go-html", "nested-go-html"):
+                with self.subTest(spelling=spelling):
+                    logfile, payload = root / "managed.jsonl", root / "input.jsonl"
+                    observation = go_escape(json.dumps({"value": secret}, ensure_ascii=False)) if spelling == "nested-go-html" else secret
+                    rows = [{"Action": "output", "Package": "fixture", "Test": "TestRequired",
+                             "Output": "controlled credential observation " + observation},
+                            {"Action": "fail", "Package": "fixture", "Test": "TestRequired"}]
+                    raw = "\n".join(json.dumps(row, ensure_ascii=spelling == "python-ascii") for row in rows) + "\n"
+                    if spelling in ("go-html", "nested-go-html"):
+                        raw = go_escape(raw)
+                    payload.write_bytes(raw.encode("utf-8"))
+                    program = "from pathlib import Path; import sys; sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes()); sys.exit(3)"
+                    errors = io.StringIO()
+                    with patch.dict(os.environ, {"FIXTURE_TOKEN": secret}), contextlib.redirect_stderr(errors):
+                        with self.assertRaises(RuntimeError):
+                            deployment.run_logged_command([sys.executable, "-c", program, str(payload)], logfile)
+                    emitted = errors.getvalue()
+                    for form in (secret, json.dumps(secret, ensure_ascii=spelling == "python-ascii")[1:-1], "fixture-quoted-"):
+                        self.assertNotIn(form, emitted)
+                    self.assertIn("controlled credential observation", emitted)
+                    self.assertIn("[redacted]", emitted)
+                    self.assertEqual(logfile.read_bytes(), raw.encode("utf-8"))
+
+    def test_go_failure_context_keeps_assertion_after_verbose_test_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "managed.jsonl"
+            rows = [{"Action": "output", "Package": "fixture", "Test": "TestRequired", "Output": output}
+                    for output in ("ordinary verbose output " + "x" * 1600,
+                                   "fixture.go:42: controlled first assertion\n", "--- FAIL: TestRequired\n")]
+            rows.append({"Action": "fail", "Package": "fixture", "Test": "TestRequired"})
+            logfile.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+            summary = json.loads(deployment.first_go_failures(logfile).removeprefix("GO_TEST_FAILURE "))
+            self.assertIn("fixture.go:42: controlled first assertion", summary["Output"])
+
+    def test_failure_context_does_not_reassemble_a_secret_from_go_output_chunks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logfile, payload = root / "managed.jsonl", root / "input.jsonl"
+            secret = "fixture-split-credential-value"
+            rows = [{"Action": "output", "Package": "fixture", "Test": "TestRequired", "Output": part}
+                    for part in (secret[:13], secret[13:])]
+            rows.insert(1, {"Action": "output", "Package": "fixture", "Test": "TestParallel", "Output": "unrelated output"})
+            rows.append({"Action": "fail", "Package": "fixture", "Test": "TestRequired"})
+            raw = "\n".join(json.dumps(row) for row in rows) + "\n"
+            payload.write_bytes(raw.encode("utf-8"))
+            program = "from pathlib import Path; import sys; sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes()); sys.exit(3)"
+            errors = io.StringIO()
+            with patch.dict(os.environ, {"FIXTURE_TOKEN": secret}), contextlib.redirect_stderr(errors):
+                with self.assertRaises(RuntimeError):
+                    deployment.run_logged_command([sys.executable, "-c", program, str(payload)], logfile)
+                summary = json.loads(deployment.first_go_failures(logfile).removeprefix("GO_TEST_FAILURE "))
+            self.assertEqual(summary["Output"], "[redacted]")
+            outputs = [json.loads(line)["Output"] for line in errors.getvalue().splitlines()
+                       if line.startswith("{") and json.loads(line).get("Action") == "output"]
+            self.assertEqual(outputs, ["[redacted]", "unrelated output"])
+            self.assertEqual(logfile.read_bytes(), raw.encode("utf-8"))
+
     def test_truncated_url_cannot_expose_query_credentials_after_its_prefix_is_lost(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

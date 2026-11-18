@@ -35,6 +35,15 @@ func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, 
 	return newPostgresStore(ctx, databaseURL, nil)
 }
 
+// NewOwnedPostgresStore rejects a misrouted outbox before any delivery claim.
+// The expected owner is a compiled integration contract, never a DSN input.
+func NewOwnedPostgresStore(ctx context.Context, databaseURL, expectedOwner string) (*PostgresStore, error) {
+	if expectedOwner == "" {
+		return nil, errors.New("expected outbox schema owner is required")
+	}
+	return openPostgresStore(ctx, databaseURL, nil, expectedOwner)
+}
+
 // NewAccountReplayPostgresStore explicitly selects the restricted Account
 // replay capability. Ordinary relay delivery and generic Billing/Token stores
 // retain their existing constructors and do not acquire a new startup gate.
@@ -73,12 +82,35 @@ func NewPartitionedPostgresStore(ctx context.Context, databaseURL string, exclud
 }
 
 func newPostgresStore(ctx context.Context, databaseURL string, excludedEventTypes []string) (*PostgresStore, error) {
+	return openPostgresStore(ctx, databaseURL, excludedEventTypes, "")
+}
+
+func openPostgresStore(ctx context.Context, databaseURL string, excludedEventTypes []string, expectedOwner string) (*PostgresStore, error) {
 	configuration, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse event store database URL: %w", err)
 	}
 	configuration.MaxConns = 4
 	configuration.MinConns = 1
+	if expectedOwner != "" {
+		// All physical connections use the attested relation; a DSN search_path
+		// cannot redirect the ordinary unqualified delivery queries elsewhere.
+		configuration.AfterConnect = func(ctx context.Context, connection *pgx.Conn) error {
+			if _, err := connection.Exec(ctx, `SET search_path TO pg_catalog,public`); err != nil {
+				return err
+			}
+			var matches bool
+			err := connection.QueryRow(ctx, `SELECT c.relkind IN ('r','p') AND pg_catalog.pg_get_userbyid(c.relowner)=$1
+ AND EXISTS(SELECT 1 FROM pg_catalog.pg_attribute a WHERE a.attrelid=c.oid AND a.attname='publication_generation'
+   AND a.atttypid='pg_catalog.int8'::regtype AND a.attnotnull AND NOT a.attisdropped)
+ FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+ WHERE c.oid=pg_catalog.to_regclass('outbox_events') AND n.nspname='public'`, expectedOwner).Scan(&matches)
+			if err != nil || !matches {
+				return errors.New("outbox schema owner or publication fence does not match the selected source")
+			}
+			return nil
+		}
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, configuration)
 	if err != nil {
 		return nil, fmt.Errorf("open event store: %w", err)

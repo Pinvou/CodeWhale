@@ -93,6 +93,7 @@ import { createPinvouBrowserCoreCatalog } from './browser-core-protocol.mjs';
 
 const log = (...args) => console.error('[browser-wrapper]', ...args);
 const BROWSER_PERF_LOG_ENABLED = process.env.PINVOU3_BROWSER_PERF_LOG === '1';
+const lifecycleDiagnostics = process.env.PINVOU3_BROWSER_LIFECYCLE_DIAGNOSTICS === '1';
 const WINDOWS_TRUSTED_INPUT_WINDOW_MS = 750;
 const WINDOWS_TRUSTED_INPUT_HEARTBEAT_INTERVAL_MS = 250;
 // Fail the cooperative refresh before the current Rust suppression window can
@@ -1177,9 +1178,15 @@ let internalRequestSeq = 0;
 const internalRequests = new Map();
 const discardedInternalRequestIds = new Set();
 const managedToolRequestIds = new Set();
+const queuedManagedProxyRequests = new Set();
 const cancelledProxyRequestIds = new Set();
 const externalToInternalRequestIds = new Map();
 const MANAGED_UPSTREAM_SETTLEMENT_GRACE_MS = 5_000;
+function lifecycleDiagnostic(phase, fields = {}) {
+  if (lifecycleDiagnostics) log('lifecycle-diagnostic', JSON.stringify({
+    phase, monotonic_ms: Math.round(performance.now()), ...fields,
+  }));
+}
 const pageIdToTabToken = new Map();
 const tabTokenToPageId = new Map();
 let runtimePageScopedTools = new Set();
@@ -1227,12 +1234,16 @@ function armManagedUpstreamSettlementDeadline(internalRequestId, pending, reason
   // External cancellation owns the first bounded settlement deadline. A later
   // host-heartbeat failure is a consequence of that same cancellation and
   // must not extend the window by clearing/rearming its timer.
+  lifecycleDiagnostic('settlement-deadline-requested', {
+    already_armed: pending.commitStateUnknown, queued: queuedManagedProxyRequests.size,
+  });
   if (pending.commitStateUnknown) return;
   pending.commitStateUnknown = true;
   pending.settlementReason = reason;
   clearTimeout(pending.timer);
   pending.timer = setTimeout(() => {
     if (internalRequests.get(internalRequestId) !== pending) return;
+    lifecycleDiagnostic('settlement-deadline-fired', { queued: queuedManagedProxyRequests.size });
     log('Managed browser tool did not settle after cooperative cancellation; closing upstream:', reason);
     void gracefulShutdown(1, `${reason}; upstream did not settle`);
   }, MANAGED_UPSTREAM_SETTLEMENT_GRACE_MS);
@@ -1255,6 +1266,11 @@ function signalManagedUpstreamCancellation(externalRequestId, reason) {
 
 function cancelManagedUpstreamRequest(externalRequestId, reason) {
   const internalRequestId = externalToInternalRequestIds.get(externalRequestId);
+  lifecycleDiagnostic('cancel-routing', {
+    mapped: internalRequestId != null,
+    awaiting_real_settlement: internalRequests.get(internalRequestId)?.awaitRealSettlement === true,
+    queued: queuedManagedProxyRequests.size,
+  });
   if (internalRequestId == null) return false;
   const pending = internalRequests.get(internalRequestId);
   // Once begin_agent_operation has succeeded, a cancellation notification is
@@ -1312,8 +1328,14 @@ function queueProxyLine(line) {
     return;
   }
   managedToolRequestIds.add(msg.id);
+  const queuedRequest = { id: msg.id, rejected: false };
+  queuedManagedProxyRequests.add(queuedRequest);
   proxyQueue = proxyQueue
     .then(async () => {
+      // Shutdown can reject work that has never entered routing independently
+      // of the active operation's genuine upstream/host cleanup barrier.
+      if (queuedRequest.rejected) return;
+      queuedManagedProxyRequests.delete(queuedRequest);
       try {
         if (shuttingDown) throw new Error(WRAPPER_SHUTTING_DOWN_ERROR);
         throwIfProxyRequestCancelled(msg.id);
@@ -2528,26 +2550,45 @@ function gracefulShutdown(
   if (shutdownPromise) return shutdownPromise;
   shuttingDown = true;
   state = 'stopping';
-  if (cancelAcceptedRequests) {
-    // A caller disconnect/signal abandons every request already accepted from
-    // stdin before an awaited startup/queue can make further progress.
-    // Internal upstream crashes deliberately do not enter this branch: their
-    // claimed request must still receive the structured commit-unknown result.
-    for (const requestId of hostCoreRequestIds) cancelledIds.add(requestId);
-    for (const raw of bufferedLines.snapshot()) {
-      try {
-        const message = JSON.parse(raw);
-        if (message?.id != null) cancelledIds.add(message.id);
-      } catch {
-        // Malformed buffered input has no executable request identity.
+  lifecycleDiagnostic('shutdown-entered', { queued: queuedManagedProxyRequests.size });
+  // Protocol output can synchronously fail while rejecting queued work and
+  // re-enter shutdown. Publish its one shared barrier before those callbacks.
+  let finishShutdown;
+  let failShutdown;
+  shutdownPromise = new Promise((resolve, reject) => {
+    finishShutdown = resolve;
+    failShutdown = reject;
+  });
+  void (async () => {
+    if (cancelAcceptedRequests) {
+      // A caller disconnect/signal abandons every request already accepted from
+      // stdin before an awaited startup/queue can make further progress.
+      // Internal upstream crashes deliberately do not enter this branch: their
+      // claimed request must still receive the structured commit-unknown result.
+      for (const requestId of hostCoreRequestIds) cancelledIds.add(requestId);
+      for (const raw of bufferedLines.snapshot()) {
+        try {
+          const message = JSON.parse(raw);
+          if (message?.id != null) cancelledIds.add(message.id);
+        } catch {
+          // Malformed buffered input has no executable request identity.
+        }
+      }
+      for (const requestId of managedToolRequestIds) {
+        cancelledProxyRequestIds.add(requestId);
+        cancelManagedUpstreamRequest(requestId, reason);
       }
     }
-    for (const requestId of managedToolRequestIds) {
-      cancelledProxyRequestIds.add(requestId);
-      cancelManagedUpstreamRequest(requestId, reason);
+    for (const queuedRequest of queuedManagedProxyRequests) {
+      queuedRequest.rejected = true;
+      if (!cancelledProxyRequestIds.has(queuedRequest.id)) {
+        respondError(queuedRequest.id, WRAPPER_SHUTTING_DOWN_ERROR);
+      }
+      managedToolRequestIds.delete(queuedRequest.id);
+      cancelledProxyRequestIds.delete(queuedRequest.id);
     }
-  }
-  shutdownPromise = (async () => {
+    queuedManagedProxyRequests.clear();
+    lifecycleDiagnostic('queued-work-rejected');
     if (startPromise) {
       try { await startPromise; } catch { /* startup failure is settled below */ }
     }
@@ -2567,7 +2608,7 @@ function gracefulShutdown(
       console.error('[browser-wrapper] failed to flush protocol stdout:', error);
     }
     process.exit(protocolOutput.failure ? 1 : exitCode);
-  })();
+  })().then(finishShutdown, failShutdown);
   return shutdownPromise;
 }
 

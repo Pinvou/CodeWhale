@@ -2,7 +2,7 @@ import { checkHelmBillingApprovalArtifacts, checkComposeBillingApprovalArtifacts
 import { checkHelmNATSCredentials } from './account-platform-nats-helm-check.mjs';
 import { isMainModule } from './account-platform-cli-entry.mjs';
 import { readFileSync } from 'node:fs';
-import { approvedRender, gateCLI, mountedSource, physicalSourcePath, readSourceFile, requireGate as check, stableJSON } from './account-platform-production-render.mjs';
+import { approvedRender, bytesDigest, gateCLI, mountedSource, physicalSourcePath, readSourceFile, requireGate as check, stableJSON } from './account-platform-production-render.mjs';
 import { checkBusinessMigrations, checkRuntimeDatabases } from './account-platform-business-migrations-check.mjs';
 import { parseReleaseJSON } from './account-platform-model-token-release-plan.mjs';
 import { verifyRenderedKeycloak } from './account-platform-keycloak-helm-check.mjs';
@@ -24,6 +24,7 @@ const receiverTemplates = Object.fromEntries(['account', 'identity', 'billing', 
   JSON.parse(readFileSync(new URL(`../account-platform/deploy/production/workload-${domain}-rules.json.template`, import.meta.url), 'utf8')),
 ]));
 const privateKeys = {
+  'token-event-relay': ['DATABASE_URL'],
   'account-service': ['DATABASE_URL', 'APPROVAL_WRITER_DATABASE_URL', 'WORKLOAD_IDENTITY_RULES_JSON',
     'OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64', 'HUMAN_DELEGATION_SIGNING_KEY_ID', 'HUMAN_DELEGATION_SIGNING_KEY_BASE64URL', 'AUDIT_EXPORT_MASTER_KEY_BASE64',
     'REGISTRATION_QUERY_HMAC_KEY_BASE64', 'REGISTRATION_BONUS_FINGERPRINT_HMAC_KEY_BASE64', 'SMS_VERIFICATION_HMAC_KEY_BASE64',
@@ -54,7 +55,7 @@ const requiredPrivate = {
   'identity-service': ['WORKLOAD_IDENTITY_RULES_JSON', 'IDENTITY_PASSWORD_HMAC_KEY_BASE64', 'AUTH_RISK_HMAC_KEY_BASE64', 'AUTH_RISK_REDIS_URL'],
   'billing-service': ['DATABASE_URL', 'WORKLOAD_IDENTITY_RULES_JSON', 'MANUAL_REVIEW_ON_CALL_USER_IDS',
     'HUMAN_DELEGATION_VERIFICATION_KEYS_JSON', 'BILLING_PAYMENT_PROVIDER'], 'token-portal': ['REDIS_URL'],
-  'account-event-relay': ['DATABASE_URL'], 'billing-event-relay': ['DATABASE_URL'],
+  'account-event-relay': ['DATABASE_URL'], 'billing-event-relay': ['DATABASE_URL'], 'token-event-relay': ['DATABASE_URL'],
 };
 function checkRequiredPrivate(workload, render) {
   const name = workload.kind === 'compose' ? workload.id : workload.service.name;
@@ -118,6 +119,19 @@ function checkRequiredPrivate(workload, render) {
 function checkEnvironment(workload, inventory, render) {
   const env = workload.environment;
   checkRequiredPrivate(workload, render);
+  if (workload.kind === 'helm' && workload.service.name === 'event-relay' && env.EVENT_SOURCE === 'token') {
+    check(/^[a-f0-9]{64}$/.test(env.TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256 || ''), 'token_relay_identity');
+  }
+  if (workload.kind === 'compose' && workload.id === 'token-event-relay') {
+    check(env.EVENT_SOURCE === 'token' && !env.NATS_CREDENTIALS_FILE
+      && env.NATS_NKEY_SEED_FILE === '/run/pinvou/nats/nkey.seed'
+      && env.TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE === '/run/pinvou/token-relay-identities/current.json', 'token_relay_identity');
+    const text = readSourceFile(mountedSource(workload, env.TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE));
+    const identity = parseReleaseJSON(text);
+    check(bytesDigest(Buffer.from(text, 'utf8')) === env.TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256
+      && identity.version === 2 && identity.purpose === 'pinvou-nats-service-identities'
+      && /^U[A-Z2-7]{55}$/.test(identity.public_keys?.['token-outbox-relay'] || ''), 'token_relay_identity');
+  }
   if (workload.kind === 'compose') {
     const source = render.template.services[workload.id], fixed = source.environment || {};
     check(!source.env_file?.length || privateKeys[workload.id] || /-migrate$/.test(workload.id)
@@ -250,13 +264,15 @@ function checkCompose(all, render, inventory) {
         && `${reader.workload}-workload-agent` === writer.workload));
     const approvedPublic = a.target === b.target && ['/run/pinvou/approval-identities', '/run/pinvou/approval-manifest',
       '/run/pinvou/approval-receipt', '/run/pinvou/token-consumer-receipt'].includes(a.target);
+    const tokenPublicIdentity = a.readOnly && b.readOnly && [a.target, b.target].every(target =>
+      ['/run/pinvou/approval-identities', '/run/pinvou/token-relay-identities'].includes(target));
     // Same-principal database mounts are checked against actual pgpass contents by
     // the migration validator; migration credentials can never reach runtime.
     const runtimeDatabase = a.readOnly && b.readOnly && a.target === '/run/pinvou/database'
       && b.target === a.target && ![a.workload, b.workload].some(n => /-migrate$/.test(n));
     const operatorIdentity = a.readOnly && b.readOnly && a.target === '/run/pinvou/nats' && b.target === a.target
       && [a.workload, b.workload].every(n => ['event-resources', 'approval-resources'].includes(n));
-    check(publicCA || projection || approvedPublic || runtimeDatabase || operatorIdentity, 'shared_secret');
+    check(publicCA || projection || approvedPublic || tokenPublicIdentity || runtimeDatabase || operatorIdentity, 'shared_secret');
   }
   checkComposeBillingApprovalArtifacts(render.config);
 }
