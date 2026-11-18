@@ -36674,6 +36674,11 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
         original.len()
     );
     let mut processed = original.clone();
+    // This assert is a direction tripwire, not a invariant of the contract:
+    // it holds because `update_goal`/`send_later`/`agents/*`/`Web` are on
+    // the catalog and fail closed by name. If the catalog ever becomes
+    // fully strict-representable (or those tools leave the surface), this
+    // line inverts — update it deliberately rather than loosening it.
     assert!(
         !crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut processed),
         "the built-in catalog contains tools the strict pipeline fails closed \

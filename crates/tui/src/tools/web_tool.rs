@@ -252,4 +252,43 @@ mod tests {
             .collect();
         assert_eq!(advertised, WebTool::ACTIONS);
     }
+
+    #[test]
+    fn strict_mode_fails_the_web_tool_closed_by_name() {
+        // Every action runtime-requires a parameter the schema marks
+        // optional (`search` a query, `fetch` a `url`, `wait` a `port`),
+        // so after the optional-removal pass the tool would ship
+        // `strict: true` callable only with `action` while the generic
+        // removal note tells the model never to send exactly the values
+        // every action needs — the update_goal/send_later class. The
+        // pipeline fails the tool closed by name
+        // (`STRICT_UNUSABLE_TOOLS`); this census test feeds the real
+        // schema through the pipeline so the list and the schema cannot
+        // drift apart.
+        let tool = WebTool::new("Web");
+        let schema = tool.input_schema();
+        assert_eq!(schema["required"], json!(["action"]));
+        assert!(schema["properties"]["query"].is_object());
+        assert!(schema["properties"]["url"].is_object());
+        assert!(schema["properties"]["port"].is_object());
+        let mut tools = vec![crate::models::Tool {
+            tool_type: None,
+            name: tool.name().to_string(),
+            description: tool.description().to_string(),
+            input_schema: schema.clone(),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }];
+
+        assert!(
+            !crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools),
+            "Web must fail closed, not ship strict with only `action`"
+        );
+        assert_eq!(tools[0].strict, None);
+        assert_eq!(tools[0].input_schema, schema);
+        assert_eq!(tools[0].description, tool.description());
+    }
 }
