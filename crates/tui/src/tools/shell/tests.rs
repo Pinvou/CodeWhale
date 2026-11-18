@@ -2385,6 +2385,59 @@ fn readonly_operand_gate_judges_chained_git_c_cumulatively() {
     );
 }
 
+/// The absolute-glob walker must expand against the canonicalized
+/// LEXICAL prefix, never against the whole literal's canonical form
+/// popped by lexical depth: canonicalizing the literal follows a
+/// wildcard-NAMED symlink, whose target can sit at a different depth
+/// than the spelling, and popping the lexical count off that path
+/// strands the walker in a directory the shell never expands against —
+/// zero matches there pass the gate while the real expansion reads an
+/// outside-resolving sibling (review thread 4600361370).
+#[cfg(unix)]
+#[test]
+fn readonly_operand_gate_judges_the_lexical_glob_expansion_base() {
+    let workspace = tempdir().expect("workspace");
+    let outside = tempdir().expect("outside");
+    // The outside sibling must be a DIRECTORY carrying the glob's tail,
+    // so the shell's real expansion matches it.
+    std::fs::write(outside.path().join("f.txt"), "secret").expect("outside file");
+    // The in-root deep chain the wildcard-named symlink points at, deep
+    // enough that its canonical depth exceeds the lexical depth.
+    let deep = workspace.path().join("deep").join("deeper").join("dir");
+    std::fs::create_dir_all(&deep).expect("in-root deep chain");
+    std::fs::write(deep.join("f.txt"), "inside").expect("deep file");
+    let a = workspace.path().join("a");
+    std::fs::create_dir(&a).expect("lexical prefix dir");
+    // The literal wildcard-named symlink: `x*` resolves deeper than its
+    // lexical depth, which is what used to strand the walker's base.
+    std::os::unix::fs::symlink(&deep, a.join("x*")).expect("wildcard-named symlink");
+    // The outside-resolving sibling the shell's real expansion matches.
+    std::os::unix::fs::symlink(outside.path(), a.join("xa")).expect("outside sibling symlink");
+    let roots = [workspace.path().to_path_buf()];
+
+    let error = enforce_readonly_workspace_operands(
+        &format!("cat {}", a.join("x*").join("f.txt").display()),
+        &roots,
+        workspace.path(),
+    )
+    .expect_err("the real expansion matches the outside sibling and must refuse")
+    .to_string();
+    assert!(
+        error.contains("shell.readonly.operand.outside_workspace"),
+        "{error}"
+    );
+
+    // The in-root shape stays admitted: the same glob spelled without the
+    // outside sibling reads only the wildcard symlink's in-root target.
+    std::fs::remove_file(a.join("xa")).expect("remove outside sibling");
+    enforce_readonly_workspace_operands(
+        &format!("cat {}", a.join("x*").join("f.txt").display()),
+        &roots,
+        workspace.path(),
+    )
+    .expect("the in-root matches stay admitted under the true expansion base");
+}
+
 /// A `-C` value is judged as a literal spelling while the shell expands
 /// wildcard (and zsh `=`) spellings against the stage's working directory
 /// before git ever sees the word — and `-C` operands are sliced off before
@@ -5828,6 +5881,19 @@ fn readonly_shell_lane_decisions_per_shell_kind() {
     assert!(readonly_compound_refused_by_shell_kind(&pwsh, "pwd; cat a^b").is_none());
     assert!(readonly_compound_refused_by_shell_kind(&sh, "pwd; pwd").is_none());
     assert!(readonly_compound_refused_by_shell_kind(&bash, "pwd; cat a^b").is_none());
+    // Doubled-apostrophe divergence (review thread 4600361386): POSIX
+    // shlex concatenates adjacent single-quoted pieces into one judged
+    // word, while PowerShell reads `''` inside single quotes as a literal
+    // apostrophe and cmd.exe passes the apostrophes through verbatim, so
+    // the dispatched operand could spell a name the gate never judged.
+    // The Windows lanes refuse any occurrence; the POSIX kinds agree with
+    // the tokenizer and stay clean.
+    assert!(readonly_compound_refused_by_shell_kind(&cmd, "cat 'a''b.txt'").is_some());
+    assert!(readonly_compound_refused_by_shell_kind(&pwsh, "cat 'a''b.txt'").is_some());
+    assert!(readonly_compound_refused_by_shell_kind(&sh, "cat 'a''b.txt'").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&bash, "cat 'a''b.txt'").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&zsh, "cat 'a''b.txt'").is_none());
+    assert!(readonly_compound_refused_by_shell_kind(&dash, "cat 'a''b.txt'").is_none());
     // The pipefail prefix rides only binaries that speak it. `/bin/sh` stays
     // unprefixed because that path is bash on macOS but dash on Debian and
     // Ubuntu, where the prefix aborts the whole `-c` payload before anything

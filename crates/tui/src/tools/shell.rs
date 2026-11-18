@@ -4799,6 +4799,22 @@ fn readonly_compound_refused_by_shell_kind(
             "[shell.readonly.sequence.unsupported_shell] PowerShell argument mode splits a bare `,` into several arguments, so a read-only probe containing one could run with operands the gate judged as a single word (quoted occurrences refuse too, fail-closed); run the probe without `,`.",
         );
     }
+    // Doubled-apostrophe divergence (review thread 4600361386, private
+    // finding J2): POSIX shlex concatenates adjacent single-quoted pieces
+    // into one judged word, while PowerShell reads `''` inside single
+    // quotes as a literal apostrophe and cmd.exe passes the apostrophes
+    // through verbatim — on either Windows kind the dispatched operand can
+    // spell a name the gate never judged. Nothing in the admitted grammar
+    // needs a literal apostrophe, so any occurrence refuses on the Windows
+    // lanes; POSIX shells and the tokenizer agree on the concatenation, so
+    // those lanes stay clean.
+    if (kind.is_powershell() || matches!(kind, crate::shell_dispatcher::ShellKind::Cmd))
+        && command.contains("''")
+    {
+        return Some(
+            "[shell.readonly.sequence.unsupported_shell] This Windows shell parses doubled apostrophes differently from the read-only gate's tokenizer (a literal apostrophe here, while the gate reads adjacent quoted pieces as one word), so a read-only probe containing `''` could open an operand the gate never judged (any occurrence refuses, fail-closed); run the probe without doubled apostrophes.",
+        );
+    }
     if !matches!(kind, crate::shell_dispatcher::ShellKind::Cmd) {
         return None;
     }
@@ -7500,12 +7516,10 @@ fn enforce_readonly_argv_operands(
             // proved a planted `x*`-named entry, not the expansion) proves
             // nothing about what the expansion hands the program — every
             // match the shell synthesizes still needs judging. Walk the
-            // glob-bearing suffix from the literal's canonical parent: the
-            // match judge applies the same resolved-location,
+            // glob-bearing suffix from the canonicalized LEXICAL prefix:
+            // the match judge applies the same resolved-location,
             // dash-named-wall, and shared-budget rules a relative operand's
-            // matches get. The literal prefix above the first glob component
-            // is already validated by this canonicalize (and resolves any
-            // symlinked directory chain), so only the suffix is walked.
+            // matches get.
             if value.contains('*') {
                 let components: Vec<&str> = value
                     .split('/')
@@ -7521,22 +7535,42 @@ fn enforce_readonly_argv_operands(
                     continue;
                 };
                 let suffix = components[first_glob..].join("/");
-                // The walk base is the directory that CONTAINS the first
-                // glob component: the canonical literal, popped once per
-                // suffix component (canonicalize proved each literal prefix
-                // segment and resolved its symlink chain; the suffix is the
-                // only part the shell still expands).
-                let mut walk_base = resolved.as_path();
-                for _ in 0..components.len() - first_glob {
-                    walk_base = walk_base
-                        .parent()
-                        .ok_or_else(|| {
-                            ToolError::permission_denied(format!(
-                                "[shell.readonly.operand.shape] Read-only shell operand {value:?} has no parent directory to walk; refused."
-                            ))
-                        })?;
+                // The expansion base must be the canonical form of the
+                // LEXICAL prefix — the spelling above the first glob
+                // component — never `resolved` popped by lexical depth:
+                // canonicalizing the whole literal follows the glob
+                // component itself, and a wildcard-NAMED symlink there
+                // makes the canonical path deeper or shallower than the
+                // spelling, so popping the lexical count off it strands
+                // the walker in a directory the shell never expands
+                // against — zero matches there pass the gate while the
+                // real expansion reads an outside-resolving sibling
+                // (review thread 4600361370, private finding J1).
+                let glob_byte = value
+                    .split('/')
+                    .scan(0usize, |offset, component| {
+                        let start = *offset;
+                        *offset += component.len() + 1;
+                        Some((component, start))
+                    })
+                    .filter(|(component, _)| !component.is_empty() && *component != ".")
+                    .nth(first_glob)
+                    .map(|(_, start)| start)
+                    .expect("first_glob indexes these filtered components");
+                let prefix = value[..glob_byte].trim_end_matches('/');
+                let walk_base = std::path::Path::new(prefix)
+                    .canonicalize()
+                    .map_err(|error| {
+                        ToolError::permission_denied(format!(
+                            "[shell.readonly.operand.unresolved] Could not prove the glob expansion base {prefix:?} of {value:?} stays inside the workspace because it could not be resolved: {error}"
+                        ))
+                    })?;
+                if !roots.iter().any(|root| walk_base.starts_with(root)) {
+                    return Err(ToolError::permission_denied(format!(
+                        "[shell.readonly.operand.outside_workspace] The glob expansion base {prefix:?} of {value:?} resolves outside the workspace."
+                    )));
                 }
-                enforce_readonly_glob_operand(&suffix, roots, walk_base, glob_budget)?;
+                enforce_readonly_glob_operand(&suffix, roots, &walk_base, glob_budget)?;
             }
             continue;
         }
