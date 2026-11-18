@@ -625,9 +625,12 @@ async fn serve_controlling_lane_with_evidence_context(
     };
     // Every keeper, including isolated tests, uses its original registration.
     let operation = evidence.operation.clone().for_lane(registration.clone());
-    if manager.with_lane_owner(&operation, || ()).is_err() {
+    // Acquire the key-slot identity only while this exact registration owns the
+    // manager. Every terminal return/cancellation retires that slot; a delayed
+    // old keeper cannot capture or clear a successor installation.
+    let Ok(_retirement) = manager.with_lane_owner(&operation, || business.retire_on_exit()) else {
         return;
-    }
+    };
     let mut owned_liveness = |frame: Value| {
         if manager.with_lane_owner(&operation, || ()).is_err() {
             return false;
@@ -1304,8 +1307,14 @@ pub(crate) async fn connect_controlling_device(
         }
     };
 
+    // Construct before spawning, not on the task's first poll: cancellation of
+    // an unpolled keeper must still retire this exact installed key slot.
+    let retirement = manager
+        .with_lane_owner(&operation, || business.retire_on_exit())
+        .ok();
     let keeper = app.clone();
     tauri::async_runtime::spawn(async move {
+        let _retirement = retirement;
         let manager = keeper.state::<ControllingDeviceManager>();
         let sessions = keeper.state::<ControllingSessionManager>();
         let business = keeper.state::<ControllingLaneState>();
@@ -3075,6 +3084,19 @@ mod tests {
         lane.authorize_resume_final = reader_authorized;
         let mut statuses: Vec<String> = Vec::new();
         let mut on_status = |status: &ControllingStatus| {
+            if matches!(
+                status.kind(),
+                ControllingStatusKind::Reconnecting | ControllingStatusKind::Connected
+            ) {
+                assert!(
+                    business.is_installed(),
+                    "recoverable transitions retain the actual crypto slot"
+                );
+                assert_eq!(
+                    business.is_suspended(),
+                    status.kind() == ControllingStatusKind::Reconnecting
+                );
+            }
             statuses.push(projection(status)["status"].as_str().unwrap().to_owned());
         };
         let mut on_session = |_: &ControllingSessionProjection| {};
@@ -3133,7 +3155,10 @@ mod tests {
             Some("live-a-2"),
             "恢复必须采用 Relay 下发的 A 端 liveness epoch"
         );
-        assert!(!business.is_suspended(), "恢复后业务通道必须重新打开");
+        assert!(
+            !business.is_installed(),
+            "keeper input ended after successful resume; terminal exit retires the slot"
+        );
         let now_a = lane_monotonic_millis();
         manager.mark_transport_disconnected(now_a, Some(now_a + 30_000));
         let second = manager
