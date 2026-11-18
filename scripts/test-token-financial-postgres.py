@@ -165,7 +165,10 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres"}
+SCHEMA_REQUIRED = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestBillingManualAdjustmentProofRollbackPostgres"}
+# The long expiry fixture gets a separate package clock; retain every schema root.
+SCHEMA_EXPIRY_REQUIRED = {"TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"}
+SCHEMA_REMAINING_REQUIRED = SCHEMA_REQUIRED - SCHEMA_EXPIRY_REQUIRED
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -257,6 +260,7 @@ RETAINED_REQUIRED = {
     *REFUND_REQUIRED,
     "TestLedgerRepairClaimActivationReadErrorsPostgres",
     "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry",
+    "TestPackageExpiryCrossWalletIndexPostgres",
     "TestProviderHealthReadFailurePostgres",
     "TestProviderHealthGlobalWindowIndexPostgres",
     "TestMemberQuotaBatchPersistedFactsAndFinancialReplay",
@@ -326,6 +330,7 @@ EXACT_REQUIRED_CHILDREN = {
         "fresh-failure-atomicity-and-retry",
         "populated-upgrade-replay-and-own-ddl-rollback",
     },
+    "TestPackageExpiryCrossWalletIndexPostgres": {"fresh-install", "retained-upgrade"},
     "TestRegistrationOutboxAggregateLookupPostgres": {"fresh-install", "retained-upgrade"},
     "TestProviderHealthGlobalWindowIndexPostgres": {"fresh-install", "retained-upgrade"},
     "TestBillingHistoricalCatalogRollbackPostgres": {
@@ -336,6 +341,17 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestOrganizationStartupDiagnosticsPostgres": {
         "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestPublishedRollbackPackageIntegrityPostgres": {
+        "published-down-legacy-crlf-no-create", "recorded-up-identity-before-down", "unrelated-custom-history",
+        "published-ledger-cannot-become-custom/LF", "published-ledger-cannot-become-custom/CRLF",
+        "forward-only-history-cannot-authorize-rollback",
+    },
+    "TestUsageWaiverHistoricalSchemaPostgres": {
+        "fresh-exact-history-append-only-runtime-and-forward-only",
+        "old-LF/changed-current-down-before-up", "old-LF/changed-current-down-before-verify",
+        "old-CRLF/changed-current-down-before-up", "old-CRLF/changed-current-down-before-verify",
+        "unknown-checksum", "wrong-legacy-shape",
     },
     "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease": {
         "first-RPC-release-crash-keeps-durable-intent",
@@ -811,7 +827,11 @@ def main(*, group="all"):
         finally:
             assert_instance({user})
         try:
-            run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED, scoped=True)
+            run_phase("owner-schema-expiry", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_EXPIRY_REQUIRED, scoped=True)
+        finally:
+            assert_instance({user})
+        try:
+            run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REMAINING_REQUIRED, scoped=True)
         finally:
             assert_instance({user})
         try:
