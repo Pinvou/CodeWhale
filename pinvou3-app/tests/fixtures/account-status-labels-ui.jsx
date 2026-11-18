@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { Status } from '../../src/features/account-platform/AdminModelTokenPrimitives.jsx';
 import { AdminReconciliationWorkspace } from '../../src/features/account-platform/AdminReconciliationWorkspace.jsx';
 import { AdminModelOperationsWorkspace } from '../../src/features/account-platform/AdminModelOperationsWorkspace.jsx';
+import { AdminOrderResults } from '../../src/features/account-platform/AdminOrderResults.jsx';
 import { PlatformRoleBindings } from '../../src/features/account-platform/PlatformRoleBindings.jsx';
 import { PlatformRoleBindingDetail } from '../../src/features/account-platform/PlatformRoleBindingDetail.jsx';
 import { adminRolePresentationCopy, platformRoleCopy, tokenManagementCopy } from '../../src/shared/i18n.js';
@@ -55,6 +56,15 @@ function Probe() {
   state.renderedValue = value;
   const words = adminRolePresentationCopy[language], copy = platformRoleCopy[language];
   state.operationsCopy = () => tokenManagementCopy[language].modelToken;
+  if (new URLSearchParams(location.search).has('orders')) {
+    // Current PENDING and legacy PARTIALLY_REFUNDED come from published Billing SQL;
+    // FUTURE_REVIEW probes the documented read-only unknown fallback.
+    state.orders = ['PENDING', 'PARTIALLY_REFUNDED', 'FUTURE_REVIEW'].map((status, index) => ({
+      order_id: `00000000-0000-4000-8000-00000000002${index + 1}`, status, amount_fen: '100',
+      created_at: observedAt, provider_id: 'controlled-provider', channel: 'controlled-channel',
+    }));
+    return <AdminOrderResults page={{ items: state.orders }} language={language} disabled={false} onOpen={id => state.viewed.push(id)} />;
+  }
   if (new URLSearchParams(location.search).has('operations')) return <div id="operations-probe">
     <AdminModelOperationsWorkspace client={operationsClient} copy={state.operationsCopy()} language={language}
       permissions={['platform.usage.read']} routeVersion={routeVersion} onRouteChange={updates => {

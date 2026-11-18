@@ -27,6 +27,15 @@ try {
   const main = async page => navigateFixture(page, `${origin}/tests/fixtures/account-platform-f01-ui.html`, signal => page.waitForFunction(() => window.f01 && document.body.textContent.includes('account-a'), { signal }));
   const chooseLanguage = (page, language) => page.select('.ap-sidebar-foot select, .adm-sidebar-foot select, header select', language);
   for (const language of ['zh', 'en', 'ja']) {
+    await run(`${language}: routed order results retain legacy refund labels and raw identities`, async page => {
+      await navigateFixture(page, `${origin}/tests/fixtures/account-status-labels-ui.html?language=${language}&orders=1`, signal => page.waitForFunction(() => document.querySelectorAll('.adm-order-list tbody tr').length === 3, { signal }));
+      const labels = { zh: ['待支付', '部分退款', '未知状态 (FUTURE_REVIEW)'], en: ['Awaiting payment', 'Partially refunded', 'Unknown status (FUTURE_REVIEW)'], ja: ['支払い待ち', '一部返金済み', '不明な状態 (FUTURE_REVIEW)'] };
+      assert.deepEqual(await page.$$eval('.adm-order-list tbody td:nth-child(7)', nodes => nodes.map(node => node.textContent)), labels[language]);
+      assert.deepEqual(await page.evaluate(() => window.statusLabelsProbe.orders.map(item => item.status)), ['PENDING', 'PARTIALLY_REFUNDED', 'FUTURE_REVIEW']);
+      assert.deepEqual(await page.evaluate(() => window.statusLabelsProbe.viewed), []);
+      await page.click('.adm-order-list tbody tr:nth-child(2) button');
+      assert.deepEqual(await page.evaluate(() => window.statusLabelsProbe.viewed), ['00000000-0000-4000-8000-000000000022']);
+    });
     await run(`${language}: production account BFF/native views preserve safe unknown text and language changes`, async page => {
       await main(page); await chooseLanguage(page, language);
       await page.click('[data-section=accountSettings]');
@@ -106,6 +115,7 @@ try {
       const review = { zh: '复核中', en: 'Under review', ja: '確認中' };
       await navigateFixture(page, `${origin}/tests/fixtures/account-status-labels-ui.html?language=${language}&reconciliation=1`, signal => page.waitForFunction(() => window.statusLabelsProbe && document.querySelector('section nav button:nth-child(2)'), { signal }));
       await page.click('section nav button:nth-child(2)');
+      await page.waitForSelector('.adm-case-scope button:first-child', { visible: true });
       await page.click('.adm-case-scope button:first-child');
       await page.waitForFunction(label => document.querySelector('tbody tr td:nth-child(2)')?.textContent === label, {}, review[language]);
       const options = await page.$$eval('option', nodes => nodes.filter(node => ['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED'].includes(node.value)).map(node => ({ value: node.value, label: node.textContent })));
