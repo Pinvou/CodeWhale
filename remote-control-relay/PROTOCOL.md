@@ -259,13 +259,14 @@ after 5 seconds, so the drain cannot outlive ws's own 30-second close timeout.
 | `desktop_credential_required` | Desktop registration for an enrolled endpoint that has not set a desktop credential yet. |
 | `credential_key_unavailable` | The enrolled credential digest references an HMAC key ID the current deployment no longer trusts. |
 | `enrollment_revision_conflict` | The enrollment compare-and-swap conflicted on every retry because concurrent writers kept changing the registry. |
-| `endpoint_already_enrolled` | A development-TOFU or self-registration claim raced another registration of the same endpoint ID into the registry. |
 | `enrollment_capacity_reached` | Creating a new registry entry would exceed the enrollment registry's entry capacity. |
 | `self_registration_capacity_reached` | A self-registration claim would exceed the entry or byte budget reserved for self-registered endpoints. |
 | `self_registration_capacity_unavailable` | The state store could not report the byte capacity a self-registration claim must reserve before writing. |
 | `enrollment_credential_transport_invalid` | A newly claimed credential exceeds the legacy transport length limit that applies to newly written credential material. |
 | `enrollment_registry_unavailable` | The enrollment state store read or write failed; nothing was enrolled or authenticated. |
-| `enrollment_registry_capacity_reached` | Writing the enrollment registry would exceed the relay state size cap. |
+| `enrollment_registry_capacity_reached` | Writing the enrollment registry would exceed the relay state size cap, or a persisted registry snapshot already exceeds the hard entry cap when it is read. |
+| `enrollment_registry_unsupported` | The persisted enrollment registry snapshot declares a different schema or registry version than this relay understands; the file is rejected on read (a snapshot that already fails validation at startup aborts startup with a fixed line instead of reaching this path). |
+| `enrollment_clock_invalid` | A development-TOFU or self-registration claim presented an enrollment timestamp outside the accepted range. |
 | `invalid_token` | `web_client_join` whose access token hash does not match the endpoint. |
 | `bad_web_client_join` | Malformed `web_client_join`: invalid `endpoint_id`, missing or oversized access token, or the socket already authenticated. |
 | `endpoint_not_found` | Join, revoke, or forwarded message referenced an endpoint that does not exist. |
@@ -274,7 +275,7 @@ after 5 seconds, so the drain cannot outlive ws's own 30-second close timeout.
 | `unsupported_message_type` | The authenticated message type is not in that direction's allowlist. |
 | `desktop_offline` | A Web-to-desktop message arrived while the desktop socket is not connected. |
 | `ingress_rate_limited` | The per-connection ingress message or byte rate was exceeded. |
-| `endpoint_revoked` | Desktop registration for a tombstoned endpoint ID. The same name is also the message type delivered to the Web client on revoke or TTL expiry, with `reason` such as `desktop_offline_ttl_expired`. |
+| `endpoint_revoked` | Desktop registration for a tombstoned endpoint ID, or for an endpoint whose enrollment-registry entry carries revoked status. The same name is also the message type delivered to the Web client on revoke or TTL expiry, with `reason` such as `desktop_offline_ttl_expired`. |
 | `revocation_in_progress` | A second revoke arrived while one is already in progress for the endpoint. |
 | `revoke_persistence_failed` | Persisting the revoke tombstone failed; the requester is closed and the endpoint remains usable. |
 | `revoked_endpoint_capacity_reached` | The tombstone capacity is exhausted (nothing was written); the requester is closed and the endpoint remains usable. |
@@ -289,13 +290,26 @@ WebSocket close code 1008; a failure that carries no code falls back to
 `enrollment_required`. The rows above enumerate the codes this path emits,
 including the storage-failure codes; if the enrollment state file stops
 validating between operations, the registry's state-validation codes (the
-`*_malformed` family headed by `enrollment_registry_malformed`) surface
-through the same path. Every such rejection stays auditable through the same
-fixed-line discipline as the other contained socket failures. Note that the
+`*_malformed` family headed by `enrollment_registry_malformed`; the
+schema/version mismatch `enrollment_registry_unsupported` has its own row
+above) surface
+through the same path. A claim that races another registration of the same
+endpoint ID never surfaces `endpoint_already_enrolled` on this path: the
+claimant validates the endpoint's absence synchronously before its
+compare-and-swap, so a racing re-claim resolves to
+`invalid_enrollment_credential` (mismatched credentials) or succeeds
+(identical claim); that code is reserved for the registry's administrative
+enroll interface. These rejections are observable only by the offending
+client — the error frame plus the 1008 close; unlike the contained socket
+failures documented above, they emit no fixed stderr line, no audit record,
+and no healthz counter. Note that the
 `receiver_error_terminations` healthz counter bounds receiver-side protocol
 violations from above rather than counting them exactly: ws emits `error`
 from the sender path too, so a write failure on an already-dropping client
-(an RST mid-flush, for example) is counted as well.
+(an RST mid-flush, for example) is counted as well. For the same reason a
+receiver error observed before the socket is attached to the router (the
+`connection_initialization_failed` path) logs the fixed line but does not
+increment the counter: the counting listener is attached after that block.
 
 Besides reject code 1008, clients observe these WebSocket close codes: `1000`
 when the revoke requester is acknowledged with a normal close ("endpoint
