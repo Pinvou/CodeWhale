@@ -70,7 +70,9 @@ func legacyExpiryDatabase(t *testing.T, ctx context.Context, templates *cifixtur
 			c.Close(context.Background())
 			return nil, err
 		}
-		migrations.Unlock(ctx, c)
+		if install {
+			migrations.Unlock(ctx, c)
+		}
 		return c, nil
 	}
 	key, err := cifixture.TemplateKey("legacy-expiry-prefix-v1", initial)

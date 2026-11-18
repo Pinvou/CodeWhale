@@ -186,7 +186,9 @@ func retainedManagementBillingRepository(t *testing.T) (*billing.PostgresReposit
 			c.Close(context.Background())
 			return nil, err
 		}
-		migrations.Unlock(ctx, c)
+		if install {
+			migrations.Unlock(ctx, c)
+		}
 		return c, nil
 	}
 	database := "retained_finance_" + strings.ReplaceAll(uuid.NewString(), "-", "")
