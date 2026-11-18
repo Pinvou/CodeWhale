@@ -3851,7 +3851,8 @@ mod tests {
             "schema": "temporary_model_package/v1", "package_id": "package-retirement-test",
             "binding": {"connection_id": context.connection_id,
                 "controller_lease_id": context.controller_lease_id,
-                "lease_epoch": context.lease_epoch, "task_id": task_id},
+                "lease_epoch": context.lease_epoch, "relay_epoch": context.relay_epoch,
+                "remote_control_generation": context.remote_control_generation, "task_id": task_id},
             "primary": {"display_name":"Retirement fixture", "preset":"openai",
                 "wire_api":"openai_chat_completions", "base_url":"https://api.openai.com/v1",
                 "model":"fixture-model", "image_capability_override":"pinvou"},
@@ -3911,7 +3912,8 @@ mod tests {
         let package = serde_json::json!({
             "schema":"temporary_model_package/v1", "package_id":"package-ledger-failure",
             "binding":{"connection_id":context.connection_id, "controller_lease_id":context.controller_lease_id,
-                "lease_epoch":context.lease_epoch, "task_id":"retirement-model-task"},
+                "lease_epoch":context.lease_epoch, "relay_epoch":context.relay_epoch,
+                "remote_control_generation":context.remote_control_generation, "task_id":"retirement-model-task"},
             "primary":{"display_name":"Retirement fixture", "preset":"openai", "wire_api":"openai_chat_completions",
                 "base_url":"https://api.openai.com/v1", "model":"fixture-model", "image_capability_override":"pinvou"},
             "primary_credential":{"kind":"api_key", "secret":"fixture-not-a-real-secret"}
@@ -4070,7 +4072,9 @@ mod tests {
         }
         impl ControlledCleanupSink for PausedCleanup {
             fn cleanup(&self, generation: &str, _: ControlledCleanupScope) {
-                if generation == self.old {
+                // A failed fixture must not panic again from manager Drop or
+                // wait for a test orchestrator that is already unwinding.
+                if generation == self.old && !std::thread::panicking() {
                     self.entered.send(()).unwrap();
                     self.release
                         .lock()

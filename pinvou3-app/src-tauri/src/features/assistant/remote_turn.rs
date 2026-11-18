@@ -1881,7 +1881,8 @@ mod tests {
         body["temporary_model_package"] = json!({
             "schema":"temporary_model_package/v1", "package_id":"package-retirement-running",
             "binding":{"connection_id":context.connection_id, "controller_lease_id":context.controller_lease_id,
-                "lease_epoch":context.lease_epoch, "task_id":"task-retirement-running"},
+                "lease_epoch":context.lease_epoch, "relay_epoch":context.relay_epoch,
+                "remote_control_generation":context.remote_control_generation, "task_id":"task-retirement-running"},
             "primary":{"display_name":"Runtime fixture", "preset":"openai", "wire_api":"openai_chat_completions",
                 "base_url":"https://api.openai.com/v1", "model":"fixture-model", "image_capability_override":"pinvou"},
             "primary_credential":{"kind":"api_key", "secret":"fixture-runtime-secret"}

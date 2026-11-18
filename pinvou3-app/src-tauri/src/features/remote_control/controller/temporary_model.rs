@@ -1212,6 +1212,7 @@ mod tests {
         other.remote_control_generation = "generation-other".into();
         let mut other_package = package("fixture-other-secret");
         other_package.binding.task_id = "task-other".into();
+        other_package.binding.remote_control_generation = other.remote_control_generation.clone();
         store
             .install(other_package, &other, "task-other", 1_001)
             .unwrap();
@@ -1241,13 +1242,11 @@ mod tests {
         assert!(store.contains_task("task-other"));
         // A delayed retirement must preserve a new owner, even if all public
         // connection/lease/task fields have been reused by that new generation.
+        let mut successor_package = package("fixture-successor-secret");
+        successor_package.binding.remote_control_generation =
+            other.remote_control_generation.clone();
         store
-            .install(
-                package("fixture-successor-secret"),
-                &other,
-                "task-0001",
-                1_002,
-            )
+            .install(successor_package, &other, "task-0001", 1_002)
             .unwrap();
         store.cleanup(&old.remote_control_generation, scope);
         assert!(store.contains_task("task-0001"));
