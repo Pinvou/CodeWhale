@@ -830,6 +830,7 @@ jobs:
               - 'scripts/ci-frontend-cache-server.py'
               - 'scripts/lib/ci_frontend_cache.py'
               - 'scripts/tests/test_ci_frontend_bundle.py'
+              - 'scripts/tests/test_ci_frontend_checkout.py'
               - 'scripts/ci-test-reuse.py'
               - 'scripts/ci-reuse-policy.py'
               - 'scripts/tests/test_ci_reuse_policy.py'
@@ -1158,7 +1159,9 @@ jobs:
       # against the release checksums.txt digest, so CI executes no mutable
       # installer code and a tampered artifact fails the gate here.
       - name: Verified frontend bundle cache contracts
-        run: python3 -m unittest discover -s scripts/tests -p test_ci_frontend_bundle.py -v
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_ci_frontend_bundle.py -v
+          python3 -m unittest discover -s scripts/tests -p test_ci_frontend_checkout.py -v
 
       - name: workflow lint (actionlint)
         run: |
@@ -1387,7 +1390,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
@@ -1550,7 +1553,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          # The tested PR merge and its two parents are sufficient for selection.
+          fetch-depth: 2
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
@@ -1657,6 +1661,12 @@ jobs:
           PINVOU_WEBUI_SKIP_BUILD: "1"
         run: |
           set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ && "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          # A queue batch can place the immutable base outside the shallow graph.
+          if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          fi
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
             | node ../scripts/run-frontend-smokes.mjs --selected --shard "${{ matrix.shard }}/4" --isolate-network

@@ -51,3 +51,21 @@ Frontend logic and browser shards use the browser-capable heavy pool selected by
 when that optional variable is absent. A capability label is assigned only after
 the actual container can create an unprivileged private user/network namespace.
 The namespace and resource-retirement gates remain mandatory.
+
+## Checkout and test CPU costs
+
+Bundle delivery timings exclude repository checkout and test execution. Logic
+tests fetch only the tested commit. Browser shards fetch that commit and its
+parents; a merge-queue base outside this shallow graph is fetched by its exact
+immutable SHA. Selection still compares the tested merge or queue base/head,
+and a missing or mismatched commit fails the gate. The checkout integration test
+executes these workflow commands against PR and multi-commit queue fixtures.
+
+The compatibility auditor indexes LF line starts once for marked source files.
+AST suppression checks use this shared index instead of rescanning the source
+prefix for every node, preserving the existing UTF-16/LF marker semantics and
+all compatibility checks. More runner cores do not accelerate that serial scan.
+
+Browser shard selection currently distributes smoke entries by count. An entry
+that invokes a group of child smokes can therefore dominate one shard; inspect
+individual smoke durations separately from cache and checkout timings.
