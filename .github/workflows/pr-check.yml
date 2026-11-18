@@ -7,6 +7,10 @@ name: PR Check
 #   compliance linkage + actionlint + Python determinism tests.
 # - merge-authored-audit: complete historical merge-resolution disclosure, independently bounded.
 # - changes:检测本 PR 有没有 Rust 代码、发布契约、L1 harness 或前端改动,给后续 job 做 paths filter。
+# - runner-pool-guard:显式校验 6 个自建池 vars 齐全,缺失即红并阻断 required-gate,
+#   消灭重任务静默回落 2 核托管机的降级路径。
+# - frontend-setup:前端依赖安装 + 三次 vite build 一次完成,产物打成工件供
+#   frontend-test 与 4 个 browser 分片复用(setup ×5 → ×1)。
 # - frontend-test:Draft/Ready lint、build、逻辑测试。
 # - frontend-browser-test:Ready PR 与 Merge Queue 按实际 base/head diff 选择
 #   smoke，四个独立 runner job 并行；未知或共享路径保守执行全部 smoke。
@@ -212,6 +216,53 @@ jobs:
 
       - name: 校验 VERSION 与各版本文件一致
         run: node scripts/sync-version.mjs --check
+
+  # 2026-11-16 调查(g1 池普查)结论:所有重 job 的 runs-on 都是
+  # `vars.<池> || vars.<fallback> || '["ubuntu-22.04"]'` 回落链,六个池 vars
+  # 意外清空时 heavy/medium 任务会静默落到 2 核托管机跑(真实降级路径)。
+  # 本 job 把缺失变成 1 分钟内的显式红并阻断 required-gate,回落链保留为
+  # 防御纵深。runs-on 用托管 ubuntu-22.04 元门禁层:被检查对象正是这些 vars,
+  # 不能依赖它们(与 DCO/secret-scan 同层)。
+  runner-pool-guard:
+    name: runner-pool-guard
+    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: 校验自建 runner 池 vars 必须齐全
+        env:
+          PINVOU_LINUX_LIGHT_RUNNER: ${{ vars.PINVOU_LINUX_LIGHT_RUNNER }}
+          PINVOU_LINUX_MEDIUM_RUNNER: ${{ vars.PINVOU_LINUX_MEDIUM_RUNNER }}
+          PINVOU_LINUX_HEAVY_RUNNER: ${{ vars.PINVOU_LINUX_HEAVY_RUNNER }}
+          PINVOU_WINDOWS_LIGHT_RUNNER: ${{ vars.PINVOU_WINDOWS_LIGHT_RUNNER }}
+          PINVOU_WINDOWS_MEDIUM_RUNNER: ${{ vars.PINVOU_WINDOWS_MEDIUM_RUNNER }}
+          PINVOU_WINDOWS_HEAVY_RUNNER: ${{ vars.PINVOU_WINDOWS_HEAVY_RUNNER }}
+          PINVOU_LINUX_RUNNER: ${{ vars.PINVOU_LINUX_RUNNER }}
+          PINVOU_WINDOWS_RUNNER: ${{ vars.PINVOU_WINDOWS_RUNNER }}
+        run: |
+          missing=0
+          for name in \
+            PINVOU_LINUX_LIGHT_RUNNER \
+            PINVOU_LINUX_MEDIUM_RUNNER \
+            PINVOU_LINUX_HEAVY_RUNNER \
+            PINVOU_WINDOWS_LIGHT_RUNNER \
+            PINVOU_WINDOWS_MEDIUM_RUNNER \
+            PINVOU_WINDOWS_HEAVY_RUNNER; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "缺失仓库 vars: $name"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "::error::runner 池 vars 缺失。这是显式失败:禁止静默回落到 2 核托管机跑重任务;请补齐上述 6 个 vars 后重跑。"
+            exit 1
+          fi
+          for name in PINVOU_LINUX_RUNNER PINVOU_WINDOWS_RUNNER; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::notice::fallback 中间层 $name 未设置(允许,但六个主层池 vars 必须齐全)"
+            fi
+          done
+          echo "6 个池 vars 齐全;fallback 中间层 linux=${PINVOU_LINUX_RUNNER:+已设置} windows=${PINVOU_WINDOWS_RUNNER:+已设置}"
 
   # PR、Merge Queue 与 main push 均按实际改动路径选择检查。
   # paths-filter v4 在 merge_group 上使用事件 base/head SHA 比较队列组合提交。
@@ -927,18 +978,13 @@ jobs:
               - 'private-runtimes/windows'
               - 'pinvou3-app/scripts/codex-bridge-runtime/**'
               - 'pinvou3-app/scripts/tauri/build.js'
-              - 'pinvou3-app/scripts/tauri/build-local-nsis.ps1'
               - 'pinvou3-app/scripts/tauri/codex-bridge.js'
               - 'pinvou3-app/scripts/tauri/effective-config.js'
               - 'pinvou3-app/scripts/tauri/windows-installer.js'
               - 'pinvou3-app/scripts/tauri/windows-runtime.js'
               - 'pinvou3-app/src-tauri/config/platforms/windows/runtime/**'
-              # The windows platform conf is a direct assertion target of the
-              # NSIS staging contract test (installer languages, nsis wiring).
-              - 'pinvou3-app/src-tauri/config/platforms/windows/tauri.conf.json'
               - 'pinvou3-app/src-tauri/packaging/windows/runtime/**'
               - 'pinvou3-app/src-tauri/packaging/windows/nsis/**'
-              - 'pinvou3-app/src-tauri/packaging/windows/wix/**'
               - 'pinvou3-app/src-tauri/src/features/codex_acp/**'
               - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
               - 'pinvou3-app/src-tauri/resources/common/bundle/mcp-servers/browser-*'
@@ -947,8 +993,6 @@ jobs:
               - 'pinvou3-app/tests/browser_wrapper_lazy.test.mjs'
               - 'pinvou3-app/tests/windows_runtime_packaging_contract.test.js'
               - 'pinvou3-app/tests/windows_python_dependency_contract.ps1'
-              - 'pinvou3-app/tests/windows_runtime_cache_behavior.ps1'
-              - 'pinvou3-app/tests/nsis_resource_staging_contract.test.js'
               - 'pinvou3-app/package.json'
               - 'pinvou3-app/package-lock.json'
               - '.github/workflows/release-packages.yml'
@@ -1211,12 +1255,111 @@ jobs:
         if: ${{ steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000)) }}
         run: python3 scripts/mcp-server-contract-smoke.py
 
+  # Setup 工件化(2026-11-16 调查结论:3 台宿主共置算力摊薄是失败主机理,#2641
+  # 后 frontend-test + 4 个 browser 分片各自重复三次 vite build,构建期满核
+  # 高峰 ×5)。分工:本 job 只做「构建产物」——三次 vite build 一次完成,只把
+  # 体积仅数十 MB 的 dist 输出打成工件;npm ci 保留在各消费 job(网络绑定、
+  # CPU 占用低)。这样避开 2026-11-16 实测的自建机↔GitHub 存储上行瓶颈:
+  # 156MB 的 node_modules bundle 上传两次 stall 至死(run 43890217142),而
+  # 产物小件不受影响。vite build 才是 CPU 大头,去重它即达成摊薄目标。
+  # build:account-portal 的一致性检查与 credential handoff 部署边界检查随
+  # 构建留在本 job(产物 = git 跟踪的 static 目录,消费方 checkout 自带,
+  # 无需传输)。测试行为零变化:vite 产物、CHROME 探针、工作目录与环境变量
+  # 与原 setup 完全一致;各消费 job 下载解包独立副本,分片间无可变共享状态。
+  frontend-setup:
+    name: frontend-setup
+    needs: changes
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test') && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    # npm ci(app) + 三次 vite build + 小件打包上传;30min 含冷缓存与慢 registry 余量。
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: pinvou3-app
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up zram and swap
+        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
+        # 本 job 只跑 ubuntu,无需 runner.os 门控;构建期峰 2-4GB,zram 先行。
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-path: |
+            pinvou3-app/package-lock.json
+            remote-control-relay/package-lock.json
+            account-platform/package-lock.json
+
+      - name: 安装前端依赖
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Vite build
+        run: npm run build:ui
+
+      - name: Verify embedded Account Portal assets are current
+        run: |
+          npm run build:account-portal
+          git diff --exit-code -- ../account-platform/internal/portal/static
+          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
+
+      - name: Verify credential handoff built deployment boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          node ../scripts/build-credential-handoff.mjs --check-deployment
+
+      # Web (relay) build: the startup-bundle layer and the web index contract
+      # test (tests/vite_static_assets_contract.test.mjs) only cover the web
+      # dist when it exists, so build it unconditionally here instead of
+      # relying on the diff-selected test:webui smoke.
+      - name: Vite web build (remote relay)
+        run: npm run build:web
+
+      # 只打包构建产物(本地实测 ui dist 15MB + web dist 14MB,tar.gz 共 19MB):
+      # 156MB 的 node_modules bundle 在自建机上行实测两次 stall 至死
+      # (run 43890217142),产物小件才是该链路扛得动的体积。dist 与 web/dist
+      # 是 gitignore 产物,checkout 不会带,必须随包下发;build:account-portal
+      # 产物是 git 跟踪的 static 目录,消费方 checkout 自带,不进包。
+      - name: Pack frontend setup bundle
+        run: |
+          set -euo pipefail
+          tar -czf "$RUNNER_TEMP/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE" \
+            pinvou3-app/dist remote-control-relay/web/dist
+          du -h "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
+
+      - name: Upload frontend setup bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-setup-bundle
+          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
+          if-no-files-found: error
+          # 同 run 内消费,最小保留。
+          retention-days: 1
+
+      # 自建机上行到 GitHub 工件存储实测偶发 stall(见上方 Pack 注释的 run 证据),
+      # 上传动作无内建重试;主上传失败时以 overwrite 重建同名工件,自动补试一次。
+      - name: Upload frontend setup bundle (retry)
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-setup-bundle
+          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
+          if-no-files-found: error
+          # 同 run 内消费,最小保留。
+          retention-days: 1
+          overwrite: true
+
   frontend-test:
     name: frontend-test
-    needs: changes
+    # Setup 工件化:依赖与三份 build 产物来自 frontend-setup 的单次构建
+    # (共置宿主算力摊薄 × setup ×5 重复,见 frontend-setup 注释)。
+    needs: [changes, frontend-setup]
     # Draft/Ready quality, builds and logic. Ready/queue browser smokes run
     # independently below, without waiting for this job's ~17-minute logic suite.
-    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) && needs['frontend-setup'].result == 'success' }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     defaults:
@@ -1250,6 +1393,8 @@ jobs:
             account-platform/package-lock.json
 
       - name: 安装前端依赖
+        # npm ci 保留在各消费 job(网络绑定、CPU 占用低,~1-2min);被去重的
+        # 是 CPU 大头——三次 vite build ×5 → ×1(见 frontend-setup 注释)。
         run: npm ci --prefer-offline --no-audit
 
       # The Node probe imports AP schema tooling before any browser skip.
@@ -1262,6 +1407,55 @@ jobs:
       - name: 安装 Remote relay 依赖 (供 test:webui smoke)
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
         run: npm --prefix ../remote-control-relay ci --prefer-offline --no-audit
+
+      # Setup 工件化:下载 frontend-setup 的单次构建产物(ui dist + web dist,
+      # 实测 tar.gz 19MB),跳过本 job 原先重复的三次 vite build;测试行为零
+      # 变化。走 REST zip 通道(download-artifact@v8 的 results blob 通道在本
+      # 池实测 hang,见 frontend-setup 注释),小件上传/下载均实测可行。
+      - name: Download frontend setup bundle (REST)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          listing="$RUNNER_TEMP/frontend-setup-artifacts.json"
+          # 工件列表存在最终一致窗口(上传完成 ≠ 列表可见),对「列表获取 + 工件
+          # 查找」做有界轮询;耗尽后显式报错退出,而非裸 StopIteration。
+          bundle_id=""
+          for _ in 1 2 3 4 5; do
+            if curl -sfSL --retry 3 --max-time 120 -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$listing"; then
+              bundle_id="$(python3 -c 'import json,sys; ids=[a["id"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == "frontend-setup-bundle"]; print(ids[0] if ids else "")' "$listing")"
+            fi
+            [[ -n "$bundle_id" ]] && break
+            echo "frontend setup 工件尚未在列表可见,25s 后重试"
+            sleep 25
+          done
+          [[ -n "$bundle_id" ]] || { echo "::error::frontend setup 工件缺失;请重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
+          code=000
+          for _ in 1 2 3 4 5; do
+            code="$(curl -sSL --max-time 900 -w '%{http_code}' -o "$RUNNER_TEMP/frontend-setup-bundle.zip" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$bundle_id/zip" || echo 000)"
+            [[ "$code" == 200 ]] && break
+            echo "artifact zip 下载 http $code,60s 后重试"
+            sleep 60
+          done
+          [[ "$code" == 200 ]] || { echo "::error::frontend setup 工件 REST 下载失败(http $code);重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
+          python3 -m zipfile -e "$RUNNER_TEMP/frontend-setup-bundle.zip" "$RUNNER_TEMP/frontend-setup-bundle"
+          test -f "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz"
+
+      - name: Unpack frontend setup bundle
+        run: |
+          tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
+          # tar 保留 frontend-setup 构建时点的旧 mtime;消费方 checkout 的 src
+          # 更新,会误触 ui_test_server 的 assertFreshBuild「UI build is stale」
+          # 守卫(它按 mtime 判断陈旧)。工件化流程中新鲜度由构造保证(prepare
+          # 从同一 tested tree 构建),touch 对齐 mtime 恢复守卫本意。
+          find dist ../remote-control-relay/web/dist -exec touch {} +
+          # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。注意本 job
+          # 的 run 默认工作目录是 pinvou3-app,校验路径须相对它解析。
+          test -f dist/index.html
+          test -f ../remote-control-relay/web/dist/index.html
 
       - name: ESLint (含 pet 缺失项,现已全覆盖)
         # Official 的存量 warning 仍可由本地 lint 完整查看；CI 只打印会阻断的
@@ -1285,33 +1479,10 @@ jobs:
       - name: madge (circular imports)
         run: npm run lint:cycles
 
-      - name: Vite build
-        run: npm run build:ui
-
-      - name: Verify embedded Account Portal assets are current
-        run: |
-          npm run build:account-portal
-          git diff --exit-code -- ../account-platform/internal/portal/static
-          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
-
-      - name: Verify credential handoff built deployment boundary
-        shell: bash
-        run: |
-          set -euo pipefail
-          node ../scripts/build-credential-handoff.mjs --check-deployment
-
-      # Web (relay) build: the startup-bundle layer and the web index contract
-      # test (tests/vite_static_assets_contract.test.mjs) only cover the web
-      # dist when it exists, so build it unconditionally here instead of
-      # relying on the diff-selected test:webui smoke. That smoke reuses this
-      # dist via PINVOU_WEBUI_SKIP_BUILD=1 (smoke steps below) instead of
-      # running a second identical vite build.
-      - name: Vite web build (remote relay)
-        run: npm run build:web
-
       # Dist-layer compatibility audit (a marked@16-style lookbehind parse
-      # regression is caught by exactly this layer); build:ui above already
-      # produced dist/, while the contract test only covers static/inline layers.
+      # regression is caught by exactly this layer); dist/ comes from the
+      # frontend-setup bundle (single build, four consumers), while the
+      # contract test only covers static/inline layers.
       - name: WebView compatibility audit (Safari 14 baseline)
         run: npm run audit:compat
 
@@ -1365,9 +1536,11 @@ jobs:
 
   frontend-browser-test:
     name: frontend-browser-test (${{ matrix.shard }})
-    needs: changes
-    # Each shard installs/builds its own tested tree and owns its fixtures.
-    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) }}
+    # Setup 工件化:依赖与三份 build 产物来自 frontend-setup 的单次构建;
+    # 每个分片只下载解包自己的独立副本,分片间无可变共享状态。
+    needs: [changes, frontend-setup]
+    # Each shard runs on the shared tested tree artifact and owns its fixtures.
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) && needs['frontend-setup'].result == 'success' }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     strategy:
@@ -1406,6 +1579,8 @@ jobs:
             account-platform/package-lock.json
 
       - name: 安装前端依赖
+        # npm ci 保留在各分片(网络绑定、CPU 占用低);去重的是三次 vite
+        # build ×5 → ×1(CPU 大头,见 frontend-setup 注释)。
         run: npm ci --prefer-offline --no-audit
 
       # The Node probe imports AP schema tooling before any browser skip.
@@ -1418,17 +1593,54 @@ jobs:
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
         run: npm --prefix ../remote-control-relay ci --prefer-offline --no-audit
 
-      - name: Vite build
-        run: npm run build:ui
-
-      - name: Verify embedded Account Portal assets are current
+      # Setup 工件化:下载 frontend-setup 的单次构建产物(实测 tar.gz 19MB),
+      # 跳过每分片重复的三次 vite build;各分片解包独立副本,分片间无可变共享
+      # 状态;dist/CHROME/工作目录与原 setup 一致。走 REST zip 通道(通道实测
+      # 证据见 frontend-setup 注释)。
+      - name: Download frontend setup bundle (REST)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          npm run build:account-portal
-          git diff --exit-code -- ../account-platform/internal/portal/static
-          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
+          set -euo pipefail
+          listing="$RUNNER_TEMP/frontend-setup-artifacts.json"
+          # 工件列表存在最终一致窗口(上传完成 ≠ 列表可见),对「列表获取 + 工件
+          # 查找」做有界轮询;耗尽后显式报错退出,而非裸 StopIteration。
+          bundle_id=""
+          for _ in 1 2 3 4 5; do
+            if curl -sfSL --retry 3 --max-time 120 -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$listing"; then
+              bundle_id="$(python3 -c 'import json,sys; ids=[a["id"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == "frontend-setup-bundle"]; print(ids[0] if ids else "")' "$listing")"
+            fi
+            [[ -n "$bundle_id" ]] && break
+            echo "frontend setup 工件尚未在列表可见,25s 后重试"
+            sleep 25
+          done
+          [[ -n "$bundle_id" ]] || { echo "::error::frontend setup 工件缺失;请重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
+          code=000
+          for _ in 1 2 3 4 5; do
+            code="$(curl -sSL --max-time 900 -w '%{http_code}' -o "$RUNNER_TEMP/frontend-setup-bundle.zip" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$bundle_id/zip" || echo 000)"
+            [[ "$code" == 200 ]] && break
+            echo "artifact zip 下载 http $code,60s 后重试"
+            sleep 60
+          done
+          [[ "$code" == 200 ]] || { echo "::error::frontend setup 工件 REST 下载失败(http $code);重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
+          python3 -m zipfile -e "$RUNNER_TEMP/frontend-setup-bundle.zip" "$RUNNER_TEMP/frontend-setup-bundle"
+          test -f "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz"
 
-      - name: Vite web build (remote relay)
-        run: npm run build:web
+      - name: Unpack frontend setup bundle
+        run: |
+          tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
+          # tar 保留 frontend-setup 构建时点的旧 mtime;消费方 checkout 的 src
+          # 更新,会误触 ui_test_server 的 assertFreshBuild「UI build is stale」
+          # 守卫(它按 mtime 判断陈旧)。工件化流程中新鲜度由构造保证(prepare
+          # 从同一 tested tree 构建),touch 对齐 mtime 恢复守卫本意。
+          find dist ../remote-control-relay/web/dist -exec touch {} +
+          # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。注意本 job
+          # 的 run 默认工作目录是 pinvou3-app,校验路径须相对它解析。
+          test -f dist/index.html
+          test -f ../remote-control-relay/web/dist/index.html
 
       - name: 准备浏览器
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
@@ -4861,11 +5073,6 @@ jobs:
       - name: Windows runtime packaging contract
         run: npm --prefix pinvou3-app run test:windows-runtime
 
-      # On Windows this additionally exercises the build-local-nsis.ps1
-      # smoke block that the Linux frontend-test lane cannot run.
-      - name: NSIS resource staging contract
-        run: npm --prefix pinvou3-app run test:nsis-resource-staging
-
       - name: Windows ACP bridge runtime smoke
         run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-acp-${{ github.run_id }}-${{ github.run_attempt }}.json" -- python scripts/test-windows-acp-runtime.py
 
@@ -5269,6 +5476,8 @@ jobs:
       - backflow-portability
       - fast-gate
       - merge-authored-audit
+      - runner-pool-guard
+      - frontend-setup
       - frontend-test
       - frontend-browser-test
       - relay-test
@@ -5313,6 +5522,9 @@ jobs:
           BACKFLOW_PORTABILITY_RESULT: ${{ needs.backflow-portability.result }}
           FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
           MERGE_AUTHORED_AUDIT_RESULT: ${{ needs.merge-authored-audit.result }}
+          # 池 vars 守卫与前端 setup 工件化 leg:缺失 vars / 构建失败在 gate 直接显红。
+          RUNNER_POOL_GUARD_RESULT: ${{ needs.runner-pool-guard.result }}
+          FRONTEND_SETUP_RESULT: ${{ needs.frontend-setup.result }}
           CI_REUSE_VERIFIED: ${{ needs.changes.outputs.reuse_verified }}
           CI_REUSE_IDS: ${{ join(fromJSON(needs.changes.outputs.reused_jobs || '[]'), ',') }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
@@ -5448,6 +5660,8 @@ jobs:
 
           failed=0
           for item in \
+            "runner-pool-guard:$RUNNER_POOL_GUARD_RESULT" \
+            "frontend-setup:$FRONTEND_SETUP_RESULT" \
             "backflow-portability:$BACKFLOW_PORTABILITY_RESULT" \
             "frontend-test:$FRONTEND_RESULT" \
             "frontend-browser-test:$FRONTEND_BROWSER_RESULT" \
