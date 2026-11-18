@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { once } from "node:events";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import {
   ENROLLMENT_NAMESPACE,
@@ -19,6 +20,8 @@ import {
 import {
   RELAY_CONTROLLER_STATE_SCHEMA,
   RelayStateStore,
+  protectWindowsPath,
+  verifyWindowsPath,
 } from "../relay-state-store.js";
 
 const HMAC_KEY = "test-only-hmac-key-material-32-bytes-minimum";
@@ -401,10 +404,10 @@ function environment(overrides = {}) {
   };
 }
 
-async function temporaryState(t) {
+async function temporaryState(t, stateDirectory = "controller") {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pinvou-enrollment-test-"));
   resourcesFor(t).directories.push(directory);
-  return path.join(directory, "controller", "state.json");
+  return path.join(directory, stateDirectory, "state.json");
 }
 
 function legacyStatePath(statePath) {
@@ -635,6 +638,339 @@ test("a warm authorization cache fails closed after persistence degradation", as
   await rejectsCode(registry.authorizeWebRegistration({ endpointId: "warm-degraded", accessToken: FIRST_CREDENTIAL }), "enrollment_registry_unavailable");
 });
 
+test("offline recovery archives the exact interrupted pair and preserves committed authorization", async (t) => {
+  const statePath = await temporaryState(t);
+  const backupPath = `${statePath}.bak`;
+  const options = {
+    statePath, legacyStatePath: legacyStatePath(statePath),
+    processIdentity: async (pid) => `test-process:${pid}`,
+    ...testSecurityOptions(),
+  };
+  let failPrimary = false;
+  const store = await openStateStore(statePath, { fs: { ...fs, async rename(source, target) {
+    if (failPrimary && target === statePath) throw Object.assign(new Error("injected crash boundary"), { code: "EIO" });
+    return fs.rename(source, target);
+  } } });
+  resourcesFor(t).stores.push(store);
+  const registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
+  await registry.enroll({ endpointId: "committed-revocation", credential: FIRST_CREDENTIAL });
+  await registry.revoke({ endpointId: "committed-revocation", expectedEndpointRevision: "1" });
+  const primary = await fs.readFile(statePath);
+  const primaryIdentity = await fs.stat(statePath, { bigint: true });
+  failPrimary = true;
+  await assert.rejects(registry.enroll({ endpointId: "staged-enrollment", credential: SECOND_CREDENTIAL }),
+    (error) => error.code === "enrollment_registry_unavailable" && error.cause?.code === "relay_state_persist_failed");
+  const staged = await fs.readFile(backupPath);
+  const sha256 = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
+  const evidence = {
+    primaryRevision: JSON.parse(primary).revision,
+    primarySha256: sha256(primary),
+    backupSha256: sha256(staged),
+  };
+  await rejectsCode(RelayStateStore.recoverStagedBackup(options, evidence), "relay_state_locked");
+  await store.close();
+  await rejectsCode(openStateStore(statePath), "relay_state_unavailable");
+  await rejectsCode(RelayStateStore.recoverStagedBackup(options), "expected_primary_revision_malformed");
+  await rejectsCode(RelayStateStore.recoverStagedBackup(options, { ...evidence, backupSha256: "0".repeat(64) }),
+    "relay_state_recovery_evidence_mismatch");
+  const future = Buffer.from(JSON.stringify({ ...JSON.parse(staged), version: 99 }));
+  await fs.writeFile(backupPath, future);
+  await rejectsCode(RelayStateStore.recoverStagedBackup(options, { ...evidence, backupSha256: sha256(future) }),
+    "relay_state_unsupported");
+  assert.deepEqual(await fs.readFile(backupPath), future);
+  await fs.writeFile(backupPath, staged);
+
+  let replaced = false;
+  const switched = { ...fs, async open(target, flags, mode) {
+    if (!replaced && flags === "wx" && target.startsWith(`${backupPath}.`)) {
+      replaced = true;
+      const alternate = path.join(path.dirname(path.dirname(statePath)), "replacement.json");
+      await fs.writeFile(alternate, staged, { mode: 0o600 });
+      await fs.rename(alternate, backupPath);
+    }
+    return fs.open(target, flags, mode);
+  } };
+  await rejectsCode(RelayStateStore.recoverStagedBackup({ ...options, fs: switched }, evidence),
+    "relay_state_recovery_changed");
+  assert.equal(replaced, true);
+  assert.deepEqual(await fs.readFile(backupPath), staged);
+  const result = await RelayStateStore.recoverStagedBackup(options, evidence);
+  assert.equal(result.revision, evidence.primaryRevision);
+  assert.deepEqual(await fs.readFile(path.join(result.archive, "primary.json")), primary);
+  assert.deepEqual(await fs.readFile(path.join(result.archive, "backup.json")), staged);
+  assert.deepEqual(await fs.readFile(backupPath), primary);
+  assert.deepEqual(await fs.readFile(statePath), primary);
+  assert.equal((await fs.stat(statePath, { bigint: true })).ino, primaryIdentity.ino);
+  await rejectsCode(RelayStateStore.recoverStagedBackup(options, evidence), "relay_state_recovery_evidence_mismatch");
+  const reopened = await openStateStore(statePath);
+  resourcesFor(t).stores.push(reopened);
+  assert.equal(reopened.readNamespaceRevision(ENROLLMENT_NAMESPACE).store_revision, evidence.primaryRevision);
+  const restored = EnrollmentRegistry.open({ stateStore: reopened, config: configForState(statePath) });
+  await rejectsCode(restored.authorizeWebRegistration({ endpointId: "committed-revocation", accessToken: FIRST_CREDENTIAL }), "endpoint_revoked");
+  await rejectsCode(restored.authorizeWebRegistration({ endpointId: "staged-enrollment", accessToken: SECOND_CREDENTIAL }), "enrollment_required");
+});
+
+async function interruptedRecovery(t, stateDirectory = "controller", { nativeSecurity = false } = {}) {
+  const statePath = await temporaryState(t, stateDirectory);
+  const backupPath = `${statePath}.bak`;
+  const options = { statePath, legacyStatePath: legacyStatePath(statePath), ...(nativeSecurity ? {} : testSecurityOptions()),
+    processIdentity: async (pid) => `test-process:${pid}` };
+  let failPrimary = false;
+  const openOptions = { ...options, fs: { ...fs, async rename(source, target) {
+    if (failPrimary && target === statePath) throw Object.assign(new Error("interrupted primary"), { code: "EIO" });
+    return fs.rename(source, target);
+  } } };
+  const store = nativeSecurity
+    ? await openDaclQualificationStore(t, openOptions)
+    : await RelayStateStore.open(openOptions);
+  resourcesFor(t).stores.push(store);
+  await store.compareAndSwap("recovery_test", "0", { committed: true });
+  const primary = await fs.readFile(statePath);
+  failPrimary = true;
+  await rejectsCode(store.compareAndSwap("recovery_test", "1", { committed: false }), "relay_state_persist_failed");
+  await store.close();
+  const staged = await fs.readFile(backupPath);
+  const digest = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
+  const evidence = { primaryRevision: JSON.parse(primary).revision,
+    primarySha256: digest(primary), backupSha256: digest(staged) };
+  return { options, statePath, backupPath, primary, staged, evidence };
+}
+
+async function recoveryCli(statePath, argv) {
+  const options = {
+    env: { ...process.env, PINVOU_REMOTE_CONTROLLER_STATE_PATH: statePath,
+      PINVOU_REMOTE_STATE_PATH: legacyStatePath(statePath) },
+    encoding: "utf8", windowsHide: true, timeout: 60_000, maxBuffer: 64 * 1024,
+  };
+  const command = [fileURLToPath(new URL("../recover-controller-state.js", import.meta.url)), ...argv];
+  try {
+    const result = await execFileAsync(process.execPath, command, options);
+    return { exit: 0, ...result };
+  } catch (error) {
+    return { exit: Number.isInteger(error.code) ? error.code : null,
+      stdout: String(error.stdout ?? ""), stderr: String(error.stderr ?? "") };
+  }
+}
+
+test("offline recovery CLI help and invalid arguments are safe and do not open a store", async (t) => {
+  const statePath = await temporaryState(t);
+  const parent = path.dirname(path.dirname(statePath));
+  const help = await recoveryCli(statePath, ["--help"]);
+  assert.equal(help.exit, 0, "help must succeed without recovery");
+  for (const flag of ["--confirmed-primary-revision", "--primary-sha256", "--staged-backup-sha256", "--archive-root"]) {
+    assert.ok(help.stdout.includes(flag), "help must describe each recovery input");
+  }
+  for (const [argv, expected] of [
+    [["--PRIVATE_OPTION_SENTINEL=PRIVATE_VALUE_SENTINEL"], "ERR_PARSE_ARGS_UNKNOWN_OPTION"],
+    [["--primary-sha256"], "ERR_PARSE_ARGS_INVALID_OPTION_VALUE"],
+  ]) {
+    const result = await recoveryCli(statePath, argv);
+    assert.equal(result.exit, 1);
+    assert.ok(result.stderr.split(/\r?\n/u).includes("relay_state_recovery_failed"));
+    const line = result.stderr.split(/\r?\n/u).find((value) => value.startsWith("{"));
+    assert.ok(line, "argument rejection must include closed diagnostic fields");
+    const diagnostic = JSON.parse(line);
+    assert.equal(diagnostic.stage, "arguments");
+    assert.equal(diagnostic.code, expected);
+    assert.equal(diagnostic.help, "node recover-controller-state.js --help");
+    assert.equal(result.stderr.includes("PRIVATE_OPTION_SENTINEL"), false);
+    assert.equal(result.stderr.includes("PRIVATE_VALUE_SENTINEL"), false);
+  }
+  assert.deepEqual(await fs.readdir(parent), [], "help/parse failures must not create state or locks");
+});
+
+test("offline recovery CLI archives originals and restores only a verified staged backup", async (t) => {
+  const value = await interruptedRecovery(t, "controller", { nativeSecurity: true });
+  const parent = path.dirname(path.dirname(value.statePath));
+  if (process.platform === "win32") {
+    // A freshly created caller parent inherits its DACL; state setup protects
+    // only its dedicated child. Establish the negative fixture independently.
+    await assert.rejects(verifyWindowsPath(parent, "directory"));
+  } else {
+    await fs.chmod(parent, 0o755);
+  }
+  const args = ["--confirmed-primary-revision", value.evidence.primaryRevision,
+    "--primary-sha256", value.evidence.primarySha256,
+    "--staged-backup-sha256", value.evidence.backupSha256];
+  for (const rootArgs of [[], ["--archive-root", parent]]) {
+    const rejected = await recoveryCli(value.statePath, [...args, ...rootArgs]);
+    assert.equal(rejected.exit, 1, "default and explicit non-private roots must both be rejected");
+    assert.ok(rejected.stderr.split(/\r?\n/u).includes(process.platform === "win32"
+      ? "relay_state_acl_unverified" : "relay_state_permissions_unsafe"));
+    assert.deepEqual(await fs.readFile(value.statePath), value.primary);
+    assert.deepEqual(await fs.readFile(value.backupPath), value.staged);
+    assert.equal((await fs.readdir(parent)).some((name) => name.startsWith("controller-recovery-")), false);
+  }
+  const archiveRoot = path.join(parent, "private-archive-root");
+  await fs.mkdir(archiveRoot, { mode: 0o700 });
+  if (process.platform === "win32") await protectWindowsPath(archiveRoot, "directory");
+  const identity = await fs.stat(value.statePath, { bigint: true });
+  const recovered = await recoveryCli(value.statePath, [...args, "--archive-root", archiveRoot]);
+  assert.equal(recovered.exit, 0, "valid CLI recovery must succeed through default OS protection");
+  const result = JSON.parse(recovered.stdout);
+  assert.equal(result.revision, value.evidence.primaryRevision);
+  assert.equal(path.dirname(result.archive), archiveRoot);
+  assert.deepEqual(await fs.readFile(path.join(result.archive, "primary.json")), value.primary);
+  assert.deepEqual(await fs.readFile(path.join(result.archive, "backup.json")), value.staged);
+  assert.deepEqual(await fs.readFile(value.statePath), value.primary);
+  assert.deepEqual(await fs.readFile(value.backupPath), value.primary);
+  const after = await fs.stat(value.statePath, { bigint: true });
+  assert.equal(after.dev, identity.dev);
+  assert.equal(after.ino, identity.ino);
+  if (process.platform === "win32") {
+    await assertPrivateWindowsAcls(t, [archiveRoot, result.archive,
+      path.join(result.archive, "primary.json"), path.join(result.archive, "backup.json"),
+      value.statePath, value.backupPath]);
+  } else {
+    for (const directory of [archiveRoot, result.archive]) assert.equal((await fs.stat(directory)).mode & 0o777, 0o700);
+    for (const file of [path.join(result.archive, "primary.json"), path.join(result.archive, "backup.json")]) {
+      assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+    }
+  }
+  const reopened = await RelayStateStore.open(value.options);
+  resourcesFor(t).stores.push(reopened);
+  assert.equal(reopened.readNamespace("recovery_test").value.committed, true);
+  await reopened.close();
+});
+
+test("offline recovery bounds archive names for long valid state directories", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const value = await interruptedRecovery(t, "c".repeat(230));
+  const archiveRoot = path.dirname(path.dirname(value.statePath));
+  const result = await RelayStateStore.recoverStagedBackup(value.options, { ...value.evidence, archiveRoot });
+  assert(Buffer.byteLength(path.basename(result.archive), "utf8") <= 255);
+  assert.equal(path.dirname(result.archive), archiveRoot);
+  assert.deepEqual(await fs.readFile(path.join(result.archive, "primary.json")), value.primary);
+  assert.deepEqual(await fs.readFile(path.join(result.archive, "backup.json")), value.staged);
+  assert.deepEqual(await fs.readFile(value.statePath), value.primary);
+  assert.deepEqual(await fs.readFile(value.backupPath), value.primary);
+  const reopened = await openStateStore(value.statePath);
+  resourcesFor(t).stores.push(reopened);
+  await reopened.compareAndSwap("recovery_test", "1", { afterRecovery: true });
+  await reopened.close();
+  const again = await openStateStore(value.statePath);
+  resourcesFor(t).stores.push(again);
+  assert.deepEqual(again.readNamespace("recovery_test").value, { afterRecovery: true });
+  assert.equal(again.readNamespaceRevision("recovery_test").store_revision, "2");
+});
+
+test("offline recovery verifies actual staged bytes and live primary before publishing", async (t) => {
+  for (const target of ["temporary", "primary"]) {
+    await t.test(target, async (subtest) => {
+      const value = await interruptedRecovery(subtest);
+      let temporary;
+      let injected = false;
+      const guardedFs = { ...fs, async open(filename, flags, mode) {
+        if (flags === "wx" && filename.startsWith(`${value.backupPath}.`)) temporary = filename;
+        if (temporary && !injected && path.basename(filename) === "backup.json") {
+          injected = true;
+          if (target === "temporary") {
+            const before = await fs.stat(temporary, { bigint: true });
+            await fs.writeFile(temporary, value.staged);
+            assert.equal((await fs.stat(temporary, { bigint: true })).ino, before.ino);
+          } else {
+            const alternate = path.join(path.dirname(path.dirname(value.statePath)), "external-primary.json");
+            await fs.writeFile(alternate, value.staged, { mode: 0o600 });
+            await fs.rename(alternate, value.statePath);
+          }
+        }
+        return fs.open(filename, flags, mode);
+      } };
+      await rejectsCode(RelayStateStore.recoverStagedBackup({ ...value.options, fs: guardedFs }, value.evidence),
+        "relay_state_recovery_changed");
+      assert(injected);
+      assert.deepEqual(await fs.readFile(value.backupPath), value.staged);
+    });
+  }
+});
+
+test("offline recovery reports an unknown outcome when the pair changes after rename", async (t) => {
+  const value = await interruptedRecovery(t);
+  let injected = false;
+  const guardedFs = { ...fs, async rename(source, target) {
+    await fs.rename(source, target);
+    if (!injected && target === value.backupPath) {
+      injected = true;
+      await fs.writeFile(value.statePath, value.staged);
+    }
+  } };
+  let archive;
+  await assert.rejects(
+    RelayStateStore.recoverStagedBackup({ ...value.options, fs: guardedFs }, value.evidence),
+    (error) => { archive = error.recoveryArchive; return error.code === "relay_state_recovery_outcome_unknown"; },
+  );
+  // The backup was published, but the mismatched pair must never receive a success result.
+  assert(injected);
+  assert.deepEqual(await fs.readFile(value.backupPath), value.primary);
+  assert.deepEqual(await fs.readFile(path.join(archive, "primary.json")), value.primary);
+  assert.deepEqual(await fs.readFile(path.join(archive, "backup.json")), value.staged);
+  await rejectsCode(openStateStore(value.statePath), "relay_state_unavailable");
+});
+
+test("offline recovery preserves the lock owner after a transient close failure", async (t) => {
+  const value = await interruptedRecovery(t);
+  let locked = false;
+  const guardedFs = { ...fs, async rm(filename, options) {
+    if (!locked && filename === `${value.statePath}.lock`) {
+      locked = true;
+      throw Object.assign(new Error("injected owner close"), { code: "EIO" });
+    }
+    return fs.rm(filename, options);
+  } };
+  let archive;
+  await assert.rejects(RelayStateStore.recoverStagedBackup({ ...value.options, fs: guardedFs }, value.evidence),
+    (error) => { archive = error.recoveryArchive; return error.code === "relay_state_recovery_close_failed"; });
+  assert(locked);
+  assert.deepEqual(await fs.readFile(path.join(archive, "backup.json")), value.staged);
+  const reopened = await openStateStore(value.statePath);
+  resourcesFor(t).stores.push(reopened);
+  assert.equal(reopened.readNamespaceRevision("recovery_test").store_revision, value.evidence.primaryRevision);
+});
+
+test("offline recovery can archive outside a read-only state parent", {
+  skip: process.platform === "win32" || process.getuid?.() === 0,
+}, async (t) => {
+  const value = await interruptedRecovery(t);
+  const parent = path.dirname(path.dirname(value.statePath));
+  const archiveRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pinvou-private-recovery-"));
+  t.after(() => fs.rm(archiveRoot, { recursive: true, force: true }));
+  await fs.chmod(parent, 0o500);
+  try {
+    await rejectsCode(RelayStateStore.recoverStagedBackup(value.options, value.evidence),
+      "relay_state_recovery_archive_root_unwritable");
+    const result = await RelayStateStore.recoverStagedBackup(value.options, { ...value.evidence, archiveRoot });
+    assert.equal(path.dirname(result.archive), archiveRoot);
+    assert.deepEqual(await fs.readFile(value.backupPath), value.primary);
+  } finally {
+    await fs.chmod(parent, 0o700);
+  }
+});
+
+test("offline recovery does not change a substituted archive symlink target's mode", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const value = await interruptedRecovery(t);
+  const parent = path.dirname(path.dirname(value.statePath));
+  const unrelated = path.join(parent, "unrelated");
+  await fs.mkdir(unrelated, { mode: 0o755 });
+  await fs.chmod(unrelated, 0o755);
+  let swapped = false;
+  const guardedFs = { ...fs, async mkdir(filename, options) {
+    await fs.mkdir(filename, options);
+    if (!swapped && filename.startsWith(path.join(parent, "controller-recovery-"))) {
+      swapped = true;
+      await fs.rename(filename, `${filename}-moved`);
+      await fs.symlink(unrelated, filename, "dir");
+    }
+  } };
+  await rejectsCode(RelayStateStore.recoverStagedBackup({ ...value.options, fs: guardedFs }, value.evidence),
+    "relay_state_recovery_changed");
+  assert(swapped);
+  assert.equal((await fs.stat(unrelated)).mode & 0o777, 0o755);
+  assert.deepEqual(await fs.readFile(value.backupPath), value.staged);
+});
+
 test("manual development enrollment never claims TOFU admission", async (t) => {
   for (const tofu of ["false", "true"]) {
     const { registry, store } = await openRegistry(t, {
@@ -764,9 +1100,59 @@ test("registry write retains typed validation and capacity failures", async (t) 
   };
   const bounded = EnrollmentRegistry.open({ stateStore: boundedStore, config: configForState(statePath) });
   await rejectsCode(bounded.enroll({ endpointId: "new-endpoint", credential: FIRST_CREDENTIAL }),
-    "enrollment_registry_capacity_reached");
+    "enrollment_capacity_reached");
   assert.equal(writes, 0);
   assert.equal(bounded.getStatus("endpoint-000000").revision, "1");
+});
+
+test("capacity expansion preserves revoked enrollment across restart and backup restore", async (t) => {
+  const { registry, store, statePath } = await openRegistry(t, {
+    env: { PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES: "1" },
+  });
+  await registry.enroll({ endpointId: "capacity-retired", credential: FIRST_CREDENTIAL });
+  const beforeRevoke = registry.exportSnapshot().registry;
+  await rejectsCode(registry.enroll({ endpointId: "capacity-new", credential: SECOND_CREDENTIAL }),
+    "enrollment_capacity_reached");
+  await registry.revoke({ endpointId: "capacity-retired", expectedEndpointRevision: "1" });
+  const revoked = registry.exportSnapshot();
+  await registry.revoke({ endpointId: "capacity-retired", expectedEndpointRevision: "1" });
+  assert.deepEqual(registry.exportSnapshot(), revoked);
+  await rejectsCode(registry.importSnapshot({ snapshot: beforeRevoke, expectedNamespaceRevision: revoked.namespace_revision }),
+    "enrollment_restore_revocation_conflict");
+  assert.throws(() => registry.previewAtomicBatch({ operations: [{
+    operation: "restore", snapshot: beforeRevoke, expected_namespace_revision: revoked.namespace_revision,
+  }] }), { code: "enrollment_restore_revocation_conflict" });
+  await store.close();
+  const expandedStore = await openStateStore(statePath, { maxBytes: 32 * 1024 * 1024 });
+  resourcesFor(t).stores.push(expandedStore);
+  const expanded = EnrollmentRegistry.open({ stateStore: expandedStore, config: configForState(statePath, {
+    PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES: "2", PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES: "33554432",
+  }) });
+  assert.equal(expandedStore.readCapacity().max_bytes, 32 * 1024 * 1024);
+  await rejectsCode(expanded.authorizeWebRegistration({ endpointId: "capacity-retired", accessToken: FIRST_CREDENTIAL }),
+    "endpoint_revoked");
+  await rejectsCode(expanded.enroll({ endpointId: "capacity-retired", credential: SECOND_CREDENTIAL }), "endpoint_revoked");
+  const restored = await expanded.importSnapshot({ snapshot: revoked.registry, expectedNamespaceRevision: revoked.namespace_revision });
+  assert.equal(restored.registry.entries[0].status, "revoked");
+  await expanded.enroll({ endpointId: "capacity-new", credential: SECOND_CREDENTIAL });
+  assert.equal(expanded.getStatus("capacity-new").status, "active");
+});
+
+test("shared byte capacity cannot report an unpersisted revocation as successful", async (t) => {
+  const { store, statePath, registry } = await openRegistry(t, { storeOptions: { maxBytes: 1024 } });
+  await registry.enroll({ endpointId: "capacity-revoke", credential: FIRST_CREDENTIAL });
+  const remaining = 1024 - store.readCapacity().serialized_bytes;
+  // Count the actual CAS framing, then fill the remaining budget exactly.
+  await store.compareAndSwap("fill", "0", { payload: "" });
+  const available = 1024 - store.readCapacity().serialized_bytes;
+  assert.ok(available < remaining && available > 0);
+  await store.compareAndSwap("fill", "1", { payload: "x".repeat(available) });
+  const committed = await fs.readFile(statePath);
+  await rejectsCode(registry.revoke({ endpointId: "capacity-revoke", expectedEndpointRevision: "1" }),
+    "enrollment_revocation_capacity_reached");
+  assert.deepEqual(await fs.readFile(statePath), committed);
+  assert.deepEqual(await fs.readFile(`${statePath}.bak`), committed);
+  assert.equal(registry.getStatus("capacity-revoke").status, "active");
 });
 
 test("extended v1 owner locks are never stolen even when the owner is live or dead", async (t) => {
@@ -1630,21 +2016,15 @@ test("POSIX setup changes only its dedicated child directory", {
   assert.equal((await fs.stat(path.dirname(statePath))).mode & 0o777, 0o700);
 });
 
-test("Windows state directory and every durable/lock file have protected DACLs", {
-  skip: process.platform !== "win32",
-}, async (t) => {
-  const statePath = await temporaryState(t);
-  const store = await openDaclQualificationStore(t, {
-    statePath,
-    legacyStatePath: legacyStatePath(statePath),
-    processIdentity: async (pid) => `acl-test-process:${pid}`,
-  });
+async function assertPrivateWindowsAcls(t, paths) {
   const inspectScript = `
     $ErrorActionPreference = 'Stop'
     $result = @()
-    $index = 0
+    $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $expectedSids = @($currentSid, 'S-1-5-18', 'S-1-5-32-544' | Microsoft.PowerShell.Utility\\Sort-Object -Unique)
     foreach ($target in ($env:PINVOU_ACL_PATHS -split '\\|')) {
       $acl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $target
+      $item = Microsoft.PowerShell.Management\\Get-Item -LiteralPath $target -Force
       $sids = @($acl.Access | Microsoft.PowerShell.Core\\ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Microsoft.PowerShell.Utility\\Sort-Object -Unique)
       $ownerAccount = Microsoft.PowerShell.Utility\\New-Object System.Security.Principal.NTAccount -ArgumentList $acl.Owner
       $ownerSid = $ownerAccount.Translate([System.Security.Principal.SecurityIdentifier]).Value
@@ -1652,22 +2032,15 @@ test("Windows state directory and every durable/lock file have protected DACLs",
       foreach ($rule in @($acl.Access)) {
         if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { $validRules = $false }
         if (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { $validRules = $false }
-        $expectedInheritance = if ($index -eq 0) { [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' } else { [System.Security.AccessControl.InheritanceFlags]::None }
+        $expectedInheritance = if ($item.PSIsContainer) { [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' } else { [System.Security.AccessControl.InheritanceFlags]::None }
         if ($rule.InheritanceFlags -ne $expectedInheritance) { $validRules = $false }
+        if ($rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None) { $validRules = $false }
       }
-      $result += [pscustomobject]@{ protected = $acl.AreAccessRulesProtected; owner = $ownerSid; sids = $sids; count = @($acl.Access).Count; valid_rules = $validRules }
-      $index += 1
+      $privatePrincipals = @($sids).Count -eq @($expectedSids).Count -and @($sids | Microsoft.PowerShell.Core\\Where-Object { $_ -notin $expectedSids }).Count -eq 0
+      $result += [pscustomobject]@{ protected = $acl.AreAccessRulesProtected; owner_is_current = $ownerSid -eq $currentSid; private_principals = $privatePrincipals; unique_rules = @($acl.Access).Count -eq $sids.Count; valid_rules = $validRules }
     }
     [Console]::Out.Write(($result | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress))
   `;
-  const paths = [
-    path.dirname(statePath),
-    path.join(path.dirname(statePath), ".pinvou-controller-state-directory"),
-    statePath,
-    `${statePath}.bak`,
-    lockPath(statePath),
-    path.join(path.dirname(statePath), ".pinvou-controller-state.guard"),
-  ];
   const inspector = windowsDaclInspectorConfiguration(paths.join("|"));
   const { stdout } = await executeDaclInspector(t, inspector.executable, [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -1682,12 +2055,31 @@ test("Windows state directory and every durable/lock file have protected DACLs",
   assert.equal(results.length, paths.length);
   for (const result of results) {
     assert.equal(result.protected, true);
-    assert.equal(result.count, result.sids.length);
+    assert.equal(result.unique_rules, true);
     assert.equal(result.valid_rules, true);
-    assert.ok(result.sids.includes(result.owner));
-    assert.ok(result.sids.includes("S-1-5-18"));
-    assert.ok(result.sids.includes("S-1-5-32-544"));
+    assert.equal(result.owner_is_current, true);
+    assert.equal(result.private_principals, true);
   }
+}
+
+test("Windows state directory and every durable/lock file have protected DACLs", {
+  skip: process.platform !== "win32",
+}, async (t) => {
+  const statePath = await temporaryState(t);
+  const store = await openDaclQualificationStore(t, {
+    statePath,
+    legacyStatePath: legacyStatePath(statePath),
+    processIdentity: async (pid) => `acl-test-process:${pid}`,
+  });
+  resourcesFor(t).stores.push(store);
+  await assertPrivateWindowsAcls(t, [
+    path.dirname(statePath),
+    path.join(path.dirname(statePath), ".pinvou-controller-state-directory"),
+    statePath,
+    `${statePath}.bak`,
+    lockPath(statePath),
+    path.join(path.dirname(statePath), ".pinvou-controller-state.guard"),
+  ]);
   await store.close();
 });
 

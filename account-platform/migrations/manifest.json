@@ -2778,6 +2778,16 @@
         "file": "900008_hold_expiry_dispatch_evidence_index.up.sql",
         "version": 900008,
         "sha256": "bcae9b81831452a1a1ccfacf9797680feb74b24b246c026bfcd28d9babeb5713"
+      },
+      {
+        "file": "900009_governance_usage_resource_indexes.down.sql",
+        "version": 900009,
+        "sha256": "598096cef42942aa7d4950436604e99599edbf5883d9ad9e77d48e8af71f481e"
+      },
+      {
+        "file": "900009_governance_usage_resource_indexes.up.sql",
+        "version": 900009,
+        "sha256": "6ba3fb063eb36f50888456cb0c665ac6828dca795bce295a44997c1ecd3ccaad"
       }
     ]
   }
