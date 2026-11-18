@@ -2579,6 +2579,28 @@ jobs:
           node --test pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+
+      - name: Preserve Windows release contract process receipts
+        id: windows_release_contract_receipts
+        if: ${{ always() && runner.os == 'Windows' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json
+            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Warn when Windows release contract receipts are unavailable
+        if: ${{ always() && runner.os == 'Windows' && steps.windows_release_contract_receipts.outcome == 'failure' }}
+        continue-on-error: true
+        run: Write-Warning 'Windows release contract receipt upload failed; original receipts remain on the runner. Test and cleanup failures remain failures.'
+
   # pinvou-knowledge 是可单独部署的 crate，必须直接验证自己的默认 feature 图、
   # 测试与部署入口，而不只依赖 Tauri 作为 client-only path dependency 的间接编译。
   # 各项收在同一 job 复用一份缓存，避免过度分拆。
