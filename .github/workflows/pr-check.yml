@@ -366,6 +366,7 @@ jobs:
               - 'scripts/check-recharge-product-document-baseline.mjs'
               - 'scripts/account-ci-postgres.py'
               - 'scripts/tests/test_account_ci_postgres.py'
+              - 'scripts/tests/test_token_outbox_acceptance.py'
               - 'scripts/account-financial-test-durations.json'
               - 'scripts/test-financial-parallel.py'
               - 'scripts/check-account-financial-ci.py'
@@ -2172,6 +2173,24 @@ jobs:
           chmod 0700 "$RUNNER_TEMP/pinvou-test-nats-server"
           export PINVOU_TEST_NATS_SERVER_BINARY="$RUNNER_TEMP/pinvou-test-nats-server"
           npm --prefix account-platform run test:existing-broker
+
+      - name: Token outbox publication on owned PostgreSQL and TLS NATS
+        timeout-minutes: 4
+        shell: bash
+        env:
+          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.broker_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.broker_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.broker_directory }}
+          PINVOU_TEST_NATS_SERVER_BINARY: ${{ runner.temp }}/pinvou-test-nats-server
+        run: |
+          set -euo pipefail
+          # Reuse only the preceding step's pinned executable; the test starts
+          # its own TLS broker and applies public Token migrations. The shared
+          # supervisor owns the complete Python/Go/NATS process tree, including
+          # panic, timeout and cancellation; always-run ledger recovery verifies it.
+          python3 -m unittest discover -s scripts/tests -p test_token_outbox_acceptance.py
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/token-outbox-process.json" -- npm --prefix account-platform run test:token-outbox
 
       - name: Audit export finite PostgreSQL rollback and persisted boundaries
         working-directory: account-platform
