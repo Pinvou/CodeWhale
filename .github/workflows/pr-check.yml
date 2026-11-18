@@ -368,11 +368,14 @@ jobs:
               - 'scripts/check-recharge-product-document-baseline.mjs'
               - 'scripts/account-ci-postgres.py'
               - 'scripts/tests/test_account_ci_postgres.py'
+              - 'scripts/tests/test_token_outbox_acceptance.py'
               - 'scripts/account-financial-test-durations.json'
               - 'scripts/test-financial-parallel.py'
+              - 'scripts/test-financial-owners.py'
               - 'scripts/check-account-financial-ci.py'
               - 'scripts/tests/test_account_financial_ci.py'
               - 'scripts/tests/test_financial_parallel.py'
+              - 'scripts/tests/test_financial_owners.py'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
               - 'scripts/test-account-closure-postgres.py'
@@ -828,6 +831,14 @@ jobs:
               - 'pinvou3-app/eslint.config.mjs'
               - '.github/workflows/pr-check.yml'
             frontend:
+              - 'scripts/ci-frontend-bundle.py'
+              - 'scripts/ci-frontend-cache-server.py'
+              - 'scripts/lib/ci_frontend_cache.py'
+              - 'scripts/lib/ci_transfer_deadline.py'
+              - 'scripts/tests/test_ci_frontend_bundle.py'
+              - 'scripts/tests/test_ci_frontend_cache_server.py'
+              - 'scripts/tests/test_ci_frontend_checkout.py'
+              - 'scripts/tests/test_ci_transfer_deadline.py'
               - 'scripts/ci-test-reuse.py'
               - 'scripts/ci-reuse-policy.py'
               - 'scripts/tests/test_ci_reuse_policy.py'
@@ -935,12 +946,18 @@ jobs:
               - 'scripts/run-windows-relay-tools-tests.mjs'
               - 'scripts/windows-relay-tools-test-summary.mjs'
               - 'scripts/windows-relay-tools-preflight.mjs'
+              - 'scripts/ci-fixture-process.py'
+              - 'scripts/tests/test_ci_fixture_process.py'
               - '.github/workflows/pr-check.yml'
             team_relay_hub:
+              - 'scripts/ci-npm-audit.py'
+              - 'scripts/tests/test_ci_npm_audit.py'
               - 'team-relay-hub/**'
               - 'docs/team-relay/migrations/**'
               - '.github/workflows/pr-check.yml'
             update_release_console:
+              - 'scripts/ci-npm-audit.py'
+              - 'scripts/tests/test_ci_npm_audit.py'
               - 'update-release-console/**'
               - 'scripts/ci-update-release-console-container.sh'
               - 'deploy/nginx-pinvou3-updates.conf'
@@ -1219,8 +1236,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Initialize gate test resource ledger
+        run: python3 scripts/ci-resource-ledger.py --init
+
+      # Full discovery includes cache server/deadline/checkout/npm contracts;
+      # run them once, inside the same owned process tree as the other guards.
       - name: Gate policy test suite (scripts/tests)
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+        run: python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/gate-policy.json" -- python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
       - name: Expiring chrono maintenance exception
         run: python3 scripts/guard-chrono-maintenance-exception.py
@@ -1257,6 +1279,21 @@ jobs:
         if: ${{ steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000)) }}
         run: python3 scripts/mcp-server-contract-smoke.py
 
+      - name: Confirm gate test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        run: python3 scripts/ci-resource-ledger.py --recover
+
+      - name: Gate test resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-resource-lifecycle-${{ github.run_attempt }}
+          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
+          retention-days: 7
+
   # Setup 工件化(2026-11-16 调查结论:3 台宿主共置算力摊薄是失败主机理,#2641
   # 后 frontend-test + 4 个 browser 分片各自重复三次 vite build,构建期满核
   # 高峰 ×5)。分工:本 job 只做「构建产物」——三次 vite build 一次完成,只把
@@ -1271,6 +1308,11 @@ jobs:
   frontend-setup:
     name: frontend-setup
     needs: changes
+    outputs:
+      commit: ${{ steps.frontend_bundle.outputs.commit }}
+      sha256: ${{ steps.frontend_bundle.outputs.sha256 }}
+      size: ${{ steps.frontend_bundle.outputs.size }}
+      transport: ${{ steps.frontend_bundle.outputs.transport }}
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test') && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) }}
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     # npm ci(app) + 三次 vite build + 小件打包上传;30min 含冷缓存与慢 registry 余量。
@@ -1332,7 +1374,14 @@ jobs:
             pinvou3-app/dist remote-control-relay/web/dist
           du -h "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
 
+      - name: Publish verified frontend setup bundle
+        id: frontend_bundle
+        env:
+          PINVOU_FRONTEND_CACHE_URL: ${{ vars.PINVOU_FRONTEND_CACHE_URL }}
+        run: python3 ../scripts/ci-frontend-bundle.py publish --bundle "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
+
       - name: Upload frontend setup bundle
+        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}
         uses: actions/upload-artifact@v7
         with:
           name: frontend-setup-bundle
@@ -1344,7 +1393,7 @@ jobs:
       # 自建机上行到 GitHub 工件存储实测偶发 stall(见上方 Pack 注释的 run 证据),
       # 上传动作无内建重试;主上传失败时以 overwrite 重建同名工件,自动补试一次。
       - name: Upload frontend setup bundle (retry)
-        if: ${{ failure() }}
+        if: ${{ failure() && steps.frontend_bundle.outputs.transport == 'github' }}
         uses: actions/upload-artifact@v7
         with:
           name: frontend-setup-bundle
@@ -1362,7 +1411,7 @@ jobs:
     # Draft/Ready quality, builds and logic. Ready/queue browser smokes run
     # independently below, without waiting for this job's ~17-minute logic suite.
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) && needs['frontend-setup'].result == 'success' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_BROWSER_HEAVY_RUNNER || vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     defaults:
       run:
@@ -1370,7 +1419,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
@@ -1414,50 +1463,25 @@ jobs:
       # 实测 tar.gz 19MB),跳过本 job 原先重复的三次 vite build;测试行为零
       # 变化。走 REST zip 通道(download-artifact@v8 的 results blob 通道在本
       # 池实测 hang,见 frontend-setup 注释),小件上传/下载均实测可行。
-      - name: Download frontend setup bundle (REST)
+      - name: Fetch verified frontend setup bundle
         env:
+          PINVOU_FRONTEND_CACHE_URL: ${{ vars.PINVOU_FRONTEND_CACHE_URL }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          listing="$RUNNER_TEMP/frontend-setup-artifacts.json"
-          # 工件列表存在最终一致窗口(上传完成 ≠ 列表可见),对「列表获取 + 工件
-          # 查找」做有界轮询;耗尽后显式报错退出,而非裸 StopIteration。
-          bundle_id=""
-          for _ in 1 2 3 4 5; do
-            if curl -sfSL --retry 3 --max-time 120 -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$listing"; then
-              bundle_id="$(python3 -c 'import json,sys; ids=[a["id"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == "frontend-setup-bundle"]; print(ids[0] if ids else "")' "$listing")"
-            fi
-            [[ -n "$bundle_id" ]] && break
-            echo "frontend setup 工件尚未在列表可见,25s 后重试"
-            sleep 25
-          done
-          [[ -n "$bundle_id" ]] || { echo "::error::frontend setup 工件缺失;请重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
-          code=000
-          for _ in 1 2 3 4 5; do
-            code="$(curl -sSL --max-time 900 -w '%{http_code}' -o "$RUNNER_TEMP/frontend-setup-bundle.zip" \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$bundle_id/zip" || echo 000)"
-            [[ "$code" == 200 ]] && break
-            echo "artifact zip 下载 http $code,60s 后重试"
-            sleep 60
-          done
-          [[ "$code" == 200 ]] || { echo "::error::frontend setup 工件 REST 下载失败(http $code);重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
-          python3 -m zipfile -e "$RUNNER_TEMP/frontend-setup-bundle.zip" "$RUNNER_TEMP/frontend-setup-bundle"
-          test -f "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz"
+        run: >-
+          python3 ../scripts/ci-frontend-bundle.py fetch
+          --commit "${{ needs.frontend-setup.outputs.commit }}"
+          --sha256 "${{ needs.frontend-setup.outputs.sha256 }}"
+          --size "${{ needs.frontend-setup.outputs.size }}"
+          --transport "${{ needs.frontend-setup.outputs.transport }}"
+          --output "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
 
       - name: Unpack frontend setup bundle
-        run: |
-          tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
-          # tar 保留 frontend-setup 构建时点的旧 mtime;消费方 checkout 的 src
-          # 更新,会误触 ui_test_server 的 assertFreshBuild「UI build is stale」
-          # 守卫(它按 mtime 判断陈旧)。工件化流程中新鲜度由构造保证(prepare
-          # 从同一 tested tree 构建),touch 对齐 mtime 恢复守卫本意。
-          find dist ../remote-control-relay/web/dist -exec touch {} +
-          # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。注意本 job
-          # 的 run 默认工作目录是 pinvou3-app,校验路径须相对它解析。
-          test -f dist/index.html
-          test -f ../remote-control-relay/web/dist/index.html
+        run: >-
+          python3 ../scripts/ci-frontend-bundle.py unpack
+          --commit "${{ needs.frontend-setup.outputs.commit }}"
+          --sha256 "${{ needs.frontend-setup.outputs.sha256 }}"
+          --bundle "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
+          --workspace "$GITHUB_WORKSPACE"
 
       - name: ESLint (含 pet 缺失项,现已全覆盖)
         # Official 的存量 warning 仍可由本地 lint 完整查看；CI 只打印会阻断的
@@ -1543,7 +1567,9 @@ jobs:
     needs: [changes, frontend-setup]
     # Each shard runs on the shared tested tree artifact and owns its fixtures.
     if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) && needs['frontend-setup'].result == 'success' }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    # Browser shards share the heavy pool so CPU-bound smoke suites can use
+    # its larger per-runner quota; all four shards retain independent fixtures.
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_BROWSER_HEAVY_RUNNER || vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -1556,7 +1582,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          # The tested PR merge and its two parents are sufficient for selection.
+          fetch-depth: 2
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
@@ -1599,50 +1626,25 @@ jobs:
       # 跳过每分片重复的三次 vite build;各分片解包独立副本,分片间无可变共享
       # 状态;dist/CHROME/工作目录与原 setup 一致。走 REST zip 通道(通道实测
       # 证据见 frontend-setup 注释)。
-      - name: Download frontend setup bundle (REST)
+      - name: Fetch verified frontend setup bundle
         env:
+          PINVOU_FRONTEND_CACHE_URL: ${{ vars.PINVOU_FRONTEND_CACHE_URL }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          listing="$RUNNER_TEMP/frontend-setup-artifacts.json"
-          # 工件列表存在最终一致窗口(上传完成 ≠ 列表可见),对「列表获取 + 工件
-          # 查找」做有界轮询;耗尽后显式报错退出,而非裸 StopIteration。
-          bundle_id=""
-          for _ in 1 2 3 4 5; do
-            if curl -sfSL --retry 3 --max-time 120 -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$listing"; then
-              bundle_id="$(python3 -c 'import json,sys; ids=[a["id"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == "frontend-setup-bundle"]; print(ids[0] if ids else "")' "$listing")"
-            fi
-            [[ -n "$bundle_id" ]] && break
-            echo "frontend setup 工件尚未在列表可见,25s 后重试"
-            sleep 25
-          done
-          [[ -n "$bundle_id" ]] || { echo "::error::frontend setup 工件缺失;请重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
-          code=000
-          for _ in 1 2 3 4 5; do
-            code="$(curl -sSL --max-time 900 -w '%{http_code}' -o "$RUNNER_TEMP/frontend-setup-bundle.zip" \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$bundle_id/zip" || echo 000)"
-            [[ "$code" == 200 ]] && break
-            echo "artifact zip 下载 http $code,60s 后重试"
-            sleep 60
-          done
-          [[ "$code" == 200 ]] || { echo "::error::frontend setup 工件 REST 下载失败(http $code);重跑 frontend-setup 或重新触发本 run。" >&2; exit 1; }
-          python3 -m zipfile -e "$RUNNER_TEMP/frontend-setup-bundle.zip" "$RUNNER_TEMP/frontend-setup-bundle"
-          test -f "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz"
+        run: >-
+          python3 ../scripts/ci-frontend-bundle.py fetch
+          --commit "${{ needs.frontend-setup.outputs.commit }}"
+          --sha256 "${{ needs.frontend-setup.outputs.sha256 }}"
+          --size "${{ needs.frontend-setup.outputs.size }}"
+          --transport "${{ needs.frontend-setup.outputs.transport }}"
+          --output "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
 
       - name: Unpack frontend setup bundle
-        run: |
-          tar -xzf "$RUNNER_TEMP/frontend-setup-bundle/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE"
-          # tar 保留 frontend-setup 构建时点的旧 mtime;消费方 checkout 的 src
-          # 更新,会误触 ui_test_server 的 assertFreshBuild「UI build is stale」
-          # 守卫(它按 mtime 判断陈旧)。工件化流程中新鲜度由构造保证(prepare
-          # 从同一 tested tree 构建),touch 对齐 mtime 恢复守卫本意。
-          find dist ../remote-control-relay/web/dist -exec touch {} +
-          # 收紧校验:两个 dist 的入口文件必须在位,缺失即显式红。注意本 job
-          # 的 run 默认工作目录是 pinvou3-app,校验路径须相对它解析。
-          test -f dist/index.html
-          test -f ../remote-control-relay/web/dist/index.html
+        run: >-
+          python3 ../scripts/ci-frontend-bundle.py unpack
+          --commit "${{ needs.frontend-setup.outputs.commit }}"
+          --sha256 "${{ needs.frontend-setup.outputs.sha256 }}"
+          --bundle "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
+          --workspace "$GITHUB_WORKSPACE"
 
       - name: 准备浏览器
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
@@ -1688,6 +1690,12 @@ jobs:
           PINVOU_WEBUI_SKIP_BUILD: "1"
         run: |
           set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ && "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          # A queue batch can place the immutable base outside the shallow graph.
+          if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          fi
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
             | node ../scripts/run-frontend-smokes.mjs --selected --shard "${{ matrix.shard }}/4" --isolate-network
@@ -1796,9 +1804,44 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      financial-owner-account-postgres:
+        # Empty image disables these extra services for the other five Jobs.
+        image: ${{ matrix.group == 'owners' && 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea' || '' }}
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 1
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-owner-wallet-postgres:
+        # Empty image disables these extra services for the other five Jobs.
+        image: ${{ matrix.group == 'owners' && 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea' || '' }}
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 1
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       GOTOOLCHAIN: local
       CGO_ENABLED: "1"
+      PINVOU_ACCOUNT_PG_PROFILE: ${{ matrix.group == 'owners' && 'owners' || 'financial' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -1849,26 +1892,30 @@ jobs:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
           set -euo pipefail
-          python3 scripts/account-ci-postgres.py --profile financial
+          python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE"
 
       - name: Run isolated financial group
         shell: bash
         env:
           ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}
+          PINVOU_CI_OWNER_PARALLEL: ${{ matrix.group == 'owners' && '1' || '0' }}
+          ACCOUNT_FINANCIAL_OWNER_SERVICES: ${{ steps.account-pg.outputs.owners_services }}
+          PINVOU_CI_FIXTURE_TEMPLATES: "1"
+          PINVOU_CI_FIXTURE_TIMING: "1"
           PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
           PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
           PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
           PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
         run: |
           set -euo pipefail
-          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP"
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP" --verify-fixture-cache
 
       - name: Stop owned temporary PostgreSQL services
         if: ${{ always() }}
         env:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
-          python3 scripts/account-ci-postgres.py --profile financial --stop-owned-services
+          python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE" --stop-owned-services
 
       - name: Confirm Account test resource retirement
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -2188,6 +2235,24 @@ jobs:
           export PINVOU_TEST_NATS_SERVER_BINARY="$RUNNER_TEMP/pinvou-test-nats-server"
           npm --prefix account-platform run test:existing-broker
 
+      - name: Token outbox publication on owned PostgreSQL and TLS NATS
+        timeout-minutes: 4
+        shell: bash
+        env:
+          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.broker_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.broker_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.broker_directory }}
+          PINVOU_TEST_NATS_SERVER_BINARY: ${{ runner.temp }}/pinvou-test-nats-server
+        run: |
+          set -euo pipefail
+          # Reuse only the preceding step's pinned executable; the test starts
+          # its own TLS broker and applies public Token migrations. The shared
+          # supervisor owns the complete Python/Go/NATS process tree, including
+          # panic, timeout and cancellation; always-run ledger recovery verifies it.
+          python3 -m unittest discover -s scripts/tests -p test_token_outbox_acceptance.py
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/token-outbox-process.json" -- npm --prefix account-platform run test:token-outbox
+
       - name: Audit export finite PostgreSQL rollback and persisted boundaries
         working-directory: account-platform
         env:
@@ -2277,6 +2342,7 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
           python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
+          python3 -m unittest discover -s scripts/tests -p test_financial_owners.py
           policy_python="${{ steps.financial-policy-python.outputs.python-path }}"
           policy_library="$(dirname "$(dirname "$policy_python")")/lib"
           python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-policy-process.json" -- env "LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$policy_python" -m unittest discover -s scripts/tests -p test_account_financial_ci.py
@@ -2451,7 +2517,17 @@ jobs:
       - name: 安装 relay 依赖
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
       - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）
-        run: node scripts/run-windows-relay-tools-tests.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs
+      - name: Preserve Windows relay tools process receipt
+        if: always()
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-relay-tools-process.json
+          if-no-files-found: warn
+          retention-days: 7
 
   team-relay-hub-test:
     name: team-relay-hub-test
@@ -2497,7 +2573,7 @@ jobs:
         run: npm --prefix team-relay-hub test
 
       - name: Hub 依赖审计
-        run: npm --prefix team-relay-hub audit --registry=https://registry.npmjs.org --audit-level=high
+        run: python3 scripts/ci-npm-audit.py --prefix team-relay-hub
 
   update-release-console-test:
     name: update-release-console-test (Node ${{ matrix.node-version }})
@@ -2530,7 +2606,7 @@ jobs:
         run: npm --prefix update-release-console test
 
       - name: 发布台依赖审计
-        run: npm --prefix update-release-console audit --registry=https://registry.npmjs.org --audit-level=high
+        run: python3 scripts/ci-npm-audit.py --prefix update-release-console
 
       - name: 发布台容器与 Compose 配置校验
         if: ${{ matrix.node-version == '20' }}
@@ -2609,6 +2685,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+
+      - name: Preserve Windows release contract process receipts
+        id: windows_release_contract_receipts
+        if: ${{ always() && runner.os == 'Windows' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json
+            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Warn when Windows release contract receipts are unavailable
+        if: ${{ always() && runner.os == 'Windows' && steps.windows_release_contract_receipts.outcome == 'failure' }}
+        run: echo '::warning::Windows release contract receipt upload failed; original receipts remain on the runner. Test and cleanup failures remain failures.'
 
   # pinvou-knowledge 是可单独部署的 crate，必须直接验证自己的默认 feature 图、
   # 测试与部署入口，而不只依赖 Tauri 作为 client-only path dependency 的间接编译。
@@ -4257,12 +4354,52 @@ jobs:
         if: ${{ matrix.phase == 'regression' }}
         run: npm --prefix pinvou3-app run test:windows-static-updater
 
+      - name: Windows atomic fixture Python
+        if: ${{ matrix.phase == 'regression' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Compilation helpers already require Python in this job. Bind the
+          # verified native executable without changing the runner installation.
+          python -X utf8 - <<'PY' >> "$GITHUB_ENV"
+          import ctypes
+          import os
+          import struct
+          import sys
+          if (
+              sys.platform != 'win32'
+              or sys.implementation.name != 'cpython'
+              or sys.version_info < (3, 12)
+              or struct.calcsize('P') != 8
+          ):
+              raise SystemExit('Windows atomic fixtures require native 64-bit CPython 3.12 or newer')
+          executable = sys.executable
+          if (
+              not os.path.isabs(executable)
+              or not os.path.isfile(executable)
+              or any(char in executable for char in '\r\n\0')
+          ):
+              raise SystemExit('Windows atomic fixture Python executable is unavailable')
+          ctypes.WinDLL('kernel32', use_last_error=True)
+          print('Windows atomic fixture Python ' + sys.version.split()[0] + ' (native, 64-bit)', file=sys.stderr)
+          print('PINVOU_WINDOWS_ATOMIC_PYTHON=' + executable)
+          PY
+
+      - name: Initialize Windows atomic resource ledger
+        if: ${{ matrix.phase == 'regression' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"
+          "$python_exe" scripts/ci-resource-ledger.py --init
+
       - name: Windows 原子替换状态机回归
         if: ${{ matrix.phase == 'regression' }}
         shell: bash
         run: |
           set -euo pipefail
           total_started=$SECONDS
+          python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"
           # 直接运行已经由 mt.exe 修补的链接产物。这里不能再次调用 cargo test，
           # 否则 Cargo 可能重链并覆盖 exe，导致 Common-Controls v6 清单丢失。
           test_exe="$(cygpath -u "$PINVOU3_TEST_EXE")"
@@ -4270,6 +4407,10 @@ jobs:
             echo "FAIL: 测试 exe 不存在:$test_exe" >&2
             exit 1
           }
+          test_exe_windows="$(cygpath -w "$test_exe")"
+          ledger="$(cygpath -u "$PINVOU_CI_RESOURCE_LEDGER")"
+          : > "$ledger/atomic-expected.txt"
+          sha256sum "$test_exe"
           cd pinvou3-app/src-tauri
           # 逐过滤器断言至少命中 1 个测试,避免测试改名后过滤器 0 匹配却 exit 0
           # 导致的静默空跑。staging::tests 是 cfg(all(test, windows)) 的传输
@@ -4378,14 +4519,61 @@ jobs:
             'windows_attachment_runtime_stays_security_gated'; do
             index=$((index+1))
             started=$SECONDS
-            "$test_exe" "$filter" --test-threads=1 2>&1 | tee /tmp/windows_regression.log
-            grep -qE 'running [1-9][0-9]* tests?' /tmp/windows_regression.log || {
+            printf 'atomic-%s.json\n' "$index" >> "$ledger/atomic-expected.txt"
+            report="$ledger/atomic-$index.log"
+            receipt="$(cygpath -w "$ledger/atomic-$index.json")"
+            "$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"
+            grep -qE 'running [1-9][0-9]* tests?' "$report" || {
               echo "FAIL: 回归过滤器 '$filter' 匹配 0 个测试(疑似测试改名导致静默空跑)" >&2
               exit 1
             }
             echo "WINDOWS_RUST_TIMING phase=regression step=test-filter-$index elapsed_seconds=$((SECONDS-started)) status=0"
           done
           echo "WINDOWS_RUST_TIMING phase=regression step=regression-filter-suite elapsed_seconds=$((SECONDS-total_started)) status=0"
+
+      - name: Confirm Windows atomic resource retirement
+        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"
+          "$python_exe" - "$PINVOU_CI_RESOURCE_LEDGER" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          root = Path(sys.argv[1])
+          expected = root / 'atomic-expected.txt'
+          if expected.is_symlink() or not expected.is_file() or expected.stat().st_size > 65536:
+              raise SystemExit('Windows atomic receipt inventory unavailable')
+          names = expected.read_text(encoding='utf-8').splitlines()
+          if not names or len(names) != len(set(names)) or any(not re.fullmatch(r'atomic-[1-9][0-9]*\.json', name) for name in names):
+              raise SystemExit('Windows atomic receipt inventory invalid or empty')
+          for name in names:
+              receipt = root / name
+              if receipt.is_symlink() or not receipt.is_file():
+                  raise SystemExit('Windows atomic resource receipt missing: ' + name)
+          PY
+          "$python_exe" scripts/ci-resource-ledger.py --directory "$PINVOU_CI_RESOURCE_LEDGER"
+
+      - name: Windows atomic lifecycle receipts
+        id: windows_atomic_receipts_upload
+        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/atomic-expected.txt
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/ledger.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when Windows atomic receipt delivery fails
+        if: ${{ always() && steps.windows_atomic_receipts_upload.outcome == 'failure' }}
+        shell: bash
+        run: echo '::warning::Windows atomic receipt upload failed; original receipts remain on the runner. Tests and retirement remain mandatory.'
 
       # Round-42 review: the pinvou-cli workspace's own cfg(windows) unit
       # tests previously ran on NO CI leg — the Linux cli-test leg cannot

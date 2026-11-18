@@ -251,7 +251,7 @@ func TestIdentityRecoveryClaimsRuntimePostgres(t *testing.T) {
 		r := f.repositoryWithInitialStage(t, func(ctx context.Context, c *pgx.Conn, all []migrations.Migration) error {
 			var old []migrations.Migration
 			for _, m := range all {
-				if m.Version != 900007 {
+				if m.Version != 900007 && m.Version != 900019 {
 					old = append(old, m)
 				}
 			}
@@ -285,7 +285,7 @@ func TestIdentityRecoveryClaimsRuntimePostgres(t *testing.T) {
 		}
 		t.Logf("actual new identity recovery fields=%d", fields)
 		var after string
-		if err := r.pool.QueryRow(f.ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900007`).Scan(&after); err != nil || after != previousLedger {
+		if err := r.pool.QueryRow(f.ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version NOT IN (900007,900019)`).Scan(&after); err != nil || after != previousLedger {
 			t.Fatal("published migration identity changed", err)
 		}
 		var upgradedOperation string
@@ -306,7 +306,7 @@ func TestIdentityRecoveryClaimsRuntimePostgres(t *testing.T) {
 		assertHistoricalForwardOnlyMigration(t, r, installed, 900007,
 			"identity recovery generations and profile dispatch facts are forward-only")
 		var afterDown string
-		if err = r.pool.QueryRow(f.ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900007`).Scan(&afterDown); err != nil || afterDown != previousLedger {
+		if err = r.pool.QueryRow(f.ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version NOT IN (900007,900019)`).Scan(&afterDown); err != nil || afterDown != previousLedger {
 			t.Fatal("failed down changed history", err)
 		}
 		t.Setenv("APP_ENV", "test")
@@ -315,7 +315,7 @@ func TestIdentityRecoveryClaimsRuntimePostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 		directory := &historyLogoutDirectory{}
-		profileService := &ProfileChangeService{store: r, identities: historyAdapter(t, directory), now: time.Now}
+		profileService := &ProfileChangeService{store: r, identities: historyAdapter(t, directory, r), now: time.Now}
 		if _, err = profileService.resume(f.ctx, old); !errors.Is(err, ErrProfileSessionRevocationUnconfirmed) {
 			t.Fatal("uncertain old profile guessed a new logout", err)
 		}
@@ -336,10 +336,20 @@ type historyLogoutDirectory struct {
 	identityadapter.UserDirectory
 	calls   atomic.Int64
 	unknown bool
+	entered chan struct{}
+	proceed chan struct{}
 }
 
-func (d *historyLogoutDirectory) RevokeSessions(context.Context, string) error {
+func (d *historyLogoutDirectory) RevokeSessions(ctx context.Context, _ string) error {
 	d.calls.Add(1)
+	if d.entered != nil {
+		close(d.entered)
+		select {
+		case <-d.proceed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if d.unknown {
 		return errors.New("controlled lost logout ACK")
 	}
@@ -357,7 +367,7 @@ func (s *historyCheckpointStore) MarkProfileSessionsRevoked(ctx context.Context,
 	}
 	return s.ProfileChangeStore.MarkProfileSessionsRevoked(ctx, id)
 }
-func historyAdapter(t *testing.T, d *historyLogoutDirectory) *HTTPIdentityProvisioner {
+func historyAdapter(t *testing.T, d *historyLogoutDirectory, repository *PostgresRepository) *HTTPIdentityProvisioner {
 	t.Helper()
 	vault, err := identityadapter.NewPasswordVault([]byte(strings.Repeat("k", 32)), d)
 	if err != nil {
@@ -365,6 +375,16 @@ func historyAdapter(t *testing.T, d *historyLogoutDirectory) *HTTPIdentityProvis
 	}
 	service, err := identityadapter.NewService(vault, "controlled-profile-service-token")
 	if err != nil {
+		t.Fatal(err)
+	}
+	accountService := NewService(repository, nil).WithServiceToken("controlled-profile-service-token").WithProfileChanges(&ProfileChangeService{store: repository})
+	accountServer := httptest.NewServer(accountService.Handler(nil))
+	t.Cleanup(accountServer.Close)
+	authority, err := identityadapter.NewHTTPProfileRevocationAuthority(accountServer.URL, "controlled-profile-service-token", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.WithProfileRevocationAuthority(authority); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(service.Handler())
@@ -394,7 +414,7 @@ func TestProfileSessionRevocationRecoveryRuntimePostgres(t *testing.T) {
 				t.Fatal(err)
 			}
 			d := &historyLogoutDirectory{unknown: mode == "unknown-ack"}
-			client := historyAdapter(t, d)
+			client := historyAdapter(t, d, r)
 			store := &historyCheckpointStore{ProfileChangeStore: r, fail: mode != "unknown-ack"}
 			service := &ProfileChangeService{store: store, identities: client, now: time.Now}
 			if _, err := service.resume(ctx, c); err == nil {
@@ -412,14 +432,14 @@ func TestProfileSessionRevocationRecoveryRuntimePostgres(t *testing.T) {
 			}
 			store.fail = false
 			if mode == "adapter-restart" {
-				service.identities = historyAdapter(t, d)
+				service.identities = historyAdapter(t, d, r)
 			}
 			_, resumeErr := service.resume(ctx, c)
 			final, err := r.ProfileChange(ctx, c.ID, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if mode == "confirmed-checkpoint-lost" {
+			if mode == "confirmed-checkpoint-lost" || mode == "adapter-restart" {
 				if resumeErr != nil || final.Status != "COMPLETED" || final.SessionsRevokedAt == nil {
 					t.Fatal("confirmed receipt failed to converge", resumeErr)
 				}
@@ -459,7 +479,7 @@ func TestProfileSessionRevocationRecoveryRuntimePostgres(t *testing.T) {
 			t.Fatal("durable grant", err)
 		}
 		d := &historyLogoutDirectory{}
-		client := historyAdapter(t, d)
+		client := historyAdapter(t, d, r)
 		if err = client.RevokeProfileSessions(ctx, c.IdentitySubject, c.ID, first); err != nil {
 			t.Fatal(err)
 		}
@@ -473,7 +493,7 @@ func TestProfileSessionRevocationRecoveryRuntimePostgres(t *testing.T) {
 			t.Fatal("scope mismatch repeated remote effect", d.calls.Load())
 		}
 	})
-	t.Run("first-grant-crash-before-http-fails-closed", func(t *testing.T) {
+	t.Run("first-grant-crash-before-http-resumes-durable-reservation", func(t *testing.T) {
 		r := f.repository(t)
 		ctx := context.Background()
 		c := historyProfile(t, r)
@@ -487,20 +507,20 @@ func TestProfileSessionRevocationRecoveryRuntimePostgres(t *testing.T) {
 		if err != nil || !first {
 			t.Fatal("durable first grant", err)
 		}
-		// Crash after the durable grant but before HTTP leaves no adapter receipt.
-		// The restarted sender cannot reconstruct whether dispatch happened.
+		// The Account RESERVED receipt proves no adapter claimed dispatch.
+		// Reconstructing both processes resumes the same operation.
 		c, err = r.ProfileChange(ctx, c.ID, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		d := &historyLogoutDirectory{}
-		service := &ProfileChangeService{store: r, identities: historyAdapter(t, d), now: time.Now}
-		if _, err = service.resume(ctx, c); !errors.Is(err, ErrProfileSessionRevocationUnconfirmed) {
-			t.Fatal("restart guessed a fresh first attempt", err)
+		service := &ProfileChangeService{store: r, identities: historyAdapter(t, d, r), now: time.Now}
+		if _, err = service.resume(ctx, c); err != nil {
+			t.Fatal("durable reservation failed to resume", err)
 		}
 		final, err := r.ProfileChange(ctx, c.ID, nil)
-		if err != nil || final.Status != "REPAIR_REQUIRED" || d.calls.Load() != 0 {
-			t.Fatal("first grant gap did not fail closed", err)
+		if err != nil || final.Status != "COMPLETED" || d.calls.Load() != 1 {
+			t.Fatal("durable first grant did not converge", err)
 		}
 	})
 	t.Run("concurrent-durable-first-grant", func(t *testing.T) {
@@ -547,6 +567,11 @@ func assertHistoricalForwardOnlyMigration(t *testing.T, r *PostgresRepository, i
 
 func assertHistoricalRollbackRefusal(t *testing.T, r *PostgresRepository, installed []migrations.Migration, version int64, sqlstate, message string) {
 	t.Helper()
+	assertHistoricalRollbackRefusalContext(t, context.Background(), r, installed, version, sqlstate, message)
+}
+
+func assertHistoricalRollbackRefusalContext(t *testing.T, ctx context.Context, r *PostgresRepository, installed []migrations.Migration, version int64, sqlstate, message string) {
+	t.Helper()
 	var downSQL string
 	for _, migration := range installed {
 		if migration.Version == version {
@@ -556,7 +581,6 @@ func assertHistoricalRollbackRefusal(t *testing.T, r *PostgresRepository, instal
 	if strings.TrimSpace(downSQL) == "" {
 		t.Fatal("historical rollback SQL missing", version)
 	}
-	ctx := context.Background()
 	cfg := r.pool.Config().ConnConfig.Copy()
 	cfg.User = "account_migrator"
 	cfg.Password = ""

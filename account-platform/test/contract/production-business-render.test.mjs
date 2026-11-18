@@ -194,6 +194,44 @@ test('actual current models Compose keeps migrator credentials out of runtime mo
   });
 });
 
+test('optional Token overlay uses current models render and independent runtime files', compose, () => {
+  const f = currentRenderFixture('compose', 'models', {tokenEvents: true});
+  try {
+    assert.equal(checkProductionBusiness(f.render, f.inventory).decision, 'BUSINESS_CONFIG_VALID');
+    const relay = f.render.config.services['token-event-relay'];
+    assert.equal(relay.environment.EVENT_SOURCE, 'token');
+    assert.equal(relay.depends_on['token-migrate'].condition, 'service_completed_successfully');
+    assert.equal(relay.environment.NATS_CREDENTIALS_FILE, undefined);
+    f.updatePrivate('TOKEN_RELAY_PRIVATE_ENV_FILE', 'DATABASE_URL', f.raw.EVENT_RELAY_PRIVATE_ENV_FILE.DATABASE_URL);
+    f.rerender(); rejected(f, undefined, /production_render_database_identity/);
+  } finally { f.dispose(); }
+  assert.throws(() => currentRenderFixture('compose', 'personal', {tokenEvents: true}), /production_render_composition/);
+});
+
+test('enabled Helm relay preflight validates resolved domain DSNs and Token digest without treating init as SQL', helm, () => {
+  const f = currentRenderFixture('helm', 'models', {tokenEvents: true});
+  try {
+    assert.equal(checkProductionBusiness(f.render, f.inventory).decision, 'BUSINESS_CONFIG_VALID');
+    const all = workloads(f.render, f.render.secrets);
+    assert.equal(all.filter(w => w.service.name === 'event-relay').length, 3);
+    const snapshots = JSON.parse(readFileSync(f.recipe.secretSnapshotFile));
+    const keyFor = ref => `${f.recipe.namespace}/${ref.name}/${ref.key}`;
+    const source = domain => all.find(w => w.service.name === 'event-relay'
+      && w.resource.spec.template.metadata.labels['app.kubernetes.io/component'] === `${domain}-event-relay`);
+    for (const [target, other] of [['token', 'account'], ['billing', 'account'], ['account', 'billing']]) {
+      const key = keyFor(source(target).refs.DATABASE_URL), original = snapshots[key];
+      snapshots[key] = snapshots[keyFor(source(other).refs.DATABASE_URL)];
+      writeFileSync(f.recipe.secretSnapshotFile, JSON.stringify(snapshots));
+      f.rerender(); rejected(f, undefined, /production_render_database_identity/);
+      snapshots[key] = original;
+    }
+    const digest = keyFor(source('token').refs.TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256);
+    snapshots[digest] = 'not-an-approved-digest';
+    writeFileSync(f.recipe.secretSnapshotFile, JSON.stringify(snapshots));
+    f.rerender(); rejected(f, undefined, /production_render_token_relay_identity/);
+  } finally { f.dispose(); }
+});
+
 test('actual production Helm migration hooks bind resolved Secret keys and backup evidence', helm, async t => {
   await fixtureCase(t, 'helm', 'models', 'all current workloads and three original hooks validated', f => {
     currentWaiverBindings(f);

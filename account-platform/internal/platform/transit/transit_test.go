@@ -116,6 +116,10 @@ func TestContextCancellationReachesTLSRequest(t *testing.T) {
 					arrived <- r.URL.Path
 					select {
 					case <-r.Context().Done():
+						// Do not finish the partial response while the client is
+						// processing cancellation: a clean EOF can win that race.
+						// The fixture owner releases both success and failure paths.
+						<-released
 					case <-released:
 					}
 				}))
@@ -153,7 +157,7 @@ func TestContextCancellationReachesTLSRequest(t *testing.T) {
 				select {
 				case err := <-done:
 					if !errors.Is(err, context.Canceled) {
-						t.Fatal("request did not return cancellation")
+						t.Fatalf("request did not return cancellation (nil=%t, invalid_secret=%t, deadline=%t)", err == nil, errors.Is(err, ErrInvalidSecret), errors.Is(err, context.DeadlineExceeded))
 					}
 					if err.Error() != context.Canceled.Error() {
 						t.Fatal("cancellation disclosed transport details")

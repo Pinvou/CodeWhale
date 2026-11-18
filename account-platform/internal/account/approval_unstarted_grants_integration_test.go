@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
@@ -252,10 +251,9 @@ func TestUnstartedApprovalGrantInventoryPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = accountschema.DownOne(ctx, operator, loaded)
-	if !errors.As(err, &pgErr) || pgErr.Code != "55000" {
-		t.Fatal("inventory down did not refuse", err)
-	}
+	// DownOne selects the latest installed migration; test this exact historical
+	// forward-only contract without rolling back a later legitimate migration.
+	assertHistoricalRollbackRefusalContext(t, ctx, repo, loaded, 900022, "55000", "900022 inventory is forward-only; preserve recovery visibility")
 	if err = operator.QueryRow(ctx, identitySQL).Scan(&ledgerAfter, &fnAfter); err != nil || ledgerBefore != ledgerAfter || fnBefore != fnAfter {
 		t.Fatal("refused down changed ledger/function", err)
 	}
