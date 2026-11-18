@@ -38,7 +38,7 @@ git submodule update --init --recursive
 git commit -s
 ```
 
-修改或 rebase 已有提交时使用 `--signoff`。详情见 [Developer Certificate of Origin](https://developercertificate.org/) 与 [DCO.md](DCO.md)（其中说明该签署证明的内容与 CI 的执行方式）。未签署的人工提交会被 CI 拦截；受信任的 Dependabot 和 GitHub Actions bot 提交，以及合并提交（多于一个父提交）除外。
+修改或 rebase 已有提交时使用 `--signoff`。详情见 [Developer Certificate of Origin](https://developercertificate.org/) 与 [DCO.md](DCO.md)（其中说明该签署证明的内容与 CI 的执行方式）。未签署的人工提交会被 CI 拦截；受信任的 Dependabot 和 GitHub Actions bot 提交，以及合并提交（多于一个父提交）除外。专用的 `DCO` workflow 仅在拉取请求上执行签署校验（merge queue 腿只复报各 PR 已验证的结果），但直推 `main` 仍会校验签署：`pr-check` 的 `commit-message` 门禁对推送区间运行 `scripts/validate-commit-msg.py`，将消息格式与签署一并校验——仅在 push 上放宽「签署者须等于提交作者」以兼容 GitHub 的 squash 提交，拉取请求上仍要求二者一致。两道门禁的分工详见 [DCO.md](DCO.md)。
 
 ## 改动应放在哪里
 
