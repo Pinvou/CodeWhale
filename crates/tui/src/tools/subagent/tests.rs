@@ -20998,6 +20998,48 @@ fn a_network_denied_child_cannot_address_a_remote_location_through_any_tool() {
         );
     }
 }
+
+/// The complete admitted-command network classification covers the npm
+/// registry metadata family: `npm view|show|info` contacts the package
+/// registry with a bare package argument — no URL-bearing field — so a
+/// network-denied child's gate must recognize the family's shape, not only
+/// URL spellings and GitHub stages.
+#[test]
+fn network_denied_gate_refuses_the_npm_registry_family() {
+    for (name, input) in [
+        (
+            "bash",
+            json!({"action": "run", "command": "npm view codewhale version"}),
+        ),
+        (
+            "bash",
+            json!({"action": "run", "command": "npm show codewhale"}),
+        ),
+        (
+            "bash",
+            json!({"action": "run", "command": "pwd; npm info x | wc -l"}),
+        ),
+        (
+            "exec_shell",
+            json!({"action": "run", "command": "npm view x"}),
+        ),
+    ] {
+        assert!(
+            reject_network_reaching_input(name, &input).is_err(),
+            "{name} reaches the package registry and must be refused: {input}"
+        );
+    }
+
+    // A genuinely local npm shape without a registry read stays admitted.
+    assert!(
+        reject_network_reaching_input(
+            "bash",
+            &json!({"action": "run", "command": "npm --version"}),
+        )
+        .is_ok(),
+        "a local npm shape without a registry read stays admitted"
+    );
+}
 /// A read-only member keeps `Run.verifiers` so it can do its job, but the
 /// `commands` array spawns arbitrary programs — `bash -lc 'rm -rf src'` is the
 /// raw shell the deny list just removed, re-entered through the door left open

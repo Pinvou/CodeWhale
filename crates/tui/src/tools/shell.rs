@@ -4899,6 +4899,24 @@ fn enforce_readonly_github_network_policy(
     // --search '*'` reaches the network while a charset-gated predicate
     // would un-admit it and skip the policy.
     if !crate::command_safety::command_reaches_github_readonly(command) {
+        // An outer network cap (`network_access = false`) applies to every
+        // admitted family, not only the GitHub one: an npm registry metadata
+        // read contacts the registry with a bare package argument — a
+        // spelling no URL-shaped or GitHub-shaped guard can see — so the
+        // complete classification gates it here too. A caller whose ceiling
+        // permits network keeps the npm family (registry metadata reads are
+        // admitted scout work).
+        if context
+            .tool_authority
+            .as_ref()
+            .is_some_and(|authority| authority.network_access == Some(false))
+            && crate::command_safety::command_reaches_network_readonly(command)
+        {
+            return Err(ToolError::permission_denied(
+                "Read-only probe rejected: this session runs under an outer network cap, and the command reaches the network (npm registry metadata read)."
+                    .to_string(),
+            ));
+        }
         return Ok(());
     }
     let Some(decider) = context.network_policy.as_ref() else {
