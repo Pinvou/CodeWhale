@@ -171,6 +171,16 @@ func (r *PostgresRepository) PrepareLatePaymentQuery(ctx context.Context, caseID
 	if err != nil {
 		return receipt, err
 	}
+	// A Serializable archive can have acquired its snapshot before waiting on
+	// these case locks. A physical row version forces that old snapshot to retry
+	// and observe this accepted marker; no public value or event is changed.
+	command, err := tx.Exec(ctx, `UPDATE late_payment_review_cases SET updated_at=updated_at WHERE id=$1`, caseID)
+	if err != nil {
+		return receipt, err
+	}
+	if command.RowsAffected() != 1 {
+		return receipt, ErrConflict
+	}
 	if err = tx.Commit(ctx); err != nil {
 		// An uncertain commit grants no execution token. The same key can only
 		// discover its retained marker on replay, never renew execution.

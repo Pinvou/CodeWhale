@@ -890,7 +890,7 @@ func TestRetainedLateClaimQueryAuthority(t *testing.T) {
 			}
 			// Controlled historical provider facts are older than the new user claim,
 			// but newer than the archive boundary. No payment/evidence fact is changed.
-			if _, err = r.pool.Exec(ctx, `UPDATE payment_orders SET created_at=$2::timestamptz-interval '10 days',expires_at=$2::timestamptz-interval '9 days',provider_payable_until=$2::timestamptz-interval '9 days',late_review_boundary_at=$2::timestamptz-interval '8 days',final_archive_eligible_at=$2,last_successful_query_at=$3,last_authoritative_unpaid_at=$3 WHERE id=$1`, order.ID, base.Add(-time.Hour), base); err != nil {
+			if _, err = r.pool.Exec(ctx, `UPDATE payment_orders SET created_at=$2::timestamptz-interval '10 days',expires_at=$2::timestamptz-interval '9 days',provider_payable_until=$2::timestamptz-interval '9 days',late_review_boundary_at=$2::timestamptz-interval '8 days',final_archive_eligible_at=$2,last_successful_query_at=$3,last_authoritative_unpaid_at=$3,archive_query_generation=gen_random_uuid(),archive_query_authoritative_unpaid=true WHERE id=$1`, order.ID, base.Add(-time.Hour), base); err != nil {
 				t.Fatal(err)
 			}
 			order.Status = "MANUAL_REVIEW"
@@ -918,7 +918,7 @@ func TestRetainedLateClaimQueryAuthority(t *testing.T) {
 				queryErr = errors.New("controlled provider query unavailable")
 			}
 			if mode != "failed_query_reject" {
-				if _, err = r.pool.Exec(ctx, `UPDATE payment_orders SET last_successful_query_at=$2,last_authoritative_unpaid_at=$2 WHERE id=$1`, order.ID, base.Add(2*time.Minute)); err != nil {
+				if _, err = r.pool.Exec(ctx, `UPDATE payment_orders SET last_successful_query_at=$2,last_authoritative_unpaid_at=$2,archive_query_generation=gen_random_uuid(),archive_query_authoritative_unpaid=true WHERE id=$1`, order.ID, base.Add(2*time.Minute)); err != nil {
 					t.Fatal(err)
 				}
 			}

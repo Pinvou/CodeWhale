@@ -41,3 +41,35 @@ repository dispatch, even though the old archive handler ignored request bodies.
 There is no write fallback. A legacy pending invocation with no marker keeps its
 original facts/key and remains unknown; it is never upgraded or dispatched as a
 new command. Unupgraded actions receive no protocol marker.
+
+## Deploy current-query archive admission
+
+Apply the complete Billing migration package, including
+`900046_late_payment_query_admission`, through the existing public deployment
+identity before starting the new service. Verify the complete applied ledger.
+The migration appends nullable current-query generation/authority facts and does
+not reconstruct them from historical timestamps or immutable evidence. Existing
+orders therefore need a real new accepted query before a new archive is eligible;
+an exact prior archive receipt still follows the original recovery path first.
+
+Drain and stop old Billing writers and their archive entrypoints before enabling
+the new service. Old binaries do not maintain the new generation facts and their
+old archive API does not gain the new guard merely because the schema exists.
+Do not run mixed old/new writers against this admission contract. Deploy the
+schema first, then the new writer/entrypoint set; do not roll back to an old
+writer or remove the forward-only facts to regain old admission behavior.
+
+The latest query is ordered by its accepted generation, not by response arrival
+time or an immutable evidence timestamp. A new accepted query reserves UNKNOWN
+before supplier I/O; only that generation can publish its normalized current
+result after the original flow succeeds. Failure/cancellation stays unknown;
+PENDING/CREATED is not authoritative unpaid. An older reply cannot replace a
+newer generation, while every strong payment and immutable observation still
+uses the existing financial merge. No database lock spans external I/O.
+
+New archives also reject an unfinished durable review-query command and an
+explicit false frozen capability on either the order or case. Missing old fields
+are not rewritten into a declared capability. These checks do not replace the
+original deadline, claim, conflict, financial-fact or current-owner requirements.
+Receipt recovery still requires the exact original actor/case/key and current
+authorization; it does not re-evaluate today's new-command admission facts.

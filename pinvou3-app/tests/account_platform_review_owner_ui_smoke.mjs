@@ -6,9 +6,10 @@ import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 import { createServer } from './helpers/vite-fixture.mjs';
+import { findBrowserExecutable } from './helpers/browser-executable.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const chrome = process.env.CHROME || ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome'].find(fs.existsSync);
+const chrome = findBrowserExecutable();
 assert.ok(chrome, 'Browser unavailable; review ownership UI was not validated');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-review-owner-'));
 let vite; let browser; let passed = 0;
@@ -18,13 +19,48 @@ try {
   browser = await puppeteer.launch({ executablePath: chrome, headless: 'new', userDataDir: profile, args: ['--disable-gpu', '--no-first-run'] });
   const page = await browser.newPage(); page.setDefaultTimeout(10000);
   const errors = []; page.on('pageerror', error => errors.push(error.message)); page.on('dialog', dialog => dialog.accept());
-  const click = async key => {
-    const clicked = await page.evaluate(key => {
+  const click = async (key, selector = 'button') => {
+    const clicked = await page.evaluate(({ key, selector }) => {
       const text = window.reviewOwnerProbe.copy[key];
-      const button = [...document.querySelectorAll('button')].find(node => node.textContent.trim() === text && !node.disabled);
+      const button = [...document.querySelectorAll(selector)].find(node => node.textContent.trim() === text && !node.disabled);
       if (!button) return false; button.click(); return true;
-    }, key);
+    }, { key, selector });
     assert.ok(clicked, `Missing enabled review action: ${key}`);
+  };
+  const enabledAction = key => page.evaluate(key => [...document.querySelectorAll('article button')]
+    .some(node => node.textContent.trim() === window.reviewOwnerProbe.copy[key] && !node.disabled), key);
+  const exerciseHandling = async anomaly => {
+    const reason = 'Controlled ownership UI handling';
+    if (anomaly) {
+      assert.equal(await enabledAction('resolve'), false, 'empty resolution and reason must not be actionable');
+      await page.select('article select', 'DISMISS');
+      assert.equal(await enabledAction('resolve'), false, 'resolution without a reason must remain disabled');
+      await page.type('article textarea', reason);
+    }
+    const action = anomaly ? 'resolve' : 'query';
+    await page.waitForFunction(key => [...document.querySelectorAll('article button')]
+      .some(node => node.textContent.trim() === window.reviewOwnerProbe.copy[key] && !node.disabled), {}, action);
+    assert.equal(await enabledAction(action), true);
+    await click(action, 'article button');
+    if (!anomaly) {
+      await page.waitForSelector('[role="alertdialog"]');
+      assert.equal(await page.evaluate(() => window.reviewOwnerProbe.calls.filter(call => call.url.endsWith('/query-commands')).length), 0);
+      await click('confirmQueryAction', '[role="alertdialog"] button');
+      await page.waitForFunction(() => [...document.querySelectorAll('[role="status"]')]
+        .some(node => node.textContent === window.reviewOwnerProbe.copy.queryRecorded));
+    } else {
+      await page.waitForFunction(() => ![...document.querySelectorAll('article button')]
+        .some(node => node.textContent.trim() === window.reviewOwnerProbe.copy.resolve));
+    }
+    const suffix = anomaly ? '/resolve' : '/query-commands';
+    const writes = await page.evaluate(suffix => window.reviewOwnerProbe.calls.filter(call => call.method === 'POST' && call.url.endsWith(suffix)), suffix);
+    assert.equal(writes.length, 1); assert.ok(writes[0].key);
+    assert.ok(writes[0].url.endsWith(`/11111111-1111-4111-8111-111111111111${suffix}`));
+    assert.deepEqual(JSON.parse(writes[0].body), anomaly ? { resolution: 'DISMISS', reason } : {
+      command_protocol: 1, payment_order_id: '11111111-1111-4111-8111-111111111111',
+      provider_id: '44444444-4444-4444-8444-444444444444', provider_version: 'fixture-version-1', merchant_order_no: 'review-owner-order',
+    });
+    assert.equal(await page.$('[data-retained-finance-command]'), null);
   };
   const hasAction = key => page.evaluate(key => [...document.querySelectorAll('article button')].some(node => node.textContent.trim() === window.reviewOwnerProbe.copy[key]), key);
   for (const language of ['zh', 'en', 'ja']) for (const anomaly of [false, true]) {
@@ -42,6 +78,7 @@ try {
         assert.equal(await hasAction('claimCase'), false);
         assert.equal(await hasAction(anomaly ? 'resolve' : 'query'), true);
       } else assert.equal(await hasAction(anomaly ? 'resolve' : 'query'), true);
+      if (owner !== 'other') await exerciseHandling(anomaly);
       assert.deepEqual(errors, []); passed++;
     }
     for (const claim of ['conflict', 'transport']) {

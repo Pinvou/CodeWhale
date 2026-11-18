@@ -250,6 +250,13 @@ order:
     filters cover the atomic-replacement state machine that the static
     updater exercises end to end; the `filesystem`/`artifact_*` filters cover
     the same writer-side invariants at the unit level.
+    The isolated preconnection regression emits `READER_PRECONNECT` phase
+    markers for host creation, real socket reconnects, registration and each
+    deadline scenario. Markers contain only fixed phase names and monotonic
+    elapsed time. When its outer watchdog fires, the last marker distinguishes
+    a fixture/transport wait from a worker deadline failure; it does not prove
+    which one failed without that evidence. Production twenty-second deadlines,
+    inner assertions and the outer watchdog remain unchanged.
     The A controller filters execute the authenticated resume status consumer,
     its first/second-disconnection telemetry, exact state/owner publication
     fences, raw DTO/shared fixture contract, and existing reader-authorized

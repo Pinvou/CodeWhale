@@ -2294,6 +2294,16 @@
         "file": "900045_provider_health_recent.up.sql",
         "version": 900045,
         "sha256": "0d1b5cc17cce2342540c4c75d15c783f53f37177412247ca5eefcd24d942d961"
+      },
+      {
+        "file": "900046_late_payment_query_admission.down.sql",
+        "version": 900046,
+        "sha256": "0525e581974cdd9b85cf7c2cbf46aa89a85b04b300c8405d814c31d9c778959a"
+      },
+      {
+        "file": "900046_late_payment_query_admission.up.sql",
+        "version": 900046,
+        "sha256": "5de84e5e0aa20f152aa63bd598fed1e5e7810031215ba43bfcccab241f6c9c1d"
       }
     ],
     "payment-simulator": [
