@@ -99,6 +99,15 @@ change, a project-file change) into the prefix — append it as a user-role
 message instead. A later request must be `previous ⊕ suffix` unless a logged
 header change or a history reset explains the difference.
 
+DeepSeek strict-mode tool shaping (`prepare_tools_for_strict_mode`) states its
+effect here per that rule: it is **frozen-prefix-compatible**. The removal
+note appended to a tool's description is a deterministic pure function of the
+pinned catalog and the route, so on a stable strict route the tools bytes are
+identical every step; the shaping runs on a per-request clone and never
+mutates the registry. A route flip (provider or `base_url` change) re-pins as
+a declared `change:provider`/`change:route` header change, not undeclared
+drift.
+
 ## Permissions fragment budget compatibility
 
 Configured `instructions = [...]` files have an existing 100 KiB per-file
