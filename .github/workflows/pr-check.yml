@@ -940,10 +940,14 @@ jobs:
               - 'scripts/windows-relay-tools-preflight.mjs'
               - '.github/workflows/pr-check.yml'
             team_relay_hub:
+              - 'scripts/ci-npm-audit.py'
+              - 'scripts/tests/test_ci_npm_audit.py'
               - 'team-relay-hub/**'
               - 'docs/team-relay/migrations/**'
               - '.github/workflows/pr-check.yml'
             update_release_console:
+              - 'scripts/ci-npm-audit.py'
+              - 'scripts/tests/test_ci_npm_audit.py'
               - 'update-release-console/**'
               - 'scripts/ci-update-release-console-container.sh'
               - 'deploy/nginx-pinvou3-updates.conf'
@@ -2447,7 +2451,7 @@ jobs:
         run: npm --prefix team-relay-hub test
 
       - name: Hub 依赖审计
-        run: npm --prefix team-relay-hub audit --registry=https://registry.npmjs.org --audit-level=high
+        run: python3 scripts/ci-npm-audit.py --prefix team-relay-hub
 
   update-release-console-test:
     name: update-release-console-test (Node ${{ matrix.node-version }})
@@ -2480,7 +2484,7 @@ jobs:
         run: npm --prefix update-release-console test
 
       - name: 发布台依赖审计
-        run: npm --prefix update-release-console audit --registry=https://registry.npmjs.org --audit-level=high
+        run: python3 scripts/ci-npm-audit.py --prefix update-release-console
 
       - name: 发布台容器与 Compose 配置校验
         if: ${{ matrix.node-version == '20' }}
