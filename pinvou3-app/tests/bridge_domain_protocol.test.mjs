@@ -235,7 +235,14 @@ const expectedProtocolHashes = {
   // Stream bubbles now carry htmlSource for native selection provenance.
   // This additive local state field is inside the hashed delta listener;
   // invoke payloads and event names are unchanged.
-  chat: '684b43170fd9f7a311b8f2e7d36270a3662324b5875abb77f7c4de2b2e21fa1d',
+  // Recomputed for the usage-meter occupancy fix: the chat:usage listener
+  // body gains the per-request context_input_tokens consumption ahead of the
+  // cumulative-input dirty guard (chat:usage fires once per turn at
+  // TurnComplete and any tool_start latches the guard until the next send —
+  // without the per-request field the meter froze at "—/…·0%" on every
+  // tool-using conversation). Same event surface — no new invoke or listen
+  // entries.
+  chat: 'a24529dea3d0dbd5b4abe08539abb6808c4e7197f448518aecec985f52e9083f',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
