@@ -1257,6 +1257,8 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
   const wrapper = driveWrapper(fixture);
   let settled = false;
   let pending;
+  const startedAt = performance.now();
+  const stages = { prepareObservedMs: null, holdReturnedMs: null, releaseAcknowledgedMs: null };
   try {
     await host.deferOperation('prepare', true);
     pending = initializeWorkspace(wrapper, 'windows-first-workspace-setup-test').then(
@@ -1269,9 +1271,12 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
       const raw = readPendingHostRequest(join(requests, name));
       return raw !== null && JSON.parse(raw).operation === 'prepare';
     }), 'initial setup did not publish prepare');
+    stages.prepareObservedMs = Math.round(performance.now() - startedAt);
     await sleep(16_000);
+    stages.holdReturnedMs = Math.round(performance.now() - startedAt);
     assert.equal(settled, false, 'setup must not inherit the shorter mutation observer');
     await host.deferOperation('prepare', false);
+    stages.releaseAcknowledgedMs = Math.round(performance.now() - startedAt);
     const outcome = await pending;
     assert.ifError(outcome.error);
     assert.equal(outcome.response.result.structuredContent.pages[0].id, 1);
@@ -1282,6 +1287,18 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
     assert.ok(Number.isSafeInteger(diagnostic.sequence) && diagnostic.sequence > 0);
     assert.ok(Number.isSafeInteger(diagnostic.ageMs) && diagnostic.ageMs >= 0);
   } catch (error) {
+    // Keep failure evidence bounded and synthetic: elapsed times belong to this
+    // observer only; flags report fixed log markers, not a proven host cause.
+    // Never include raw stderr, session IDs, URLs or filesystem paths.
+    const stderr = wrapper.stderrText();
+    console.error('[browser-first-workspace-setup-diagnostic]', JSON.stringify({
+      ...stages,
+      elapsedMs: Math.round(performance.now() - startedAt),
+      prepareFailureReported: stderr.includes('On-demand WebView2 startup request failed:'),
+      prepareDeadlineReported: stderr.includes('On-demand WebView2 startup request failed: browser/host-request-timeout: prepare exceeded 25000ms'),
+      upstreamStartReported: stderr.includes('Starting chrome-devtools-mcp:'),
+      upstreamBoundReported: stderr.includes('Bound conversation browser page:'),
+    }));
     fixture.primaryErrors = [error];
     throw error;
   } finally {
