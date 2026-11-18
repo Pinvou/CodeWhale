@@ -38,6 +38,14 @@
       "conclusion": "success"
     },
     {
+      "name": "Download frontend setup bundle (REST)",
+      "conclusion": "success"
+    },
+    {
+      "name": "Unpack frontend setup bundle",
+      "conclusion": "success"
+    },
+    {
       "name": "ESLint (含 pet 缺失项,现已全覆盖)",
       "conclusion": "success"
     },
@@ -59,22 +67,6 @@
     },
     {
       "name": "madge (circular imports)",
-      "conclusion": "success"
-    },
-    {
-      "name": "Vite build",
-      "conclusion": "success"
-    },
-    {
-      "name": "Verify embedded Account Portal assets are current",
-      "conclusion": "success"
-    },
-    {
-      "name": "Verify credential handoff built deployment boundary",
-      "conclusion": "success"
-    },
-    {
-      "name": "Vite web build (remote relay)",
       "conclusion": "success"
     },
     {

@@ -807,6 +807,17 @@ because it carries controller v1 frames, while its existing v2
 An ordinary browser socket does not negotiate the controller subprotocol and
 cannot submit controller v1 frames. The Relay binds a controlled controller
 identity only to a negotiated desktop socket.
+On a negotiated socket the first role-establishing operation reserves the
+socket's role while authentication is pending. A competing operation for the
+other role cannot change that reservation or replace an enrolled endpoint.
+On reconnect, B may send `controller_resume_prepare` immediately after
+`desktop_endpoint_register`. The Relay holds at most one prepare for a lease
+of that endpoint, coalesces exact retransmissions while registration is
+pending, and processes it after successful registration and its ACK. The
+resume token, current endpoint binding and original recovery deadline still
+apply. The same endpoint ownership check applies when the prepare arrives
+after the ACK. Neither desktop role may replace an active lease or pending
+handshake by preparing a different recovery on that socket.
 If an older Relay or proxy omits the requested subprotocol in its upgrade
 response, the desktop opens a fresh v2-only connection to preserve WebUI
 access. That connection cannot carry controller v1 traffic: already queued v1
@@ -1152,12 +1163,19 @@ extension; changed or cross-socket retired traffic is rejected and has no
 cleanup authority over the new revision. New resume attempts replace the
 tombstone only after successful commit.
 
-Final deliveries precede the Relay's atomic token/epoch rotation so a failed
-delivery can still abort the old revision. This is not an atomic distributed
-commit: one peer may have seen a final before the other delivery fails. Any such
-uncertainty terminates the lease rather than opening business on the Relay.
-Accepted-result cleanup is fenced to the exact immutable lease revision; once
-router post-processing finishes, that result's abort authority is retired.
+An authenticated B socket that replaces the committed B for the same endpoint
+starts the old socket's retirement during registration. The successor can
+prepare within the frozen recovery window before the old socket's physical
+close arrives. The late close shares the old socket's one-time retirement.
+
+After both ready acknowledgements, the Relay rotates the exact lease and
+installs the next liveness state with business still suspended. It rechecks the
+frozen cutoff and both socket owners before queueing either final. After both
+queues accept their frames, the Relay opens business and records completion.
+If either queue fails, one peer may already have received a final, so the Relay
+terminates the exact rotated revision and leaves business suspended. A failure
+before rotation can retire only the original recovery revision. Finalization
+retires the accepted result's abort authority.
 Authoritative termination releases the interaction slot, clears all lease peer
 links and notifies stateful hooks even if replacement notification fails. Hook
 cleanup is owner-fenced, including a bounded immediate predecessor during a
