@@ -5,7 +5,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import react from '@vitejs/plugin-react';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
-import {createServer} from './helpers/vite-fixture.mjs';
+import {createServer,prepareFixtureModules} from './helpers/vite-fixture.mjs';
 import {approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy, approvalDirectoryToolbarCopy} from '../src/shared/i18n.js';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const chrome=process.env.CHROME || ['C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Microsoft/Edge/Application/msedge.exe','C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Google/Chrome/Application/chrome.exe','/snap/bin/chromium','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome','/usr/bin/google-chrome-stable','/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'].find(fs.existsSync);
@@ -15,6 +15,7 @@ let vite,browser,page,passed=0,failed=0;
 const errors=[];
 try {
  vite=await createServer({root,configFile:false,appType:'mpa',logLevel:'error',plugins:[react()],server:{host:'127.0.0.1',port:0,watch:null,fs:{allow:[root,fs.realpathSync(path.join(root,'node_modules'))],deny:[]}}});await vite.listen();
+ await prepareFixtureModules(vite,['/@vite/client','/tests/fixtures/account-platform-approval-center.jsx']);
  browser=await puppeteer.launch({executablePath:chrome,headless:'new',userDataDir:profile,args:['--disable-gpu','--no-first-run']});page=await browser.newPage();page.setDefaultTimeout(5000);page.on('pageerror',e=>errors.push(e.message));
  const url=`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-approval-center.html`;
  const loadingWords=Object.fromEntries(['en','zh','ja'].map(language=>[language,[approvalReadCopy[language].loading,pendingApprovalReadCopy[language].loading,executionApprovalReadCopy[language].loading,approvalDirectoryToolbarCopy[language].loading].filter(Boolean)]));
