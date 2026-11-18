@@ -114,21 +114,24 @@ cryptographic Git signatures are distinct.
 
 ## Scheduled-origin follow-up
 
-Status: separate behavior fix pending; this is the actionable follow-up for the
-R5 exclusion, not a claim that PR799 repairs it. At the approved R6 checkpoint,
+Status: fixed in this repository (landed 2026-11-16; the follow-up below is the
+historical R6 record, retained because the frozen R5/R6 evidence refers to it).
+The fix assembles the session instruction stack before adding the
+`runtime:scheduled-request-origin` entry exactly once, and is pinned by the
+regression tests `origin_note_appends_after_the_session_instruction_stack` and
+`aux_sessions_do_not_carry_the_origin_note` in
+[`bridge.rs`](../../pinjou3-app/src-tauri/src/features/assistant/platform/bridge.rs).
+
+At the approved R6 checkpoint (pre-fix behavior),
 `build_engine_config_for_session_roots` in
-[`bridge.rs`](../../pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs)
-pushes `runtime:scheduled-request-origin` for non-aux sessions, then replaces
+[`bridge.rs`](../../pinjou3-app/src-tauri/src/features/assistant/platform/bridge.rs)
+pushed `runtime:scheduled-request-origin` for non-aux sessions, then replaced
 `cfg.instructions` with `session_instructions(session_id)`, discarding that entry.
 The entry carries session provenance for idempotent automation operations; it
-does not grant permission.
-
-A follow-up should assemble the session instruction stack before adding the
-origin entry exactly once. Verify ordinary, scheduled, Code and Plan sessions,
-the empty-project-rule case, and repeated config construction. Aux sessions must
-retain their minimal instruction/tool surface without this entry. Check the
-actual session id and preserve the distinction between provenance and authority.
-Keep those behavior changes and their regression tests in a separate PR.
+does not grant permission. The follow-up verified ordinary, scheduled, Code and
+Plan sessions, the empty-project-rule case, repeated config construction, and
+that aux sessions retain their minimal instruction/tool surface without this
+entry, preserving the distinction between provenance and authority.
 
 ## Evidence storage boundary
 
