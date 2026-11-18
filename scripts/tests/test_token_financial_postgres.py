@@ -17,10 +17,11 @@ SPEC.loader.exec_module(RUNNER)
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
 EXPECTED_RETAINED_ROOT_COUNT = 86
-EXPECTED_SCHEMA_ROOT_COUNT = 16
+EXPECTED_SCHEMA_ROOT_COUNT = 25
 
 # Fixed identities independently checked against each actual -run selector.
 EXPECTED_SCHEMA_ROOTS = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestBillingManualAdjustmentProofRollbackPostgres"}
+EXPECTED_SCHEMA_ROOTS |= {'TestF02CommerceClaimWaitStartsFreshLease', 'TestCommerceClosureCallbacksRespectSubjectFence', 'TestF02CommerceOriginal15LateUpgradePreservesFacts', 'TestCommerceClaimSubjectLockKeepsLeaseLive', 'TestCommerceClaimMappingLockKeepsLeaseLive', 'TestF02PublicCommerceCustomerLifecycle', 'TestF02CommerceSupersededGenerationCannotDispatch', 'TestF02CommerceLeaseExpiresWhileWaitingForMappingLock', 'TestF02CommerceConfirmedProducersPreserveStatuses'}
 EXPECTED_SCHEMA_EXPIRY_ROOT = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
 
 
@@ -2444,7 +2445,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             self.assertEqual(self.fixture_writes, [] if phase in {"owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation"} else ["create", "drop"])
 
     def test_schema_phase_partition_preserves_all_fixed_identities_and_boundaries(self):
-        self.assertEqual(len(EXPECTED_SCHEMA_ROOTS), 16)
+        self.assertEqual(len(EXPECTED_SCHEMA_ROOTS), 25)
         self.assertEqual(RUNNER.SCHEMA_REQUIRED, EXPECTED_SCHEMA_ROOTS)
         for group in ("owners", "all"):
             with self.subTest(group=group):
@@ -2462,7 +2463,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     self.assertEqual(command[-1], "./internal/billingschema")
                     self.assertEqual([arg for arg in command if arg.startswith("-timeout=")], ["-timeout=20m"])
                     selected.append(actual)
-                self.assertEqual([len(roots) for roots in selected], [1, 15])
+                self.assertEqual([len(roots) for roots in selected], [1, 24])
                 self.assertFalse(selected[0] & selected[1])
                 self.assertEqual(selected[0] | selected[1], EXPECTED_SCHEMA_ROOTS)
                 self.assertEqual(sum(map(len, selected)), len(EXPECTED_SCHEMA_ROOTS))

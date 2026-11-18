@@ -1020,7 +1020,8 @@ def main(*, group="all", verify_fixture_cache=False, owner_lane=None):
             "owner-account": ACCOUNT_CHILD_REQUIRED,
             "retained-token": TOKEN_CHILD_REQUIRED,
             "retained-billing": BILLING_CHILD_REQUIRED & required,
-            "owner-schema": SCHEMA_CHILD_REQUIRED,
+            "owner-schema": SCHEMA_CHILD_REQUIRED & required,
+            "owner-schema-legacy-expiry": SCHEMA_CHILD_REQUIRED & required,
         }.get(label)
         count = verify_results(events,
                                required, package=package, require_children=scoped or label == "retained-token", exact_roots=scoped,
