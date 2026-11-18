@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,7 +17,8 @@ SCRIPT = ROOT / "scripts/guard-chrono-maintenance-exception.py"
 SPEC = importlib.util.spec_from_file_location("chrono_guard", SCRIPT)
 GUARD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GUARD)
-LOCKS = ("pinvou-knowledge/Cargo.lock", "pinvou3-app/src-tauri/Cargo.lock", "pinvou-cli/Cargo.lock")
+LOCKS = ("pinvou-knowledge/Cargo.lock", "pinvou3-app/src-tauri/Cargo.lock", "pinvou-cli/Cargo.lock",
+         "pinvou3-app/src-tauri/tests/controller-crypto-harness/Cargo.lock")
 APPROVED_DATE = date(2026, 11, 17)
 
 
@@ -111,9 +113,92 @@ class ChronoExceptionTests(unittest.TestCase):
         policy = GUARD.read_toml(ROOT, 'pinvou3-app/src-tauri/deny.toml')
         self.assertEqual(policy['advisories']['ignore'], ['RUSTSEC-2026-0543'])
 
+    def test_additional_or_malformed_ignore_entries_are_rejected(self):
+        path = self.root / GUARD.POLICY
+        original = path.read_text(encoding='utf-8')
+        for extra, error in (
+            ('"RUSTSEC-2000-0001",', 'only the reviewed'),
+            ('42,', 'invalid advisory ignore entry'),
+            ('{ reason = "missing id" },', 'invalid advisory ignore entry'),
+        ):
+            with self.subTest(extra=extra):
+                path.write_text(original.replace('"RUSTSEC-2026-0543",',
+                                                '"RUSTSEC-2026-0543", ' + extra), encoding='utf-8')
+                with self.assertRaisesRegex(GUARD.GuardError, error):
+                    self.validate()
+
+    def test_single_exception_table_requires_valid_id_reason_and_no_unknown_fields(self):
+        path = self.root / GUARD.POLICY
+        original = path.read_text(encoding='utf-8')
+        for table in ('{ id = "RUSTSEC-2026-0543" }',
+                      '{ id = "RUSTSEC-2026-0543", reason = "maintenance" }'):
+            with self.subTest(valid=table):
+                path.write_text(original.replace('"RUSTSEC-2026-0543",', table + ','), encoding='utf-8')
+                self.validate()
+        for table in ('{ id = "RUSTSEC-2026-0543", reason = 42 }',
+                      '{ id = "RUSTSEC-2026-0543", allow = [] }',
+                      '{ id = 42, reason = "maintenance" }',
+                      '{ reason = "missing id" }'):
+            with self.subTest(invalid=table):
+                path.write_text(original.replace('"RUSTSEC-2026-0543",', table + ','), encoding='utf-8')
+                with self.assertRaisesRegex(GUARD.GuardError, 'invalid advisory ignore entry'):
+                    self.validate()
+
+    def test_non_table_policy_has_a_clean_guard_error(self):
+        path = self.root / GUARD.POLICY
+        for value in ('[]', 'true', '"invalid"'):
+            with self.subTest(value=value):
+                path.write_text('advisories = ' + value, encoding='utf-8')
+                with self.assertRaisesRegex(GUARD.GuardError, 'policy table'):
+                    self.validate()
+
+    def test_advisory_policy_format_requires_reviewed_integer_version(self):
+        path = self.root / GUARD.POLICY
+        original = path.read_text(encoding='utf-8')
+        for version in ('2.0', '"invalid"', 'true', '3'):
+            with self.subTest(version=version):
+                path.write_text(original.replace('version = 2', 'version = ' + version, 1),
+                                encoding='utf-8')
+                with self.assertRaisesRegex(GUARD.GuardError, 'policy format 2'):
+                    self.validate()
+
+    def test_lock_format_requires_integer_and_inventory_requires_tables(self):
+        path = self.root / LOCKS[-1]
+        original = path.read_text(encoding='utf-8')
+        for version in ('4.0', '"4"', 'true'):
+            with self.subTest(version=version):
+                path.write_text(re.sub(r'^version = 4$', 'version = ' + version, original,
+                                       count=1, flags=re.M), encoding='utf-8')
+                with self.assertRaisesRegex(GUARD.GuardError, 'lockfile format'):
+                    self.validate()
+        path.write_text('version = 4\npackage = [42]\n', encoding='utf-8')
+        with self.assertRaisesRegex(GUARD.GuardError, 'package inventory'):
+            self.validate()
+
+    def test_real_cli_rejects_bad_harness_lock_and_clock_override_without_writes(self):
+        entry = self.root / 'scripts/guard-chrono-maintenance-exception.py'
+        entry.parent.mkdir()
+        entry.write_bytes(SCRIPT.read_bytes())
+        path = self.root / LOCKS[-1]
+        original = path.read_bytes()
+        try:
+            path.unlink()
+            before = {str(p): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+            result = subprocess.run([sys.executable, '-I', str(entry)], cwd=ROOT,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(LOCKS[-1], result.stderr)
+            self.assertEqual(before, {str(p): p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+        finally:
+            path.write_bytes(original)
+        result = subprocess.run([sys.executable, '-I', str(entry), '--date=2026-11-17'],
+                                cwd=ROOT, capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('takes no arguments', result.stderr)
+
     def test_expiry_runs_even_without_rust_changes_and_guard_changes_route_to_audits(self):
         workflow = (ROOT / '.github/workflows/pr-check.yml').read_text(encoding='utf-8')
-        fast = re.search(r'^  fast-gate:\n(.*?)(?=^  [\w-]+:)', workflow, re.S | re.M)[1]
+        fast = re.search(r'^  fast-gate:\n(.*?)(?=^  [\w-]+:|\Z)', workflow, re.S | re.M)[1]
         step = next(s for s in fast.split('\n      - ') if s.startswith('name: Expiring chrono maintenance exception\n'))
         self.assertIn('run: python3 scripts/guard-chrono-maintenance-exception.py\n', step)
         self.assertNotIn('if:', step)
