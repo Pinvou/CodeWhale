@@ -156,22 +156,31 @@ func TestF04PersonalGatewayProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := func() int {
+	reserve := func() net.Listener {
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
 		}
-		p := l.Addr().(*net.TCPAddr).Port
-		_ = l.Close()
-		return p
+		t.Cleanup(func() { _ = l.Close() })
+		return l
 	}
-	appPort, metricsPort := port(), port()
+	// Keep both reservations live while choosing ports so they cannot repeat.
+	appReservation, metricsReservation := reserve(), reserve()
+	appPort := appReservation.Addr().(*net.TCPAddr).Port
+	metricsPort := metricsReservation.Addr().(*net.TCPAddr).Port
 	command := exec.Command(os.Args[0], "-test.run=^TestF04PersonalGatewayProcess$", "-test.count=1")
 	env := personalProcessEnvironment()
 	command.Env = append(env, "F04_PERSONAL_GATEWAY_TEST_PROCESS=1", "APP_ENV=test", "ACCOUNT_PLATFORM_PROFILE=personal", "ACCOUNT_HTTP_URL="+accountServer.URL, "BILLING_HTTP_URL="+billingServer.URL, "INTERNAL_SERVICE_TOKEN=controlled-workload", "OIDC_ISSUER="+jwks.URL, "OIDC_JWKS_URL="+jwks.URL, "OIDC_AUDIENCE=personal-fixture", "PORT="+strconv.Itoa(appPort), "METRICS_ADDRESS=127.0.0.1:"+strconv.Itoa(metricsPort), "TOKEN_SECRET_PROVIDER=invalid-model-provider", "DATABASE_URL=invalid-model-database")
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output
+	// Release only these owned reservations at the subprocess handoff.
+	if err = appReservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = metricsReservation.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err = command.Start(); err != nil {
 		t.Fatal(err)
 	}
