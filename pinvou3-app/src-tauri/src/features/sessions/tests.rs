@@ -22,16 +22,47 @@ use std::sync::Arc;
 // Crate-visible helpers exercised directly by the suite (not re-exported by
 // the facade because they are internal collaboration seams).
 use super::scheduled::ScheduledProfileRegistry;
-use super::store::HEADLESS_SESSION_PREFIX;
-use super::store::MAX_SESSIONS_PER_KIND;
+use super::store::{
+    HEADLESS_SESSION_PREFIX, MAX_SESSIONS_PER_KIND, clear_generated_id_queue_for_test,
+    push_generated_id_candidates_for_test,
+};
 use super::validators::generate_session_id;
 
-/// Borrows the paths module's process-level env lock — avoiding parallel
-/// races with other tests that mutate PINVOU3_HOME. Returns the store with
-/// the guard; the lock is released only when the guard drops.
-fn isolated_store() -> (SessionStore, std::sync::MutexGuard<'static, ()>) {
-    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    (boot_isolated_store_locked(), guard)
+/// RAII teardown for `isolated_store`: Drop removes the temporary home while
+/// the environment lock is held; field order then restores the environment
+/// before releasing that lock.
+struct TestHomeGuard {
+    _env: crate::platform::test_support::EnvRestore,
+    _lock: std::sync::MutexGuard<'static, ()>,
+    home: std::path::PathBuf,
+}
+
+impl Drop for TestHomeGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+/// Take the process-level environment lock and restore both the prior home
+/// and temporary-directory cleanup on every exit, including panics.
+fn isolated_store() -> (SessionStore, TestHomeGuard) {
+    let (lock, env) = crate::platform::test_support::locked_env(&["PINVOU3_HOME"]);
+    let tmp = std::env::temp_dir().join(format!(
+        "pinvou3-sessions-test-{}-{}",
+        std::process::id(),
+        paths::tests::unique_suffix()
+    ));
+    // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+    unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+    let store = SessionStore::boot_with_scheduled_root(tmp.join("scheduled")).expect("boot");
+    (
+        store,
+        TestHomeGuard {
+            _env: env,
+            _lock: lock,
+            home: tmp,
+        },
+    )
 }
 
 fn boot_isolated_store_locked() -> SessionStore {
@@ -1299,12 +1330,17 @@ fn text_message(role: &str, text: &str) -> Message {
     }
 }
 
-fn scheduled_engine_state(messages: Vec<Message>, mode: ScheduledRunMode) -> ScheduledEngineState {
+fn scheduled_engine_state(
+    messages: Vec<Message>,
+    mode: ScheduledRunMode,
+    token_accounting: ScheduledTokenAccounting,
+) -> ScheduledEngineState {
     ScheduledEngineState {
         messages,
         system_prompt: Some(SystemPrompt::Text("scheduled system prompt".to_string())),
         model: "/engine-model".to_string(),
         mode,
+        token_accounting,
     }
 }
 
@@ -1815,7 +1851,11 @@ fn scheduled_engine_state_persists_full_snapshot_and_preserves_identity_and_prof
     let persisted = store
         .persist_scheduled_engine_state(
             &id,
-            scheduled_engine_state(messages.clone(), ScheduledRunMode::Yolo),
+            scheduled_engine_state(
+                messages.clone(),
+                ScheduledRunMode::Yolo,
+                ScheduledTokenAccounting::PreservePersisted,
+            ),
         )
         .expect("persist scheduled engine state");
 
@@ -1853,6 +1893,226 @@ fn scheduled_engine_state_persists_full_snapshot_and_preserves_identity_and_prof
     assert_eq!(from_disk.system_prompt, persisted.system_prompt);
 }
 
+/// engine.rs 的 spawn 时点 base 读取必须走 `load_for_engine_spawn`（与两条
+/// persist 写入同一 `scheduled_mutation` 门）：裸 `store.load` 会与在途
+/// TurnComplete 落盘交错，新 incarnation 先读后写时把旧引擎最后几轮的
+/// 累计永久少记。行为级竞窗无法稳定复现，这里钉住调用点形状（换回裸读
+/// 即红）；去空白后匹配，对 rustfmt 换行不敏感。
+#[test]
+fn scheduled_spawn_base_reads_through_the_mutation_gate() {
+    let normalized: String = include_str!("../assistant/engine.rs")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert!(
+        normalized.contains("store.load_for_engine_spawn(session_id)?"),
+        "engine spawn base must read through the scheduled_mutation gate"
+    );
+    assert!(
+        !normalized.contains("Some(store.load(session_id)?.metadata.total_tokens)"),
+        "the ungated bare load must not come back on the spawn base path"
+    );
+}
+
+#[test]
+fn scheduled_engine_token_accounting_preserves_persisted_totals_across_restarts() {
+    with_isolated_store_restoring_home(|store| {
+        struct FixtureCleanup(PathBuf);
+
+        impl Drop for FixtureCleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let _fixture = FixtureCleanup(
+            store
+                .manager
+                .sessions_dir()
+                .parent()
+                .expect("fixture home")
+                .to_path_buf(),
+        );
+        scheduled_engine_token_accounting_contract(store);
+    });
+}
+
+fn scheduled_engine_token_accounting_contract(store: &SessionStore) {
+    let scheduled = store
+        .create_scheduled_run(scheduled_profile("task-token-accounting"))
+        .expect("create scheduled run");
+    let id = scheduled.metadata.id.clone();
+
+    store
+        .persist_scheduled_token_total(&id, 0, 100)
+        .expect("persist terminal token total");
+    store
+        .persist_scheduled_engine_state(
+            &id,
+            scheduled_engine_state(
+                vec![
+                    text_message("user", "first turn"),
+                    text_message("assistant", "incremental update"),
+                ],
+                ScheduledRunMode::Plan,
+                ScheduledTokenAccounting::PreservePersisted,
+            ),
+        )
+        .expect("persist SessionUpdated-equivalent state");
+    assert_eq!(
+        store
+            .load(&id)
+            .expect("load after update")
+            .metadata
+            .total_tokens,
+        100
+    );
+
+    let reloaded = reopen_store(&store).expect("restart before later turn");
+    reloaded
+        .persist_scheduled_engine_state(
+            &id,
+            scheduled_engine_state(
+                vec![text_message("assistant", "later turn")],
+                ScheduledRunMode::Yolo,
+                ScheduledTokenAccounting::PreservePersisted,
+            ),
+        )
+        .expect("persist later engine snapshot");
+
+    assert_eq!(
+        reloaded
+            .load(&id)
+            .expect("load preserved total")
+            .metadata
+            .total_tokens,
+        100,
+        "engine-state persistence must keep the durable token total"
+    );
+
+    reloaded
+        .persist_scheduled_engine_state(
+            &id,
+            scheduled_engine_state(
+                vec![text_message("assistant", "later turn")],
+                ScheduledRunMode::Yolo,
+                ScheduledTokenAccounting::EngineCumulative {
+                    base_total_tokens: 100,
+                    engine_total_tokens: 25,
+                },
+            ),
+        )
+        .expect("persist later engine snapshot");
+    assert_eq!(
+        reloaded
+            .load(&id)
+            .expect("load first cumulative total")
+            .metadata
+            .total_tokens,
+        125,
+        "first engine snapshot lands the spawn base plus cumulative usage"
+    );
+    reloaded
+        .persist_scheduled_engine_state(
+            &id,
+            scheduled_engine_state(
+                vec![text_message("assistant", "same engine next turn")],
+                ScheduledRunMode::Yolo,
+                ScheduledTokenAccounting::EngineCumulative {
+                    base_total_tokens: 100,
+                    engine_total_tokens: 40,
+                },
+            ),
+        )
+        .expect("persist cumulative same-engine snapshot");
+
+    assert_eq!(
+        reloaded
+            .load(&id)
+            .expect("load accumulated total")
+            .metadata
+            .total_tokens,
+        140,
+        "same-engine cumulative usage must not be added twice"
+    );
+
+    reloaded
+        .persist_scheduled_engine_state(
+            &id,
+            scheduled_engine_state(
+                vec![text_message("assistant", "stale base lowers total")],
+                ScheduledRunMode::Yolo,
+                ScheduledTokenAccounting::EngineCumulative {
+                    base_total_tokens: 100,
+                    engine_total_tokens: 5,
+                },
+            ),
+        )
+        .expect("persist stale-base snapshot");
+    assert_eq!(
+        reloaded
+            .load(&id)
+            .expect("load lowered total")
+            .metadata
+            .total_tokens,
+        105,
+        "combined total must replace, not max() against, the persisted value"
+    );
+
+    reloaded
+        .persist_scheduled_engine_state(
+            &id,
+            scheduled_engine_state(
+                vec![text_message("assistant", "saturating lifetime total")],
+                ScheduledRunMode::Yolo,
+                ScheduledTokenAccounting::EngineCumulative {
+                    base_total_tokens: u64::MAX - 10,
+                    engine_total_tokens: 100,
+                },
+            ),
+        )
+        .expect("persist saturating snapshot");
+    assert_eq!(
+        reloaded
+            .load(&id)
+            .expect("load saturating total")
+            .metadata
+            .total_tokens,
+        u64::MAX,
+        "the lifetime encoding must saturate at u64::MAX rather than wrap"
+    );
+
+    // persist_scheduled_token_total shares the same encoding, so the replace
+    // and saturate contracts must hold on that path too: a stale base lowers
+    // the persisted u64::MAX, and an overflowing pair clamps instead of
+    // wrapping.
+    reloaded
+        .persist_scheduled_token_total(&id, 100, 5)
+        .expect("persist stale terminal total");
+    assert_eq!(
+        reloaded
+            .load(&id)
+            .expect("load stale terminal total")
+            .metadata
+            .total_tokens,
+        105,
+        "the terminal path must replace, not max(), against the persisted value"
+    );
+    reloaded
+        .persist_scheduled_token_total(&id, u64::MAX - 10, 100)
+        .expect("persist saturating terminal total");
+    assert_eq!(
+        reopen_store(&reloaded)
+            .expect("restart after terminal saturating write")
+            .load(&id)
+            .expect("load saturating terminal total")
+            .metadata
+            .total_tokens,
+        u64::MAX,
+        "the terminal path must share the saturating encoding durably"
+    );
+}
+
 #[test]
 fn scheduled_engine_state_entry_rejects_normal_chat_without_mutation() {
     let (store, _g) = isolated_store();
@@ -1870,6 +2130,7 @@ fn scheduled_engine_state_entry_rejects_normal_chat_without_mutation() {
             scheduled_engine_state(
                 vec![text_message("user", "must not persist")],
                 ScheduledRunMode::Plan,
+                ScheduledTokenAccounting::PreservePersisted,
             ),
         )
         .expect_err("normal chat must not use scheduled persistence");
@@ -1977,6 +2238,7 @@ fn scheduled_agent_mode_round_trips_without_collapsing_profile_or_metadata() {
                 system_prompt: Some(SystemPrompt::Text("agent prompt".to_string())),
                 model: "/agent-model".to_string(),
                 mode: ScheduledRunMode::Agent,
+                token_accounting: ScheduledTokenAccounting::PreservePersisted,
             },
         )
         .expect("persist agent engine state");
@@ -2025,6 +2287,7 @@ fn scheduled_terminal_token_persistence_does_not_replace_engine_state() {
                     text_message("assistant", "retain this response"),
                 ],
                 ScheduledRunMode::Plan,
+                ScheduledTokenAccounting::PreservePersisted,
             ),
         )
         .expect("persist cached SessionUpdated state");
@@ -2084,6 +2347,7 @@ fn scheduled_engine_persist_preserves_nonzero_token_total_across_restarts() {
             scheduled_engine_state(
                 vec![text_message("user", "first turn")],
                 ScheduledRunMode::Plan,
+                ScheduledTokenAccounting::PreservePersisted,
             ),
         )
         .expect("persist baseline engine state");
@@ -2102,6 +2366,7 @@ fn scheduled_engine_persist_preserves_nonzero_token_total_across_restarts() {
                     text_message("assistant", "second turn"),
                 ],
                 ScheduledRunMode::Plan,
+                ScheduledTokenAccounting::PreservePersisted,
             ),
         )
         .expect("persist later engine state");
@@ -2116,6 +2381,7 @@ fn scheduled_engine_persist_preserves_nonzero_token_total_across_restarts() {
             scheduled_engine_state(
                 vec![text_message("assistant", "third turn")],
                 ScheduledRunMode::Yolo,
+                ScheduledTokenAccounting::PreservePersisted,
             ),
         )
         .expect("persist engine state after restart");
@@ -2367,6 +2633,7 @@ fn scheduled_delete_profile_persistence_failure_remains_retryable_after_record_c
 
 #[test]
 fn scheduled_creation_rolls_back_when_profile_write_fails() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let root = std::env::temp_dir().join(format!(
         "pinvou3-scheduled-rollback-{}",
         std::time::SystemTime::now()
@@ -10605,4 +10872,261 @@ fn inherited_default_confirmation_is_exact_and_old_bindings_never_become_implici
             None
         );
     });
+}
+
+struct ClearGeneratedIdQueueOnDrop;
+
+impl Drop for ClearGeneratedIdQueueOnDrop {
+    fn drop(&mut self) {
+        clear_generated_id_queue_for_test();
+    }
+}
+
+#[test]
+fn generate_unused_session_id_retries_past_an_occupied_candidate() {
+    let (store, _env) = isolated_store();
+    std::fs::write(store.manager.sessions_dir().join("occupied.json"), b"{}")
+        .expect("plant occupied record file");
+
+    let mut calls = 0u32;
+    let error = store
+        .generate_unused_session_id_with(|| {
+            calls += 1;
+            "occupied".to_string()
+        })
+        .expect_err("an always-occupied candidate must exhaust and fail loudly");
+    assert_eq!(calls, 8, "the retry budget is 8 candidates");
+    assert!(
+        error
+            .to_string()
+            .contains("could not allocate an unused session id"),
+        "{error}"
+    );
+
+    let mut seq = ["occupied", "fresh"].into_iter();
+    let id = store
+        .generate_unused_session_id_with(|| seq.next().unwrap().to_string())
+        .expect("a fresh second candidate must land");
+    assert_eq!(id, "fresh");
+}
+
+#[cfg(unix)]
+#[test]
+fn generate_unused_session_id_fails_loud_on_stat_fault() {
+    use std::os::unix::fs::PermissionsExt;
+    let (store, _env) = isolated_store();
+    let sessions_dir = store.manager.sessions_dir();
+    let original = std::fs::metadata(&sessions_dir)
+        .expect("stat sessions dir")
+        .permissions()
+        .mode();
+    struct RestorePermissions<'a>(&'a std::path::Path, u32);
+    impl Drop for RestorePermissions<'_> {
+        fn drop(&mut self) {
+            if std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(self.1)).is_err() {
+                eprintln!(
+                    "PERM-RESTORE-FAILED[generate_unused_session_id_fails_loud_on_stat_fault]: the sessions dir may be left 0o000"
+                );
+            }
+        }
+    }
+    let probe = sessions_dir.join("probe.json");
+    std::fs::write(&probe, b"{}").expect("plant probe file");
+    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o000))
+        .expect("chmod sessions dir");
+    let _restore = RestorePermissions(&sessions_dir, original);
+    if std::fs::metadata(&probe).is_ok() {
+        eprintln!(
+            "ROOT-SKIP[generate_unused_session_id_fails_loud_on_stat_fault]: running as root, the 0o000 precondition does not hold; NOT exercised"
+        );
+        return;
+    }
+    let error = store
+        .generate_unused_session_id()
+        .expect_err("a stat-faulted sessions dir must fail loudly, not hand out an unverified id");
+    assert!(
+        error
+            .to_string()
+            .contains("could not allocate an unused session id"),
+        "{error}"
+    );
+    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(original))
+        .expect("restore the sessions dir permissions");
+}
+
+#[test]
+fn create_new_fails_loud_when_every_generated_candidate_is_occupied() {
+    let (store, _env) = isolated_store();
+    let _queue_guard = ClearGeneratedIdQueueOnDrop;
+    std::fs::write(store.manager.sessions_dir().join("occupied.json"), b"{}")
+        .expect("plant occupied record file");
+    push_generated_id_candidates_for_test(&["occupied"; 8]);
+    let error = store
+        .create_new("/model".into(), None, std::env::temp_dir())
+        .expect_err("an always-occupied candidate source must fail create_new loudly");
+    assert!(
+        error
+            .to_string()
+            .contains("could not allocate an unused session id"),
+        "{error:#}"
+    );
+    let json_names: Vec<String> = std::fs::read_dir(store.manager.sessions_dir())
+        .expect("list sessions")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".json"))
+        .collect();
+    assert_eq!(
+        json_names,
+        vec!["occupied.json".to_string()],
+        "no record may land past create_new exhaustion: {json_names:?}"
+    );
+}
+
+#[test]
+fn replacement_branch_draws_candidates_through_the_occupancy_probe() {
+    let (store, _env) = isolated_store();
+    let _queue_guard = ClearGeneratedIdQueueOnDrop;
+    let source = store
+        .create_new("removed-model".into(), None, std::env::temp_dir())
+        .expect("create source");
+    let mut source_record = store.load(&source.metadata.id).expect("load source");
+    source_record.messages = vec![user_text("source")];
+    store.save(&source_record).expect("save source");
+    std::fs::write(store.manager.sessions_dir().join("occupied.json"), b"{}")
+        .expect("plant occupied record file");
+
+    push_generated_id_candidates_for_test(&["occupied"; 8]);
+    let error = store
+        .create_replacement_branch(
+            &source.metadata.id,
+            1,
+            "turn-1".into(),
+            "platform/replacement".into(),
+            "Replacement".into(),
+            "New chat".into(),
+        )
+        .expect_err("an always-occupied candidate source must fail branch creation loudly");
+    assert!(
+        error
+            .to_string()
+            .contains("could not allocate an unused session id"),
+        "{error:#}"
+    );
+    assert!(store.load(&source.metadata.id).is_ok());
+
+    push_generated_id_candidates_for_test(&["occupied", "fresh"]);
+    let (branch, _) = store
+        .create_replacement_branch(
+            &source.metadata.id,
+            1,
+            "turn-1".into(),
+            "platform/replacement".into(),
+            "Replacement".into(),
+            "New chat".into(),
+        )
+        .expect("the fresh second candidate must land");
+    assert_eq!(branch.metadata.id, "fresh");
+    assert!(store.load("fresh").is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn save_persist_failure_reasons_fold_the_storage_prefix() {
+    use std::os::unix::fs::PermissionsExt;
+    let (store, _env) = isolated_store();
+    let created = store
+        .create_new("/model".into(), None, std::env::temp_dir())
+        .expect("create");
+    let mut session = store.load(&created.metadata.id).expect("load");
+    session.messages = vec![user_text("hi"), assistant_text("ok")];
+
+    let sessions_dir = store.manager.sessions_dir();
+    let original = std::fs::metadata(&sessions_dir)
+        .expect("stat sessions dir")
+        .permissions()
+        .mode();
+    struct RestorePermissions<'a>(&'a std::path::Path, u32);
+    impl Drop for RestorePermissions<'_> {
+        fn drop(&mut self) {
+            if std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(self.1)).is_err() {
+                eprintln!(
+                    "PERM-RESTORE-FAILED[save_persist_failure_reasons_fold_the_storage_prefix]: the sessions dir may be left 0o000"
+                );
+            }
+        }
+    }
+    let probe = sessions_dir.join("probe-save.json");
+    std::fs::write(&probe, b"{}").expect("plant probe file");
+    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o000))
+        .expect("chmod sessions dir");
+    let _restore = RestorePermissions(&sessions_dir, original);
+    if std::fs::metadata(&probe).is_ok() {
+        eprintln!(
+            "ROOT-SKIP[save_persist_failure_reasons_fold_the_storage_prefix]: running as root, the 0o000 precondition does not hold; NOT exercised"
+        );
+        return;
+    }
+    let error = store
+        .save(&session)
+        .expect_err("a 0o000 sessions dir must fail the persist loudly");
+    let text = format!("{error:#}");
+    assert!(
+        text.contains("write session ~/.pinvou3/sessions/"),
+        "the persist reason must be storage-prefix folded: {text}"
+    );
+    assert!(
+        !text.contains("pinvou3-sessions-test-"),
+        "the persist reason must not leak the raw home prefix: {text}"
+    );
+    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(original))
+        .expect("restore the sessions dir permissions");
+}
+
+#[test]
+fn create_scheduled_run_draws_candidates_through_the_occupancy_probe() {
+    let (store, _env) = isolated_store();
+    let _queue_guard = ClearGeneratedIdQueueOnDrop;
+    std::fs::write(
+        store.manager.sessions_dir().join("sched-occupied.json"),
+        b"{}",
+    )
+    .expect("plant occupied record file");
+
+    push_generated_id_candidates_for_test(&["sched-occupied"; 8]);
+    let error = store
+        .create_scheduled_run(scheduled_profile("task-sched-pin"))
+        .expect_err("an always-occupied candidate source must fail the sched run loudly");
+    assert!(
+        error
+            .to_string()
+            .contains("could not allocate an unused session id"),
+        "{error:#}"
+    );
+    let json_names: Vec<String> = std::fs::read_dir(store.manager.sessions_dir())
+        .expect("list sessions")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".json"))
+        .collect();
+    assert_eq!(
+        json_names,
+        vec!["sched-occupied.json".to_string()],
+        "no sched record may land past exhaustion: {json_names:?}"
+    );
+    assert!(
+        !store
+            .scheduled_workspace_for_task("task-sched-pin")
+            .expect("derive task workspace")
+            .exists(),
+        "id exhaustion must not create the task workspace dir"
+    );
+
+    push_generated_id_candidates_for_test(&["sched-occupied", "sched-fresh"]);
+    let session = store
+        .create_scheduled_run(scheduled_profile("task-sched-pin2"))
+        .expect("the fresh second candidate must land");
+    assert_eq!(session.metadata.id, "sched-fresh");
+    assert!(store.load("sched-fresh").is_ok());
+    assert!(store.scheduled_profile("sched-fresh").is_some());
 }

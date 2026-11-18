@@ -104,7 +104,7 @@ export async function runControllerReleaseGate(env = process.env) {
   const gatewayConfigBytes = await readFile(resolve(env.PINVOU_REMOTE_GATEWAY_CONFIG_PATH))
     .catch(() => fail("release_gateway_config_unavailable"));
   const gatewayConfigSha256 = crypto.createHash("sha256").update(gatewayConfigBytes).digest("hex");
-  const validated = await validateReleaseEvidenceFile(resolve(evidence), {
+  const evidenceOptions = {
     expectedCommit: commit,
     expectedSignerThumbprint: env.PINVOU_TRUSTED_WINDOWS_SIGNER_THUMBPRINT,
     expectedSignerPublisher: env.PINVOU_TRUSTED_WINDOWS_SIGNER_PUBLISHER,
@@ -133,7 +133,8 @@ export async function runControllerReleaseGate(env = process.env) {
     expectedBuildWorkflow: env.PINVOU_RELEASE_BUILD_WORKFLOW,
     expectedBuildRunId: env.PINVOU_RELEASE_BUILD_RUN_ID,
     allowTestAttestation: false,
-  });
+  };
+  await validateReleaseEvidenceFile(resolve(evidence), evidenceOptions);
   const evidenceRoot = dirname(resolve(evidence));
   await runTrustedGh(env, ["attestation", "verify", join(evidenceRoot, "binaries/pinvou-installer.exe"),
     "--bundle", join(evidenceRoot, "build/installer-attestation.sigstore.jsonl"), "--repo", env.PINVOU_RELEASE_BUILD_REPOSITORY,
@@ -159,6 +160,10 @@ export async function runControllerReleaseGate(env = process.env) {
   // protected gate environment, never from an overlay of a Relay env file.
   await run(process.execPath, [join(relayRoot, "scripts/query-controller-release-telemetry.mjs")], buildReleaseSubprocessEnvironment(env, "telemetry"));
   await run(process.execPath, [join(repoRoot, "scripts/check-enrollment-gated-v2-rollback.mjs")], buildReleaseSubprocessEnvironment(env, "rollback"));
+  // External checks may outlive qualification or the pinned certificates.
+  // Re-read, hash and verify before granting release, without trusting dates
+  // re-read separately from the authenticated evidence.
+  const validated = await validateReleaseEvidenceFile(resolve(evidence), evidenceOptions);
   return { ok: true, enabled: true, evidence_required: true, ...validated };
 }
 
