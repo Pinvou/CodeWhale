@@ -6829,7 +6829,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn store_card_link_survives_option_edits_and_clears_when_route_changes() {
         let mut model: SavedModel = serde_json::from_value(serde_json::json!({
@@ -6919,7 +6918,6 @@ mod tests {
         );
         assert!(!unchanged.model_store_link_detached);
     }
-
 
     #[test]
     fn discover_parse_accepts_the_documented_flag_surface() {
