@@ -120,11 +120,11 @@ The fix assembles the session instruction stack before adding the
 `runtime:scheduled-request-origin` entry exactly once, and is pinned by the
 regression tests `origin_note_appends_after_the_session_instruction_stack` and
 `aux_sessions_do_not_carry_the_origin_note` in
-[`bridge.rs`](../../pinjou3-app/src-tauri/src/features/assistant/platform/bridge.rs).
+[`bridge.rs`](../../pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs).
 
 At the approved R6 checkpoint (pre-fix behavior),
 `build_engine_config_for_session_roots` in
-[`bridge.rs`](../../pinjou3-app/src-tauri/src/features/assistant/platform/bridge.rs)
+[`bridge.rs`](../../pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs)
 pushed `runtime:scheduled-request-origin` for non-aux sessions, then replaced
 `cfg.instructions` with `session_instructions(session_id)`, discarding that entry.
 The entry carries session provenance for idempotent automation operations; it

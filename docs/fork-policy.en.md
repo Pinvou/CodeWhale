@@ -3,7 +3,7 @@
 > Updated: 2026-11-15. Public maintenance 687358f7e sits on 8e8d52fdb and contains [Pinvou/CodeWhale#157](https://github.com/Pinvou/CodeWhale/pull/157) (session-reader read-only reclassification); the parent aligns through the strict public-maintenance-head gate.
 > Canonical Chinese policy: [`docs/fork-policy.md`](fork-policy.md). This English page is a condensed summary; the Chinese version is the complete, authoritative process.
 
-Integrated upstream backport and historical provenance: [modification register](fork-modifications.en.md#web-jsonpath-upstream-backport-integrated-historical-candidate-evidence-756). The public maintenance gate and section 6 authorization requirement continue to apply.
+Integrated upstream backport and historical provenance: [modification register](fork-modifications.en.md#web-jsonpath-upstream-backport-integrated-historical-candidate-evidence-pinjou-agent756). The public maintenance gate and section 6 authorization requirement continue to apply.
 
 ## 0. Current maintenance baseline and validation boundary
 
