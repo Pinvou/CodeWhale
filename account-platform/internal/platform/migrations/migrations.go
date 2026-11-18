@@ -24,6 +24,9 @@ type Migration struct {
 	UpSQL    string
 	DownSQL  string
 	Checksum string
+	// HasDownScript distinguishes an absent, forward-only rollback descriptor
+	// from a supplied empty script. Nonempty DownSQL is checked either way.
+	HasDownScript bool
 }
 
 // UpHooks let a trusted domain wrapper lend and revoke narrowly scoped DDL
@@ -77,10 +80,11 @@ func Load(directory string) ([]Migration, error) {
 			}
 			migration.UpSQL = string(body)
 		} else {
-			if migration.DownSQL != "" {
+			if migration.HasDownScript {
 				return nil, fmt.Errorf("migration version %d has duplicate down script", version)
 			}
 			migration.DownSQL = string(body)
+			migration.HasDownScript = true
 		}
 	}
 
@@ -93,6 +97,9 @@ func Load(directory string) ([]Migration, error) {
 		migrations = append(migrations, *migration)
 	}
 	sort.Slice(migrations, func(i, j int) bool { return migrations[i].Version < migrations[j].Version })
+	if err := verifyPublishedRollbacks(migrations); err != nil {
+		return nil, err
+	}
 	return migrations, nil
 }
 
@@ -101,6 +108,9 @@ func Up(ctx context.Context, connection *pgx.Conn, migrations []Migration) error
 }
 
 func UpWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migration, hooks UpHooks) error {
+	if err := verifyPublishedRollbacks(migrations); err != nil {
+		return err
+	}
 	if err := prepare(ctx, connection); err != nil {
 		return err
 	}
@@ -255,6 +265,9 @@ func DownOneWithGuard(ctx context.Context, connection *pgx.Conn, migrations []Mi
 }
 
 func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migration, hooks DownHooks) error {
+	if err := verifyPublishedRollbacks(migrations); err != nil {
+		return err
+	}
 	if err := prepare(ctx, connection); err != nil {
 		return err
 	}
@@ -263,7 +276,8 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 		return err
 	}
 	var version int64
-	err = connection.QueryRow(ctx, `SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version)
+	var appliedChecksum string
+	err = connection.QueryRow(ctx, `SELECT version,checksum FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &appliedChecksum)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -273,6 +287,13 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 	for _, migration := range migrations {
 		if migration.Version != version {
 			continue
+		}
+		// Recorded forward history is authoritative even if editing supplied Up
+		// bytes makes the candidate fall outside the published inventory. Genuine
+		// old custom ledgers with no checksum retain their original contract.
+		_, published := publishedRollbackChecksums[rollbackIdentity{version: migration.Version, up: normalizedChecksum(migration.UpSQL)}]
+		if (published || appliedChecksum != "") && !checksumMatches(appliedChecksum, migration.UpSQL) {
+			return fmt.Errorf("migration %d checksum changed before rollback", version)
 		}
 		if strings.TrimSpace(migration.DownSQL) == "" {
 			return fmt.Errorf("migration %d is irreversible", version)
@@ -323,6 +344,9 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 // forward migration history. It is intentionally run after Up so release
 // evidence cannot be produced from a partially migrated database.
 func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []Migration) (Verification, error) {
+	if err := verifyPublishedRollbacks(loaded); err != nil {
+		return Verification{}, err
+	}
 	rows, err := connection.Query(ctx, `SELECT version, checksum FROM schema_migrations ORDER BY version`)
 	if err != nil {
 		return Verification{}, fmt.Errorf("query applied migration inventory: %w", err)

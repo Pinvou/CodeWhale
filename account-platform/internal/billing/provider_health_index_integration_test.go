@@ -71,7 +71,15 @@ func providerHealthTableFacts(t *testing.T, ctx context.Context, r *PostgresRepo
 	var facts []string
 	for _, table := range tables {
 		var value string
-		statement := `SELECT COALESCE(md5(string_agg(md5(to_jsonb(row_value)::text),'' ORDER BY COALESCE(to_jsonb(row_value)->>'id',to_jsonb(row_value)->>'event_id',to_jsonb(row_value)::text))),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
+		order := `COALESCE(to_jsonb(row_value)->>'id',to_jsonb(row_value)->>'event_id',to_jsonb(row_value)::text)`
+		switch table {
+		case "wallets", "credit_lots", "entitlement_packages", "entitlement_components":
+			// These published tables have a non-null UUID primary key. Its
+			// canonical text equals the first JSON key above, without another
+			// full-row conversion for each large retained-history sort key.
+			order = `row_value.id::text`
+		}
+		statement := `SELECT COALESCE(md5(string_agg(md5(to_jsonb(row_value)::text),'' ORDER BY ` + order + `)),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
 		if err := r.pool.QueryRow(ctx, statement).Scan(&value); err != nil {
 			t.Fatal(table, err)
 		}
