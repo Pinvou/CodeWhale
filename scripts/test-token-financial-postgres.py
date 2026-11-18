@@ -95,6 +95,8 @@ ACCOUNT_REQUIRED = {
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
+    "TestProfileRevocationDurableAdmissionRuntimePostgres",
+    "TestProfileRevocationClosureRuntimePostgres",
     "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
@@ -231,6 +233,9 @@ RETAINED_REQUIRED = {
     "TestReconciliationLedgerRepairForcedPeerPostgres",
     "TestReconciliationLedgerRepairPublicPostgres",
     "TestCallbackHTTPAdmissionPersistsPostgres",
+    "TestPaymentNotificationWorkerEscalatesUnmatchedTrustedCallback",
+    "TestPaymentNotificationWorkerKeepsUnverifiedCallbacksOnRetry",
+    "TestPaymentNotificationWorkerRollsBackAndRetriesManualCase",
     "TestDirectPaymentRepairCommandReceiptPostgres",
     "TestEscalatedPaymentFinancialCompletionPostgres",
     "TestLatePaymentQueryCommandPostgres",
@@ -286,6 +291,9 @@ BILLING_LEAF_REQUIRED = {
     "TestReconciliationLedgerRepairForcedPeerPostgres",
     "TestReconciliationLedgerRepairPublicPostgres",
     "TestCallbackHTTPAdmissionPersistsPostgres",
+    "TestPaymentNotificationWorkerEscalatesUnmatchedTrustedCallback",
+    "TestPaymentNotificationWorkerKeepsUnverifiedCallbacksOnRetry",
+    "TestPaymentNotificationWorkerRollsBackAndRetriesManualCase",
     "TestRefundRejectsPlanBeforeFinancialWritesPostgres",
     "TestRefundSuspendedMemberAdmissionWithoutEarlierBlockerPostgres",
     "TestRefundStalePreflightCannotReclaimUnknownDispatchPostgres",
@@ -302,6 +310,20 @@ BILLING_CHILD_REQUIRED = RETAINED_REQUIRED - BILLING_LEAF_REQUIRED
 EXACT_REQUIRED_CHILDREN = {
     "TestBillingManualAdjustmentProofRollbackPostgres": {
         f"{state}/{entry}" for state in ("empty", "retained-proof") for entry in ("public-api", "actual-cli", "renamed-history-cli")
+    },
+    "TestProfileRevocationDurableAdmissionRuntimePostgres": {
+        "capacity-before-grant-confirmed-replay-and-unknown-retention",
+        "cancel-before-authority-preserves-reservation",
+        "dispatch-token-and-legacy-command-cannot-regrant",
+        "concurrent-global-admission-across-profiles",
+        "legacy-upgrade-preserves-confirmed-and-unknown-receipts",
+        "capacity-public-complete-resumes-original-operation",
+        "lease-expiry-during-global-admission-wait",
+    },
+    "TestProfileRevocationClosureRuntimePostgres": {
+        "reserved-closure-seals-no-dispatch-and-releases-capacity",
+        "confirmed-replays-after-anonymization",
+        "late-confirmation-replays-after-anonymization",
     },
     "TestGovernanceUsageResourcePrechecksPostgres": {
         "all-active-states-preserve-full-facts", "repeated-read-stable-and-read-only",
