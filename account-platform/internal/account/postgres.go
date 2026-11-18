@@ -20,6 +20,7 @@ import (
 )
 
 type PostgresRepository struct {
+	profileRevocationCapacity         int
 	registrationBonusFingerprintKeyID string
 	registrationBonusFingerprintKey   []byte
 	pool                              *pgxpool.Pool

@@ -913,6 +913,10 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("runs-on: windows-latest", job)
         self.assertIn("needs: changes", job)
         self.assertIn("node scripts/run-windows-relay-tools-tests.mjs", job)
+        self.assertIn('run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs', job)
+        receipt = _step_named(job, "Preserve Windows relay tools process receipt")
+        self.assertIn('if: always()', receipt)
+        self.assertIn('path: ${{ runner.temp }}/windows-relay-tools-process.json', receipt)
         self.assertIn('node-version: "24"', job)
         self.assertIn("timeout-minutes: 10", job)
         expression = re.search(r"if: \$\{\{ (.*?) \}\}", job).group(1)
@@ -937,6 +941,7 @@ class CiGatePolicyTests(unittest.TestCase):
                      "scripts/remote-control-local-selftest.ps1", "scripts/run-remote-control-endpoint.ps1",
                      "scripts/run-windows-relay-tools-tests.mjs", "scripts/windows-relay-tools-test-summary.mjs",
                      "scripts/windows-relay-tools-preflight.mjs",
+                     "scripts/ci-fixture-process.py", "scripts/tests/test_ci_fixture_process.py",
                      ".github/workflows/pr-check.yml"):
             self.assertTrue(_matches_paths_filter(path, paths), path)
 
@@ -2027,8 +2032,7 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn("npm --prefix team-relay-hub ci", hub_job)
         self.assertIn("npm --prefix team-relay-hub test", hub_job)
         self.assertIn(
-            "npm --prefix team-relay-hub audit "
-            "--registry=https://registry.npmjs.org --audit-level=high",
+            "python3 scripts/ci-npm-audit.py --prefix team-relay-hub",
             hub_job,
         )
 
@@ -2044,8 +2048,7 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn('node-version: ["20", "24"]', console_job)
         self.assertIn("node-version: ${{ matrix.node-version }}", console_job)
         self.assertIn(
-            "npm --prefix update-release-console audit "
-            "--registry=https://registry.npmjs.org --audit-level=high",
+            "python3 scripts/ci-npm-audit.py --prefix update-release-console",
             console_job,
         )
         self.assertIn("bash scripts/ci-update-release-console-container.sh", console_job)
@@ -3673,12 +3676,37 @@ python3() { fixture_mock python3 "$@"; }
             "Account closure resource lifecycle receipts",
             "Preserve browser fixture exit receipts",
             "Preserve ACP fixture exit receipt",
+            "Windows atomic lifecycle receipts",
+            "Preserve Windows relay tools process receipt",
+            "Preserve Windows release contract process receipts",
         )
         self.assertEqual(
             len(step_level),
             len(reviewed_diagnostics),
             "only reviewed diagnostic or strictly recovered upload steps may be provisional; "
             f"found {len(step_level)} continue-on-error settings: {step_level}",
+        )
+        release_receipt = _step_named(_extract_job_block(body, 'release-contract-test'), 'Preserve Windows release contract process receipts')
+        self.assertEqual(release_receipt.rstrip(), '\n'.join([
+            '      - name: Preserve Windows release contract process receipts',
+            '        id: windows_release_contract_receipts',
+            "        if: ${{ always() && runner.os == 'Windows' }}",
+            '        timeout-minutes: 3',
+            '        continue-on-error: true',
+            '        uses: actions/upload-artifact@v7',
+            '        with:',
+            '          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}',
+            '          path: |',
+            '            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json',
+            '            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json',
+            '            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json',
+            '            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json',
+            '          if-no-files-found: warn',
+            '          retention-days: 7',
+        ]))
+
+        atomic_receipt = _step_named(
+            _extract_job_block(body, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
         )
         for name in reviewed_diagnostics:
             diagnostic_step = body.split(
@@ -3818,6 +3846,26 @@ python3() { fixture_mock python3 "$@"; }
             """).rstrip(), "      "),
         )
 
+        self.assertEqual(
+            atomic_receipt.rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Windows atomic lifecycle receipts
+                  id: windows_atomic_receipts_upload
+                  if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  with:
+                    name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
+                    path: |
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/atomic-expected.txt
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/ledger.txt
+                    if-no-files-found: error
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+
     def test_diagnostic_exemptions_cannot_move_to_business_tests_or_jobs(self):
         original = self.pr_workflow
         financial_start = "      - name: Financial group lifecycle receipts\n"
@@ -3848,6 +3896,39 @@ python3() { fixture_mock python3 "$@"; }
                 1,
             ),
         }
+        atomic = _step_named(
+            _extract_job_block(original, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
+        )
+        for label, old, new in (
+            ('atomic upload action', 'uses: actions/upload-artifact@v7', 'run: exit 37'),
+            ('atomic upload id', 'id: windows_atomic_receipts_upload', 'id: unreviewed_upload'),
+            ('atomic upload condition', "if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", 'if: always()'),
+            ('atomic upload timeout', '        timeout-minutes: 3\n', ''),
+            ('atomic upload path', '${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json', '${{ github.workspace }}/**/*'),
+            ('atomic upload retention', 'retention-days: 7', 'retention-days: 30'),
+            ('atomic upload name', 'name: Windows atomic lifecycle receipts', 'name: Unreviewed transport'),
+            ('atomic upload environment', '        uses: actions/upload-artifact@v7', '        env:\n          UNREVIEWED: yes\n        uses: actions/upload-artifact@v7'),
+        ):
+            mutations[label] = original.replace(atomic, atomic.replace(old, new, 1), 1)
+        mutations['duplicate atomic upload'] = original.replace(atomic, atomic + atomic, 1)
+        frontend = _step_named(
+            _extract_job_block(original, 'frontend-test'), 'Test resource lifecycle receipts'
+        )
+        mutations['atomic upload in another job'] = original.replace(atomic, '', 1).replace(
+            frontend, frontend + atomic, 1
+        )
+        atomic_without_exemption = atomic.replace('        continue-on-error: true\n', '', 1)
+        without_atomic_exemption = original.replace(atomic, atomic_without_exemption, 1)
+        for name in ('Windows 原子替换状态机回归', 'Confirm Windows atomic resource retirement'):
+            mandatory = _step_named(_extract_job_block(original, 'windows-rust-test'), name)
+            mutations['add atomic exemption to ' + name] = original.replace(
+                mandatory, mandatory.replace('      - name: ' + name + '\n',
+                    '      - name: ' + name + '\n        continue-on-error: true\n', 1), 1
+            )
+            mutations['move atomic exemption to ' + name] = without_atomic_exemption.replace(
+                mandatory, mandatory.replace('      - name: ' + name + '\n',
+                    '      - name: ' + name + '\n        continue-on-error: true\n', 1), 1
+            )
         for first_line, remaining in (
             ("run: exit 37", "        name: Required business command\n"),
             ("id: business_guard", '        name: Required business command\n        "run": exit 37\n'),
@@ -3855,11 +3936,16 @@ python3() { fixture_mock python3 "$@"; }
             ("env:", "          FIXTURE: yes\n        run: exit 37\n"),
         ):
             # Moving the exception must fail even when the next valid YAML
-            # step starts with run/id/if/env and the total count stays five.
+            # step starts with run/id/if/env and the total count stays unchanged.
             mutations[f"move exemption to {first_line} next step"] = without_upload_exemption.replace(
                 "      - name: Stop owned temporary PostgreSQL services\n",
                 f"      - {first_line}\n{remaining}        continue-on-error: true\n\n"
                 "      - name: Stop owned temporary PostgreSQL services\n",
+                1,
+            )
+            mutations[f'move atomic exemption to {first_line} next step'] = without_atomic_exemption.replace(
+                atomic_without_exemption,
+                atomic_without_exemption + f'      - {first_line}\n{remaining}        continue-on-error: true\n',
                 1,
             )
         try:
@@ -4743,9 +4829,7 @@ python3() { fixture_mock python3 "$@"; }
         job = _without_yaml_comments(
             _extract_job_block(self.pr_workflow, "windows-rust-test")
         )
-        step = job.split(
-            "\n      - name: Windows 原子替换状态机回归\n", 1
-        )[1].split("\n      - name:", 1)[0]
+        step = _step_named(job, "Windows 原子替换状态机回归")
         loop = step.split("for filter in \\\n", 1)[1].split("; do", 1)[0]
         filters = re.findall(r"(?m)^\s*'([^']+)'(?:\s*\\)?\s*$", loop)
         for module in (
@@ -4754,9 +4838,9 @@ python3() { fixture_mock python3 "$@"; }
         ):
             with self.subTest(module=module):
                 self.assertEqual(filters.count(module), 1)
-        self.assertIn('"$test_exe" "$filter" --test-threads=1', step)
+        self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', step)
         self.assertIn(
-            "grep -qE 'running [1-9][0-9]* tests?' /tmp/windows_regression.log || {",
+            "grep -qE 'running [1-9][0-9]* tests?' \"$report\" || {",
             step,
         )
         self.assertIn("exit 1", step.split("grep -qE", 1)[1])
@@ -5016,10 +5100,8 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn('"-outputresource:$($testExe.FullName);#1"', windows_rust_test)
         self.assertIn('"PINVOU3_TEST_EXE=$testExe" | Out-File', windows_rust_test)
         self.assertIn('test_exe="$(cygpath -u "$PINVOU3_TEST_EXE")"', windows_rust_test)
-        regression = windows_rust_test.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1]
-        self.assertIn('"$test_exe" "$filter" --test-threads=1', regression)
+        regression = _step_named(windows_rust_test, "Windows 原子替换状态机回归")
+        self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', regression)
         self.assertNotIn("cargo test", regression)
         self.assertIn(
             "'connector_introspection_guard_matches_complete_names_only'",
@@ -5046,9 +5128,7 @@ python3() { fixture_mock python3 "$@"; }
                 "\n  windows-rustup-repair-test:", maxsplit=1
             )[0]
         )
-        regression = windows_job.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1]
+        regression = _step_named(windows_job, "Windows 原子替换状态机回归")
 
         def assert_reader_execution(block):
             loop = block.split("for filter in ", maxsplit=1)[1].split(
@@ -5059,7 +5139,7 @@ python3() { fixture_mock python3 "$@"; }
                 filters.count("'app::commands::remote_control::reader_resume_tests::'"),
                 1,
             )
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5070,21 +5150,21 @@ python3() { fixture_mock python3 "$@"; }
         # cannot satisfy this wiring contract. These are not Wry runtime evidence.
         for old, new in (
             ("'app::commands::remote_control::reader_resume_tests::'", "'features::remote_control::'"),
-            ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compile-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
         ):
             with self.subTest(mutation=old):
+                mutant = regression.replace(old, new)
+                self.assertNotEqual(mutant, regression, "the negative control must change the real step")
                 with self.assertRaises(AssertionError):
-                    assert_reader_execution(regression.replace(old, new))
+                    assert_reader_execution(mutant)
 
     def test_windows_a_resume_projection_executes_with_nonzero_product_filters(self):
         windows = _without_yaml_comments(
             _extract_job_block(self.pr_workflow, "windows-rust-test")
         )
-        regression = windows.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1].split("\n      - name:", maxsplit=1)[0]
+        regression = _step_named(windows, "Windows 原子替换状态机回归")
         required = (
             "'features::remote_control::controller::controlling_service::resume_projection_tests::'",
             "'features::remote_control::controller::controlling::tests::'",
@@ -5096,7 +5176,7 @@ python3() { fixture_mock python3 "$@"; }
             filters, commands = loop.split("; do", maxsplit=1)
             for prefix in required:
                 self.assertEqual(filters.count(prefix), 1)
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5108,14 +5188,16 @@ python3() { fixture_mock python3 "$@"; }
         mutations = [(prefix, change) for prefix in required
                      for change in ("", "'renamed_no_matching_tests'")]
         mutations += [
-            ('"$test_exe" "$filter" --test-threads=1', "echo compiled-only"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compiled-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
         ]
         for old, new in mutations:
             with self.subTest(mutation=(old, new)):
+                mutant = regression.replace(old, new)
+                self.assertNotEqual(mutant, regression, "the negative control must change the real step")
                 with self.assertRaises(AssertionError):
-                    assert_execution(regression.replace(old, new))
+                    assert_execution(mutant)
 
     def test_windows_controller_inbound_runs_in_the_nonzero_regression_loop(self):
         windows_job = _without_yaml_comments(
@@ -5123,9 +5205,7 @@ python3() { fixture_mock python3 "$@"; }
                 "\n  windows-rustup-repair-test:", maxsplit=1
             )[0]
         )
-        regression = windows_job.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1]
+        regression = _step_named(windows_job, "Windows 原子替换状态机回归")
         required_filters = (
             "'features::remote_control::controller::controlling_inbound::tests::'",
             "'features::remote_control::controller::controlling_service::inbound_tests::'",
@@ -5138,7 +5218,7 @@ python3() { fixture_mock python3 "$@"; }
             filters, commands = loop.split("; do", maxsplit=1)
             for required in required_filters:
                 self.assertEqual(filters.count(required), 1)
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5152,14 +5232,16 @@ python3() { fixture_mock python3 "$@"; }
             for required in required_filters
             for replacement in ("", "'features::remote_control::'")
         ] + [
-            ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compile-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
         ]
         for old, new in mutations:
             with self.subTest(mutation=(old, new)):
+                mutant = regression.replace(old, new)
+                self.assertNotEqual(mutant, regression, "the negative control must change the real step")
                 with self.assertRaises(AssertionError):
-                    assert_inbound_execution(regression.replace(old, new))
+                    assert_inbound_execution(mutant)
 
     def test_windows_rust_split_matches_the_declared_feature_graph(self):
         with TAURI_MANIFEST.open("rb") as manifest_file:

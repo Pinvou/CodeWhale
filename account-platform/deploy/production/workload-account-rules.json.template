@@ -60,7 +60,9 @@
     "subject": "__IDENTITY_WORKLOAD_SUBJECT__",
     "service": "identity-service",
     "permissions": [
-      "internal.auth.password-preparation.claim"
+      "internal.auth.password-preparation.claim",
+      "internal.account.profile-revocation.claim",
+      "internal.account.profile-revocation.confirm"
     ]
   }
 ]

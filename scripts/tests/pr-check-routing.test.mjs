@@ -279,6 +279,22 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
+  {
+    const receipt = namedStep(jobBlock("windows-relay-tools-test", text), "Preserve Windows relay tools process receipt");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Preserve Windows relay tools process receipt",
+      "        if: always()",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: ${{ runner.temp }}/windows-relay-tools-process.json",
+      "          if-no-files-found: warn",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
   for (const [job, name, id, artifact] of [
     ["frontend-test", "Test resource lifecycle receipts", "frontend_receipts_upload", "frontend-resource-lifecycle-${{ github.run_attempt }}"],
     ["frontend-browser-test", "Browser shard resource lifecycle receipts", "browser_receipts_upload", "frontend-browser-${{ matrix.shard }}-resource-lifecycle-${{ github.run_attempt }}"],
@@ -361,6 +377,47 @@ function assertWorkflowFailurePolicy(workflowText) {
   // mandatory recovery reducer still protects this artifact and every build.
   assertFrontendUploadRecovery(text);
   remainder = remainder.replace(namedStep(jobBlock("frontend-setup", text), frontendUploadStep), "");
+  {
+    const receipt = namedStep(jobBlock("windows-rust-test", text), "Windows atomic lifecycle receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Windows atomic lifecycle receipts",
+      "        id: windows_atomic_receipts_upload",
+      "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/atomic-expected.txt",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/ledger.txt",
+      "          if-no-files-found: error",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
+    const receipt = namedStep(jobBlock("release-contract-test", text), "Preserve Windows release contract process receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Preserve Windows release contract process receipts",
+      "        id: windows_release_contract_receipts",
+      "        if: ${{ always() && runner.os == 'Windows' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json",
+      "            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json",
+      "          if-no-files-found: warn",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
   // Explicit YAML keys may put comments/newlines before their value indicator.
   const keySeparator = String.raw`(?:\s|#[^\n]*(?:\n|$))*:`;
   assert.doesNotMatch(remainder, new RegExp(String.raw`\bcontinue-on-error\s*['"]?` + keySeparator),
@@ -390,9 +447,13 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   const original = workflow.replaceAll("\r\n", "\n");
   assertWorkflowFailurePolicy(original);
   const windows = namedStep(jobBlock("windows-rust-test", original), "Windows 测试二进制导入诊断");
+  const relayReceipt = namedStep(jobBlock("windows-relay-tools-test", original), "Preserve Windows relay tools process receipt");
   const withoutWindowsExemption = original.replace(windows,
     windows.replace("        continue-on-error: true\n", ""));
   const mutants = [
+    original.replace(relayReceipt, relayReceipt.replace("windows-relay-tools-process.json", "other-process.json")),
+    original.replace("      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n",
+      "      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n        continue-on-error: true\n"),
     original.replace("  frontend-test:\n", "  frontend-test:\n    continue-on-error: true\n"),
     original.replace("  frontend-test:\n", "  frontend-test:\n    'continue-on-error': true\n"),
     original.replace("  windows-rust-test:\n", "  windows-rust-test:\n    continue-on-error: true\n"),
@@ -419,6 +480,9 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     ["account-closure-test", "Account closure resource lifecycle receipts"],
     ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
     ["windows-codex-runtime-test", "Preserve ACP fixture exit receipt"],
+    ["windows-rust-test", "Windows atomic lifecycle receipts"],
+    ["windows-relay-tools-test", "Preserve Windows relay tools process receipt"],
+    ["release-contract-test", "Preserve Windows release contract process receipts"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,
@@ -437,6 +501,43 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
       mutants.push(withoutReceiptExemption.replace(receipt.replace("        continue-on-error: true\n", ""),
         `${receipt.replace("        continue-on-error: true\n", "")}      - ${first}\n${rest}        continue-on-error: true\n`));
     }
+  }
+  const releaseReceipt = namedStep(jobBlock("release-contract-test", original), "Preserve Windows release contract process receipts");
+  for (const [old, replacement] of [
+    ["if: ${{ always() && runner.os == 'Windows' }}", "if: always()"],
+    ["${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json", "${{ runner.temp }}/**/*"],
+    ["retention-days: 7", "retention-days: 30"],
+  ]) mutants.push(original.replace(releaseReceipt, releaseReceipt.replace(old, replacement)));
+  mutants.push(original.replace(releaseReceipt, releaseReceipt + releaseReceipt));
+  const withoutReleaseExemption = original.replace(releaseReceipt, releaseReceipt.replace("        continue-on-error: true\n", ""));
+  for (const name of ["Windows 原生命令退出码回归", "Windows 远控发布与安全契约"]) {
+    const mandatory = namedStep(jobBlock("release-contract-test", original), name);
+    for (const variant of [original, withoutReleaseExemption]) {
+      mutants.push(variant.replace(mandatory, mandatory.replace("      - name: " + name + "\n", "      - name: " + name + "\n        continue-on-error: true\n")));
+    }
+  }
+  const atomicReceipt = namedStep(jobBlock("windows-rust-test", original), "Windows atomic lifecycle receipts");
+  for (const [old, replacement] of [
+    ["id: windows_atomic_receipts_upload", "id: unreviewed_upload"],
+    ["if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", "if: always()"],
+    ["${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json", "${{ github.workspace }}/**/*"],
+    ["retention-days: 7", "retention-days: 30"],
+    ["name: Windows atomic lifecycle receipts", "name: Unreviewed transport"],
+    ["        uses: actions/upload-artifact@v7", "        env:\n          UNREVIEWED: yes\n        uses: actions/upload-artifact@v7"],
+  ]) {
+    mutants.push(original.replace(atomicReceipt, atomicReceipt.replace(old, replacement)));
+  }
+  mutants.push(original.replace(atomicReceipt, atomicReceipt + atomicReceipt));
+  const frontendReceipt = namedStep(jobBlock("frontend-test", original), "Test resource lifecycle receipts");
+  mutants.push(original.replace(atomicReceipt, "").replace(frontendReceipt, frontendReceipt + atomicReceipt));
+  const withoutAtomicExemption = original.replace(atomicReceipt,
+    atomicReceipt.replace("        continue-on-error: true\n", ""));
+  for (const name of ["Windows 原子替换状态机回归", "Confirm Windows atomic resource retirement"]) {
+    const mandatory = namedStep(jobBlock("windows-rust-test", original), name);
+    mutants.push(original.replace(mandatory,
+      mandatory.replace("      - name: " + name + "\n", "      - name: " + name + "\n        continue-on-error: true\n")));
+    mutants.push(withoutAtomicExemption.replace(mandatory,
+      mandatory.replace("      - name: " + name + "\n", "      - name: " + name + "\n        continue-on-error: true\n")));
   }
   for (const mutant of mutants) {
     assert.notEqual(mutant, original, "the counterexample must change the actual workflow");
@@ -1873,7 +1974,7 @@ function assertFrontendUploadRecovery(text) {
   assert.ok(!setup.split(uploadPolicyLF).some(value => value.startsWith("    continue-on-error:")));
   assert.ok(line(primary, "        id: frontend_setup_upload"));
   assert.ok(line(primary, "        continue-on-error: true"));
-  assert.ok(!primary.split(uploadPolicyLF).some(value => value.startsWith("        if:")));
+  assert.equal(stepCondition(setup, frontendUploadStep), "steps.frontend_bundle.outputs.transport == 'github'");
   assert.ok(line(retry, "        id: frontend_setup_upload_retry"));
   assert.equal(stepCondition(setup, frontendUploadRetryStep), "!cancelled() && steps.frontend_setup_upload.outcome == 'failure'");
   assert.ok(!hasContinue(retry));
@@ -1888,12 +1989,14 @@ function assertFrontendUploadRecovery(text) {
   assert.equal(stepCondition(setup, frontendUploadRequiredStep), "always() && !cancelled()");
   assert.ok(!hasContinue(required));
   assert.ok(line(required, "        shell: bash"));
+  assert.ok(line(required, "          FRONTEND_TRANSPORT: ${{ steps.frontend_bundle.outputs.transport }}"));
   assert.ok(line(required, "          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}"));
   assert.ok(line(required, "          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}"));
   assert.ok(line(required, "          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz"));
   const run = stepRun(setup, frontendUploadRequiredStep);
-  assert.ok(run.includes('case "$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in'));
-  assert.ok(run.includes("success:skipped|failure:success) ;;"));
+  assert.ok(run.includes('case "$FRONTEND_TRANSPORT:$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in'));
+  assert.ok(run.includes("github:success:skipped|github:failure:success) ;;"));
+  assert.ok(run.includes("lan:skipped:skipped) ;;"));
   assert.ok(run.includes('[[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]'));
   assert.ok(setup.indexOf(namedStep(setup, "Pack frontend setup bundle")) < setup.indexOf(primary));
   assert.ok(setup.indexOf(primary) < setup.indexOf(retry) && setup.indexOf(retry) < setup.indexOf(required));
@@ -1924,6 +2027,8 @@ test("frontend setup upload policy rejects broad retry, swallowed failures and p
     setup.replace(required, required.replace("always() && !cancelled()", "success()")),
     setup.replace(required, required.replace("        shell:", "        continue-on-error: true" + uploadPolicyLF + "        shell:")),
     setup.replace(required, required.replace("[[ ! -s", "[[ ! -e")),
+    setup.replace(required, required.replace("lan:skipped:skipped) ;;", "lan:skipped:skipped) error ;;")),
+    setup.replace(primary, primary.replace("if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}" + uploadPolicyLF, "")),
   ];
   for (const variant of variants) assert.throws(() => assertFrontendUploadRecovery(workflow.replace(setup, variant)));
 });
@@ -1945,18 +2050,20 @@ test("frontend upload final shell accepts exactly recovered outcomes with a none
   const directory = mkdtempSync(join(tmpdir(), "frontend-upload-policy-"));
   try {
     const file = join(directory, "frontend-setup-bundle.tar.gz");
-    const cases = [["success", "skipped", true], ["failure", "success", true],
-      ["failure", "failure", false], ["failure", "skipped", false], ["failure", "cancelled", false],
-      ["cancelled", "skipped", false], ["skipped", "skipped", false], ["success", "success", false], ["", "", false]];
-    for (const [primary, retry, accepted] of cases) {
+    const cases = [["github", "success", "skipped", true], ["github", "failure", "success", true],
+      ["lan", "skipped", "skipped", true],
+      ["github", "failure", "failure", false], ["github", "failure", "skipped", false], ["github", "failure", "cancelled", false],
+      ["github", "cancelled", "skipped", false], ["github", "skipped", "skipped", false], ["github", "success", "success", false],
+      ["lan", "success", "skipped", false], ["github", "", "", false]];
+    for (const [transport, primary, retry, accepted] of cases) {
       for (const payload of accepted ? ["nonempty", "empty", "missing"] : ["nonempty"]) {
         rmSync(file, { force: true });
         if (payload !== "missing") writeFileSync(file, payload === "empty" ? "" : "fixed bundle");
         const result = spawnSync(bash, ["-c", run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true,
-          env: { ...process.env, FIRST_UPLOAD_OUTCOME: primary, RETRY_UPLOAD_OUTCOME: retry,
+          env: { ...process.env, FRONTEND_TRANSPORT: transport, FIRST_UPLOAD_OUTCOME: primary, RETRY_UPLOAD_OUTCOME: retry,
             FRONTEND_SETUP_BUNDLE: "frontend-setup-bundle.tar.gz" } });
         assert.equal(result.status, accepted && payload === "nonempty" ? 0 : 1,
-          `${primary}/${retry}/${payload}: ${result.error?.message || result.stderr}`);
+          `${transport}/${primary}/${retry}/${payload}: ${result.error?.message || result.stderr}`);
       }
     }
   } finally {
