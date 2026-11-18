@@ -1185,8 +1185,11 @@ pub(crate) fn build_chat_wire_body(
         if matches!(provider, crate::config::ApiProvider::Moonshot) {
             omitted_tool_names = sanitize_moonshot_chat_tools(&mut chat_tools);
         }
-        // xAI rejects a parameters root that is not a plain object schema
-        // (e.g. apply_patch's root `oneOf` required-groups) with a 400.
+        // xAI rejects a parameters root that is neither an object schema nor
+        // a root-level union of object branches (e.g. apply_patch's root
+        // `oneOf` required-groups) with a 400 naming the tool; a documented
+        // union of object schemas passes through with its branch structure
+        // preserved (normalization still applies inside the branches).
         if matches!(provider, crate::config::ApiProvider::Xai) {
             for t in &mut chat_tools {
                 let Some(function) = t
@@ -8337,6 +8340,95 @@ mod image_block_wire_tests {
             tools[1]["function"]["description"],
             format!("Lookup things. {NOTE}"),
             "a non-empty description keeps the appended-note form"
+        );
+    }
+
+    /// A root `oneOf` whose every branch declares `type: "object"` is a
+    /// documented-good xAI parameters root (2026-10-10 function-calling
+    /// doc): the xAI lane must keep the union — variants and all — instead
+    /// of folding it into one merged object.
+    #[test]
+    fn xai_chat_keeps_root_union_of_object_branches() {
+        let union_schema = serde_json::json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "email"},
+                        "address": {"type": "string"}
+                    },
+                    "required": ["kind", "address"]
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"const": "sms"},
+                        "phone": {"type": "string"}
+                    },
+                    "required": ["kind", "phone"]
+                }
+            ]
+        });
+        let tool = Tool {
+            tool_type: None,
+            name: "notify".to_string(),
+            description: "Send a notification.".to_string(),
+            input_schema: union_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        };
+        let request = MessageRequest {
+            model: "grok-4".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "notify someone".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: Some(vec![tool]),
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let body = build_chat_wire_body(
+            &request,
+            ApiProvider::Xai,
+            crate::config::DEFAULT_XAI_BASE_URL,
+            false,
+        )
+        .expect("xAI wire body");
+
+        let parameters = &body.body["tools"][0]["function"]["parameters"];
+        let branches = parameters["oneOf"]
+            .as_array()
+            .expect("root oneOf must survive");
+        assert_eq!(branches.len(), 2, "both object variants must survive");
+        assert_eq!(
+            branches[0]["required"],
+            serde_json::json!(["kind", "address"])
+        );
+        assert_eq!(
+            branches[1]["required"],
+            serde_json::json!(["kind", "phone"])
+        );
+        assert!(
+            parameters.get("type").is_none(),
+            "the root must not gain a forced object type: {parameters}"
+        );
+        assert!(
+            parameters.get("properties").is_none(),
+            "branch properties must not be merged into the root: {parameters}"
         );
     }
 }
