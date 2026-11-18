@@ -10,6 +10,7 @@ const files = [
   'local-selftest-identity.test.js',
   'endpoint-launcher.test.js',
   'controller-state-guard.test.js',
+  'windows-ancestor-paths.test.js',
   'controller-lock-rollout.test.js',
 ];
 

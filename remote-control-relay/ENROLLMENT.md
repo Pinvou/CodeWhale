@@ -382,8 +382,8 @@ fails, and a live store becomes unavailable.
 
 ### Offline recovery after an interrupted commit
 
-There is no supported automatic repair CLI. A failed open must not be bypassed
-by deleting a candidate, editing JSON, resetting the registry, or enabling TOFU.
+Startup fails closed on unexplained disagreement. Do not bypass a failed open by
+deleting a candidate, editing JSON, resetting the registry, or enabling TOFU.
 Stop the Relay and confirm no process still owns or writes the store before any
 recovery. First archive the entire dedicated directory unchanged, including the
 primary, `.bak`, lock, marker, temporary/stale files and their owner/permission
@@ -403,15 +403,52 @@ copy is not sufficient for automatic migration.
 For non-equivalent copies, a damaged peer or uncertain provenance, restore a
 verified pair from the same coordinated offline snapshot. Do not combine
 different snapshots or choose a copy solely because its revision is higher.
-Alternatively, an administrator may undertake an **offline, audited manual
-recovery** only after external commit/incident evidence establishes that the
-valid primary is the last committed state and the newer backup was merely
-staged. After archiving and validating that decision, reconstruct the backup
-from that confirmed primary through a same-directory temporary file, file sync,
-atomic replacement and directory sync; preserve and re-verify restrictive
-owner/permissions. Leave the primary unchanged. Do not promote the staged
-backup or apply this recipe to an unexplained mismatch. Without sufficient
-evidence, keep the service stopped and escalate rather than guessing.
+For a valid v1 primary and a valid v1 backup exactly one revision ahead, the
+offline recovery command can reconstruct the backup. First establish from
+external commit or incident records that the primary is the last committed
+state and the backup was only staged. Record the confirmed primary revision
+and exact SHA-256 of both files as part of that decision. The revision order
+alone does not establish which authorization state was committed. Keep the
+service stopped if the evidence is missing or the mismatch is unexplained.
+
+Run as the Relay state owner with the same supported Node runtime. Set
+`PINVOU_REMOTE_CONTROLLER_STATE_PATH` and `PINVOU_REMOTE_STATE_PATH` to the
+absolute paths used by the stopped Relay, then run from `remote-control-relay`.
+Use the installed Relay application directory for a managed production or
+test deployment, or the `remote-control-relay` directory of the matching
+source checkout for a self-hosted installation. The recovery entry is shipped
+with the other root JavaScript modules of both deployments.
+
+Choose an existing private archive directory outside the dedicated controller
+state directory. It must be owned by the Relay state owner, with mode `0700`
+on POSIX or the same private ACL as the state directory on Windows. The archive
+root may live elsewhere when the parent of the state directory is read-only.
+When `--archive-root` is omitted, the state directory's parent is used and must
+pass the same ownership and private-mode/ACL checks, including on Windows.
+Recovery does not repair a non-private parent; choose an existing private
+alternate root instead.
+
+```sh
+node recover-controller-state.js \
+  --confirmed-primary-revision "$CONFIRMED_PRIMARY_REVISION" \
+  --primary-sha256 "$CONFIRMED_PRIMARY_SHA256" \
+  --staged-backup-sha256 "$STAGED_BACKUP_SHA256" \
+  --archive-root "$ABSOLUTE_PRIVATE_ARCHIVE_ROOT"
+```
+
+The command takes the same exclusive writer lock as startup. It copies both
+files byte for byte to a new private directory under the archive root. It
+uses a bounded `controller-recovery-<random>` directory name so valid long state
+directory names remain recoverable. It
+rechecks both source files, the archives and the actual staged file before
+publishing the backup. It then verifies the installed pair and archives while
+still holding the writer lock. The success result gives the archive path and
+recovered revision. Keep the whole-directory incident archive and these copies
+access-restricted. If installation happened before a verification or lock
+release error, the command exits unsuccessfully and reports the archive path.
+Keep the Relay stopped and inspect the current pair and retained copies before
+attempting recovery again. The writer lock coordinates Relay and maintenance
+processes using the store. Stop any other offline writer before recovery.
 
 Before restarting, verify that both candidates are valid, canonically equivalent
 and have the correct owner/protection. Retain the archive and recovery decision
