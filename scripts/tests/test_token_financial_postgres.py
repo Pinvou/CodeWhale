@@ -17,6 +17,7 @@ SPEC.loader.exec_module(RUNNER)
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
 EXPECTED_RETAINED_ROOT_COUNT = 83
+EXPECTED_SCHEMA_ROOT_COUNT = 16
 
 
 CHECKPOINT_LEAF_ROOTS = {
@@ -1019,7 +1020,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         selections = [command[command.index("-run") + 1] for command in commands]
         historical = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
         self.assertEqual(selections[0], "^" + historical + "$")
-        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 15)
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), EXPECTED_SCHEMA_ROOT_COUNT)
         for root in RUNNER.SCHEMA_REQUIRED:
             matches = [bool(re.fullmatch(selection, root)) for selection in selections]
             self.assertEqual(matches, [root == historical, root != historical], root)
@@ -1179,7 +1180,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_reconciliation_retry_identity_root_is_selected_and_cannot_be_faked(self):
         root = "TestReconciliationFairRetryRegisteredIdentity"
-        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 16)
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), EXPECTED_SCHEMA_ROOT_COUNT)
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
         self.run_main_fixture()
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]

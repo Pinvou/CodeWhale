@@ -93,6 +93,7 @@ import { createPinvouBrowserCoreCatalog } from './browser-core-protocol.mjs';
 
 const log = (...args) => console.error('[browser-wrapper]', ...args);
 const BROWSER_PERF_LOG_ENABLED = process.env.PINVOU3_BROWSER_PERF_LOG === '1';
+const lifecycleDiagnostics = process.env.PINVOU3_BROWSER_LIFECYCLE_DIAGNOSTICS === '1';
 const WINDOWS_TRUSTED_INPUT_WINDOW_MS = 750;
 const WINDOWS_TRUSTED_INPUT_HEARTBEAT_INTERVAL_MS = 250;
 // Fail the cooperative refresh before the current Rust suppression window can
@@ -1181,6 +1182,11 @@ const queuedManagedProxyRequests = new Set();
 const cancelledProxyRequestIds = new Set();
 const externalToInternalRequestIds = new Map();
 const MANAGED_UPSTREAM_SETTLEMENT_GRACE_MS = 5_000;
+function lifecycleDiagnostic(phase, fields = {}) {
+  if (lifecycleDiagnostics) log('lifecycle-diagnostic', JSON.stringify({
+    phase, monotonic_ms: Math.round(performance.now()), ...fields,
+  }));
+}
 const pageIdToTabToken = new Map();
 const tabTokenToPageId = new Map();
 let runtimePageScopedTools = new Set();
@@ -1228,12 +1234,16 @@ function armManagedUpstreamSettlementDeadline(internalRequestId, pending, reason
   // External cancellation owns the first bounded settlement deadline. A later
   // host-heartbeat failure is a consequence of that same cancellation and
   // must not extend the window by clearing/rearming its timer.
+  lifecycleDiagnostic('settlement-deadline-requested', {
+    already_armed: pending.commitStateUnknown, queued: queuedManagedProxyRequests.size,
+  });
   if (pending.commitStateUnknown) return;
   pending.commitStateUnknown = true;
   pending.settlementReason = reason;
   clearTimeout(pending.timer);
   pending.timer = setTimeout(() => {
     if (internalRequests.get(internalRequestId) !== pending) return;
+    lifecycleDiagnostic('settlement-deadline-fired', { queued: queuedManagedProxyRequests.size });
     log('Managed browser tool did not settle after cooperative cancellation; closing upstream:', reason);
     void gracefulShutdown(1, `${reason}; upstream did not settle`);
   }, MANAGED_UPSTREAM_SETTLEMENT_GRACE_MS);
@@ -1256,6 +1266,11 @@ function signalManagedUpstreamCancellation(externalRequestId, reason) {
 
 function cancelManagedUpstreamRequest(externalRequestId, reason) {
   const internalRequestId = externalToInternalRequestIds.get(externalRequestId);
+  lifecycleDiagnostic('cancel-routing', {
+    mapped: internalRequestId != null,
+    awaiting_real_settlement: internalRequests.get(internalRequestId)?.awaitRealSettlement === true,
+    queued: queuedManagedProxyRequests.size,
+  });
   if (internalRequestId == null) return false;
   const pending = internalRequests.get(internalRequestId);
   // Once begin_agent_operation has succeeded, a cancellation notification is
@@ -2535,6 +2550,7 @@ function gracefulShutdown(
   if (shutdownPromise) return shutdownPromise;
   shuttingDown = true;
   state = 'stopping';
+  lifecycleDiagnostic('shutdown-entered', { queued: queuedManagedProxyRequests.size });
   // Protocol output can synchronously fail while rejecting queued work and
   // re-enter shutdown. Publish its one shared barrier before those callbacks.
   let finishShutdown;
@@ -2572,6 +2588,7 @@ function gracefulShutdown(
       cancelledProxyRequestIds.delete(queuedRequest.id);
     }
     queuedManagedProxyRequests.clear();
+    lifecycleDiagnostic('queued-work-rejected');
     if (startPromise) {
       try { await startPromise; } catch { /* startup failure is settled below */ }
     }

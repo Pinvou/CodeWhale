@@ -468,6 +468,7 @@ function driveWrapper(fixture, { collectResponses = false } = {}) {
       FAKE_BROWSER_WORKSPACE: fixture.workspacePath,
       FAKE_BROWSER_MCP_MODE: fixture.modePath,
       FAKE_BROWSER_MCP_AUDIT: fixture.auditPath,
+      PINVOU3_BROWSER_LIFECYCLE_DIAGNOSTICS: '1',
     },
     timeoutMs: 15_000,
     collectResponses,
@@ -1272,7 +1273,12 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
       return raw !== null && JSON.parse(raw).operation === 'prepare';
     }), 'initial setup did not publish prepare');
     stages.prepareObservedMs = Math.round(performance.now() - startedAt);
+    const heldAt = performance.now();
+    console.error('[browser-prepare-observer]', JSON.stringify({ phase: 'prepare-seen' }));
     await sleep(16_000);
+    console.error('[browser-prepare-observer]', JSON.stringify({
+      phase: 'prepare-release', held_ms: Math.round(performance.now() - heldAt),
+    }));
     stages.holdReturnedMs = Math.round(performance.now() - startedAt);
     assert.equal(settled, false, 'setup must not inherit the shorter mutation observer');
     await host.deferOperation('prepare', false);
