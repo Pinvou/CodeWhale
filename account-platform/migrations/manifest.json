@@ -1142,6 +1142,16 @@
         "file": "900022_approval_unstarted_grants.up.sql",
         "version": 900022,
         "sha256": "bb646987572a659091d293bdf781a39874e82d16aadd8346d9d740da7298fd10"
+      },
+      {
+        "file": "900026_approval_delivery_terminal_recovery.down.sql",
+        "version": 900026,
+        "sha256": "6c27277197eea78b54e959bbf48793cf0dad004f6b1f19336076481b8475660c"
+      },
+      {
+        "file": "900026_approval_delivery_terminal_recovery.up.sql",
+        "version": 900026,
+        "sha256": "aa4dd01995ecc0fe9bcc8ede004404e83ebca986d527131d914663eb189d3860"
       }
     ],
     "billing": [

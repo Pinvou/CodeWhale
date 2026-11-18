@@ -82,6 +82,7 @@ ACCOUNT_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/account"
 LIFECYCLE_RECONCILIATION_REQUIRED = {"TestLifecycleV3ApprovalReconciliationPostgres"}
 ACCOUNT_REQUIRED = {
     "TestOrganizationStartupDiagnosticsPostgres",
+    "TestApprovalDeliveryTerminalRecoveryPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
@@ -348,6 +349,15 @@ EXACT_REQUIRED_CHILDREN = {
     "TestOrphanPaidOrderIndexPublicMigration": {
         "fresh-failure-atomicity-and-retry",
         "populated-upgrade-replay-and-own-ddl-rollback",
+    },
+    "TestApprovalDeliveryTerminalRecoveryPostgres": {
+        "public-migration-rollback-and-upgrade",
+        "ack-success-terminal-write-failure-worker-and-redelivery",
+        "bounded-batches-replay-and-negative-states",
+        "locked-row-and-concurrent-workers-then-next-pass",
+        "permission-fault-zero-effect-and-restoration",
+        "batch-sql-failure-is-atomic-and-next-call-recovers",
+        "populated-rollback-retains-frozen-and-terminal-history",
     },
     "TestPackageExpiryCrossWalletIndexPostgres": {"fresh-install", "retained-upgrade"},
     "TestRegistrationOutboxAggregateLookupPostgres": {"fresh-install", "retained-upgrade"},
