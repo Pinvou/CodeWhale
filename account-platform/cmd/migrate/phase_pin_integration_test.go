@@ -197,7 +197,13 @@ func TestPhaseMigrationCLIPinsBeforeDown(t *testing.T) {
 			}
 			child.Env = append(child.Env, "DATABASE_URL="+parsed.String(), "MIGRATIONS_DIR="+directory, "MIGRATION_ROLE=", "PINVOU_DEPLOYMENT_ENVIRONMENT=test", "PINVOU_SCHEMA_CLI_CHILD=owned-phase-down")
 			output, err := child.CombinedOutput()
-			if err == nil || !strings.Contains(string(output), "MIGRATION_EXECUTION_FAILED") {
+			// Published packages are now rejected while loading source. A
+			// renamed custom source still reaches the installed identity guard.
+			wantFailure := "MIGRATION_SOURCE_INVALID"
+			if fixture.alias == "owned-renamed-source" {
+				wantFailure = "MIGRATION_EXECUTION_FAILED"
+			}
+			if err == nil || !strings.Contains(string(output), wantFailure) {
 				t.Fatal("real migration CLI did not reject edited rollback before execution")
 			}
 			var after string

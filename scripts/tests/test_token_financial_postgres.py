@@ -16,7 +16,8 @@ SPEC.loader.exec_module(RUNNER)
 
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
-EXPECTED_RETAINED_ROOT_COUNT = 82
+EXPECTED_RETAINED_ROOT_COUNT = 83
+EXPECTED_SCHEMA_ROOT_COUNT = 16
 
 
 CHECKPOINT_LEAF_ROOTS = {
@@ -310,6 +311,45 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             ):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_published_rollback_package_requires_real_completed_boundaries(self):
+        root = "TestPublishedRollbackPackageIntegrityPostgres"
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        required = {"published-down-legacy-crlf-no-create", "recorded-up-identity-before-down", "unrelated-custom-history", "published-ledger-cannot-become-custom/LF", "published-ledger-cannot-become-custom/CRLF", "forward-only-history-cannot-authorize-rollback"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in required:
+            for invalid in (
+                [event for event in events if event.get("Test", "").split("/", 1)[0] != root],
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+
+    def test_historical_waiver_conversion_requires_current_rollback_boundaries(self):
+        root = "TestUsageWaiverHistoricalSchemaPostgres"
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        required = {"fresh-exact-history-append-only-runtime-and-forward-only", "old-LF/changed-current-down-before-up", "old-LF/changed-current-down-before-verify", "old-CRLF/changed-current-down-before-up", "old-CRLF/changed-current-down-before-verify", "unknown-checksum", "wrong-legacy-shape"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in required:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
 
     def test_password_preparation_requires_redaction_boundaries_and_reference_safety(self):
         root = "TestPasswordPreparationAuthorizationPostgres"
@@ -970,7 +1010,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_financial_phase_budgets_preserve_all_commands_and_cleanup(self):
         self.run_main_fixture()
         self.assertEqual(self.fixture_phases, [
-            "owner-account", "owner-wallet", "owner-schema", "owner-token-schema",
+            "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema",
             "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing",
         ])
         for phase, command in zip(self.fixture_phases, self.fixture_commands, strict=True):
@@ -987,9 +1027,43 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertEqual(len(RUNNER.RETAINED_REQUIRED), EXPECTED_RETAINED_ROOT_COUNT)
         self.assertEqual(self.fixture_writes, ["create", "drop"])
         self.assertEqual(self.fixture_trace, [
-            "owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning",
+            "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning",
             "lifecycle-reconciliation", "create", "retained-token", "retained-billing", "drop",
         ])
+
+    def test_schema_batches_select_every_complete_root_once_with_separate_20m_budgets(self):
+        self.run_main_fixture(group="owners")
+        commands = [command for command in self.fixture_commands if command[-1] == "./internal/billingschema"]
+        self.assertEqual(len(commands), 2)
+        selections = [command[command.index("-run") + 1] for command in commands]
+        historical = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
+        self.assertEqual(selections[0], "^" + historical + "$")
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), EXPECTED_SCHEMA_ROOT_COUNT)
+        for root in RUNNER.SCHEMA_REQUIRED:
+            matches = [bool(re.fullmatch(selection, root)) for selection in selections]
+            self.assertEqual(matches, [root == historical, root != historical], root)
+        for command in commands:
+            self.assertEqual([arg for arg in command if arg.startswith("-timeout=")], ["-timeout=20m"])
+            for flag in ("-p=1", "-race", "-tags=nomsgpack", "-mod=readonly", "-count=1", "-json"):
+                self.assertIn(flag, command)
+            self.assertNotIn("-skip", command)
+        self.assertFalse(any(re.fullmatch(selection, "TestUnknownSchemaRoot") for selection in selections))
+        self.assertEqual(self.fixture_writes, [])
+
+    def test_new_required_schema_root_joins_second_batch_without_repeating_history(self):
+        future = "TestFutureRequiredSchemaContract"
+        with patch.object(RUNNER, "SCHEMA_REQUIRED", RUNNER.SCHEMA_REQUIRED | {future}):
+            self.run_main_fixture(group="owners")
+        commands = [command for command in self.fixture_commands if command[-1] == "./internal/billingschema"]
+        self.assertEqual(len(commands), 2)
+        self.assertFalse(re.fullmatch(commands[0][commands[0].index("-run") + 1], future))
+        self.assertTrue(re.fullmatch(commands[1][commands[1].index("-run") + 1], future))
+
+    def test_invalid_schema_partition_is_rejected_instead_of_running_empty_or_unknown_batch(self):
+        for required in (set(), {"TestSomeOtherSchemaRoot"}, {"TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"}):
+            with self.subTest(required=required), patch.object(RUNNER, "SCHEMA_REQUIRED", required):
+                with self.assertRaisesRegex(RuntimeError, "two nonempty complete-root batches"):
+                    RUNNER.schema_batches()
 
     def test_account_financial_jobs_keep_retained_budgets_and_independent_closure(self):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/pr-check.yml").read_text(encoding="utf-8")
@@ -1124,7 +1198,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_reconciliation_retry_identity_root_is_selected_and_cannot_be_faked(self):
         root = "TestReconciliationFairRetryRegisteredIdentity"
-        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 15)
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), EXPECTED_SCHEMA_ROOT_COUNT)
         self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
         self.run_main_fixture()
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
@@ -1568,7 +1642,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         )
 
     def run_main_fixture(self, *, group="all", existing_roles=False, user_objects=False, leftover=False,
-                         owner_leftover=False, account_leftover=False, schema_leftover=False, provisioning_leftover=False, active_client=False, external_dependency=False,
+                         owner_leftover=False, account_leftover=False, schema_leftover=False, schema_leftover_phase=None, provisioning_leftover=False, active_client=False, external_dependency=False,
                          go_fail_phase=None, empty_phase=None, skipped_phase=None, missing_token_children=False, platform_role_evidence=None):
         writes, commands, phases, trace = [], [], [], []
         state = {"bootstrapped": False, "account_done": False, "owner_done": False, "schema_done": False, "provisioning_done": False, "retained_done": False}
@@ -1599,16 +1673,25 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     phase, required, package = "owner-token-schema", RUNNER.TOKEN_SCHEMA_REQUIRED, RUNNER.TOKEN_SCHEMA_PACKAGE
                     self.assertFalse(state["bootstrapped"])
                 elif argv[-1] == "./internal/billingschema":
-                    phase, required, package = "owner-schema", RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
+                    # Model the actual Go root selection, independently of the
+                    # runner's partition helper, so omitted/duplicate selection
+                    # cannot be hidden by always fabricating all schema events.
+                    selection = argv[argv.index("-run") + 1]
+                    required = {name for name in RUNNER.SCHEMA_REQUIRED if re.fullmatch(selection, name)}
+                    phase = ("owner-schema-legacy-expiry" if required == {
+                        "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
+                    } else "owner-schema")
+                    package = RUNNER.SCHEMA_PACKAGE
                     self.assertFalse(state["bootstrapped"])
                     state["schema_done"] = True
+                    state["schema_phase"] = phase
                 else:
                     phase, required, package = "retained-billing", RUNNER.billing_roots(group), RUNNER.BILLING_PACKAGE
                     self.assertTrue(state["bootstrapped"])
                     state["retained_done"] = True
                 phases.append(phase)
                 trace.append(phase)
-                if phase == "owner-schema":
+                if phase in {"owner-schema-legacy-expiry", "owner-schema"}:
                     self.assertEqual(kwargs["env"]["PINVOU_TEST_SCHEMA_DATABASE_URL"], "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable")
                     self.assertNotIn("PINVOU_TEST_BILLING_DATABASE_URL", kwargs["env"])
                 else:
@@ -1621,10 +1704,10 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 elif phase in {"retained-token", "lifecycle-reconciliation"}:
                     self.assertEqual(kwargs["env"]["PINVOU_TEST_ACCOUNT_DATABASE_URL"], kwargs["env"]["PINVOU_TEST_BILLING_DATABASE_URL"])
                     self.assertEqual(kwargs["env"]["PINVOU_TEST_TOKEN_DATABASE_URL"], kwargs["env"]["PINVOU_TEST_ACCOUNT_DATABASE_URL"])
-                elif phase not in {"owner-schema", "owner-token-schema"}:
+                elif phase not in {"owner-schema-legacy-expiry", "owner-schema", "owner-token-schema"}:
                     self.assertNotIn("PINVOU_TEST_ACCOUNT_DATABASE_URL", kwargs["env"])
                     self.assertEqual(kwargs["env"]["PINVOU_TEST_BILLING_DATABASE_URL"], "postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable")
-                if phase == "owner-schema":
+                if phase in {"owner-schema-legacy-expiry", "owner-schema"}:
                     self.assertNotIn("PINVOU_TEST_ACCOUNT_DATABASE_URL", kwargs["env"])
                 if phase in {"owner-token-schema", "owner-provisioning", "retained-token", "lifecycle-reconciliation"}:
                     self.assertIn("PINVOU_TEST_TOKEN_DATABASE_URL", kwargs["env"])
@@ -1678,7 +1761,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     roles.add("existing_runtime")
                 elif account_leftover and state["account_done"]:
                     roles.add("account_service")
-                elif schema_leftover and state["schema_done"]:
+                elif state["schema_done"] and (schema_leftover or schema_leftover_phase == state["schema_phase"]):
                     roles.add("billing_schema_owner")
                 elif provisioning_leftover and state["provisioning_done"]:
                     roles.add("token_gateway")
@@ -1698,7 +1781,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     value += "\nexisting_runtime"
                 elif account_leftover and state["account_done"]:
                     value += "\naccount_service"
-                elif schema_leftover and state["schema_done"]:
+                elif state["schema_done"] and (schema_leftover or schema_leftover_phase == state["schema_phase"]):
                     value += "\nbilling_schema_owner"
                 elif provisioning_leftover and state["provisioning_done"]:
                     value += "\ntoken_gateway"
@@ -1753,8 +1836,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             for command in self.fixture_commands:
                 self.assertIn("-race", command)
                 self.assertIn("-count=1", command)
-        self.assertEqual(len(phases), 11)  # Public Token schema phase; four complete Billing shards.
-        self.assertEqual(set(phases), {"owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"})
+        self.assertEqual(len(phases), 12)  # Two schema batches; four complete Billing shards.
+        self.assertEqual(set(phases), {"owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"})
         self.assertFalse(shards[0] & shards[1])
         self.assertEqual(set().union(*shards), RUNNER.RETAINED_REQUIRED)
         self.assertEqual(sum(map(len, shards)), len(RUNNER.RETAINED_REQUIRED))
@@ -1784,11 +1867,11 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_main_fixture(leftover=True)
         self.assertEqual(self.fixture_writes, ["create"])
-        self.assertEqual(self.fixture_phases, ["owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token"])
+        self.assertEqual(self.fixture_phases, ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token"])
 
     def test_public_entry_executes_account_then_owner_token_and_retained(self):
         self.run_main_fixture()
-        self.assertEqual(len(self.fixture_commands), 8)
+        self.assertEqual(len(self.fixture_commands), 9)
         command = self.fixture_commands[1]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF06OrganizationWalletRequiresLifecycleEvidence", selection)
@@ -1796,17 +1879,22 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertIn("TestTokenWalletReceiptConservationAndLifecyclePostgres", selection)
         self.assertEqual(self.fixture_commands[0][-1], "./internal/account")
         self.assertEqual(self.fixture_commands[2][-1], "./internal/billingschema")
-        self.assertEqual(self.fixture_commands[3][-1], "./internal/tokenschema")
-        self.assertEqual(self.fixture_commands[4][-1], "./internal/token")
-        self.assertEqual(self.fixture_commands[5][-1], "./internal/account")
-        self.assertEqual(self.fixture_commands[6][-1], "./internal/token")
-        self.assertEqual(self.fixture_commands[7][-1], "./internal/billing")
+        self.assertEqual(self.fixture_commands[3][-1], "./internal/billingschema")
+        self.assertEqual(self.fixture_commands[4][-1], "./internal/tokenschema")
+        self.assertEqual(self.fixture_commands[5][-1], "./internal/token")
+        self.assertEqual(self.fixture_commands[6][-1], "./internal/account")
+        self.assertEqual(self.fixture_commands[7][-1], "./internal/token")
+        self.assertEqual(self.fixture_commands[8][-1], "./internal/billing")
 
-    def test_schema_restoration_is_required_before_retained_bootstrap(self):
-        with self.assertRaises(RuntimeError):
-            self.run_main_fixture(schema_leftover=True)
-        self.assertEqual(self.fixture_writes, [])
-        self.assertEqual(self.fixture_phases, ["owner-account", "owner-wallet", "owner-schema"])
+    def test_schema_restoration_is_required_between_batches_and_before_later_phases(self):
+        for phase, expected in (
+            ("owner-schema-legacy-expiry", ["owner-account", "owner-wallet", "owner-schema-legacy-expiry"]),
+            ("owner-schema", ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema"]),
+        ):
+            with self.subTest(phase=phase), self.assertRaises(RuntimeError):
+                self.run_main_fixture(schema_leftover_phase=phase)
+            self.assertEqual(self.fixture_writes, [])
+            self.assertEqual(self.fixture_phases, expected)
 
     def test_unknown_provider_api_and_append_migration_roots_are_mandatory(self):
         self.run_main_fixture()
@@ -1832,7 +1920,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres"})
+        self.assertEqual(roots, {"TestOrphanPaidOrderIndexPublicMigration", "TestPublishedRollbackPackageIntegrityPostgres", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres"})
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)
@@ -1921,6 +2009,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestOrdinaryDeadLetterReplayRuntimePostgres",
             "TestIdentityRecoveryClaimsRuntimePostgres",
             "TestProfileSessionRevocationRecoveryRuntimePostgres",
+            "TestProfileRevocationDurableAdmissionRuntimePostgres",
+            "TestProfileRevocationClosureRuntimePostgres",
             "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
             "TestRegistrationIdentityRejectionRuntimePostgres",
@@ -2170,18 +2260,19 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_any_failed_phase_stops_later_phases(self):
         for phase, expected in [("owner-account", ["owner-account"]),
                                 ("owner-wallet", ["owner-account", "owner-wallet"]),
-                                ("owner-schema", ["owner-account", "owner-wallet", "owner-schema"]),
-                                ("owner-provisioning", ["owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning"]),
-                                ("lifecycle-reconciliation", ["owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation"]),
-                                ("retained-token", ["owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token"]),
-                                ("retained-billing", ["owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"])]:
+                                ("owner-schema-legacy-expiry", ["owner-account", "owner-wallet", "owner-schema-legacy-expiry"]),
+                                ("owner-schema", ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema"]),
+                                ("owner-provisioning", ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning"]),
+                                ("lifecycle-reconciliation", ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation"]),
+                                ("retained-token", ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token"]),
+                                ("retained-billing", ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"])]:
             with self.subTest(phase=phase), self.assertRaises(RuntimeError):
                 self.run_main_fixture(go_fail_phase=phase)
             self.assertEqual(self.fixture_phases, expected)
-            self.assertEqual(self.fixture_writes, [] if phase in {"owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation"} else ["create", "drop"])
+            self.assertEqual(self.fixture_writes, [] if phase in {"owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation"} else ["create", "drop"])
 
     def test_each_phase_rejects_zero_or_skipped_required_tests(self):
-        for phase in ["owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"]:
+        for phase in ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "retained-token", "retained-billing"]:
             for option in ["empty_phase", "skipped_phase"]:
                 with self.subTest(phase=phase, option=option), self.assertRaises(RuntimeError):
                     self.run_main_fixture(**{option: phase})
@@ -2215,7 +2306,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_main_fixture(provisioning_leftover=True)
         self.assertEqual(self.fixture_writes, [])
-        self.assertEqual(self.fixture_phases, ["owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning"])
+        self.assertEqual(self.fixture_phases, ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning"])
 
     def test_scoped_evidence_requires_exact_package_and_children_and_completion(self):
         valid = self.events(RUNNER.OWNER_REQUIRED, RUNNER.BILLING_PACKAGE, children=True)
@@ -2258,7 +2349,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_owned_fixture_restores_only_its_actors(self):
         self.run_main_fixture()
         self.assertEqual(self.fixture_writes, ["create", "drop"])
-        self.assertEqual(self.fixture_trace, ["owner-account", "owner-wallet", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "create", "retained-token", "retained-billing", "drop"])
+        self.assertEqual(self.fixture_trace, ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation", "create", "retained-token", "retained-billing", "drop"])
 
     def test_ledger_activation_read_failure_regression_is_mandatory(self):
         root = "TestLedgerRepairClaimActivationReadErrorsPostgres"
@@ -2502,6 +2593,23 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 with self.subTest(child=child), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(invalid, {root}, **options)
 
+    def test_package_expiry_index_requires_both_real_installation_scenarios(self):
+        root = "TestPackageExpiryCrossWalletIndexPostgres"
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        expected = {"fresh-install", "retained-upgrade"}
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for name in {root, *(root + "/" + child for child in expected)}:
+            for invalid in ([e for e in events if e.get("Test") != name],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}]):
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+
     def test_provider_health_read_failure_requires_all_three_streams(self):
         root = "TestProviderHealthReadFailurePostgres"
         self.assertIn(root, RUNNER.RETAINED_REQUIRED)
@@ -2566,6 +2674,49 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             with self.subTest(child=child), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(incomplete, {root}, **options)
 
+
+    def test_profile_revocation_requires_every_closure_child(self):
+        root = "TestProfileRevocationClosureRuntimePostgres"
+        children = {"reserved-closure-seals-no-dispatch-and-releases-capacity",
+                    "confirmed-replays-after-anonymization", "late-confirmation-replays-after-anonymization"}
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_profile_revocation_requires_every_durable_admission_child(self):
+        root = "TestProfileRevocationDurableAdmissionRuntimePostgres"
+        children = {
+            "capacity-before-grant-confirmed-replay-and-unknown-retention",
+            "cancel-before-authority-preserves-reservation",
+            "dispatch-token-and-legacy-command-cannot-regrant",
+            "concurrent-global-admission-across-profiles",
+            "legacy-upgrade-preserves-confirmed-and-unknown-receipts",
+            "capacity-public-complete-resumes-original-operation",
+            "lease-expiry-during-global-admission-wait",
+        }
+        self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = {"package": RUNNER.ACCOUNT_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_schema_restoration_is_required_before_retained_bootstrap(self):
+        with self.assertRaises(RuntimeError):
+            self.run_main_fixture(schema_leftover_phase="owner-schema")
+        self.assertEqual(self.fixture_writes, [])
+        self.assertEqual(self.fixture_phases, ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema"])
 
 if __name__ == "__main__":
     unittest.main()

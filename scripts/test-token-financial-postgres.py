@@ -95,6 +95,8 @@ ACCOUNT_REQUIRED = {
     "TestOrdinaryDeadLetterReplayRuntimePostgres",
     "TestIdentityRecoveryClaimsRuntimePostgres",
     "TestProfileSessionRevocationRecoveryRuntimePostgres",
+    "TestProfileRevocationDurableAdmissionRuntimePostgres",
+    "TestProfileRevocationClosureRuntimePostgres",
     "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
@@ -167,7 +169,7 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
-SCHEMA_REQUIRED = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres"}
+SCHEMA_REQUIRED = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestBillingManualAdjustmentProofRollbackPostgres"}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -259,6 +261,7 @@ RETAINED_REQUIRED = {
     *REFUND_REQUIRED,
     "TestLedgerRepairClaimActivationReadErrorsPostgres",
     "TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry",
+    "TestPackageExpiryCrossWalletIndexPostgres",
     "TestProviderHealthReadFailurePostgres",
     "TestProviderHealthGlobalWindowIndexPostgres",
     "TestMemberQuotaBatchPersistedFactsAndFinancialReplay",
@@ -305,6 +308,20 @@ EXACT_REQUIRED_CHILDREN = {
     "TestStreamStatePollingPublicPostgres": {"complete", "cancel", "disconnect",
         "complete/concurrent-last-event-id-public-replay", "disconnect/concurrent-last-event-id-public-replay",
         "external-committed", "external-released"},
+    "TestProfileRevocationDurableAdmissionRuntimePostgres": {
+        "capacity-before-grant-confirmed-replay-and-unknown-retention",
+        "cancel-before-authority-preserves-reservation",
+        "dispatch-token-and-legacy-command-cannot-regrant",
+        "concurrent-global-admission-across-profiles",
+        "legacy-upgrade-preserves-confirmed-and-unknown-receipts",
+        "capacity-public-complete-resumes-original-operation",
+        "lease-expiry-during-global-admission-wait",
+    },
+    "TestProfileRevocationClosureRuntimePostgres": {
+        "reserved-closure-seals-no-dispatch-and-releases-capacity",
+        "confirmed-replays-after-anonymization",
+        "late-confirmation-replays-after-anonymization",
+    },
     "TestGovernanceUsageResourcePrechecksPostgres": {
         "all-active-states-preserve-full-facts", "repeated-read-stable-and-read-only",
         "historical-only-preserves-other-dependencies",
@@ -331,6 +348,7 @@ EXACT_REQUIRED_CHILDREN = {
         "fresh-failure-atomicity-and-retry",
         "populated-upgrade-replay-and-own-ddl-rollback",
     },
+    "TestPackageExpiryCrossWalletIndexPostgres": {"fresh-install", "retained-upgrade"},
     "TestRegistrationOutboxAggregateLookupPostgres": {"fresh-install", "retained-upgrade"},
     "TestProviderHealthGlobalWindowIndexPostgres": {"fresh-install", "retained-upgrade"},
     "TestBillingHistoricalCatalogRollbackPostgres": {
@@ -341,6 +359,17 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestOrganizationStartupDiagnosticsPostgres": {
         "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestPublishedRollbackPackageIntegrityPostgres": {
+        "published-down-legacy-crlf-no-create", "recorded-up-identity-before-down", "unrelated-custom-history",
+        "published-ledger-cannot-become-custom/LF", "published-ledger-cannot-become-custom/CRLF",
+        "forward-only-history-cannot-authorize-rollback",
+    },
+    "TestUsageWaiverHistoricalSchemaPostgres": {
+        "fresh-exact-history-append-only-runtime-and-forward-only",
+        "old-LF/changed-current-down-before-up", "old-LF/changed-current-down-before-verify",
+        "old-CRLF/changed-current-down-before-up", "old-CRLF/changed-current-down-before-verify",
+        "unknown-checksum", "wrong-legacy-shape",
     },
     "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease": {
         "first-RPC-release-crash-keeps-durable-intent",
@@ -726,6 +755,16 @@ def billing_roots(group):
     return billing_partitions(RETAINED_REQUIRED, durations)[group]
 
 
+def schema_batches():
+    # Keep the slow historical-upgrade root intact. New required roots join the
+    # second batch; neither batch may be empty or introduce an unknown root.
+    historical = {"TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"}
+    if not historical < SCHEMA_REQUIRED:
+        raise RuntimeError("owner schema requires two nonempty complete-root batches")
+    return (("owner-schema-legacy-expiry", historical),
+            ("owner-schema", SCHEMA_REQUIRED - historical))
+
+
 def main(*, group="all"):
     if group not in ("all", *GROUPS):
         raise ValueError("unknown financial execution group")
@@ -812,10 +851,15 @@ def main(*, group="all"):
             run_phase("owner-wallet", "./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED, scoped=True)
         finally:
             assert_instance({user})
-        try:
-            run_phase("owner-schema", "./internal/billingschema", SCHEMA_PACKAGE, SCHEMA_REQUIRED, scoped=True)
-        finally:
-            assert_instance({user})
+        # Two sequential test binaries retain their individual 20m deadline;
+        # the schema portion now has an explicit cumulative 40m test budget.
+        # Ordinary cleanup and pristine-instance acknowledgement are mandatory
+        # between the batches, before another fixture may create its actors.
+        for label, required in schema_batches():
+            try:
+                run_phase(label, "./internal/billingschema", SCHEMA_PACKAGE, required, scoped=True)
+            finally:
+                assert_instance({user})
         try:
             run_phase("owner-token-schema", "./internal/tokenschema", TOKEN_SCHEMA_PACKAGE, TOKEN_SCHEMA_REQUIRED, scoped=True)
         finally:
