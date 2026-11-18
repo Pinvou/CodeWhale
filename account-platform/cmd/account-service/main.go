@@ -49,6 +49,10 @@ func main() {
 		log.Fatal("ACCOUNT_DATABASE_UNAVAILABLE")
 	}
 	defer repository.Close()
+	revocationCapacity, err := configuredProfileRevocationCapacity(os.Getenv("PROFILE_REVOCATION_CAPACITY"))
+	if err != nil || repository.ConfigureProfileRevocationCapacity(revocationCapacity) != nil {
+		log.Fatal("ACCOUNT_PROFILE_REVOCATION_CAPACITY_INVALID")
+	}
 	workers := []accountBackgroundTask{{"mobile-retention", account.NewMobileRetentionWorker(repository, time.Hour).Run}}
 	walletPolicyVersion := strings.TrimSpace(os.Getenv("WALLET_PROVISIONING_POLICY_VERSION"))
 	if walletPolicyVersion == "" {
@@ -236,6 +240,17 @@ func main() {
 		repository.Close()
 		log.Fatal("ACCOUNT_HTTP_SERVER_FAILED")
 	}
+}
+
+func configuredProfileRevocationCapacity(raw string) (int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return account.DefaultProfileRevocationCapacity, nil
+	}
+	capacity, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || capacity < 1 || capacity > 1000000 {
+		return 0, errors.New("profile revocation capacity is outside the bounded range")
+	}
+	return capacity, nil
 }
 
 func configuredWalletSLA(raw string) (time.Duration, error) {

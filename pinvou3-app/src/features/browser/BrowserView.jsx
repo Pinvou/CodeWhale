@@ -964,9 +964,9 @@ export function BrowserView({
                 title={browserTabLabel(tab, t.browserEmptyTab)}
                 onClick={() => activateTab(tab.target_id)}
                 onKeyDown={(event) => {
-                  // 行内嵌着真 <button>（关闭标签）：键盘事件先判来源，否则冒泡
-                  // 到这里的 preventDefault 会吞掉嵌套按钮的原生 Enter/Space
-                  // 激活并误触切换标签。
+                  // The tab hosts a real <button> (close): ignore keys bubbled
+                  // from it, or preventDefault here would swallow its native
+                  // Enter/Space activation and activate the tab instead.
                   if (event.target !== event.currentTarget) return;
                   if (event.key !== 'Enter' && event.key !== ' ') return;
                   event.preventDefault();
