@@ -45,6 +45,8 @@ impl RemoteProxyState {
     }
 
     pub(crate) fn load(path: PathBuf, sessions_dir: &Path) -> Result<Self> {
+        let recovery_epoch =
+            super::recovery::read_epoch(&path).context(RemoteProxyLoadFailure::Unreadable)?;
         let file = match fs::File::open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -53,6 +55,7 @@ impl RemoteProxyState {
                         path.with_extension("archives.sqlite3"),
                     ),
                     path,
+                    recovery_epoch,
                     ..Self::default()
                 };
                 state
@@ -78,6 +81,7 @@ impl RemoteProxyState {
         let mut state = Self {
             archives: super::archive::ArchiveStore::at(path.with_extension("archives.sqlite3")),
             path,
+            recovery_epoch,
             ..Self::default()
         };
         let mut references = HashSet::new();
@@ -141,6 +145,10 @@ impl RemoteProxyState {
     }
 
     pub(super) fn persist(&self) -> Result<()> {
+        let _writer = super::recovery::try_write_owner(&self.path)?;
+        if super::recovery::read_epoch(&self.path)? != self.recovery_epoch {
+            bail!("remote_proxy_recovery_stale_store");
+        }
         self.require_available()?;
         if self.records.len() > MAX_REMOTE_PROXY_RECORDS {
             bail!("RemoteProxy record capacity exceeded");
