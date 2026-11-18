@@ -285,7 +285,7 @@ const formatMemoryTime = (item, copy) => {
                 <div className="text-[17px] font-semibold">{remoteCopy.title}</div>
                 <div className={`text-[12px] mt-1 text-[#5F6368] dark:text-[#AEB4BC]`}>{remoteCopy.desc}</div>
               </div>
-              <button type="button" onClick={onClose} className={`w-8 h-8 rounded-full flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10`}><X size={17} /></button>
+              <button type="button" onClick={onClose} aria-label={remoteCopy.close} className={`w-8 h-8 rounded-full flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10`}><X size={17} /></button>
             </div>
             <div className={`rounded-[16px] border p-3 mb-4 border-black/10 bg-[#F8F9FA] dark:border-white/10 dark:bg-white/[0.035]`}>
               <div className="flex items-start justify-between gap-3">

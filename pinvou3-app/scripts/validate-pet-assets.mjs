@@ -18,7 +18,7 @@ function check(condition, message) {
 }
 
 function sorted(values) {
-  return [...values].sort();
+  return [...values].sort(); // eslint-disable-line unicorn/require-array-sort-compare -- lexicographic string order is exactly what the assertions expect
 }
 
 function sameValues(actual, expected) {
@@ -79,6 +79,7 @@ async function loadRegistry(registrySource, manifest) {
   check(registrySource.includes(importLine), 'registry must import the manifest SSOT');
   if (!registrySource.includes(importLine)) return null;
 
+  // eslint-disable-next-line unicorn/no-unsafe-string-replacement -- replacement value is a controlled literal
   const executableSource = registrySource.replace(
     importLine,
     `const manifest = ${JSON.stringify(manifest)};`,
