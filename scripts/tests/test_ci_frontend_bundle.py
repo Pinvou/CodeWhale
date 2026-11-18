@@ -59,6 +59,15 @@ class StoreTests(unittest.TestCase):
         (self.store.objects / self.digest).write_bytes(b"corrupted")
         self.assertIsNone(self.store.open(COMMIT, self.digest))
 
+    def test_corrupted_reference_is_a_miss_and_can_be_repaired(self):
+        self.publish()
+        reference = self.store.refs / (COMMIT + "-" + self.digest + ".json")
+        reference.write_text("invalid metadata")
+        self.assertIsNone(self.store.open(COMMIT, self.digest))
+        self.publish()
+        stream, _ = self.store.open(COMMIT, self.digest)
+        stream.close()
+
     def test_concurrent_publications_share_complete_immutable_bytes(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(lambda unused: self.publish(), range(8)))

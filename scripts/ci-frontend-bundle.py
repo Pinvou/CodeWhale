@@ -196,7 +196,9 @@ def fetch(args):
     if tested_commit() != args.commit or not 0 < args.size <= MAX_BLOB:
         raise ValueError("bundle does not match this checked-out commit")
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = args.output.with_name(args.output.name + ".partial")
+    descriptor, name = tempfile.mkstemp(prefix="frontend-download-", dir=args.output.parent)
+    os.close(descriptor)
+    temporary = Path(name)
     source = "github"
     try:
         if args.transport == "lan":
@@ -217,6 +219,8 @@ def fetch(args):
                 with temporary.open("wb") as output:
                     remaining = args.size
                     while remaining:
+                        if time.monotonic() - start >= 90:
+                            raise TimeoutError("host cache transfer budget exhausted")
                         block = response.read(min(256 * 1024, remaining))
                         if not block:
                             raise ValueError("incomplete cache response")

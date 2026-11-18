@@ -51,7 +51,10 @@ class Store:
         with self.locks[int(digest[:4], 16) % len(self.locks)], self.prune_lock:
             if not blob.is_file() or blob.is_symlink() or not ref.is_file() or ref.is_symlink():
                 return None
-            metadata = json.loads(ref.read_text())
+            try:
+                metadata = json.loads(ref.read_text())
+            except (OSError, ValueError):
+                return None
             if metadata != {"commit": commit, "sha256": digest, "size": blob.stat().st_size}:
                 return None
             if sha256_file(blob) != digest:
@@ -70,10 +73,13 @@ class Store:
             raise OSError("cache disk reserve reached")
         temporary = self.temporary / uuid.uuid4().hex
         checksum = hashlib.sha256()
+        deadline = time.monotonic() + 90
         try:
             with temporary.open("xb") as output:
                 remaining = size
                 while remaining:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("cache upload budget exhausted")
                     block = stream.read(min(256 * 1024, remaining))
                     if not block:
                         raise ValueError("incomplete upload")
