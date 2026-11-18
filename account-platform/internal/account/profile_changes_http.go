@@ -141,6 +141,8 @@ func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
 func (s *Service) writeProfileError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "PROFILE_CHANGE_FAILED", "the profile change could not be completed"
 	switch {
+	case errors.Is(err, ErrProfileSessionRevocationCapacity):
+		status, code, message = http.StatusServiceUnavailable, "PROFILE_REVOCATION_CAPACITY", "the profile change is pending session revocation capacity"
 	case errors.Is(err, ErrRecentAuthenticationRequired):
 		status, code, message = http.StatusUnauthorized, "RECENT_AUTHENTICATION_REQUIRED", "sign in again before changing profile details"
 	case errors.Is(err, ErrUsernameInvalid):

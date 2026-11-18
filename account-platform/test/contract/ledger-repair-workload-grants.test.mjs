@@ -23,9 +23,11 @@ function assertBillingOnly(rules, expectedSubject) {
   assert.equal(holders[0].subject, expectedSubject);
 }
 function accountRulesFromHelmTemplate(source) {
-  const branch = source.match(/\{\{- if eq \$app\.name "account-service" \}\}\s*(- name: WORKLOAD_IDENTITY_RULES_JSON[\s\S]*?)\{\{- else if eq \$app\.name "identity-service" \}\}/);
+  const branch = source.match(/\{\{- if eq \$app\.name "account-service" \}\}((?:(?!\{\{- (?:else|end)\b)[\s\S])*?)\{\{- else if eq \$app\.name "identity-service" \}\}/);
   assert.ok(branch, 'Account Helm workload branch missing');
-  const expression = branch[1].match(/^\s*- name: WORKLOAD_IDENTITY_RULES_JSON\s+value: \{\{ toJson \(list ([\s\S]*)\) \| quote \}\}\s*$/);
+  assert.equal([...branch[1].matchAll(/\bname:\s*WORKLOAD_IDENTITY_RULES_JSON\b/g)].length, 1,
+    'Account branch must contain exactly one workload rules value');
+  const expression = branch[1].match(/^[ \t]*- name: WORKLOAD_IDENTITY_RULES_JSON\s+value: \{\{ toJson \(list ([\s\S]*?)\) \| quote \}\}[ \t]*$/m);
   assert.ok(expression, 'Account workload list must be closed');
   const pattern = /\(dict "subject" \(printf "system:serviceaccount:%s:%s-([a-z-]+)" \$root\.Release\.Namespace \$fullname\) "service" "([a-z-]+)" "permissions" \(list ((?:"[^"]+"\s*)+)\)\)/g;
   const parsed = [...expression[1].matchAll(pattern)].map(m => {
@@ -34,6 +36,24 @@ function accountRulesFromHelmTemplate(source) {
   assert.equal(expression[1].replace(pattern, '').trim(), '', 'unparsed Account workload rule');
   return parsed;
 }
+
+test('Account Helm workload extraction tolerates unrelated env and rejects missing or duplicate rules', () => {
+  const source = read('account-platform/deploy/helm/account-platform/templates/app-deployments.yaml');
+  const rules = accountRulesFromHelmTemplate(source);
+  const withoutCapacity = source.replace(/^[^\r\n]*name: PROFILE_REVOCATION_CAPACITY[^\r\n]*\r?\n/m, '');
+  assert.notEqual(withoutCapacity, source, 'fixture must exercise the new preceding Account env');
+  assert.deepEqual(accountRulesFromHelmTemplate(withoutCapacity), rules);
+  const name = '- name: WORKLOAD_IDENTITY_RULES_JSON';
+  assert.throws(() => accountRulesFromHelmTemplate(source.replace(name, '- name: UNRELATED_RULES')),
+    /exactly one workload rules value/);
+  assert.throws(() => accountRulesFromHelmTemplate(source.replace(name,
+    `${name}\n              value: "[]"\n            ${name}`)), /exactly one workload rules value/);
+  const accountStart = '{{- if eq $app.name "account-service" }}\n            - { name: PROFILE_REVOCATION_CAPACITY';
+  assert.ok(source.replaceAll('\r\n', '\n').includes(accountStart));
+  const detached = source.replaceAll('\r\n', '\n').replace(accountStart,
+    '{{- if eq $app.name "account-service" }}{{- end }}\n            - { name: PROFILE_REVOCATION_CAPACITY');
+  assert.throws(() => accountRulesFromHelmTemplate(detached), /Account Helm workload branch missing/);
+});
 
 test('production, Compose and Helm grant historical repair proof only to Billing', () => {
   const production = JSON.parse(read('account-platform/deploy/production/workload-account-rules.json.template'));

@@ -10,6 +10,7 @@ const root = resolve(import.meta.dirname, '../../..');
 const chart = join(root, 'account-platform/deploy/helm/account-platform');
 const compose = join(root, 'account-platform/deploy/compose');
 const permission = 'internal.auth.password-preparation.claim';
+const identityAccountPermissions = [permission, 'internal.account.profile-revocation.claim', 'internal.account.profile-revocation.confirm'];
 function isolated(run) {
   const home = mkdtempSync(join(tmpdir(), 'pinvou-password-preparation-render-'));
   const docker = join(home, 'docker'); mkdirSync(docker);
@@ -29,13 +30,16 @@ function execute(binary, args, env) {
   return result.stdout;
 }
 function grant(rules, subject) {
-  assert.deepEqual(rules.filter(rule => rule.permissions.includes(permission)), [{ subject, service: 'identity-service', permissions: [permission] }]);
+  for (const required of identityAccountPermissions) {
+    assert.deepEqual(rules.filter(rule => rule.permissions.includes(required)), [{ subject, service: 'identity-service', permissions: identityAccountPermissions }]);
+  }
   assert.ok(rules.every(rule => !rule.permissions.includes('*')));
 }
 function checkNegativeControls(rules, subject) {
   grant(rules, subject);
   const entry = rules.find(rule => rule.service === 'identity-service');
-  for (const altered of [{...entry, permissions: []}, {...entry, subject: `${subject}-other`}, {...entry, permissions: [permission, '*']}]) {
+  for (const altered of [{...entry, permissions: []}, {...entry, subject: `${subject}-other`}, {...entry, permissions: [...identityAccountPermissions, '*']},
+    ...identityAccountPermissions.map(missing => ({...entry, permissions: identityAccountPermissions.filter(value => value !== missing)}))]) {
     assert.throws(() => grant(rules.map(rule => rule === entry ? altered : rule), subject));
   }
 }
@@ -44,7 +48,7 @@ test('actual Helm preparation caller is the rendered Identity service account an
 }, () => isolated(environment => {
   const release = 'preparation-contract', namespace = 'preparation-namespace';
   const raw = execute(process.env.PINVOU_TEST_KMS_HELM_BINARY || 'helm', ['template', release, chart, '--namespace', namespace,
-    '-f', join(chart, 'values-model-token-test.yaml'), '--set-json', 'security.passwordPreparationTrustedProxyIPs=["192.0.2.10","192.0.2.11"]'], environment);
+    '-f', join(chart, 'values-model-token-test.yaml'), '--set', 'account.profileRevocationCapacity=1', '--set-json', 'security.passwordPreparationTrustedProxyIPs=["192.0.2.10","192.0.2.11"]'], environment);
   const docs = YAML.parseAllDocuments(raw); assert.ok(docs.every(doc => doc.errors.length === 0));
   const resources = docs.map(doc => doc.toJSON()).filter(Boolean);
   const pod = name => resources.find(item => item.kind === 'Deployment' && item.spec.template.metadata.labels['app.kubernetes.io/component'] === name).spec.template.spec;
@@ -56,6 +60,7 @@ test('actual Helm preparation caller is the rendered Identity service account an
   assert.equal(env('identity-service').WORKLOAD_IDENTITY_TOKEN_FILE, '/var/run/secrets/pinvou/workload/token');
   assert.equal(env('identity-service').IDENTITY_PASSWORD_PREPARATION_TRUSTED_PROXY_IPS, '192.0.2.10,192.0.2.11');
   assert.equal(env('account-service').ACCOUNT_TRUSTED_SOURCE_PEER_IPS, '192.0.2.10,192.0.2.11');
+  assert.equal(env('account-service').PROFILE_REVOCATION_CAPACITY, '1');
 }));
 test('actual retained Compose preparation caller has one exact scope without changing the existing receivers', {
   skip: process.env.PINVOU_TEST_KMS_COMPOSE !== '1',
@@ -69,4 +74,5 @@ test('actual retained Compose preparation caller has one exact scope without cha
   checkNegativeControls(JSON.parse(services['account-service'].environment.WORKLOAD_IDENTITY_RULES_JSON), 'pinvou:service:identity-service');
   assert.equal(services['identity-service'].environment.ACCOUNT_HTTP_URL, 'http://account-service:8080');
   assert.equal(services['identity-service'].environment.IDENTITY_PASSWORD_PREPARATION_TRUSTED_PROXY_IPS, '');
+  assert.equal(services['account-service'].environment.PROFILE_REVOCATION_CAPACITY, '4096');
 }));
