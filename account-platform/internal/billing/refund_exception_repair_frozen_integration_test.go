@@ -346,7 +346,7 @@ func assertRefundRepairFourWayFacts(t *testing.T, r *PostgresRepository, ctx con
 	// Use the same trusted API-bill persistence path as production. Passing an
 	// incoming row alone does not prove the supplier's occurrence date.
 	provider := &reconciliationFixtureProvider{retainedFinancialProvider: *c.provider.(*retainedFinancialProvider), rows: controlledBill}
-	api, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	api, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

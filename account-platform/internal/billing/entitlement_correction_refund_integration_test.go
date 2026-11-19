@@ -47,6 +47,15 @@ func correctedRefundFixture(t *testing.T, actualBase, expectedBase int64, organi
 	if _, err = tx.Exec(ctx, `INSERT INTO payment_transactions(id,payment_order_id,channel,provider_transaction_id,status,amount_fen,currency,source,provider_paid_at,verified_at,created_at,updated_at,fulfillment_status,fulfilled_at,provider_id,provider_version) VALUES($1,$2,'ALIPAY',$3,'PAID',100,'CNY','QUERY',$4,$4,$4,$4,'CREDITED',$4,'controlled','v1')`, transaction, order.ID, "corrected-txn-"+transaction.String(), now); err != nil {
 		t.Fatal(err)
 	}
+	// This deliberately damaged component fixture still has a real current
+	// Billing admission receipt. Only the external Account decision is the
+	// declared controlled-open actor used by other Billing-only fixtures.
+	providerReference := "corrected-txn-" + transaction.String()
+	provider := ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, Status: "SUCCESS", AmountFen: order.AmountFen, Currency: order.Currency, ChannelTransactionID: &providerReference, PaidAt: &now, ExternalCustomerKey: order.RequesterID.String()}
+	admission, admitted, err := c.preparePaymentCredit(ctx, tx, order, transaction, provider)
+	if err != nil || !admitted {
+		t.Fatal("current damaged-component fixture lacks its real Billing admission", err)
+	}
 	if err = insertJournal(ctx, tx, journal, "RECHARGE", reference, "controlled original funding", now); err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +100,9 @@ func correctedRefundFixture(t *testing.T, actualBase, expectedBase int64, organi
 	}
 	if _, err = tx.Exec(ctx, `UPDATE wallets SET posted_microcredits=100,version=version+1 WHERE id=$1`, order.WalletID); err != nil {
 		t.Fatal(err)
+	}
+	if err = markPaymentCreditApplied(ctx, tx, admission); err != nil {
+		t.Fatal("current fixture admission did not commit with its financial effects", err)
 	}
 	if err = tx.Commit(ctx); err != nil {
 		t.Fatal(err)

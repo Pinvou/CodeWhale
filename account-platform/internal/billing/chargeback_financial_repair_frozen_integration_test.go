@@ -100,7 +100,7 @@ func TestChargebackFrozenExecutionPostgres(t *testing.T) {
 			{EntryType: "CHARGEBACK", ProviderReferenceID: providerReference, ChannelTransactionID: providerReference, MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Status: "SUCCESS", PaidAt: observedAt},
 		}
 		provider := &reconciliationFixtureProvider{retainedFinancialProvider: *c.provider.(*retainedFinancialProvider), rows: controlledBill}
-		api, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+		api, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 		if err != nil {
 			t.Fatal(err)
 		}
