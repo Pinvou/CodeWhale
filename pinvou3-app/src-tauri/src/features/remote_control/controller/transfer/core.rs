@@ -747,6 +747,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::limits::MAX_TRANSFER_BYTES;
     use super::*;
 
     fn context(generation: &str) -> LeaseContext {
@@ -883,12 +884,16 @@ mod tests {
             TransferDirection::Upload,
         )
         .unwrap();
-        let oversized = vec![0u8; 33 * 1024 * 1024];
+        // Derive from the per-file limit (community PR #894 raised it, and the
+        // shared core with it, to 50 MiB): only total_bytes feeds the
+        // admission gate, so the over-limit leg stays allocation-free and
+        // cannot go stale when the bound moves again.
+        let oversized = TransferMetadata {
+            total_bytes: MAX_TRANSFER_BYTES + 1,
+            ..metadata("huge.bin", b"x")
+        };
         assert_eq!(
-            registry
-                .begin(context, metadata("huge.bin", &oversized), 1_000)
-                .unwrap_err()
-                .code,
+            registry.begin(context, oversized, 1_000).unwrap_err().code,
             "transfer_size_invalid"
         );
         let small = vec![0u8; 1024];

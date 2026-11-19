@@ -65,9 +65,10 @@ use ingest_core::{binary_placeholder, classify, estimate_tokens, redacted_secret
 mod published_attachment;
 pub(crate) use published_attachment::{AttachmentReadOwner, PublishedAttachment};
 
-/// 单文件硬上限 20 MB —— 超大文件就算转 md 后 token 数也炸上下文。
+/// 单文件硬上限 50 MB(定义与完整依据见 `super::limits` 模块文档:
+/// 原始体积与上下文占用解耦,进 prompt 的部分由内联预算按解析后文本封顶)。
 /// `pub` 供 remote_control 上传链路对齐硬上限(PR #213 审查 #5:mobile upload cap 必须
-/// ≤ 此值,否则 20-64MiB 文件会被 mobile 接受但 file_ingest 静默降级为 oversize 兜底)。
+/// ≤ 此值,否则超限文件会被 mobile 接受但 file_ingest 静默降级为 oversize 兜底)。
 pub use super::limits::MAX_FILE_BYTES;
 
 pub const ATTACHMENT_FILE_TOO_LARGE: &str = "attachment_file_too_large";
@@ -698,10 +699,12 @@ mod tests {
 
     #[test]
     fn ingest_oversize_rejected() {
-        // 模拟超大文件：write 21MB 内容，应被拒
+        // 模拟超大文件：稀疏文件 set_len 到超限（不实际写 50 MiB），应被拒
         let tmp = std::env::temp_dir().join("pinvou3-ingest-oversize-test.bin");
-        let big = vec![0u8; (MAX_FILE_BYTES + 1024) as usize];
-        std::fs::write(&tmp, &big).unwrap();
+        std::fs::File::create(&tmp)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1024)
+            .unwrap();
         let r = ingest(&tmp);
         assert_eq!(r.kind, "oversize");
         assert!(r.warning.is_some());
@@ -709,6 +712,26 @@ mod tests {
             ingest_attachment(&tmp).unwrap_err(),
             ATTACHMENT_FILE_TOO_LARGE
         );
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn ingest_accepts_file_over_legacy_cap() {
+        // community PR #894（issue #842）回归钉:旧 20 MiB 上限拒掉的体积,在新
+        // 上限内必须完成摄入。全 NUL 稀疏 .txt:set_len 直接补出 20 MiB + 1 的
+        // 稀疏体量;.txt 走 classify 直进文本摄入(不经过嗅探),NUL 内容不影响
+        // 判定——本钉只证明尺寸门放行 + 全管线完成。
+        let tmp = std::env::temp_dir().join("pinvou3-ingest-legacy-cap-test.txt");
+        std::fs::File::create(&tmp)
+            .unwrap()
+            .set_len(20 * 1024 * 1024 + 1)
+            .unwrap();
+        assert!(
+            ingest_attachment(&tmp).is_ok(),
+            "超旧上限、新上限内的文件不得再被尺寸门拒绝"
+        );
+        let r = ingest(&tmp);
+        assert_eq!(r.kind, "text", "该体积必须走完文本摄入管线");
         std::fs::remove_file(&tmp).ok();
     }
 

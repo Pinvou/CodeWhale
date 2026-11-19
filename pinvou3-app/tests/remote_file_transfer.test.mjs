@@ -18,9 +18,13 @@ function file(name, content, type = 'text/plain') {
 // Validation consumes File metadata before reading or uploading any bytes.
 // These fixtures exercise that public validator boundary, not file transfer.
 const metadataFile = size => ({ name: 'boundary.bin', type: 'application/octet-stream', size });
+// The per-file cap is the mirrored shared ingest cap (community PR #894
+// raised it 20 -> 50 MiB); derive the boundary fixtures from it so a future
+// bump cannot leave these pins testing a stale bound.
+const CAP = globalThis.PinvouChunkedFileUpload.MAX_FILE_BYTES;
 
-test('remote attachment validation accepts exactly 20 MiB in one file', () => {
-  const selected = [metadataFile(20 * 1024 * 1024)];
+test('remote attachment validation accepts exactly the per-file cap in one file', () => {
+  const selected = [metadataFile(CAP)];
   assert.deepEqual(validateRemoteFiles(selected), selected);
 });
 
@@ -38,10 +42,10 @@ test('attachment size limit stays aligned with the Rust receiver and localized m
   }
 });
 
-test('32 MiB and 32 MiB plus one uploads are rejected before file read or remote begin', async () => {
+test('over-cap uploads are rejected before file read or remote begin', async () => {
   let read = false;
   let begun = false;
-  for (const size of [32 * 1024 * 1024, 32 * 1024 * 1024 + 1]) {
+  for (const size of [CAP + 1, CAP + 2]) {
     const oversized = { ...metadataFile(size), arrayBuffer: async () => { read = true; } };
     await assert.rejects(uploadRemoteFiles({ attachmentBegin: async () => { begun = true; } },
       { localSessionId: 'local', remoteRef: 'ref' }, 'task', [oversized]), /remote_attachment_size_invalid/);
@@ -272,8 +276,8 @@ test('unknown batches cannot exhaust capacity after a verified lease change', as
   retireCompletedRemoteUpload('owner-new', binding, 'fresh-task');
 });
 
-test('remote attachment validation rejects 20 MiB plus one byte in one file', () => {
-  assert.throws(() => validateRemoteFiles([metadataFile(20 * 1024 * 1024 + 1)]),
+test('remote attachment validation rejects cap plus one byte in one file', () => {
+  assert.throws(() => validateRemoteFiles([metadataFile(CAP + 1)]),
     /remote_attachment_size_invalid/);
 });
 
@@ -282,7 +286,7 @@ test('oversized file in a batch is rejected before any file is read or uploaded'
   let begins = 0;
   const selected = [
     { ...metadataFile(1), arrayBuffer: async () => { reads += 1; return new ArrayBuffer(1); } },
-    { ...metadataFile(20 * 1024 * 1024 + 1), arrayBuffer: async () => { reads += 1; return new ArrayBuffer(1); } },
+    { ...metadataFile(CAP + 1), arrayBuffer: async () => { reads += 1; return new ArrayBuffer(1); } },
   ];
   await assert.rejects(uploadRemoteFiles({ attachmentBegin: async () => { begins += 1; } },
     { localSessionId: 'local', remoteRef: 'remote' }, 'task', selected), /remote_attachment_size_invalid/);
