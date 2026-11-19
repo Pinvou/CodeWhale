@@ -262,13 +262,15 @@ mod tests {
         // removal note tells the model never to send exactly the values
         // every action needs — the update_goal/send_later class. The
         // pipeline fails the tool closed by name
-        // (`STRICT_UNUSABLE_TOOLS`). Honesty note: this census test alone
-        // does not BIND the list entry — the schema's own `oneOf` fails
-        // the shape gate regardless of the name list, so deleting `Web`
-        // from the constant leaves this test green; the entry's real
-        // binding is the literal membership pin in schema_sanitize.rs.
-        // What this test does pin is the runtime-contract evidence: the
-        // schema shape this entry's justification cites.
+        // (`STRICT_UNUSABLE_TOOLS`). Binding note: this census test DOES
+        // bind the list entry. The schema's only `oneOf`s (root `recency`
+        // and the one under `search_query` items) ride optional
+        // properties, which the enforce pass removes wholesale before the
+        // composition gate judges the enforced clone — so without the
+        // `"Web"` entry the enforced shape is a flat `{action}` that
+        // passes the gate, `prepare` flips true, and the asserts below go
+        // red. (The literal membership pin in schema_sanitize.rs is a
+        // second, independent binding; both must hold.)
         let tool = WebTool::new("Web");
         let schema = tool.input_schema();
         assert_eq!(schema["required"], json!(["action"]));

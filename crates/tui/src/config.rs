@@ -3161,7 +3161,7 @@ pub struct Config {
     /// represent faithfully — root alternatives, required nullables
     /// (`nullable` / null-type union branches), or tools whose runtime
     /// demands schema-optional parameters (`update_goal`, `send_later`,
-    /// `agents/message`, `agents/followup`) —
+    /// `agents/message`, `agents/followup`, `Web`) —
     /// stay non-strict: they keep their original schema. `tool_choice`
     /// follows the route gate on the parent turn surface, not per-tool
     /// outcomes: it stays `required` on an in-scope route even when some

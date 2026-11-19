@@ -738,6 +738,35 @@ official GitHub API endpoint. If a configured `update_uri` cannot be fetched or
 parsed and a release mirror env var is set, the TUI falls back to that mirror
 instead of failing startup.
 
+### DeepSeek strict tool schema mode (`strict_tool_mode`)
+
+```toml
+strict_tool_mode = true
+```
+
+Off by default. When enabled, requests routed to an **official DeepSeek-family
+route** (provider-typed DeepSeek on `api.deepseek.com`, including the legacy
+`api.deepseeki.com` alias and the Anthropic-compatible Messages route) also set
+`tool_choice: "required"` and reshape every active tool schema to DeepSeek's
+strict contract: optional parameters are removed from the schema (each removal
+is reported in the tool description), non-numeric `const` values land on
+`enum`, and conditional-requirement tables (`dependentRequired`) are stripped.
+
+Tools whose schema cannot be represented faithfully under the strict subset —
+root alternatives, required nullables, or tools whose runtime demands
+schema-optional parameters (`update_goal`, `send_later`, `agents/message`,
+`agents/followup`, `Web`) — fail closed per tool: they keep their original
+schema and ship without the strict flag, so they stay callable non-strict.
+`tool_choice` follows the route gate, not per-tool outcomes: it stays
+`required` on an in-scope route even when some tools fail closed. The child
+sub-agent surface requests with `auto` regardless.
+
+The setting is inert on every other route (third-party gateways, OpenAI
+wires, non-official hosts): their schemas ship unchanged, because the
+reshaping follows DeepSeek's documents and would strip keywords other
+providers document. `run_doctor`'s strict-mode verdict reports whether the
+current route is in scope.
+
 ## Workshop output budgets
 
 `[workshop]` still routes oversized tool results through the synthesis

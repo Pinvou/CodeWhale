@@ -1743,9 +1743,14 @@ mod tests {
             "the context note must render verbatim; got: {}",
             shipped.description
         );
+        // The generic removal note names every removed optional, so the
+        // description must disclose `mode` as a removed parameter — the
+        // capability loss itself is what the context note above names.
         assert!(
-            !shipped.description.contains("`mode` must not be sent"),
-            "the generic removal note lists removed names, so `mode` appears              there; the context sentence is what names the capability loss"
+            shipped.description.contains("must not be sent:")
+                && shipped.description.contains("`mode`"),
+            "the generic removal note must render and disclose `mode` as removed; got: {}",
+            shipped.description
         );
     }
 }

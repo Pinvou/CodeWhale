@@ -1177,13 +1177,17 @@ pub(crate) fn chat_shape_provider_for(
 
 impl DeepSeekClient {
     fn is_local_ds4_model(&self, model: &str) -> bool {
+        // Delegate to the same predicate the wire and the doctor use
+        // (`chat_shape_provider_for`), so the DS4 model list lives in one
+        // place; the `Custom` guard keeps a natively-configured Deepseek
+        // provider from counting as the local-DS4 shape.
         self.api_provider == ApiProvider::Custom
-            && self.provider_identity.eq_ignore_ascii_case("ds4")
-            && crate::config::base_url_uses_local_host(&self.base_url)
-            && matches!(
-                model.trim().to_ascii_lowercase().as_str(),
-                "deepseek-v4-flash" | "deepseek-v4-pro"
-            )
+            && chat_shape_provider_for(
+                self.api_provider,
+                &self.provider_identity,
+                &self.base_url,
+                model,
+            ) == ApiProvider::Deepseek
     }
 
     /// DS4 is configured as a named custom route so its endpoint and billing
