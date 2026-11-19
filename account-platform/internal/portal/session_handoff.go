@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -43,6 +44,29 @@ func (s *Service) createSessionHandoff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	access := strings.TrimSpace(authorization[len(prefix):])
+	if !s.admitPortalOperation(w, r, HandoffCreateOperation, "SESSION_HANDOFF_UNAVAILABLE") {
+		return
+	}
+	ticket, ticketErr := randomToken(48)
+	if ticketErr != nil {
+		api.WriteError(w, http.StatusInternalServerError, "SESSION_HANDOFF_FAILED", "the session handoff could not be created", httpserver.RequestID(r.Context()))
+		return
+	}
+	digest := sha256.Sum256([]byte(ticket))
+	digestID := hex.EncodeToString(digest[:])
+	if err := s.store.ReserveSessionHandoff(r.Context(), digestID, time.Now().Add(handoffReservationLifetime)); err != nil {
+		if !writePortalQuotaError(w, r, err) {
+			api.WriteError(w, http.StatusServiceUnavailable, "SESSION_HANDOFF_UNAVAILABLE", "handoff capacity is unavailable", httpserver.RequestID(r.Context()))
+		}
+		return
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
+		defer cancel()
+		if err := s.store.ReleaseSessionHandoffReservation(cleanup, digestID); err != nil {
+			slog.ErrorContext(cleanup, "portal_handoff_reservation_release_failed", "error_code", "PORTAL_HANDOFF_RESERVATION_RELEASE_FAILED")
+		}
+	}()
 	expectedUser, err := s.accountUserID(r.Context(), access)
 	if err != nil {
 		if errors.Is(err, errAccountIdentityRejected) {
@@ -94,8 +118,6 @@ func (s *Service) createSessionHandoff(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID, sessionIDErr := randomToken(32)
 	csrfToken, csrfTokenErr := randomToken(32)
-	ticket, ticketErr := randomToken(48)
-	digest := sha256.Sum256([]byte(ticket))
 	session := Session{ApprovalV2Eligible: true,
 		ID: sessionID, AccessToken: tokens.AccessToken,
 		AccessExpiresAt:  accessExpiresAt,
@@ -104,11 +126,14 @@ func (s *Service) createSessionHandoff(w http.ResponseWriter, r *http.Request) {
 	}
 	session.LineageRoot = session.ID
 	session.OIDCClientID = s.config.HandoffClientID
-	if sessionIDErr != nil || csrfTokenErr != nil || ticketErr != nil {
+	if sessionIDErr != nil || csrfTokenErr != nil {
 		api.WriteError(w, http.StatusInternalServerError, "SESSION_HANDOFF_FAILED", "the session handoff could not be created", httpserver.RequestID(r.Context()))
 		return
 	}
 	if err := s.store.SaveSessionHandoff(r.Context(), hex.EncodeToString(digest[:]), SessionHandoff{Session: session, ExpiresAt: handoffExpiresAt}); err != nil {
+		if writePortalQuotaError(w, r, err) {
+			return
+		}
 		api.WriteError(w, http.StatusServiceUnavailable, "SESSION_HANDOFF_UNAVAILABLE", "the session handoff could not be stored", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -145,6 +170,9 @@ func (s *Service) consumeSessionHandoff(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	digest := sha256.Sum256([]byte(request.Ticket))
+	if !s.admitPortalOperation(w, r, HandoffConsumeOperation, "SESSION_HANDOFF_UNAVAILABLE") {
+		return
+	}
 	handoff, err := s.store.TakeSessionHandoff(r.Context(), hex.EncodeToString(digest[:]))
 	if errors.Is(err, ErrSessionNotFound) {
 		api.WriteError(w, http.StatusUnauthorized, "SESSION_HANDOFF_INVALID", "the session handoff ticket is invalid or expired", httpserver.RequestID(r.Context()))
