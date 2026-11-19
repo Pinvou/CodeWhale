@@ -95,7 +95,9 @@ function scheduleToolCompletion(id, complete, delayMs, releasePath) {
 }
 
 audit({ kind: 'start' });
+let inputChunks = 0;
 process.stdin.on('data', (chunk) => {
+  if (inputChunks++ < 4) audit({ kind: 'stdin-chunk', bytes: chunk.length });
   input += chunk;
   let newline;
   while ((newline = input.indexOf('\n')) >= 0) {
@@ -104,22 +106,27 @@ process.stdin.on('data', (chunk) => {
     if (!line.trim()) continue;
     const message = JSON.parse(line);
     if (message.method === 'initialize') {
+      audit({ kind: 'protocol-received', name: 'initialize' });
       const currentMode = mode();
       if (currentMode.handshakeError) {
         error(message.id, 'configured startup handshake rejection');
         continue;
       }
-      const finishHandshake = () => result(message.id, {
+      const finishHandshake = () => {
+        audit({ kind: 'protocol-reply', name: 'initialize' });
+        result(message.id, {
           protocolVersion: message.params?.protocolVersion ?? '2024-11-05',
           capabilities: { tools: {} },
           serverInfo: { name: 'fake-windows-mcp', version: '0' },
         });
+      };
       const handshakeDelayMs = Number(currentMode.handshakeDelayMs) || 0;
       if (handshakeDelayMs > 0) setTimeout(finishHandshake, handshakeDelayMs);
       else finishHandshake();
       continue;
     }
     if (message.method === 'tools/list') {
+      audit({ kind: 'protocol-received', name: 'tools/list' });
       if (mode().toolsListError) {
         error(message.id, 'configured runtime catalog rejection');
         continue;
@@ -318,6 +325,14 @@ process.stdin.on('data', (chunk) => {
     error(message.id, 'unexpected tool: ' + name);
   }
 });
+audit({ kind: 'stdin-listener-ready' });
+let startupTicks = 0;
+const startupProgress = setInterval(() => {
+  const cpu = process.cpuUsage();
+  audit({ kind: 'startup-tick', cpuMs: (cpu.user + cpu.system) / 1000 });
+  if (++startupTicks >= 5) clearInterval(startupProgress);
+}, 1000);
+startupProgress.unref();
 `;
 
 const CATALOG = {
@@ -527,8 +542,8 @@ async function cleanupFixture(fixture, host, ...wrappers) {
     ));
     const auditReadStarted = performance.now();
     try {
-      const audit = readAudit(fixture.auditPath).slice(-40).map(({ kind, name, pid, at }) =>
-        ({ kind, name, pid, at }));
+      const audit = readAudit(fixture.auditPath).slice(-40).map(({ kind, name, pid, at, bytes, cpuMs }) =>
+        ({ kind, name, pid, at, bytes, cpuMs }));
       console.error('[browser-upstream-fixture-events]', JSON.stringify(audit));
     } catch {
       console.error('[browser-upstream-fixture-events]', JSON.stringify({ unavailable: true }));
