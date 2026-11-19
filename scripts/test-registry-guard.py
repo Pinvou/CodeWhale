@@ -90,6 +90,18 @@ MANIFEST = os.path.join(REPO_ROOT, "pinvou3-app", "src-tauri", "Cargo.toml")
 # pinned test to another module fails loud with the new location; update the
 # path in that (rare, deliberate) case.
 REQUIRED_PINS = [
+    # features/sessions (PR #835 r8/r9 waves): rollback-critical fork/import
+    # pins — a stolen `#[test]` here would let the fork binding replication,
+    # the bind-failure rollback arm (source needle; no deterministic
+    # filesystem fault injection exists between persist and bind), the
+    # three-state skip probe, or the counter-arm total forwarding regress
+    # silently (each is a silent-data-shape failure class, the guard's charter).
+    # 回流社区 #836：来源按末段匹配登记裸名；本仓守卫已演进为全路径相等，
+    # 按本仓契约改写为 registry 全路径。
+    "features::sessions::fork::tests::fork_rebinds_workspace_binding_for_branch",
+    "features::sessions::fork::tests::fork_bind_failure_rollback_arm_is_pinned",
+    "features::sessions::import::tests::import_reports_stat_fault_instead_of_overwriting_existing_record",
+    "features::assistant::engine::forwarder::transcript_commit_tests::all_transcript_commit_arms_forward_the_computed_total",
     # commands/tests.rs: the install-path consent rollback pair (round-33
     # minor 6, review #455) — exactly the consent/rollback class this guard
     # exists to protect from attribute theft.
