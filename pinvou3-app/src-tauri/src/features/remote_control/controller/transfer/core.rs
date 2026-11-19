@@ -12,7 +12,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::limits::{
-    MAX_FILE_NAME_CHARS, MAX_MIME_CHARS, MAX_TRANSFER_CHUNKS, MAX_TRANSFER_ID_CHARS, TransferLimits,
+    MAX_FILE_NAME_CHARS, MAX_MIME_CHARS, MAX_TRANSFER_BYTES, MAX_TRANSFER_CHUNKS,
+    MAX_TRANSFER_ID_CHARS, TransferLimits,
 };
 use crate::features::remote_control::controller::protocol::LeaseContext;
 
@@ -883,10 +884,17 @@ mod tests {
             TransferDirection::Upload,
         )
         .unwrap();
-        let oversized = vec![0u8; 33 * 1024 * 1024];
+        // Derive from the per-file limit (community PR #894 raised it, and the
+        // shared core with it, to 50 MiB): only total_bytes feeds the
+        // admission gate, so the over-limit leg stays allocation-free and
+        // cannot go stale when the bound moves again.
+        let oversized = TransferMetadata {
+            total_bytes: MAX_TRANSFER_BYTES + 1,
+            ..metadata("huge.bin", b"x")
+        };
         assert_eq!(
             registry
-                .begin(context, metadata("huge.bin", &oversized), 1_000)
+                .begin(context, oversized, 1_000)
                 .unwrap_err()
                 .code,
             "transfer_size_invalid"

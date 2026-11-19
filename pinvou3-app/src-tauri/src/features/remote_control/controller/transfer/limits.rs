@@ -1,15 +1,23 @@
 //! Transfer resource budgets (DEV-14).
 //!
 //! No controller limit may be wider than the existing Web transfer limits:
-//! Web attachments already cap a single file at 32 MiB, the whole upload set at
-//! 64 MiB and in-flight uploads at 4. The controller core reuses those numbers
-//! and adds a chunk ceiling taken from the frozen protocol constants.
+//! the Web upload lane admits a single file up to the shared ingest budget
+//! (`files::limits::MAX_FILE_BYTES`, raised 20 -> 50 MiB by community PR
+//! #894) inside a 64 MiB upload set and 4 in-flight uploads. The controller
+//! core reuses those numbers — [`MAX_TRANSFER_BYTES`] tracks the same
+//! single-file admission bound the host staging port enforces
+//! (`SessionIsolationStaging::max_upload_bytes`), so the A-side preflight and
+//! the B-side admission never disagree about one file — and adds a chunk
+//! ceiling taken from the frozen protocol constants.
 
 use std::time::Duration;
 
 pub(crate) use super::super::protocol::MAX_TRANSFER_CHUNK_BYTES;
 
-pub(crate) const MAX_TRANSFER_BYTES: u64 = 32 * 1024 * 1024;
+/// 单传输字节上限：必须 ≥ 宿主摄入预算（`files::limits::MAX_FILE_BYTES`），
+/// 否则 A 端按共享预算放行的文件会被 B 端 admission 拒绝
+/// （`host_ingest_budget_rejects_before_reservation_or_staging` 钉住该次序）。
+pub(crate) const MAX_TRANSFER_BYTES: u64 = 50 * 1024 * 1024;
 pub(crate) const MAX_CONNECTION_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_IN_FLIGHT_TRANSFERS: usize = 4;
 pub(crate) const MAX_TRANSFERS_PER_TASK: usize = 8;
@@ -79,7 +87,9 @@ mod tests {
     #[test]
     fn defaults_are_bounded_by_the_web_limits() {
         let limits = TransferLimits::default();
-        assert_eq!(limits.max_transfer_bytes, 32 * 1024 * 1024);
+        // 与宿主摄入预算同源：共享核心不得窄于 host staging 放行的单文件上限
+        // （community PR #894 把该预算提到 50 MiB），也不得宽于 64 MiB 连接总量。
+        assert_eq!(limits.max_transfer_bytes, crate::features::files::file_ingest::MAX_FILE_BYTES);
         assert_eq!(limits.max_connection_bytes, 64 * 1024 * 1024);
         assert_eq!(limits.max_in_flight, 4);
         assert_eq!(limits.chunk_bytes, MAX_TRANSFER_CHUNK_BYTES);
