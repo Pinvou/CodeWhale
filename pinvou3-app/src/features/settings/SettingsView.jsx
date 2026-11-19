@@ -15,6 +15,7 @@ import { isBuiltInAccountPlatformModel, selectableModels } from '../../shared/mo
 import { can, isWeb } from '../../shared/platform.js';
 import { refreshModelAccessAfterAuthentication } from './model-access.js';
 import { pathBasename } from '../../shared/path-utils.js';
+import { invokeTauri } from '../../platform/tauri/client.js';
 import qwenIcon from '../../brand-icons/qwen.svg';
 import {
   MODEL_PRESET_DEFS, PROVIDER_KIND_CODING_PLAN, PROVIDER_KIND_OFFICIAL_API, PROVIDER_KIND_CUSTOM,
@@ -62,6 +63,13 @@ import { VoiceShortcutIntroModal } from '../voice-composer/VoiceShortcutIntroMod
 import { ReasoningTierPicker, useModelReasoningTierState } from './local-server-tiers.jsx';
 import { StatusChip } from './StatusChip.jsx';
 import { isModelRouteUnchanged, modelRouteSnapshot } from './model-route-intent.js';
+import EndpointModelPicker from './endpoint-model-picker.jsx';
+import {
+  ADD_ALL_BATCH_LIMIT,
+  normalizeDiscoveredRows,
+  savedModelKeys,
+  splitBatchAdd,
+} from './endpoint-model-picker-logic.js';
 
 function isReadonlyModel(model) {
   return !!(model && (model.readonly || model.system));
@@ -433,6 +441,46 @@ const formatMemoryTime = (item, copy) => {
       // Inline validation message for the custom port. Kept separate from
       // localDetectResult so a failed validation never hides previous candidates.
       const [localPortError, setLocalPortError] = useState(null);
+      // 端点模型自动发现(规格 §2.6):「获取模型列表」按钮显式点击才探测,面板仅
+      // 展示候选行——添加一律由用户在 picker 内逐行/批量显式触发,组件本身绝不
+      // 发请求、绝不自动写库(与本地检测面板同一安全不变量)。
+      const [endpointListing, setEndpointListing] = useState(null);
+      const [endpointPickerOpen, setEndpointPickerOpen] = useState(false);
+      const [fetchingModels, setFetchingModels] = useState(false);
+      // 每次「获取模型列表」点击递增:作为 picker 的 React key,按探测结果重挂
+      // 组件,让 filterDraft/滚动位置在新列表上干净复位(复审 picker minor)。
+      const [endpointFetchSeq, setEndpointFetchSeq] = useState(0);
+      // 探测请求失败(reject)时的行内提示,经 normalizeConnectionTestResult 映射
+      // 为三语 connectionMessages 文案,不透出原始 URL/key。
+      const [fetchModelsMessage, setFetchModelsMessage] = useState(null);
+      // 测试连接成功后按「仅空字段」规则自动填入的端点事实;一次性小字,手动
+      // 改字段或显式换模型即清除,绝不覆盖用户已填值。
+      const [filledFromEndpoint, setFilledFromEndpoint] = useState(false);
+      // 逐行/批量添加后的行内结果:{ ok, text } | null——ok 决定状态行红/绿
+      // (复审 M4:失败曾硬编码绿色);失败时 picker 保持打开重试,同一份提示经
+      // addNotice 透传进 picker,不再被其全屏遮罩挡住。
+      const [endpointAddResult, setEndpointAddResult] = useState(/** @type {{ ok: boolean, text: string } | null} */ (null));
+      const [addingAllModels, setAddingAllModels] = useState(false);
+      // 单行添加在飞(round-3 审 M3):state 驱动 picker 行按钮禁用,ref 同步
+      // 挡同一 tick 的双击(异步 setState 在下一次渲染才可见,挡不住连击)。
+      const [pickSavingModel, setPickSavingModel] = useState(false);
+      const pickInFlightRef = useRef(false);
+      // 「全部添加」挂起批次(应用内 SheetConfirmDialog 确认闸门的数据):先记
+      // (addable, truncated) 快照,确认后才批量落库;取消则原样丢弃。
+      const [addAllModelsConfirm, setAddAllModelsConfirm] = useState(/** @type {{ addable: Array, truncated: boolean } | null} */ (null));
+      // 最新表单字段镜像(复审 M6):「测试连接」是异步探测,resolve 时空字段
+      // 判定必须看当时的输入值,而不是点击瞬间捕获的旧值——否则探测期间用户
+      // 手输的 context/max_output 会被过期的「空」判定清掉。每次渲染同步。
+      const latestFieldsRef = useRef({ contextWindow, maxOutput });
+      latestFieldsRef.current = { contextWindow, maxOutput }; // eslint-disable-line react-hooks/refs -- synchronously mirror the latest field drafts during render so the async probe callback judges emptiness against current values (round-1 review M6)
+      // base URL 同款镜像(复审 M5):探测在飞时改 URL,resolve 后的旧端点结果
+      // 必须作废,不允许在 URL B 的表单头/落库 payload 下展示 URL A 的列表。
+      const baseUrlRef = useRef(baseUrl);
+      baseUrlRef.current = baseUrl; // eslint-disable-line react-hooks/refs -- mirror the live base URL so an in-flight probe result can be discarded when the field moved on (round-1 review M5)
+      // wire 模型 ID 同款镜像(复审 M2):端点事实按模型探得,测试在飞时换了模型
+      // (目录切换/手输 ID/候选行填充),旧模型的数字不得填进新模型的空字段。
+      const modelRef = useRef(model);
+      modelRef.current = model; // eslint-disable-line react-hooks/refs -- synchronously mirror the live wire model so per-model probed facts are discarded when the model moved on (round-2 review M2)
       // 图片输入能力三档(pinvou/enabled/disabled)与兜底视觉模型引用(阶段 G 设置页控件)。
       // 已下线的「保存时检测」(auto)档残留值按「自动处理」(pinvou)回显。
       // 未人工钉死(非 enabled/disabled)时按目录视觉能力标注预填:命中已验证
@@ -534,6 +582,16 @@ const formatMemoryTime = (item, copy) => {
         // The output cap is no longer prefilled with 24K: left empty like
         // cloud/custom, declared uniformly by the runtime window tiers.
         setMaxOutput('');
+        // 显式换模型:上一次端点探测的自动填入提示已失效,一并清除。
+        setFilledFromEndpoint(false);
+        // 目录切换会改写 base_url(复审 M5 同因):旧 URL 上探到的候选列表、
+        // 打开的 picker 与挂起的批量确认一并作废,绝不许在新 URL 下复用;
+        // 旧 URL 下的添加提示与探测失败提示同因作废(复审 M4 + round-3 minor)。
+        setEndpointListing(null);
+        setEndpointPickerOpen(false);
+        setAddAllModelsConfirm(null);
+        setEndpointAddResult(null);
+        setFetchModelsMessage(null);
         // Reset the thinking effort to the new entry's default tier when the
         // catalog item changes (vllm→low (lowest thinking tier), others→high;
         // models without tiers get null = not explicitly set). Pass nextBaseUrl
@@ -562,25 +620,240 @@ const formatMemoryTime = (item, copy) => {
       function handleModelIdChange(value) {
         setModel(value);
         renormalizeReasoningEffort({ preset, model: value, vendor, base_url: baseUrl });
+        // 手输模型 ID 是显式换模型(round-3 审 minor:此前只有目录项切换/
+        // chooseModel 清除):上一次端点探测的自动填入提示已失效,一并清除,
+        // 不让旧模型的「已从端点填入」小字挂在新模型下面误导。
+        setFilledFromEndpoint(false);
         // 手输模型 ID 命中目录标注同样预填;手动改过档位后不再跟随。
         if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(value));
       }
       function handleBaseUrlChange(value) {
         setBaseUrl(value);
         renormalizeReasoningEffort({ preset, model, vendor, base_url: value });
+        // base URL 变更即失效既有探测结果(复审 M5):URL A 上探到的列表绝不许
+        // 在 URL B 的表单里打开或落库(picker 头部与保存 payload 都按当前输入
+        // 的 URL 走),挂起的批量确认一并丢弃;旧 URL 下的添加提示与探测失败
+        // 提示同因作废(round-3 审 minor:fetchModelsMessage 此前漏在失效
+        // 清扫外,旧 URL 的红色失败提示会挂在新 URL 下)。
+        setEndpointListing(null);
+        setEndpointPickerOpen(false);
+        setAddAllModelsConfirm(null);
+        setEndpointAddResult(null);
+        setFetchModelsMessage(null);
       }
+      // 测试连接成功后,把端点探测到的 context/max_output 仅填入空字段
+      // (规格 §2.6:绝不覆盖非空值)。空字段判定读 latestFieldsRef(复审 M6):
+      // resolve 时刻的最新输入,而非点击瞬间捕获的旧值。context_window_tokens/
+      // max_output_tokens 是可选新字段,老后端不返回时 Number() 落 NaN 自然跳过。
+      function applyProbedFacts(result) {
+        if (!result || typeof result !== 'object' || !result.ok) return;
+        const probedContext = Number(result.context_window_tokens);
+        const probedOutput = Number(result.max_output_tokens);
+        let filled = false;
+        if (!latestFieldsRef.current.contextWindow && Number.isFinite(probedContext) && probedContext > 0) { setContextWindow(String(probedContext)); filled = true; }
+        if (!latestFieldsRef.current.maxOutput && Number.isFinite(probedOutput) && probedOutput > 0) { setMaxOutput(String(probedOutput)); filled = true; }
+        if (filled) setFilledFromEndpoint(true);
+      }
+
       async function handleTest() {
         if (!bridge.available) return;
         setTesting(true); setTestResult(null);
         const testKey = keyAction === 'replace' || (isLocalPreset && localKeyEnabled) ? apiKey.trim() : '';
+        // resolve 时刻守卫(复审 M5):点击瞬间快照 base URL,resolve 时发现
+        // 表单已改走就整份丢弃——结果(含失败结果)属于旧端点,静默丢弃,
+        // 不打扰用户。
+        const probedBaseUrl = baseUrl.trim();
         try {
           const result = await bridge.models.testModelConnection(baseUrl.trim(), testKey, initial.__new ? null : initial.id);
+          if (baseUrlRef.current.trim() !== probedBaseUrl) return;
           setTestResult(normalizeConnectionTestResult(result, isCodingPlan));
+          // round-3 审 M2:端点事实按**已保存记录**的 model 字段探得并匹配
+          // (后端经 fact_model 回带这个名字),编辑表单里未保存的 model-ID
+          // 改动会让表单模型与事实模型分叉——旧守卫拿表单模型跟自己比,
+          // 分叉时旧模型的数字会填进新模型的空字段并存盘。守卫对齐到
+          // fact_model:表单当前模型仍是事实所属模型才填;fact_model 缺席
+          // (新建表单/未知 id)时结果必无事实字段,照旧调用为空操作。
+          const factModel = typeof result.fact_model === 'string' ? result.fact_model.trim() : '';
+          if (!factModel || modelRef.current.trim() === factModel) applyProbedFacts(result);
         } catch (e) {
+          if (baseUrlRef.current.trim() !== probedBaseUrl) return;
           setTestResult(normalizeConnectionTestResult(e, isCodingPlan));
         }
         finally { setTesting(false); }
       }
+      // 获取模型列表(规格 §2.6):仅由按钮显式点击触发(无 effect/启动期调用,
+      // settings_ui_smoke 源码守卫钉住);凭据阶梯与 handleTest 一致——表单新填
+      // key 优先。列表只写入 state 打开 picker,不落库。
+      async function handleFetchModels() {
+        if (!bridge.available || typeof bridge.models.probeEndpointModels !== 'function' || fetchingModels) return;
+        const probedBaseUrl = baseUrl.trim();
+        if (!probedBaseUrl) return;
+        const probedAuth = keyAction === 'replace' || (isLocalPreset && localKeyEnabled) ? apiKey.trim() : '';
+        const probedPreset = preset;
+        // 探测序号递增:picker 以此为 key 重挂,新列表的 filter/滚动干净复位。
+        setEndpointFetchSeq(seq => seq + 1);
+        setFetchingModels(true);
+        // 新一轮探测开始:上一次探测提示与逐行/批量添加的行内结果一并作废(复审 M4)。
+        setFetchModelsMessage(null);
+        setEndpointAddResult(null);
+        try {
+          const listing = await bridge.models.probeEndpointModels({
+            baseUrl: probedBaseUrl,
+            // 与 handleTest/图片能力测试同一口径(round-5 审 M1,#851 一致性):
+            // 免鉴权声明生效时不携带已输入的 key——开关开着时 key 行隐藏,
+            // 但已输入的 key 仍残留 state;探测要与保存后的鉴权形态一致
+            // (免鉴权记录运行时不发鉴权头),残留 key 也不得发往新填的 URL。
+            apiKey: probedAuth,
+            preset: probedPreset,
+          });
+          // 复审 M5:探测在飞时用户改了 base URL → 这份 URL A 的结果作废
+          // (baseUrlRef 是 resolve 时刻的实时输入);静默丢弃,不打扰用户。
+          if (baseUrlRef.current.trim() !== probedBaseUrl) return;
+          // review P2 2026-11-17:凭据/协议维度并入失效键——在飞时换 key、
+          // 切免鉴权或换 preset,旧凭证探得的列表不得在新凭证下打开
+          // (picker 的 Add 会按当前凭证落库,旧列表的模型可能无权访问)。
+          if (probeAuthRef.current !== probedAuth) return;
+          if (probePresetRef.current !== probedPreset) return;
+          setEndpointListing(listing && typeof listing === 'object' ? listing : { status: 'error', models: [] });
+          setEndpointPickerOpen(true);
+        } catch (e) {
+          // round-3 审 minor:reject 路径与 try 路径同一 resolve 时刻守卫——
+          // URL A 的探测失败不许以红色提示挂在已改走的 URL B 表单下
+          // (handleTest 的 catch 早已同款守卫,这里是补齐)。
+          if (baseUrlRef.current.trim() !== probedBaseUrl) return;
+          // reject 路径同键(review P2 2026-11-17):旧凭证的探测失败同样不得
+          // 以提示挂在新凭证表单下。
+          if (probeAuthRef.current !== probedAuth) return;
+          if (probePresetRef.current !== probedPreset) return;
+          setFetchModelsMessage(normalizeConnectionTestResult(e, isCodingPlan));
+        }
+        finally { setFetchingModels(false); }
+      }
+      // picker 逐行「添加」(聊天线):构建 draft(当前 preset/base_url/表单 key)
+      // → bridge.models.saveModel(桥内自带 loadModels 刷新),成功后行内提示;
+      // 失败保持弹窗与提示,不静默丢弃。
+      function buildEndpointModelPayload(row, overrides) {
+        // 与 doSave 同一凭据阶梯 + 免鉴权声明,收口后 picker 添加的记录不会在
+        // chat 门被免鉴权声明外的凭据要求挡住。
+        const nextKeyAction = isLocalPreset
+          ? (localKeyEnabled && apiKey.trim() ? 'replace' : 'keep_existing')
+          : (apiKey.trim() ? 'replace' : (initial.__new || !hasSavedKey ? 'replace' : 'keep_existing'));
+        const nextApiKey = isLocalPreset
+          ? (localKeyEnabled && apiKey.trim() ? apiKey.trim() : '')
+          : (apiKey.trim() ? apiKey.trim() : '');
+        // 与 buildLocalModelPayload 同一教义:listing 带 server_kind 时
+        // ollama / lm_studio 行的 context_window_tokens 是运行时生效值
+        // (/api/ps 生效窗口、loaded_context_length),持久化成声明会在
+        // resolve_context_window 里永久 min-clamp 后续探测——存 null,
+        // 行内徽章照常显示探测值,仅落库被闸。
+        const serverKind = endpointListing && typeof endpointListing === 'object' ? endpointListing.server_kind : null;
+        const runtimeProbedLane = serverKind === 'ollama' || serverKind === 'lm_studio';
+        return {
+          id: makeModelId(),
+          name: row.title || row.id,
+          preset: overrides && overrides.preset !== undefined ? overrides.preset : preset,
+          alias: null,
+          context_window_tokens: runtimeProbedLane ? null : row.contextWindowTokens,
+          max_output_tokens: row.maxOutputTokens,
+          model: row.id,
+          base_url: overrides && overrides.baseUrl !== undefined ? overrides.baseUrl : baseUrl.trim(),
+          api_key: nextApiKey,
+          credential_action: nextKeyAction,
+          provider_kind: providerKind || null,
+          vendor: vendor || null,
+          endpoint_mode: endpointMode || null,
+          auth_mode: null,
+          image_capability_override: imageCapability || 'pinvou',
+          vision_model_id: null,
+          reasoning_effort: null,
+        };
+      }
+      async function handleEndpointModelPick(row) {
+        // round-3 审 M3:单行添加此前没有在飞守卫——savingModel/addingAllModels
+        // 都不在这条路径上置位,行按钮也只在 alreadySaved 后才禁用,快速
+        // 双击会以两个新 id 把同一 (model, base_url) 落库两次。ref 在同步
+        // 序列里立即置位挡住同一 tick 的第二次点击,state 驱动行按钮禁用
+        // (保存 IPC + 刷新链路的窗口内不给可点的第二下)。round-4 M4 补充:
+        // 批量确认弹窗挂着时同样禁入——挂起批次是「添加前」的旧快照,单行
+        // 若在其窗口内落库,确认后的批量保存会把它当未保存行再落一次。
+        if (pickInFlightRef.current || savingModel || addingAllModels || addAllModelsConfirm) return;
+        pickInFlightRef.current = true;
+        setPickSavingModel(true);
+        try {
+          await onSave(buildEndpointModelPayload(row));
+          setEndpointAddResult({ ok: true, text: settingsCopy.addedCount(1) });
+        } catch (e) {
+          // 失败:picker 保持打开供重试,提示以 addNotice 就地透传(复审 M4)。
+          setEndpointAddResult({ ok: false, text: settingsCopy.imageCapabilitySaveFailed(String(e && e.message ? e.message : e)) });
+        }
+        finally {
+          pickInFlightRef.current = false;
+          setPickSavingModel(false);
+        }
+      }
+      // 「全部添加」(聊天线):先与已保存模型按 (model id + base_url) 去重,把
+      // (addable, truncated) 快照进应用内确认弹窗(原生 confirm 在 Tauri
+      // WebView2 不渲染;>100 时提示截断到 100)。确认是硬闸门:入口只记录挂起
+      // 批次、绝不落库(settings_ui_smoke 源码守卫钉住)。
+      async function handleAddAllEndpointModels() {
+        // round-4 M4(批量×单行交错):单行添加在飞时(pickInFlightRef 同步挡
+        // 同 tick、pickSavingModel/savingModel 盖保存 IPC+刷新窗口)禁入——
+        // 此刻的去重快照会把正在保存的那一行当成未保存,确认后重复落库。
+        if (addingAllModels || pickInFlightRef.current || pickSavingModel || savingModel || !endpointListing) return;
+        const { addable, truncated } = splitBatchAdd(normalizeDiscoveredRows(endpointListing), endpointSavedKeys, baseUrl.trim(), ADD_ALL_BATCH_LIMIT);
+        if (addable.length === 0) return;
+        // round-5 审 m1(键盘可达的拆批):确认弹窗没有焦点陷阱,键盘用户可
+        // 以在批量保存循环进行中改 URL(URL 变更清扫只摘弹窗,已开跑的循环
+        // 不受影响)。去重与落库都以确认时刻的快照为准——循环内的 payload
+        // 用快照 URL/preset,后改的 URL 只影响下一轮,绝不产生 A/B 拆批。
+        setAddAllModelsConfirm({ addable, truncated, baseUrl: baseUrl.trim(), preset });
+      }
+      // 确认后的批量保存(复审 M9):逐行 saveModel 带 deferRefresh 跳过桥内
+      // 的三连 reload(100 行 × 3 次 IPC 的风暴),循环结束后统一刷新一次;
+      // 失败路径也补一次刷新,让已落库的前缀行正确出现在列表里。全部成功才
+      // 关 picker 并提示数量;失败保持弹窗与提示,不静默丢弃。老桌面/web 桥
+      // 没有 reloadSavedModels 时回退旧行为(逐行全量刷新,不加 options)。
+      async function confirmAddAllEndpointModels() {
+        if (!addAllModelsConfirm || addingAllModels) return;
+        const { addable, baseUrl: confirmBaseUrl, preset: confirmPreset } = addAllModelsConfirm;
+        const batchReloadAvailable = bridge.available && typeof bridge.models.reloadSavedModels === 'function';
+        setAddingAllModels(true);
+        let added = 0;
+        try {
+          for (const row of addable) {
+            // 快照 URL/preset(round-5 审 m1):循环期间改 URL 只影响下一轮,
+            // 本批行永远落在确认时刻的端点上。
+            await onSave(buildEndpointModelPayload(row, { baseUrl: confirmBaseUrl, preset: confirmPreset }), batchReloadAvailable ? { deferRefresh: true } : undefined);
+            added += 1;
+          }
+          if (batchReloadAvailable) await bridge.models.reloadSavedModels();
+          setEndpointAddResult({ ok: true, text: settingsCopy.addedCount(added) });
+          setEndpointPickerOpen(false);
+        } catch (e) {
+          if (batchReloadAvailable) {
+            try { await bridge.models.reloadSavedModels(); } catch { /* best-effort: keep the save error visible */ }
+          }
+          // 中途失败:已落库的前缀行保留,picker 保持打开并就地透传失败原因
+          // (表单状态行在遮罩下方不可见,复审 M4)。
+          setEndpointAddResult({ ok: false, text: settingsCopy.imageCapabilitySaveFailed(String(e && e.message ? e.message : e)) });
+        }
+        finally { setAddingAllModels(false); setAddAllModelsConfirm(null); }
+      }
+      // Escape 逐层关(round-5 审 m1,与 ACP 线 ProviderFormModal 的窗口级
+      // 监听同款;聊天线此前只有 X 按钮能关 picker):视觉顶层先关——批量
+      // 确认弹窗(z-120)先于 picker(z-100);批量保存在飞时不入(忙碌中
+      // 丢弃确认只会把「是否完成」变得不可见)。onClose 的清扫语义与 X
+      // 按钮一致(摘 picker + 行内添加结果)。
+      useEffect(() => {
+        if (!endpointPickerOpen && !addAllModelsConfirm) return;
+        const onPickerKeyDown = e => {
+          if (e.key !== 'Escape') return;
+          if (addAllModelsConfirm && !addingAllModels) setAddAllModelsConfirm(null);
+          else if (endpointPickerOpen) { setEndpointPickerOpen(false); setEndpointAddResult(null); }
+        };
+        window.addEventListener('keydown', onPickerKeyDown);
+        return () => window.removeEventListener('keydown', onPickerKeyDown);
+      }, [endpointPickerOpen, addAllModelsConfirm, addingAllModels]);
       // 测试图片能力(设计 §7.3):与测试连接同一模式——表单未保存也按当前表单值发测,
       // 凭据优先用新填的 key,否则由后端按 model_id 读已保存凭据。
       function normalizeImageCapabilityTestResult(value) {
@@ -668,6 +941,15 @@ const formatMemoryTime = (item, copy) => {
       }
       const isLocalPreset = preset === 'local_vllm';
       const showCodingPlanModelField = !isLocalPreset && isCodingPlan;
+      // 端点探测的有效鉴权载荷同款镜像(review P2 2026-11-17):探测在飞时换 key
+      // 或切免鉴权姿态,旧账号的列表不得在新凭证下打开——凭据维度并入失效键。
+      // (镜像必须位于 isLocalPreset/isCodingPlan 声明之后:render 路径在此处
+      // 直读它们,声明前直读是 TDZ 崩溃——noInvalidUseBeforeDeclaration。)
+      const probeAuthRef = useRef('');
+      probeAuthRef.current = keyAction === 'replace' || (isLocalPreset && localKeyEnabled) ? apiKey.trim() : ''; // eslint-disable-line react-hooks/refs -- synchronously mirror the effective auth payload
+      // 协议 preset 同款镜像:同 URL 同凭证但 preset 切换,列表语义同样属于旧协议。
+      const probePresetRef = useRef(preset);
+      probePresetRef.current = preset; // eslint-disable-line react-hooks/refs -- synchronously mirror the live protocol preset
       const showProviderModelField = !isLocalPreset && !!activeProvider && Array.isArray(activeProvider.items) && activeProvider.items.length > 0;
       const showModelIdField = isLocalPreset || customModel || showProviderModelField;
       const showBaseUrlField = isLocalPreset
@@ -879,6 +1161,14 @@ const formatMemoryTime = (item, copy) => {
         setLocalKeyEnabled(false);
         setCustomModel(true);
         setPickerOpen(false);
+        // 显式切换路由与 applyCatalogItem 同一纪律(复审 minor-14):残留的端点
+        // 探测状态(候选列表/picker/挂起批量/添加提示)一律清空,绝不许在手动
+        // 本地模型表单下复用上一个表单的探测结果。
+        setEndpointListing(null);
+        setEndpointPickerOpen(false);
+        setAddAllModelsConfirm(null);
+        setEndpointAddResult(null);
+        setFetchModelsMessage(null);
         // 手动添加本地模型是显式切换:未手动改过档位时回到「自动处理」。
         if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(''));
         // Local model → manual add is an explicit route switch: drop the
@@ -895,6 +1185,9 @@ const formatMemoryTime = (item, copy) => {
       const formSectionTitle = `px-1 mb-1.5 text-[12px] leading-4 font-semibold text-[#8A8A8E] dark:text-[#8E8E93]`;
       const formGroup = `overflow-hidden rounded-[16px] bg-[#F2F2F7] dark:bg-[#2C2C2E]`;
       const formDivider = 'border-black/[0.10] dark:border-white/[0.10]';
+      // 「获取模型列表」与「测试连接」共用同一颗蓝色胶囊按钮(样式去重,主入口
+      // chunk 有启动预算红线)。
+      const actionPillClass = 'shrink-0 min-h-8 px-3 rounded-full text-[14px] font-medium disabled:opacity-45 bg-[#007AFF]/10 text-[#007AFF] hover:bg-[#007AFF]/[0.16] dark:bg-[#0A84FF]/20 dark:text-[#0A84FF] dark:hover:bg-[#0A84FF]/[0.28]';
       // Custom-entry description for the provider model picker and the catalog
       // picker: both key off the same group fields (key/providerKind/preset).
       const customModelDescFor = (group, copy) => (group && group.key === 'tencent_token_plan'
@@ -923,9 +1216,11 @@ const formatMemoryTime = (item, copy) => {
           // 同一 provider 内换模型时重置思考深度到新模型的默认档位：K2.6 选 off 后切 K3
           // 会残留不在 K3 档位表内的 off，界面无高亮且保存仍写旧值；与 applyCatalogItem 一致。
           setReasoningEffort(reasoningEffortForModelSwitch({ preset, model: nextModel, vendor, base_url: baseUrl }));
-          // Explicit model switches also reset the manual context window so it never leaks across models (same reset discipline as applyCatalogItem).
+          // Explicit model switches also reset the manual context window and the output cap so neither leaks across models (same reset discipline as applyCatalogItem).
           setContextWindow('');
           setContextWindowTouched(true);
+          setMaxOutput('');
+          setFilledFromEndpoint(false);
           // 与 applyCatalogItem 一致:未手动改过档位时按新条目的视觉能力标注预填。
           if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(nextModel));
           setProviderModelPickerOpen(false);
@@ -1179,6 +1474,13 @@ const formatMemoryTime = (item, copy) => {
       // 一律识图探测,supported 才允许选中(探测是唯一闸门;disabled 可能是
       // 历史探测误判残留,不应隐藏,如 kimi-for-coding)。
       const visionCandidates = (models || []).filter(item => item && item.id && item.id !== initial.id);
+      // 端点面板的「已保存」标记与批量去重键(规格 §2.6:model id + base_url)。
+      // 不 memo 化:React Compiler 在本组件的早退结构上无法保持手工 memo
+      // (preserve-manual-memoization lint),而重复构建键集是亚毫秒级开销。
+      const endpointSavedKeys = savedModelKeys(models);
+      // 老版本桌面/被拒 web 白名单下 bridge.models.probeEndpointModels 不存在:
+      // 探活禁用按钮并给 title 提示(与 testImageInputCapability 同款惯例)。
+      const probeEndpointModelsAvailable = !!(bridge.available && typeof bridge.models.probeEndpointModels === 'function');
       const visionOptions = [{ key: '', label: settingsCopy.visionModelNone }]
         .concat(visionCandidates.map(item => ({ key: item.id, label: selectorMainLabel(item, t) || item.model })));
       const renderPickerRow = ({ testId, label, value, options, currentKey, open, onToggle, onChoose, probingKey, probeError }) => (
@@ -1447,9 +1749,22 @@ const formatMemoryTime = (item, copy) => {
                     {!isLocalPreset && renderInlineField({
                       label: t.modelContextWindow,
                       value: contextWindow,
-                      onChange: e => { setContextWindow(e.target.value.replaceAll(/[^0-9]/g, '').slice(0, 9)); setContextWindowTouched(true); }, // eslint-disable-line sonarjs/concise-regex -- keep [^0-9] literal instead of \D; readability first
+                      onChange: e => { setContextWindow(e.target.value.replaceAll(/[^0-9]/g, '').slice(0, 9)); setContextWindowTouched(true); setFilledFromEndpoint(false); }, // eslint-disable-line sonarjs/concise-regex -- keep [^0-9] literal instead of \D; readability first
                       placeholder: settingsCopy.modelContextWindowPlaceholder,
                       testId: 'model-form-context-window',
+                      inputMode: 'numeric',
+                      spellCheck: false,
+                    })}
+                    {/* Max output (optional for cloud models): resolved_output_limit
+                        prefers the user declaration; empty = declared uniformly by
+                        the runtime window tiers. Same u32 9-digit truncation as the
+                        context window (max_output_tokens persists as u32). */}
+                    {!isLocalPreset && renderInlineField({
+                      label: settingsCopy.modelMaxOutput,
+                      value: maxOutput,
+                      onChange: e => { setMaxOutput(e.target.value.replaceAll(/[^0-9]/g, '').slice(0, 9)); setFilledFromEndpoint(false); }, // eslint-disable-line sonarjs/concise-regex -- keep [^0-9] literal instead of \D; readability first, same as the context window row
+                      placeholder: settingsCopy.modelMaxOutputPlaceholder,
+                      testId: 'model-form-max-output',
                       inputMode: 'numeric',
                       spellCheck: false,
                     })}
@@ -1466,7 +1781,14 @@ const formatMemoryTime = (item, copy) => {
                     {showLocalKeyField && renderApiKeyField({ withBorder: true })}
                   </div>
                   {!isLocalPreset && (
-                    <div className={`px-1 mt-1.5 text-[12px] leading-4 ${isDark ? 'text-[#8E8E93]' : 'text-[#8A8A8E]'}`}>{settingsCopy.modelContextWindowHint}</div>
+                    <>
+                      <div className={`px-1 mt-1.5 text-[12px] leading-4 ${isDark ? 'text-[#8E8E93]' : 'text-[#8A8A8E]'}`}>{settingsCopy.modelContextWindowHint}</div>
+                      <div className={`px-1 mt-1 text-[12px] leading-4 ${isDark ? 'text-[#8E8E93]' : 'text-[#8A8A8E]'}`}>{settingsCopy.modelMaxOutputHint}</div>
+                      {/* 一次性小字:测试连接成功后按空字段规则自动填入的提示;手动改字段即清除。 */}
+                      {filledFromEndpoint && (
+                        <div data-testid="model-form-filled-from-endpoint" className={`px-1 mt-1 text-[12px] leading-4 ${isDark ? 'text-[#30D158]' : 'text-[#137333]'}`}>{settingsCopy.filledFromEndpoint}</div>
+                      )}
+                    </>
                   )}
                   {keyRevealError && <div className="px-1 mt-1.5 text-[12px] leading-4 text-[#FF3B30]">{keyRevealError}</div>}
                 </section>
@@ -1479,12 +1801,27 @@ const formatMemoryTime = (item, copy) => {
                       <span className={`min-w-0 flex-1 text-[13px] leading-5 ${testResult ? (testResult.ok ? ('text-[#137333] dark:text-[#93D5A6]') : 'text-[#FF3B30]') : ('text-[#8A8A8E] dark:text-[#98989D]')}`}>
                         {testResult ? testResult.message : settingsCopy.testBeforeSave}
                       </span>
+                      {/* 获取模型列表:仅显式点击触发探测(规格 §2.6);bridge 方法未
+                          就绪(老桌面/白名单未放行)时探活禁用并以 title 提示。 */}
+                      <button type="button" data-testid="settings-model-fetch-lists" onClick={handleFetchModels}
+                        disabled={fetchingModels || !baseUrl.trim() || !probeEndpointModelsAvailable}
+                        title={probeEndpointModelsAvailable ? undefined : settingsCopy.fetchUnavailable}
+                        className={actionPillClass}>
+                        {fetchingModels ? settingsCopy.fetchingModelList : settingsCopy.fetchModelList}
+                      </button>
                       <button type="button" onClick={handleTest} disabled={testing || !baseUrl.trim()}
-                        className={`shrink-0 min-h-8 px-3 rounded-full text-[14px] font-medium disabled:opacity-45 bg-[#007AFF]/10 text-[#007AFF] hover:bg-[#007AFF]/[0.16] dark:bg-[#0A84FF]/20 dark:text-[#0A84FF] dark:hover:bg-[#0A84FF]/[0.28]`}>
+                        className={actionPillClass}>
                         {testing ? t.testingConn : t.testConnection}
                       </button>
                     </div>
                   </div>
+                  {(fetchModelsMessage || endpointAddResult) && (
+                    // 复审 M4:添加结果按 .ok 双色显示,不再硬编码绿色;失败时
+                    // picker 保持打开,同一份提示经 addNotice 在 picker 内可见。
+                    <div data-testid="model-form-fetch-lists-status" className={`px-1 mt-1.5 text-[12px] leading-4 ${fetchModelsMessage ? (fetchModelsMessage.ok ? 'text-[#137333] dark:text-[#93D5A6]' : 'text-[#FF3B30]') : (endpointAddResult.ok ? 'text-[#137333] dark:text-[#93D5A6]' : 'text-[#FF3B30]')}`}>
+                      {fetchModelsMessage ? fetchModelsMessage.message : endpointAddResult.text}
+                    </div>
+                  )}
                 </section>
               )}
               {preset === 'local_vllm' && detectResult && (
@@ -1530,6 +1867,39 @@ const formatMemoryTime = (item, copy) => {
             </div>
             </div>
           </div>
+          {/* 端点模型选择面板(规格 §2.6):纯 props 驱动,绝不自行发请求、
+              绝不自动添加;聊天线传 onAddAll(批量 confirm 在父层),ACP 线复用时不传。 */}
+          <EndpointModelPicker
+            key={endpointFetchSeq}
+            open={endpointPickerOpen}
+            onClose={() => { setEndpointPickerOpen(false); setEndpointAddResult(null); }}
+            listing={endpointListing}
+            loading={fetchingModels}
+            onPick={handleEndpointModelPick}
+            onAddAll={handleAddAllEndpointModels}
+            baseUrl={baseUrl.trim()}
+            savedKeys={endpointSavedKeys}
+            addNotice={endpointAddResult}
+            pickBusy={pickSavingModel || savingModel}
+            t={t}
+          />
+          {/* 「全部添加」应用内确认弹窗(Tauri WebView2 不渲染原生 confirm;与
+              MemoryDeleteDialog 同一 SheetConfirmDialog 配方,z-[110] 压过
+              picker 的 z-[100]):标题=数量+与已保存模型去重说明,截断时 desc
+              追加提示;确认前不落库,取消不动任何状态。 */}
+          {addAllModelsConfirm && (
+            <SheetConfirmDialog
+              testid="add-all-models-confirm"
+              confirmTestId="add-all-models-confirm-ok"
+              title={settingsCopy.addAllConfirm(addAllModelsConfirm.addable.length)}
+              desc={addAllModelsConfirm.truncated ? settingsCopy.addAllTruncated(ADD_ALL_BATCH_LIMIT) : undefined}
+              confirmLabel={addingAllModels ? settingsCopy.saving : settingsCopy.addAllModels}
+              cancelLabel={settingsCopy.cancel}
+              onConfirm={confirmAddAllEndpointModels}
+              onCancel={() => setAddAllModelsConfirm(null)}
+              busy={addingAllModels}
+            />
+          )}
         </div>
       );
     };
@@ -1690,17 +2060,19 @@ const formatMemoryTime = (item, copy) => {
       </div>
     );
     // iOS-style confirm dialog (stacked buttons: red confirm on top, blue cancel below; backdrop click does not close).
-    // Two isomorphic sites: model delete / search source delete; RestartDialog (two-column grid, wider) is not one of them.
-    const SheetConfirmDialog = ({ title, desc, confirmLabel, cancelLabel, onConfirm, onCancel }) => (
-      <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
+    // Four isomorphic sites: model delete / search source delete / memory delete / feedback close; RestartDialog (two-column grid, wider) is not one of them.
+    // Optional testid/confirmTestId mount the test pins the memory-delete and feedback-close dialogs need; desc is omitted where the dialog carries no description row.
+    // Optional busy disables both buttons so an in-flight batch (add-all) cannot be double-submitted or dismissed mid-loop.
+    const SheetConfirmDialog = ({ title, desc, confirmLabel, cancelLabel, onConfirm, onCancel, testid, confirmTestId, busy = false }) => (
+      <div data-testid={testid} className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
         <div className={`w-[270px] overflow-hidden rounded-[14px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
           <div className="px-5 pt-5 pb-4 text-center">
             <h3 className="text-[17px] leading-6 font-semibold">{title}</h3>
             <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{desc}</p>
           </div>
           <div className={`border-t border-black/[0.12] dark:border-white/[0.12]`}>
-            <button type="button" onClick={onConfirm} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12]`}>{confirmLabel}</button>
-            <button type="button" onClick={onCancel} className="w-full h-12 text-[17px] font-semibold text-[#007AFF]">{cancelLabel}</button>
+            <button type="button" data-testid={confirmTestId} onClick={onConfirm} disabled={busy} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12] disabled:opacity-45`}>{confirmLabel}</button>
+            <button type="button" onClick={onCancel} disabled={busy} className="w-full h-12 text-[17px] font-semibold text-[#007AFF] disabled:opacity-45">{cancelLabel}</button>
           </div>
         </div>
       </div>
@@ -1747,6 +2119,121 @@ const formatMemoryTime = (item, copy) => {
     // Mirrors DOUBLE_CLICK_GUARD_MS in features/computer-use/ComputerUseConsent.jsx.
     const COMPUTER_USE_TOGGLE_GUARD_MS = 200;
     /**
+     * The virtual-display status hint lines under the preference row
+     * (extracted so the section component stays inside its
+     * cognitive-complexity budget). Driven by the status projection:
+     * "unavailable" renders the localized lead line plus the backend's
+     * English diagnostic (never localized, shown verbatim under the lead —
+     * the install guidance must stay visible exactly while a session runs
+     * on a probe-red host); a failed write replaces the status line with
+     * the error until the next attempt.
+     *
+     * R11: a live PHYSICAL session renders the dedicated live-physical
+     * line. "disabled"'s copy reads "Off —" (true about where NEW sessions
+     * will run) but contradicts a switch showing ON when the preference
+     * was flipped on mid-session — the exact artifact the R10 fix resolved
+     * for the "unavailable" leg, now completed for the "available" leg.
+     * "active" keeps its line and GAINS the live-physical line: with one
+     * virtual and one physical session both live, the aggregate word must
+     * not hide the session on the real screen. Fail-neutral: an older
+     * backend without the field keeps the previous rendering.
+     *
+     * R12: the live-physical copy is split into the FACT ("a session is
+     * currently using your real screen" — true whenever physicalSessionLive)
+     * and the future-isolation PROMISE ("new sessions will use the isolated
+     * display" — true only while the persisted preference is on AND the
+     * probe is up, i.e. never under "unavailable", and under "disabled"
+     * only while the switch is ON). The R11 single-line shape promised
+     * isolation under an OFF switch and next to the "no isolated display
+     * available" lead — an over-claim in both legs. Note the two
+     * projections: the switch binds `!== false` (default-on for a legacy
+     * backend's checked state) while the promise needs the strict
+     * `=== true` — promising isolation requires backend truth, not a
+     * default.
+     */
+    const VirtualDisplayStatusLines = ({ t, virtualError, virtualState, virtualDetail, physicalSessionLive, preferVirtual }) => {
+      const physicalLive = physicalSessionLive === true;
+      const promiseIsolated = preferVirtual === true;
+      // "disabled" + live physical + pref ON: the "Off —" copy would
+      // contradict the ON switch (the R11 artifact) — the fact + promise
+      // lines REPLACE it. With the pref OFF the "Off —" copy is true and
+      // stays, with the fact line appended.
+      const replaceDisabledLine = virtualState === 'disabled' && physicalLive && promiseIsolated;
+      const virtualHint = virtualState === 'ready'
+        ? t.uiComputerUse.virtualStateReady
+        : virtualState === 'active'
+          ? t.uiComputerUse.virtualStateActive
+          : replaceDisabledLine
+            ? null
+            : virtualState === 'disabled'
+              ? t.uiComputerUse.virtualStateDisabled
+              : null;
+      const virtualUnavailable = virtualState === 'unavailable';
+      // The FACT is true whenever a physical session is live — INCLUDING
+      // the replace-disabled leg: there the "Off —" copy is replaced, but
+      // the live-session fact must still render next to the promise (the
+      // user who flipped the preference ON mid-session must not lose the
+      // only line saying a session is driving their real screen right
+      // now; R13 — gating it on `!replaceDisabledLine` rendered the
+      // promise alone in that leg, contradicting the R12 split comment
+      // above).
+      const showFact = physicalLive;
+      // The promise rides only a state where the backend can deliver it:
+      // "active" proves the isolated stack is working, and the
+      // pref-ON "disabled" leg replaced the line above. "unavailable" (the
+      // probe is down) never promises — and neither does any leg carrying a
+      // non-empty `virtualDetail`: the detail is the backend's recorded
+      // "something is wrong" fact (e.g. the last virtual creation failed),
+      // and a live "active" row CAN ride a red snapshot (the vocabulary
+      // answers the session's own target, not the probe). Promising
+      // isolation while the next creation would resolve physical is the
+      // R18 hole; the detail gate keeps the promise silent until the
+      // backend's own fact clears (the detail renders under "unavailable").
+      const showPromise =
+        promiseIsolated &&
+        physicalLive &&
+        !virtualDetail &&
+        (replaceDisabledLine || virtualState === 'active');
+      return (
+        <>
+          <span className="block">{t.uiComputerUse.settingsVirtualHint}</span>
+          {virtualError ? (
+            <span className="block mt-0.5">
+              {/* The session truth survives the write error: a failed
+                  preference write used to replace ALL status lines,
+                  suppressing the live-physical fact while a session kept
+                  driving the user's real screen (R15). The fact is server
+                  truth, not an outcome of the failed write. */}
+              {showFact && (
+                <span className="block">{t.uiComputerUse.virtualStatePhysicalLive}</span>
+              )}
+              <span className="block">{virtualError}</span>
+            </span>
+          ) : virtualUnavailable ? (
+            <span className="block mt-0.5">
+              <span className="block">{t.uiComputerUse.virtualStateUnavailableLead}</span>
+              {virtualDetail && <span className="block">{virtualDetail}</span>}
+              {physicalLive && (
+                <span className="block">{t.uiComputerUse.virtualStatePhysicalLive}</span>
+              )}
+            </span>
+          ) : (
+            (virtualHint || showFact || showPromise) && (
+              <span className="block mt-0.5">
+                {virtualHint && <span className="block">{virtualHint}</span>}
+                {showFact && (
+                  <span className="block">{t.uiComputerUse.virtualStatePhysicalLive}</span>
+                )}
+                {showPromise && (
+                  <span className="block">{t.uiComputerUse.virtualStatePhysicalNextVirtual}</span>
+                )}
+              </span>
+            )
+          )}
+        </>
+      );
+    };
+    /**
      * Computer-use settings row as a self-contained component so the failed
      * write can surface an inline error (the old code did `catch(() => {})`,
      * so a failed enable looked like the switch bouncing back with no
@@ -1759,7 +2246,7 @@ const formatMemoryTime = (item, copy) => {
      * rapid clicks cannot interleave contradictory set_enabled calls
      * (matching the consent dialog's single-flight standard).
      */
-    const ComputerUseSettingSection = ({ t }) => {
+    const ComputerUseSettingSection = ({ t, platformCapabilities }) => {
       const slice = useBridgeState(['computerUse']);
       const computerUse = (slice && slice.computerUse) || {};
       const [actionError, setActionError] = useState('');
@@ -1771,6 +2258,57 @@ const formatMemoryTime = (item, copy) => {
       // consent dialog's useConsentAction flightRef.
       const flightRef = useRef({ busy: false, settledAt: 0 });
       const unsupported = computerUse.platformSupported === false;
+      // Virtual-display preference row (frozen status contract: the backend
+      // always reports `preferVirtualDisplay`). The switch binds to the
+      // PERSISTED PREFERENCE, not the derived state (review finding): an
+      // active virtual session with the preference off must show the switch
+      // OFF while the state-driven hint line below keeps describing the live
+      // session ("Agent is working in an isolated virtual display…") — the
+      // live backend's target was decided once, at creation, so the state
+      // legitimately disagrees with the preference. While the projection is
+      // still "unknown" (no authoritative read yet), the row stays RENDERED
+      // (discoverability: the user must see the option exists before the
+      // first status lands; hiding it here would fight the section's
+      // unsupported gate above, which remains the only hider) but the switch
+      // is disabled AND unchecked: unchecked because the slice's default
+      // (true, mirroring the backend default) is not an authoritative answer,
+      // and a checked-ON-disabled switch would assert a preference nobody
+      // confirmed yet. No authoritative read also means no preference write
+      // is submitted (an older backend without the command would only produce
+      // a confusing failure). Same single-flight pattern as the master toggle
+      // above, with its own ref so the two switches never block each other.
+      const virtualState = computerUse.virtualDisplayState || 'unknown';
+      const virtualUnknown = virtualState === 'unknown';
+      const virtualPref = computerUse.preferVirtualDisplay !== false;
+      const virtualDetail = typeof computerUse.virtualDisplayDetail === 'string'
+        ? computerUse.virtualDisplayDetail
+        : '';
+      const [virtualPending, setVirtualPending] = useState(false);
+      const [virtualError, setVirtualError] = useState('');
+      const virtualFlightRef = useRef({ busy: false, settledAt: 0 });
+      // Per-platform note rows: gated on the dedicated semantic capability
+      // `virtualDisplayNote` ("windows" | "macos" | "linux" from
+      // get_platform_capabilities) — the capability is the semantic source;
+      // an older proxy that keyed these rows off the dependency-installer
+      // bits (usesBundledDependencyInstaller / usesHomebrewDependencyInstaller)
+      // broke the moment installer semantics changed, so it is gone. Static
+      // product notes about the stack's real fidelity/lifecycle shape — they
+      // render whenever this platform has a note (not only while the feature
+      // toggle is on), so the absolute-sounding virtual hint above never
+      // stands on the page without its platform caveat next to it.
+      const showWindowsVirtualNote = platformCapabilities?.virtualDisplayNote === 'windows';
+      const showMacosVirtualNote = platformCapabilities?.virtualDisplayNote === 'macos';
+      const showLinuxVirtualNote = platformCapabilities?.virtualDisplayNote === 'linux';
+      // R16: when the capability is absent or unverified (an older proxy
+      // that predates `virtualDisplayNote`), all three platform note rows
+      // are skipped — the hint above, whose copy claims the display "never
+      // shows on your screen", would then stand on the page with NO caveat
+      // next to it, contradicting this block's own comment. The
+      // unknown-platform honesty line (the same fallback class the grant
+      // dialog uses) keeps the absolute claim from shipping unqualified on
+      // any backend.
+      const showUnknownVirtualNote =
+        !showWindowsVirtualNote && !showMacosVirtualNote && !showLinuxVirtualNote;
       // An emergency stop latches `stopped` without touching the toggle: the
       // switch still reads ON but every consent surface is dead until the
       // user toggles off and back on (set_enabled's re-enable is the only
@@ -1873,6 +2411,69 @@ const formatMemoryTime = (item, copy) => {
               }}
             />
           </IOSRow>
+          {!unsupported && (
+            <IOSRow
+              label={t.uiComputerUse.settingsVirtualToggle}
+              desc={
+                <VirtualDisplayStatusLines
+                  t={t}
+                  virtualError={virtualError}
+                  virtualState={virtualState}
+                  virtualDetail={virtualDetail}
+                  physicalSessionLive={computerUse.physicalSessionLive}
+                  preferVirtual={computerUse.preferVirtualDisplay}
+                />
+              }
+            >
+              <IOSSwitch
+                checked={virtualUnknown ? false : virtualPref}
+                disabled={virtualPending || virtualUnknown}
+                onChange={(value) => {
+                  const flight = virtualFlightRef.current;
+                  if (flight.busy || Date.now() - flight.settledAt < COMPUTER_USE_TOGGLE_GUARD_MS) return;
+                  if (!bridge.available || !bridge.computerUse) return;
+                  flight.busy = true;
+                  setVirtualError('');
+                  setVirtualPending(true);
+                  // The wrapper re-reads the authoritative status before
+                  // resolving, so the switch and the hint line below it move
+                  // to the persisted value (or roll back on failure) without
+                  // a separate refresh here.
+                  bridge.computerUse.setVirtualDisplayPreference(value)
+                    .then(() => {
+                      flight.settledAt = Date.now();
+                    })
+                    .catch((error) => {
+                      setVirtualError(t.uiComputerUse.actionFailed(String(error && error.message ? error.message : error)));
+                    })
+                    .finally(() => {
+                      flight.busy = false;
+                      setVirtualPending(false);
+                    });
+                }}
+              />
+            </IOSRow>
+          )}
+          {showWindowsVirtualNote && (
+            <div className="px-4 py-2.5 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]">
+              {t.uiComputerUse.virtualNoteWindows}
+            </div>
+          )}
+          {showMacosVirtualNote && (
+            <div className="px-4 py-2.5 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]">
+              {t.uiComputerUse.virtualNoteMacos}
+            </div>
+          )}
+          {showLinuxVirtualNote && (
+            <div className="px-4 py-2.5 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]">
+              {t.uiComputerUse.virtualNoteLinux}
+            </div>
+          )}
+          {showUnknownVirtualNote && (
+            <div className="px-4 py-2.5 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]">
+              {t.uiComputerUse.virtualNoteUnknownPlatform}
+            </div>
+          )}
         </IOSSection>
       );
     };
@@ -2091,8 +2692,51 @@ const formatMemoryTime = (item, copy) => {
     // eslint-disable-next-line sonarjs/cognitive-complexity -- settings page aggregates many form branches; splitting needs a dedicated design; tracked via this suppression for now
     /** @typedef {{ behaviorAnalyticsTitle: string, behaviorAnalyticsEntryTitle: string, behaviorAnalyticsEntryDesc: string, behaviorAnalyticsBack: string, behaviorAnalyticsLabel: string, behaviorAnalyticsDesc: string, behaviorAnalyticsNotConfigured: string, behaviorAnalyticsEnableConfirm: string, behaviorAnalyticsDisableConfirm: string, behaviorAnalyticsStatusEnabled: string, behaviorAnalyticsStatusDisabled: string, behaviorAnalyticsStatusWithdrawalPending: string, behaviorAnalyticsActionFailed: string }} BehaviorAnalyticsSettingsCopy */
     // eslint-disable-next-line no-unused-vars, sonarjs/cognitive-complexity -- contract slot parameters kept; the settings page aggregates many form branches, splitting needs a dedicated design
-    const SettingsView = ({ activeTheme, colorScheme, onColorSchemeChange, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, inputNeededNotif, setInputNeededNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, defaultModelRef, accountPlatformClient, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, chatStreamingAnimation = true, onChatStreamingAnimationChange, updateFocusTick, remoteConversationOpen, onRemoteConversationOpen, onRemoteConnected, onRemoteConversationClose, onCloseSettings, initialSection = 'general' }) => {
+    const SettingsView = ({ activeTheme, colorScheme, onColorSchemeChange, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, inputNeededNotif, setInputNeededNotif, setSettingsToast, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, defaultModelRef, accountPlatformClient, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, chatStreamingAnimation = true, onChatStreamingAnimationChange, updateFocusTick, remoteConversationOpen, onRemoteConversationOpen, onRemoteConnected, onRemoteConversationClose, onCloseSettings, initialSection = 'general' }) => {
       const settingsCopy = /** @type {typeof t.uiSettingsDetail & BehaviorAnalyticsSettingsCopy} */ (t.uiSettingsDetail);
+      // 会话备份导入（export_session 的逆操作）：命令侧自开文件对话框，用户
+      // 取消返回 null；结果按 imported/skipped_existing/failed 组 toast。
+      // 处理器住在懒加载的 SettingsView 里（不再占主入口 chunk）。
+      const [importingSessions, setImportingSessions] = useState(false);
+      const handleImportSessionArchive = useCallback(async () => {
+        // import_session_archive 不经引擎（纯本地 store + 原生对话框）：
+        // bridge 断连不拦截，只挡并发重入（r7 minor）。
+        if (importingSessions) return;
+        setImportingSessions(true);
+        try {
+          const result = await invokeTauri('import_session_archive');
+          if (!result) return;
+          // 逐条失败原因落到 console（toast 只放计数——失败串含 id/原因，
+          // 不适合塞进 pill；此前原因哪都不出现，用户只见「1 failed」无从
+          // 判断是保留 id 还是 schema 超限）。
+          for (const failure of [...(result.failed || []), ...(result.artifacts_failed || [])]) {
+            console.warn(`[sessions] import ${failure.session_id}: ${failure.reason}`);
+          }
+          const artifactsFailedCount = (result.artifacts_failed || []).length;
+          setSettingsToast({
+            // 四计数汇总 + 缺产物补救指引是长文案：单行 pill 3 秒会把「删会话
+            // 重导入」的恢复路径整个截掉（重导入又命中 skip-existing）——
+            // 长文案自带 8 秒时长（r7 minor）。
+            text: t.uiSettings.importSessionsDone(
+              (result.imported || []).length,
+              (result.skipped_existing || []).length,
+              (result.failed || []).length,
+              // 部分导入（缺 artifacts）计数：Rust SessionImportSummary.artifacts_failed。
+              artifactsFailedCount,
+            ),
+            duration: artifactsFailedCount > 0 || (result.failed || []).length > 0 ? 8000 : 3000,
+            // multiline（r8）：长文案在窄窗口上单行 truncate 仍会裁掉补救指引
+            // 的尾部——四计数汇总只在有缺产/失败时才是长文案。
+            multiline: artifactsFailedCount > 0 || (result.failed || []).length > 0,
+          });
+        } catch (error) {
+          const detail = String((error && error.message) || error || t.unknownError);
+          console.warn('import session archive failed', error);
+          setSettingsToast({ text: `${t.uiSettings.importSessionsFailed}: ${detail}`, duration: 8000, multiline: true });
+        } finally {
+          setImportingSessions(false);
+        }
+      }, [importingSessions, setSettingsToast, t]);
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const showSuperPermissionSettings = !!platformCapabilities.showSuperPermissionSettings;
       const usesBundledDependencyInstaller = !!platformCapabilities.usesBundledDependencyInstaller;
@@ -2825,6 +3469,19 @@ const formatMemoryTime = (item, copy) => {
             </IOSRow>
           </IOSSection>
           )}
+          {/* 会话备份导入：桌面独占（web 车道无文件对话框，也不该触及宿主
+              会话存储），放在通用页尾部与导出入口（侧栏会话菜单）互为闭环。 */}
+          {!isWeb && setSettingsToast && (
+            <IOSSection title={t.uiSettings.sessionsSection}>
+              <IOSRow label={t.uiSettings.importSessionsArchive} desc={t.uiSettings.importSessionsDesc}>
+                <button type="button" data-testid="settings-import-sessions" disabled={importingSessions}
+                  onClick={handleImportSessionArchive}
+                  className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${importingSessions ? 'opacity-60 cursor-not-allowed' : ''} ${actionButton('blue')}`}>
+                  {importingSessions ? t.uiSettings.importingSessions : t.uiSettings.importSessionsArchive}
+                </button>
+              </IOSRow>
+            </IOSSection>
+          )}
         </>
         );
       };
@@ -3182,7 +3839,7 @@ const formatMemoryTime = (item, copy) => {
                 </IOSRow>
               </IOSSection>
             )}
-            {canUseComputerUse && <ComputerUseSettingSection t={t} />}
+            {canUseComputerUse && <ComputerUseSettingSection t={t} platformCapabilities={platformCapabilities} />}
             {canInstallDependencies && <div id="settings-dependencies">
               <IOSSection
                 title={t.depCheckTitle}
@@ -3328,7 +3985,7 @@ const formatMemoryTime = (item, copy) => {
             <ModelFormModal isDark={activeTheme === 'dark'} t={t} initial={editingModel} bs={bs} models={userModels}
               onCancel={() => setEditingModel(null)}
               // 保存/错误提示由弹窗内部控制关闭(保存失败保持打开展示行内错误)。
-              onSave={async m => onSaveModel(m)} />
+              onSave={async (m, options) => onSaveModel(m, options)} />
           )}
           {modelDeleteConfirm && <ModelDeleteDialog model={modelDeleteConfirm} settingsCopy={settingsCopy} onDeleteModel={onDeleteModel} setModelDeleteConfirm={setModelDeleteConfirm} />}
           {searchDeleteConfirm && <SearchDeleteDialog source={searchDeleteConfirm} settingsCopy={settingsCopy} onDeleteSearchProvider={onDeleteSearchProvider} setSearchDeleteConfirm={setSearchDeleteConfirm} setRestartDialog={setRestartDialog} />}

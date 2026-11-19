@@ -3795,7 +3795,8 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "enum": ["USAGE_RECONCILIATION_REVIEW", "MODEL_EMERGENCY_CANCELLATION_REVIEW"]
             }
           },
           {
