@@ -13,7 +13,9 @@ use std::sync::Arc;
 use super::desktop_remote_state::DesktopRemoteState as State;
 
 use crate::features::codex_acp::{AcpPool, RemotePermissionOwner};
-use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
+use crate::features::remote_control::controller::controlled::{
+    ControlledDeviceManager, PERMISSION_DISPATCH_DEFERRED,
+};
 #[cfg(test)]
 use crate::features::remote_control::controller::permission::{
     DecisionAuthority, PermissionRequest,
@@ -63,10 +65,31 @@ pub fn desktop_remote_permission_deny_task(
 /// never decide a remote request.
 pub(crate) async fn respond_remote_permission_via_acp(
     acp_pool: &AcpPool,
+    authority: &PermissionAuthority,
     owner: &RemotePermissionOwner,
     permission_request_id: &str,
     decision: PermissionDecision,
 ) -> Result<(), String> {
+    if !authority.request_matches_task_instance(
+        &owner.lease,
+        &owner.task_id,
+        &owner.session_id,
+        owner.task_sequence,
+        permission_request_id,
+    ) {
+        return Err("permission_binding_stale".to_owned());
+    }
+    if decision == PermissionDecision::Allow
+        && authority.allow_delivery_for_task_instance(
+            &owner.lease,
+            &owner.task_id,
+            &owner.session_id,
+            owner.task_sequence,
+            permission_request_id,
+        )
+    {
+        return Ok(());
+    }
     let result = acp_pool
         .respond_remote_permission(
             owner,
@@ -77,10 +100,35 @@ pub(crate) async fn respond_remote_permission_via_acp(
     if result.is_ok() {
         return Ok(());
     }
+    if result
+        .as_ref()
+        .is_err_and(|error| error.to_string() == PERMISSION_DISPATCH_DEFERRED)
+    {
+        return Err(PERMISSION_DISPATCH_DEFERRED.to_owned());
+    }
+    if decision == PermissionDecision::Allow
+        && authority.allow_delivery_for_task_instance(
+            &owner.lease,
+            &owner.task_id,
+            &owner.session_id,
+            owner.task_sequence,
+            permission_request_id,
+        )
+    {
+        return Ok(());
+    }
     // The ACP adapter may observe the authority decision and win the response
     // race. Treat that as the same successful resolution only while the exact
     // owner is still current and the exact request is no longer pending.
-    if acp_pool.has_remote_permission_owner(owner)
+    if (decision != PermissionDecision::Allow
+        || authority.allow_delivery_for_task_instance(
+            &owner.lease,
+            &owner.task_id,
+            &owner.session_id,
+            owner.task_sequence,
+            permission_request_id,
+        ))
+        && acp_pool.has_remote_permission_owner(owner)
         && !acp_pool
             .pending_remote_permissions(owner)
             .await

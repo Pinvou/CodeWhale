@@ -45,15 +45,34 @@ func TestEntitlementCorrectionReadPlanUsesPaymentEvidenceAndRejectsUsePostgresIn
 		{`INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,expires_at,created_at) VALUES($1,$2,'RECHARGE',$3,100,100,TRUE,$4,$5)`, []any{lotID, walletID, reference, now.Add(24 * time.Hour), now}},
 		{`INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,source_payment_transaction_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at,source_type,source_reference) VALUES($1,$2,$3,$4,$5,$6,'CORRECTION_TEST','Test','',100,100,100,$7,$7,$8,'ACTIVE',$7,$7,'PAYMENT',$9)`, []any{packageID, ownerID, walletID, orderID, transactionID, lotID, now, now.Add(24 * time.Hour), reference}},
 		{`INSERT INTO entitlement_components(id,package_id,component_type,credit_lot_id,original_microcredits,available_microcredits,credited_at,expires_at,status,created_at,updated_at) VALUES($1,$2,'BASE',$1,100,100,$3,$4,'ACTIVE',$3,$3)`, []any{lotID, packageID, now, now.Add(24 * time.Hour)}},
-		{`INSERT INTO journal_entries(id,entry_type,business_reference,description,created_at) VALUES($1,'RECHARGE',$2,'fixture',$3)`, []any{journalID, reference, now}},
-		{`INSERT INTO ledger_postings(id,journal_entry_id,ledger_account_id,delta_microcredits,credit_lot_id,created_at) VALUES($1,$2,$3,100,$4,$5)`, []any{uuid.New(), journalID, walletAccountID, lotID, now}},
-		{`INSERT INTO ledger_postings(id,journal_entry_id,ledger_account_id,delta_microcredits,created_at) VALUES($1,$2,$3,-100,$4)`, []any{uuid.New(), journalID, clearingAccountID, now}},
 	}
 	for index, item := range statements {
 		if _, err := tx.Exec(ctx, item.sql, item.args...); err != nil {
 			t.Fatalf("fixture statement %d: %v", index, err)
 		}
 	}
+	coordinator, err := newBillingFixturePaymentCoordinator(repository, &retainedFinancialProvider{}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissionID := prepareBillingFixturePaymentCredit(t, ctx, coordinator, tx, orderID, transactionID, "correction-txn-"+transactionID.String(), now)
+	funding := []struct {
+		sql  string
+		args []any
+	}{
+		{`INSERT INTO journal_entries(id,entry_type,business_reference,description,created_at) VALUES($1,'RECHARGE',$2,'fixture',$3)`, []any{journalID, reference, now}},
+		{`INSERT INTO ledger_postings(id,journal_entry_id,ledger_account_id,delta_microcredits,credit_lot_id,created_at) VALUES($1,$2,$3,100,$4,$5)`, []any{uuid.New(), journalID, walletAccountID, lotID, now}},
+		{`INSERT INTO ledger_postings(id,journal_entry_id,ledger_account_id,delta_microcredits,created_at) VALUES($1,$2,$3,-100,$4)`, []any{uuid.New(), journalID, clearingAccountID, now}},
+	}
+	for index, item := range funding {
+		if _, err := tx.Exec(ctx, item.sql, item.args...); err != nil {
+			t.Fatalf("fixture statement %d: %v", index+len(statements), err)
+		}
+	}
+	if err := markPaymentCreditApplied(ctx, tx, admissionID); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}

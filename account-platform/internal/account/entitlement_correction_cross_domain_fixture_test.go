@@ -91,11 +91,20 @@ GRANT USAGE,CREATE ON SCHEMA public TO billing_service`); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := billingschema.Up(ctx, connection, loaded); err != nil {
+	// These are retained paid financial facts, not a new post-fence credit.
+	// Seed them at the actual previous schema, then publicly upgrade before
+	// returning the runtime fixture. Do not fabricate Account money permits.
+	var historical []migrations.Migration
+	for _, migration := range loaded {
+		if migration.Version != 900039 {
+			historical = append(historical, migration)
+		}
+	}
+	if err := billingschema.Up(ctx, connection, historical); err != nil {
 		t.Fatalf("Billing fixture migrations: %v", err)
 	}
 	migrations.Unlock(ctx, connection)
-	if _, err := migrations.VerifyApplied(ctx, connection, loaded); err != nil {
+	if _, err := migrations.VerifyApplied(ctx, connection, historical); err != nil {
 		t.Fatal(err)
 	}
 
@@ -113,6 +122,13 @@ GRANT USAGE,CREATE ON SCHEMA public TO billing_service`); err != nil {
 	t.Cleanup(pool.Close)
 	repository := billingdomain.NewPostgresRepositoryWithPool(pool)
 	seedEntitlementCrossDomainBillingEvidence(t, ctx, pool)
+	if err := billingschema.Up(ctx, connection, loaded); err != nil {
+		t.Fatalf("Billing retained paid evidence upgrade: %v", err)
+	}
+	migrations.Unlock(ctx, connection)
+	if _, err := migrations.VerifyApplied(ctx, connection, loaded); err != nil {
+		t.Fatal(err)
+	}
 	return repository, pool, connection
 }
 

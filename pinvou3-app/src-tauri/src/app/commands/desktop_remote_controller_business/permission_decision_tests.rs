@@ -1,7 +1,7 @@
 use super::*;
 use crate::features::remote_control::controller::{
     controlled::{ControlledDeviceManager, ControlledLease, ControlledRegistration},
-    permission::PermissionRequest,
+    permission::{DispatchCommit, PermissionRequest},
     relay_transport::{AuthenticatedLease, ControllerRole, transport_channels},
     task::{RemoteSessionProvisioner, RemoteTaskLedger, RemoteTaskRequest, RemoteTaskTerminal},
 };
@@ -161,6 +161,17 @@ impl Fixture {
     fn approval(&self) -> &str {
         self.body["permission_request_id"].as_str().unwrap()
     }
+    // Controlled substitute for the sole asynchronous ACP dependency. It uses
+    // the real authority send boundary; native ACP/owner tests cover the adapter.
+    fn deliver_allow(&self) {
+        assert_eq!(
+            self.authority
+                .dispatch_bound_allow(&self.lease, "task-permission", self.approval(), || true,)
+                .unwrap()
+                .0,
+            DispatchCommit::Committed
+        );
+    }
     fn finish(&self, terminal: RemoteTaskTerminal) {
         self.tasks
             .ledger()
@@ -177,6 +188,7 @@ async fn committed_allow_survives_terminal_during_the_real_handler_await_and_nev
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let calls = Arc::new(AtomicUsize::new(0));
+    let sent = &fixture;
     let handler = fixture.handler();
     let response = handler.handle(&fixture.lease, "a-ref-permission", &fixture.body, {
         let entered = entered.clone();
@@ -185,6 +197,7 @@ async fn committed_allow_survives_terminal_during_the_real_handler_await_and_nev
         move |_, _, decision| async move {
             assert_eq!(decision, PermissionDecision::Allow);
             calls.fetch_add(1, Ordering::SeqCst);
+            sent.deliver_allow();
             entered.notify_one();
             release.notified().await;
             Ok(())
@@ -219,11 +232,13 @@ async fn concurrent_same_decision_reads_commit_while_only_one_acp_response_is_pe
     let fixture = Fixture::new("allow");
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
+    let sent = &fixture;
     let handler = fixture.handler();
     let first = handler.handle(&fixture.lease, "a-ref-permission", &fixture.body, {
         let entered = entered.clone();
         let release = release.clone();
         move |_, _, _| async move {
+            sent.deliver_allow();
             entered.notify_one();
             release.notified().await;
             Ok(())
@@ -298,7 +313,10 @@ async fn first_acp_error_is_preserved_but_committed_retry_does_not_dispatch_agai
                 &fixture.lease,
                 "a-ref-permission",
                 &fixture.body,
-                |_, _, _| async { Err("permission_dispatch_failed".to_owned()) }
+                |_, _, _| async {
+                    fixture.deliver_allow();
+                    Err("permission_dispatch_failed".to_owned())
+                }
             )
             .await
             .unwrap_err(),
@@ -387,7 +405,10 @@ async fn conflicting_decision_and_retired_connection_cannot_read_or_change_a_com
             &fixture.lease,
             "a-ref-permission",
             &fixture.body,
-            |_, _, _| async { Ok(()) },
+            |_, _, _| async {
+                fixture.deliver_allow();
+                Ok(())
+            },
         )
         .await
         .unwrap();
@@ -435,7 +456,10 @@ async fn a_new_task_sequence_with_reused_visible_ids_cannot_read_the_old_receipt
             &fixture.lease,
             "a-ref-permission",
             &fixture.body,
-            |_, _, _| async { Ok(()) },
+            |_, _, _| async {
+                fixture.deliver_allow();
+                Ok(())
+            },
         )
         .await
         .unwrap();
@@ -559,4 +583,96 @@ async fn undecided_terminal_approval_cannot_be_adopted_after_actual_task_pruning
             );
         }
     }
+}
+
+#[tokio::test]
+async fn pre_send_failure_does_not_commit_and_exact_live_retry_can_send() {
+    let fixture = Fixture::new("allow");
+    assert_eq!(
+        fixture
+            .handler()
+            .handle(
+                &fixture.lease,
+                "a-ref-permission",
+                &fixture.body,
+                |_, _, _| async { Err("permission_dispatch_failed".to_owned()) }
+            )
+            .await
+            .unwrap_err(),
+        "permission_dispatch_failed"
+    );
+    assert_eq!(
+        fixture
+            .authority
+            .dispatch_result(fixture.approval())
+            .unwrap(),
+        crate::features::remote_control::controller::permission::DispatchResult::NotDispatched
+    );
+    let value = fixture
+        .handler()
+        .handle(
+            &fixture.lease,
+            "a-ref-permission",
+            &fixture.body,
+            |_, _, _| async {
+                fixture.deliver_allow();
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(value, json!({"state":"allowed"}));
+    fixture.finish(RemoteTaskTerminal::Succeeded);
+    assert_eq!(
+        fixture
+            .handler()
+            .handle(
+                &fixture.lease,
+                "a-ref-permission",
+                &fixture.body,
+                |_, _, _| async { panic!("actually committed retry cannot send twice") }
+            )
+            .await
+            .unwrap(),
+        value
+    );
+}
+
+#[tokio::test]
+async fn pre_send_failure_then_terminal_never_reads_an_allowed_send_receipt() {
+    let fixture = Fixture::new("allow");
+    assert_eq!(
+        fixture
+            .handler()
+            .handle(
+                &fixture.lease,
+                "a-ref-permission",
+                &fixture.body,
+                |_, _, _| async { Err("permission_dispatch_failed".to_owned()) }
+            )
+            .await
+            .unwrap_err(),
+        "permission_dispatch_failed"
+    );
+    fixture.finish(RemoteTaskTerminal::Failed);
+    assert_eq!(
+        fixture
+            .handler()
+            .handle(
+                &fixture.lease,
+                "a-ref-permission",
+                &fixture.body,
+                |_, _, _| async { panic!("terminal cannot dispatch an unsent allow") }
+            )
+            .await
+            .unwrap(),
+        json!({"state":"denied"})
+    );
+    assert_eq!(
+        fixture
+            .authority
+            .dispatch_result(fixture.approval())
+            .unwrap(),
+        crate::features::remote_control::controller::permission::DispatchResult::NotDispatched
+    );
 }

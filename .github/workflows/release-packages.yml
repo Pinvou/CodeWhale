@@ -29,6 +29,8 @@ name: release-packages
 # Windows 正式发布仍进入 windows-release Environment。运行时仓库已公开，
 # checkout 后不保留凭据，后续按锁定 gitlink 匿名拉取运行时和 Git LFS 对象。
 # Linux/macOS 同样零 secret 依赖；所有路径均零外部写入副作用。
+# 桌面远控发布策略由代码固定：Windows 与 64 位 Linux 开启，macOS 关闭；
+# 不读取同名仓库变量。Windows 开启产物仍须通过真实证据门禁并复用验收安装包。
 
 on:
   push:
@@ -103,6 +105,14 @@ on:
       - 'remote-control-relay/test/installer-spdx.test.js'
       - 'scripts/run-windows-remote-control-e2e.ps1'
       - 'scripts/windows-e2e-process-guard.ps1'
+      - 'scripts/ci-fixture-process.py'
+      - 'scripts/windows-owned-process.cs'
+      - 'scripts/release-owned-process.py'
+      - 'remote-control-relay/scripts/release-process.mjs'
+      - 'remote-control-relay/test/release-process.test.js'
+      - 'remote-control-relay/test/windows-release-owned-service.test.js'
+      - 'remote-control-relay/test/fixtures/windows-owned-driver.cs'
+      - 'scripts/tests/test_ci_fixture_process.py'
       - 'scripts/windows-e2e-orchestrator-helpers.ps1'
       - 'scripts/create-installer-spdx.mjs'
       - 'scripts/check-enrollment-gated-v2-rollback.mjs'
@@ -296,6 +306,14 @@ on:
       - 'remote-control-relay/test/installer-spdx.test.js'
       - 'scripts/run-windows-remote-control-e2e.ps1'
       - 'scripts/windows-e2e-process-guard.ps1'
+      - 'scripts/ci-fixture-process.py'
+      - 'scripts/windows-owned-process.cs'
+      - 'scripts/release-owned-process.py'
+      - 'remote-control-relay/scripts/release-process.mjs'
+      - 'remote-control-relay/test/release-process.test.js'
+      - 'remote-control-relay/test/windows-release-owned-service.test.js'
+      - 'remote-control-relay/test/fixtures/windows-owned-driver.cs'
+      - 'scripts/tests/test_ci_fixture_process.py'
       - 'scripts/windows-e2e-orchestrator-helpers.ps1'
       - 'scripts/create-installer-spdx.mjs'
       - 'scripts/check-enrollment-gated-v2-rollback.mjs'
@@ -495,7 +513,7 @@ jobs:
           else
             CHANGED_FILES=$(git diff --name-only "$BEFORE" "$GITHUB_SHA")
             if printf '%s\n' "$CHANGED_FILES" | node scripts/remote-control-release-path-policy.mjs || printf '%s\n' "$CHANGED_FILES" | grep -Eq \
-              '^(VERSION|scripts/(sync-version\.mjs|run-windows-remote-control-e2e\.ps1|windows-e2e-process-guard\.ps1|windows-e2e-orchestrator-helpers\.ps1|create-installer-spdx\.mjs|check-enrollment-gated-v2-rollback\.mjs|asr/(build-sensevoice-runtime\.sh|sensevoice-source\.env)|check-linux-(elf-policy|glibc-floor)\.sh)|remote-control-relay/(docs/schemas/|package(-lock)?\.json|scripts/(controller-release-gate|validate-controller-release-evidence|deploy-controller-preflight|query-controller-release-telemetry|prepare-legacy-gateway-route|verify-provider-attestation|verify-installer-supply-chain)\.mjs|controller-sensitive-scan\.js|test/(controller-(release-|sensitive-scan|telemetry)|windows-e2e-(orchestrator-contract|orchestrator-helpers|path-guard)))|\.github/workflows/(release-packages|windows-remote-control-(evidence|build-evidence))\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/(remote-control-ui-smoke\.mjs|tauri/(build|codex-bridge|linux-asr-runtime|platform-config|windows-installer|windows-runtime)\.js)|src-tauri/(config/platforms/(linux|windows)|packaging/windows)/|src-tauri/resources/platforms/linux/asr/|tests/(codex_acp_windows_|linux_asr_runtime_packaging\.test\.js|remote_control_real_ui_smoke_contract\.test\.mjs|windows_runtime_packaging_contract\.test\.js)))'; then
+              '^(VERSION|scripts/(sync-version\.mjs|run-windows-remote-control-e2e\.ps1|windows-e2e-process-guard\.ps1|ci-fixture-process\.py|tests/test_ci_fixture_process\.py|windows-owned-process\.cs|release-owned-process\.py|windows-e2e-orchestrator-helpers\.ps1|create-installer-spdx\.mjs|check-enrollment-gated-v2-rollback\.mjs|asr/(build-sensevoice-runtime\.sh|sensevoice-source\.env)|check-linux-(elf-policy|glibc-floor)\.sh)|remote-control-relay/(docs/schemas/|package(-lock)?\.json|scripts/(release-process|controller-release-gate|validate-controller-release-evidence|deploy-controller-preflight|query-controller-release-telemetry|prepare-legacy-gateway-route|verify-provider-attestation|verify-installer-supply-chain)\.mjs|controller-sensitive-scan\.js|test/(windows-release-owned-service\.test\.js|fixtures/windows-owned-driver\.cs|release-process\.test\.js|controller-(release-|sensitive-scan|telemetry)|windows-e2e-(orchestrator-contract|orchestrator-helpers|path-guard)))|\.github/workflows/(release-packages|windows-remote-control-(evidence|build-evidence))\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/(remote-control-ui-smoke\.mjs|tauri/(build|codex-bridge|linux-asr-runtime|platform-config|windows-installer|windows-runtime)\.js)|src-tauri/(config/platforms/(linux|windows)|packaging/windows)/|src-tauri/resources/platforms/linux/asr/|tests/(codex_acp_windows_|linux_asr_runtime_packaging\.test\.js|remote_control_real_ui_smoke_contract\.test\.mjs|windows_runtime_packaging_contract\.test\.js)))'; then
               BUILD_REQUIRED=true
             else
               BUILD_REQUIRED=false
@@ -523,7 +541,7 @@ jobs:
       evidence_artifact_id: ${{ steps.remote-evidence-identity.outputs.artifact-id }}
       evidence_run_id: ${{ steps.remote-evidence-identity.outputs.run-id }}
     env:
-      PINVOU_DESKTOP_CONTROLLER_ENABLED: ${{ vars.PINVOU_DESKTOP_CONTROLLER_ENABLED || '0' }}
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '1'
       PINVOU_RELEASE_COMMIT_SHA: ${{ github.sha }}
       PINVOU_REMOTE_RELEASE_EVIDENCE: ${{ github.workspace }}/remote-control-evidence/manifest.json
       PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY: ${{ vars.PINVOU_REMOTE_LEGACY_ENDPOINT_INVENTORY }}
@@ -627,6 +645,11 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.remote_control_evidence_run_id || vars.PINVOU_REMOTE_CONTROL_EVIDENCE_RUN_ID }}
 
+      - uses: actions/setup-python@v7
+        if: ${{ runner.environment == 'github-hosted' }}
+        with:
+          python-version: "3.13"
+
       - name: 执行远控发布门禁
         run: node remote-control-relay/scripts/controller-release-gate.mjs
 
@@ -642,6 +665,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 90
     env:
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '1'
       VERSION: ${{ needs.check-version-bump.outputs.version }}
       # 托管 x86_64 runner 的冷 thin-LTO 构建也连续在约 30 分钟收到 shutdown
       # (exit 143)。与 ARM64 一致，仅对 CI artifact 关闭跨 crate LTO 并提高
@@ -853,6 +877,7 @@ jobs:
     # windows 150 与 macos 360 的余量比例更紧,见各自 job 注释观察。
     timeout-minutes: 120
     env:
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '1'
       VERSION: ${{ needs.check-version-bump.outputs.version }}
       # thin-LTO + codegen-units=1 的冷构建在托管 ARM runner 上连续于约 25 分钟
       # 收到 shutdown(exit 143),且 runner 终止会跳过 Rust cache 保存。仅在该 CI
@@ -1032,6 +1057,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 180
     env:
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '1'
       VERSION: ${{ needs.check-version-bump.outputs.version }}
       # 与 x64/arm64 同源风险:release(thin-LTO O3) 编译 codewhale-tui 的
       # rustc/LLVM 栈溢出(SIGBUS)。交叉构建的 rustc 仍是 x86_64 宿主进程,
@@ -1248,7 +1274,7 @@ jobs:
         shell: bash
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
-      PINVOU_DESKTOP_CONTROLLER_ENABLED: ${{ vars.PINVOU_DESKTOP_CONTROLLER_ENABLED || '0' }}
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '1'
       PINVOU_RELEASE_INSTALLER_SHA256: ${{ vars.PINVOU_RELEASE_INSTALLER_SHA256 }}
       AWS_LC_SYS_PREBUILT_NASM: "1"
       # release 编译 codewhale-tui 的 SIGBUS 同源风险防护(三端统一注入;
@@ -1450,6 +1476,7 @@ jobs:
     # linker.
     timeout-minutes: 360
     env:
+      PINVOU_DESKTOP_CONTROLLER_ENABLED: '0'
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       VERSION: ${{ needs.check-version-bump.outputs.version }}
       # Normalizes build-machine absolute paths embedded in the artifact

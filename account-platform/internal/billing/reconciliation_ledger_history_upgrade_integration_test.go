@@ -23,7 +23,7 @@ func TestLedgerRepairProofHistoricalUpgradePostgres(t *testing.T) {
 	}
 	row := ProviderBillEntry{EntryType: "PAYMENT", ProviderReferenceID: *source.ChannelTransactionID, ChannelTransactionID: *source.ChannelTransactionID, MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen + 1, Currency: order.Currency, Status: "SUCCESS", PaidAt: *source.PaidAt}
 	provider := &reconciliationFixtureProvider{retainedFinancialProvider: retainedFinancialProvider{result: source}, rows: []ProviderBillEntry{row}}
-	coordinator, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
