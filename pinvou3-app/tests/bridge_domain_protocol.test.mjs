@@ -249,7 +249,14 @@ const expectedProtocolHashes = {
   // 834 回流重钉：chat:compaction 监听体新增 in-flight 标记维护块（含
   // compactionStarts/compactionSeq 与 post_tokens 消费）；官方侧 addSystemItem
   // 行保留 `compactId: compactId` 写法，与社区 shorthand 不同，故哈希为本仓实算值。
-  chat: '457c465bd8f365864f9e9988e369eba1258086bd18dfd85077d406b0d7f6c278',
+  // 回流社区 #836 重算：chat.js/chat-events.js 的 <context_update> 序号基线
+  // （runtimeContextUpdatesBefore 随气泡下发、压缩后 vintage 重置）与
+  // committed 转写权威重同步监听体落在采集文本内；invoke/listen 调用面
+  // 无增删（dependencies 钉不变）。
+  // rebase 至 main e828f68fe6 重算：#2735（手动压缩入口）对
+  // bridge-shared-helpers.js 的 compaction 状态切片与 in-flight 缓冲豁免
+  // 与本分支 <context_update> vintage 重置叠加进哈希面，此钉=并集树实算值。
+  chat: '0a1ed5b87dcb42672256370ea5cdbd266da011164f3770b14d37363450860712',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -374,7 +381,8 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // kb_model_cancel 回流：共享知识模型 helper 新增取消命令，合计 75 个签名。
 // 社区 #841 回流：评审快照串行链在 record 时捕获 owning sid，避免排队写漂到
 // 切换后的会话；并集后按当前共享桥接面重算协议指纹。
-const expectedSharedBaseHash = '704c9375f0cc90d0a94c64c186ccaff688d193c155df7d6f6596de50bf3a7d44';
+// 社区 #870 回流：按并集共享桥接面（含 #2733 虚拟显示与既有内容）重算协议指纹。
+const expectedSharedBaseHash = '4acf82a923beb336166f69639fea51b76550cc53bfcff88f34044d0c8a378843';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),

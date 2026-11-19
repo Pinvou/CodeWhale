@@ -281,12 +281,15 @@ try {
   Write-Host "[test] -CheckOnly detected the corrupted toolchain: OK"
 
   Set-RustupSmokePhase "repair" # rustup-smoke-diagnostic
-  $repairOutput = @(
-    & $repairScript `
-      -InstallAttemptTimeoutSeconds 300 `
-      -RepairAttemptsPerSource 1 *>&1
-  )
-  $repairOutput | ForEach-Object { Write-Host $_ }
+  # Stream diagnostics before a terminating repair error can discard an
+  # assignment's buffered output. Keep the same evidence for assertions.
+  $repairOutput = [System.Collections.Generic.List[object]]::new()
+  & $repairScript `
+    -InstallAttemptTimeoutSeconds 300 `
+    -RepairAttemptsPerSource 1 *>&1 | ForEach-Object {
+      $repairOutput.Add($_)
+      Write-Host $_
+    }
   $repairLog = $repairOutput | Out-String
 
   Set-RustupSmokePhase "repair_evidence" # rustup-smoke-diagnostic

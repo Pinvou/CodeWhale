@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
-import { validateModelOperationsPageOverview,validateModelOperationsOverview,modelTokenPageOverviewPermissionView,modelTokenPageOverviewDrilldown,usageOverviewRoute } from '../src/features/account-platform/admin-usage-overview.js';
+import { validateModelOperationsPageOverview,validateModelOperationsOverview,modelTokenPageOverviewPermissionView,modelTokenPageOverviewDrilldown,modelOperationsOverviewDrilldown,usageOverviewRoute } from '../src/features/account-platform/admin-usage-overview.js';
 import { planAdminModelTokenPageOverview,modelTokenPageOverviewCacheKey,createModelTokenPageOverviewRequestTracker } from '../src/features/account-platform/admin-usage-overview-state.js';
-import { adminModelTokenQueryUpdates } from '../src/features/account-platform/admin-navigation.js';
+import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from '../src/features/account-platform/admin-navigation.js';
 import { overviewDTO } from './fixtures/account-platform-f05-overview-data.js';
 
 test('Three installed permission views exactly bind plan/window and real client GET',async()=>{
@@ -25,6 +25,25 @@ test('Card and bucket routes reset detail/evidence/cursor with half-open source 
   if(key==='usage_trend'){assert.equal(next.query.usage_started_from,bucket.from);assert.equal(next.query.usage_started_to,bucket.to);assert.equal(next.query.usage_cursor,null);}
   if(key==='provisioning_pending_count')assert.equal(next.query.provisioning_status,'PENDING');
  }
+});
+test('Financial overview routes keep the original case type on the real client request', async () => {
+ const window=overviewDTO('TOKEN_AND_USAGE').usage.window;
+ const oldFetch=globalThis.fetch; const calls=[];
+ globalThis.fetch=async url=>{calls.push(new URL(url,'https://portal.example'));return new Response('{}');};
+ try {
+  const client=new AdminPlatformClient();
+  for(const metric of ['reconciliation_pending_count','reconciliation_stopped_count']){
+   const legacy=modelOperationsOverviewDrilldown(metric,window);
+   const page=modelTokenPageOverviewDrilldown('modelOperations',metric,window);
+   for(const [target,query] of [[legacy,legacy.query],[page,adminModelTokenQueryUpdates(page.source,page.query)]]){
+    const route=usageOverviewRoute(target,query);
+    const search=new URLSearchParams(Object.entries(route.query).filter(([,value])=>value!=null));
+    await client.usageReconciliationCases(readAdminModelTokenQuery('reconciliation',{search}));
+    assert.equal(calls.at(-1).pathname,'/api/admin/token/admin/v1/reconciliation-cases');
+    assert.equal(calls.at(-1).searchParams.get('case_type'),'USAGE_RECONCILIATION_REVIEW');
+   }
+  }
+ }finally{globalThis.fetch=oldFetch;}
 });
 test('Lineage cache and request generations isolate actor/version/permission/window',()=>{
  const base={userID:'controlled-owner',authorizationVersion:1,section:'modelOperations',permissionView:'TOKEN_AND_USAGE',window:'24h'};const key=modelTokenPageOverviewCacheKey(base);for(const change of[{userID:'other'},{authorizationVersion:2},{permissionView:'USAGE_ONLY'},{window:'7d'}])assert.notEqual(modelTokenPageOverviewCacheKey({...base,...change}),key);

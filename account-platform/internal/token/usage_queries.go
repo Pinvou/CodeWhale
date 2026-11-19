@@ -28,7 +28,7 @@ const (
 	adminUsageSort                        = "updated_at DESC,id ASC"
 	adminReconciliationSort               = "updated_at DESC,id DESC"
 	adminUsageEvidenceSort                = "observed_at ASC,source_kind ASC,source_id ASC"
-	adminUsageReconciliationCasePredicate = "review.domain='TOKEN' AND review.case_type IN ('USAGE_RECONCILIATION_REVIEW') AND review.resource_type='USAGE_REQUEST' AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=review.resource_id)"
+	adminUsageReconciliationCasePredicate = "review.domain='TOKEN' AND review.case_type IN ('USAGE_RECONCILIATION_REVIEW','" + modelEmergencyCancellationReviewCase + "') AND review.resource_type='USAGE_REQUEST' AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=review.resource_id)"
 )
 
 type AdminReconciliationCase struct {
@@ -141,7 +141,7 @@ func reconciliationSnapshotSource(filter adminQueryFilter) (AdminSnapshotMemberS
 	if err != nil {
 		return nil, err
 	}
-	caseType, err := filter.enum("case_type", "USAGE_RECONCILIATION_REVIEW")
+	caseType, err := filter.enum("case_type", "USAGE_RECONCILIATION_REVIEW", modelEmergencyCancellationReviewCase)
 	if err != nil {
 		return nil, err
 	}

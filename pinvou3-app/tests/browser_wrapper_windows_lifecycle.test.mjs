@@ -96,7 +96,9 @@ function scheduleToolCompletion(id, complete, delayMs, releasePath) {
 }
 
 audit({ kind: 'start' });
+let inputChunks = 0;
 process.stdin.on('data', (chunk) => {
+  if (inputChunks++ < 4) audit({ kind: 'stdin-chunk', bytes: chunk.length });
   input += chunk;
   let newline;
   while ((newline = input.indexOf('\n')) >= 0) {
@@ -105,22 +107,27 @@ process.stdin.on('data', (chunk) => {
     if (!line.trim()) continue;
     const message = JSON.parse(line);
     if (message.method === 'initialize') {
+      audit({ kind: 'protocol-received', name: 'initialize' });
       const currentMode = mode();
       if (currentMode.handshakeError) {
         error(message.id, 'configured startup handshake rejection');
         continue;
       }
-      const finishHandshake = () => result(message.id, {
+      const finishHandshake = () => {
+        audit({ kind: 'protocol-reply', name: 'initialize' });
+        result(message.id, {
           protocolVersion: message.params?.protocolVersion ?? '2024-11-05',
           capabilities: { tools: {} },
           serverInfo: { name: 'fake-windows-mcp', version: '0' },
         });
+      };
       const handshakeDelayMs = Number(currentMode.handshakeDelayMs) || 0;
       if (handshakeDelayMs > 0) setTimeout(finishHandshake, handshakeDelayMs);
       else finishHandshake();
       continue;
     }
     if (message.method === 'tools/list') {
+      audit({ kind: 'protocol-received', name: 'tools/list' });
       if (mode().toolsListError) {
         error(message.id, 'configured runtime catalog rejection');
         continue;
@@ -264,6 +271,14 @@ process.stdin.on('data', (chunk) => {
     }
     if (name === 'click') {
       const currentMode = mode();
+      if (currentMode.crashOnClick) {
+        // Inject the selected fault in the receiver, at dispatch. Waiting for
+        // a controller-side file poll and then scheduling a kill races the
+        // independent, deliberately strict input-authorization heartbeat.
+        audit({ kind: 'crash-injected', name, requestId: message.id });
+        process.kill(process.pid, 'SIGKILL');
+        return;
+      }
       const complete = () => {
         pendingToolTimers.delete(message.id);
         audit({ kind: 'tool-complete', name, requestId: message.id });
@@ -311,6 +326,14 @@ process.stdin.on('data', (chunk) => {
     error(message.id, 'unexpected tool: ' + name);
   }
 });
+audit({ kind: 'stdin-listener-ready' });
+let startupTicks = 0;
+const startupProgress = setInterval(() => {
+  const cpu = process.cpuUsage();
+  audit({ kind: 'startup-tick', cpuMs: (cpu.user + cpu.system) / 1000 });
+  if (++startupTicks >= 5) clearInterval(startupProgress);
+}, 1000);
+startupProgress.unref();
 `;
 
 const CATALOG = {
@@ -520,8 +543,8 @@ async function cleanupFixture(fixture, host, ...wrappers) {
     ));
     const auditReadStarted = performance.now();
     try {
-      const audit = readAudit(fixture.auditPath).slice(-40).map(({ kind, name, pid, at }) =>
-        ({ kind, name, pid, at }));
+      const audit = readAudit(fixture.auditPath).slice(-40).map(({ kind, name, pid, at, bytes, cpuMs }) =>
+        ({ kind, name, pid, at, bytes, cpuMs }));
       console.error('[browser-upstream-fixture-events]', JSON.stringify(audit));
     } catch {
       console.error('[browser-upstream-fixture-events]', JSON.stringify({ unavailable: true }));
@@ -2082,11 +2105,8 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
   const wrapper = driveWrapper(fixture);
 
   try {
+    writeFileSync(fixture.modePath, JSON.stringify({ crashOnClick: true }));
     await initializeWorkspace(wrapper, 'windows-upstream-crash-test');
-
-    writeFileSync(fixture.modePath, JSON.stringify({
-      clickReleasePath: ownedReleaseGate(fixture, 'upstream-crash.release'),
-    }));
     const beforeHostState = await host.snapshot();
     const before = {
       begin: beforeHostState.operationCalls.get('begin_agent_operation') || 0,
@@ -2098,19 +2118,18 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
       name: 'click',
       arguments: { uid: 'crash-during-dispatch' },
     });
-    await waitUntil(
-      async () => readAudit(fixture.auditPath)
-        .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length ===
-        before.clicks + 1,
-      'crash fixture did not dispatch its click',
-    );
-    const upstreamPid = readAudit(fixture.auditPath)
+    const outcome = await inFlight.response;
+    const audit = readAudit(fixture.auditPath);
+    assert.equal(audit.filter((entry) => entry.kind === 'tool' && entry.name === 'click').length, before.clicks + 1);
+    const upstreamPid = audit
       .filter((entry) => entry.kind === 'start')
       .at(-1)?.pid;
     assert.ok(Number.isInteger(upstreamPid), 'fake upstream pid is missing');
-    process.kill(upstreamPid, 'SIGKILL');
-
-    const outcome = await inFlight.response;
+    const crash = audit.filter((entry) => entry.kind === 'crash-injected');
+    assert.equal(crash.length, 1, 'the receiver must inject exactly one real crash');
+    assert.equal(crash[0].pid, upstreamPid);
+    assert.equal(crash[0].name, 'click');
+    assert.equal(audit.filter((entry) => entry.kind === 'tool-complete' && entry.name === 'click').length, 0);
     assert.equal(
       outcome.result.structuredContent.errorCode,
       'browser/action-commit-unknown-after-upstream-interruption',

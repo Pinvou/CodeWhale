@@ -121,9 +121,13 @@ func packageExpiryFactsWithOrder(t *testing.T, ctx context.Context, r *PostgresR
 		if table == "outbox_events" {
 			key = "event_id"
 		}
-		query := `SELECT COALESCE(md5(string_agg(md5(to_jsonb(row_value)::text),'' ORDER BY row_value.` + pgx.Identifier{key}.Sanitize() + `::text)),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
+		// PostgreSQL's record wire representation includes every column, its
+		// type, length and null marker. Hash the complete row without repeatedly
+		// constructing wide JSON objects at every financial checkpoint. This
+		// fingerprint is compared only within the same owned database/schema.
+		query := `SELECT COALESCE(md5(string_agg(md5(record_send(row_value)),'' ORDER BY row_value.` + pgx.Identifier{key}.Sanitize() + `::text)),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
 		if originalJSONOrder {
-			query = `SELECT COALESCE(md5(string_agg(md5(to_jsonb(row_value)::text),'' ORDER BY to_jsonb(row_value)->>'id',to_jsonb(row_value)->>'event_id')),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
+			query = `SELECT COALESCE(md5(string_agg(md5(record_send(row_value)),'' ORDER BY to_jsonb(row_value)->>'id',to_jsonb(row_value)->>'event_id')),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
 		}
 		if err := r.pool.QueryRow(ctx, query).Scan(&value); err != nil {
 			t.Fatal(table, err)
