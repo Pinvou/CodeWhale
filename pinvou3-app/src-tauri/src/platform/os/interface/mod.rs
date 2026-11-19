@@ -21,7 +21,7 @@ pub use clipboard::read_clipboard_image;
     not(any(target_os = "macos", target_os = "windows")),
     allow(unused_imports)
 )]
-pub(crate) use path::{ volume_fold_eq, volume_fold_prefix, volume_fold_spelling };
+pub(crate) use path::{volume_fold_eq, volume_fold_prefix, volume_fold_spelling};
 
 pub use path::{
     apply_user_npm_prefix, configure_onnxruntime_dylib, connector_cli_command,
