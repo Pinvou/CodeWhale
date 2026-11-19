@@ -344,6 +344,8 @@ jobs:
             account_platform:
               - 'scripts/ci-test-reuse.py'
               - 'scripts/ci-reuse-policy.py'
+              - 'scripts/ci-job-inputs.py'
+              - 'scripts/tests/test_ci_job_inputs.py'
               - 'scripts/tests/test_ci_reuse_policy.py'
               - 'scripts/tests/test_ci_test_reuse.py'
               - 'account-platform/**'
@@ -857,6 +859,8 @@ jobs:
               - 'scripts/tests/test_ci_transfer_deadline.py'
               - 'scripts/ci-test-reuse.py'
               - 'scripts/ci-reuse-policy.py'
+              - 'scripts/ci-job-inputs.py'
+              - 'scripts/tests/test_ci_job_inputs.py'
               - 'scripts/tests/test_ci_reuse_policy.py'
               - 'scripts/tests/test_ci_test_reuse.py'
               - 'scripts/tests/account-platform-invocation-environment.test.mjs'
@@ -5809,6 +5813,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # schema 2 records the base→tested diff, so the first parent must exist.
+          fetch-depth: 2
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。

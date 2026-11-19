@@ -23,6 +23,8 @@ import (
 
 const packageExpiryIndexName = "entitlement_packages_expiry_scan_idx"
 
+const packageExpiryWorkloadBudget = 5 * time.Minute
+
 // Log only the exact expiry-index root using fixed phase labels and no business data.
 func logPackageExpiryPhase(t *testing.T, ctx context.Context, phase string) {
 	t.Helper()
@@ -42,7 +44,7 @@ func logPackageExpiryPhase(t *testing.T, ctx context.Context, phase string) {
 	} else if ctx.Err() == context.Canceled {
 		state = "cancelled"
 	}
-	t.Logf("PACKAGE_EXPIRY_PHASE phase=%s elapsed_ms=%d remaining_ms=%d state=%s", phase, (3*time.Minute - remaining).Milliseconds(), remaining.Milliseconds(), state)
+	t.Logf("PACKAGE_EXPIRY_PHASE phase=%s elapsed_ms=%d remaining_ms=%d state=%s", phase, (packageExpiryWorkloadBudget - remaining).Milliseconds(), remaining.Milliseconds(), state)
 }
 
 // Read the actual candidate statement without changing the production worker
@@ -234,9 +236,9 @@ func TestPackageExpiryCrossWalletIndexPostgres(t *testing.T) {
 			var r *PostgresRepository
 			var ctx context.Context
 			if scenario == "retained-upgrade" {
-				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second, 900032)
+				r, ctx = retainedFinanceRepositoryWithBudgets(t, packageExpiryWorkloadBudget, 45*time.Second, 900032)
 			} else {
-				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second)
+				r, ctx = retainedFinanceRepositoryWithBudgets(t, packageExpiryWorkloadBudget, 45*time.Second)
 			}
 			base := time.Now().UTC().Truncate(time.Second)
 			r.now = func() time.Time { return base }
