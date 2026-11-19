@@ -220,8 +220,18 @@ FROM payment_transactions WHERE provider_transaction_id=$1 FOR NO KEY UPDATE`, *
 			if err := p.ensureCollectionAllowedWithinTransaction(ctx, tx, order); err != nil {
 				return order, evidenceID, err
 			}
+			admissionID, admitted, err := p.preparePaymentCredit(ctx, tx, order, transaction.ID, provider)
+			if err != nil {
+				return order, evidenceID, err
+			}
+			if !admitted {
+				return order, evidenceID, ErrConflict
+			}
 			packageID, err := issuePackageWithinTransaction(ctx, tx, order, transaction.ID, now, true)
 			if err != nil {
+				return order, evidenceID, err
+			}
+			if err := markPaymentCreditApplied(ctx, tx, admissionID); err != nil {
 				return order, evidenceID, err
 			}
 			resolvedStatus := "PAID"
@@ -266,6 +276,22 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),$13,$14,$14,$14)`,
 	if err != nil {
 		return order, uuid.Nil, err
 	}
+	var admissionID uuid.UUID
+	admissionUnconfirmed := false
+	if !requiresReview {
+		var admitted bool
+		admissionID, admitted, err = p.preparePaymentCredit(ctx, tx, order, transaction.ID, provider)
+		if err != nil {
+			return order, uuid.Nil, err
+		}
+		if !admitted {
+			admissionUnconfirmed = true
+			requiresReview = true
+			if _, err := tx.Exec(ctx, `UPDATE payment_transactions SET status='REVIEW_REQUIRED',fulfillment_status='REVIEW_REQUIRED' WHERE id=$1`, transaction.ID); err != nil {
+				return order, uuid.Nil, err
+			}
+		}
+	}
 	mergeResult := "MERGED"
 	if requiresReview {
 		mergeResult = "REVIEW_REQUIRED"
@@ -279,13 +305,20 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),$13,$14,$14,$14)`,
 		if priorTransactions > 0 {
 			anomalyType = "DUPLICATE_PAYMENT"
 		}
-		if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, anomalyType, "P1", "payment-evidence:"+evidenceID.String(), paymentAnomalyReference{PaymentOrderID: &order.ID, PaymentTransactionID: &transaction.ID, PaymentEvidenceID: &evidenceID}, map[string]any{"evidence_type": evidenceType, "provider_transaction_id": provider.ChannelTransactionID, "provider_paid_at": provider.PaidAt, "prior_transaction_count": priorTransactions}, now); err != nil {
+		details := map[string]any{"evidence_type": evidenceType, "provider_transaction_id": provider.ChannelTransactionID, "provider_paid_at": provider.PaidAt, "prior_transaction_count": priorTransactions}
+		if admissionUnconfirmed {
+			details["reason_code"] = "PAYMENT_CREDIT_ADMISSION_UNCONFIRMED"
+		}
+		if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, anomalyType, "P1", "payment-evidence:"+evidenceID.String(), paymentAnomalyReference{PaymentOrderID: &order.ID, PaymentTransactionID: &transaction.ID, PaymentEvidenceID: &evidenceID}, details, now); err != nil {
 			return order, uuid.Nil, err
 		}
 	}
 	if !requiresReview {
 		packageID, err := issuePackageWithinTransaction(ctx, tx, order, transaction.ID, now, false)
 		if err != nil {
+			return order, evidenceID, err
+		}
+		if err := markPaymentCreditApplied(ctx, tx, admissionID); err != nil {
 			return order, evidenceID, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE payment_transactions SET fulfillment_status='CREDITED',fulfilled_at=$2,updated_at=$2 WHERE id=$1`, transaction.ID, now); err != nil {

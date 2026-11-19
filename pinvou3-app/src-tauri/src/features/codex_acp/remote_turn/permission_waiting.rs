@@ -4,8 +4,9 @@ use crate::features::codex_acp::RemoteOwnedPermission;
 use crate::features::remote_control::controller::task::TaskLeaseBinding;
 
 use super::{
-    AcpPool, ControllerTaskEventSink, PermissionAuthority, REMOTE_PERMISSION_TTL_MS,
-    permission_mint_projection,
+    AcpPool, ControllerTaskEventSink, PERMISSION_DISPATCH_DEFERRED, PermissionAuthority,
+    REMOTE_PERMISSION_TTL_MS, TASK_CANCELLED_CODE, TURN_TIMEOUT_CODE,
+    permission_dispatch_unresolved, permission_mint_projection,
 };
 use crate::features::remote_control::controller::permission::PermissionView;
 use std::{collections::HashSet, sync::Arc};
@@ -90,14 +91,28 @@ pub(super) async fn sync(
                 let resolution = pool
                     .respond_remote_permission(owner, approval_id, allow)
                     .await;
-                if resolution.is_err()
-                    && pool
+                if let Err(error) = resolution {
+                    let code = error.to_string();
+                    if code == PERMISSION_DISPATCH_DEFERRED {
+                        continue;
+                    }
+                    if matches!(code.as_str(), TURN_TIMEOUT_CODE | TASK_CANCELLED_CODE) {
+                        return Err(code);
+                    }
+                    let still_pending = pool
                         .pending_remote_permissions(owner)
                         .await
                         .iter()
-                        .any(|pending| pending.approval_id.as_deref() == Some(approval_id))
-                {
-                    return Err("permission_dispatch_failed".to_owned());
+                        .any(|pending| pending.approval_id.as_deref() == Some(approval_id));
+                    if permission_dispatch_unresolved(
+                        authority,
+                        owner,
+                        approval_id,
+                        allow,
+                        still_pending,
+                    ) {
+                        return Err("permission_dispatch_failed".to_owned());
+                    }
                 }
             }
             continue;

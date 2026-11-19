@@ -25,7 +25,7 @@ func TestF12PaymentActivationFinancialTransactionPostgres(t *testing.T) {
 	setActivation := paymentFixtureActivation(t, ctx, pool)
 	activationVersion := setActivation("ACTIVE")
 	provider := &paymentRepairStubProvider{}
-	coordinator, err := NewPaymentCoordinatorWithProvider(repository, provider)
+	coordinator, err := newBillingFixturePaymentCoordinator(repository, provider)
 	if err != nil {
 		t.Fatal(err)
 	}

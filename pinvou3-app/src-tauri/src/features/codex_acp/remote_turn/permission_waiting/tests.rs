@@ -9,14 +9,21 @@ use crate::features::remote_control::controller::{
     task::{RemoteTaskLedger, RemoteTaskRequest, RemoteTaskTerminal, task_input_digest_for_value},
 };
 use serde_json::{Value, json};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Mutex, oneshot};
 
 // Only provider/runtime activation and response delivery are controlled. The
 // production polling loop, B authority, pool mint, owner matching and task
 // ledger/state service below are real; the one-active-per-task cap is retained.
+struct ResponseFault {
+    code: &'static str,
+    remove_callback: bool,
+}
+
 struct Pool {
     pending: Mutex<HashMap<String, PendingPermission>>,
+    response_fault: parking_lot::Mutex<Option<ResponseFault>>,
+    cancel_before_mint: AtomicBool,
     owners: parking_lot::Mutex<HashMap<String, RemotePermissionOwner>>,
 }
 impl Pool {
@@ -46,6 +53,8 @@ impl Pool {
                 turn_id: None,
                 activity: crate::features::codex_acp::stall::new_activity_clock(),
                 response_tx,
+                // This fixture controls delivery; actual SDK acceptance has its own root.
+                sdk_responder: None,
                 bridge: None,
             },
         );
@@ -82,6 +91,9 @@ impl PermissionPool for Pool {
         ledger: &RemoteTaskLedger,
         ttl: u64,
     ) -> anyhow::Result<PermissionView> {
+        if self.cancel_before_mint.swap(false, Ordering::SeqCst) {
+            self.pending.lock().await.remove(callback);
+        }
         mint_remote_permission_in_maps(
             &self.pending,
             &self.owners,
@@ -99,9 +111,16 @@ impl PermissionPool for Pool {
         approval: &str,
         _: bool,
     ) -> anyhow::Result<()> {
+        let fault = self.response_fault.lock().take();
         let mut pending = self.pending.lock().await;
         let key = remote_permission_response_key(&pending, owner, approval)
             .ok_or_else(|| anyhow::anyhow!("stale"))?;
+        if let Some(fault) = fault {
+            if fault.remove_callback {
+                pending.remove(&key).unwrap();
+            }
+            return Err(anyhow::anyhow!(fault.code));
+        }
         pending.remove(&key).unwrap();
         Ok(())
     }
@@ -154,6 +173,8 @@ impl Fixture {
             })),
             pool: Pool {
                 pending: Mutex::new(HashMap::new()),
+                response_fault: parking_lot::Mutex::new(None),
+                cancel_before_mint: AtomicBool::new(false),
                 owners: parking_lot::Mutex::new(HashMap::from([(
                     owner.session_id.clone(),
                     owner.clone(),
@@ -443,6 +464,91 @@ async fn simultaneous_callbacks_continue_after_first_expiry_without_retiring_the
     assert_eq!(f.authority.active_count(), 1);
     assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
     f.decide(second, PermissionDecision::Deny);
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::Running);
+}
+
+#[tokio::test]
+async fn dispatch_deferred_keeps_waiting_and_terminal_codes_are_preserved() {
+    for code in [
+        PERMISSION_DISPATCH_DEFERRED,
+        TURN_TIMEOUT_CODE,
+        TASK_CANCELLED_CODE,
+    ] {
+        let mut f = Fixture::new();
+        f.pool.insert(&f.owner, "dispatch").await;
+        f.tick().await.unwrap();
+        f.decide("dispatch", PermissionDecision::Deny);
+        *f.pool.response_fault.lock() = Some(ResponseFault {
+            code,
+            remove_callback: false,
+        });
+        let result = f.tick().await;
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        assert_eq!(f.pool.pending_remote_permissions(&f.owner).await.len(), 1);
+        if code == PERMISSION_DISPATCH_DEFERRED {
+            result.unwrap();
+            f.tick().await.unwrap();
+            assert_eq!(f.state(), RemoteTaskState::Running);
+        } else {
+            assert_eq!(result.unwrap_err(), code);
+        }
+    }
+}
+
+#[tokio::test]
+async fn lost_allow_delivery_cannot_resume_when_the_callback_disappears() {
+    let mut f = Fixture::new();
+    f.pool.insert(&f.owner, "lost-allow").await;
+    f.tick().await.unwrap();
+    let id = f.registered["lost-allow"].clone();
+    // A decision alone is not an accepted provider response. Unlike decide(),
+    // deliberately leave this real authority entry awaiting delivery.
+    f.authority
+        .decide_for_owner(
+            DecisionAuthority::ControllerA,
+            &f.owner.lease,
+            &f.owner.task_id,
+            &id,
+            PermissionDecision::Allow,
+            &PermissionDecisionOwner {
+                session_id: f.owner.session_id.clone(),
+                task_sequence: f.owner.task_sequence,
+            },
+        )
+        .unwrap();
+    assert_eq!(f.authority.view(&id).unwrap().state, "allowed");
+    assert!(
+        !f.authority
+            .allow_delivery_observed(&f.owner.lease, &f.owner.task_id, &id)
+    );
+    assert!(
+        !f.authority
+            .callback_was_cancelled(&f.owner.lease, &f.owner.task_id, &id)
+    );
+    *f.pool.response_fault.lock() = Some(ResponseFault {
+        code: "controlled_delivery_failed",
+        remove_callback: true,
+    });
+    assert_eq!(f.tick().await.unwrap_err(), "permission_dispatch_failed");
+    assert!(f.pool.pending_remote_permissions(&f.owner).await.is_empty());
+    assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+}
+
+#[tokio::test]
+async fn callback_cancelled_between_snapshot_and_mint_keeps_the_next_approval_usable() {
+    let mut f = Fixture::new();
+    f.pool.insert(&f.owner, "cancel-before-mint").await;
+    f.pool.cancel_before_mint.store(true, Ordering::SeqCst);
+    f.tick().await.unwrap();
+    assert!(f.pool.pending_remote_permissions(&f.owner).await.is_empty());
+    assert_eq!(f.authority.active_count(), 0);
+    assert_eq!(f.state(), RemoteTaskState::Running);
+    f.pool.insert(&f.owner, "next").await;
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+    assert_eq!(f.authority.active_count(), 1);
+    f.decide("next", PermissionDecision::Deny);
     f.tick().await.unwrap();
     assert_eq!(f.state(), RemoteTaskState::Running);
 }

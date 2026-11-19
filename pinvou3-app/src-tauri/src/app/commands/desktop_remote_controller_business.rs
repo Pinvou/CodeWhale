@@ -14,8 +14,8 @@ use crate::features::remote_control::controller::controlled::{
     ControlledCleanupScope, ControlledCleanupSink, ControlledDeviceManager,
 };
 use crate::features::remote_control::controller::permission::{
-    DecisionAuthority, DecisionOutcome, DispatchCommit, DispatchState, PermissionAuthority,
-    PermissionDecision, PermissionDecisionOwner,
+    DecisionAuthority, DecisionOutcome, PermissionAuthority, PermissionDecision,
+    PermissionDecisionOwner,
 };
 use crate::features::remote_control::controller::ports::{
     ControlledExecutionPort, RemotePortError, RemotePortFuture,
@@ -55,39 +55,6 @@ use tauri::{AppHandle, Manager as _};
 
 #[path = "desktop_remote_controller_business/permission_decision.rs"]
 mod permission_decision;
-
-/// A same-value allow retry observes the original dispatch, never dispatches twice.
-fn commit_effective_permission_allow(
-    authority: &PermissionAuthority,
-    request_id: &str,
-    outcome: &DecisionOutcome,
-) -> Result<(), String> {
-    match outcome {
-        DecisionOutcome::Decided {
-            decision: PermissionDecision::Allow,
-            dispatch_state,
-        }
-        | DecisionOutcome::Replayed {
-            decision: PermissionDecision::Allow,
-            dispatch_state,
-        } => {
-            if *dispatch_state == DispatchState::Dispatched {
-                return Ok(());
-            }
-            match authority
-                .commit_dispatch(request_id, authority.now_ms())
-                .map_err(|error| error.code.to_owned())?
-            {
-                DispatchCommit::Committed
-                | DispatchCommit::Rejected {
-                    code: "permission_already_dispatched",
-                } => Ok(()),
-                DispatchCommit::Rejected { code } => Err(code.to_owned()),
-            }
-        }
-        _ => Ok(()),
-    }
-}
 
 /// E2E-06：B 端清理端口。`ControlledDeviceManager` 在 stop / refresh / 远端断开 /
 /// 恢复失败等任何终态都会触发它；这里用同一代的任务登记表中断本代远端任务，
@@ -904,6 +871,7 @@ impl DesktopControlledBusiness {
             .service();
         let authority = self.app.state::<Arc<PermissionAuthority>>();
         let pool = self.app.state::<AcpPool>();
+        let response_authority = Arc::clone(&authority);
         permission_decision::PermissionDecisionHandler {
             controlled: &controlled,
             tasks: tasks.as_ref(),
@@ -916,6 +884,7 @@ impl DesktopControlledBusiness {
             |owner, request_id, decision| async move {
                 super::desktop_remote_permission::respond_remote_permission_via_acp(
                     &pool,
+                    &response_authority,
                     &owner,
                     &request_id,
                     decision,
@@ -1898,7 +1867,9 @@ mod submit_boundary_tests {
     #[test]
     fn same_allow_retries_and_concurrent_dispatch_are_idempotent() {
         use super::*;
-        use crate::features::remote_control::controller::permission::PermissionRequest;
+        use crate::features::remote_control::controller::permission::{
+            DispatchCommit, DispatchState, PermissionRequest,
+        };
         let authority = Arc::new(PermissionAuthority::with_clock(Arc::new(|| 9_001_000)));
         let lease = LeaseContext {
             connection_id: "connection-1".into(),
@@ -1924,14 +1895,16 @@ mod submit_boundary_tests {
             .permission_request_id;
         // Both callers observe allow before either crosses the dispatch CAS.
         let barrier = Arc::new(std::sync::Barrier::new(2));
+        let deliveries = Arc::new(AtomicUsize::new(0));
         let handles: Vec<_> = (0..2)
             .map(|_| {
                 let authority = Arc::clone(&authority);
                 let barrier = Arc::clone(&barrier);
+                let deliveries = Arc::clone(&deliveries);
                 let lease = lease.clone();
                 let id = id.clone();
                 std::thread::spawn(move || {
-                    let outcome = authority
+                    authority
                         .decide(
                             DecisionAuthority::ControllerA,
                             &lease,
@@ -1942,13 +1915,25 @@ mod submit_boundary_tests {
                         )
                         .unwrap();
                     barrier.wait();
-                    commit_effective_permission_allow(&authority, &id, &outcome)
+                    authority
+                        .dispatch_bound_allow(&lease, "task-1", &id, || {
+                            deliveries.fetch_add(1, Ordering::SeqCst);
+                            true
+                        })
+                        .unwrap()
+                        .0
                 })
             })
             .collect();
-        for handle in handles {
-            assert_eq!(handle.join().unwrap(), Ok(()));
-        }
+        let outcomes: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert!(outcomes.contains(&DispatchCommit::Committed));
+        assert!(outcomes.contains(&DispatchCommit::Rejected {
+            code: "permission_already_dispatched"
+        }));
+        assert_eq!(deliveries.load(Ordering::SeqCst), 1);
         let retry = authority
             .decide(
                 DecisionAuthority::ControllerA,
@@ -1967,11 +1952,10 @@ mod submit_boundary_tests {
             }
         );
         assert_eq!(
-            commit_effective_permission_allow(&authority, &id, &retry),
-            Ok(())
-        );
-        assert_eq!(
-            authority.commit_dispatch(&id, authority.now_ms()).unwrap(),
+            authority
+                .dispatch_bound_allow(&lease, "task-1", &id, || panic!("retry dispatched again"))
+                .unwrap()
+                .0,
             DispatchCommit::Rejected {
                 code: "permission_already_dispatched"
             }

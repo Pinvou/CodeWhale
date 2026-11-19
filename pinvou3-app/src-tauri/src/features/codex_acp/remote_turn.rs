@@ -18,6 +18,7 @@ use tauri::{Listener as _, Manager as _};
 use tokio_util::sync::CancellationToken;
 
 use super::{AcpPool, AcpSession, RemotePermissionOwner};
+use crate::features::remote_control::controller::controlled::PERMISSION_DISPATCH_DEFERRED;
 use crate::features::remote_control::controller::journal::{
     JournalKind, StreamingTextSanitizer, sanitize_text,
 };
@@ -28,7 +29,7 @@ use crate::features::remote_control::controller::task::{
     RemoteTaskState, TASK_CANCELLED_CODE, TaskLeaseBinding,
 };
 use crate::features::remote_control::controller::transfer::download::ArtifactDescriptor;
-use crate::features::remote_control::controller::turn_budget::TurnBudget;
+use crate::features::remote_control::controller::turn_budget::{TURN_TIMEOUT_CODE, TurnBudget};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const BUSY_GRACE: Duration = Duration::from_secs(5);
@@ -547,13 +548,26 @@ pub(super) fn permission_mint_projection(
         Err(error)
             if matches!(
                 error.to_string().as_str(),
-                "task_cleanup_busy" | "permission_task_busy"
+                "task_cleanup_busy" | "permission_task_busy" | "remote_permission_callback_gone"
             ) =>
         {
             Ok(None)
         }
         Err(_) => Err("permission_binding_stale".to_owned()),
     }
+}
+
+pub(super) fn permission_dispatch_unresolved(
+    authority: &PermissionAuthority,
+    owner: &RemotePermissionOwner,
+    approval_id: &str,
+    allow: bool,
+    still_pending: bool,
+) -> bool {
+    still_pending
+        || (allow
+            && !authority.allow_delivery_observed(&owner.lease, &owner.task_id, approval_id)
+            && !authority.callback_was_cancelled(&owner.lease, &owner.task_id, approval_id))
 }
 
 impl AcpPoolCodeTurnPort {
