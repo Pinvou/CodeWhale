@@ -3,7 +3,7 @@
 use super::{
     DecisionAuthority, DecisionOutcome, LeaseContext, PermissionAuthority, PermissionDecision,
     PermissionDecisionOwner, RemotePermissionOwner, RemoteTaskService, TaskLeaseBinding, Value,
-    commit_effective_permission_allow, json,
+    json,
 };
 use crate::features::remote_control::controller::task::RemoteTaskState;
 
@@ -95,7 +95,8 @@ impl PermissionDecisionHandler<'_> {
                         &receipt_owner,
                     )
                     .map_err(|error| error.code.to_owned())?;
-                commit_effective_permission_allow(self.authority, request_id, &outcome)?;
+                // A decision reserves Allow; the ACP adapter commits only while
+                // synchronously handing the response to its exact live owner.
                 Ok(Admission::Dispatch {
                     owner: RemotePermissionOwner {
                         task_sequence: record.sequence,
@@ -122,8 +123,8 @@ impl PermissionDecisionHandler<'_> {
                 requested,
             } => (owner, request_id, effective, requested),
         };
-        // Keep the original first-response error semantics. A later exact retry
-        // may read the committed authority receipt, but can never resend ACP.
+        // Preserve the first response error. Only an actually committed ACP send
+        // grants a read-only receipt; a failed pre-send attempt is not sent.
         respond(owner.clone(), request_id.clone(), effective).await?;
         self.controlled
             .with_current_business_lease(lease, || {

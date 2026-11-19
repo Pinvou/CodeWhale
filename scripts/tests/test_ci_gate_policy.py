@@ -3679,6 +3679,7 @@ python3() { fixture_mock python3 "$@"; }
             "Windows atomic lifecycle receipts",
             "Preserve Windows relay tools process receipt",
             "Preserve Windows release contract process receipts",
+            "保留 Relay 进程作用域原始回执",
         )
         self.assertEqual(
             len(step_level),
@@ -3701,6 +3702,8 @@ python3() { fixture_mock python3 "$@"; }
             '            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json',
             '            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json',
             '            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json',
+            '            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json',
+            '            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json',
             '          if-no-files-found: warn',
             '          retention-days: 7',
         ]))

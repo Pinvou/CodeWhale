@@ -204,12 +204,12 @@ fn real_reader_manager_worker_resume_round_trip() {
 }
 
 #[test]
-fn real_reader_resume_prepare_survives_failed_write() {
+fn real_reader_failed_prepare_write_ends_recovery() {
     run_isolated_reader(false, false, false, Some("prepare_write"));
 }
 
 #[test]
-fn real_reader_resume_prepare_survives_legacy_socket_epoch() {
+fn real_reader_legacy_socket_close_ends_recovery() {
     run_isolated_reader(false, false, false, Some("prepare_legacy"));
 }
 
@@ -241,6 +241,21 @@ fn real_reader_old_tick_challenge_cannot_mask_successor_suspicion() {
 #[test]
 fn real_reader_resume_activation_holds_lifecycle_owner_commit() {
     run_isolated_reader(false, false, false, Some("activation"));
+}
+
+#[test]
+fn real_reader_second_disconnect_ends_prepared_recovery() {
+    run_isolated_reader(false, false, false, Some("resume_prepared"));
+}
+
+#[test]
+fn real_reader_second_disconnect_ends_provisional_recovery() {
+    run_isolated_reader(false, false, false, Some("resume_provisional"));
+}
+
+#[test]
+fn real_reader_second_disconnect_ends_pending_recovery() {
+    run_isolated_reader(false, false, false, Some("resume_pending"));
 }
 
 #[test]
@@ -415,7 +430,9 @@ fn run_isolated_reader(
                     .manage(crate::features::remote_control::controller::encrypted_lane::ControlledLaneState::default())
                     .manage(crate::features::remote_control::controller::relay_runtime::ControlledOutboundState::default())
                     .build(context).unwrap();
-                if final_admission {
+                if final_admission || owner_case.is_some_and(|case| {
+                    case.starts_with("resume_") || matches!(case, "prepare_write" | "prepare_legacy")
+                }) {
                     let handle = app.handle().clone();
                     handle.manage(crate::features::remote_control::RemoteControlManager::new(handle.clone()));
                     let cleanup: std::sync::Arc<dyn crate::features::remote_control::controller::controlled::ControlledCleanupSink> = std::sync::Arc::new(super::super::desktop_remote_controller_business::DesktopControlledCleanup::new(handle.clone()));
@@ -458,9 +475,12 @@ fn run_isolated_reader(
         Some("disconnect") => "real_reader_old_received_disconnect_cannot_mutate_successor",
         Some("joined") => "real_reader_old_received_joined_cannot_install_or_clear_successor",
         Some("activation") => "real_reader_resume_activation_holds_lifecycle_owner_commit",
-        Some("prepare_write") => "real_reader_resume_prepare_survives_failed_write",
-        Some("prepare_legacy") => "real_reader_resume_prepare_survives_legacy_socket_epoch",
+        Some("prepare_write") => "real_reader_failed_prepare_write_ends_recovery",
+        Some("prepare_legacy") => "real_reader_legacy_socket_close_ends_recovery",
         Some("challenge") => "real_reader_old_tick_challenge_cannot_mask_successor_suspicion",
+        Some("resume_prepared") => "real_reader_second_disconnect_ends_prepared_recovery",
+        Some("resume_provisional") => "real_reader_second_disconnect_ends_provisional_recovery",
+        Some("resume_pending") => "real_reader_second_disconnect_ends_pending_recovery",
         Some(other) => panic!("unknown isolated ownership case: {other}"),
         None if final_admission => {
             "real_worker_final_admission_preserves_timeout_and_signed_deadline"

@@ -104,10 +104,9 @@ func (f *retainedWalletFenceFixture) repositoryWithInitialStage(t *testing.T, in
 	return f.repositoryThroughVersion(t, 0, initial)
 }
 
-// A nonzero boundary installs an actual historical release, without rewriting
-// its ledger or temporarily removing newer migrations from a current database.
-// Existing callers keep the full current public chain through the zero default.
-func (f *retainedWalletFenceFixture) repositoryThroughVersion(t *testing.T, through int64, initial func(context.Context, *pgx.Conn, []migrations.Migration) error) *PostgresRepository {
+// Zero keeps the current complete public installation. A historical rollback
+// contract must request its exact published head rather than the moving latest.
+func (f *retainedWalletFenceFixture) repositoryThroughVersion(t *testing.T, version int64, initial func(context.Context, *pgx.Conn, []migrations.Migration) error) *PostgresRepository {
 	t.Helper()
 	ctx := f.ctx
 	name := "f01_wallet_fence_" + strings.ReplaceAll(uuid.NewString(), "-", "")
@@ -155,19 +154,19 @@ func (f *retainedWalletFenceFixture) repositoryThroughVersion(t *testing.T, thro
 	if err != nil {
 		t.Fatal(err)
 	}
-	if through != 0 {
-		var historical []migrations.Migration
+	if version > 0 {
+		var prefix []migrations.Migration
 		found := false
 		for _, migration := range installed {
-			if migration.Version <= through {
-				historical = append(historical, migration)
+			if migration.Version <= version {
+				prefix = append(prefix, migration)
 			}
-			found = found || migration.Version == through
+			found = found || migration.Version == version
 		}
 		if !found {
-			t.Fatal("historical migration boundary missing", through)
+			t.Fatal("historical public migration head missing", version)
 		}
-		installed = historical
+		installed = prefix
 	}
 	if initial != nil {
 		if err = initial(ctx, connection, installed); err != nil {
