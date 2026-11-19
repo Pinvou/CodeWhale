@@ -366,11 +366,14 @@ jobs:
               - 'scripts/check-recharge-product-document-baseline.mjs'
               - 'scripts/account-ci-postgres.py'
               - 'scripts/tests/test_account_ci_postgres.py'
+              - 'scripts/tests/test_token_outbox_acceptance.py'
               - 'scripts/account-financial-test-durations.json'
               - 'scripts/test-financial-parallel.py'
+              - 'scripts/test-financial-owners.py'
               - 'scripts/check-account-financial-ci.py'
               - 'scripts/tests/test_account_financial_ci.py'
               - 'scripts/tests/test_financial_parallel.py'
+              - 'scripts/tests/test_financial_owners.py'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
               - 'scripts/test-account-closure-postgres.py'
@@ -837,8 +840,11 @@ jobs:
               - 'scripts/ci-frontend-bundle.py'
               - 'scripts/ci-frontend-cache-server.py'
               - 'scripts/lib/ci_frontend_cache.py'
+              - 'scripts/lib/ci_transfer_deadline.py'
               - 'scripts/tests/test_ci_frontend_bundle.py'
+              - 'scripts/tests/test_ci_frontend_cache_server.py'
               - 'scripts/tests/test_ci_frontend_checkout.py'
+              - 'scripts/tests/test_ci_transfer_deadline.py'
               - 'scripts/ci-test-reuse.py'
               - 'scripts/ci-reuse-policy.py'
               - 'scripts/tests/test_ci_reuse_policy.py'
@@ -1174,11 +1180,6 @@ jobs:
       # The binary is downloaded from the pinned release tag and verified
       # against the release checksums.txt digest, so CI executes no mutable
       # installer code and a tampered artifact fails the gate here.
-      - name: Verified frontend bundle cache contracts
-        run: |
-          python3 -m unittest discover -s scripts/tests -p test_ci_frontend_bundle.py -v
-          python3 -m unittest discover -s scripts/tests -p test_ci_frontend_checkout.py -v
-
       - name: workflow lint (actionlint)
         run: |
           curl --retry 3 -fsSL -o actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
@@ -1243,8 +1244,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Initialize gate test resource ledger
+        run: python3 scripts/ci-resource-ledger.py --init
+
+      # Full discovery includes cache server/deadline/checkout/npm contracts;
+      # run them once, inside the same owned process tree as the other guards.
       - name: Gate policy test suite (scripts/tests)
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+        run: python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/gate-policy.json" -- python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
       - name: Expiring chrono maintenance exception
         run: python3 scripts/guard-chrono-maintenance-exception.py
@@ -1280,6 +1286,21 @@ jobs:
       - name: 内置 MCP 协议与产物契约
         if: ${{ steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000)) }}
         run: python3 scripts/mcp-server-contract-smoke.py
+
+      - name: Confirm gate test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        run: python3 scripts/ci-resource-ledger.py --recover
+
+      - name: Gate test resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-resource-lifecycle-${{ github.run_attempt }}
+          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
+          retention-days: 7
 
   # Setup 工件化(2026-11-16 调查结论:3 台宿主共置算力摊薄是失败主机理,#2641
   # 后 frontend-test + 4 个 browser 分片各自重复三次 vite build,构建期满核
@@ -1804,9 +1825,44 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      financial-owner-account-postgres:
+        # Empty image disables these extra services for the other five Jobs.
+        image: ${{ matrix.group == 'owners' && 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea' || '' }}
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 1
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-owner-wallet-postgres:
+        # Empty image disables these extra services for the other five Jobs.
+        image: ${{ matrix.group == 'owners' && 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea' || '' }}
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 1
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       GOTOOLCHAIN: local
       CGO_ENABLED: "1"
+      PINVOU_ACCOUNT_PG_PROFILE: ${{ matrix.group == 'owners' && 'owners' || 'financial' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -1857,26 +1913,30 @@ jobs:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
           set -euo pipefail
-          python3 scripts/account-ci-postgres.py --profile financial
+          python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE"
 
       - name: Run isolated financial group
         shell: bash
         env:
           ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}
+          PINVOU_CI_OWNER_PARALLEL: ${{ matrix.group == 'owners' && '1' || '0' }}
+          ACCOUNT_FINANCIAL_OWNER_SERVICES: ${{ steps.account-pg.outputs.owners_services }}
+          PINVOU_CI_FIXTURE_TEMPLATES: "1"
+          PINVOU_CI_FIXTURE_TIMING: "1"
           PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
           PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
           PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
           PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
         run: |
           set -euo pipefail
-          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP"
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP" --verify-fixture-cache
 
       - name: Stop owned temporary PostgreSQL services
         if: ${{ always() }}
         env:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
-          python3 scripts/account-ci-postgres.py --profile financial --stop-owned-services
+          python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE" --stop-owned-services
 
       - name: Confirm Account test resource retirement
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -2196,6 +2256,24 @@ jobs:
           export PINVOU_TEST_NATS_SERVER_BINARY="$RUNNER_TEMP/pinvou-test-nats-server"
           npm --prefix account-platform run test:existing-broker
 
+      - name: Token outbox publication on owned PostgreSQL and TLS NATS
+        timeout-minutes: 4
+        shell: bash
+        env:
+          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.broker_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.broker_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.broker_directory }}
+          PINVOU_TEST_NATS_SERVER_BINARY: ${{ runner.temp }}/pinvou-test-nats-server
+        run: |
+          set -euo pipefail
+          # Reuse only the preceding step's pinned executable; the test starts
+          # its own TLS broker and applies public Token migrations. The shared
+          # supervisor owns the complete Python/Go/NATS process tree, including
+          # panic, timeout and cancellation; always-run ledger recovery verifies it.
+          python3 -m unittest discover -s scripts/tests -p test_token_outbox_acceptance.py
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/token-outbox-process.json" -- npm --prefix account-platform run test:token-outbox
+
       - name: Audit export finite PostgreSQL rollback and persisted boundaries
         working-directory: account-platform
         env:
@@ -2256,6 +2334,7 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
           python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
+          python3 -m unittest discover -s scripts/tests -p test_financial_owners.py
           policy_python="${{ steps.financial-policy-python.outputs.python-path }}"
           policy_library="$(dirname "$(dirname "$policy_python")")/lib"
           python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-policy-process.json" -- env "LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$policy_python" -m unittest discover -s scripts/tests -p test_account_financial_ci.py
@@ -2565,11 +2644,13 @@ jobs:
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
 
       - name: 安装 Relay 发布门禁依赖
-        if: ${{ runner.os == 'Windows' }}
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit --ignore-scripts
 
       - name: Rust（构建期开关的实际产物回归）
         uses: dtolnay/rust-toolchain@stable
+
+      - name: 桌面远控发布平台与构建期开关契约
+        run: node --test remote-control-relay/test/release-path-policy.test.js pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/desktop_remote_loaded_capability.test.mjs
 
       # 版本一致性校验(--check)由 version-consistency job 无路径门全事件覆盖,
       # 此处不重复;仅跑 Tauri overlay、各平台打包与知识宿主契约。
@@ -2596,7 +2677,10 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         env:
           PINVOU_DESKTOP_CONTROLLER_ENABLED: '0'
+        # Windows 默认 pwsh 只把最后一行原生命令的退出码作为步骤退出码,
+        # 中间行失败会被静默掩蔽;逐行检查 $LASTEXITCODE 并立即传播。
         run: |
+          $ErrorActionPreference = 'Stop'
           npm --prefix remote-control-relay run release:gate
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/release-evidence-artifacts.test.js remote-control-relay/test/controller-release-source-binding.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js remote-control-relay/test/release-process.test.js remote-control-relay/test/windows-release-owned-service.test.js

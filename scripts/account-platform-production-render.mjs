@@ -73,7 +73,7 @@ const base = ['personal', 'personal-workload'];
 const model = [...base, 'finance', 'reconciliation', 'models'];
 export const composeCompositions = Object.freeze({ personal: base, models: model });
 const extraOverlays = new Set(['finance', 'reconciliation', 'signup', 'organizations', 'invocation', 'closure', 'approval-recovery',
-  'receivable-write-off', 'payment-financial-repair', 'ledger-repair', 'entitlement-correction', 'audit-export']);
+  'receivable-write-off', 'payment-financial-repair', 'ledger-repair', 'entitlement-correction', 'audit-export', 'token-events']);
 
 function runRenderer(binary, args, root, environment) {
   const rendered = spawnSync(binary, args, { cwd: root, env: environment, encoding: 'buffer',
@@ -96,7 +96,7 @@ export function renderCurrentProduction(recipe, options = {}) {
     const extra = recipe.overlays || [];
     requireGate(Array.isArray(extra) && new Set(extra).size === extra.length && extra.every(v => extraOverlays.has(v)), 'composition');
     requireGate(new Set([...composeCompositions[recipe.profile], ...extra]).size === composeCompositions[recipe.profile].length + extra.length, 'composition');
-    requireGate(recipe.profile === 'models' || !extra.some(v => ['organizations', 'invocation'].includes(v)), 'composition_profile');
+    requireGate(recipe.profile === 'models' || !extra.some(v => ['organizations', 'invocation', 'token-events'].includes(v)), 'composition_profile');
     requireGate(typeof recipe.envFile === 'string' && isAbsolute(recipe.envFile), 'env_file');
     readGateFile(recipe.envFile, 1024 * 1024);
     const version = runRenderer(binary, ['version', '--short'], root, environment).trim();

@@ -33,7 +33,7 @@ func legacyExpiryInput(t *testing.T, through int64) []migrations.Migration {
 
 // The root test owns the deployment actors through newStageFixture. Each
 // subtest owns only its UUID database and never drops an unknown object.
-func legacyExpiryDatabase(t *testing.T, ctx context.Context) *pgx.Conn {
+func legacyExpiryDatabase(t *testing.T, ctx context.Context, templates *cifixture.TemplatePool, initial []migrations.Migration) *pgx.Conn {
 	t.Helper()
 	raw := os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL")
 	if raw == "" {
@@ -43,13 +43,52 @@ func legacyExpiryDatabase(t *testing.T, ctx context.Context) *pgx.Conn {
 	if err != nil {
 		t.Fatal("connect owned expiry fixture")
 	}
+	t.Cleanup(func() { admin.Close(context.Background()) })
+	configuration, err := pgx.ParseConfig(raw)
+	if err != nil {
+		t.Fatal("parse expiry fixture")
+	}
+	configuration.User, configuration.Password = "billing_migrator", ""
+	open := func(ctx context.Context, name string, install bool) (*pgx.Conn, error) {
+		config := configuration.Copy()
+		config.Database = name
+		c, err := pgx.ConnectConfig(ctx, config)
+		if err != nil {
+			return nil, err
+		}
+		if install {
+			_, err = c.Exec(ctx, `SET ROLE billing_schema_owner; ALTER SCHEMA public OWNER TO billing_schema_owner; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE,CREATE ON SCHEMA public TO billing_service; SET ROLE billing_service`)
+			if err == nil {
+				done := cifixture.Measure("migration-initialize")
+				err = Up(ctx, c, initial)
+				done()
+			}
+		} else {
+			_, err = c.Exec(ctx, `SET ROLE billing_service`)
+		}
+		if err != nil {
+			c.Close(context.Background())
+			return nil, err
+		}
+		if install {
+			migrations.Unlock(ctx, c)
+		}
+		return c, nil
+	}
+	key, err := cifixture.TemplateKey("legacy-expiry-prefix-v1", initial)
+	if err != nil {
+		t.Fatal(err)
+	}
 	name := "legacy_expiry_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	var fixtureDatabase *cifixture.Database
-	quoted := pgx.Identifier{name}.Sanitize()
-	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, admin, name, "CREATE DATABASE "+quoted+" OWNER billing_schema_owner")
-	fixtureDatabase = fixtureDatabaseCreated
-	if err := creationError; err != nil {
-		admin.Close(ctx)
+	lease, prepared, err := templates.Create(ctx, admin, name, "billing_schema_owner", key, func(ctx context.Context, source string) error {
+		c, err := open(ctx, source, true)
+		if c != nil {
+			c.Close(context.Background())
+		}
+		return err
+	})
+	if err != nil {
+		admin.Close(context.Background())
 		t.Fatal(err)
 	}
 	var c *pgx.Conn
@@ -60,22 +99,12 @@ func legacyExpiryDatabase(t *testing.T, ctx context.Context) *pgx.Conn {
 		if c != nil {
 			c.Close(clean)
 		}
-		if _, err := cifixture.DropDatabase(clean, admin, fixtureDatabase, "billing_schema_owner"); err != nil {
+		if _, err := cifixture.DropDatabase(clean, admin, lease, "billing_schema_owner"); err != nil {
 			t.Error("expiry fixture cleanup failed", err)
 		}
 	})
-	config, err := pgx.ParseConfig(raw)
+	c, err = open(ctx, name, !prepared)
 	if err != nil {
-		t.Fatal("parse expiry fixture")
-	}
-	config.Database = name
-	config.User = "billing_migrator"
-	config.Password = ""
-	c, err = pgx.ConnectConfig(ctx, config)
-	if err != nil {
-		t.Fatal("connect limited expiry migrator")
-	}
-	if _, err := c.Exec(ctx, `SET ROLE billing_schema_owner; ALTER SCHEMA public OWNER TO billing_schema_owner; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE,CREATE ON SCHEMA public TO billing_service; SET ROLE billing_service`); err != nil {
 		t.Fatal(err)
 	}
 	return c
@@ -112,6 +141,15 @@ func TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres(t *testing.T) {
 	actorContext, stopActors := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer stopActors()
 	newStageFixture(t, actorContext, os.Getenv("PINVOU_TEST_SCHEMA_DATABASE_URL"))
+	// The pool belongs to this absent-actor root, and retires before its actors.
+	templates := cifixture.NewTemplatePool(true, "billing_schema_owner", "billing_migrator", "billing_service")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		if err := templates.Close(ctx); err != nil {
+			t.Error("expiry baseline cleanup failed", err)
+		}
+	})
 	for through := int64(16); through <= 24; through++ {
 		for _, legacy := range []struct {
 			name      string
@@ -127,10 +165,7 @@ func TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres(t *testing.T) {
 				old := len(legacy.types) > 0
 				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 				defer cancel()
-				c := legacyExpiryDatabase(t, ctx)
-				if err := Up(ctx, c, legacyExpiryInput(t, through)); err != nil {
-					t.Fatal(err)
-				}
+				c := legacyExpiryDatabase(t, ctx, templates, legacyExpiryInput(t, through))
 				for _, entryType := range legacy.types {
 					seedLegacyJournalType(t, ctx, c, entryType)
 				}

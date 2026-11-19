@@ -38,8 +38,9 @@ func main() {
 		fmt.Println(string(raw))
 		return
 	}
-	if len(os.Args) == 2 && (os.Args[1] == "render" || os.Args[1] == "render-existing-broker" || os.Args[1] == "render-refund-upgrade") {
-		result, err := renderResourcesKind(os.Getenv, os.Args[1] == "render-existing-broker", os.Args[1] == "render-refund-upgrade")
+	if len(os.Args) == 2 && (os.Args[1] == "render" || os.Args[1] == "render-existing-broker" || os.Args[1] == "render-refund-upgrade" || os.Args[1] == "render-token-events" || os.Args[1] == "render-existing-broker-token-events" || os.Args[1] == "render-refund-upgrade-token-events") {
+		kind := strings.TrimSuffix(os.Args[1], "-token-events")
+		result, err := renderResourcesSelection(os.Getenv, kind == "render-existing-broker", kind == "render-refund-upgrade", kind != os.Args[1])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "PUBLIC_RESOURCE_RENDER_FAILED")
 			os.Exit(1)
