@@ -1265,16 +1265,20 @@ impl ControlledDeviceManager {
             .map(|(status, _)| status)
     }
 
+    /// Retire business material only after the exact transport-owner check,
+    /// under the same lock as its terminal commit. The action must not reenter
+    /// this manager; external cleanup notifications run after releasing it.
     pub(crate) fn fail_owned_transport(
         &self,
         owner: &ControlledTransportOwner,
         error_code: String,
+        retire_business: impl FnOnce(),
     ) -> Result<ControlledStatus> {
         self.fail_operation_with_cleanup_inner(
             owner.operation.clone(),
             Some(owner),
             error_code,
-            || {},
+            retire_business,
             |_| {},
         )
         .map(|(status, _)| status)
@@ -2466,6 +2470,31 @@ mod tests {
             .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(manager.status().kind(), ControlledStatusKind::Connected);
+        // Retirement runs under the same exact owner fence as the terminal
+        // transition. Same operation and lease cannot authorize an old socket.
+        let retired = AtomicUsize::new(0);
+        assert!(
+            manager
+                .fail_owned_transport(&old, "desktop_remote_resume_rejected".into(), || {
+                    retired.fetch_add(1, Ordering::SeqCst);
+                })
+                .is_err()
+        );
+        assert_eq!(retired.load(Ordering::SeqCst), 0);
+        manager
+            .fail_owned_transport(&current, "desktop_remote_resume_rejected".into(), || {
+                retired.fetch_add(1, Ordering::SeqCst);
+            })
+            .unwrap();
+        assert_eq!(manager.status().kind(), ControlledStatusKind::Error);
+        assert!(
+            manager
+                .fail_owned_transport(&current, "desktop_remote_resume_rejected".into(), || {
+                    retired.fetch_add(1, Ordering::SeqCst);
+                })
+                .is_err()
+        );
+        assert_eq!(retired.load(Ordering::SeqCst), 1);
     }
 
     #[test]
