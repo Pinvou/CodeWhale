@@ -32,6 +32,8 @@ const tokenManualReviewEscalationEligible = `status='OPEN'
       (mitigation_at IS NULL AND mitigation_due_at<=checked_at) OR resolution_due_at<=checked_at)
  AND (last_escalated_at IS NULL OR last_escalated_at<checked_at-interval '1 hour')`
 
+const modelEmergencyCancellationReviewCase = "MODEL_EMERGENCY_CANCELLATION_REVIEW"
+
 func (r *PostgresRepository) SyncManualReviewCases(ctx context.Context, limit int) (int, error) {
 	if limit < 1 || limit > 500 {
 		limit = 100
@@ -42,6 +44,9 @@ SELECT case_type,resource_type,resource_id,severity,created_at FROM (
         CASE WHEN actual_microcredits>maximum_microcredits OR lower(COALESCE(error_class,'')) LIKE '%hold%' THEN 'P1' ELSE 'P2' END AS severity,
         started_at AS created_at
    FROM usage_requests WHERE status='REVIEW' AND (reconciliation_stopped_at IS NOT NULL OR error_class='cancel_hold_recovery_unconfirmed')
+ UNION ALL
+ SELECT '`+modelEmergencyCancellationReviewCase+`','USAGE_REQUEST',usage_request_id,'P2',updated_at
+   FROM model_emergency_cancellations WHERE status='MANUAL_REVIEW'
  UNION ALL
  SELECT 'ROUTE_PROVISIONING_REPAIR','ROUTE_PROVISIONING',id,'P2',created_at
    FROM route_provisionings WHERE status='REPAIR_REQUIRED'

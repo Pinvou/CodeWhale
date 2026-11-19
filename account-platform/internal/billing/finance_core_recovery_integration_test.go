@@ -231,7 +231,7 @@ func TestFinanceCreateBindingReplayAfterPreDispatchCrash(t *testing.T) {
 	}
 	product := retainedSameKeyProduct(t, r, ctx, owner)
 	provider := &coreRecoveryProvider{retainedFinancialProvider: &retainedFinancialProvider{}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

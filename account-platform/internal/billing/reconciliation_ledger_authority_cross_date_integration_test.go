@@ -34,7 +34,7 @@ func TestLedgerRepairAuthorityCrossDatePostgres(t *testing.T) {
 			now := clock()
 			row := ProviderBillEntry{EntryType: "REFUND", ProviderReferenceID: ref, MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: refund.AmountFen + 1, Currency: order.Currency, Status: "SUCCESS", PaidAt: now}
 			provider := &reconciliationFixtureProvider{retainedFinancialProvider: *payment.provider.(*retainedFinancialProvider), rows: []ProviderBillEntry{row}}
-			c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+			c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 			if err != nil {
 				t.Fatal(err)
 			}

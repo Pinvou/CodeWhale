@@ -20,10 +20,16 @@ policy and Keycloak SMS authenticator are used; no additional login mode is adde
 
 Supply full verified current incoming arrays through `ACCOUNT_WORKLOAD_RULES_JSON`
 and `BILLING_WORKLOAD_RULES_JSON`, preserving every currently installed exact rule.
-Within the Account array add only `internal.registration-bonus-eligibility.read`
-to the existing verified Billing subject/service `billing-service`. Within Billing
-add only `internal.billing.registration-bonus.provision` to the existing verified
-Account subject/service `account-service`. The existing Account wallet.ensure
+Within the Account array, the existing verified Billing subject/service
+`billing-service` needs `internal.registration-bonus-eligibility.read` and
+`internal.account.payment-credit.admit`. Within Billing, the existing verified
+Account subject/service `account-service` needs
+`internal.billing.registration-bonus.provision` and
+`internal.billing.payment-credit.resolve`. The production
+`workload-account-rules.json.template` and `workload-billing-rules.json.template`
+include these exact caller-specific grants; retain the other installed rules.
+See [payment admission and identity cleanup](../../docs/payment-credit-identity-cleanup.md)
+for migration order and unresolved-outcome handling. The existing Account wallet.ensure
 permission stays required for receipt owner verification. No wildcard permission,
 new subject, consumer role, closure/reclaim permission or private value is needed.
 The arrays are actual `WORKLOAD_IDENTITY_RULES_JSON` inputs in this overlay; a
