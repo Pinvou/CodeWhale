@@ -112,7 +112,13 @@ fn connected(
     attempt: &mut ControlledResumeAttempt,
 ) {
     assert_eq!(
-        retry_controlled_resume_prepare(port, manager, attempt, controlled_monotonic_millis),
+        handle_controlled_resume_frame(
+            port,
+            manager,
+            &ControlledLaneState::default(),
+            attempt,
+            &json!({ "type": "desktop_relay_connection", "connected": true }),
+        ),
         ControlledResumeOutcome::Ignored
     );
 }

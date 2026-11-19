@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"io"
 	"log"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
@@ -18,6 +21,20 @@ import (
 )
 
 func main() {
+	configurePortalRedisLogging()
+	if len(os.Args) > 1 {
+		if os.Args[1] != "capacity-inventory" {
+			log.Fatal("TOKEN_PORTAL_COMMAND_INVALID")
+		}
+		if err := runCapacityInventory(os.Args[2:], os.Stdout); err != nil {
+			d := portal.DescribeCapacityInventoryError(err)
+			if errors.Is(err, errCapacityInventoryArguments) {
+				d.Code, d.Stage = "PORTAL_INVENTORY_ARGUMENTS_INVALID", "arguments"
+			}
+			log.Fatal(d.Code, " component=", d.Component, " stage=", d.Stage)
+		}
+		return
+	}
 	if err := httpserver.ConfigureProcessLogging("token-portal"); err != nil {
 		log.Fatal(err)
 	}
@@ -29,7 +46,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	store, err := portal.NewRedisStoreWithCA(os.Getenv("REDIS_URL"), os.Getenv("REDIS_CA_FILE"))
+	store, err := portal.NewRedisStoreWithAdmissionLimits(os.Getenv("REDIS_URL"), os.Getenv("REDIS_CA_FILE"), portalConfig.AdmissionLimits)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -38,13 +55,50 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := httpserver.RunWithApplication("token-portal", service.Handler(portal.StaticHandler()), store.Ping); err != nil {
-		log.Fatal(err)
+	if err := runPortal(service, store); err != nil {
+		_ = store.Close() // log.Fatal bypasses defers.
+		log.Fatal("TOKEN_PORTAL_HTTP_SERVER_FAILED")
 	}
+}
+
+func runPortal(service *portal.Service, store *portal.RedisStore) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	done := make(chan struct{})
+	go func() { defer close(done); store.RunTransientInventory(ctx) }()
+	err := httpserver.RunWithApplicationContext(ctx, "token-portal", service.Handler(portal.StaticHandler()), store.Ping)
+	stop()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		return errors.New("TOKEN_PORTAL_INVENTORY_DRAIN_FAILED")
+	}
+	return err
 }
 
 func loadPortalConfig(environment string, getenv func(string) string) (portal.Config, error) {
 	cfg := portal.Config{SystemProbeCAFile: strings.TrimSpace(getenv("PORTAL_SYSTEM_PROBE_CA_FILE")), Environment: environment, ClientID: getenv("PORTAL_OIDC_CLIENT_ID"), PrivateCAFile: strings.TrimSpace(getenv("PORTAL_PRIVATE_CA_FILE")), HandoffClientID: getenv("PORTAL_HANDOFF_OIDC_CLIENT_ID"), SessionHandoffTTL: 30 * time.Second}
+	cfg.AdmissionLimits = portal.DefaultAdmissionLimits()
+	for _, limit := range []struct {
+		name   string
+		target *int
+	}{
+		{"PORTAL_OPERATION_RPS", &cfg.AdmissionLimits.OperationsPerSecond},
+		{"PORTAL_OPERATION_BURST", &cfg.AdmissionLimits.OperationBurst},
+		{"PORTAL_LOGIN_FLOW_CAPACITY", &cfg.AdmissionLimits.FlowCapacity},
+		{"PORTAL_SESSION_HANDOFF_CAPACITY", &cfg.AdmissionLimits.HandoffCapacity},
+	} {
+		if raw := strings.TrimSpace(getenv(limit.name)); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil || value <= 0 {
+				return portal.Config{}, errors.New(limit.name + " must be a positive integer")
+			}
+			*limit.target = value
+		}
+	}
+	if !cfg.AdmissionLimits.Valid() {
+		return portal.Config{}, portal.ErrAdmissionConfiguration
+	}
 	trustedProxies, err := portal.ParseTrustedProxyIPs(getenv("PORTAL_TRUSTED_PROXY_IPS"))
 	if err != nil {
 		return portal.Config{}, err
