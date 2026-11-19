@@ -67,7 +67,7 @@ class FinancialCIMatrixTests(unittest.TestCase):
         closure = job(self.source, 'account-closure-test')
         services = lambda text: text.split('    services:\n', 1)[1].split('    steps:\n', 1)[0]
         self.assertEqual(re.findall(r'^      ([\w-]+):$', services(core), re.M),
-                         ['audit-export-postgres', 'existing-broker-postgres'])
+                         ['portal-redis', 'audit-export-postgres', 'existing-broker-postgres'])
         self.assertEqual(re.findall(r'^      ([\w-]+):$', services(financial), re.M), ['financial-postgres', 'financial-owner-account-postgres', 'financial-owner-wallet-postgres'])
         self.assertEqual(re.findall(r'^      ([\w-]+):$', services(closure), re.M), ['financial-postgres'])
         self.assertIn('    needs: changes\n', financial)
@@ -80,7 +80,7 @@ class FinancialCIMatrixTests(unittest.TestCase):
             self.assertIn('${{ steps.account-pg.outputs.financial_' + key + ' }}', financial)
         for text, profile in ((core, 'core'), (financial, '"$PINVOU_ACCOUNT_PG_PROFILE"'), (closure, 'closure')):
             self.assertIn('scripts/account-ci-postgres.py --profile ' + profile, text)
-            self.assertIn('--profile ' + profile + ' --stop-owned-services', text)
+            self.assertIn('--profile ' + profile + (' --with-portal-redis' if profile == 'core' else '') + ' --stop-owned-services', text)
             stop = text.index('      - name: Stop owned temporary PostgreSQL services')
             self.assertIn('if: ${{ always() }}', text[stop:])
             self.assertIn('ci-resource-ledger.py --recover', text[stop:])
