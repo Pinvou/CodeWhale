@@ -51,6 +51,9 @@ func TestUnknownProviderEntryPublicMigrationPostgres(t *testing.T) {
 			if err := Up(ctx, c, input); err != nil {
 				t.Fatal("public predecessor Up", err)
 			}
+			if err := migrations.Unlock(ctx, c); err != nil {
+				t.Fatal(err)
+			}
 			run := uuid.New()
 			if _, err := c.Exec(ctx, `INSERT INTO reconciliation_runs(id,provider_id,provider_version,channel,business_date,source_mode,status,started_at) VALUES($1,'controlled','v1','ALIPAY',current_date,'MANUAL_API','RUNNING',now())`, run); err != nil {
 				t.Fatal(err)
@@ -71,6 +74,9 @@ func TestUnknownProviderEntryPublicMigrationPostgres(t *testing.T) {
 				if err := Up(ctx, c, target); err != nil {
 					t.Fatal("actual public append upgrade", err)
 				}
+				if err := migrations.Unlock(ctx, c); err != nil {
+					t.Fatal(err)
+				}
 				if known != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(row) ORDER BY row_number)::text FROM reconciliation_provider_rows row`) || ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<900025`) {
 					t.Fatal("append changed prior source facts or ledger")
 				}
@@ -87,11 +93,18 @@ func TestUnknownProviderEntryPublicMigrationPostgres(t *testing.T) {
 			if err := insert(3, ""); err == nil {
 				t.Fatal("empty kind accepted")
 			}
+			if kind != "historical-forward-only" {
+				testStatisticsHeadRoundTrip(t, ctx, c, loaded, `SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY row_number),'[]'::jsonb)::text FROM reconciliation_provider_rows x`)
+				return
+			}
 			before := stageValue(t, ctx, c, `SELECT jsonb_build_object('rows',(SELECT jsonb_agg(to_jsonb(x) ORDER BY row_number) FROM reconciliation_provider_rows x),'ledger',(SELECT jsonb_agg(to_jsonb(x) ORDER BY version) FROM schema_migrations x))::text`)
 			if kind == "historical-forward-only" && stageValue(t, ctx, c, `SELECT max(version)::text FROM schema_migrations`) != "900025" {
 				t.Fatal("forward-only probe is not at migration 900025")
 			}
 			downErr := DownOne(ctx, c, target)
+			if err := migrations.Unlock(ctx, c); err != nil {
+				t.Fatal(err)
+			}
 			if downErr == nil {
 				t.Fatal("forward-only evidence rollback accepted")
 			}
@@ -107,6 +120,9 @@ func TestUnknownProviderEntryPublicMigrationPostgres(t *testing.T) {
 			if kind == "historical-forward-only" {
 				if err := Up(ctx, c, target); err != nil {
 					t.Fatal("public replay after refused rollback", err)
+				}
+				if err := migrations.Unlock(ctx, c); err != nil {
+					t.Fatal(err)
 				}
 				if _, err := VerifyApplied(ctx, c, target); err != nil {
 					t.Fatal("applied identity after refused rollback and replay", err)
