@@ -21,7 +21,7 @@ func TestF03ObservationCannotReopenNewerResolution(t *testing.T) {
 	actor := uuid.New()
 	row := pipelineRefundRow(order, fixed)
 	provider := &trackedBillProvider{reconciliationFixtureProvider: reconciliationFixtureProvider{rows: []ProviderBillEntry{row}}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestF03ObservationCannotReopenNewerResolution(t *testing.T) {
 	// A has persisted its immutable snapshot, but the fact lock prevents its
 	// case chunk. B now performs the genuine clean provider verification/RESOLVE.
 	cleanProvider := &trackedBillProvider{}
-	clean, err := NewPaymentCoordinatorWithProvider(r, cleanProvider, "test")
+	clean, err := newBillingFixturePaymentCoordinator(r, cleanProvider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -68,6 +68,26 @@ try {
     await fresh(); await click('reconciliationQueue'); await page.waitForSelector('#reconciliation-title'); await page.waitForSelector('tbody'); await click('reviewEvidence'); await page.waitForSelector('#usage-detail-title'); await click('backToList'); await page.waitForSelector('#reconciliation-title');
     assert.ok(await page.evaluate(() => window.f05Usage.calls.some(call => call.path.endsWith('/reconciliation-cases'))));
   });
+  await caseRun('Operations can filter the separate emergency cancellation case', async () => {
+    for (const language of ['zh', 'en', 'ja']) {
+      await fresh(); await page.evaluate(language => { window.f05Usage.language = language; window.f05Usage.render(); }, language);
+      await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === window.f05Usage.labels().reconciliationQueue));
+      await click('reconciliationQueue'); await page.waitForSelector('#reconciliation-title');
+      const kind = 'MODEL_EMERGENCY_CANCELLATION_REVIEW';
+      await page.waitForFunction(kind => {
+        const rows = document.querySelectorAll('tbody tr'); const label = window.f05Usage.labels().enumLabels[kind];
+        return rows.length === 2 && typeof label === 'string' && label !== kind && [...rows].some(row => row.textContent.includes(label));
+      }, {}, kind);
+      await page.evaluate(kind => {
+        const select = [...document.querySelectorAll('.adm-model-token-filters select')].find(item => [...item.options].some(option => option.value === kind));
+        select.value = kind; select.dispatchEvent(new Event('change', { bubbles: true }));
+      }, kind);
+      await click('search');
+      await page.waitForFunction(kind => document.querySelectorAll('tbody tr').length === 1 && window.f05Usage.calls.some(call => call.path.endsWith('/reconciliation-cases') && new URLSearchParams(call.query).get('case_type') === kind), {}, kind);
+      await click('reviewEvidence'); await page.waitForSelector('#usage-detail-title');
+      assert.equal(await page.evaluate(() => window.f05Usage.calls.filter(call => call.method !== 'GET').length), 0);
+    }
+  });
   await caseRun('Expired list snapshot remains error and refresh clears cursor instead of false empty success', async () => {
     await fresh(); await page.evaluate(() => { window.f05Usage.listFailure = 410; history.replaceState({}, '', `${location.pathname}?usage_cursor=controlled-expired`); dispatchEvent(new PopStateEvent('popstate')); }); await page.waitForSelector('[role=alert]');
     await page.evaluate(() => { window.f05Usage.listFailure = 0; }); await click('retry'); await page.waitForSelector('tbody');

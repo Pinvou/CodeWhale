@@ -55,6 +55,10 @@ images:
   nats: { repository: nats, tag: "2.11-alpine", pullPolicy: IfNotPresent }
 
 portal:
+  operationRps: 100
+  operationBurst: 200
+  loginFlowCapacity: 65536
+  sessionHandoffCapacity: 8192
   adminModelTokenIAEnabled: false
   adminTokenResourceFormsEnabled: false
   adminModelOperationsDetailsEnabled: false

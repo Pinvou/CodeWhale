@@ -168,7 +168,9 @@ test('original Docker context exclusions retain Go COPY and do not govern the se
   const dockerfile = read('account-platform/Dockerfile');
   const localCopySources = [...dockerfile.matchAll(/^COPY (?!.*--from=)(.+)$/gm)]
     .flatMap((match) => match[1].trim().split(/\s+/).slice(0, -1));
-  assert.deepEqual(localCopySources, ['go.mod', 'go.sum', 'cmd', 'internal', 'migrations']);
+  assert.deepEqual(localCopySources, ['go.mod', 'go.sum', 'cmd', 'internal', 'migrations', 'ops/close-emergency-cancellation-case.sql']);
+  assert.match(dockerfile, /^COPY ops\/close-emergency-cancellation-case[.]sql \/ops\/close-emergency-cancellation-case[.]sql$/m);
+  assert.ok(read('account-platform/ops/close-emergency-cancellation-case.sql').trim().length > 0);
   assert.doesNotMatch(dockerfile, /^COPY (?:deploy|test|web)(?:\s|\/)/m);
   const compose = YAML.parse(read('account-platform/deploy/compose/compose.yaml'), { merge: true });
   assert.deepEqual(compose['x-service-build'], { context: '../..', dockerfile: 'Dockerfile' });

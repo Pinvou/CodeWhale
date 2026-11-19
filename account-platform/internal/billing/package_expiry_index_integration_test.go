@@ -23,6 +23,8 @@ import (
 
 const packageExpiryIndexName = "entitlement_packages_expiry_scan_idx"
 
+const packageExpiryWorkloadBudget = 5 * time.Minute
+
 // Log only the exact expiry-index root using fixed phase labels and no business data.
 func logPackageExpiryPhase(t *testing.T, ctx context.Context, phase string) {
 	t.Helper()
@@ -42,7 +44,7 @@ func logPackageExpiryPhase(t *testing.T, ctx context.Context, phase string) {
 	} else if ctx.Err() == context.Canceled {
 		state = "cancelled"
 	}
-	t.Logf("PACKAGE_EXPIRY_PHASE phase=%s elapsed_ms=%d remaining_ms=%d state=%s", phase, (3*time.Minute - remaining).Milliseconds(), remaining.Milliseconds(), state)
+	t.Logf("PACKAGE_EXPIRY_PHASE phase=%s elapsed_ms=%d remaining_ms=%d state=%s", phase, (packageExpiryWorkloadBudget - remaining).Milliseconds(), remaining.Milliseconds(), state)
 }
 
 // Read the actual candidate statement without changing the production worker
@@ -119,9 +121,13 @@ func packageExpiryFactsWithOrder(t *testing.T, ctx context.Context, r *PostgresR
 		if table == "outbox_events" {
 			key = "event_id"
 		}
-		query := `SELECT COALESCE(md5(string_agg(md5(to_jsonb(row_value)::text),'' ORDER BY row_value.` + pgx.Identifier{key}.Sanitize() + `::text)),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
+		// PostgreSQL's record wire representation includes every column, its
+		// type, length and null marker. Hash the complete row without repeatedly
+		// constructing wide JSON objects at every financial checkpoint. This
+		// fingerprint is compared only within the same owned database/schema.
+		query := `SELECT COALESCE(md5(string_agg(md5(record_send(row_value)),'' ORDER BY row_value.` + pgx.Identifier{key}.Sanitize() + `::text)),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
 		if originalJSONOrder {
-			query = `SELECT COALESCE(md5(string_agg(md5(to_jsonb(row_value)::text),'' ORDER BY to_jsonb(row_value)->>'id',to_jsonb(row_value)->>'event_id')),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
+			query = `SELECT COALESCE(md5(string_agg(md5(record_send(row_value)),'' ORDER BY to_jsonb(row_value)->>'id',to_jsonb(row_value)->>'event_id')),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
 		}
 		if err := r.pool.QueryRow(ctx, query).Scan(&value); err != nil {
 			t.Fatal(table, err)
@@ -219,13 +225,20 @@ func TestPackageExpiryCrossWalletIndexPostgres(t *testing.T) {
 	statement := packageExpiryCandidateStatement(t)
 	for _, scenario := range []string{"fresh-install", "retained-upgrade"} {
 		t.Run(scenario, func(t *testing.T) {
-			source, staged := stageBillingMigrationContract(t, 900043)
+			var source, staged string
+			if scenario == "retained-upgrade" {
+				// Keep the historical 038 carrier plus only the target index.
+				// The final full-carrier check still restores every source SQL file.
+				source, staged = stageBillingMigrationContract(t, 900043, 900043)
+			} else {
+				source, staged = stageBillingMigrationContract(t, 900043)
+			}
 			var r *PostgresRepository
 			var ctx context.Context
 			if scenario == "retained-upgrade" {
-				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second, 900038)
+				r, ctx = retainedFinanceRepositoryWithBudgets(t, packageExpiryWorkloadBudget, 45*time.Second, 900032)
 			} else {
-				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second)
+				r, ctx = retainedFinanceRepositoryWithBudgets(t, packageExpiryWorkloadBudget, 45*time.Second)
 			}
 			base := time.Now().UTC().Truncate(time.Second)
 			r.now = func() time.Time { return base }
@@ -243,6 +256,11 @@ func TestPackageExpiryCrossWalletIndexPostgres(t *testing.T) {
 				} else {
 					packs = append(packs, pack)
 				}
+			}
+			if scenario == "retained-upgrade" {
+				// Preserve the real historical paid and frozen facts through 038
+				// before testing the target-only index migration.
+				installBillingFixturePrefix(t, ctx, r, 900038)
 			}
 			sort.Slice(packs, func(i, j int) bool { return packs[i].String() < packs[j].String() })
 			config := r.pool.Config().ConnConfig.Copy()

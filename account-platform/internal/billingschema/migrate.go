@@ -62,6 +62,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if err := validateFinancialJSONObjects(input); err != nil {
 		return nil, err
 	}
+	if err := validatePaymentCreditAttempts(input); err != nil {
+		return nil, err
+	}
 	if err := validatePackageExpiryScan(input); err != nil {
 		return nil, err
 	}

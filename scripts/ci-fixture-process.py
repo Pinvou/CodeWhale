@@ -42,7 +42,14 @@ def linux_children():
     return result
 
 
-def linux_run(command, env, grace):
+def linux_run(command, env, grace, *, exit_evidence=None):
+    # Optional observation for release callers. It never changes the existing
+    # cancellation return code, retirement verdict, reaping or cleanup gate.
+    if exit_evidence is not None:
+        if type(exit_evidence) is not dict:
+            raise TypeError('root exit evidence must be a plain dictionary')
+        exit_evidence.clear()
+        exit_evidence['started'] = False
     libc = ctypes.CDLL(None, use_errno=True)
     parent = os.getppid()
     if libc.prctl(36, 1, 0, 0, 0) or libc.prctl(1, signal.SIGTERM, 0, 0, 0):
@@ -50,6 +57,8 @@ def linux_run(command, env, grace):
     if os.getppid() != parent:
         return 143, True, False
     child = subprocess.Popen(command, env=env, start_new_session=True)
+    if exit_evidence is not None:
+        exit_evidence['started'] = True
     ended = None
     forcing = False
     dirty = False
@@ -57,6 +66,8 @@ def linux_run(command, env, grace):
     while True:
         if ended is None:
             ended = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if exit_evidence is not None and ended is not None and 'exit_code' not in exit_evidence:
+            exit_evidence['exit_code'] = ended.si_status if ended.si_code == os.CLD_EXITED else 128 + ended.si_status
         children = linux_children()
         alive = [pid for pid, state in children if state != 'Z' and (pid != child.pid or ended is None)]
         # Keep the root zombie unreaped until all descendants are retired. Its
@@ -96,7 +107,12 @@ def linux_run(command, env, grace):
         time.sleep(0.025)
 
 
-def windows_run(command, env, grace):
+def windows_run(command, env, grace, *, exit_evidence=None):
+    if exit_evidence is not None:
+        if type(exit_evidence) is not dict:
+            raise TypeError('root exit evidence must be a plain dictionary')
+        exit_evidence.clear()
+        exit_evidence['started'] = False
     from ctypes import wintypes as w
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
 
@@ -166,6 +182,8 @@ def windows_run(command, env, grace):
         command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline([executable, *command[1:]]))
         environment = ctypes.create_unicode_buffer('\0'.join(f'{k}={v}' for k, v in sorted(env.items())) + '\0\0')
         checked(kernel.CreateProcessW(executable, command_line, None, None, True, 0x4 | 0x400 | 0x200, environment, None, ctypes.byref(startup), ctypes.byref(process)))
+        if exit_evidence is not None:
+            exit_evidence['started'] = True
         checked(kernel.AssignProcessToJobObject(job, process.hProcess))
         assigned = True
         if kernel.ResumeThread(process.hThread) == 0xffffffff:
@@ -176,6 +194,10 @@ def windows_run(command, env, grace):
             accounting = Accounting()
             checked(kernel.QueryInformationJobObject(job, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None))
             ended = kernel.WaitForSingleObject(process.hProcess, 0) == 0
+            if exit_evidence is not None and ended and 'exit_code' not in exit_evidence:
+                root_code = w.DWORD()
+                checked(kernel.GetExitCodeProcess(process.hProcess, ctypes.byref(root_code)))
+                exit_evidence['exit_code'] = root_code.value
             if ended and accounting.ActiveProcesses == 0:
                 code = w.DWORD()
                 checked(kernel.GetExitCodeProcess(process.hProcess, ctypes.byref(code)))

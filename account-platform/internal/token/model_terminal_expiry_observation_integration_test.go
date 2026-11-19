@@ -140,7 +140,7 @@ func TestModelTerminalObservationPreservesExpiryProofPostgres(t *testing.T) {
 				if stage == "requested" {
 					// A real worker may resume after this committed request and an
 					// expired lease; do not fabricate its ATTEMPTED/CONVERGED rows.
-					if _, err := f.r.pool.Exec(f.ctx, `UPDATE model_emergency_cancellations SET lease_until=$2 WHERE id=$1`, id, f.r.now().Add(-time.Second)); err != nil {
+					if _, err := f.r.pool.Exec(f.ctx, `UPDATE model_emergency_cancellations SET lease_until=$2,next_attempt_at=$2 WHERE id=$1`, id, f.r.now().Add(-time.Second)); err != nil {
 						t.Fatal(err)
 					}
 				}

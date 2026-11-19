@@ -8,7 +8,7 @@ import { PassThrough } from "node:stream";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { test } from "node:test";
+import { test as nodeTest } from "node:test";
 import { runControllerReleaseGate } from "../scripts/controller-release-gate.mjs";
 import { validateMonotonicDeadlineObservation, validateReleaseEvidence } from "../scripts/validate-controller-release-evidence.mjs";
 import { providerAttestationPayload, verifyProviderAttestation, verifyProviderAttestationForRun } from "../scripts/verify-provider-attestation.mjs";
@@ -32,28 +32,55 @@ const testPublicKeyPem = testKeys.publicKey.export({ type: "spki", format: "pem"
 const testPublicKeySha256 = crypto.createHash("sha256")
   .update(testKeys.publicKey.export({ type: "spki", format: "der" })).digest("hex");
 const certificateRoot = await mkdtemp(join(tmpdir(), "pinvou-provider-chain-"));
-// Git for Windows may be portable and may ship native or MSYS OpenSSL.
-let openssl = "openssl";
+// The provider X.509 fixture chain needs a real openssl build. Prefer the
+// openssl bundled with the active Git installation (git --exec-path also
+// covers portable or relocated Windows installs, native `bin/` and MSYS
+// `usr/bin/` layouts alike), then fall back to a PATH lookup so self-hosted
+// runners still execute the contract. When no candidate responds, skip every
+// test in this file explicitly instead of failing the whole file on a missing
+// environment precondition.
+const opensslCandidates = [];
 if (process.platform === "win32") {
-  const gitExecPath = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
-  const bundledOpenSSL = [
-    resolve(gitExecPath, "../../bin/openssl.exe"),
-    resolve(gitExecPath, "../../../usr/bin/openssl.exe"),
-  ].find(candidate => existsSync(candidate));
-  if (bundledOpenSSL) openssl = bundledOpenSSL;
+  let gitExecPath = null;
+  try {
+    gitExecPath = execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim();
+  } catch {
+    // git itself unavailable; the remaining candidates still apply.
+  }
+  if (gitExecPath !== null) {
+    opensslCandidates.push(resolve(gitExecPath, "../../bin/openssl.exe"));
+    opensslCandidates.push(resolve(gitExecPath, "../../../usr/bin/openssl.exe"));
+  }
 }
-// Explicit extensions: LibreSSL emits no Basic Constraints by default and its
-// x509 subcommand lacks -addext, so the leaf profile comes from an extfile.
-const leafExtensions = join(certificateRoot, "leaf-extensions.cnf");
-await writeFile(leafExtensions, "basicConstraints=critical,CA:FALSE\n", "utf8");
-execFileSync(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certificateRoot, "root.key"), "-out", join(certificateRoot, "root.pem"), "-subj", "/CN=Pinvou Test Provider Root", "-days", "2", "-addext", "basicConstraints=critical,CA:TRUE"], { stdio: "ignore" });
-execFileSync(openssl, ["req", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certificateRoot, "leaf.key"), "-out", join(certificateRoot, "leaf.csr"), "-subj", "/CN=Pinvou Test Provider Verifier"], { stdio: "ignore" });
-execFileSync(openssl, ["x509", "-req", "-in", join(certificateRoot, "leaf.csr"), "-CA", join(certificateRoot, "root.pem"), "-CAkey", join(certificateRoot, "root.key"), "-CAcreateserial", "-out", join(certificateRoot, "leaf.pem"), "-days", "2", "-extfile", leafExtensions], { stdio: "ignore" });
-const providerRootPem = await readFile(join(certificateRoot, "root.pem"), "utf8");
-const providerLeafPem = await readFile(join(certificateRoot, "leaf.pem"), "utf8");
-const providerLeafKey = crypto.createPrivateKey(await readFile(join(certificateRoot, "leaf.key"), "utf8"));
-const providerRootSha256 = hash(new crypto.X509Certificate(providerRootPem).raw);
-const providerLeafSha256 = hash(new crypto.X509Certificate(providerLeafPem).raw);
+opensslCandidates.push("openssl");
+const openssl = opensslCandidates.find((candidate) => {
+  try {
+    execFileSync(candidate, ["version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+});
+const opensslSkip = openssl ? false
+  : `openssl unavailable (tried: ${opensslCandidates.join(", ")}); the provider X.509 certificate fixtures cannot be generated, so the release evidence contract did not execute`;
+const test = (name, run) => nodeTest(name, { skip: opensslSkip }, run);
+let providerRootPem = null;
+let providerLeafPem = null;
+let providerLeafKey = null;
+if (openssl) {
+  // Explicit extensions: LibreSSL emits no Basic Constraints by default and its
+  // x509 subcommand lacks -addext, so the leaf profile comes from an extfile.
+  const leafExtensions = join(certificateRoot, "leaf-extensions.cnf");
+  await writeFile(leafExtensions, "basicConstraints=critical,CA:FALSE\n", "utf8");
+  execFileSync(openssl, ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certificateRoot, "root.key"), "-out", join(certificateRoot, "root.pem"), "-subj", "/CN=Pinvou Test Provider Root", "-days", "2", "-addext", "basicConstraints=critical,CA:TRUE"], { stdio: "ignore" });
+  execFileSync(openssl, ["req", "-newkey", "rsa:2048", "-nodes", "-keyout", join(certificateRoot, "leaf.key"), "-out", join(certificateRoot, "leaf.csr"), "-subj", "/CN=Pinvou Test Provider Verifier"], { stdio: "ignore" });
+  execFileSync(openssl, ["x509", "-req", "-in", join(certificateRoot, "leaf.csr"), "-CA", join(certificateRoot, "root.pem"), "-CAkey", join(certificateRoot, "root.key"), "-CAcreateserial", "-out", join(certificateRoot, "leaf.pem"), "-days", "2", "-extfile", leafExtensions], { stdio: "ignore" });
+  providerRootPem = await readFile(join(certificateRoot, "root.pem"), "utf8");
+  providerLeafPem = await readFile(join(certificateRoot, "leaf.pem"), "utf8");
+  providerLeafKey = crypto.createPrivateKey(await readFile(join(certificateRoot, "leaf.key"), "utf8"));
+}
+const providerRootSha256 = providerRootPem === null ? null : hash(new crypto.X509Certificate(providerRootPem).raw);
+const providerLeafSha256 = providerLeafPem === null ? null : hash(new crypto.X509Certificate(providerLeafPem).raw);
 const testStartedAt = new Date().toISOString();
 const testFinishedAt = new Date(Date.parse(testStartedAt) + 3_600_000).toISOString();
 const uiActions = {
@@ -839,19 +866,36 @@ test("enabled release gate checks authenticated evidence before and after extern
       const invalidateMarker = () => writeFile(markerPath, "{}");
       // Only subprocess boundaries are substituted. The imported gate and its
       // deep reader retain actual file hashing, signatures, trust pins and time.
-      t.mock.method(childProcess, "spawn", (command, args) => {
-        calls.push({ command, args: [...args] });
+      t.mock.method(childProcess, "spawn", () => {
         const child = new EventEmitter();
+        child.stdin = new PassThrough();
         child.stdout = new PassThrough();
         child.stderr = new PassThrough();
-        queueMicrotask(async () => {
-          try {
-            if (args[0]?.endsWith("check-enrollment-gated-v2-rollback.mjs")) {
-              if (scenario === "changed-after-prerequisites") await invalidateMarker();
-              if (scenario === "expired-after-prerequisites") now += 86_400_001;
-            }
-            child.stdout.end(); child.stderr.end(); child.emit("close", 0);
-          } catch (error) { child.emit("error", error); }
+        let input = "";
+        let handled = false;
+        // The supervisor receives its request before EOF and keeps stdin open
+        // for receipt acknowledgement. Record the inner business command.
+        child.stdin.on("data", (chunk) => {
+          input += chunk.toString();
+          if (handled || !input.includes("\n")) return;
+          handled = true;
+          queueMicrotask(async () => {
+            try {
+              const request = JSON.parse(input.split("\n", 1)[0]);
+              const [command, ...args] = request.command;
+              calls.push({ command, args });
+              if (args[0]?.endsWith("check-enrollment-gated-v2-rollback.mjs")) {
+                if (scenario === "changed-after-prerequisites") await invalidateMarker();
+                if (scenario === "expired-after-prerequisites") now += 86_400_001;
+              }
+              const receipt = { nonce: request.nonce, exit_code: 0, forced: false,
+                root_exit_code: 0, primary_exit_code: null, execution_error: null,
+                cleanup_confirmed: true, reason: null };
+              child.stdout.end();
+              child.stderr.end(`\nPINVOU_RELEASE_PROCESS ${JSON.stringify(receipt)}\n`);
+              child.emit("close", 0);
+            } catch (error) { child.emit("error", error); }
+          });
         });
         return child;
       });

@@ -21,7 +21,9 @@ ci_identity_guard = _financial_helpers["ci_identity_guard"]
 require_exclusive_instance = _financial_helpers["require_exclusive_instance"]
 LEDGER_REPAIR_APPROVAL_ROOT = "TestLedgerRepairCrossDomainActivationPostgresIntegration"
 LEDGER_REPAIR_PAYMENT_E2E_ROOT = "TestLedgerRepairPaymentAuthorityE2EPostgresIntegration"
-LEDGER_REPAIR_APPROVAL_ROOTS = {LEDGER_REPAIR_APPROVAL_ROOT, LEDGER_REPAIR_PAYMENT_E2E_ROOT}
+PAYMENT_CREDIT_F12_ROOT = "TestPaymentFinancialRepairCrossDomainActivationPostgresIntegration"
+PAYMENT_CREDIT_F12_CHILDREN = {"active-subject-and-legacy-closed-receipt-replay", "closed-subject-cannot-create-a-new-repair-effect"}
+LEDGER_REPAIR_APPROVAL_ROOTS = {LEDGER_REPAIR_APPROVAL_ROOT, LEDGER_REPAIR_PAYMENT_E2E_ROOT, PAYMENT_CREDIT_F12_ROOT}
 BILLING_ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 MIGRATION_CLI_ROOTS = {"TestMigrationCLIBudgetRecovery", "TestAccountClosureLegacyRollbackCLI", "TestPhaseMigrationCLIPinsBeforeDown", "TestAccountClosureSagaIdentityDispatchPostgres"}
 MIGRATION_IDENTITY_ROOT = "TestAccountClosureSagaIdentityDispatchPostgres"
@@ -119,6 +121,7 @@ def emit_child_logs(child_log, children):
 
 def verify_results(raw, required):
     passed = set()
+    passed_children = set()
     passed_cases = set()
     count = 0
     running = set()
@@ -150,6 +153,8 @@ def verify_results(raw, required):
         if name and action == "pass":
             passed_cases.add(name)
             count += 1
+            if "/" in name:
+                passed_children.add(name)
             if "/" not in name:
                 if name in passed:
                     raise RuntimeError("duplicate closure root result: " + name)
@@ -161,6 +166,8 @@ def verify_results(raw, required):
         raise RuntimeError("required closure contracts did not execute exactly: missing="
                            + ", ".join(sorted(required - passed)) + "; unexpected="
                            + ", ".join(sorted(passed - required)))
+    if PAYMENT_CREDIT_F12_ROOT in required and {PAYMENT_CREDIT_F12_ROOT+"/"+name for name in PAYMENT_CREDIT_F12_CHILDREN} - passed_children:
+        raise RuntimeError("payment credit F12 child contracts did not execute")
     if "TestMigrationCLIBudgetRecovery" in required:
         budget_cases = {"TestMigrationCLIBudgetRecovery/" + suffix for suffix in (
             "invalid_budget_before_database", "domain_lock_wait", "partial_up_timeout",
