@@ -392,6 +392,11 @@ function assertWorkflowFailurePolicy(workflowText) {
   }
   {
     const receipt = namedStep(jobBlock("windows-rust-test", text), "Windows atomic lifecycle receipts");
+    assert.equal(namedStep(jobBlock("windows-rust-test", text), "Configure bounded Windows atomic upload diagnostics").trimEnd(), [
+      "      - name: Configure bounded Windows atomic upload diagnostics",
+      "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        run: node scripts/ci-artifact-upload-diagnostics.cjs --configure-env",
+    ].join("\n"));
     assert.equal(receipt.trimEnd(), [
       "      - name: Windows atomic lifecycle receipts",
       "        id: windows_atomic_receipts_upload",
@@ -399,6 +404,9 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_UPLOAD_NODE_OPTIONS }}",
       "        with:",
       "          name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}",
       "          path: |",
@@ -489,10 +497,12 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   assertWorkflowFailurePolicy(original);
   const windows = namedStep(jobBlock("windows-rust-test", original), "Windows 测试二进制导入诊断");
   const relayReceipt = namedStep(jobBlock("windows-relay-tools-test", original), "Preserve Windows relay tools process receipt");
+  const atomicConfig = namedStep(jobBlock("windows-rust-test", original), "Configure bounded Windows atomic upload diagnostics");
   const withoutWindowsExemption = original.replace(windows,
     windows.replace("        continue-on-error: true\n", ""));
   const mutants = [
     original.replace("scripts/ci-artifact-upload-diagnostics.cjs --configure-env", "scripts/unreviewed-upload.cjs --configure-env"),
+    original.replace(atomicConfig, atomicConfig.replace("scripts/ci-artifact-upload-diagnostics.cjs", "scripts/unreviewed-upload.cjs")),
     original.replace(relayReceipt, relayReceipt.replace("windows-relay-tools-process.json", "other-process.json")),
     original.replace("      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n",
       "      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n        continue-on-error: true\n"),

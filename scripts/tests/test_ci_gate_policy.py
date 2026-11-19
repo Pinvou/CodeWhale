@@ -3695,6 +3695,9 @@ python3() { fixture_mock python3 "$@"; }
             '        timeout-minutes: 3',
             '        continue-on-error: true',
             '        uses: actions/upload-artifact@v7',
+            '        env:',
+            "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+            '          NODE_OPTIONS: ${{ env.PINVOU_CI_UPLOAD_NODE_OPTIONS }}',
             '        with:',
             '          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}',
             '          path: |',
@@ -3711,6 +3714,12 @@ python3() { fixture_mock python3 "$@"; }
         atomic_receipt = _step_named(
             _extract_job_block(body, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
         )
+        self.assertEqual(_step_named(_extract_job_block(body, 'windows-rust-test'),
+            'Configure bounded Windows atomic upload diagnostics').rstrip(), '\n'.join([
+                '      - name: Configure bounded Windows atomic upload diagnostics',
+                "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+                '        run: node scripts/ci-artifact-upload-diagnostics.cjs --configure-env',
+            ]))
         for name in reviewed_diagnostics:
             diagnostic_step = body.split(
                 "- name: " + name + "\n", maxsplit=1
@@ -3856,6 +3865,9 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_UPLOAD_NODE_OPTIONS }}
                   with:
                     name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
                     path: |
@@ -3907,6 +3919,10 @@ python3() { fixture_mock python3 "$@"; }
         atomic = _step_named(
             _extract_job_block(original, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
         )
+        atomic_config = _step_named(_extract_job_block(original, 'windows-rust-test'),
+            'Configure bounded Windows atomic upload diagnostics')
+        mutations['unreviewed atomic preload'] = original.replace(atomic_config,
+            atomic_config.replace('scripts/ci-artifact-upload-diagnostics.cjs', 'scripts/unreviewed.cjs'), 1)
         for label, old, new in (
             ('atomic upload action', 'uses: actions/upload-artifact@v7', 'run: exit 37'),
             ('atomic upload id', 'id: windows_atomic_receipts_upload', 'id: unreviewed_upload'),

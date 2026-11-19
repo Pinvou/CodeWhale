@@ -23,6 +23,7 @@ if (process.env.PINVOU_CI_ARTIFACT_DIAGNOSTICS === '1') {
   const pending = new Map();
   let serial = 0;
   let lines = 0;
+  const receiptReads = { created: 0, opened: 0, ended: 0, closed: 0, bytes: 0, errors: 0, active: 0 };
   const elapsed = () => Math.round(performance.now() - started);
   function emit(event) {
     if (lines++ >= 160) return;
@@ -73,20 +74,29 @@ if (process.env.PINVOU_CI_ARTIFACT_DIAGNOSTICS === '1') {
   const originalRead = fs.createReadStream;
   fs.createReadStream = function (...args) {
     const stream = originalRead.apply(this, args);
-    if (pending.size >= 32 || !String(args[0]).endsWith('.json')) return stream;
-    const id = ++serial;
+    if (!String(args[0]).endsWith('.json')) return stream;
+    receiptReads.created++; receiptReads.active++;
+    // A large atomic ledger must not exhaust the network diagnostic budget
+    // before its first request. Keep all read totals, detail only four files.
+    const detailed = receiptReads.created <= 4 && pending.size < 32;
+    const id = detailed ? ++serial : null;
     const record = { id, kind: 'receipt_read', phase: 'created', start_ms: elapsed() };
-    pending.set(id, record);
-    emit({ id, kind: record.kind, phase: 'created' });
-    stream.once('open', () => { record.phase = 'open'; emit({ id, kind: record.kind, phase: 'open' }); });
-    stream.once('end', () => { record.phase = 'end'; emit({ id, kind: record.kind, phase: 'end', bytes: stream.bytesRead }); });
-    stream.once(errorMonitor, error => emit({ id, kind: record.kind, phase: 'error', code: errorCode(error) }));
-    stream.once('close', () => { emit({ id, kind: record.kind, phase: 'closed', bytes: stream.bytesRead }); pending.delete(id); });
+    const phase = (name, extra = {}) => { record.phase = name; if (detailed) emit({ id, kind: record.kind, phase: name, ...extra }); };
+    if (detailed) pending.set(id, record);
+    phase('created');
+    stream.once('open', () => { receiptReads.opened++; phase('open'); });
+    stream.once('end', () => { receiptReads.ended++; phase('end', { bytes: stream.bytesRead }); });
+    stream.once(errorMonitor, error => { receiptReads.errors++; emit({ id, kind: record.kind, phase: 'error', code: errorCode(error) }); });
+    stream.once('close', () => {
+      receiptReads.closed++; receiptReads.active--; receiptReads.bytes += stream.bytesRead;
+      phase('closed', { bytes: stream.bytesRead });
+      if (detailed) pending.delete(id);
+    });
     return stream;
   };
   require('node:module').syncBuiltinESMExports();
   emit({ phase: 'enabled', pid: process.pid });
-  const pulse = setInterval(() => emit({ phase: 'progress', pending: [...pending.values()].map(r => ({ ...r, waiting_ms: elapsed() - r.start_ms })) }), 10000);
+  const pulse = setInterval(() => emit({ phase: 'progress', receipt_reads: receiptReads, pending: [...pending.values()].map(r => ({ ...r, waiting_ms: elapsed() - r.start_ms })) }), 10000);
   pulse.unref();
-  process.once('beforeExit', () => { clearInterval(pulse); emit({ phase: 'exit', pending: pending.size }); });
+  process.once('beforeExit', () => { clearInterval(pulse); emit({ phase: 'exit', receipt_reads: receiptReads, pending: pending.size }); });
 }

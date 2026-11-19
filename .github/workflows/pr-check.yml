@@ -4632,12 +4632,19 @@ jobs:
           PY
           "$python_exe" scripts/ci-resource-ledger.py --directory "$PINVOU_CI_RESOURCE_LEDGER"
 
+      - name: Configure bounded Windows atomic upload diagnostics
+        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        run: node scripts/ci-artifact-upload-diagnostics.cjs --configure-env
+
       - name: Windows atomic lifecycle receipts
         id: windows_atomic_receipts_upload
         if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+          NODE_OPTIONS: ${{ env.PINVOU_CI_UPLOAD_NODE_OPTIONS }}
         with:
           name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
           path: |

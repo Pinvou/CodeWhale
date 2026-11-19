@@ -32,6 +32,36 @@ test('passive receipt/network evidence preserves bytes and excludes signed URLs,
 
 function osTemp() { return require('node:os').tmpdir(); }
 
+test('many receipt reads retain the later network phases within the bounded log', () => {
+  const source = `
+    const fs=require('node:fs'),http=require('node:http'),os=require('node:os'),path=require('node:path');
+    const root=fs.mkdtempSync(path.join(os.tmpdir(),'artifact-many-'));
+    (async()=>{
+      for(let i=0;i<64;i++){
+        const file=path.join(root,'private-bulk-'+i+'.json');fs.writeFileSync(file,'{}');
+        await new Promise((resolve,reject)=>{const s=fs.createReadStream(file);s.once('error',reject);s.once('close',resolve);s.resume();});
+      }
+      const server=http.createServer((req,res)=>res.end('ok'));
+      server.listen(0,'127.0.0.1',()=>{
+        const req=http.request({hostname:'127.0.0.1',port:server.address().port,path:'/private-bulk?sig=private-token'},res=>{
+          res.resume();res.once('end',()=>server.close(()=>{fs.rmSync(root,{recursive:true});console.log('completed-64');}));
+        });req.once('error',()=>{process.exitCode=2;server.close();});req.end();
+      });
+    })().catch(()=>{process.exitCode=3;});`;
+  const result = spawnSync(process.execPath, ['--require', helper, '-e', source], {
+    env: { ...process.env, PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1' }, encoding: 'utf8', timeout: 15000
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'completed-64');
+  assert.ok(!result.stderr.includes('private-bulk'));
+  assert.ok(!result.stderr.includes('private-token'));
+  const events = result.stderr.split('\n').filter(x => x.startsWith('[artifact-transport] ')).map(x => JSON.parse(x.slice(21)));
+  assert.ok(events.some(x => x.phase === 'response_headers' && x.status === 200));
+  const final = events.findLast(x => x.phase === 'exit');
+  assert.deepEqual(final.receipt_reads, { created: 64, opened: 64, ended: 64, closed: 64, bytes: 128, errors: 0, active: 0 });
+  assert.ok(events.length <= 160);
+});
+
 test('generated NODE_OPTIONS really preloads a path with spaces and preserves existing options', () => {
   const fs = require('node:fs');
   const { preloadOptions } = require(helper);
