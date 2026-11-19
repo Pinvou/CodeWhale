@@ -165,8 +165,12 @@ for (const host of ['desktop', 'web']) {
   });
 
   test(`${host}: empty/oversized validation runs before native upload; missing loader is configuration`, async () => {
+    // Over-cap fixture: the shared ingest cap rose 20 -> 50 MiB (community
+    // PR #894); the mirrored-constant pins live in chunked_file_upload /
+    // remote_file_transfer / web_access_contract tests, so a future bump
+    // must update this literal too.
     for (const [size, missingUploader, category] of [[0, false, 'validation_failed'],
-      [20 * 1024 * 1024 + 1, false, 'validation_failed'], [1, true, 'configuration_missing']]) {
+      [50 * 1024 * 1024 + 1, false, 'validation_failed'], [1, true, 'configuration_missing']]) {
       const h = harness(host, { missingUploader });
       await h.api.uploadDeviceFiles([file(size)]);
       const terminal = completed(h);
