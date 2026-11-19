@@ -179,7 +179,7 @@ func refundQuerySimulatorPaidOrder(t *testing.T, r *PostgresRepository, ctx cont
 	if response.StatusCode != http.StatusOK {
 		t.Fatal("simulator payment rejected", response.StatusCode)
 	}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

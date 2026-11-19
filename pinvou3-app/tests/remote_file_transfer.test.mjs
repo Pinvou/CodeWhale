@@ -344,6 +344,7 @@ test('remote attachment upload hashes bytes and commits only B-confirmed transfe
 });
 
 test('artifact download preserves ordered chunks and aborts malformed progress', async () => {
+  const cleanups = [];
   const api = {
     artifactDownloadBegin: async () => ({ transferId: 'download-1', chunkBytes: 2, totalBytes: 5 }),
     artifactDownloadChunk: async (_local, _remote, _task, _artifact, _transfer, index) => ({
@@ -354,13 +355,14 @@ test('artifact download preserves ordered chunks and aborts malformed progress',
       nextChunk: index + 1,
       completed: index === 2,
     }),
-    artifactDownloadAbort: async () => assert.fail('valid download must not abort'),
+    artifactDownloadAbort: async (...args) => { cleanups.push(args); },
   };
   const blob = await downloadRemoteArtifact(api, { localSessionId: 'remote-one', remoteRef: 'ref-one' }, {
     taskId: 'task-1', artifactId: 'artifact-1', mimeType: 'text/plain', displayName: 'hello.txt',
     sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
   });
   assert.equal(await blob.text(), 'hello');
+  assert.deepEqual(cleanups, [['remote-one', 'ref-one', 'task-1', 'artifact-1', 'download-1']]);
   assert.throws(() => validateRemoteFiles([]), /remote_attachment_count_invalid/);
 });
 
@@ -380,6 +382,25 @@ test('downloads enforce their independent 32 MiB bound and abort on violation', 
     /remote_artifact_size_limit/,
   );
   assert.equal(aborts, 1);
+});
+
+test('verified download survives cleanup response loss and digest failure retires its receipt', async () => {
+  let cleanups = 0;
+  const api = {
+    artifactDownloadBegin: async () => ({ transferId: 'download-1', chunkBytes: 5, totalBytes: 5 }),
+    artifactDownloadChunk: async () => ({ chunkIndex: 0, chunkB64: Buffer.from('hello').toString('base64'),
+      chunkBytes: 5, receivedBytes: 5, nextChunk: 1, completed: true }),
+    artifactDownloadAbort: async () => { cleanups++; throw Object.assign(new Error('result_unknown'), { code: 'result_unknown' }); },
+  };
+  const binding = { localSessionId: 'remote-one', remoteRef: 'ref-one' };
+  const artifact = { taskId: 'task-1', artifactId: 'artifact-1', mimeType: 'text/plain',
+    sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824' };
+  assert.equal(await (await downloadRemoteArtifact(api, binding, artifact)).text(), 'hello');
+  assert.equal(cleanups, 1);
+  await assert.rejects(downloadRemoteArtifact(api, binding, { ...artifact, sha256: 'a'.repeat(64) }), /remote_artifact_checksum_mismatch/);
+  assert.equal(cleanups, 2);
+  assert.equal(await (await downloadRemoteArtifact(api, binding, artifact)).text(), 'hello');
+  assert.equal(cleanups, 3);
 });
 
 test('a download whose chunks exceed the declared total stops before unbounded growth', async () => {

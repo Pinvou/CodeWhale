@@ -131,6 +131,10 @@ export const REMOTE_CONTROL_RELEASE_EXACT_PATHS = Object.freeze([
   "scripts/run-windows-remote-control-e2e.ps1",
   "scripts/windows-e2e-orchestrator-helpers.ps1",
   "scripts/windows-e2e-process-guard.ps1",
+  "scripts/ci-fixture-process.py",
+  "scripts/tests/test_ci_fixture_process.py",
+  "scripts/release-owned-process.py",
+  "scripts/windows-owned-process.cs",
   "scripts/generate-remote-control-release-paths.mjs"
 ]);
 

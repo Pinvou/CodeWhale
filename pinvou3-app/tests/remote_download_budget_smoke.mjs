@@ -88,7 +88,8 @@ try {
     if (row.mode === 'exact-budget' || row.mode === 'recovery') {
       assert.equal(row.returned, true, JSON.stringify(row));
       assert.equal(row.error, null);
-      assert.equal(row.aborts, 0);
+      // Success also retires the exact completed receipt; it does not cancel the Blob.
+      assert.equal(row.aborts, 1);
       assert.equal(row.allocations, 1);
       assert.equal(row.calls, row.mode === 'exact-budget' ? 4096 : 1);
     } else {

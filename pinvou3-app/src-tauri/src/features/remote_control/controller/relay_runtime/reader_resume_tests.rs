@@ -20,6 +20,8 @@ pub(crate) mod reservation_replay_tests;
 
 #[path = "reader_resume_tests/prepare_requeue_tests.rs"]
 mod prepare_requeue_tests;
+#[path = "reader_resume_tests/second_disconnect_tests.rs"]
+mod second_disconnect_tests;
 
 fn fixture_wall_clock_millis() -> u64 {
     std::time::SystemTime::now()
@@ -1158,6 +1160,9 @@ pub(crate) async fn resume_round_trip<T>(
         return;
     }
     let owner_case = std::env::var("PINVOU_READER_OWNER_CASE").ok();
+    let disconnect_stage = owner_case
+        .as_deref()
+        .and_then(|case| case.strip_prefix("resume_"));
     let race = match owner_case.as_deref() {
         Some("disconnect") => {
             Some(super::owner_interleaving_tests::OwnerRaceCase::ReceivedDisconnect)
@@ -1229,7 +1234,12 @@ pub(crate) async fn resume_round_trip<T>(
             now,
         )
         .unwrap();
-    let relay = RemoteControlManager::new(handle.clone());
+    // The second-loss tests use the production cleanup adapter registered by
+    // the app host. Worker and adapter must share this exact manager instance.
+    let relay = handle.try_state::<RemoteControlManager>().map_or_else(
+        || RemoteControlManager::new(handle.clone()),
+        |relay| relay.inner().clone(),
+    );
     let channel = relay
         .start_controller_relay(operation.generation())
         .await
@@ -1299,6 +1309,15 @@ pub(crate) async fn resume_round_trip<T>(
         "initial_connected",
     )
     .await;
+    if disconnect_stage.is_some() {
+        second_disconnect_tests::wire_notice_is_not_local_authority(
+            &manager,
+            &relay,
+            &mut socket,
+            &mut processed_rx,
+        )
+        .await;
+    }
     if retire_endpoint {
         // Unlike the direct channel rotation regression, this retires a live
         // worker after the full authenticated handshake and actual joined frame.
@@ -1380,33 +1399,37 @@ pub(crate) async fn resume_round_trip<T>(
     wait_prepared(&manager).await;
     assert!(!owned.worker.as_ref().unwrap().is_finished());
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
-    let mut socket =
-        if let Some(case @ ("prepare_write" | "prepare_legacy")) = owner_case.as_deref() {
-            prepare_requeue_tests::successor_socket(
-                &listener,
-                &relay,
-                &manager,
-                &mut processed_rx,
-                case,
-            )
-            .await
-        } else {
-            let mut socket = accept(&listener).await;
-            registered(&mut socket).await;
-            socket
-        };
-    let prepare = prepare_requeue_tests::receive_prepare(&mut socket).await;
-    if owner_case.as_deref() == Some("prepare_write") {
-        use sha2::Digest as _;
-        let digest: [u8; 32] = sha2::Sha256::digest(prepare.to_string().as_bytes()).into();
-        assert_eq!(
-            relay.failed_prepare_digest_for_test(),
-            Some(digest),
-            "successor must regenerate the same prepare, not rotate its proof or request"
-        );
+    if let Some(case @ ("prepare_write" | "prepare_legacy")) = owner_case.as_deref() {
+        prepare_requeue_tests::fault_ends_candidate(
+            &listener,
+            &manager,
+            &handle.state::<ControlledLaneState>(),
+            &handle.state::<ControlledOutboundState>(),
+            &mut owned,
+            &mut processed_rx,
+            case,
+        )
+        .await;
+        return;
     }
+    let mut socket = accept(&listener).await;
+    registered(&mut socket).await;
+    let prepare = prepare_requeue_tests::receive_prepare(&mut socket).await;
     assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
     assert!(handle.state::<ControlledLaneState>().is_suspended());
+    if disconnect_stage == Some("prepared") {
+        second_disconnect_tests::end_current_candidate(
+            &manager,
+            &handle.state::<ControlledLaneState>(),
+            &handle.state::<ControlledOutboundState>(),
+            &mut owned,
+            &mut processed_rx,
+            socket,
+            (frozen, super::super::resume::ResumePhase::Prepared),
+        )
+        .await;
+        return;
+    }
     let activation = "activation-reader-0001";
     let provisional = json!({
         "v":1, "type":"controller_resume_provisional", "request_id":prepare["request_id"],
@@ -1449,6 +1472,19 @@ pub(crate) async fn resume_round_trip<T>(
         manager.status().kind(),
         ControlledStatusKind::ResumeProvisional
     );
+    if disconnect_stage == Some("provisional") {
+        second_disconnect_tests::end_current_candidate(
+            &manager,
+            &handle.state::<ControlledLaneState>(),
+            &handle.state::<ControlledOutboundState>(),
+            &mut owned,
+            &mut processed_rx,
+            socket,
+            (frozen, super::super::resume::ResumePhase::Provisional),
+        )
+        .await;
+        return;
+    }
     // Crucially, bare encrypted_resume_confirm must traverse the manager
     // allowlist: dropping it makes the ACK wait fail, not a zero-test pass.
     let wrong = a_lane
@@ -1481,6 +1517,22 @@ pub(crate) async fn resume_round_trip<T>(
     send(&mut socket, &pending).await;
     let liveness = receive(&mut socket, "controller_post_activation_liveness").await;
     assert_ne!(liveness["request_id"], activation_ack["request_id"]);
+    if disconnect_stage == Some("pending") {
+        second_disconnect_tests::end_current_candidate(
+            &manager,
+            &handle.state::<ControlledLaneState>(),
+            &handle.state::<ControlledOutboundState>(),
+            &mut owned,
+            &mut processed_rx,
+            socket,
+            (
+                frozen,
+                super::super::resume::ResumePhase::PostActivationLiveness,
+            ),
+        )
+        .await;
+        return;
+    }
     let mut confirmed = pending.clone();
     confirmed
         .as_object_mut()

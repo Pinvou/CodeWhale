@@ -310,6 +310,13 @@ export async function downloadRemoteArtifact(api, binding, artifact) {
       const digest = hex(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())));
       if (digest !== artifact.sha256) throw new Error('remote_artifact_checksum_mismatch');
     }
+    // Bytes are now verified locally. Retire the server's final-response
+    // receipt through the existing exact-bound cleanup operation. A lost
+    // cleanup reply cannot invalidate the completed local download; TTL is
+    // the fallback for that receipt.
+    await api.artifactDownloadAbort(
+      binding.localSessionId, binding.remoteRef, artifact.taskId, artifact.artifactId, begin.transferId,
+    ).catch(() => {});
     return blob;
   } catch (error) {
     if (error?.code !== 'result_unknown') {

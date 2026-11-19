@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SOURCE = Path(__file__).resolve().parents[1] / "account-platform-auth-quota-lua-check.py"
 SPEC = importlib.util.spec_from_file_location("quota_lua_check", SOURCE)
@@ -111,9 +111,44 @@ class QuotaLuaRunnerTests(unittest.TestCase):
                 return status == 258
             finally:
                 kernel.CloseHandle(handle)
-        state = Path("/proc") / str(pid) / "stat"
+        return self._proc_child_running(Path("/proc") / str(pid) / "stat")
+
+    @staticmethod
+    def _proc_child_running(state):
         # An exited child may briefly remain a zombie until its new parent reaps it.
-        return state.exists() and state.read_text().split(") ", 1)[1].split()[0] not in {"Z", "X"}
+        try:
+            content = state.read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            # Reaping can remove the proc entry before or during the read.
+            return False
+        return content.split(") ", 1)[1].split()[0] not in {"Z", "X"}
+
+    def test_proc_child_running_accepts_disappearance_during_read(self):
+        for error in (FileNotFoundError("gone"), ProcessLookupError("gone")):
+            with self.subTest(error=type(error).__name__):
+                state = Mock(spec=Path)
+                state.exists.return_value = True
+                state.read_text.side_effect = error
+                self.assertFalse(self._proc_child_running(state))
+
+    def test_proc_child_running_preserves_live_and_terminal_states(self):
+        for status, live in (("S", True), ("R", True), ("Z", False), ("X", False)):
+            with self.subTest(status=status):
+                state = Mock(spec=Path)
+                state.read_text.return_value = f"123 (python) {status} 1 123 123 0\n"
+                self.assertIs(self._proc_child_running(state), live)
+
+    def test_proc_child_running_rejects_unknown_observations(self):
+        for error in (PermissionError("denied"), OSError("unreadable")):
+            with self.subTest(error=type(error).__name__):
+                state = Mock(spec=Path)
+                state.read_text.side_effect = error
+                with self.assertRaises(type(error)):
+                    self._proc_child_running(state)
+        state = Mock(spec=Path)
+        state.read_text.return_value = "incomplete stat"
+        with self.assertRaises(IndexError):
+            self._proc_child_running(state)
 
     def invoke(self, mode="pass", *, lua_missing=False, timeout=5):
         with tempfile.TemporaryDirectory(prefix="quota runner fixture ") as directory:

@@ -944,6 +944,16 @@
         "sha256": "eea5cccf8417dc013b56b459da58335391228fb51d71a4a9afe5cbc178618fb1"
       },
       {
+        "file": "000095_payment_credit_admissions.down.sql",
+        "version": 95,
+        "sha256": "d75574c134ac440670ca70c90b38b379864717b1a484a5158798f5f146190e87"
+      },
+      {
+        "file": "000095_payment_credit_admissions.up.sql",
+        "version": 95,
+        "sha256": "e86c64509388bb4257fc36d0d6acaed70627270c167409ffded4a8ec1f08bdb7"
+      },
+      {
         "file": "900001_first_delivery_permission_metadata.down.sql",
         "version": 900001,
         "sha256": "fb0c59fb6749b7c82dc824a64a248a152b5a86672c2b7c44fdd06c52ab2cef04"
@@ -1092,6 +1102,16 @@
         "file": "900015_organization_evidence_truncate_guards.up.sql",
         "version": 900015,
         "sha256": "8ef3aea3b9923be58e6aa4460886e03df786db8771697e53bd86bdeea5809e78"
+      },
+      {
+        "file": "900016_payment_credit_closure_fence.down.sql",
+        "version": 900016,
+        "sha256": "ad5a114ce0cf45145fdea4fedd0d2ca8bb151f876ba6061a1783b4b84aabccda"
+      },
+      {
+        "file": "900016_payment_credit_closure_fence.up.sql",
+        "version": 900016,
+        "sha256": "92b600b81e4fe589645fed6a0dbe4f4f857a1dc5b99d3de6be918caa742a5f90"
       },
       {
         "file": "900017_sms_provider_admission_window.down.sql",
@@ -2296,6 +2316,16 @@
         "sha256": "458f58680bc1ff48ceb59ec274329e429d5806a07000e0aae3c9551136eaaa70"
       },
       {
+        "file": "900039_payment_credit_attempts.down.sql",
+        "version": 900039,
+        "sha256": "65553f8114e3778b096386114aea689afbd3fb222147a6f8a7451d8912d62d24"
+      },
+      {
+        "file": "900039_payment_credit_attempts.up.sql",
+        "version": 900039,
+        "sha256": "722e0334e4072c841704015f1f0a5b40e412f6b4a82a7c8477c4b1f6600df7e9"
+      },
+      {
         "file": "900043_package_expiry_scan.down.sql",
         "version": 900043,
         "sha256": "0a2edbe127d2abfdbe978298cf6b1e84bbef14e217fd7fbf9a653810fac334d6"
@@ -2798,6 +2828,16 @@
         "file": "900009_governance_usage_resource_indexes.up.sql",
         "version": 900009,
         "sha256": "6ba3fb063eb36f50888456cb0c665ac6828dca795bce295a44997c1ecd3ccaad"
+      },
+      {
+        "file": "900010_emergency_cancellation_retry.down.sql",
+        "version": 900010,
+        "sha256": "d61e88656c378b7f06312b9d4db858c64f4a75cfd6e7b63e4259c7b09f2ff86e"
+      },
+      {
+        "file": "900010_emergency_cancellation_retry.up.sql",
+        "version": 900010,
+        "sha256": "cf366da4d34621f9728d79e8e30ba8b55940ad254cda7802888b7f9082abc24c"
       },
       {
         "file": "900011_outbox_publication_generation.down.sql",

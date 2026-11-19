@@ -66,7 +66,9 @@ use agent_client_protocol::schema::v1::{
     SessionModeState, SessionNotification, SetSessionConfigOptionRequest, SetSessionModeRequest,
     StopReason, ToolKind,
 };
-use agent_client_protocol::{Agent, ByteStreams, Client, ConnectionTo};
+use agent_client_protocol::{
+    Agent, ByteStreams, Client, ConnectionTo, RequestCancellation, Responder,
+};
 use agent_probe::{CliProbeCache, CliProbeGates, ResolvedCli};
 use anyhow::{Context, Result, anyhow, bail};
 use auth_probe::{AgentAuthProbeState, CachedAuthStatus};
@@ -79,6 +81,9 @@ use tokio::sync::{Mutex, MutexGuard, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use wait_timeout::ChildExt;
 
+use crate::features::remote_control::controller::permission::{
+    PermissionAuthority, PermissionTelemetryEvent,
+};
 use crate::features::sessions::SessionStore;
 use attachments::prepare_codex_prompt;
 use deepseek_tui::session_manager::SessionMetadata;
@@ -1219,7 +1224,34 @@ struct PendingPermission {
     turn_id: Option<String>,
     activity: stall::ActivityClock,
     response_tx: oneshot::Sender<RequestPermissionResponse>,
+    sdk_responder: Option<Responder<RequestPermissionResponse>>,
     bridge: Option<EventBridge>,
+}
+
+impl PendingPermission {
+    fn respond(self, response: RequestPermissionResponse) -> Result<()> {
+        // Answering or cancelling this callback ends the user's waiting time.
+        // The remote task's immutable total deadline uses a separate clock.
+        stall::mark_activity(&self.activity);
+        if let Some(responder) = self.sdk_responder {
+            if self.response_tx.is_closed() {
+                bail!("remote_permission_closed");
+            }
+            // The ACP connection must accept the real response before an
+            // allow receipt is written. The local channel only wakes cleanup.
+            let accepted = responder
+                .respond(response)
+                .map_err(|_| anyhow!("remote_permission_closed"));
+            let _ = self.response_tx.send(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+            accepted
+        } else {
+            self.response_tx
+                .send(response)
+                .map_err(|_| anyhow!("remote_permission_closed"))
+        }
+    }
 }
 
 /// Exact owner of ACP interactive requests raised by a controller-sourced code
@@ -1323,22 +1355,85 @@ async fn insert_pending_permission(
     let mut pending = pending.lock().await;
     let owners = owners.lock();
     let bridge = request.bridge.clone();
+    let mut request = Some(request);
     let insert = || {
+        let Some(candidate) = request.as_ref() else {
+            return false;
+        };
         if !owners
-            .callback_owner(&request.view.session_id, identity)
-            .is_ok_and(|current| current.as_ref() == request.remote_owner.as_ref())
+            .callback_owner(&candidate.view.session_id, identity)
+            .is_ok_and(|current| current.as_ref() == candidate.remote_owner.as_ref())
         {
-            let _ = request.response_tx.send(RequestPermissionResponse::new(
-                RequestPermissionOutcome::Cancelled,
-            ));
             return false;
         }
-        pending.insert(key, request);
+        let Some(candidate) = request.take() else {
+            return false;
+        };
+        if let Some(previous) = pending.insert(key, candidate) {
+            let _ = previous.respond(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+        }
         true
     };
-    match bridge {
+    let inserted = match bridge {
         Some(bridge) => bridge.with_active_runtime(insert).unwrap_or(false),
         None => insert(),
+    };
+    if let Some(request) = request {
+        let _ = request.respond(RequestPermissionResponse::new(
+            RequestPermissionOutcome::Cancelled,
+        ));
+    }
+    inserted
+}
+
+// Call only outside an authority dispatch closure. The pending-map guard keeps
+// another poll from observing removal before the authority records cancellation.
+fn settle_cancelled_remote_permission(
+    pending: &mut HashMap<String, PendingPermission>,
+    key: &str,
+    callback: &Arc<()>,
+    authority: Option<&PermissionAuthority>,
+) -> Option<PermissionTelemetryEvent> {
+    let request = lifecycle::remove_owned_callback(pending, key, |request| {
+        Arc::ptr_eq(&request.callback_instance, callback)
+            && request
+                .sdk_responder
+                .as_ref()
+                .is_some_and(|responder| responder.cancellation().is_cancelled())
+    })?;
+    let telemetry = request.remote_owner.as_ref().and_then(|owner| {
+        authority?.cancel_bound_callback(
+            &owner.lease,
+            &owner.task_id,
+            request.remote_approval_id.as_deref()?,
+        )
+    });
+    let _ = request.respond(RequestPermissionResponse::new(
+        RequestPermissionOutcome::Cancelled,
+    ));
+    telemetry
+}
+
+async fn watch_remote_permission(
+    pending: Arc<Mutex<HashMap<String, PendingPermission>>>,
+    key: String,
+    callback: Arc<()>,
+    mut response_rx: oneshot::Receiver<RequestPermissionResponse>,
+    cancellation: RequestCancellation,
+    authority: Option<Arc<PermissionAuthority>>,
+) {
+    tokio::select! {
+        _ = &mut response_rx => return,
+        _ = cancellation.cancelled() => {}
+    }
+    let telemetry = {
+        let mut pending = pending.lock().await;
+        settle_cancelled_remote_permission(&mut pending, &key, &callback, authority.as_deref())
+    };
+    if let Some(authority) = authority {
+        authority.publish_dispatch_telemetry(telemetry);
     }
 }
 
@@ -5451,7 +5546,7 @@ impl AcpPool {
                     }
                 });
             }
-            let _ = request.response_tx.send(RequestPermissionResponse::new(
+            let _ = request.respond(RequestPermissionResponse::new(
                 RequestPermissionOutcome::Cancelled,
             ));
         }
@@ -5525,8 +5620,7 @@ impl AcpPool {
         bridge
             .with_active_runtime(|| -> Result<()> {
                 request
-                    .response_tx
-                    .send(response)
+                    .respond(response)
                     .map_err(|_| anyhow::anyhow!("Codex ACP 权限请求已关闭"))?;
                 bridge.emit(
                     "permission_resolved",
@@ -5550,31 +5644,129 @@ impl AcpPool {
         permission_request_id: &str,
         allow: bool,
     ) -> Result<()> {
+        use crate::features::remote_control::controller::controlled::ControlledDeviceManager;
+        use crate::features::remote_control::controller::permission::{
+            DispatchCommit, PermissionAuthority,
+        };
+        use crate::features::remote_control::controller::task::RemoteTaskLedger;
+
         let mut pending = self.pending_permissions.lock().await;
         let owners = self.remote_permission_owners.lock();
         let (runtime, turn_id) = owners
             .active_runtime(owner)
             .context("remote_permission_binding_stale")?;
-        let RemotePermissionResolution {
-            request,
-            response,
-            option_id,
-            outcome,
-        } = take_remote_permission_resolution(&mut pending, owner, permission_request_id, allow)?;
+        let (budget, cancel) = owners
+            .dispatch_budget(owner)
+            .context("remote_permission_binding_stale")?;
+        let key = remote_permission_response_key(&pending, owner, permission_request_id)
+            .context("remote_permission_binding_stale")?;
+        let request = pending
+            .get(&key)
+            .context("remote_permission_binding_stale")?;
+        if request.turn_id.as_deref() != Some(turn_id.as_str()) || request.sdk_responder.is_none() {
+            bail!("remote_permission_binding_stale");
+        }
         let tool_call_id = request.view.tool_call_id.clone();
-        runtime
-            .bridge
-            .with_active_runtime(|| -> Result<()> {
-                if request.turn_id.as_deref() != Some(turn_id.as_str()) {
-                    bail!("remote_permission_binding_stale");
+        let callback = Arc::clone(&request.callback_instance);
+        let mut send = |allow: bool| -> Result<_> {
+            let request = pending
+                .get(&key)
+                .context("remote_permission_binding_stale")?;
+            if allow && remote_permission_option_id(&request.option_kinds, true).is_none() {
+                bail!("remote_permission_allow_option_missing");
+            }
+            if allow {
+                if request
+                    .sdk_responder
+                    .as_ref()
+                    .is_some_and(|responder| responder.cancellation().is_cancelled())
+                {
+                    bail!("remote_permission_closed");
                 }
-                runtime
+                budget.checkpoint(cancel).map_err(anyhow::Error::msg)?;
+            }
+            // Consume only inside the final fenced send. Keep the shared
+            // exact-owner option selection and deny fallback on this real path.
+            let RemotePermissionResolution {
+                request,
+                response,
+                option_id,
+                outcome,
+            } = take_remote_permission_resolution(
+                &mut pending,
+                owner,
+                permission_request_id,
+                allow,
+            )?;
+            request.respond(response)?;
+            Ok((option_id, outcome))
+        };
+        let authority = self.app.try_state::<Arc<PermissionAuthority>>();
+        let mut dispatch_telemetry = None;
+        let result = runtime
+            .bridge
+            .with_active_runtime(|| -> Result<_> {
+                let (option_id, outcome) = runtime
                     .bridge
-                    .with_current_turn(&turn_id, || {
-                        request
-                            .response_tx
-                            .send(response)
-                            .map_err(|_| anyhow::anyhow!("remote_permission_closed"))
+                    .with_current_turn(&turn_id, || -> Result<_> {
+                        if !allow {
+                            return send(false);
+                        }
+                        let controlled = self
+                            .app
+                            .try_state::<ControlledDeviceManager>()
+                            .context("remote_permission_binding_stale")?;
+                        let ledger = self
+                            .app
+                            .try_state::<Arc<RemoteTaskLedger>>()
+                            .context("remote_permission_binding_stale")?;
+                        let authority = authority
+                            .as_ref()
+                            .context("remote_permission_binding_stale")?;
+                        let mut sent = None;
+                        let result = controlled
+                            .with_permission_dispatch_lease(&owner.lease, || {
+                                ledger.with_live_permission_task(
+                                    &owner.task_id,
+                                    owner.task_sequence,
+                                    &owner.session_id,
+                                    &owner.lease,
+                                    || {
+                                        authority.dispatch_bound_allow(
+                                            &owner.lease,
+                                            &owner.task_id,
+                                            permission_request_id,
+                                            || {
+                                                let response = send(true);
+                                                let succeeded = response.is_ok();
+                                                sent = Some(response);
+                                                succeeded
+                                            },
+                                        )
+                                    },
+                                )
+                            })
+                            .map_err(|error| anyhow::anyhow!(error.code))?
+                            .map_err(|error| anyhow::anyhow!(error.code))?;
+                        let (commit, telemetry) = match result {
+                            Ok(result) => result,
+                            Err(error) => {
+                                if let Some(Err(send_error)) = sent {
+                                    return Err(send_error);
+                                }
+                                bail!(error.code);
+                            }
+                        };
+                        dispatch_telemetry = telemetry;
+                        match commit {
+                            DispatchCommit::Committed => {
+                                sent.context("permission_dispatch_failed")?
+                            }
+                            DispatchCommit::Rejected {
+                                code: "permission_expired",
+                            } => send(false),
+                            DispatchCommit::Rejected { code } => bail!(code),
+                        }
                     })
                     .context("remote_permission_binding_stale")??;
                 runtime.bridge.emit(
@@ -5587,10 +5779,26 @@ impl AcpPool {
                 );
                 Ok(())
             })
-            .context("remote_permission_closed")??;
+            .context("remote_permission_closed")
+            .and_then(|result| result);
+        if result.is_err() {
+            // The SDK flag is visible before its watcher can acquire this map.
+            // Settle that exact cancellation before another poll reads pending
+            // callbacks. A closed SDK queue without cancellation stays an error.
+            let cancellation_telemetry = settle_cancelled_remote_permission(
+                &mut pending,
+                &key,
+                &callback,
+                authority.as_deref().map(Arc::as_ref),
+            );
+            dispatch_telemetry = cancellation_telemetry.or(dispatch_telemetry);
+        }
         drop(owners);
         drop(pending);
-        Ok(())
+        if let Some(authority) = authority {
+            authority.publish_dispatch_telemetry(dispatch_telemetry);
+        }
+        result
     }
 
     pub async fn respond_elicitation(
@@ -5641,7 +5849,7 @@ impl AcpPool {
             .collect::<Vec<_>>();
         for key in keys {
             if let Some(request) = pending.remove(&key) {
-                let _ = request.response_tx.send(RequestPermissionResponse::new(
+                let _ = request.respond(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Cancelled,
                 ));
             }
@@ -5695,7 +5903,7 @@ impl AcpPool {
             if let Some(request) = pending.remove(&key) {
                 stall::mark_activity(&request.activity);
                 cancelled.push(request.view.tool_call_id.clone());
-                let _ = request.response_tx.send(RequestPermissionResponse::new(
+                let _ = request.respond(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Cancelled,
                 ));
             }
@@ -6165,6 +6373,10 @@ impl AcpPool {
         let replay_for_notification = replay_suppressed.clone();
         let pending_for_permission = self.pending_permissions.clone();
         let remote_owners_for_permission = self.remote_permission_owners.clone();
+        let authority_for_permission = self
+            .app
+            .try_state::<Arc<PermissionAuthority>>()
+            .map(|state| Arc::clone(state.inner()));
         let pending_for_elicitation = self.pending_elicitations.clone();
         let remote_owners_for_elicitation = self.remote_permission_owners.clone();
         let pinvou_id_for_permission = pinvou_session_id.to_string();
@@ -6248,6 +6460,13 @@ impl AcpPool {
                             request: request_value.clone(),
                         };
                         let (response_tx, response_rx) = oneshot::channel();
+                        let cancellation = remote_owner.as_ref().map(|_| responder.cancellation());
+                        let mut local_responder = Some(responder);
+                        let sdk_responder = if remote_owner.is_some() {
+                            local_responder.take()
+                        } else {
+                            None
+                        };
                         let callback_instance = Arc::new(());
                         if !insert_pending_permission(
                             &pending_for_permission,
@@ -6267,14 +6486,17 @@ impl AcpPool {
                                 turn_id: bridge_for_permission.current_turn_id(),
                                 activity: bridge_for_permission.activity(),
                                 response_tx,
+                                sdk_responder,
                                 bridge: Some(bridge_for_permission.clone()),
                             },
                         )
                         .await
                         {
-                            return responder.respond(RequestPermissionResponse::new(
-                                RequestPermissionOutcome::Cancelled,
-                            ));
+                            return local_responder.map_or(Ok(()), |responder| {
+                                responder.respond(RequestPermissionResponse::new(
+                                    RequestPermissionOutcome::Cancelled,
+                                ))
+                            });
                         }
                         bridge_for_permission.emit(
                             "permission_requested",
@@ -6285,6 +6507,19 @@ impl AcpPool {
                         );
                         // A permission request is agent activity and resets the silence window.
                         bridge_for_permission.note_agent_activity();
+                        if let Some(cancellation) = cancellation {
+                            // The SDK handles incoming frames in order. It must be
+                            // free to read peer cancellation while A is deciding.
+                            tokio::spawn(watch_remote_permission(
+                                pending_for_permission.clone(),
+                                key,
+                                callback_instance,
+                                response_rx,
+                                cancellation,
+                                authority_for_permission.clone(),
+                            ));
+                            return Ok(());
+                        }
                         let response = response_rx.await.unwrap_or_else(|_| {
                             RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
                         });
@@ -6299,7 +6534,7 @@ impl AcpPool {
                         // the stall clock. Without this reset, answering an
                         // old card can immediately cancel healthy follow-up
                         // work using the time spent waiting for the user.
-                        responder.respond(response)
+                        local_responder.map_or(Ok(()), |responder| responder.respond(response))
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
@@ -7252,13 +7487,6 @@ async fn mint_remote_permission_in_maps(
     use crate::features::remote_control::controller::task::{RemoteTaskState, TaskLeaseBinding};
     let mut pending = pending.lock().await;
     let owners = owners.lock();
-    let request = pending
-        .values_mut()
-        .find(|request| {
-            remote_request_owned_by(request.remote_owner.as_ref(), owner)
-                && request.remote_request_id.as_deref() == Some(callback_id)
-        })
-        .context("remote_permission_binding_stale")?;
     // Acquire only after the asynchronous pending-map wait, and never wait
     // on cleanup's resource gate while holding either permission map lock.
     // The same gate covers the authority mint AND callback binding.
@@ -7277,6 +7505,13 @@ async fn mint_remote_permission_in_maps(
                 {
                     bail!("remote_permission_binding_stale");
                 }
+                let request = pending
+                    .values_mut()
+                    .find(|request| {
+                        remote_request_owned_by(request.remote_owner.as_ref(), owner)
+                            && request.remote_request_id.as_deref() == Some(callback_id)
+                    })
+                    .context("remote_permission_callback_gone")?;
                 mint_pending_remote_permission(request, owner, callback_id, authority, ttl_ms)
             })
             .map_err(|error| anyhow::anyhow!(error.code))?
@@ -7664,6 +7899,7 @@ mod tests {
             turn_id: None,
             activity: stall::new_activity_clock(),
             response_tx: oneshot::channel().0,
+            sdk_responder: None,
             bridge: None,
         };
         let elicitation = |generation: u64| PendingElicitation {
@@ -8613,7 +8849,14 @@ mod tests {
                 TaskLeaseBinding, task_input_digest_for_value,
             },
         };
-        for ending in ["live", "busy", "terminal", "reused"] {
+        for ending in [
+            "live",
+            "busy",
+            "callback_cancelled",
+            "owner_replaced",
+            "terminal",
+            "reused",
+        ] {
             let lease = crate::features::remote_control::controller::protocol::LeaseContext {
                 connection_id: "connection-1".into(),
                 controller_lease_id: "lease-1".into(),
@@ -8669,6 +8912,7 @@ mod tests {
                     bridge: None,
                     callback_instance: Arc::new(()),
                     response_tx,
+                    sdk_responder: None,
                 },
             )]));
             let owners =
@@ -8676,7 +8920,7 @@ mod tests {
             let authority = PermissionAuthority::default();
             // Drive the actual pool mint helper into the pending-map await.
             // The ACP owner deliberately remains old while ledger identity changes.
-            let held = pending.lock().await;
+            let mut held = pending.lock().await;
             let mut mint = Box::pin(mint_remote_permission_in_maps(
                 &pending,
                 &owners,
@@ -8691,6 +8935,14 @@ mod tests {
                 std::task::Poll::Ready(())
             })
             .await;
+            let cancelled_request = if ending == "callback_cancelled" {
+                held.remove("callback-key")
+            } else {
+                None
+            };
+            if ending == "owner_replaced" {
+                owners.lock().clear();
+            }
             if matches!(ending, "terminal" | "reused") {
                 ledger
                     .complete(&owner.task_id, RemoteTaskTerminal::Failed, None, 3)
@@ -8775,6 +9027,53 @@ mod tests {
             } else {
                 mint.await
             };
+            if ending == "callback_cancelled" {
+                assert_eq!(
+                    result.as_ref().unwrap_err().to_string(),
+                    "remote_permission_callback_gone"
+                );
+                assert!(
+                    remote_turn::permission_mint_projection(result)
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(authority.pending_for_task(&owner.task_id).is_empty());
+                let mut successor = cancelled_request.unwrap();
+                let (response_tx, _successor_response) = oneshot::channel();
+                let cancelled_response = std::mem::replace(&mut successor.response_tx, response_tx);
+                let _ = cancelled_response.send(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                ));
+                successor.callback_instance = Arc::new(());
+                successor.view.tool_call_id = "tool-2".into();
+                successor.remote_request_id = Some("successor-callback".into());
+                pending
+                    .lock()
+                    .await
+                    .insert("successor-key".into(), successor);
+                let next = mint_remote_permission_in_maps(
+                    &pending,
+                    &owners,
+                    &owner,
+                    "successor-callback",
+                    &authority,
+                    &ledger,
+                    60_000,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    pending.lock().await["successor-key"]
+                        .remote_approval_id
+                        .as_deref(),
+                    Some(next.permission_request_id.as_str())
+                );
+                assert_eq!(
+                    ledger.record(&owner.task_id).unwrap().state,
+                    crate::features::remote_control::controller::task::RemoteTaskState::Running
+                );
+                continue;
+            }
             let requests = pending.lock().await;
             if matches!(ending, "live" | "busy") {
                 let view = result.unwrap();
@@ -8836,6 +9135,7 @@ mod tests {
             activity: stall::new_activity_clock(),
             bridge: None,
             response_tx,
+            sdk_responder: None,
         };
         let permission_clock = Arc::new(std::sync::atomic::AtomicU64::new(9_001_000));
         let observed = Arc::clone(&permission_clock);
@@ -9124,6 +9424,7 @@ mod tests {
             turn_id: Some("new-turn".into()),
             activity: stall::new_activity_clock(),
             response_tx,
+            sdk_responder: None,
             bridge: None,
             callback_instance: Arc::new(()),
         };
@@ -9724,6 +10025,7 @@ mod tests {
                 turn_id: None,
                 activity: activity.clone(),
                 response_tx,
+                sdk_responder: None,
                 bridge: None,
             },
         );
@@ -9751,6 +10053,322 @@ mod tests {
             "removing a user decision must reset the stall clock immediately"
         );
         drop(request);
+    }
+
+    #[tokio::test]
+    async fn remote_permission_receipt_requires_the_actual_sdk_response_queue() {
+        use crate::features::remote_control::controller::permission::{
+            DecisionAuthority, DispatchCommit, PermissionAuthority, PermissionDecision,
+            PermissionRequest,
+        };
+        use crate::features::remote_control::controller::protocol::LeaseContext;
+        use agent_client_protocol::schema::v1::RequestId;
+        use agent_client_protocol::{Channel, RawJsonRpcMessage, TransportFrame};
+        use futures_util::StreamExt as _;
+
+        for scenario in [
+            "accepted",
+            "closed",
+            "cancelled",
+            "cancelled_before_watcher",
+        ] {
+            let disconnect = scenario == "closed";
+            let (transport, mut peer) = Channel::duplex();
+            let (responder_tx, responder_rx) = oneshot::channel();
+            let responder_tx = Mutex::new(Some(responder_tx));
+            let connection = tokio::spawn(async move {
+                Client
+                    .builder()
+                    .on_receive_request(
+                        async move |_request: RequestPermissionRequest, responder, _cx| {
+                            assert!(
+                                responder_tx
+                                    .lock()
+                                    .await
+                                    .take()
+                                    .unwrap()
+                                    .send(responder)
+                                    .is_ok()
+                            );
+                            Ok(())
+                        },
+                        agent_client_protocol::on_receive_request!(),
+                    )
+                    .connect_with(transport, async move |_: ConnectionTo<Agent>| {
+                        std::future::pending::<agent_client_protocol::Result<()>>().await
+                    })
+                    .await
+            });
+            let frame = RawJsonRpcMessage::request(
+                "session/request_permission".into(),
+                json!({
+                    "sessionId": "sdk-session",
+                    "toolCall": {"toolCallId": "sdk-tool"},
+                    "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}]
+                }),
+                RequestId::Number(1),
+            )
+            .unwrap();
+            peer.tx
+                .unbounded_send(TransportFrame::Single(frame))
+                .unwrap();
+            let sdk_responder = tokio::time::timeout(Duration::from_secs(5), responder_rx)
+                .await
+                .expect("SDK did not dispatch the typed permission callback")
+                .unwrap();
+            let connection = if disconnect {
+                connection.abort();
+                assert!(connection.await.unwrap_err().is_cancelled());
+                None
+            } else {
+                Some(connection)
+            };
+
+            let authority = Arc::new(PermissionAuthority::with_clock(Arc::new(|| 1_100)));
+            let lease = LeaseContext {
+                connection_id: "connection-1".into(),
+                controller_lease_id: "lease-1".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-1".into(),
+                remote_control_generation: "generation-1".into(),
+            };
+            let task_id = "task-0001";
+            let approval = authority
+                .request_for_task_instance(
+                    &lease,
+                    task_id,
+                    "sdk-session",
+                    1,
+                    PermissionRequest {
+                        operation_type: "shell_command".into(),
+                        risk_level: "high".into(),
+                        target_scope: "workspace-0001".into(),
+                        preview: "test approval".into(),
+                        expires_at_ms: 301_000,
+                    },
+                    1_000,
+                )
+                .unwrap()
+                .permission_request_id;
+            authority
+                .decide_for_owner(
+                    DecisionAuthority::ControllerA,
+                    &lease,
+                    task_id,
+                    &approval,
+                    PermissionDecision::Allow,
+                    &crate::features::remote_control::controller::permission::PermissionDecisionOwner { session_id: "sdk-session".into(), task_sequence: 1 },
+                )
+                .unwrap();
+
+            let activity = stall::new_activity_clock();
+            *activity.lock() = Instant::now() - Duration::from_secs(200);
+            assert_eq!(
+                stall::stall_step(stall::quiet_for(&activity), false, None),
+                stall::StallStep::Notice,
+            );
+            let (response_tx, response_rx) = oneshot::channel();
+            let request = PendingPermission {
+                callback_instance: Arc::new(()),
+                view: CodexAcpPendingPermission {
+                    session_id: "sdk-session".into(),
+                    tool_call_id: "sdk-tool".into(),
+                    request: Value::Null,
+                },
+                option_ids: vec!["allow".into()],
+                option_kinds: HashMap::new(),
+                remote_owner: Some(RemotePermissionOwner {
+                    task_sequence: 1,
+                    session_id: "sdk-session".into(),
+                    task_id: task_id.to_owned(),
+                    lease: lease.clone(),
+                }),
+                remote_request_id: None,
+                remote_approval_id: Some(approval.clone()),
+                remote_projection: None,
+                generation: 1,
+                turn_id: None,
+                activity: Arc::clone(&activity),
+                bridge: None,
+                response_tx,
+                sdk_responder: Some(sdk_responder),
+            };
+            if scenario == "cancelled" || scenario == "cancelled_before_watcher" {
+                let key = permission_key("sdk-session", "sdk-tool");
+                let callback = Arc::clone(&request.callback_instance);
+                let cancellation = request.sdk_responder.as_ref().unwrap().cancellation();
+                let pending = Arc::new(Mutex::new(HashMap::from([(key.clone(), request)])));
+                let mut held_pending = if scenario == "cancelled_before_watcher" {
+                    Some(pending.lock().await)
+                } else {
+                    None
+                };
+                let watcher = tokio::spawn(watch_remote_permission(
+                    Arc::clone(&pending),
+                    key.clone(),
+                    Arc::clone(&callback),
+                    response_rx,
+                    cancellation.clone(),
+                    Some(Arc::clone(&authority)),
+                ));
+                let cancel = RawJsonRpcMessage::notification(
+                    "$/cancel_request".into(),
+                    json!({"requestId": 1}),
+                )
+                .unwrap();
+                peer.tx
+                    .unbounded_send(TransportFrame::Single(cancel))
+                    .unwrap();
+                if let Some(pending) = held_pending.as_mut() {
+                    tokio::time::timeout(Duration::from_secs(5), cancellation.cancelled())
+                        .await
+                        .expect("SDK did not publish its cancellation flag");
+                    assert!(pending.contains_key(&key), "watcher must still be fenced");
+                    assert_eq!(authority.view(&approval).unwrap().state, "allowed");
+                    assert!(
+                        settle_cancelled_remote_permission(
+                            pending,
+                            &key,
+                            &Arc::new(()),
+                            Some(&authority),
+                        )
+                        .is_none()
+                    );
+                    assert!(
+                        pending.contains_key(&key),
+                        "a different callback cannot remove it"
+                    );
+                    let telemetry = settle_cancelled_remote_permission(
+                        pending,
+                        &key,
+                        &callback,
+                        Some(&authority),
+                    );
+                    assert!(pending.is_empty());
+                    assert_eq!(
+                        stall::stall_step(stall::quiet_for(&activity), false, None),
+                        stall::StallStep::Idle,
+                    );
+                    assert!(authority.callback_was_cancelled(&lease, task_id, &approval));
+                    assert!(!remote_turn::permission_dispatch_unresolved(
+                        &authority,
+                        &RemotePermissionOwner {
+                            task_sequence: 1,
+                            session_id: "sdk-session".into(),
+                            task_id: task_id.into(),
+                            lease: lease.clone(),
+                        },
+                        &approval,
+                        true,
+                        false,
+                    ));
+                    authority.publish_dispatch_telemetry(telemetry);
+                }
+                drop(held_pending);
+                let Some(TransportFrame::Single(response)) =
+                    tokio::time::timeout(Duration::from_secs(5), peer.rx.next())
+                        .await
+                        .unwrap()
+                else {
+                    panic!("SDK did not settle the cancelled permission");
+                };
+                let response = serde_json::to_value(response).unwrap();
+                assert_eq!(response["id"], 1);
+                assert_eq!(response["result"]["outcome"]["outcome"], "cancelled");
+                watcher.await.unwrap();
+                assert_eq!(
+                    stall::stall_step(stall::quiet_for(&activity), false, None),
+                    stall::StallStep::Idle,
+                );
+                assert!(pending.lock().await.is_empty());
+                assert_eq!(authority.view(&approval).unwrap().state, "denied");
+                assert!(!authority.allow_delivery_observed(&lease, task_id, &approval));
+                let owner = RemotePermissionOwner {
+                    task_sequence: 1,
+                    session_id: "sdk-session".into(),
+                    task_id: task_id.into(),
+                    lease: lease.clone(),
+                };
+                // Poll's previously read Allow is stale after this actual SDK
+                // cancellation. Its production classifier must settle only
+                // this callback, while a still-pending callback remains fatal.
+                assert!(!remote_turn::permission_dispatch_unresolved(
+                    &authority, &owner, &approval, true, false,
+                ));
+                assert!(remote_turn::permission_dispatch_unresolved(
+                    &authority, &owner, &approval, true, true,
+                ));
+                let connection = connection.unwrap();
+                connection.abort();
+                assert!(connection.await.unwrap_err().is_cancelled());
+                continue;
+            }
+            let outcome = authority.dispatch_bound_allow(&lease, task_id, &approval, || {
+                request
+                    .respond(RequestPermissionResponse::new(
+                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new("allow")),
+                    ))
+                    .is_ok()
+            });
+            // Even when SDK delivery fails, the callback cleanup gets its wake signal.
+            assert!(response_rx.await.is_ok());
+            assert_eq!(
+                stall::stall_step(stall::quiet_for(&activity), false, None),
+                stall::StallStep::Idle,
+            );
+            assert_eq!(
+                authority.allow_delivery_observed(&lease, task_id, &approval),
+                !disconnect
+            );
+            if let Some(connection) = connection {
+                assert_eq!(outcome.unwrap().0, DispatchCommit::Committed);
+                let Some(TransportFrame::Single(response)) =
+                    tokio::time::timeout(Duration::from_secs(5), peer.rx.next())
+                        .await
+                        .unwrap()
+                else {
+                    panic!("SDK did not send a permission response");
+                };
+                let response = serde_json::to_value(response).unwrap();
+                assert_eq!(response["id"], 1);
+                assert_eq!(response["result"]["outcome"]["optionId"], "allow");
+                connection.abort();
+                assert!(connection.await.unwrap_err().is_cancelled());
+                assert!(authority.allow_delivery_for_task_instance(
+                    &lease,
+                    task_id,
+                    "sdk-session",
+                    1,
+                    &approval
+                ));
+                assert!(!authority.allow_delivery_for_task_instance(
+                    &lease,
+                    task_id,
+                    "sdk-session",
+                    2,
+                    &approval
+                ));
+                assert!(!authority.allow_delivery_for_task_instance(
+                    &lease,
+                    task_id,
+                    "other-session",
+                    1,
+                    &approval
+                ));
+            } else {
+                assert_eq!(outcome.unwrap_err().code, "permission_dispatch_failed");
+                assert!(peer.rx.next().await.is_none());
+                let owner = RemotePermissionOwner {
+                    task_sequence: 1,
+                    session_id: "sdk-session".into(),
+                    task_id: task_id.into(),
+                    lease: lease.clone(),
+                };
+                assert!(remote_turn::permission_dispatch_unresolved(
+                    &authority, &owner, &approval, true, false,
+                ));
+            }
+        }
     }
 
     #[tokio::test]
@@ -9792,6 +10410,7 @@ mod tests {
             activity: stall::new_activity_clock(),
             bridge: None,
             response_tx,
+            sdk_responder: None,
         };
         // Deterministic barrier: the callback has captured its remote owner,
         // but cannot insert until terminal cleanup has removed that owner.
