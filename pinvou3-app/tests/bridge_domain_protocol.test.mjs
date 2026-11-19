@@ -374,7 +374,8 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // kb_model_cancel 回流：共享知识模型 helper 新增取消命令，合计 75 个签名。
 // 社区 #841 回流：评审快照串行链在 record 时捕获 owning sid，避免排队写漂到
 // 切换后的会话；并集后按当前共享桥接面重算协议指纹。
-const expectedSharedBaseHash = '704c9375f0cc90d0a94c64c186ccaff688d193c155df7d6f6596de50bf3a7d44';
+// 社区 #870 回流：按并集共享桥接面（含 #2733 虚拟显示与既有内容）重算协议指纹。
+const expectedSharedBaseHash = '4acf82a923beb336166f69639fea51b76550cc53bfcff88f34044d0c8a378843';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),

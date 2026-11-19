@@ -2228,6 +2228,9 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var discoverLocalVllm = settingsFeature.discoverLocalVllm;
   var loadModels = settingsFeature.loadModels;
   var saveModel = settingsFeature.saveModel;
+  // Batch add-all post-loop refresh (round-1 review M9): one reload burst for
+  // up to 100 deferred saves instead of three loaders per row.
+  var reloadSavedModels = settingsFeature.reloadSavedModels;
   var revealModelApiKey = settingsFeature.revealModelApiKey;
   var deleteModel = settingsFeature.deleteModel;
   var deleteModelIfStoreLink = settingsFeature.deleteModelIfStoreLink;
@@ -2238,6 +2241,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var testModelConnection = settingsFeature.testModelConnection;
   var getImageInputCapability = settingsFeature.getImageInputCapability;
   var testImageInputCapability = settingsFeature.testImageInputCapability;
+  var probeEndpointModels = settingsFeature.probeEndpointModels;
   var probeLocalServerKind = settingsFeature.probeLocalServerKind;
   var testSearchProvider = settingsFeature.testSearchProvider;
   // Dedicated global-shortcut command (update_settings is never used);
@@ -2809,6 +2813,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       loadEffectiveModelConfig: loadEffectiveModelConfig,
       loadModels: loadModels,
       saveModel: saveModel,
+      reloadSavedModels: reloadSavedModels,
       revealModelApiKey: revealModelApiKey,
       deleteModel: deleteModel,
       deleteModelIfStoreLink: deleteModelIfStoreLink,
@@ -2820,6 +2825,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       testModelConnection: testModelConnection,
       getImageInputCapability: getImageInputCapability,
       testImageInputCapability: testImageInputCapability,
+      probeEndpointModels: probeEndpointModels,
       probeLocalServerKind: probeLocalServerKind,
     },
     interaction: { toggleSuperPerm: toggleSuperPerm,
