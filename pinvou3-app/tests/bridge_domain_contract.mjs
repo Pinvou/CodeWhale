@@ -104,30 +104,6 @@ export const desktopOnlyBridgeApi = {
   // exposes the method (its stub warns and returns false on IS_WEB), so the
   // web surface keeps requiring it.
   settings: ['setBuiltinFeatureEnabled', 'setGlobalShortcutConfig'],
-
-
-  // Local vLLM discovery probes loopback services on the desktop host; the web capability bit is always false
-  // and the command is not in the access-policy allowlist. Deliberate exception (round-2 review M7): the
-  // single-endpoint probe_endpoint_models (one caller-supplied URL per invocation; the remote ladders stay
-  // no-redirect and pinned, while the local lane may follow redirects with Bearer stripped on any host-or-port change (scheme is not compared) —
-  // round-4 amendment) IS web-allowlisted for the model form's fetch-models button —
-  // keyring-blind, caller-supplied key only. Its reach is disclosed (round-3 review M5 amendment) in
-  // tests/web_access_contract.test.mjs: GLOBAL, not loopback-private — the command accepts any caller-supplied
-  // URL and the remote ladders classify any public host (a port/service oracle with the desktop as vantage,
-  // bounded only by MAX_RPC_IN_FLIGHT=32). This local discovery itself stays desktop-only.
-  vllm: ['discoverLocalVllm'],
-  // In-app upgrade: check/download/install/restart all depend on the local package manager; on the web
-  // only the version-number read is available (the appUpdate capability bit is always false).
-  updater: ['cancelUpdate', 'checkForUpdate', 'downloadAndInstallUpdate', 'restartApp'],
-  // Remote control (desktop web-proxy management) depends on the web_access_* admin commands and is unavailable
-  // on the web (the webAccessAdmin capability bit is always false).
-  remoteControl: ['refreshRemoteControlQr', 'revokeRemoteHostWorkspace', 'startRemoteControl', 'stopRemoteControl'],
-  // One-click install of missing dependencies elevates via pkexec apt and is unavailable on the web (the dependencyInstall
-  // capability bit is always false). The check_dependencies command is likewise not web-allowlisted: checkDependencies
-  // stays in the expected list above (the JS facade exists on both hosts), but the Rust command is policy-denied on web,
-  // and the web hides the whole dependency section behind that capability bit — do not move checkDependencies into this
-  // desktop-only list.
-  dependencies: ['installDependencies'],
 };
 
 // 整域桌面专属：Web 端连域都不存在（区别于 platform 这类"空域仍在"）。
