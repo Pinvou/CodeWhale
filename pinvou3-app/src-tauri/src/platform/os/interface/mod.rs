@@ -9,15 +9,19 @@ pub use clipboard::read_clipboard_image;
 // path (`super::interface::volume_fold_*`). macOS/Windows adapters consume
 // eq/prefix (no allowance needed there — a stopped consumer must resurface as
 // an unused-import tripwire); on the byte-exact platforms none of the aliases
-// is referenced, hence the cfg'd allowance. `volume_fold_spelling` is never
-// consumed through this re-export on any platform (its own module's eq/prefix
-// reach it directly; its İ-expansion behavior is pinned by a test in
-// `path.rs`), so it stays out of the list.
+// is referenced, hence the cfg'd allowance. `volume_fold_spelling` joined the
+// list when the archive import/export ledger became its first unconditional
+// cross-platform consumer (sessions/import.rs member-fold dedup: the ledger
+// must fold like the strictest target volume an archive may move to, not like
+// the local one, so it bypasses the host-adaptive path_component_* aliases);
+// its İ-expansion behavior stays pinned by a test in `path.rs`. The E0425
+// class is about a MISSING re-export, which stays impossible: the consumed
+// aliases are unconditional in the list.
 #[cfg_attr(
     not(any(target_os = "macos", target_os = "windows")),
     allow(unused_imports)
 )]
-pub(crate) use path::{volume_fold_eq, volume_fold_prefix};
+pub(crate) use path::{ volume_fold_eq, volume_fold_prefix, volume_fold_spelling };
 
 pub use path::{
     apply_user_npm_prefix, configure_onnxruntime_dylib, connector_cli_command,
