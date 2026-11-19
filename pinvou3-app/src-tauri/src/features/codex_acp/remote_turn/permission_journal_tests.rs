@@ -153,6 +153,9 @@ impl Fixture {
                 turn_id: Some("turn-journal".into()),
                 activity: super::super::stall::new_activity_clock(),
                 bridge: None,
+                // Projection fixture: no SDK connection; the shared resolver
+                // drives its controlled oneshot. SDK acceptance is tested separately.
+                sdk_responder: None,
                 response_tx,
             },
         );
