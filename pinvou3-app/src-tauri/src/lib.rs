@@ -51,8 +51,9 @@ pub mod automation_foundation {
 /// the GUI keeps calling `crate::core::model_endpoint` directly.
 pub mod model_probe {
     pub use crate::core::model_endpoint::{
-        is_anthropic_api_url, is_opencode_gateway_base_url, model_probe_http_code,
-        model_probe_transport_code, models_probe_url, opencode_session_id_for, strip_v1_suffix,
+        error_chain_looks_like_tls, is_anthropic_api_url, is_opencode_gateway_base_url,
+        model_probe_http_code, model_probe_transport_code, models_probe_url,
+        opencode_session_id_for, strip_v1_suffix,
     };
 }
 
@@ -1080,6 +1081,30 @@ pub fn run() {
         })
         .setup(|app| {
             startup::mark("setup:start");
+            // Steer terminal consumer assembly: the in-flight settlement of
+            // cross-session message delivery (features::messaging) is driven
+            // by the forwarder's SteerCommitted/SteerDropped events. The hook
+            // is injected along the dependency direction (messaging →
+            // assistant); assistant never depends back on the consumer
+            // feature (the architecture guard's feature-cycle line). Engines
+            // spawn lazily on a session's first send, so this registration
+            // precedes any steer event.
+            if features::assistant::steer_outcomes
+                ::register_steer_resolution_hook(features::messaging::resolve_pending_steer)
+                .is_err()
+            {
+                // Same best-effort stderr shape as the plugin-attach arm
+                // below: `eprintln!` panics when the stderr write fails
+                // (no console on packaged Windows) and a panic inside setup
+                // takes boot down. The branch is unreachable today (single
+                // registration site above), but it must stay harmless — the
+                // module doc's "logs the refusal" only holds if this write
+                // cannot take the process down.
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[pinvou3] steer resolution hook registered twice; keeping the first"
+                );
+            }
             // The disabled_bundles migration verdict must be frozen here: the
             // broad upgrade signal (settings.json/session dirs exist ⇒ upgrade
             // install) gets polluted by bridge boot's first-startup behavior
@@ -1662,6 +1687,9 @@ pub fn run() {
                         handle.manage(CapabilitySnapshotManager::default());
                         let temporary_models = commands::desktop_remote_model::shared_model_store();
                         handle.manage(temporary_models.clone());
+                        temporary_models.register_controlled_cleanup(
+                            &handle.state::<ControlledDeviceManager>(),
+                        );
                         let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
                         permission_authority.register_controlled_cleanup(
                             &handle.state::<ControlledDeviceManager>(),
@@ -2215,6 +2243,7 @@ pub fn run() {
             commands::codex::open_code_reader,
             commands::codex::take_code_reader_pending,
             commands::settings::test_model_connection,
+            commands::settings::probe_endpoint_models,
             commands::settings::test_image_input_capability,
             commands::voice::transcribe_voice_audio,
             commands::voice::postprocess_voice_text,
@@ -2236,11 +2265,13 @@ pub fn run() {
             commands::projects::rebind_workspace_root,
             commands::sessions::list_sessions,
             commands::sessions::create_session,
+            commands::sessions::fork_session,
             commands::sessions::get_session_workspace_binding,
             commands::sessions::load_session,
             commands::sessions::delete_session,
             commands::sessions::rename_session,
             commands::sessions::export_session,
+            commands::sessions::import_session_archive,
             commands::sessions::set_session_pinned,
             commands::sessions::list_archived_sessions,
             commands::sessions::set_session_archived,

@@ -20,7 +20,11 @@ export const desktopBridgeApi = {
   feedback: ['submitFeedback', 'listFailureDiagnostics', 'previewFailureDiagnostic', 'submitFailureDiagnostic', 'pickDiagnosticFiles'],
   vllm: ['discoverLocalVllm'],
   multiAgent: ['listSubagentTranscripts', 'readSubagentTranscript'],
-  models: ['deleteModel', 'deleteModelIfStoreLink', 'deleteModelIfMatches', 'getEffectiveModelConfig', 'getImageInputCapability', 'loadModels', 'loadEffectiveModelConfig', 'loadSessionModel', 'probeLocalServerKind', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'switchModelRef', 'testImageInputCapability', 'testModelConnection'],
+  // reloadSavedModels (round-1 review M9): post-batch refresh twin of the
+  // saveModel reload tail — one loader burst after a confirmed add-all batch
+  // whose rows were saved with { deferRefresh: true }. Lane-agnostic: both
+  // bridges reload exactly what their own saveModel chain reloads.
+  models: ['deleteModel', 'deleteModelIfStoreLink', 'deleteModelIfMatches', 'getEffectiveModelConfig', 'getImageInputCapability', 'loadModels', 'loadEffectiveModelConfig', 'loadSessionModel', 'probeEndpointModels', 'probeLocalServerKind', 'reloadSavedModels', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'switchModelRef', 'testImageInputCapability', 'testModelConnection'],
   interaction: ['acceptPlan', 'cancelUserInput', 'compactNow', 'confirmCodeYolo', 'discardPlan', 'dismissPinvouReview', 'editLastTurn', 'exitPlanToYolo', 'getCodePermissionPrefs', 'inspectPinvou', 'planStuckGo', 'planStuckReplan', 'refreshModeDefaults', 'resolvePinvouReview', 'setDraftMode', 'setModeLane', 'setMultiAgentMode', 'setPlanModeNext', 'submitUserInput', 'summonPinvou', 'syncModeState', 'toggleSuperPerm'],
   rendering: ['renderMarkdown'],
   remoteControl: ['getWebRelaySettings', 'refreshRemoteControlQr', 'refreshRemoteControlStatus', 'revokeRemoteHostWorkspace', 'setWebRelayAddress', 'startRemoteControl', 'stopRemoteControl'],

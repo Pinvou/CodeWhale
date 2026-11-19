@@ -597,7 +597,7 @@ async fn retained_ordered_tail_reaches_authenticated_projection_after_resume_wit
 }
 
 #[tokio::test(start_paused = true)]
-async fn repeated_disconnect_and_waiting_business_keep_the_first_absolute_cutoff() {
+async fn foreign_disconnect_and_waiting_business_keep_the_first_absolute_cutoff() {
     let mut fixture = connected(limits());
     let frame = journal_frame(
         &mut fixture.b,
@@ -644,10 +644,15 @@ async fn repeated_disconnect_and_waiting_business_keep_the_first_absolute_cutoff
     for _ in 0..4 {
         tokio::time::advance(Duration::from_secs(5)).await;
         let sink = ingress.clone();
-        super::super::relay_transport::disconnect_test_transport_to_sink(
-            &transport,
-            &move |event| sink.enqueue(event),
-        );
+        let mut foreign = transport.disconnect_context();
+        assert_ne!(foreign.lease.as_ref().unwrap().lease_epoch, "999");
+        foreign.lease.as_mut().unwrap().lease_epoch = "999".into();
+        sink.enqueue(ControllerTransportEvent::Disconnected {
+            remote_control_generation: foreign.generation.clone(),
+            lease_epoch: Some("999".into()),
+            context: foreign,
+            error: "foreign lease disconnected".into(),
+        });
         assert!(futures_util::poll!(&mut serving).is_pending());
     }
     tokio::time::advance(Duration::from_millis(9_999)).await;

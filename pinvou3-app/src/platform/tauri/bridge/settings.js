@@ -229,7 +229,7 @@ function pinvouSharedtauriSettings() {
  async function trackProviderSetup(request) {
    try { await invoke("track_behavior_event", { request }); } catch (_) { /* analytics is best effort */ }
  }
- async function saveModel(model) {
+ async function saveModel(model, options) {
    const operationId = analyticsOperationId('provider');
    const providerKey = analyticsProviderKey(model);
    const startedAt = Date.now();
@@ -256,6 +256,12 @@ function pinvouSharedtauriSettings() {
          eventName: 'task_environment_ready', readinessSource: 'provider_setup', providerKey,
        });
      }
+     // options.deferRefresh (round-1 review M9): the batch add-all loop saves
+     // up to 100 rows back-to-back; skipping the three reloads per row avoids a
+     // 100x IPC storm. The caller reloads once via reloadSavedModels() when the
+     // loop finishes. Default (no options) keeps the save-then-refresh chain
+     // every single-row caller relies on.
+     if (options && options.deferRefresh) return;
      await loadModels();
      await loadSettings();
      await loadEffectiveModelConfig();
@@ -281,6 +287,15 @@ function pinvouSharedtauriSettings() {
    await loadEffectiveModelConfig();
    return removed === true;
  }
+// Post-batch refresh twin of saveModel's reload tail (round-1 review M9):
+// exactly the three loaders the save chain runs, executed once for the whole
+// confirmed add-all batch.
+async function reloadSavedModels() {
+  await loadModels();
+  await loadSettings();
+  await loadEffectiveModelConfig();
+}
+
  // 设备管理移除回收专用（三十三轮评审 P2）：把快照行的身份原串交给最终事务
  // 核对——等待期间被用户改属的同 id 配置必须保留。true=已删，false=保留。
  async function deleteModelIfMatches(id, expectedBaseUrl, expectedModel) {
@@ -351,6 +366,9 @@ function pinvouSharedtauriSettings() {
   // 测试图片输入能力(设计 §7.3):用当前表单的 model/base_url/key 发一张内置纯色图,
   // 仅由模型编辑弹窗主动点击触发,无任何启动/定时自动测试。
   async function testImageInputCapability(model, baseUrl, apiKey, modelId) { return pinvouSharedtauriSettings().testImageInputCapability(model, baseUrl, apiKey, modelId); }
+// 端点模型自动发现(冻结契约 §2.5):probe_endpoint_models。失败必须 reject
+// 穿透,由 SettingsView 归一为三语 connectionMessages 提示。
+async function probeEndpointModels(request) { return pinvouSharedtauriSettings().probeEndpointModels(request); }
   async function probeLocalServerKind(baseUrl, apiKey, modelId) {
     // 本地/内网 OpenAI 兼容端点的服务类型探测（vllm/ollama/lmstudio/generic）。
     // Rust 侧按 base_url TTL 缓存；命令失败（老版本桌面/命令被拒）在这里 reject，
@@ -452,6 +470,7 @@ function pinvouSharedtauriSettings() {
       getImageInputCapability: getImageInputCapability,
       loadModels: loadModels,
       saveModel: saveModel,
+      reloadSavedModels: reloadSavedModels,
       revealModelApiKey: revealModelApiKey,
       deleteModel: deleteModel,
       deleteModelIfStoreLink: deleteModelIfStoreLink,
@@ -462,6 +481,7 @@ function pinvouSharedtauriSettings() {
       switchModelRef: switchModelRef,
       testModelConnection: testModelConnection,
       testImageInputCapability: testImageInputCapability,
+      probeEndpointModels: probeEndpointModels,
       probeLocalServerKind: probeLocalServerKind,
       testSearchProvider: testSearchProvider,
       setGlobalShortcutConfig,
