@@ -115,13 +115,16 @@ print('original-cancel-verdict-preserved-with-root23')
             "pathlib.Path(raw,'proof.txt').write_text('owned');"
             "print(len(str(deep)),flush=True)"
         )
-        with tempfile.TemporaryDirectory() as directory:
-            p, receipt, _ = self.invoke(source, directory)
-            self.assertEqual(p.returncode, 0, p.stderr)
-            self.assertGreater(int(p.stdout.strip()), 260)
-            self.assertEqual(receipt['state'], 'released')
-            self.assertFalse(receipt['cleanup_failed'])
-            self.assertFalse(Path(receipt['workspace']['path']).exists())
+        # Bounded stress, not retries: every iteration must satisfy the same
+        # 15-second limit and confirmed process/workspace retirement.
+        for iteration in range(20):
+            with tempfile.TemporaryDirectory() as directory:
+                p, receipt, _ = self.invoke(source, directory)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertGreater(int(p.stdout.strip()), 260)
+                self.assertEqual(receipt['state'], 'released')
+                self.assertFalse(receipt['cleanup_failed'])
+                self.assertFalse(Path(receipt['workspace']['path']).exists())
 
     @unittest.skipUnless(shutil.which('node'), 'Node is required for the actual JavaScript signal hook')
     def test_failed_fixture_signal_keeps_receipt_and_supervisor_retires_owned_descendant(self):
