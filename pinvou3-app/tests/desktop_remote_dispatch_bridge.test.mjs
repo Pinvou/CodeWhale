@@ -178,7 +178,7 @@ test('attachment bridge uses the shared boundary and fails closed without it', a
   const digest = 'a'.repeat(64);
   await feature.attachmentBegin(...args, 20 * 1024 * 1024, digest);
   assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
-  await assert.rejects(feature.attachmentBegin(...args, 32 * 1024 * 1024, digest), { code: 'remote_attachment_size_invalid' });
+  await assert.rejects(feature.attachmentBegin(...args, 64 * 1024 * 1024, digest), { code: 'remote_attachment_size_invalid' }); // 50 MiB 共享上限（社区 #894）之上
   assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
   const missing = installFeature(onInvoke, false);
   await assert.rejects(missing.feature.attachmentBegin(...args, 1, digest), { code: 'remote_attachment_size_invalid' });
@@ -1310,7 +1310,7 @@ test('unknown attachment actions are fenced rather than replayed as new uploads'
     assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, before + (index === 2 ? 2 : 1));
   }
   const before = calls.length;
-  await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-2', 'big.bin', 'application/octet-stream', 20 * 1024 * 1024 + 1, digest), { code: 'remote_attachment_size_invalid' });
+  await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-2', 'big.bin', 'application/octet-stream', 64 * 1024 * 1024 + 1, digest), { code: 'remote_attachment_size_invalid' }); // 钉 50 MiB 之上拒绝
   assert.equal(calls.length, before);
 });
 
