@@ -105,7 +105,7 @@ New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
 
 # Behavioral coverage for the real ABI probe branch (no -AbiProbe injection). Windows
 # cannot fake an executable named python.exe without a real PE image, so copy the PATH
-# python and stub its platform module: the probe then prints to stdout with a
+# python and its bootstrap encodings, then stub its platform module: the probe prints to stdout with a
 # controllable machine() result, which is exactly the stray-output case the
 # "$null = & $pythonExe" fix guards. Skipped when no runnable PATH python exists.
 $pathPython = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
@@ -114,7 +114,7 @@ $realProbeRoot = $null
 $probeVersion = ""
 if ($pathPython) {
   try {
-    $null = & $pathPython -c "print('sanity')"
+    $null = & $pathPython -I -S -B -c "print('sanity')"
     if ($LASTEXITCODE -eq 0) {
       $realProbeRoot = Join-Path $fixtureRoot "real-probe-python"
       $pathPythonDir = Split-Path -Parent $pathPython
@@ -122,9 +122,16 @@ if ($pathPython) {
       Copy-Item -LiteralPath $pathPython -Destination (Join-Path $realProbeRoot "python.exe")
       Copy-Item -Path (Join-Path $pathPythonDir "python3*.dll") -Destination $realProbeRoot -ErrorAction SilentlyContinue
       Copy-Item -Path (Join-Path $pathPythonDir "vcruntime140*.dll") -Destination $realProbeRoot -ErrorAction SilentlyContinue
-      Copy-Item -Path (Join-Path $pathPythonDir "Lib") -Destination (Join-Path $realProbeRoot "Lib") -Recurse
+      # The production ABI probe uses -I -S -B and imports only sys plus our
+      # controlled platform.py. Copying Lib recursively also copied unrelated
+      # site-packages (many thousands of files) and could consume the entire
+      # CI job before the real assertions ran. Keep a real isolated PE/DLL
+      # interpreter and only the encodings needed to bootstrap it.
+      $probeLib = Join-Path $realProbeRoot "Lib"
+      New-Item -ItemType Directory -Path $probeLib -Force | Out-Null
+      Copy-Item -LiteralPath (Join-Path $pathPythonDir "Lib\encodings") -Destination $probeLib -Recurse
       $realProbePython = Join-Path $realProbeRoot "python.exe"
-      $probeVersion = ([string](& $realProbePython -c "import sys; print('%d.%d' % sys.version_info[:2])")).Trim()
+      $probeVersion = ([string](& $realProbePython -I -S -B -c "import sys; print('%d.%d' % sys.version_info[:2])")).Trim()
       $realProbeReady = $probeVersion -cmatch '^\d+\.\d+$'
     }
   } catch {
