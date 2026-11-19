@@ -106,9 +106,13 @@ pinned catalog and the route, so on a stable strict route the tools bytes are
 identical every step; the shaping runs on a per-request clone and never
 mutates the registry. A provider change re-pins as a declared
 `change:provider` header change, and a token-budget change as `change:route`.
-A `base_url`-only flip is not a declared header field today: it surfaces as
-undeclared drift unless another pending change masks it, so when moving
-endpoints prefer a change the header set can name.
+A `base_url`-only flip is not a declared header field today. A flip that
+changes the gate's verdict — official host ↔ foreign host, a padded URL, or a
+provider retype — changes the shaped tool bytes and surfaces as undeclared
+drift unless another pending change masks it; a flip inside the same scope
+(the canonical beta ↔ non-beta path) leaves the shaped bytes identical and
+produces no drift at all. When moving endpoints, prefer a change the header
+set can name.
 
 ## Permissions fragment budget compatibility
 
