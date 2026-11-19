@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestStreamStatePollingPublicPostgres",
     "TestGovernanceUsageResourcePrechecksPostgres",
     "TestEmergencyCancellationWorkerDiagnosticsPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
@@ -143,6 +144,7 @@ ACCOUNT_LEAF_REQUIRED = {
 ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestStreamStatePollingPublicPostgres",
     "TestGovernanceUsageResourcePrechecksPostgres",
     "TestOrganizationModelPolicyPublicPostgres",
     "TestEmergencyCancellationClaimOwnershipPostgres",
@@ -337,6 +339,9 @@ EXACT_REQUIRED_CHILDREN = {
         "pre-admission-fixture-rejects-current-schema",
         "runtime-immutable-command-and-exact-prefix-down",
     },
+    "TestStreamStatePollingPublicPostgres": {"complete", "cancel", "disconnect",
+        "complete/concurrent-last-event-id-public-replay", "disconnect/concurrent-last-event-id-public-replay",
+        "external-committed", "external-released"},
     "TestProfileRevocationDurableAdmissionRuntimePostgres": {
         "capacity-before-grant-confirmed-replay-and-unknown-retention",
         "cancel-before-authority-preserves-reservation",
