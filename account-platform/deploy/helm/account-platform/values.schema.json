@@ -1217,6 +1217,26 @@
         "adminModelTokenActionsEnabled"
       ],
       "properties": {
+        "operationRps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "operationBurst": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "loginFlowCapacity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "sessionHandoffCapacity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
         "adminModelTokenIAEnabled": {
           "type": "boolean"
         },
