@@ -320,6 +320,118 @@ printf 'owned consumer marker\\n' > "$cache/profile-$3"
             with self.assertRaises(RuntimeError):
                 verify_results(logfile.read_text(), {"Required"})
 
+    def test_early_go_failure_survives_later_passing_output_without_exposing_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logfile, payload = root / "managed.jsonl", root / "input.jsonl"
+            secret = "fixture-first-assertion-credential"
+            rows = [
+                {"Action": "output", "Package": "fixture/managed", "Test": "TestRequired/early",
+                 "Output": "fixture.go:23: controlled first assertion " + secret + " postgres://fixture:private@localhost/db\n"},
+                {"Action": "fail", "Package": "fixture/managed", "Test": "TestRequired/early"},
+            ]
+            rows += [{"Action": "output", "Package": "fixture/managed", "Test": "TestLater",
+                      "Output": "later passing output " + "x" * 1000} for _ in range(160)]
+            rows += [{"Action": "pass", "Package": "fixture/managed", "Test": "TestLater"},
+                     {"Action": "fail", "Package": "fixture/managed"}]
+            raw = "\n".join(json.dumps(row) for row in rows) + "\n"
+            payload.write_bytes(raw.encode("utf-8"))
+            program = "from pathlib import Path; import sys; sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes()); sys.exit(9)"
+            errors = io.StringIO()
+            with patch.dict(os.environ, {"DATABASE_PASSWORD": secret}), contextlib.redirect_stderr(errors):
+                with self.assertRaisesRegex(RuntimeError, "deployment contract command failed"):
+                    deployment.run_logged_command([sys.executable, "-c", program, str(payload)], logfile)
+            emitted = errors.getvalue()
+            summaries = [json.loads(line.removeprefix("GO_TEST_FAILURE ")) for line in emitted.splitlines()
+                         if line.startswith("GO_TEST_FAILURE ")]
+            self.assertEqual(len(summaries), 1)
+            self.assertEqual(summaries[0]["Test"], "TestRequired/early")
+            self.assertIn("fixture.go:23: controlled first assertion", summaries[0]["Output"])
+            for value in (secret, "fixture:private", "postgres://"):
+                self.assertNotIn(value, emitted)
+            self.assertIn("CONTRACT_COMMAND_FAILED exit=9", emitted)
+            self.assertLessEqual(len(emitted), 41000)
+            self.assertEqual(logfile.read_bytes(), raw.encode())
+
+    def test_go_failure_summary_is_bounded_and_does_not_parse_partial_oversized_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "managed.jsonl"
+            malformed = '{"Action":"fail","Package":"fixture","Test":"NotACompleteEvent","x":"' + "x" * 100000
+            rows = [json.dumps({"Action": "output", "Package": "fixture", "Test": "Test" + str(i),
+                                "Output": "controlled failure " + "界" * 10000}) + "\n" +
+                    json.dumps({"Action": "fail", "Package": "fixture", "Test": "Test" + str(i)})
+                    for i in range(20)]
+            logfile.write_text(malformed + "\n" + "\n".join(rows), encoding="utf-8")
+            summary = deployment.first_go_failures(logfile)
+            self.assertNotIn("NotACompleteEvent", summary)
+            self.assertIn('"Test": "Test0"', summary)
+            self.assertLessEqual(len(summary.encode("ascii")), 16384)
+            self.assertLessEqual(len(summary.splitlines()), 5)
+
+    def test_go_json_escaped_environment_secret_is_redacted_in_summary_and_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            secret = 'fixture-quoted-"credential\\<&>-界\u2028\u2029'
+            def go_escape(value):
+                return (value.replace("<", r"\u003c").replace(">", r"\u003e").replace("&", r"\u0026")
+                        .replace("\u2028", r"\u2028").replace("\u2029", r"\u2029"))
+            for spelling in ("python-unicode", "python-ascii", "go-html", "nested-go-html"):
+                with self.subTest(spelling=spelling):
+                    logfile, payload = root / "managed.jsonl", root / "input.jsonl"
+                    observation = go_escape(json.dumps({"value": secret}, ensure_ascii=False)) if spelling == "nested-go-html" else secret
+                    rows = [{"Action": "output", "Package": "fixture", "Test": "TestRequired",
+                             "Output": "controlled credential observation " + observation},
+                            {"Action": "fail", "Package": "fixture", "Test": "TestRequired"}]
+                    raw = "\n".join(json.dumps(row, ensure_ascii=spelling == "python-ascii") for row in rows) + "\n"
+                    if spelling in ("go-html", "nested-go-html"):
+                        raw = go_escape(raw)
+                    payload.write_bytes(raw.encode("utf-8"))
+                    program = "from pathlib import Path; import sys; sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes()); sys.exit(3)"
+                    errors = io.StringIO()
+                    with patch.dict(os.environ, {"FIXTURE_TOKEN": secret}), contextlib.redirect_stderr(errors):
+                        with self.assertRaises(RuntimeError):
+                            deployment.run_logged_command([sys.executable, "-c", program, str(payload)], logfile)
+                    emitted = errors.getvalue()
+                    for form in (secret, json.dumps(secret, ensure_ascii=spelling == "python-ascii")[1:-1], "fixture-quoted-"):
+                        self.assertNotIn(form, emitted)
+                    self.assertIn("controlled credential observation", emitted)
+                    self.assertIn("[redacted]", emitted)
+                    self.assertEqual(logfile.read_bytes(), raw.encode("utf-8"))
+
+    def test_go_failure_context_keeps_assertion_after_verbose_test_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "managed.jsonl"
+            rows = [{"Action": "output", "Package": "fixture", "Test": "TestRequired", "Output": output}
+                    for output in ("ordinary verbose output " + "x" * 1600,
+                                   "fixture.go:42: controlled first assertion\n", "--- FAIL: TestRequired\n")]
+            rows.append({"Action": "fail", "Package": "fixture", "Test": "TestRequired"})
+            logfile.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+            summary = json.loads(deployment.first_go_failures(logfile).removeprefix("GO_TEST_FAILURE "))
+            self.assertIn("fixture.go:42: controlled first assertion", summary["Output"])
+
+    def test_failure_context_does_not_reassemble_a_secret_from_go_output_chunks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logfile, payload = root / "managed.jsonl", root / "input.jsonl"
+            secret = "fixture-split-credential-value"
+            rows = [{"Action": "output", "Package": "fixture", "Test": "TestRequired", "Output": part}
+                    for part in (secret[:13], secret[13:])]
+            rows.insert(1, {"Action": "output", "Package": "fixture", "Test": "TestParallel", "Output": "unrelated output"})
+            rows.append({"Action": "fail", "Package": "fixture", "Test": "TestRequired"})
+            raw = "\n".join(json.dumps(row) for row in rows) + "\n"
+            payload.write_bytes(raw.encode("utf-8"))
+            program = "from pathlib import Path; import sys; sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes()); sys.exit(3)"
+            errors = io.StringIO()
+            with patch.dict(os.environ, {"FIXTURE_TOKEN": secret}), contextlib.redirect_stderr(errors):
+                with self.assertRaises(RuntimeError):
+                    deployment.run_logged_command([sys.executable, "-c", program, str(payload)], logfile)
+                summary = json.loads(deployment.first_go_failures(logfile).removeprefix("GO_TEST_FAILURE "))
+            self.assertEqual(summary["Output"], "[redacted]")
+            outputs = [json.loads(line)["Output"] for line in errors.getvalue().splitlines()
+                       if line.startswith("{") and json.loads(line).get("Action") == "output"]
+            self.assertEqual(outputs, ["[redacted]", "unrelated output"])
+            self.assertEqual(logfile.read_bytes(), raw.encode("utf-8"))
+
     def test_truncated_url_cannot_expose_query_credentials_after_its_prefix_is_lost(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -388,8 +500,13 @@ printf 'owned consumer marker\\n' > "$cache/profile-$3"
             self.assertEqual(logfile.read_text(), payload)
             emitted = errors.getvalue()
             self.assertIn("CONTRACT_COMMAND_FAILED exit=9 log=" + name, emitted)
-            self.assertLessEqual(len(emitted), 24200)
-            self.assertLessEqual(len(emitted.splitlines()), 101)
+            # Approved independent summary + tail channels, not the old
+            # whole-stderr 24k contract. Limits are characters, not UTF-8 bytes.
+            self.assertLessEqual(len(emitted), 41000)
+            self.assertIn("CONTRACT_LOG_TAIL\n", emitted)
+            tail = emitted.split("CONTRACT_LOG_TAIL\n", 1)[1]
+            self.assertLessEqual(len(tail), 24001)  # print adds one newline
+            self.assertLessEqual(len(tail.splitlines()), 100)
             return emitted, str(raised.exception)
 
     def managed_event(self, name, action, output=None, **fields):
@@ -472,8 +589,12 @@ printf 'owned consumer marker\\n' > "$cache/profile-$3"
         payload += "x" * 70000 + "\nordinary final tail\n"
         emitted, _ = self.failure_diagnostic(payload)
         self.assertNotIn("MANAGED_FAILURE_CONTEXT", emitted)
-        self.assertNotIn("outside-window-assertion", emitted)
-        self.assertIn("ordinary final tail", emitted)
+        # The bounded-window selector does not recover this event. The
+        # independent main full-log summary intentionally can report it.
+        tail = emitted.split("CONTRACT_LOG_TAIL\n", 1)[1]
+        self.assertNotIn("outside-window-assertion", tail)
+        self.assertIn("outside-window-assertion", emitted.split("CONTRACT_LOG_TAIL\n", 1)[0])
+        self.assertIn("ordinary final tail", tail)
 
     def test_partial_first_event_is_discarded_before_context_and_redaction(self):
         target = "TestManagedRDSReleaseActualPostgres/partial"
@@ -503,6 +624,57 @@ printf 'owned consumer marker\\n' > "$cache/profile-$3"
         self.assertIn("[redacted]", context)
         self.assertNotIn("confidential-suffix", emitted)
         self.assertNotIn(short, emitted)
+
+
+    def test_split_overlapping_environment_credentials_are_masked_before_summary_truncation(self):
+        target = "TestManagedRDSReleaseActualPostgres/split-overlap"
+        payload = self.managed_event(target, "output", "abcd")
+        payload += self.managed_event(target, "output", "TAIL")
+        payload += self.managed_event(target, "fail")
+        emitted, _ = self.failure_diagnostic(payload, environment={"FIXTURE_TOKEN": "abcd", "FIXTURE_SECRET": "abcdTAIL"})
+        summaries = [json.loads(line.removeprefix("GO_TEST_FAILURE ")) for line in emitted.splitlines()
+                     if line.startswith("GO_TEST_FAILURE ")]
+        self.assertEqual(summaries[0]["Output"], "[redacted]")
+        self.assertNotIn("TAIL", emitted.replace("CONTRACT_LOG_TAIL", ""))
+        context = emitted.split("MANAGED_FAILURE_CONTEXT", 1)[1]
+        self.assertIn("[redacted]", context)
+
+    def test_summary_redacts_complete_url_before_limiting_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "managed.jsonl"
+            target = "TestManagedRDSReleaseActualPostgres/long-url"
+            payload = self.managed_event(target, "output", "https://example.invalid/" + "x" * 5000 + "?auth=private-query-suffix")
+            payload += self.managed_event(target, "output", "\nfixture.go:42: controlled assertion\n")
+            payload += self.managed_event(target, "fail")
+            logfile.write_bytes(payload.encode("utf-8"))
+            summary = deployment.first_go_failures(logfile)
+            self.assertNotIn("private-query-suffix", summary)
+            self.assertNotIn("https://", summary)
+            self.assertIn("controlled assertion", summary)
+            self.assertIn("[URL redacted]", summary)
+            self.assertEqual(logfile.read_bytes(), payload.encode("utf-8"))
+
+    def test_summary_and_selected_context_keep_last_four_outputs(self):
+        target = "TestManagedRDSReleaseActualPostgres/last-four"
+        payload = "".join(self.managed_event(target, "output", "controlled-part-" + str(i) + "\n") for i in range(5))
+        payload += self.managed_event(target, "fail")
+        emitted, _ = self.failure_diagnostic(payload)
+        summary = next(json.loads(line.removeprefix("GO_TEST_FAILURE ")) for line in emitted.splitlines()
+                       if line.startswith("GO_TEST_FAILURE "))
+        self.assertNotIn("controlled-part-0", summary["Output"])
+        context = emitted.split("MANAGED_FAILURE_CONTEXT", 1)[1]
+        self.assertNotIn("controlled-part-0", context)
+        for i in range(1, 5):
+            self.assertIn("controlled-part-" + str(i), summary["Output"])
+            self.assertIn("controlled-part-" + str(i), context)
+
+    def test_deep_json_does_not_replace_primary_command_failure(self):
+        payload = "[" * 2000 + "0" + "]" * 2000 + "\n"
+        emitted, error = self.failure_diagnostic(payload)
+        self.assertIn("CONTRACT_COMMAND_FAILED exit=9", emitted)
+        self.assertEqual(error, "deployment contract command failed; see redacted diagnostic")
+        self.assertNotIn("GO_TEST_FAILURE", emitted)
+
 
 
 if __name__ == "__main__":

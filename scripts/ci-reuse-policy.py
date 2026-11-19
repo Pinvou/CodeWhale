@@ -253,7 +253,7 @@ def labels(policy, matrix, configuration):
     if '${{' not in runner: return [runner.strip("'\"")]
     if machine and machine.startswith('macos'): return [machine]
     system = 'WINDOWS' if machine and machine.startswith('windows') else 'LINUX' if machine and machine.startswith('ubuntu') else None
-    names = re.findall(r'vars\.(PINVOU_(?:LINUX|WINDOWS)(?:_(?:HEAVY|MEDIUM|LIGHT))?_RUNNER)', runner)
+    names = re.findall(r'vars\.(PINVOU_(?:LINUX|WINDOWS)(?:_(?:BROWSER_HEAVY|HEAVY|MEDIUM|LIGHT))?_RUNNER)', runner)
     if names:
         system = system or ('WINDOWS' if '_WINDOWS' in names[0] else 'LINUX')
         for name in names:

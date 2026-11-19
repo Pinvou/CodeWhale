@@ -338,6 +338,7 @@ class WebpkiCiContractTests(unittest.TestCase):
                       # 与主上传同为功能性传输(retention 1 天,无 continue-on-error)。
                       ('frontend-setup', 'Upload frontend setup bundle (retry)')]
         reviewed = [('required-gate', 'PR test success proof transport'),
+                    ('fast-gate', 'Gate test resource lifecycle receipts'),
                     ('frontend-test', 'Test resource lifecycle receipts'),
                     ('frontend-browser-test', 'Browser shard resource lifecycle receipts'),
                     ('account-financial-test', 'Financial group lifecycle receipts'),
@@ -364,6 +365,21 @@ class WebpkiCiContractTests(unittest.TestCase):
             self.assertIn(f"retention-days: {2 if job == 'required-gate' else 7}\n", entries[0])
             self.assertIn('        timeout-minutes: 3\n', entries[0])
             self.assertIn('        continue-on-error: true\n', entries[0])
+            if job == 'fast-gate':
+                diagnostic = '\n'.join(line for line in entries[0].splitlines()
+                                       if line.strip() and not line.lstrip().startswith('#'))
+                self.assertEqual(diagnostic, '\n'.join([
+                    'name: Gate test resource lifecycle receipts',
+                    "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+                    '        timeout-minutes: 3',
+                    '        continue-on-error: true',
+                    '        uses: actions/upload-artifact@v7',
+                    '        with:',
+                    '          name: gate-resource-lifecycle-${{ github.run_attempt }}',
+                    '          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/',
+                    '          if-no-files-found: error',
+                    '          retention-days: 7',
+                ]))
         # Only diagnostic transport may be non-blocking. In particular, a
         # failed test or an unconfirmed cleanup must still fail its job even
         # when artifact storage is unavailable.
@@ -388,6 +404,7 @@ class WebpkiCiContractTests(unittest.TestCase):
     def test_diagnostic_transport_never_relaxes_tests_or_resource_retirement(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
         for name in ['Confirm test resource retirement', 'Confirm Account test resource retirement',
+                     'Gate policy test suite (scripts/tests)', 'Confirm gate test resource retirement',
                      'Test and vet all Account Platform Go modules',
                      'Install financial contract dependencies', 'Verify financial contract Node consumers',
                      'Run isolated financial group', 'Stop owned temporary PostgreSQL services',
@@ -418,6 +435,28 @@ class WebpkiCiContractTests(unittest.TestCase):
                 self.verify_workflow(workflow.replace('actions/upload-artifact@v7', replacement))
         with self.assertRaises(AssertionError):
             self.verify_diagnostic_uploads(workflow + '\n      - uses: actions/upload-artifact@v7\n')
+
+    def test_gate_diagnostic_exception_is_bound_to_its_exact_job_and_fields(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        fragment = next(step for step in job_block(workflow, 'fast-gate').split('\n      - ')
+                        if step.startswith('name: Gate test resource lifecycle receipts\n'))
+        for old, new in [
+            ("if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", 'if: always()'),
+            ('${{ env.PINVOU_CI_RESOURCE_LEDGER }}/', '${{ github.workspace }}/**/*'),
+            ('retention-days: 7', 'retention-days: 30'),
+            ('uses: actions/upload-artifact@v7', 'run: exit 37'),
+            ('name: Gate test resource lifecycle receipts', 'name: Unreviewed upload'),
+        ]:
+            with self.subTest(field=old), self.assertRaises(AssertionError):
+                self.verify_diagnostic_uploads(workflow.replace(fragment, fragment.replace(old, new, 1), 1))
+        with self.assertRaises(AssertionError):
+            self.verify_diagnostic_uploads(workflow.replace(fragment, fragment + '\n      - ' + fragment, 1))
+        frontend = job_block(workflow, 'frontend-test')
+        moved = workflow.replace('      - ' + fragment, '', 1).replace(
+            frontend, frontend.replace('    steps:\n', '    steps:\n      - ' + fragment + '\n', 1), 1)
+        self.assertNotEqual(moved, workflow)
+        with self.assertRaises(AssertionError):
+            self.verify_diagnostic_uploads(moved)
 
     def test_both_shared_policy_consumers_have_mandatory_locked_scan(self):
         self.verify_workflow(WORKFLOW.read_text(encoding='utf-8'))
