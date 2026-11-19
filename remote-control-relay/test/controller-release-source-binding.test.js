@@ -34,6 +34,7 @@ test("production validator source capture rejects changed artifact reader and re
         EvidenceArtifactReader='remote-control-relay/scripts/release-evidence-artifacts.mjs'
         UiSmokeScript='pinvou3-app/scripts/remote-control-ui-smoke.mjs'
         ProcessGuardScript='scripts/windows-e2e-process-guard.ps1'
+        OwnedProcessSource='scripts/windows-owned-process.cs'
         OrchestratorHelperScript='scripts/windows-e2e-orchestrator-helpers.ps1'
         RouteSpecPreparer='remote-control-relay/scripts/prepare-legacy-gateway-route.mjs'
         ProviderAttestationVerifier='remote-control-relay/scripts/verify-provider-attestation.mjs'
@@ -57,6 +58,8 @@ test("production validator source capture rejects changed artifact reader and re
       . ([scriptblock]::Create($pins.Extent.Text))
       if(-not $trustedSourceBytes.ContainsKey($EvidenceArtifactReader)){throw 'reader-not-captured'}
       if(-not $validatorSourceHashes.ContainsKey($EvidenceArtifactReader)){throw 'reader-not-pinned'}
+      . $ProcessGuardScript
+      $global:PinvouE2EOwnedProcessSha256=$trustedSourceHashes[$OwnedProcessSource]
       $node=${quote(process.execPath)}
       $signature=Get-AuthenticodeSignature -LiteralPath $node
       if($signature.Status -ne 'Valid'){throw 'test-node-not-signed'}
