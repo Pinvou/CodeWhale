@@ -72,14 +72,19 @@ func providerHealthTableFacts(t *testing.T, ctx context.Context, r *PostgresRepo
 	for _, table := range tables {
 		var value string
 		order := `COALESCE(to_jsonb(row_value)->>'id',to_jsonb(row_value)->>'event_id',to_jsonb(row_value)::text)`
+		rowHash := `md5(to_jsonb(row_value)::text)`
 		switch table {
 		case "wallets", "credit_lots", "entitlement_packages", "entitlement_components":
 			// These published tables have a non-null UUID primary key. Its
 			// canonical text equals the first JSON key above, without another
 			// full-row conversion for each large retained-history sort key.
 			order = `row_value.id::text`
+			// These fixed-schema carrier tables can hold 100000 rows. Retain
+			// every row/column (including null/type/length information) in the
+			// same-database fingerprint without rebuilding JSON at each check.
+			rowHash = `md5(record_send(row_value))`
 		}
-		statement := `SELECT COALESCE(md5(string_agg(md5(to_jsonb(row_value)::text),'' ORDER BY ` + order + `)),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
+		statement := `SELECT COALESCE(md5(string_agg(` + rowHash + `,'' ORDER BY ` + order + `)),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
 		if err := r.pool.QueryRow(ctx, statement).Scan(&value); err != nil {
 			t.Fatal(table, err)
 		}

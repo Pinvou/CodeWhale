@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,11 +18,11 @@ func TestF04PrivateUsageQueryFoundations(t *testing.T) {
 	r, ctx := retainedManagementTokenRepository(t)
 	usage := retainedCancellationUsage(t, r, ctx, uuid.New(), uuid.New(), nil, "HOLD_RESERVED")
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	caseID, unrelatedCase := uuid.New(), uuid.New()
+	caseID, emergencyCase, unrelatedCase := uuid.New(), uuid.New(), uuid.New()
 	for _, item := range []struct {
 		id   uuid.UUID
 		kind string
-	}{{caseID, "USAGE_RECONCILIATION_REVIEW"}, {unrelatedCase, "UNRELATED_REVIEW"}} {
+	}{{caseID, "USAGE_RECONCILIATION_REVIEW"}, {emergencyCase, modelEmergencyCancellationReviewCase}, {unrelatedCase, "UNRELATED_REVIEW"}} {
 		_, err := r.pool.Exec(ctx, `INSERT INTO manual_review_cases(id,domain,case_type,resource_type,resource_id,severity,status,created_at,claim_due_at,first_response_due_at,mitigation_due_at,resolution_due_at,updated_at) VALUES($1,'TOKEN',$2,'USAGE_REQUEST',$3,'P1','OPEN',$4,$4,$4,$4,$4,$4)`, item.id, item.kind, usage, now)
 		if err != nil {
 			t.Fatal(err)
@@ -102,12 +103,25 @@ func TestF04PrivateUsageQueryFoundations(t *testing.T) {
 			t.Fatal(err)
 		}
 		keys := readMembers(t, source)
-		if len(keys) != 1 || keys[0] != caseID.String() {
-			t.Fatal("unrelated case leaked", keys)
+		if len(keys) != 2 || !slices.Contains(keys, caseID.String()) || !slices.Contains(keys, emergencyCase.String()) {
+			t.Fatal("default list lost a supported type or exposed an unrelated case", keys)
 		}
-		items, err := r.adminReconciliationByIDs(ctx, keys)
-		if err != nil || len(items) != 1 || items[0].ResourceID != usage {
-			t.Fatal(items, err)
+		for _, filterCase := range []struct {
+			kind string
+			id   uuid.UUID
+		}{{"USAGE_RECONCILIATION_REVIEW", caseID}, {modelEmergencyCancellationReviewCase, emergencyCase}} {
+			selection, err := reconciliationSnapshotSource(filter(url.Values{"case_type": {filterCase.kind}}, "case_type"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			selected := readMembers(t, selection)
+			if len(selected) != 1 || selected[0] != filterCase.id.String() {
+				t.Fatal("case type filter mixed operations and finance", filterCase.kind, selected)
+			}
+			items, err := r.adminReconciliationByIDs(ctx, selected)
+			if err != nil || len(items) != 1 || items[0].ResourceID != usage || items[0].CaseType != filterCase.kind {
+				t.Fatal(items, err)
+			}
 		}
 		if _, err = r.adminReconciliationByIDs(ctx, []string{unrelatedCase.String()}); !errors.Is(err, ErrAdminSnapshotResourceChanged) {
 			t.Fatal("unrelated projection accepted", err)

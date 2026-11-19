@@ -54,7 +54,10 @@ class OwnersTests(unittest.TestCase):
             'up-path-change-keeps-original-ledger', 'verify-rejects-original-drift-despite-shadow',
             'down-path-change-removes-only-original-row', 'actual-cli-retains-bound-namespace',
             'binding-cannot-cross-connections', 'missing-search-path-schema-rejects-before-preparation',
-            'another-workflow-selects-its-own-visible-ledger'})
+            'another-workflow-selects-its-own-visible-ledger',
+            'temporary-shadow-does-not-hide-later-permanent-ledger',
+            'temporary-shadow-does-not-capture-creation-schema',
+            'temporary-only-path-rejects-before-preparation'})
 
     def test_schema_split_preserves_each_named_phase_and_all_original_roots(self):
         self.assertEqual(set(OWNER.REQUIRED), set(OWNER.FIN['OWNER_ORDER']))
