@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -7,6 +8,7 @@ import socket
 import threading
 import time
 import unittest
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location('ci_proxy', Path(__file__).parents[1] / 'ci-egress-proxy.py')
 PROXY = importlib.util.module_from_spec(SPEC)
@@ -23,6 +25,54 @@ def read_all(connection):
 
 
 class ProxyTests(unittest.TestCase):
+    def test_capacity_uses_soft_descriptor_budget_including_selector_and_header_reserve(self):
+        self.assertEqual(PROXY.tunnel_capacity(1024, 1024), 240)
+        self.assertEqual(PROXY.tunnel_capacity(1024, 8192), 1024)
+        self.assertEqual(PROXY.tunnel_capacity(20, 8192), 20)
+        with self.assertRaises(ValueError):
+            PROXY.tunnel_capacity(1024, 64)
+
+    def test_local_descriptor_exhaustion_is_preserved_without_trying_every_remote_address(self):
+        with mock.patch.object(PROXY.socket, 'create_connection', side_effect=OSError(errno.EMFILE, 'private diagnostic')) as connect:
+            with self.assertRaises(PROXY.UpstreamError) as raised:
+                PROXY.connect_target('github.com', lambda _: ['140.82.113.3', '140.82.113.4'])
+        self.assertEqual(connect.call_count, 1)
+        self.assertEqual(raised.exception.errno, errno.EMFILE)
+        self.assertEqual(raised.exception.stage, 'descriptor-capacity')
+        self.assertNotIn('private diagnostic', str(raised.exception))
+
+    def test_admission_covers_slow_headers_and_releases_capacity_when_client_disconnects(self):
+        proxy = PROXY.Server(('127.0.0.1', 0), max_tunnels=1)
+        thread = threading.Thread(target=proxy.serve_forever)
+        thread.start()
+        first = socket.create_connection(proxy.server_address, timeout=3)
+        try:
+            deadline = time.monotonic() + 3
+            while proxy.slots.acquire(blocking=False):
+                proxy.slots.release()
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            with socket.create_connection(proxy.server_address, timeout=3) as second:
+                second.sendall(b'GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+                headers = b''
+                while b'\r\n\r\n' not in headers:
+                    headers += second.recv(1)
+                self.assertIn(b'503 Proxy capacity reached', headers)
+            first.close()
+            deadline = time.monotonic() + 3
+            while not proxy.slots.acquire(blocking=False):
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            proxy.slots.release()
+            with socket.create_connection(proxy.server_address, timeout=3) as third:
+                third.sendall(b'GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n')
+                self.assertTrue(read_all(third).endswith(b'ok\n'))
+        finally:
+            first.close()
+            proxy.shutdown()
+            proxy.server_close()
+            thread.join(5)
+
     def test_certificate_services_cover_observed_chain_without_becoming_an_open_proxy(self):
         for host in ('crl.globalsign.com', 'ocsp.globalsign.com', 'ocsp2.globalsign.com', 'secure.globalsign.com'):
             self.assertEqual(PROXY.pki_target('http://' + host + '/signed-object').hostname, host)

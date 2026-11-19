@@ -36,6 +36,14 @@ Windows Schannel 的证书链补全、OCSP 和 CRL 查询有独立的系统/用�
 
 切换前检查 systemd 的双向依赖。Runner 若通过 `Requires=` 依赖代理，显式 `systemctl restart` 会传播停止事务并重启 Runner；即使当前代理连接只剩 Listener，也不能据此认定切换无影响。支持 `RestartMode=direct` 的主机应先用独立测试服务验证自动恢复不会停掉依赖者，再配合原有自动重启策略执行进程级切换；此模式不保护显式的服务停止/重启事务。前后核对全部 Runner 容器的启动时间、数量及配额，不能只看服务已恢复或 PID 变化。已中断的任务应通过实际 Runner 断联记录单独登记及补跑，不能归因给原网络问题。
 
+## 描述符容量与 Action 初始化
+
+Action 源码下载发生在工作流准备步骤之前；仅让上传/缓存探针通过，不能证明 Runner 的初始化链路稳定。代理每条 CONNECT 至少使用客户端、上游和 selector 三个描述符。必须同时核对 `LimitNOFILESoft`、硬上限以及 `/proc/<pid>/limits`；硬上限很高不代表软上限足够。生产默认软上限 1024 会在并发时提前耗尽，造成 DNS/连接在 0–1 毫秒内失败并返回 502，而不是外网连接超时。
+
+1024 隧道部署预算使用 `LimitNOFILE=8192:524288`，并保证代理服务的 `TasksMax` 高于隧道和控制线程总数，例如 2048；这些是代理进程预算，不是 Runner CPU/内存配额。保存持久服务配置后，可用 `prlimit` 在保留 PID 和已有连接的情况下修正运行进程的软上限。核对全部容器启动时间，避免为调整软上限显式重启代理及其依赖者。
+
+代理启动按实际软上限保守计算容量，在解析 HTTP 头、创建线程前准入；低预算下受控返回 503，并给 accept/DNS/日志留出描述符，而不是耗尽后使所有上游一起 502。诊断保留安全的 DNS/TCP/本地容量阶段和数值 errno，不打印异常原文。隔离复现应包括低软上限的失败、低预算保护及正确预算下的并发完整传输，不能只在空闲时验证一个连接。
+
 ## 验证
 
 运行网络策略守卫、`scripts/tests/ci-artifact-*.test.cjs` 和 `test_ci_{download,https,egress_proxy,apt_prepare,network_environment}.py`，以及 frontend bundle、结果复用、发布契约回归。Linux shell/符号链接契约在 Linux 验证；Windows 原生传输通过实际工作流验证。对照保留同一来源、TLS 策略、冷/暖下载耗时、哈希与服务器代理阶段日志，不能以一次重跑绿灯代替根因证据。

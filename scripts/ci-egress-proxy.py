@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Loopback CI CONNECT proxy with bounded, half-close-safe TCP forwarding."""
 import argparse
+import errno
 import http.server
 import ipaddress
 import json
@@ -45,6 +46,28 @@ def label(host):
 
 def event(phase, **fields):
     print(json.dumps({'phase': phase, **fields}, sort_keys=True), flush=True)
+
+
+def tunnel_capacity(requested=1024, soft_limit=None):
+    """Reserve descriptors for accept/DNS/logging, not just active sockets."""
+    if soft_limit is None:
+        try:
+            import resource
+            soft_limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+            if soft_limit == resource.RLIM_INFINITY:
+                return requested
+        except ImportError:  # The production proxy is Linux; portable tests also run on Windows.
+            return requested
+    capacity = min(requested, (soft_limit - 64) // 4)
+    if capacity < 1:
+        raise ValueError('proxy descriptor budget is insufficient')
+    return capacity
+
+
+class UpstreamError(OSError):
+    def __init__(self, stage, original=None):
+        super().__init__(getattr(original, 'errno', None), 'upstream unavailable')
+        self.stage = stage
 
 
 class Resolver:
@@ -102,8 +125,12 @@ class Resolver:
 
 
 def connect_target(host, resolver):
-    addresses = resolver(host)
+    try:
+        addresses = resolver(host)
+    except OSError as error:
+        raise UpstreamError('dns', error) from None
     deadline = time.monotonic() + 12
+    last_error = None
     for address in addresses:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -112,9 +139,12 @@ def connect_target(host, resolver):
             connection = socket.create_connection((address, 443), timeout=min(4, remaining))
             connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             return connection
-        except OSError:
+        except OSError as error:
+            last_error = error
+            if error.errno in (errno.ENFILE, errno.EMFILE):
+                raise UpstreamError('descriptor-capacity', error) from None
             continue
-    raise OSError('no reachable upstream address')
+    raise UpstreamError('tcp-connect', last_error)
 
 
 def relay(left, right, *, idle=300, buffer_limit=256 * 1024):
@@ -204,10 +234,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_CONNECT(self):
         upstream = None
         connected = False
-        acquired = self.server.slots.acquire(blocking=False)
-        if not acquired:
-            self.send_error(503, 'CI proxy capacity reached')
-            return
         ident = uuid.uuid4().hex[:12]
         sampled = int(ident[-2:], 16) % 16 == 0
         started = time.monotonic()
@@ -236,7 +262,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 event('drained', id=ident, host=label(host), **receipt,
                       elapsed_ms=round((time.monotonic() - started) * 1000))
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
-            event('failed', id=ident, host=label(host), stage=phase, error_type=type(error).__name__,
+            event('failed', id=ident, host=label(host), stage=getattr(error, 'stage', phase),
+                  os_errno=getattr(error, 'errno', None), error_type=type(error).__name__,
                   elapsed_ms=round((time.monotonic() - started) * 1000))
             if not connected:
                 self.send_error(502, 'HTTPS connection unavailable')
@@ -244,23 +271,51 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if upstream:
                 upstream.close()
-            self.server.slots.release()
 
 
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 128
 
-    def __init__(self, address, *, resolver=None, connector=connect_target):
+    def __init__(self, address, *, resolver=None, connector=connect_target, max_tunnels=1024):
         self.resolver = resolver or Resolver()
         self.connector = connector
-        self.slots = threading.BoundedSemaphore(1024)
+        self.capacity = tunnel_capacity(max_tunnels)
+        self.slots = threading.BoundedSemaphore(self.capacity)
         super().__init__(address, Handler)
+
+    def process_request(self, request, client_address):
+        # Admission precedes both HTTP header parsing and thread creation.
+        # A tunnel needs a client socket, upstream socket and selector fd;
+        # an unbounded accept/handler path can otherwise exhaust RLIMIT_NOFILE
+        # before a CONNECT reaches its old semaphore.
+        if not self.slots.acquire(blocking=False):
+            try:
+                request.settimeout(1)
+                request.sendall(b'HTTP/1.1 503 Proxy capacity reached\r\n'
+                                b'Retry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=17897)
     args = parser.parse_args()
-    event('listening', protocol='CONNECT', log_fields='stage-host-counts-only')
-    Server(('127.0.0.1', args.port)).serve_forever()
+    server = Server(('127.0.0.1', args.port))
+    event('listening', protocol='CONNECT', capacity=server.capacity, log_fields='stage-host-counts-only')
+    server.serve_forever()
