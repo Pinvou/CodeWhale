@@ -77,6 +77,8 @@ fingerprints=(
   "T1|宿主只消费明确模型来源终态         |pinvou3-app/src-tauri/src/features/assistant/forwarder.rs|== Some(deepseek_tui::core::events::TurnErrorSource::Model))"
   "T2|待办缺省状态契约保持内容必填       |CodeWhale/crates/tui/src/tools/todo.rs|todo_item_status_is_optional_with_a_pending_default"
   "T2|待办缺省执行结果保持 pending       |CodeWhale/crates/tui/src/tools/todo.rs|work_update_treats_a_missing_status_as_pending"
+  "T2|会话读取面归入只读助手精确名匹配   |CodeWhale/crates/tui/src/tools/registry.rs|\"mcp_session-reader_read_session\""
+  "T2|会话列举面归入只读助手精确名匹配   |CodeWhale/crates/tui/src/tools/registry.rs|\"mcp_session-reader_list_sessions\""
   "T1|宿主输出预算复用真实组合导出       |CodeWhale/crates/tui/src/core/engine.rs|pub use context::route_effective_max_output_tokens;"
   "T1|输出预算导出覆盖真实组合结果       |CodeWhale/crates/tui/src/core/engine/context.rs|route_effective_max_output_tokens_matches_the_transport_composition"
   "T1|Terminal error producer is explicit|CodeWhale/crates/tui/src/core/events.rs|pub enum TurnErrorSource"
@@ -537,6 +539,24 @@ run_pinned_todo_schema_tests() {
   done
 }
 run_pinned_todo_schema_tests || fail=1
+
+# #157 session-reader 只读分类不新增测试函数，而是扩展两个既有测试的表驱动
+# 条目；同样不落入 forkguard_ 过滤器，按名钉住防止改名或删除后静默 no-op。
+run_pinned_session_reader_tests() {
+  local test output
+  for test in \
+    mcp_read_helpers_remain_auto_and_eagerly_loaded \
+    mcp_actions_require_approval_with_exact_helper_matching; do
+    output=$( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked \
+      "$test" -- --test-threads=1 2>&1 ) || { printf '%s\n' "$output"; return 1; }
+    if ! grep -q '1 passed' <<<"$output"; then
+      printf '%s\n' "$output"
+      red "❌ pinned test $test did not run (renamed or deleted?)"
+      return 1
+    fi
+  done
+}
+run_pinned_session_reader_tests || fail=1
 
 echo
 bold "── 第 3 层：pinvou3-app forkguard 回归 ──"
