@@ -19,7 +19,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 import { spawnNdjsonChild, stopNdjsonChild } from './helpers/ndjson-child-driver.mjs';
 import { cleanupBrowserFixture, confirmedChildStopper, confirmedProcessExited, readPendingHostRequest } from './helpers/browser-wrapper-fixture-cleanup.mjs';
-import { heldRequestResultDiagnostic } from './helpers/browser-wrapper-held-result.mjs';
+import { heldRequestResultDiagnostic, heldRequestAuthorizationDiagnostic } from './helpers/browser-wrapper-held-result.mjs';
 
 const WRAPPER = fileURLToPath(new URL(
   '../src-tauri/resources/common/bundle/mcp-servers/browser-wrapper.mjs',
@@ -95,7 +95,9 @@ function scheduleToolCompletion(id, complete, delayMs, releasePath) {
 }
 
 audit({ kind: 'start' });
+let inputChunks = 0;
 process.stdin.on('data', (chunk) => {
+  if (inputChunks++ < 4) audit({ kind: 'stdin-chunk', bytes: chunk.length });
   input += chunk;
   let newline;
   while ((newline = input.indexOf('\n')) >= 0) {
@@ -104,22 +106,27 @@ process.stdin.on('data', (chunk) => {
     if (!line.trim()) continue;
     const message = JSON.parse(line);
     if (message.method === 'initialize') {
+      audit({ kind: 'protocol-received', name: 'initialize' });
       const currentMode = mode();
       if (currentMode.handshakeError) {
         error(message.id, 'configured startup handshake rejection');
         continue;
       }
-      const finishHandshake = () => result(message.id, {
+      const finishHandshake = () => {
+        audit({ kind: 'protocol-reply', name: 'initialize' });
+        result(message.id, {
           protocolVersion: message.params?.protocolVersion ?? '2024-11-05',
           capabilities: { tools: {} },
           serverInfo: { name: 'fake-windows-mcp', version: '0' },
         });
+      };
       const handshakeDelayMs = Number(currentMode.handshakeDelayMs) || 0;
       if (handshakeDelayMs > 0) setTimeout(finishHandshake, handshakeDelayMs);
       else finishHandshake();
       continue;
     }
     if (message.method === 'tools/list') {
+      audit({ kind: 'protocol-received', name: 'tools/list' });
       if (mode().toolsListError) {
         error(message.id, 'configured runtime catalog rejection');
         continue;
@@ -263,6 +270,14 @@ process.stdin.on('data', (chunk) => {
     }
     if (name === 'click') {
       const currentMode = mode();
+      if (currentMode.crashOnClick) {
+        // Inject the selected fault in the receiver, at dispatch. Waiting for
+        // a controller-side file poll and then scheduling a kill races the
+        // independent, deliberately strict input-authorization heartbeat.
+        audit({ kind: 'crash-injected', name, requestId: message.id });
+        process.kill(process.pid, 'SIGKILL');
+        return;
+      }
       const complete = () => {
         pendingToolTimers.delete(message.id);
         audit({ kind: 'tool-complete', name, requestId: message.id });
@@ -310,6 +325,14 @@ process.stdin.on('data', (chunk) => {
     error(message.id, 'unexpected tool: ' + name);
   }
 });
+audit({ kind: 'stdin-listener-ready' });
+let startupTicks = 0;
+const startupProgress = setInterval(() => {
+  const cpu = process.cpuUsage();
+  audit({ kind: 'startup-tick', cpuMs: (cpu.user + cpu.system) / 1000 });
+  if (++startupTicks >= 5) clearInterval(startupProgress);
+}, 1000);
+startupProgress.unref();
 `;
 
 const CATALOG = {
@@ -458,7 +481,7 @@ async function createFakeHost(fixture, options) {
   return createBrowserWrapperHost(fixture, { sessionId: SESSION_ID, sessionToken: SESSION_TOKEN }, options);
 }
 
-function driveWrapper(fixture) {
+function driveWrapper(fixture, { collectResponses = false } = {}) {
   const driver = spawnNdjsonChild({
     args: [WRAPPER, fixture.mcpBin, fixture.portPath],
     env: {
@@ -468,8 +491,10 @@ function driveWrapper(fixture) {
       FAKE_BROWSER_WORKSPACE: fixture.workspacePath,
       FAKE_BROWSER_MCP_MODE: fixture.modePath,
       FAKE_BROWSER_MCP_AUDIT: fixture.auditPath,
+      PINVOU3_BROWSER_LIFECYCLE_DIAGNOSTICS: '1',
     },
     timeoutMs: 15_000,
+    collectResponses,
   });
   return {
     ...driver,
@@ -512,13 +537,20 @@ async function initializeWorkspace(wrapper, clientName) {
 async function cleanupFixture(fixture, host, ...wrappers) {
   if (fixture.primaryErrors?.length) {
     console.error('[browser-host-fixture-diagnostic]', JSON.stringify(host.diagnostic()));
+    console.error('[browser-wrapper-fixture-diagnostic]', JSON.stringify(
+      wrappers.filter(Boolean).map(wrapper => wrapper.diagnostic()),
+    ));
+    const auditReadStarted = performance.now();
     try {
-      const audit = readAudit(fixture.auditPath).slice(-40).map(({ kind, name, pid, at }) =>
-        ({ kind, name, pid, at }));
+      const audit = readAudit(fixture.auditPath).slice(-40).map(({ kind, name, pid, at, bytes, cpuMs }) =>
+        ({ kind, name, pid, at, bytes, cpuMs }));
       console.error('[browser-upstream-fixture-events]', JSON.stringify(audit));
     } catch {
       console.error('[browser-upstream-fixture-events]', JSON.stringify({ unavailable: true }));
     }
+    console.error('[browser-fixture-fs-diagnostic]', JSON.stringify({
+      operation: 'audit-read', elapsedMs: performance.now() - auditReadStarted,
+    }));
     try {
       const observed = await host.snapshot();
       console.error('[browser-host-fixture-events]', JSON.stringify({
@@ -1256,6 +1288,8 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
   const wrapper = driveWrapper(fixture);
   let settled = false;
   let pending;
+  const startedAt = performance.now();
+  const stages = { prepareObservedMs: null, holdReturnedMs: null, releaseAcknowledgedMs: null };
   try {
     await host.deferOperation('prepare', true);
     pending = initializeWorkspace(wrapper, 'windows-first-workspace-setup-test').then(
@@ -1268,9 +1302,17 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
       const raw = readPendingHostRequest(join(requests, name));
       return raw !== null && JSON.parse(raw).operation === 'prepare';
     }), 'initial setup did not publish prepare');
+    stages.prepareObservedMs = Math.round(performance.now() - startedAt);
+    const heldAt = performance.now();
+    console.error('[browser-prepare-observer]', JSON.stringify({ phase: 'prepare-seen' }));
     await sleep(16_000);
+    console.error('[browser-prepare-observer]', JSON.stringify({
+      phase: 'prepare-release', held_ms: Math.round(performance.now() - heldAt),
+    }));
+    stages.holdReturnedMs = Math.round(performance.now() - startedAt);
     assert.equal(settled, false, 'setup must not inherit the shorter mutation observer');
     await host.deferOperation('prepare', false);
+    stages.releaseAcknowledgedMs = Math.round(performance.now() - startedAt);
     const outcome = await pending;
     assert.ifError(outcome.error);
     assert.equal(outcome.response.result.structuredContent.pages[0].id, 1);
@@ -1281,6 +1323,18 @@ test('Windows proxy: first workspace setup may outlive the mutation observer wit
     assert.ok(Number.isSafeInteger(diagnostic.sequence) && diagnostic.sequence > 0);
     assert.ok(Number.isSafeInteger(diagnostic.ageMs) && diagnostic.ageMs >= 0);
   } catch (error) {
+    // Keep failure evidence bounded and synthetic: elapsed times belong to this
+    // observer only; flags report fixed log markers, not a proven host cause.
+    // Never include raw stderr, session IDs, URLs or filesystem paths.
+    const stderr = wrapper.stderrText();
+    console.error('[browser-first-workspace-setup-diagnostic]', JSON.stringify({
+      ...stages,
+      elapsedMs: Math.round(performance.now() - startedAt),
+      prepareFailureReported: stderr.includes('On-demand WebView2 startup request failed:'),
+      prepareDeadlineReported: stderr.includes('On-demand WebView2 startup request failed: browser/host-request-timeout: prepare exceeded 25000ms'),
+      upstreamStartReported: stderr.includes('Starting chrome-devtools-mcp:'),
+      upstreamBoundReported: stderr.includes('Bound conversation browser page:'),
+    }));
     fixture.primaryErrors = [error];
     throw error;
   } finally {
@@ -1510,7 +1564,8 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
         ),
         request.then((response) => assert.fail(
           'tool completed before its release barrier: ' +
-          JSON.stringify(heldRequestResultDiagnostic(response)),
+          JSON.stringify({ ...heldRequestResultDiagnostic(response),
+            authorization: heldRequestAuthorizationDiagnostic(response) }),
         )),
       ]);
       assert.equal(
@@ -2042,11 +2097,8 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
   const wrapper = driveWrapper(fixture);
 
   try {
+    writeFileSync(fixture.modePath, JSON.stringify({ crashOnClick: true }));
     await initializeWorkspace(wrapper, 'windows-upstream-crash-test');
-
-    writeFileSync(fixture.modePath, JSON.stringify({
-      clickReleasePath: ownedReleaseGate(fixture, 'upstream-crash.release'),
-    }));
     const beforeHostState = await host.snapshot();
     const before = {
       begin: beforeHostState.operationCalls.get('begin_agent_operation') || 0,
@@ -2058,19 +2110,18 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
       name: 'click',
       arguments: { uid: 'crash-during-dispatch' },
     });
-    await waitUntil(
-      async () => readAudit(fixture.auditPath)
-        .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length ===
-        before.clicks + 1,
-      'crash fixture did not dispatch its click',
-    );
-    const upstreamPid = readAudit(fixture.auditPath)
+    const outcome = await inFlight.response;
+    const audit = readAudit(fixture.auditPath);
+    assert.equal(audit.filter((entry) => entry.kind === 'tool' && entry.name === 'click').length, before.clicks + 1);
+    const upstreamPid = audit
       .filter((entry) => entry.kind === 'start')
       .at(-1)?.pid;
     assert.ok(Number.isInteger(upstreamPid), 'fake upstream pid is missing');
-    process.kill(upstreamPid, 'SIGKILL');
-
-    const outcome = await inFlight.response;
+    const crash = audit.filter((entry) => entry.kind === 'crash-injected');
+    assert.equal(crash.length, 1, 'the receiver must inject exactly one real crash');
+    assert.equal(crash[0].pid, upstreamPid);
+    assert.equal(crash[0].name, 'click');
+    assert.equal(audit.filter((entry) => entry.kind === 'tool-complete' && entry.name === 'click').length, 0);
     assert.equal(
       outcome.result.structuredContent.errorCode,
       'browser/action-commit-unknown-after-upstream-interruption',
@@ -2103,12 +2154,14 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
   }
 });
 
-test('Windows proxy: cancelled uncooperative dispatch shuts down on the first deadline and rejects queued work', {
+for (const withholdEndReply of [false, true]) {
+test('Windows proxy: cancelled uncooperative dispatch shuts down on the first deadline and rejects queued work'
+  + (withholdEndReply ? ' while the host end reply is withheld' : ''), {
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
   const host = await createFakeHost(fixture);
-  const wrapper = driveWrapper(fixture);
+  const wrapper = driveWrapper(fixture, { collectResponses: withholdEndReply });
   let replacement = null;
   // In this fixture the first tool call includes lazy startup. Allow for a
   // slow handshake followed by a slow post-bind catalog response. The
@@ -2148,21 +2201,47 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
     const listsBeforeQueued = readAudit(fixture.auditPath)
       .filter((entry) => entry.kind === 'tool' && entry.name === 'list_pages').length;
 
+    if (withholdEndReply) await host.deferOperation('end_agent_operation', true);
     wrapper.abandonRequest(inFlight.id);
     const cancelledAt = Date.now();
     wrapper.notify('notifications/cancelled', {
       requestId: inFlight.id,
       reason: 'cancel uncooperative dispatch',
     });
-    const queuedOutcome = await wrapper.request('tools/call', {
+    const queued = wrapper.startRequest('tools/call', {
       name: 'list_pages',
       arguments: {},
     }, {
       label: 'queued list_pages awaiting shutdown rejection',
     });
+    let cancelledQueued = null;
+    if (withholdEndReply) {
+      cancelledQueued = wrapper.startRequest('tools/call', { name: 'list_pages', arguments: {} });
+      wrapper.abandonRequest(cancelledQueued.id);
+      wrapper.notify('notifications/cancelled', { requestId: cancelledQueued.id });
+    }
+    const queuedOutcome = await queued.response;
     const rejectedAt = Date.now();
     assert.match(queuedOutcome.error?.message || '', /browser\/wrapper-shutting-down/,
       JSON.stringify(heldRequestResultDiagnostic(queuedOutcome)));
+
+    if (withholdEndReply) {
+      // Observe the real End request, keeping its reply withheld. A queued
+      // rejection must not wait for this separate cleanup acknowledgement.
+      const directory = join(fixture.root, 'host-requests');
+      await waitUntil(async () => readdirSync(directory).some(name => {
+        if (!name.endsWith('.json')) return false;
+        const raw = readPendingHostRequest(join(directory, name));
+        return raw != null && JSON.parse(raw).operation === 'end_agent_operation';
+      }), 'cancelled dispatch did not publish its exact host End request');
+      assert.equal((await host.snapshot()).operationCalls.get('end_agent_operation') || 0,
+        before.end, 'withheld End must not be reported as acknowledged');
+      assert.equal(wrapper.child.exitCode, null, 'wrapper must retain its host cleanup barrier');
+      assert.equal(wrapper.child.signalCode, null, 'wrapper must remain live until host cleanup');
+      const late = await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+      assert.match(late.error?.message || '', /browser\/wrapper-shutting-down/);
+      await host.deferOperation('end_agent_operation', false);
+    }
 
     if (wrapper.child.exitCode == null && wrapper.child.signalCode == null) {
       await Promise.race([
@@ -2171,6 +2250,12 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
       ]);
     }
     const shutdownElapsedMs = rejectedAt - cancelledAt;
+    if (withholdEndReply) {
+      assert.equal(wrapper.responses.filter(response => response.id === queued.id).length, 1,
+        'queue draining must not respond again after host End');
+      assert.equal(wrapper.responses.filter(response => response.id === cancelledQueued.id).length, 0,
+        'cancelled queued work must remain abandoned');
+    }
     // Reject delivery that takes a full additional 5s grace window even if
     // the response arrives within the driver's 15s observation budget.
     assert.ok(
@@ -2210,6 +2295,11 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
     fixture.primaryErrors = [error];
     throw error;
   } finally {
-    await cleanupFixture(fixture, host, wrapper, replacement);
+    try {
+      if (withholdEndReply) await host.deferOperation('end_agent_operation', false);
+    } finally {
+      await cleanupFixture(fixture, host, wrapper, replacement);
+    }
   }
 });
+}

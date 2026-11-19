@@ -90,6 +90,14 @@ func main() {
 	if err != nil {
 		log.Fatal("IDENTITY_PASSWORD_PREPARATION_CONFIGURATION_INVALID")
 	}
+	revocations, err := identityadapter.NewHTTPProfileRevocationAuthority(os.Getenv("ACCOUNT_HTTP_URL"), serviceauth.CredentialFromEnvironment(), os.Getenv("ACCOUNT_CA_FILE"))
+	if err != nil {
+		log.Fatal("IDENTITY_PROFILE_REVOCATION_CONFIGURATION_REQUIRED")
+	}
+	service, err = service.WithProfileRevocationAuthority(revocations)
+	if err != nil {
+		log.Fatal("IDENTITY_PROFILE_REVOCATION_CONFIGURATION_INVALID")
+	}
 	if err := httpserver.RunWithApplication("identity-service", service.Handler(), ready); err != nil {
 		log.Fatal(err)
 	}

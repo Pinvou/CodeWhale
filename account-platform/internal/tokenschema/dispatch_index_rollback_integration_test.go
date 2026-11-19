@@ -105,6 +105,12 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`, controlledUsage).Sca
 	if err = connection.QueryRow(ctx, `SELECT processed,complete FROM public.backfill_usage_history_projection(100)`).Scan(&scanned, &projectionComplete); err != nil || scanned != 1 || !projectionComplete {
 		t.Fatal("scan retained request through the public history worker", scanned, projectionComplete, err)
 	}
+	// Capture every usage row in this independent historical fixture.
+	const dispatchUsageFacts = `SELECT jsonb_agg(to_jsonb(u) ORDER BY id)::text FROM usage_requests u`
+	var allUsageBefore string
+	if err = connection.QueryRow(ctx, dispatchUsageFacts).Scan(&allUsageBefore); err != nil {
+		t.Fatal(err)
+	}
 	const evidenceSnapshot = `SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb)::text FROM usage_cancellation_evidence e`
 	var retainedEvidence string
 	if err = connection.QueryRow(ctx, evidenceSnapshot).Scan(&retainedEvidence); err != nil {
@@ -127,8 +133,8 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`, controlledUsage).Sca
 		t.Fatal("denied rollback changed persistent facts", err)
 	}
 	var retainedVersions []int64
-	if err = connection.QueryRow(ctx, `SELECT array_agg(version ORDER BY version) FROM schema_migrations WHERE version<>900008`).Scan(&retainedVersions); err != nil {
-		t.Fatal(err)
+	if err = connection.QueryRow(ctx, `SELECT array_agg(version ORDER BY version) FROM schema_migrations WHERE version<>900008`).Scan(&retainedVersions); err != nil || len(retainedVersions) == 0 {
+		t.Fatal("capture historical predecessor versions", err)
 	}
 	var retained string
 	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900008`).Scan(&retained); err != nil {
@@ -146,12 +152,17 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`, controlledUsage).Sca
 	if err = connection.QueryRow(ctx, evidenceSnapshot).Scan(&current); err != nil || current != retainedEvidence {
 		t.Fatal("controlled rollback changed retained cancellation evidence", err)
 	}
+	// Full public Up installs all pending migrations. The exact retry fence is
+	// checked in its own historical fixture before the later publication head.
 	run("token_gateway", "up")
 	if err = connection.QueryRow(ctx, snapshot).Scan(&after); err != nil {
 		t.Fatal(err)
 	}
 	if err = connection.QueryRow(ctx, evidenceSnapshot).Scan(&current); err != nil || current != retainedEvidence {
 		t.Fatal("reinstallation changed retained cancellation evidence", err)
+	}
+	if err = connection.QueryRow(ctx, dispatchUsageFacts).Scan(&current); err != nil || current != allUsageBefore {
+		t.Fatal("combined public index lifecycle changed complete usage rows", err)
 	}
 	// Ledger installation timestamps legitimately change on re-install. Check
 	// original rows separately and verify every current published SQL identity.

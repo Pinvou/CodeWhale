@@ -83,6 +83,12 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
+	internal.POST("/payment-credit-admissions", serviceauth.Require("internal.account.payment-credit.admit"), httpserver.AdaptFunc(s.admitPaymentCredit))
+	internal.POST("/payment-credit-admissions/retention-check", serviceauth.Require("internal.account.payment-credit.admit"), httpserver.AdaptFunc(s.checkPaymentCreditRetention))
+	if s.profiles != nil {
+		internal.POST("/profile-revocation-receipts/claim", serviceauth.Require("internal.account.profile-revocation.claim"), httpserver.AdaptFunc(s.claimProfileRevocation))
+		internal.POST("/profile-revocation-receipts/confirm", serviceauth.Require("internal.account.profile-revocation.confirm"), httpserver.AdaptFunc(s.confirmProfileRevocation))
+	}
 	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account.closure.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.GET("/client-compatibility", serviceauth.Require("internal.client-compatibility.read"), httpserver.AdaptFunc(s.internalClientCompatibility))
 	internal.GET("/registration-bonus-eligibility/readiness", serviceauth.Require("internal.registration-bonus-eligibility.read"), httpserver.AdaptFunc(s.internalRegistrationBonusEligibilityReadiness))

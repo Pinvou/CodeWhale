@@ -19,9 +19,14 @@ for key in ("financial_token", *(f"financial_billing_{index}" for index in range
     original = SERVICES["financial"]
     SERVICES[key] = (key.replace("_", "-") + "-postgres", *original[1:])
 CLOSURE_SERVICES = {'financial': SERVICES['financial']}
+OWNER_SERVICES = {**CLOSURE_SERVICES,
+                  **{key: (name, *SERVICES['financial'][1:]) for key, name in (
+                      ('owner_account', 'financial-owner-account-postgres'),
+                      ('owner_wallet', 'financial-owner-wallet-postgres'))}}
 CORE_SERVICES = {key: SERVICES[key] for key in ('audit', 'broker')}
 SERVICE_PROFILES = {'full': SERVICES, 'closure': CLOSURE_SERVICES,
-                    'core': CORE_SERVICES, 'financial': CLOSURE_SERVICES}
+                    'core': CORE_SERVICES, 'financial': CLOSURE_SERVICES,
+                    'owners': OWNER_SERVICES}
 
 IDENTITY_SQL = "SELECT system_identifier::text,current_setting('data_directory'),current_setting('port'),session_user,current_user,current_database(),(SELECT rolsuper FROM pg_roles WHERE rolname=session_user),current_setting('server_version_num') FROM pg_control_system()"
 
@@ -156,14 +161,42 @@ def identity_matches(value, directory, major):
         raise ValueError('service PostgreSQL identity mismatch')
     return fields[0]
 
-def main(*, services=None):
+def profile_metadata(metadata, services, *, portal_redis=False):
+    """Split the one declared companion from PG ownership; reject unknowns."""
+    names = {item[0] for item in services.values()}
+    if portal_redis and services != CORE_SERVICES:
+        raise ValueError('Portal Redis companion requires the core PG profile')
+    expected = names | ({'portal-redis'} if portal_redis else set())
+    if not isinstance(metadata, dict) or set(metadata) != expected:
+        raise ValueError('job service set does not match the selected PostgreSQL profile')
+    if portal_redis:
+        companion = metadata['portal-redis']
+        if not isinstance(companion, dict) or not isinstance(companion.get('id'), str) or not re.fullmatch('[0-9a-f]{64}', companion['id']):
+            raise ValueError('canonical Portal Redis registration required')
+        ports = companion.get('ports')
+        if not isinstance(ports, dict) or set(ports) != {'6379'}:
+            raise ValueError('canonical Portal Redis port registration required')
+        port = port_value(ports['6379'])
+        for name in names:
+            item = metadata[name]
+            if not isinstance(item, dict) or not isinstance(item.get('ports'), dict):
+                raise ValueError('canonical core PG registration required')
+            if item.get('id') == companion['id'] or item['ports'].get('5432') == port:
+                raise ValueError('Portal Redis and PG registrations must be distinct')
+    # Redis admission and retirement remain exclusively in account-ci-redis.py.
+    # Neither its ID nor its volume enters the PG supervisor's ownership set.
+    return {name: metadata[name] for name in metadata if name in names}
+
+
+def main(*, services=None, portal_redis=False):
     services = SERVICES if services is None else services
-    metadata = json.loads(os.environ['ACCOUNT_CI_SERVICES'])
+    metadata = profile_metadata(json.loads(os.environ['ACCOUNT_CI_SERVICES']), services, portal_redis=portal_redis)
     if not isinstance(metadata, dict) or set(metadata) != {item[0] for item in services.values()}:
         raise ValueError('job service set does not match the selected PostgreSQL profile')
     ids, ports, volumes, systems = set(), set(), set(), set()
     outputs = []
     financial = {}
+    owners = {}
     for key, (name, image, directory, major) in services.items():
         meta = metadata[name]
         identifier = meta.get('id', '')
@@ -173,6 +206,11 @@ def main(*, services=None):
         if len(items) != 1:
             raise ValueError('ambiguous Docker service')
         port, volume = inspect_service(meta, items[0], image)
+        if services == OWNER_SERVICES:
+            limits = items[0]['HostConfig']
+            if (limits.get('NanoCpus') != (2 if key == 'financial' else 1) * 10**9
+                    or limits.get('Memory') != 1024**3 or limits.get('MemorySwap') != 1024**3):
+                raise ValueError('owners PostgreSQL resource bounds mismatch')
         url = f'postgres://postgres@127.0.0.1:{port}/postgres?sslmode=disable'
         direct = run(['docker', 'exec', identifier, 'psql', '-U', 'postgres', '-d', 'postgres', '-XAt', '-v', 'ON_ERROR_STOP=1', '-c', IDENTITY_SQL])
         endpoint = run(['psql', url, '-XAt', '-v', 'ON_ERROR_STOP=1', '-c', IDENTITY_SQL])
@@ -184,19 +222,26 @@ def main(*, services=None):
         if key in FINANCIAL_GROUPS.values():
             group = next(group for group, service in FINANCIAL_GROUPS.items() if service == key)
             financial[group] = dict(url=url, port=port, system=system, directory=directory)
+        if services == OWNER_SERVICES:
+            lane = {'financial': 'schema', 'owner_account': 'account', 'owner_wallet': 'wallet'}[key]
+            owners[lane] = dict(url=url, port=port, system=system, directory=directory, id=identifier)
         print(f'Account CI {key}: exact service ID, loopback port, anonymous volume and PostgreSQL identity verified')
     with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output:
         output.write('\n'.join(outputs) + '\n')
         output.write('financial_services=' + json.dumps(financial, separators=(',', ':')) + '\n')
+        output.write('owners_services=' + json.dumps(owners, separators=(',', ':')) + '\n')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--stop-owned-services', action='store_true')
     parser.add_argument('--profile', choices=tuple(SERVICE_PROFILES), default='full')
+    parser.add_argument('--with-portal-redis', action='store_true')
     args = parser.parse_args()
+    if args.with_portal_redis and args.profile != 'core':
+        parser.error('--with-portal-redis requires --profile core')
     services = SERVICE_PROFILES[args.profile]
     if args.stop_owned_services:
         ledger = os.environ.get('PINVOU_CI_RESOURCE_LEDGER')
         stop_owned_services(json.loads(os.environ['ACCOUNT_CI_SERVICES']), Path(ledger) / 'postgres-services.json' if ledger else None, services=services)
     else:
-        main(services=services)
+        main(services=services, portal_redis=args.with_portal_redis)

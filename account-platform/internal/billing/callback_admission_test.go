@@ -91,7 +91,7 @@ func admissionFixture(t *testing.T, repository *PostgresRepository) (*Service, *
 	if repository == nil {
 		repository = &PostgresRepository{}
 	}
-	coordinator, err := NewPaymentCoordinatorWithProvider(repository, &admissionFixtureProvider{}, "test")
+	coordinator, err := newBillingFixturePaymentCoordinator(repository, &admissionFixtureProvider{}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestCallbackHTTPAdmissionPersistsPostgres(t *testing.T) {
 	}
 	ids := []uuid.UUID{uuid.New(), uuid.New()}
 	for i, id := range ids {
-		body := fmt.Sprintf(`{"id":%q}`, id.String())
+		body := fmt.Sprintf(`{"provider_metadata":{"reference":"controlled","code":7},"id":%q}`, id.String())
 		source := fmt.Sprintf("198.51.100.%d", i+1)
 		w := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, source, body)
 		if w.Code != 202 {
@@ -248,10 +248,77 @@ func TestCallbackHTTPAdmissionPersistsPostgres(t *testing.T) {
 		}
 	}
 	// Retained financial idempotency: replay leaves one notification and no new risk fact.
-	if got := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, "198.51.100.1", fmt.Sprintf(`{"id":%q}`, ids[0].String())).Code; got != 202 {
+	if got := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, "198.51.100.1", fmt.Sprintf(`{"provider_metadata":{"reference":"controlled","code":7},"id":%q}`, ids[0].String())).Code; got != 202 {
 		t.Fatal("retained callback replay failed", got)
+	}
+	if got := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, "198.51.100.1", fmt.Sprintf(`{"id":%q,"provider_metadata":{"code":7,"reference":"controlled"}}`, ids[0].String())).Code; got != 401 {
+		t.Fatal("different native callback bytes reused an existing receipt", got)
+	}
+	if got := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, "198.51.100.1", fmt.Sprintf(`{ "provider_metadata":{"reference":"controlled","code":7},"id":%q}`, ids[0].String())).Code; got != 401 {
+		t.Fatal("the native receipt did not freeze the exact provider body", got)
+	}
+	if got := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, "198.51.100.1", fmt.Sprintf(`{"id":%q,"provider_metadata":{"code":8,"reference":"controlled"}}`, ids[0].String())).Code; got != 401 {
+		t.Fatal("changed provider evidence reused an existing receipt", got)
 	}
 	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM payment_notifications`).Scan(&received); err != nil || received != 2 {
 		t.Fatal("callback replay duplicated facts", received, err)
+	}
+	newBody := fmt.Sprintf(`{"provider_metadata":{"reference":"controlled","code":7},"id":%q}`, ids[0].String())
+	newDigest := sha256.Sum256([]byte(newBody))
+	var newHash string
+	if err := repository.pool.QueryRow(ctx, `SELECT request_hash FROM payment_notifications WHERE notification_id=$1`, ids[0]).Scan(&newHash); err != nil || newHash != fmt.Sprintf("native-sha256:%x", newDigest) {
+		t.Fatal("stored receipt does not match the original native bytes", err)
+	}
+
+	// Model the old writer by keeping its original envelope digest and an
+	// earlier receipt time. The PostgreSQL JSONB copy has reordered raw keys.
+	var saved []byte
+	if err := repository.pool.QueryRow(ctx, `SELECT payload FROM payment_notifications WHERE notification_id=$1`, ids[1]).Scan(&saved); err != nil {
+		t.Fatal(err)
+	}
+	var historical paymentNotification
+	if err := json.Unmarshal(saved, &historical); err != nil {
+		t.Fatal(err)
+	}
+	oldBody := fmt.Sprintf(`{"provider_metadata":{"reference":"controlled","code":7},"id":%q}`, ids[1].String())
+	historical.ProviderPayload = json.RawMessage(oldBody)
+	historical.Timestamp -= 10
+	oldEnvelope, err := json.Marshal(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDigest := sha256.Sum256(oldEnvelope)
+	oldHash := fmt.Sprintf("%x", oldDigest)
+	if _, err := repository.pool.Exec(ctx, `UPDATE payment_notifications SET request_hash=$2,payload=$3 WHERE notification_id=$1`, ids[1], oldHash, oldEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if got := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, "198.51.100.2", oldBody).Code; got != 202 {
+		t.Fatal("historical native receipt did not survive JSONB normalization or refreshed time", got)
+	}
+	if got := admissionRequest(h, "/api/v1/payment-callbacks", "Bearer "+a, "198.51.100.2", fmt.Sprintf(`{"id":%q,"provider_metadata":{"code":7,"reference":"controlled"}}`, ids[1].String())).Code; got != 401 {
+		t.Fatal("historical envelope accepted a different provider document", got)
+	}
+	var preserved bool
+	if err := repository.pool.QueryRow(ctx, `SELECT request_hash=$2 AND payload=$3::jsonb FROM payment_notifications WHERE notification_id=$1`, ids[1], oldHash, oldEnvelope).Scan(&preserved); err != nil || !preserved {
+		t.Fatal("historical receipt was rewritten", err)
+	}
+
+	// The compatible signing path accepts a JSON field case variant. Replay
+	// must still compare the actual decoded nested provider facts.
+	legacyID := uuid.New()
+	legacy := func(fact string) []byte {
+		return fmt.Appendf(nil, `{"notification_id":%q,"merchant_id":"controlled-merchant","merchant_order_no":"fixture","channel":"ALIPAY","status":"PENDING","amount_fen":100,"currency":"CNY","timestamp":%d,"Provider_Payload":{"fact":%q}}`, legacyID.String(), service.payments.now().Unix(), fact)
+	}
+	legacySecret := []byte(strings.Repeat("fixture", 6))
+	for _, attempt := range []struct {
+		fact    string
+		created bool
+		wantErr error
+	}{{"original", true, nil}, {"original", false, nil}, {"changed", false, ErrForbiddenPayment}} {
+		body := legacy(attempt.fact)
+		_, created, err := service.payments.PersistNotification(ctx, "ALIPAY", paymentSignature(legacySecret, body), body, "fixture-legacy")
+		if created != attempt.created || !errors.Is(err, attempt.wantErr) {
+			t.Fatalf("legacy signed provider facts did not match the original receipt: %v, %v", created, err)
+		}
 	}
 }

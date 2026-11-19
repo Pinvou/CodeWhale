@@ -76,6 +76,30 @@ class FinancialFamiliesTests(unittest.TestCase):
     def phase(self):
         return {"id": "original", "target": "./internal/billingschema", "package": RUNNER.TARGETS["./internal/billingschema"], "roots": {"TestParent": ["first"]}, "inputs": ["schema"], "mode": "owner", "children": [{"id": "f11", "stream_env": "F11_CHILD_LOG", "go_env": "F11_GO_BINARY", "package": RUNNER.TARGETS["./internal/billing"], "roots": {"TestChild": ["only"]}}]}
 
+    def test_family_child_cache_modes_do_not_inherit_or_mutate_the_parent(self):
+        parent = {
+            "GITHUB_ACTIONS": "true",
+            "PINVOU_CI_FIXTURE_TEMPLATES": "1",
+            "PINVOU_CI_RETAINED_BILLING_TEMPLATES": "1",
+            "PINVOU_CI_OWNER_WALLET_TEMPLATES": "1",
+            "PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL": "original-parent-url",
+            "PINVOU_ACCOUNT_CI_PG_PORT": "49173",
+            "PINVOU_ACCOUNT_CI_PG_SYSTEM_ID": "1234567",
+            "PINVOU_ACCOUNT_CI_PG_DIRECTORY": "/declared/owned",
+        }
+        with patch.dict(os.environ, parent, clear=True):
+            before = dict(os.environ)
+            for phase in RUNNER.load_manifest()["phases"]:
+                with self.subTest(phase=phase["id"]):
+                    child = RUNNER.phase_environment("owned-url", "/declared/go", phase, Path("/fresh/evidence"))
+                    self.assertEqual(child["PINVOU_CI_FIXTURE_TEMPLATES"], "1")
+                    for key in ("PINVOU_CI_RETAINED_BILLING_TEMPLATES", "PINVOU_CI_OWNER_WALLET_TEMPLATES"):
+                        self.assertEqual(child[key], "0")
+                    for key, value in parent.items():
+                        if key.startswith("PINVOU_ACCOUNT_") or key == "GITHUB_ACTIONS":
+                            self.assertEqual(child[key], value)
+                    self.assertEqual(dict(os.environ), before)
+
     def test_role_factory_preserves_baseline_and_retires_only_recorded_actors(self):
         query = FakeInstance()
         owner = RUNNER.OwnedInstance(query)

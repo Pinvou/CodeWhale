@@ -5,7 +5,22 @@ import { Worker, MessageChannel, isMainThread, workerData } from 'node:worker_th
 import { createServer } from './http-fixture.mjs';
 import { fixtureScope } from './fixture-scope.mjs';
 
-const progressPhases = ['starting', 'idle', 'scan', 'read', 'write', 'control', 'cdp', 'failed', 'exists', 'directory', 'audit'];
+// Test-only opt-in diagnostics. Disabled callers do not read a clock or emit.
+const hostControlDiagnosticPhases = new Set(["model_close_enter", "model_timers_cleared", "model_watch_close_enter", "model_watch_close_done", "model_pending_poll_enter", "model_pending_poll_done", "model_close_awaits_done", "main_shutdown_rpc_enter", "main_shutdown_rpc_ack", "main_shutdown_ack_sent", "main_exit_wait_enter", "main_exit_wait_done", "main_terminate_enter", "main_terminate_done", "main_release_finally", "main_worker_exit", "main_stop_polling_enter", "main_stop_polling_ack", "worker_stop_poller_enter", "worker_stop_poller_done", "worker_server_close_enter", "worker_server_close_done", "worker_shutdown_reply", "worker_ack_received", "worker_configure_barrier_enter", "worker_configure_barrier_done", "worker_message_configure", "worker_message_stop_polling", "worker_message_shutdown", "worker_execute_configure", "worker_execute_stop_polling", "worker_execute_shutdown", "main_timeout_configure", "main_timeout_stop_polling", "main_timeout_shutdown"]);
+let hostControlDiagnosticStarted;
+let hostControlDiagnosticSequence = 0;
+function hostControlPhaseDiagnostic(enabled, phase, exited) {
+  if (enabled !== true) return;
+  if (!hostControlDiagnosticPhases.has(phase)) return;
+  try {
+    hostControlDiagnosticStarted ??= performance.now();
+    const frame = { phase, elapsed_ms: Math.round(performance.now() - hostControlDiagnosticStarted), seq: ++hostControlDiagnosticSequence };
+    if (typeof exited === 'boolean') frame.exited = exited;
+    console.error('[host-control-phase]', JSON.stringify(frame));
+  } catch { /* diagnostics never replace primary failure or owned cleanup */ }
+}
+
+const progressPhases = ['starting', 'idle', 'scan', 'read', 'write', 'control', 'cdp', 'failed', 'exists', 'directory', 'audit', 'native-readdir'];
 const inputReplySlot = 3;
 let workerProgress;
 async function waitForBarrier(shared) {
@@ -27,7 +42,7 @@ async function atomicWriteJson(path, value) {
   await rename(temporary, path);
 }
 
-function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SESSION_TOKEN }, watchRequests, requestReadBarrier) {
+function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SESSION_TOKEN }, watchRequests, requestReadBarrier, phaseDiagnostics) {
   const requestDirectory = join(fixture.root, 'host-requests');
   mkdirSync(requestDirectory, { recursive: true });
   const handled = new Set();
@@ -133,6 +148,9 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
       // metadata call. The optional test barrier models a pending directory
       // read without consuming a worker thread or changing lease deadlines.
       await waitForBarrier(requestReadBarrier);
+      // Separate the intentional barrier from actual filesystem completion.
+      // The observer remains able to read this while that I/O is pending.
+      progress('native-readdir');
       const names = await readdir(requestDirectory);
       progress('scan');
       for (const name of names) {
@@ -253,11 +271,18 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
     },
     close() {
       return closing ||= (async () => {
+        hostControlPhaseDiagnostic(phaseDiagnostics, 'model_close_enter');
         stopped = true;
         clearInterval(timer);
         if (scheduled) clearImmediate(scheduled);
+        hostControlPhaseDiagnostic(phaseDiagnostics, 'model_timers_cleared');
+        if (watcher) hostControlPhaseDiagnostic(phaseDiagnostics, 'model_watch_close_enter');
         if (watcher) { watcher.close(); await watcherExit; }
+        if (watcher) hostControlPhaseDiagnostic(phaseDiagnostics, 'model_watch_close_done');
+        hostControlPhaseDiagnostic(phaseDiagnostics, 'model_pending_poll_enter');
         await pendingPoll;
+        hostControlPhaseDiagnostic(phaseDiagnostics, 'model_pending_poll_done');
+        hostControlPhaseDiagnostic(phaseDiagnostics, 'model_close_awaits_done');
         if (state.failure) throw state.failure;
       })();
     },
@@ -269,8 +294,10 @@ function createFakeHostModel(fixture, { sessionId: SESSION_ID, sessionToken: SES
 // an observer must not suppress the host's 400ms input-refresh replies.
 export async function createBrowserWrapperHost(fixture, identity, {
   scope = fixtureScope, watchRequests = true, requestReadBarrier, configurationReplyBarrier,
+  phaseDiagnostics = false,
 } = {}) {
   if (typeof watchRequests !== 'boolean') throw new TypeError('watchRequests must be boolean');
+  if (typeof phaseDiagnostics !== 'boolean') throw new TypeError('phaseDiagnostics must be boolean');
   for (const barrier of [requestReadBarrier, configurationReplyBarrier]) {
     if (barrier !== undefined && (!(barrier instanceof SharedArrayBuffer)
       || barrier.byteLength !== Int32Array.BYTES_PER_ELEMENT)) throw new TypeError('invalid host fixture barrier');
@@ -316,6 +343,9 @@ export async function createBrowserWrapperHost(fixture, identity, {
     const id = ++next;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        if (command === 'configure') hostControlPhaseDiagnostic(phaseDiagnostics, 'main_timeout_configure', exited);
+        if (command === 'stop_polling') hostControlPhaseDiagnostic(phaseDiagnostics, 'main_timeout_stop_polling', exited);
+        if (command === 'shutdown') hostControlPhaseDiagnostic(phaseDiagnostics, 'main_timeout_shutdown', exited);
         pending.delete(id);
         reject(new Error(`browser host fixture ${command} acknowledgement timed out; progress=${JSON.stringify(diagnostic())}`));
       }, 5_000);
@@ -341,7 +371,9 @@ export async function createBrowserWrapperHost(fixture, identity, {
       try {
         if (worker && !exited) {
           try {
+            hostControlPhaseDiagnostic(phaseDiagnostics, 'main_shutdown_rpc_enter', exited);
             const result = await rpc('shutdown');
+            hostControlPhaseDiagnostic(phaseDiagnostics, 'main_shutdown_rpc_ack', exited);
             if (result?.serverClosed !== true || result?.pollerStopped !== true) {
               throw new Error('browser host fixture shutdown was not acknowledged');
             }
@@ -351,19 +383,26 @@ export async function createBrowserWrapperHost(fixture, identity, {
             serverClosed = true;
             expectedShutdown = true;
             port1.postMessage({ command: 'ack_shutdown' });
+            hostControlPhaseDiagnostic(phaseDiagnostics, 'main_shutdown_ack_sent', exited);
             let exitTimer;
             try {
+              hostControlPhaseDiagnostic(phaseDiagnostics, 'main_exit_wait_enter', exited);
               await Promise.race([exit, new Promise((resolve, reject) => {
                 exitTimer = setTimeout(() => reject(new Error('browser host fixture worker exit was not confirmed')), 2_000);
               })]);
+              hostControlPhaseDiagnostic(phaseDiagnostics, 'main_exit_wait_done', exited);
             } finally { clearTimeout(exitTimer); }
           } finally {
             // The exact worker object is the ownership capability. Even a
             // lost control response must not leave its timer/server alive.
+            const diagnosticTermination = phaseDiagnostics && !exited;
+            if (diagnosticTermination) hostControlPhaseDiagnostic(phaseDiagnostics, 'main_terminate_enter', exited);
             if (!exited) await worker.terminate();
+            if (diagnosticTermination) hostControlPhaseDiagnostic(phaseDiagnostics, 'main_terminate_done', exited);
           }
         }
       } finally {
+        hostControlPhaseDiagnostic(phaseDiagnostics, 'main_release_finally', exited);
         if (!worker) exited = true;
         port1.close();
         if (!worker) port2.close();
@@ -389,6 +428,7 @@ export async function createBrowserWrapperHost(fixture, identity, {
         watchRequests,
         requestReadBarrier,
         configurationReplyBarrier,
+        phaseDiagnostics,
       },
       transferList: [port2],
     });
@@ -398,6 +438,7 @@ export async function createBrowserWrapperHost(fixture, identity, {
     });
     worker.once('exit', code => {
       exited = true;
+      hostControlPhaseDiagnostic(phaseDiagnostics, 'main_worker_exit', exited);
       if (!expectedShutdown || code !== 0) {
         terminalFailure ||= new Error(`browser host fixture worker exited unexpectedly (${code})`);
       }
@@ -465,14 +506,16 @@ export async function createBrowserWrapperHost(fixture, identity, {
     stopSessionA() { try { unlinkSync(fixture.workspacePath); } catch { /* already stopped, matching the original fixture */ } },
     async close() {
       if (stopped) return;
+      hostControlPhaseDiagnostic(phaseDiagnostics, 'main_stop_polling_enter', exited);
       try { await rpc('stop_polling'); }
       catch (error) { reportedHostFailure = error.message; throw error; }
+      hostControlPhaseDiagnostic(phaseDiagnostics, 'main_stop_polling_ack', exited);
       stopped = true;
     },
   };
 }
 
-async function serveHostWorker({ fixture, identity, control, sharedProgress, watchRequests, requestReadBarrier, configurationReplyBarrier }) {
+async function serveHostWorker({ fixture, identity, control, sharedProgress, watchRequests, requestReadBarrier, configurationReplyBarrier, phaseDiagnostics = false }) {
   workerProgress = new Int32Array(sharedProgress);
   progress('starting');
   const cdp = createServer((request, response) => {
@@ -484,15 +527,17 @@ async function serveHostWorker({ fixture, identity, control, sharedProgress, wat
   });
   await new Promise((resolve, reject) => { cdp.once('error', reject); cdp.listen(0, '127.0.0.1', resolve); });
   await atomicWriteJson(fixture.portPath, { port: cdp.address().port, owner: 'app' });
-  const model = createFakeHostModel(fixture, identity, watchRequests, requestReadBarrier);
+  const model = createFakeHostModel(fixture, identity, watchRequests, requestReadBarrier, phaseDiagnostics);
   let revision = 0;
   let pollerStopped = false;
   let shuttingDown = false;
   let commands = Promise.resolve();
   let stopping;
   const stopPoller = () => stopping ||= (async () => {
+    hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_stop_poller_enter');
     pollerStopped = true;
     await model.close();
+    hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_stop_poller_done');
   })();
   const configure = change => {
     const { field, action, key, value } = change ?? {};
@@ -512,6 +557,9 @@ async function serveHostWorker({ fixture, identity, control, sharedProgress, wat
   };
   const execute = async request => {
     progress('control');
+    if (request.command === 'configure') hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_execute_configure');
+    if (request.command === 'stop_polling') hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_execute_stop_polling');
+    if (request.command === 'shutdown') hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_execute_shutdown');
     if (shuttingDown) throw new Error('browser host fixture is shutting down');
     // The transferred control port owns this worker. Retirement must remain
     // possible after a timed-out configure was applied but its reply was lost.
@@ -528,22 +576,31 @@ async function serveHostWorker({ fixture, identity, control, sharedProgress, wat
         try { await stopPoller(); } catch (error) { modelFailure = error; }
         modelFailure ||= model.state.failure;
         try {
+          hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_server_close_enter');
           await new Promise((resolve, reject) => cdp.close(error => error ? reject(error) : resolve()));
+          hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_server_close_done');
         } catch (cleanup) {
           if (modelFailure) throw new Error(`${modelFailure.message}; browser host server cleanup also failed: ${cleanup.message}`, { cause: cleanup });
           throw cleanup;
         }
+        hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_shutdown_reply');
         return { pollerStopped, serverClosed: !cdp.listening, modelFailure: modelFailure?.message || null };
       }
       default: throw new Error('unknown browser host fixture command');
     }
   };
   control.on('message', request => {
+    if (request?.command === 'ack_shutdown' && shuttingDown) hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_ack_received');
     if (request?.command === 'ack_shutdown' && shuttingDown) { control.close(); return; }
+    if (request?.command === 'configure') hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_message_configure');
+    if (request?.command === 'stop_polling') hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_message_stop_polling');
+    if (request?.command === 'shutdown') hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_message_shutdown');
     commands = commands.then(async () => {
       try {
         const value = await execute(request);
+        if (request.command === 'configure') hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_configure_barrier_enter');
         if (request.command === 'configure') await waitForBarrier(configurationReplyBarrier);
+        if (request.command === 'configure') hostControlPhaseDiagnostic(phaseDiagnostics, 'worker_configure_barrier_done');
         control.postMessage({ id: request.id, value });
       }
       catch (error) { control.postMessage({ id: request.id, error: error?.message || 'browser host fixture command failed' }); }

@@ -24,6 +24,40 @@ async function fixtureCase(t, kind, profile, name, action, settings = {}) {
   await t.test(name, () => { const f = currentRenderFixture(kind, profile, settings); try { action(f); } finally { f.dispose(); } });
 }
 
+// Real renderer output is the baseline. Mutate both in-memory views solely to
+// reach the semantic consumer past the separately-tested source-binding fence.
+for (const [kind, profile, options] of [['compose', 'personal', compose], ['compose', 'models', compose], ['helm', 'models', helm]]) {
+  test(`${kind} ${profile} migrations require Billing success before Account`, options, async t => {
+    await fixtureCase(t, kind, profile, 'actual current ordered migration configuration', f => {
+      assert.equal(checkBusinessMigrations(f.render, f.inventory).decision, 'MIGRATION_CONFIG_VALID');
+      const mutations = kind === 'compose' ? [
+        source => { delete source.services['account-migrate'].depends_on['billing-migrate']; },
+        source => { source.services['account-migrate'].depends_on['billing-migrate'].condition = 'service_started'; },
+        source => { source.services['account-migrate'].depends_on['billing-migrate'].required = false; },
+        source => { source.services['billing-migrate'].depends_on = { ...source.services['billing-migrate'].depends_on, 'account-migrate': { condition: 'service_completed_successfully' } }; },
+      ] : [
+        source => {
+          for (const resource of source) {
+            const component = resource.spec?.template?.metadata?.labels?.['app.kubernetes.io/component'];
+            if (component === 'migrate-account') resource.metadata.annotations['helm.sh/hook-weight'] = '-30';
+            if (component === 'migrate-billing') resource.metadata.annotations['helm.sh/hook-weight'] = '-20';
+          }
+        },
+        source => {
+          for (const resource of source) if (['migrate-account', 'migrate-billing'].includes(resource.spec?.template?.metadata?.labels?.['app.kubernetes.io/component'])) {
+            resource.metadata.annotations['helm.sh/hook-weight'] = '-20';
+          }
+        },
+      ];
+      for (const mutate of mutations) {
+        const render = structuredClone(f.render);
+        mutate(render.config); mutate(render.template);
+        assert.throws(() => checkBusinessMigrations(render, f.inventory), /production_render_migration_order/);
+      }
+    });
+  });
+}
+
 test('production render parser rejects ambiguous documents and keeps libpq password escapes', () => {
   assert.throws(() => parseHelmRender('apiVersion: v1\nkind: Secret\nkind: Pod\n'), /production_render_yaml_invalid/);
   assert.throws(() => parseHelmRender('apiVersion: v1\nkind: ConfigMap\nmetadata: {name: same}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata: {name: same}\n'), /production_render_resource_duplicate/);
@@ -192,6 +226,44 @@ test('actual current models Compose keeps migrator credentials out of runtime mo
     f.updateEnv('TOKEN_MIGRATION_DATABASE_DIRECTORY', alias.replaceAll('\\', '/')); f.rerender();
     rejected(f, undefined, /production_render_source_symlink/);
   });
+});
+
+test('optional Token overlay uses current models render and independent runtime files', compose, () => {
+  const f = currentRenderFixture('compose', 'models', {tokenEvents: true});
+  try {
+    assert.equal(checkProductionBusiness(f.render, f.inventory).decision, 'BUSINESS_CONFIG_VALID');
+    const relay = f.render.config.services['token-event-relay'];
+    assert.equal(relay.environment.EVENT_SOURCE, 'token');
+    assert.equal(relay.depends_on['token-migrate'].condition, 'service_completed_successfully');
+    assert.equal(relay.environment.NATS_CREDENTIALS_FILE, undefined);
+    f.updatePrivate('TOKEN_RELAY_PRIVATE_ENV_FILE', 'DATABASE_URL', f.raw.EVENT_RELAY_PRIVATE_ENV_FILE.DATABASE_URL);
+    f.rerender(); rejected(f, undefined, /production_render_database_identity/);
+  } finally { f.dispose(); }
+  assert.throws(() => currentRenderFixture('compose', 'personal', {tokenEvents: true}), /production_render_composition/);
+});
+
+test('enabled Helm relay preflight validates resolved domain DSNs and Token digest without treating init as SQL', helm, () => {
+  const f = currentRenderFixture('helm', 'models', {tokenEvents: true});
+  try {
+    assert.equal(checkProductionBusiness(f.render, f.inventory).decision, 'BUSINESS_CONFIG_VALID');
+    const all = workloads(f.render, f.render.secrets);
+    assert.equal(all.filter(w => w.service.name === 'event-relay').length, 3);
+    const snapshots = JSON.parse(readFileSync(f.recipe.secretSnapshotFile));
+    const keyFor = ref => `${f.recipe.namespace}/${ref.name}/${ref.key}`;
+    const source = domain => all.find(w => w.service.name === 'event-relay'
+      && w.resource.spec.template.metadata.labels['app.kubernetes.io/component'] === `${domain}-event-relay`);
+    for (const [target, other] of [['token', 'account'], ['billing', 'account'], ['account', 'billing']]) {
+      const key = keyFor(source(target).refs.DATABASE_URL), original = snapshots[key];
+      snapshots[key] = snapshots[keyFor(source(other).refs.DATABASE_URL)];
+      writeFileSync(f.recipe.secretSnapshotFile, JSON.stringify(snapshots));
+      f.rerender(); rejected(f, undefined, /production_render_database_identity/);
+      snapshots[key] = original;
+    }
+    const digest = keyFor(source('token').refs.TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256);
+    snapshots[digest] = 'not-an-approved-digest';
+    writeFileSync(f.recipe.secretSnapshotFile, JSON.stringify(snapshots));
+    f.rerender(); rejected(f, undefined, /production_render_token_relay_identity/);
+  } finally { f.dispose(); }
 });
 
 test('actual production Helm migration hooks bind resolved Secret keys and backup evidence', helm, async t => {

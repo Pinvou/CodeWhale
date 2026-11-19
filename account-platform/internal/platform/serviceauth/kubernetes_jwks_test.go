@@ -449,27 +449,42 @@ func TestKubernetesJWKSContextCancellationAndTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(client.Transport.(*kubernetesJWKSAuthorizer).base.(*http.Transport).CloseIdleConnections)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	r, _ := http.NewRequestWithContext(ctx, http.MethodGet, kubernetesJWKSURL, nil)
-	if _, err := client.Do(r); !errors.Is(err, context.Canceled) {
+	response, requestErr := client.Do(r)
+	if response != nil {
+		response.Body.Close()
+	}
+	if !errors.Is(requestErr, context.Canceled) {
 		t.Fatal("cancelled context was not respected")
 	}
 	f.mu.Lock()
-	if len(f.headers) != 0 {
+	sent := len(f.headers)
+	f.mu.Unlock()
+	if sent != 0 {
 		t.Fatal("cancelled request sent credential")
 	}
-	f.mu.Unlock()
 	if client.Timeout != 10*time.Second {
 		t.Fatal("production fetch timeout changed")
 	}
 	entered := make(chan struct{}, 2)
 	done := make(chan struct{}, 2)
+	released := make(chan struct{})
+	defer close(released)
 	f.mu.Lock()
 	f.handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		entered <- struct{}{}
-		<-r.Context().Done()
-		done <- struct{}{}
+		select {
+		case <-r.Context().Done():
+			done <- struct{}{}
+			// A normal handler return can send an implicit 200 while the
+			// client is processing cancellation. Hold that competing response
+			// until the assertions finish; cleanup also releases failures.
+			<-released
+		case <-released:
+		}
 	})
 	f.mu.Unlock()
 	// Establish the real TLS request before cancelling it. The short client
@@ -507,8 +522,12 @@ func TestKubernetesJWKSContextCancellationAndTimeout(t *testing.T) {
 	client.Timeout = 30 * time.Millisecond
 	r, _ = http.NewRequest(http.MethodGet, kubernetesJWKSURL, nil)
 	start := time.Now()
-	if _, err := client.Do(r); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatal("bounded request did not return a deadline error", err)
+	response, requestErr = client.Do(r)
+	if response != nil {
+		response.Body.Close()
+	}
+	if !errors.Is(requestErr, context.DeadlineExceeded) {
+		t.Fatalf("bounded request did not return a deadline error (nil=%t, canceled=%t)", requestErr == nil, errors.Is(requestErr, context.Canceled))
 	}
 	if time.Since(start) > time.Second {
 		t.Fatal("timeout was not bounded")

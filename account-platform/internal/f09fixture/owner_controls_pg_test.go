@@ -20,7 +20,7 @@ func TestF09UnexpiredReplayPublicCoordinator(t *testing.T) {
 	dir := filepath.Join("..", "billing")
 	args := []string{"test", "-race", "-json", "-count=1", "-mod=readonly", "-run", "^TestEntitlementCorrectionExecuteAndConsumerReadPostgresIntegration$"}
 	args = append(args, stageProductionSources(t, ctx, dir)...)
-	args = append(args, filepath.Join(dir, "retained_financial_integration_test.go"), filepath.Join(dir, "finance_refund_reconcile_integration_test.go"), filepath.Join(dir, "entitlement_correction_execute_integration_test.go"))
+	args = append(args, filepath.Join(dir, "payment_credit_legacy_fixture_test.go"), filepath.Join(dir, "payment_credit_fixture_test.go"), filepath.Join(dir, "fixture_template_helpers_test.go"), filepath.Join(dir, "package_expiry_phase_test.go"), filepath.Join(dir, "retained_financial_integration_test.go"), filepath.Join(dir, "finance_refund_reconcile_integration_test.go"), filepath.Join(dir, "entitlement_correction_execute_integration_test.go"))
 	child := exec.CommandContext(ctx, os.Getenv("PINVOU_PRIVATE_GO"), args...)
 	child.Env = append(os.Environ(), "PINVOU_TEST_BILLING_DATABASE_URL="+raw)
 	stream, err := os.Create(os.Getenv("PINVOU_F09_CHILD_STREAM"))

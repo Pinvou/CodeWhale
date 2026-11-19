@@ -232,6 +232,11 @@ class OwnedInstance:
 
 def phase_environment(raw, go, phase, directory):
     env = {key: value for key, value in os.environ.items() if not key.startswith(("PINVOU_TEST_", "F11_", "F12_", "F13_", "F18_", "PINVOU_F09_")) and key != "PINVOU_PRIVATE_GO"}
+    # These original family fixtures own and retire their actors at each phase.
+    # Keep their uncached path independent of ambient per-worker cache modes;
+    # the main owners runner still validates its own scoped cache separately.
+    env["PINVOU_CI_RETAINED_BILLING_TEMPLATES"] = "0"
+    env["PINVOU_CI_OWNER_WALLET_TEMPLATES"] = "0"
     env["GOFLAGS"] = " ".join(filter(None, (env.get("GOFLAGS", ""), "-race -tags=nomsgpack -mod=readonly")))
     for domain in phase["inputs"]:
         env[INPUTS[domain]] = raw

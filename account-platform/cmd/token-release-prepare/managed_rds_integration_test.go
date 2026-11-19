@@ -168,9 +168,12 @@ func testManagedRDSReleaseActualPostgres(t *testing.T, legacyUpgrade bool) {
 	}
 	err = tokenschema.Up(ctx, migrator, loaded)
 	migrations.Unlock(ctx, migrator)
-	migrator.Close(context.Background())
+	closeError := closeManagedFixtureConnection(ctx, admin, migrator)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if closeError != nil {
+		t.Fatal(closeError)
 	}
 	exec(admin, "ALTER ROLE token_migrator NOLOGIN; ALTER ROLE token_policy_operator NOLOGIN")
 	// Vanilla PostgreSQL reserves pg_ role creation even for superusers. Only
@@ -198,7 +201,9 @@ func testManagedRDSReleaseActualPostgres(t *testing.T, legacyUpgrade bool) {
 	}
 	platformCreated = true
 	exec(admin, "REVOKE CONNECT ON DATABASE rdsadmin FROM PUBLIC")
-	native.Close(context.Background())
+	if err := closeManagedFixtureConnection(ctx, admin, native); err != nil {
+		t.Fatal(err)
+	}
 	managedConfig := tokenConfig.Copy()
 	managedConfig.User = "managed_dba_fixture"
 	managed, err := pgx.ConnectConfig(ctx, managedConfig)
@@ -377,7 +382,9 @@ func testManagedRDSReleaseActualPostgres(t *testing.T, legacyUpgrade bool) {
 			t.Fatal("post-commit recovery rewrote installed credentials")
 		}
 	})
-	managed.Close(context.Background())
+	if err := closeManagedFixtureConnection(ctx, admin, managed); err != nil {
+		t.Fatal(err)
+	}
 	t.Run("full-migration-policy-expansion-and-runtime-consumer", func(t *testing.T) {
 		testGovernanceExpansionPostgres(t, ctx, admin, tokenConfig, &created)
 	})

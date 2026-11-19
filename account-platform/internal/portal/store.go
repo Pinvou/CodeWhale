@@ -16,6 +16,9 @@ var ErrLoginFlowInvalidated = errors.New("portal login flow invalidated by logou
 var ErrRefreshConflict = errors.New("portal session changed during refresh")
 
 type Store interface {
+	AdmitOperation(context.Context, PortalOperation) error
+	ReserveSessionHandoff(context.Context, string, time.Time) error
+	ReleaseSessionHandoffReservation(context.Context, string) error
 	SaveFlow(context.Context, string, LoginFlow) error
 	TakeFlow(context.Context, string) (LoginFlow, error)
 	SaveSessionHandoff(context.Context, string, SessionHandoff) error
@@ -37,65 +40,54 @@ type Store interface {
 	Close() error
 }
 
-type RedisStore struct{ client *redis.Client }
+type RedisStore struct {
+	client          *redis.Client
+	transientClient *redis.Client
+	limits          AdmissionLimits
+}
 
 func NewRedisStore(rawURL string) (*RedisStore, error) {
 	return NewRedisStoreWithCA(rawURL, "")
 }
 
 func NewRedisStoreWithCA(rawURL, caFile string) (*RedisStore, error) {
+	return NewRedisStoreWithAdmissionLimits(rawURL, caFile, DefaultAdmissionLimits())
+}
+
+func NewRedisStoreWithAdmissionLimits(rawURL, caFile string, limits AdmissionLimits) (*RedisStore, error) {
+	if !limits.Valid() {
+		return nil, ErrAdmissionConfiguration
+	}
 	options, err := redisconnection.Options(rawURL, caFile)
 	if err != nil {
 		return nil, err
 	}
-	return &RedisStore{client: redis.NewClient(options)}, nil
+	transientOptions := *options
+	// Retrying a non-idempotent GETDEL after a lost reply can turn unknown
+	// consumption into a false "missing" result. Existing session transports
+	// retain their own behavior; the new admission path uses no automatic retry.
+	transientOptions.MaxRetries = -1
+	transientOptions.ContextTimeoutEnabled = true
+	return &RedisStore{client: redis.NewClient(options), transientClient: redis.NewClient(&transientOptions), limits: limits}, nil
 }
 
 func (s *RedisStore) SaveFlow(ctx context.Context, state string, flow LoginFlow) error {
-	body, err := json.Marshal(flow)
-	if err != nil {
-		return err
-	}
-	ttl := time.Until(flow.ExpiresAt)
-	if ttl <= 0 {
-		return ErrSessionNotFound
-	}
-	return s.client.Set(ctx, "portal:flow:"+state, body, ttl).Err()
+	return s.saveTransient(ctx, flowTransient, state, flow, flow.ExpiresAt)
 }
 
 func (s *RedisStore) TakeFlow(ctx context.Context, state string) (LoginFlow, error) {
-	value, err := s.client.GetDel(ctx, "portal:flow:"+state).Bytes()
-	if errors.Is(err, redis.Nil) {
-		return LoginFlow{}, ErrSessionNotFound
-	}
 	var flow LoginFlow
-	if err == nil {
-		err = json.Unmarshal(value, &flow)
-	}
+	err := s.takeTransient(ctx, flowTransient, state, &flow)
 	return flow, err
 }
 
 func (s *RedisStore) SaveSessionHandoff(ctx context.Context, hash string, value SessionHandoff) error {
-	body, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	ttl := time.Until(value.ExpiresAt)
-	if ttl <= 0 {
-		return ErrSessionNotFound
-	}
-	return s.client.Set(ctx, "portal:session-handoff:"+hash, body, ttl).Err()
+	return s.saveTransient(ctx, handoffTransient, hash, value, value.ExpiresAt)
 }
 
 func (s *RedisStore) TakeSessionHandoff(ctx context.Context, hash string) (SessionHandoff, error) {
-	value, err := s.client.GetDel(ctx, "portal:session-handoff:"+hash).Bytes()
-	if errors.Is(err, redis.Nil) {
-		return SessionHandoff{}, ErrSessionNotFound
-	}
 	var handoff SessionHandoff
-	if err == nil {
-		err = json.Unmarshal(value, &handoff)
-	}
+	err := s.takeTransient(ctx, handoffTransient, hash, &handoff)
 	return handoff, err
 }
 
@@ -292,7 +284,7 @@ return 1
 
 func (s *RedisStore) Ping(ctx context.Context) error { return s.client.Ping(ctx).Err() }
 
-func (s *RedisStore) Close() error { return s.client.Close() }
+func (s *RedisStore) Close() error { return errors.Join(s.client.Close(), s.transientClient.Close()) }
 
 func (s *RedisStore) DeleteRefreshedSession(ctx context.Context, previous Session, owner string) error {
 	if previous.ID == "" || owner == "" {

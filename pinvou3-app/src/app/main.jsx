@@ -91,6 +91,7 @@ import {
   isControlledSessionChatActive,
 } from '../features/remote-control/remote-control-logic.mjs';
 import { modelSourceForLease } from '../features/remote-control/remote-model-source.mjs';
+import { useRemoteConversationVisibility } from '../features/remote-control/useRemoteConversationVisibility.js';
 import { mergeSessionStoreHistory, remoteProxyForSession } from '../features/remote-control/remote-session-adapter.mjs';
 import {
   sessionTitlePlainText,
@@ -1365,7 +1366,7 @@ const App = () => {
       const [savedConfirm, setSavedConfirm] = useState(null); // 存入成功 → iOS 确认窗 {name}
       const [poolMyOnly, setPoolMyOnly] = useState(false); // 跳卡池时是否直接落「我的卡牌」筛选(从确认窗"去查看"进来=true)
       const [webAccessOpen, setWebAccessOpen] = useState(false);
-      const [remoteConversationOpen, setRemoteConversationOpen] = useState(false);
+      const [remoteConversationOpen, setRemoteConversationOpen, closeRemoteConversation] = useRemoteConversationVisibility();
       const [remoteModelSource, setRemoteModelSource] = useState('controller_temporary');
       const remoteTemporaryModelAvailable = bs?.controllerConnection?.temporaryModelAvailable === true;
       const remoteModelLeaseKey = `${bs?.controllerConnection?.connectionId || ''}:${bs?.controllerConnection?.leaseEpoch || ''}:${remoteTemporaryModelAvailable ? 'temporary' : 'controlled'}`;
@@ -1801,12 +1802,10 @@ const App = () => {
         title: (!session.title || isDefaultChatTitle(session.title))
           ? t.newChat
           : session.title,
-        subtitle: session.workspace_kind === 'project'
-          ? workspaceDisplayName(session.workspace_path)
-          : t.uiCodex.temporarySession,
         date: formatSessionDate(session.updated_at || session.created_at, language),
         updatedAt: session.updated_at || session.created_at || '',
         workspacePath: session.workspace_path || '',
+        // 行是单行:文件夹归属由「项目」视图的分组组头表达,不再逐项标注。
         workspaceKind: session.workspace_kind || '',
         // §6 keychain snapshot for the "view workspace" menu entry (same
         // cwd-first shape as the chat lane's workspaceRoots).
@@ -1858,7 +1857,7 @@ const App = () => {
           return {
             id: run.sessionId,
             title,
-            date: formatSessionDate(run.scheduledFor || run.createdAt, language),
+            date: `${scheduledRunLabel(run.status)} · ${formatSessionDate(run.scheduledFor || run.createdAt, language)}`,
             updatedAt: run.createdAt || run.scheduledFor || '',
             pinned: !!run.pinned,
             pinnedAt: run.pinnedAt || '',
@@ -1888,7 +1887,7 @@ const App = () => {
           : chat.title;
           return Object.assign({}, chat, {
             title,
-            subtitle: `${scheduledRunLabel(run.status)} · ${formatSessionDate(run.scheduledFor || run.createdAt, language)}`,
+            date: `${scheduledRunLabel(run.status)} · ${formatSessionDate(run.scheduledFor || run.createdAt, language)}`,
             leadingIcon: (
               <span className="relative inline-flex h-5 w-5 items-center justify-center">
               <Clock size={18} />
@@ -1971,7 +1970,16 @@ const App = () => {
       }, [sidebarCodeListActive, taskListFilter]);
       const [archiveConfirm, setArchiveConfirm] = useState(null);
       const [archiveToast, setArchiveToast] = useState(false);
+      // settingsToast 接受字符串或 { text, duration, multiline }：默认 pill 按
+      // 3 秒的短文案设计；导入汇总（四计数 + 缺产物补救指引）与导入/导出失败
+      // 详情是长文案，3 秒 + 单行截断会把恢复路径整个吞掉（r7 minor），
+      // 长文案调用方自带 duration；multiline（r8）再放开宽度截断——窄窗口上
+      // 80vw 单行仍会裁掉补救指引的尾部，改为可换行 + 圆角大卡形态。
       const [settingsToast, setSettingsToast] = useState('');
+      const settingsToastText = (settingsToast && typeof settingsToast === 'object') ? settingsToast.text : settingsToast;
+      const settingsToastDuration = (settingsToast && typeof settingsToast === 'object' && Number.isFinite(settingsToast.duration))
+        ? settingsToast.duration : 3000;
+      const settingsToastMultiline = !!(settingsToast && typeof settingsToast === 'object' && settingsToast.multiline);
       const [projectOpsBusy, setProjectOpsBusy] = useState(false);
       const [moveToProjectSession, setMoveToProjectSession] = useState(null);
       const [moveToPresetProject, setMoveToPresetProject] = useState(null);
@@ -3545,8 +3553,14 @@ const App = () => {
           if (!result) return;
           setSettingsToast(t.exportSessionDone(result.path));
         } catch (error) {
+          // Rust 侧导出前置校验的拒绝串指名文件并给出改法（「rename or
+          // remove this file and retry the export」）——只透静态文案会把
+          // 恢复路径留在 console 里（review finding）。
+          const detail = String((error && error.message) || error || t.unknownError);
           console.warn('export session archive failed', error);
-          setSettingsToast(t.exportSessionFailed);
+          // 拒绝串指名文件并给出改法（长文案）：8 秒 + 默认时长会把恢复路径
+          // 读完之前就收走（r7 minor）；multiline 放开窄窗口的单行截断（r8）。
+          setSettingsToast({ text: `${t.exportSessionFailed}: ${detail}`, duration: 8000, multiline: true });
         } finally {
           setExportingSessionIds(prev => {
             const next = new Set(prev);
@@ -3793,9 +3807,9 @@ const App = () => {
 
       useEffect(() => {
         if (!settingsToast) return;
-        const timer = setTimeout(() => setSettingsToast(''), 3000);
+        const timer = setTimeout(() => setSettingsToast(''), settingsToastDuration);
         return () => clearTimeout(timer);
-      }, [settingsToast]);
+      }, [settingsToast, settingsToastDuration]);
 
       async function handleToggleSuperPerm() {
         const target = !superPerm;
@@ -4392,8 +4406,11 @@ const App = () => {
             // Layer sits above modal overlays (picker backdrop is z-[200]) so a
             // failure raised under an open dialog stays visible; a filesystem
             // path in the message must not push the pill past the viewport.
-            <div className="fixed left-1/2 bottom-8 z-[210] -translate-x-1/2 max-w-[80vw] truncate rounded-full bg-black/80 px-4 py-2 text-[13px] font-medium text-white shadow-2xl">
-              {settingsToast}
+            // multiline（r8）：长文案（导入四计数 + 补救指引 / 失败详情）在
+            // 窄窗口上单行 truncate 仍会裁掉恢复路径的尾部——换行 + 2xl 圆角
+            // 卡形态，宽度上限不变。
+            <div className={`fixed left-1/2 bottom-8 z-[210] -translate-x-1/2 max-w-[80vw] bg-black/80 px-4 py-2 text-[13px] font-medium text-white shadow-2xl ${settingsToastMultiline ? 'whitespace-normal break-words rounded-2xl leading-5' : 'truncate rounded-full'}`}>
+              {settingsToastText}
             </div>,
             document.body
           )}
@@ -4794,7 +4811,7 @@ const App = () => {
                 遮住下滑的列表项,避免首项与上方 nav 贴死("重合")。 */}
             {isSidebarOpen && (
               <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-3 flex flex-col">
-                <div data-testid="sidebar-recents" className="pt-5 pb-2 max-sm:pt-2">
+                <div data-testid="sidebar-recents" className="pt-3 pb-2 max-sm:pt-2">
                   <div ref={taskFilterRef} className="relative mb-2">
                     {/* 第一行:「任务列表」标题 + 查看全部/筛选按钮;
                         第二行:全部/项目 胶囊 + 一键折叠(分组)按钮。
@@ -4923,7 +4940,7 @@ const App = () => {
                       </div>
                     )}
                   </div>
-                  <div className="space-y-1">
+                  <div className="space-y-0.5">
                     {sidebarCodeListActive ? (
                       (sidebarFolderPinned.length > 0 || sidebarFolderGroups.length > 0) ? (
                         <>
@@ -4963,7 +4980,7 @@ const App = () => {
                                   onDropActive={(active) => setDropTargetGroupKey(active ? group.key : null)}
                                 /></Suspense>
                                 {isOpen && (
-                                  <div className="mt-1 space-y-0.5">
+                                  <div className="space-y-0.5">
                                     {group.rows.map(renderSidebarTaskItem)}
                                   </div>
                                 )}
@@ -5000,7 +5017,7 @@ const App = () => {
                             <ChevronDown size={14} className={`shrink-0 transition-transform ${isOpen ? '' : '-rotate-90'}`} />
                           </button>
                           {isOpen && (
-                            <div className="mt-1 space-y-0.5">
+                            <div className="space-y-0.5">
                               {group.rows.map(renderSidebarTaskItem)}
                             </div>
                           )}
@@ -5174,6 +5191,7 @@ const App = () => {
                   superPerm={superPerm} setSuperPerm={handleToggleSuperPerm}
                   taskCompletedNotif={taskCompletedNotif} setTaskCompletedNotif={handleSetTaskCompletedNotif}
                   inputNeededNotif={inputNeededNotif} setInputNeededNotif={handleSetInputNeededNotif}
+                  setSettingsToast={setSettingsToast}
                   searchProvider={searchProvider} setSearchProvider={handleSetSearchProvider}
                   enabledSearchProviders={enabledSearchProviders}
                   onAddSearchProvider={handleAddSearchProvider}
@@ -5183,7 +5201,7 @@ const App = () => {
                   activeModelId={bs && bs.activeModelId}
                   defaultModelRef={bs && bs.defaultModelRef}
                   accountPlatformClient={personalAccountClient}
-                  onSaveModel={(m) => bridge.available && bridge.models.saveModel(m)}
+                  onSaveModel={(m, options) => bridge.available && bridge.models.saveModel(m, options)}
                   onDeleteModel={(m) => { if (bridge.available) bridge.models.deleteModel(m.id); }}
                   onSetActiveModel={(id) => bridge.available && bridge.models.setActiveModel(id)}
                   onSaveSearchConfig={handleSaveSearchConfig}
@@ -5207,12 +5225,18 @@ const App = () => {
                   initialSection={settingsInitialSection}
                   remoteConversationOpen={remoteConversationOpen}
                   onRemoteConversationOpen={() => {
-                    openCurrentRemoteProxy()
-                      .then(opened => { if (!opened) setRemoteConversationOpen(true); })
-                      .catch(() => setRemoteConversationOpen(true));
+                    const connectionId = bsRef.current?.controllerConnection?.connectionId;
+                    const showFallback = () => {
+                      if (bsRef.current?.controllerConnection?.connectionId === connectionId) {
+                        setRemoteConversationOpen(true);
+                      }
+                    };
+                    return openCurrentRemoteProxy()
+                      .then(opened => { if (!opened) showFallback(); })
+                      .catch(showFallback);
                   }}
                   onRemoteConnected={activateRemoteProxy}
-                  onRemoteConversationClose={() => setRemoteConversationOpen(false)}
+                  onRemoteConversationClose={closeRemoteConversation}
                   onCloseSettings={() => {
                     navigateFromScheduledRun(settingsReturnViewRef.current || 'chat');
                   }}
@@ -5331,9 +5355,10 @@ const App = () => {
                   <div className="fixed inset-0 z-[120] flex items-start sm:items-center justify-center bg-black/50 p-3 sm:p-6">
                     <div role="dialog" aria-modal="true" aria-labelledby="remote-connection-title" aria-describedby="remote-connection-background-hint" className="w-full max-w-[960px] max-h-full overflow-y-auto custom-scrollbar rounded-2xl bg-white shadow-2xl forced-colors:border forced-colors:border-[CanvasText] dark:bg-[#1F2023]">
                       <LazyRemoteConnectionShell
+                        key={bs?.controllerConnection?.connectionId || 'unbound'}
                         t={t}
                         bs={bs}
-                        onClose={() => setRemoteConversationOpen(false)}
+                        onClose={closeRemoteConversation}
                         onOpenChat={openCurrentRemoteProxy}
                         onRequestDisconnect={async () => {
                           if (!bridge?.available || !bridge.desktopRemoteControl) {
@@ -5342,7 +5367,7 @@ const App = () => {
                             throw failure;
                           }
                           await bridge.desktopRemoteControl.controllerDisconnect();
-                          setRemoteConversationOpen(false);
+                          closeRemoteConversation();
                         }}
                       />
                     </div>

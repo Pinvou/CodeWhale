@@ -12,6 +12,10 @@ import (
 )
 
 var safeLogEvents = map[string]string{
+	"portal_handoff_reservation_release_failed":                       "portal_handoff_reservation_release_failed",
+	"portal_capacity_inventory_failed":                                "portal_capacity_inventory_failed",
+	"portal_redis_client_event":                                       "portal_redis_client_event",
+	"approval delivery terminal recovery failed":                      "approval_delivery_terminal_recovery_failed",
 	"expired hold proof retry scheduled":                              "expired_hold_proof_retry_scheduled",
 	"commerce_customer_sync_claim_failed":                             "commerce_customer_sync_claim_failed",
 	"commerce_customer_sync_retry_failed":                             "commerce_customer_sync_retry_failed",

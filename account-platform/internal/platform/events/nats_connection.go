@@ -32,7 +32,7 @@ func connectNATS(rawURL, name string, cfg NATSConfig) (*nats.Conn, jetstream.Jet
 	if cfg.RequireExplicitAuthentication && (seedFile == "") == (credentialsFile == "") {
 		return nil, nil, ErrNATSResources
 	}
-	authentication, err := natsAuthentication(rawURL, seedFile, credentialsFile)
+	authentication, err := natsAuthenticationWithExpectedIdentity(rawURL, seedFile, credentialsFile, cfg.ExpectedPublicKey)
 	if err != nil {
 		return nil, nil, err
 	}

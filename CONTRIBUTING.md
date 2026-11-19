@@ -79,10 +79,32 @@ Run additional frontend, Relay, Rust, CodeWhale, or platform checks when relevan
 
 The retained Token financial phase has a 40-minute Go test-binary timeout,
 including the complete selected package. Retained Billing keeps its 75-minute
-budget and other financial phases keep 20 minutes. Compilation, startup and
-ownership checks are outside these test-binary budgets; the Account job retains
-its existing outer limit. Increasing the Token budget does not accelerate tests
-or relax required roots, subcases, race detection or resource retirement.
+budget and other financial test binaries keep 20 minutes. Within the existing
+owners job, Billing schema contracts run as two sequential binaries: the complete
+LegacyExpiry historical-upgrade root, then all remaining required schema roots.
+Each keeps its 20-minute limit, making the schema portion's cumulative test budget
+40 minutes instead of 20. Compilation, startup and ownership checks are outside
+these test-binary budgets; the Account job retains its existing outer limit.
+Each batch must restore the pristine instance before the next can run. No roots,
+subcases, race detection, actor checks or ordinary resource-retirement gates are
+removed, and the existing job groups and runner concurrency are unchanged.
+
+The six financial Jobs keep the same root selection and race checks. With
+`PINVOU_CI_FIXTURE_TEMPLATES=1`, retained Billing business fixtures may clone a
+process-owned, frozen baseline prepared by the real migration actor. The cache
+key includes complete SQL/checksums, fixture policy, cluster identity, role OIDs,
+attributes and memberships. Every case still owns a new UUID database and an
+opaque cleanup lease. Sources refuse connections and retire before phase-level
+role cleanup. Token's absent-role setup is not shared; historical expiry baselines
+are scoped inside their original actor-owning root, and all 36 upgrade/replay
+cases still run. No cached test success, shared mutable database, forced backend
+termination or durability-setting change is permitted. The six Jobs execute a
+real snapshot-isolation probe before their contracts. Unconfirmed preparation,
+changed source identity/owner, writable source, cleanup failure or a skipped
+probe remains a failure. Local runs retain the original empty-create setup by
+default. Set `PINVOU_CI_FIXTURE_TIMING=1` to report bounded setup/cleanup costs;
+financial phases stream their original output and store timing/root-pass diagnostics
+in the existing lifecycle artifact for before/after comparison.
 
 When a change regenerates a `package-lock.json`, regenerate against the official
 registry (`https://registry.npmjs.org/`): a mirror configured in a local npmrc is
@@ -94,7 +116,24 @@ up to 11.10 silently strips them and the same guard fails the strip.
 
 Tests requiring a live model, network service, credential, or large model asset must be ignored by default and provide an explicit opt-in command.
 
+Windows relay signer regressions report only closed spawn-error/signal categories,
+bounded status and elapsed time, and the last observed test instrumentation stage.
+Unknown values remain unknown; these observations do not establish an underlying
+timeout or infrastructure root cause. Invalid stored-key cases must prove refusal
+by the signer itself before publication, independently of the writer's safeguards.
+Raw child output and exception text must not enter failure diagnostics.
+
+Controller bootstrap workers retain a separate bounded diagnostic IPC cache.
+Unexpected exits report only closed opening/post-open, store-error and native-cause
+observations, plus an ancestor phase only when that verifier actually failed.
+Missing observations stay unknown and never add a wait. Ordinary worker messages,
+native defaults and the exact 81/82/83 fault-qualification exits remain unchanged;
+better diagnostics do not establish the cause of a previously unexplained exit.
+
 ### Test resource lifetime
+
+Release command ownership, failure diagnostics and supported interpreter setup are
+documented in [the release process lifetime guide](docs/remote-release-process-lifetime.md).
 
 One-shot CI fixtures must create resources through the shared lifetime boundary:
 
@@ -162,6 +201,15 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   a private temporary directory. A killed Linux controller can be recovered only
   by the registered scope marker, UID, cgroup and pidfd identity. No PID/name
   sweep or shared Runner Job Object is used.
+  The Windows atomic regression suite runs each original patched-executable
+  filter in an independent scope and retains attempted-receipt inventory even
+  on failure. Its capture-retention fixtures hand off the child's creation
+  identity before launcher exit and verify the same kernel object's exit;
+  a `finished` phase marker alone is not resource retirement.
+  This Windows atomic chain validates the job's existing native 64-bit CPython
+  (3.12 or newer) and binds its absolute executable for initialization, each
+  filter and retirement. Missing or incompatible interpreters fail before the
+  ledger starts; this fixture setup does not install or reconfigure system Python.
 - Node test Workers register with the shared fixture scope as `worker` resources.
   Configuration changes require acknowledgement, and snapshots come from the
   worker that owns the state. Close the owned listeners and observe Worker exit
@@ -465,10 +513,17 @@ reuse or a non-applicable diff. Replace any existing requirements on those old
 names before enabling this behavior. This PR does not change server-side rules
 or make these auxiliary workflows mandatory where they were not required.
 
-The lightweight `changes` job verifies the entire tested Git tree (not only the
-PR head), base commit/ref, unchanged workflow/verifiers, all routing and policy
-outputs, repository-variable hashes, runner labels, source repository/PR/head,
-source run attempt and successful workflow aggregate gate. A matrix is reusable only if
+The lightweight `changes` job verifies immutable source and queue Git objects,
+unchanged workflow/verifiers, effective inputs, runner labels, source repository,
+PR/head, source run attempt and successful workflow aggregate gate. PR Check
+schema 2 compares each job's source/dependency entries, base-to-tested diff,
+effective configuration and routing independently. The currently reviewed
+Rust/CLI domains exclude the independent Account/Hub/release-console service
+trees; other jobs retain whole-tree inputs. Shared scripts, unknown paths and
+unknown configuration remain conservative fences. See
+[the input boundary](docs/ci-result-reuse.md) for the precise supported scope.
+Schema 1 and the two auxiliary workflow profiles retain exact whole-tree/base,
+all-variable and routing checks. A matrix is reusable only if
 all configured legs are present exactly once and every step required in the
 queue has successful execution evidence. A format-only or partial ready-PR run
 cannot replace full queue regression. Unknown expressions require successful
@@ -484,8 +539,10 @@ unknown or modified context-dependent runner expressions retain execution.
 Only a wholly successful ready-PR workflow donates proof; a red aggregate gate
 does not donate successful individual jobs. The recorded base comes from the
 actual tested merge commit's first parent, not the mutable PR event/API base SHA.
-Lookup independently verifies that immutable commit's base, head and tree against
-the queue. Ready-PR browser smoke selection uses that same actual merge parent
+Lookup independently verifies that immutable commit's own base, head and tree;
+schema 2 additionally recomputes the relevant inputs before comparing them with
+the queue. The PR Check proof producer fetches two generations so its real first
+parent is available even on a clean runner. Ready-PR browser smoke selection uses that same actual merge parent
 and tested tree, including main-side renames, so its named step can witness the
 queue selection. Expected record refusals emit notices without configuration values.
 

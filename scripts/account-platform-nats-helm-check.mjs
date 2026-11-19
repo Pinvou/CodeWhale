@@ -15,12 +15,15 @@ export function checkHelmNATSCredentials(items) {
     const name = component(item), pod = item.spec.template.spec, main = pod.containers[0], values = env(main);
     const clients = name === 'account-event-relay' ? ['account-event-relay', 'account-approval-relay']
       : name === 'billing-event-relay' ? ['billing-event-relay']
+        : name === 'token-event-relay' ? ['token-event-relay']
         : name === 'billing-service' ? ['billing-command-executor']
           : name === 'token-command-executor' ? ['token-command-executor']
             : ['account-service', 'token-gateway'].includes(name)
               && (governed || values.NATS_CREDENTIALS_FILE) ? [name] : [];
     if (!clients.length) continue;
-    check(values.NATS_CREDENTIALS_FILE === `/run/pinvou/nats/private/${clients[0]}.creds`, 'runtime_path');
+    const seedOnly = name === 'token-event-relay', suffix = seedOnly ? 'seed' : 'creds';
+    check(seedOnly ? values.NATS_NKEY_SEED_FILE === '/run/pinvou/nats/private/token-event-relay.seed' && values.NATS_CREDENTIALS_FILE === ''
+      : values.NATS_CREDENTIALS_FILE === `/run/pinvou/nats/private/${clients[0]}.creds`, 'runtime_path');
     if (name === 'account-event-relay') check(values.APPROVAL_RELAY_NATS_CREDENTIALS_FILE === '/run/pinvou/nats/private/account-approval-relay.creds', 'runtime_path');
     check(pod.securityContext?.runAsNonRoot === true && pod.securityContext.runAsUser === 65532
       && pod.securityContext.runAsGroup === 65532 && pod.securityContext.fsGroup === 65532
@@ -30,6 +33,20 @@ export function checkHelmNATSCredentials(items) {
       && pod.automountServiceAccountToken === false && !pod.hostNetwork && !pod.hostPID && !pod.hostIPC
       && !pod.shareProcessNamespace && !pod.ephemeralContainers?.length, 'runtime_identity');
     const volumes = Object.fromEntries((pod.volumes || []).map(v => [v.name, v]));
+    if (seedOnly) {
+      const secret = key => (main.env || []).find(v => v.name === key)?.valueFrom?.secretKeyRef;
+      const database = secret('DATABASE_URL'), digest = secret('TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256');
+      const source = volumes['nats-source-token-event-relay']?.secret;
+      check(values.EVENT_SOURCE === 'token' && !Object.keys(values).some(key => key.startsWith('APPROVAL_RELAY_'))
+        && database?.name === source?.secretName && database?.key === 'token-event-relay-database-url'
+        && !database?.optional && digest?.name === source?.secretName
+        && digest?.key === 'token-event-relay-nats-current-public-keys-sha256' && !digest?.optional, 'token_identity');
+      check(values.TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE === '/run/pinvou/token-relay-identities/current.json'
+        && volumes['token-relay-public-artifact']?.configMap?.name
+        && equal(volumes['token-relay-public-artifact'].configMap.items, [{key: 'current-v2.json', path: 'current-v2.json'}])
+        && equal((main.volumeMounts || []).filter(v => v.name === 'token-relay-public-artifact'),
+          [{name: 'token-relay-public-artifact', mountPath: values.TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE, subPath: 'current-v2.json', readOnly: true}]), 'token_identity');
+    }
     check(Object.keys(volumes).length === pod.volumes.length
       && equal(volumes['nats-private'], { name: 'nats-private', emptyDir: { medium: 'Memory', sizeLimit: '1Mi' } }), 'private_volume');
     mount(main, 'nats-private', '/run/pinvou/nats', true);
@@ -39,7 +56,7 @@ export function checkHelmNATSCredentials(items) {
     for (const client of clients) {
       const init = inits.find(c => c.name === `prepare-nats-${client}`);
       check(init && init.image === main.image && init.imagePullPolicy === main.imagePullPolicy
-        && equal(init.command, ['/service']) && equal(init.args, ['prepare-nats-credentials', client])
+        && equal(init.command, ['/service']) && equal(init.args, [seedOnly ? 'prepare-nats-seed' : 'prepare-nats-credentials', client])
         && !init.env?.length && !init.envFrom && !init.ports?.length && !init.lifecycle
         && !init.readinessProbe && !init.livenessProbe && !init.startupProbe, 'init_scope');
       const security = init.securityContext;
@@ -52,15 +69,15 @@ export function checkHelmNATSCredentials(items) {
       const sourceVolume = volumes[`nats-source-${client}`], source = sourceVolume?.secret;
       check(source?.secretName && source.defaultMode === 288 && !source.optional
         && Object.keys(sourceVolume).sort().join(',') === 'name,secret'
-        && equal(source.items, [{ key: `${client}.creds`, path: `${client}.creds` }]), 'source_scope');
+        && equal(source.items, [{ key: `${client}.${suffix}`, path: `${client}.${suffix}` }]), 'source_scope');
       // No volume alias can turn the same credential Secret into an unfiltered
       // projection, or expose another copy of its NATS key to the application.
       for (const volume of pod.volumes) if (volume.secret?.secretName === source.secretName && !sourceNames.includes(volume.name)) {
-        check(volume.secret.items?.length && !volume.secret.items.some(v => v.key.endsWith('.creds')), 'source_scope');
+        check(volume.secret.items?.length && !volume.secret.items.some(v => typeof v.key !== 'string' || /\.(?:creds|seed)$/.test(v.key)), 'source_scope');
       }
       for (const volume of pod.volumes) for (const projection of volume.projected?.sources || []) {
         if (projection.secret?.name === source.secretName) check(projection.secret.items?.length
-          && !projection.secret.items.some(v => v.key.endsWith('.creds')), 'source_scope');
+          && !projection.secret.items.some(v => typeof v.key !== 'string' || /\.(?:creds|seed)$/.test(v.key)), 'source_scope');
       }
     }
     for (const container of pod.containers) for (const v of container.volumeMounts || []) {

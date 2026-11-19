@@ -169,7 +169,11 @@ const expectedProtocolHashes = {
   // Recomputed for the permission onboarding row: the new
   // computer_use_permission_status invoke (settings permissionStatus) joins
   // the domain's call set.
-  computerUse: 'e0f4aadbba8ab68e1dd54f9ab172680657958d548e3c3da50a489931cf525388',
+  // 回流 community PR pinvou-agent#826：domain 新增 computer_use_set_virtual_display_preference
+  // invoke（设置页"优先使用隔离的虚拟显示器"开关；仅桌面端，与其余命令一样不在 web
+  // 访问策略 allowlist 上）。hash 由合并树实际运行本测试读回（actual 值，与来源 PR
+  // 记录一致）后写回。
+  computerUse: '6e06e71458a8f8e347e83abda1fc39cd04ecbf80c78168abf43f3d8873cf0d75',
   // Recomputed for #308 follow-ups: prefillComposer(text, append) recovery
   // entry + comment translations touching `invoke(` mentions (the extractor
   // scans raw source, so comment wording is part of the digest). Recomputed
@@ -235,7 +239,24 @@ const expectedProtocolHashes = {
   // Stream bubbles now carry htmlSource for native selection provenance.
   // This additive local state field is inside the hashed delta listener;
   // invoke payloads and event names are unchanged.
-  chat: '684b43170fd9f7a311b8f2e7d36270a3662324b5875abb77f7c4de2b2e21fa1d',
+  // Recomputed for the usage-meter occupancy fix: the chat:usage listener
+  // body gains the per-request context_input_tokens consumption ahead of the
+  // cumulative-input dirty guard (chat:usage fires once per turn at
+  // TurnComplete and any tool_start latches the guard until the next send —
+  // without the per-request field the meter froze at "—/…·0%" on every
+  // tool-using conversation). Same event surface — no new invoke or listen
+  // entries.
+  // 834 回流重钉：chat:compaction 监听体新增 in-flight 标记维护块（含
+  // compactionStarts/compactionSeq 与 post_tokens 消费）；官方侧 addSystemItem
+  // 行保留 `compactId: compactId` 写法，与社区 shorthand 不同，故哈希为本仓实算值。
+  // 回流社区 #836 重算：chat.js/chat-events.js 的 <context_update> 序号基线
+  // （runtimeContextUpdatesBefore 随气泡下发、压缩后 vintage 重置）与
+  // committed 转写权威重同步监听体落在采集文本内；invoke/listen 调用面
+  // 无增删（dependencies 钉不变）。
+  // rebase 至 main e828f68fe6 重算：#2735（手动压缩入口）对
+  // bridge-shared-helpers.js 的 compaction 状态切片与 in-flight 缓冲豁免
+  // 与本分支 <context_update> vintage 重置叠加进哈希面，此钉=并集树实算值。
+  chat: '0a1ed5b87dcb42672256370ea5cdbd266da011164f3770b14d37363450860712',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -247,6 +268,20 @@ const expectedProtocolHashes = {
   // T0-b (#701 桥接面对齐) 重算：confirm/ignore/never 三支 invoke 移入
   // shared/bridge-shared-helpers.js 的 resolveMemoryCandidate（memory.js 留
   // 参数化薄包装），命令面无增删。
+  // Recomputed for the PR #834 review-fix wave: the chat:compaction listener
+  // now stores a timestamp (not a boolean) at start so the read side can
+  // expire a lost-terminal in-flight flag with the same 15-minute backstop
+  // as the Rust MAX_COMPACTION_LATCH_AGE latch, and the comment wording no
+  // longer calls post_tokens "accurate" (Rust emits a conservative estimate).
+  // Event names, invoke shapes and the payload contract unchanged; the web
+  // twin carries the identical body.
+  // Recomputed for review 5874108926 follow-up: the chat:compaction
+  // marker-maintenance block also records the persistent per-session
+  // compactionStarts signal (no invoke/listen surface change — the body
+  // text is part of the pinned call argument).
+  // Recomputed again for review 5876783763: the marker-maintenance block
+  // also advances the monotonic compactionSeq counter (no invoke/listen
+  // surface change).
   memory: 'ca88a71d9f0f9b15f1df52cf80218694f76b2295add98e65a0d167fc88b627c8',
   monitor: 'e63e8d5d4edf813640e08c9951a12abdbc3cad4991763d3dd956e883e277fb1c',
   // New domain: MegaCube 设备管理 (device manager). Six commands —
@@ -343,7 +378,11 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // T0-b 重算：helpers 新增 3 个 invoke 面（get_session_persona_events /
 // get_session_pinvou_reviews / resolveMemoryCandidate 的 invoke(command, args)
 // 参数化入口），合计 74 个签名。
-const expectedSharedBaseHash = 'f92d9e73a2ed12655bf7516b894c7d3283b5634cd1774e933320ed122d889013';
+// kb_model_cancel 回流：共享知识模型 helper 新增取消命令，合计 75 个签名。
+// 社区 #841 回流：评审快照串行链在 record 时捕获 owning sid，避免排队写漂到
+// 切换后的会话；并集后按当前共享桥接面重算协议指纹。
+// 社区 #870 回流：按并集共享桥接面（含 #2733 虚拟显示与既有内容）重算协议指纹。
+const expectedSharedBaseHash = '4acf82a923beb336166f69639fea51b76550cc53bfcff88f34044d0c8a378843';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),

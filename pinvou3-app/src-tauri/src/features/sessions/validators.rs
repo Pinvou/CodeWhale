@@ -11,6 +11,17 @@ use anyhow::{Result, bail};
 use deepseek_tui::models::SystemPrompt;
 use deepseek_tui::session_manager::SessionManager;
 
+/// 底座保留的 sessions 根文件名/目录名 stem（不区分大小写比较）：
+/// - `session_boot_owners`（`session_manager.rs` `SESSION_BOOT_OWNERS_STEM`）：
+///   `sessions/<stem>.json` 是 boot-owners 注册表而非会话记录。
+/// - `checkpoints`：`sessions/checkpoints/` 是崩溃恢复检查点存储目录（全部
+///   会话共享；底座自身的 reclaim 清扫都专门避开这个 stem）。不拒绝则导入
+///   一条 id 为 `checkpoints` 的记录会把共享目录当自己的 artifacts 目录
+///   落盘，随后的删除/驱逐 `remove_dir_all` 会清掉所有会话的崩溃恢复检查点。
+/// 单一事实源——导入/直存路径的保留名拒绝一律引用本常量，避免两处字面量
+/// 漂移。
+pub(crate) const RESERVED_SESSION_ID_STEMS: [&str; 2] = ["session_boot_owners", "checkpoints"];
+
 /// 生成 URL-safe session id（短 8 字节 timestamp + nanos hash）。
 /// 上游 `validated_session_path` 只允许 `[A-Za-z0-9_-]`，所以走 base32-like 字符集。
 /// `pub` for the pinvou-cli `projects` family: the rebind orphan probe
@@ -18,7 +29,21 @@ use deepseek_tui::session_manager::SessionManager;
 /// fail-closed rule the GUI path applies), through the `features::sessions`
 /// re-export. The GUI itself keeps calling the crate-private path.
 pub fn validate_session_id(id: &str) -> Result<()> {
-    validate_id_charset(id, "session")
+    validate_id_charset(id, "session")?;
+    // 底座保留名（见 RESERVED_SESSION_ID_STEMS 的逐项说明）：不拒绝则导入/
+    // 直存可以整个覆盖注册表，或把共享的崩溃恢复检查点目录当成会话私有
+    // 目录。大小写不敏感——charset 允许大写，而这些名字在大小写不敏感
+    // 文件系统（APFS/NTFS）上与全大写拼写是同一文件；`sched-`/`aux-` 前缀
+    // 门（is_sched_session_id / is_aux_session_id）已是同一别名击穿口径，
+    // 保留名必须同等待遇。
+    // （底座 validated_session_id 的精确匹配是上游待同步项；本守卫先行。）
+    if RESERVED_SESSION_ID_STEMS
+        .iter()
+        .any(|stem| id.eq_ignore_ascii_case(stem))
+    {
+        bail!("Session id '{id}' collides with a reserved sessions file");
+    }
+    Ok(())
 }
 
 /// The URL-safe charset check shared by every id kind in this store: non-empty
@@ -442,6 +467,9 @@ pub(crate) fn scheduled_session_file(manager: &SessionManager, id: &str) -> Resu
     Ok(manager.sessions_dir().join(format!("{id}.json")))
 }
 
+/// Generate a URL-safe session id from wall-clock nanos. Callers must not
+/// persist the result unconditionally: route allocation through the store's
+/// occupancy probe so a clock collision cannot replace a live record.
 pub(crate) fn generate_session_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -479,6 +507,27 @@ mod tests {
                 .to_string(),
             "Invalid scheduled task id 'has space'"
         );
+    }
+
+    #[test]
+    fn bare_generate_session_id_has_no_unwired_production_call_sites() {
+        let scanned = [
+            ("validators.rs", include_str!("validators.rs"), 1usize),
+            ("retention.rs", include_str!("retention.rs"), 1),
+            ("store.rs", include_str!("store.rs"), 0),
+        ];
+        for (name, source, expected) in scanned {
+            let source = source.replace("\r\n", "\n");
+            let production = match source.split_once("#[cfg(test)]\nmod tests") {
+                Some((production, _tests)) => production,
+                None => source.as_str(),
+            };
+            let found = production.matches("generate_session_id(").count();
+            assert_eq!(
+                found, expected,
+                "{name}: bare `generate_session_id(` occurrences in production must stay exactly {expected}; route allocation through SessionStore::generate_unused_session_id[_with]"
+            );
+        }
     }
 
     #[test]
