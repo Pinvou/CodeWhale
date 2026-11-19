@@ -3105,6 +3105,12 @@ impl RemoteControlManager {
         reader_owner: &RelaySender,
         receipt: Option<ControllerReadReceipt>,
     ) {
+        // Transport notices come only from handle_connection after its exact
+        // local reader fence. A remote JSON frame cannot impersonate that
+        // authority or end an authenticated recovery candidate.
+        if value.get("type").and_then(Value::as_str) == Some("desktop_relay_connection") {
+            return;
+        }
         // All controller peer frames, not only v2 errors, belong to the exact
         // active reader. An old endpoint's queue cannot feed its replacement.
         if !self
