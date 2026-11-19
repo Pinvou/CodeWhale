@@ -17307,16 +17307,20 @@ fn carries_network_url(input: &Value) -> bool {
 /// written. It fails closed and names the posture, so the refusal reads as a
 /// contract rather than a malfunction.
 fn reject_network_reaching_input(name: &str, input: &Value) -> Result<()> {
-    // Judged per stage with the same predicate the execution seam's network
-    // guard uses, so `pwd; gh repo view` and `gh pr list --search '*'` are
-    // refused here exactly like a bare `gh repo view`; the whole-command
-    // parallel classifier would see the compound or the `*` and pass them.
-    let github_shell_read = matches!(name, "bash" | "Bash" | "exec_shell")
+    // Judged by the COMPLETE admitted-command network classification, per
+    // stage with the same splits the execution seam's network guard uses:
+    // `pwd; gh repo view` and `gh pr list --search '*'` are refused here
+    // exactly like a bare `gh repo view`, and — the family the URL scan can
+    // never see — an npm registry metadata read (`npm view|show|info`
+    // contacts the package registry with a bare package argument) refuses
+    // here too, so a network-denied child cannot reach the registry through
+    // an admitted family whose reach carries no URL spelling.
+    let network_shell_read = matches!(name, "bash" | "Bash" | "exec_shell")
         && input
             .get("command")
             .and_then(Value::as_str)
-            .is_some_and(crate::command_safety::command_reaches_github_readonly);
-    if !github_shell_read && !carries_network_url(input) {
+            .is_some_and(crate::command_safety::command_reaches_network_readonly);
+    if !network_shell_read && !carries_network_url(input) {
         return Ok(());
     }
     Err(anyhow!(

@@ -5795,6 +5795,59 @@ fn readonly_github_shell_calls_obey_the_host_network_policy_before_spawn() {
     assert!(prompted.contains("requires network approval"));
 }
 
+/// An outer network cap applies to every admitted family, not only the
+/// GitHub one: an npm registry metadata read contacts the registry with a
+/// bare package argument — a spelling no URL-shaped or GitHub-shaped guard
+/// can see — so the cap refuses it at this seam, while a ceiling that
+/// permits network keeps the family (registry metadata reads are admitted
+/// scout work).
+#[test]
+fn readonly_npm_registry_reads_obey_an_outer_network_cap() {
+    let tmp = tempdir().expect("tempdir");
+    let context = |network_access| {
+        let envelope = crate::tools::spec::ToolAuthorityEnvelope {
+            schema_version: 1,
+            owner: "cap-test".to_string(),
+            authority: crate::tools::spec::ToolMutationAuthority::ReadOnly,
+            network_access,
+            shell: crate::tools::spec::ToolShellAuthority::None,
+            verification: crate::tools::spec::ToolVerificationAuthority::None,
+            writable_roots: Vec::new(),
+            writable_files: Vec::new(),
+            coordination_contracts: Vec::new(),
+        };
+        ToolContext::new(tmp.path())
+            .with_tool_authority(envelope)
+            .expect("valid test authority")
+    };
+
+    let capped = context(Some(false));
+    // Pure npm stages and npm-only compounds obey the cap. A compound that
+    // also carries a GitHub stage is judged by the policy arm below (a capped
+    // child runs with a deny-default policy derived from the same envelope),
+    // so it is not part of this list.
+    for command in [
+        "npm view codewhale version",
+        "npm show codewhale",
+        "pwd; npm info x | wc -l",
+    ] {
+        let error = enforce_readonly_github_network_policy(command, &capped)
+            .expect_err("an npm registry read must obey an outer network cap")
+            .to_string();
+        assert!(error.contains("outer network cap"), "{command}: {error}");
+    }
+
+    for network_access in [None, Some(true)] {
+        enforce_readonly_github_network_policy(
+            "npm view codewhale version",
+            &context(network_access),
+        )
+        .expect("a ceiling that permits network keeps the npm family");
+    }
+    enforce_readonly_github_network_policy("git status; wc -l README.md", &capped)
+        .expect("local reads never consult the network cap");
+}
+
 /// The decision function is only half the wall; the ordering claim ("before
 /// spawn") lives at the tool entry. A regression that drops or reorders the
 /// guard inside `execute` must redden here: under Deny, an admitted gh read

@@ -20777,6 +20777,17 @@ fn a_network_denied_child_cannot_address_a_remote_location_through_any_tool() {
             "exec_shell",
             json!({"action": "run", "command": "gh repo view | head -n 3"}),
         ),
+        // The npm registry family carries no URL-bearing field — the reach
+        // is inherent to the family — so a bare package read refuses exactly
+        // like a gh read, compound stages included.
+        (
+            "bash",
+            json!({"action": "run", "command": "npm view codewhale version"}),
+        ),
+        (
+            "exec_shell",
+            json!({"action": "run", "command": "pwd; npm info x | wc -l"}),
+        ),
     ] {
         assert!(
             reject_network_reaching_input(name, &input).is_err(),
@@ -20806,6 +20817,8 @@ fn a_network_denied_child_cannot_address_a_remote_location_through_any_tool() {
             "bash",
             json!({"action": "run", "command": "pwd; cat gh-notes.md | wc -l"}),
         ),
+        // `npm --version` is local; only the registry-metadata verbs reach.
+        ("bash", json!({"action": "run", "command": "npm --version"})),
     ] {
         assert!(
             reject_network_reaching_input(name, &input).is_ok(),
