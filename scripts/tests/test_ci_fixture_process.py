@@ -40,6 +40,10 @@ def alive(pid):
 
 @unittest.skipUnless(sys.platform in ('win32', 'linux'), 'process scope supports CI operating systems')
 class ProcessScopeTests(unittest.TestCase):
+    def test_diagnostic_delivery_failure_cannot_replace_execution_or_cleanup(self):
+        with patch.object(WORKSPACE, 'diagnostics', True), patch('builtins.print', side_effect=OSError('closed diagnostics')):
+            WORKSPACE.diagnostic_phase('observe_process_tree')
+
     @unittest.skipUnless(shutil.which('node'), 'Node creates the detached test descendant')
     def test_optional_root_evidence_preserves_original_cancellation_verdict(self):
         # The separate interpreter alone owns the observed command and its
@@ -105,7 +109,8 @@ print('original-cancel-verdict-preserved-with-root23')
     @unittest.skipUnless(sys.platform == 'win32', 'actual Windows deep-path retirement')
     def test_supervisor_retires_deep_owned_workspace_after_process_exit(self):
         source = (
-            "import os,pathlib,sys;"
+            "import os,pathlib,sys,faulthandler;"
+            "faulthandler.dump_traceback_later(3,repeat=False);"
             "root=pathlib.Path(os.environ['PINVOU_CI_FIXTURE_ROOT']);"
             "deep=root.joinpath(*(['deep-segment-0123456789']*12));"
             "raw='\\\\\\\\?\\\\'+str(deep);"
@@ -113,7 +118,9 @@ print('original-cancel-verdict-preserved-with-root23')
             "os.makedirs(raw);"
             "print('fixture_child_phase=write',file=sys.stderr,flush=True);"
             "pathlib.Path(raw,'proof.txt').write_text('owned');"
-            "print(len(str(deep)),flush=True)"
+            "print('fixture_child_phase=written',file=sys.stderr,flush=True);"
+            "print(len(str(deep)),flush=True);"
+            "faulthandler.cancel_dump_traceback_later()"
         )
         # Bounded stress, not retries: every iteration must satisfy the same
         # 15-second limit and confirmed process/workspace retirement.
@@ -165,7 +172,7 @@ else process.kill(process.pid,'SIGTERM');
                 evidence = evidence.decode('utf-8', errors='replace')
             # TimeoutExpired's normal traceback drops the captured diagnostic
             # stderr. Preserve bounded stage/stack evidence without printing argv.
-            self.fail('supervisor exceeded unchanged 15-second limit; stage/stack evidence:\n' + evidence[-16000:])
+            raise AssertionError('supervisor exceeded unchanged 15-second limit; stage/stack evidence:\n' + evidence[-16000:]) from None
         return p, json.loads(receipt.read_text()), receipt
 
     def test_success_preserves_output_and_confirms_tree_exit(self):
@@ -183,6 +190,7 @@ else process.kill(process.pid,'SIGTERM');
                 self.invoke('never runs', directory)
         self.assertIn('fixture_phase=retire_workspace', str(caught.exception))
         self.assertNotIn('private-command-argument', str(caught.exception))
+        self.assertTrue(caught.exception.__suppress_context__)
 
     @unittest.skipUnless(sys.platform == 'linux', 'AF_UNIX Chrome path limit is Linux-specific')
     def test_long_runner_temp_cannot_overflow_chrome_singleton_socket(self):

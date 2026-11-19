@@ -28,9 +28,12 @@ diagnostic_start = 0
 def diagnostic_phase(name):
     if diagnostics:
         # Never include command arguments, environment values or fixture data.
-        print(json.dumps({'fixture_phase': name, 'elapsed_seconds': round(time.monotonic() - diagnostic_start, 3)}), file=sys.stderr, flush=True)
-        faulthandler.cancel_dump_traceback_later()
-        faulthandler.dump_traceback_later(3, repeat=False)
+        try:
+            print(json.dumps({'fixture_phase': name, 'elapsed_seconds': round(time.monotonic() - diagnostic_start, 3)}), file=sys.stderr, flush=True)
+            faulthandler.cancel_dump_traceback_later()
+            faulthandler.dump_traceback_later(3, repeat=False)
+        except (OSError, ValueError, RuntimeError):
+            pass  # Diagnostic delivery cannot replace the command/cleanup verdict.
 
 
 def cancel(signum, _frame):
@@ -206,6 +209,8 @@ def windows_run(command, env, grace, *, exit_evidence=None):
         deadline = None
         dirty = False
         diagnostic_phase('observe_process_tree')
+        observation_started = time.monotonic()
+        observed_stall = False
         while True:
             accounting = Accounting()
             checked(kernel.QueryInformationJobObject(job, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None))
@@ -219,6 +224,12 @@ def windows_run(command, env, grace, *, exit_evidence=None):
                 checked(kernel.GetExitCodeProcess(process.hProcess, ctypes.byref(code)))
                 return (128 + cancelled if cancelled else code.value), dirty, True
             orphaned = kernel.WaitForSingleObject(parent, 0) == 0
+            if diagnostics and not observed_stall and time.monotonic() - observation_started >= 3:
+                observed_stall = True
+                try:
+                    print(json.dumps({'fixture_process_state': {'root_exited': ended, 'active_processes': accounting.ActiveProcesses, 'parent_exited': orphaned}}), file=sys.stderr, flush=True)
+                except (OSError, ValueError):
+                    pass
             if (ended or cancelled or orphaned) and deadline is None:
                 deadline = time.monotonic() + grace
             if deadline is not None and time.monotonic() >= deadline:
@@ -228,6 +239,7 @@ def windows_run(command, env, grace, *, exit_evidence=None):
                     return 86, True, False
             time.sleep(0.025)
     finally:
+        diagnostic_phase('close_process_handles')
         if process.hProcess and not assigned:
             kernel.TerminateProcess(process.hProcess, 86)  # Never resumed outside its job.
         for handle in (process.hThread, process.hProcess, parent, job):
@@ -298,6 +310,7 @@ def main(argv=None):
     env = {**os.environ, 'PINVOU_CI_PROCESS_SCOPE': scope, 'PINVOU_CI_FIXTURE_ROOT': str(root), 'PINVOU_CI_RESOURCE_LEDGER': str(ledger), 'TMPDIR': str(root), 'TMP': str(root), 'TEMP': str(root)}
     try:
         if sys.platform == 'linux':
+            diagnostic_phase('observe_process_tree')
             code, dirty, clean = linux_run(command, env, args.cleanup_seconds)
         elif sys.platform == 'win32':
             code, dirty, clean = windows_run(command, env, args.cleanup_seconds)
@@ -305,6 +318,7 @@ def main(argv=None):
             raise RuntimeError('owned process-tree observation is supported on Linux and Windows')
         # An in-test cleanup failure stays a failure even if OS containment was
         # subsequently able to retire the process. Never hide it with a retry.
+        diagnostic_phase('validate_retirement_receipts')
         for record in ledger.glob('*.json'):
             if record.is_symlink() or record.stat().st_size > 65536:
                 dirty = True

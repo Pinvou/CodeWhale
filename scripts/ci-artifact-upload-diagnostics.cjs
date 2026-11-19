@@ -26,7 +26,8 @@ if (process.env.PINVOU_CI_ARTIFACT_DIAGNOSTICS === '1') {
   const elapsed = () => Math.round(performance.now() - started);
   function emit(event) {
     if (lines++ >= 160) return;
-    process.stderr.write(`[artifact-transport] ${JSON.stringify({ elapsed_ms: elapsed(), ...event })}\n`);
+    try { fs.writeSync(2, `[artifact-transport] ${JSON.stringify({ elapsed_ms: elapsed(), ...event })}\n`); }
+    catch { /* Closed diagnostic output cannot change the transfer verdict. */ }
   }
   function hostLabel(host) {
     host = String(host || '').toLowerCase();

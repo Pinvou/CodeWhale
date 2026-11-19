@@ -58,3 +58,14 @@ test('error observation does not consume an unhandled stream error or make it su
   assert.match(result.stderr, /"code":"ENOENT"/);
   assert.match(result.stderr, /Unhandled 'error' event/);
 });
+
+test('closed diagnostic stderr does not make a successful receipt read fail', () => {
+  const source = `const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+    const root=fs.mkdtempSync(path.join(os.tmpdir(),'artifact-closed-stderr-'));const file=path.join(root,'receipt.json');fs.writeFileSync(file,'{}');
+    fs.closeSync(2);fs.createReadStream(file).resume().on('end',()=>{fs.rmSync(root,{recursive:true});console.log('read-completed');});`;
+  const result = spawnSync(process.execPath, ['--require', helper, '-e', source], {
+    env: { ...process.env, PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1' }, encoding: 'utf8', timeout: 10000
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), 'read-completed');
+});
