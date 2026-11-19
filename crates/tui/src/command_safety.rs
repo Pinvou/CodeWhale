@@ -4044,9 +4044,11 @@ mod tests {
         }
     }
 
-    /// The complete network classification adds the npm registry metadata
-    /// family — the one admitted family whose reach carries no URL-bearing
-    /// field, so the URL-shaped scan cannot cover it.
+    /// The complete network classification covers the npm registry family:
+    /// `npm view|show|info` contacts the package registry with a bare
+    /// package argument, a reach no URL-shaped or GitHub-shaped guard can
+    /// see. Compound stages reach it exactly like a bare call; genuinely
+    /// local work must stay unrecognized.
     #[test]
     fn command_reaches_network_readonly_covers_the_npm_registry_family() {
         for command in [
