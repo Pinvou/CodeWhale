@@ -219,11 +219,18 @@ func TestPackageExpiryCrossWalletIndexPostgres(t *testing.T) {
 	statement := packageExpiryCandidateStatement(t)
 	for _, scenario := range []string{"fresh-install", "retained-upgrade"} {
 		t.Run(scenario, func(t *testing.T) {
-			source, staged := stageBillingMigrationContract(t, 900043)
+			var source, staged string
+			if scenario == "retained-upgrade" {
+				// Keep the historical 038 carrier plus only the target index.
+				// The final full-carrier check still restores every source SQL file.
+				source, staged = stageBillingMigrationContract(t, 900043, 900043)
+			} else {
+				source, staged = stageBillingMigrationContract(t, 900043)
+			}
 			var r *PostgresRepository
 			var ctx context.Context
 			if scenario == "retained-upgrade" {
-				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second, 900038)
+				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second, 900032)
 			} else {
 				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second)
 			}
@@ -243,6 +250,11 @@ func TestPackageExpiryCrossWalletIndexPostgres(t *testing.T) {
 				} else {
 					packs = append(packs, pack)
 				}
+			}
+			if scenario == "retained-upgrade" {
+				// Preserve the real historical paid and frozen facts through 038
+				// before testing the target-only index migration.
+				installBillingFixturePrefix(t, ctx, r, 900038)
 			}
 			sort.Slice(packs, func(i, j int) bool { return packs[i].String() < packs[j].String() })
 			config := r.pool.Config().ConnConfig.Copy()

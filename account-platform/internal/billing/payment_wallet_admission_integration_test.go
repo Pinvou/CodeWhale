@@ -33,7 +33,7 @@ func TestPaymentPersonalWalletAdmissionStatusRacePostgres(t *testing.T) {
 	}
 	product := retainedSameKeyProduct(t, r, ctx, owner)
 	provider := &coreRecoveryProvider{retainedFinancialProvider: &retainedFinancialProvider{}}
-	coordinator, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestPaymentPersonalWalletAdmissionPostgres(t *testing.T) {
 			}
 			product := retainedSameKeyProduct(t, r, ctx, owner)
 			provider := &coreRecoveryProvider{retainedFinancialProvider: &retainedFinancialProvider{}}
-			coordinator, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+			coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 			if err != nil {
 				t.Fatal(err)
 			}

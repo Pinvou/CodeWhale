@@ -40,6 +40,45 @@ def alive(pid):
 
 @unittest.skipUnless(sys.platform in ('win32', 'linux'), 'process scope supports CI operating systems')
 class ProcessScopeTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node creates the detached test descendant')
+    def test_optional_root_evidence_preserves_original_cancellation_verdict(self):
+        # The separate interpreter alone owns the observed command and its
+        # descendants. A metadata barrier triggers cancellation only after the
+        # real root's nonzero exit has been observed through its held identity.
+        source = r'''
+import importlib.util,json,os,signal,sys,threading,time
+spec=importlib.util.spec_from_file_location('owned',sys.argv[1])
+owned=importlib.util.module_from_spec(spec);spec.loader.exec_module(owned)
+evidence={};errors=[]
+def cancel_after_exit():
+    until=time.monotonic()+10
+    while 'exit_code' not in evidence:
+        if time.monotonic()>=until: errors.append('exit evidence missing');owned.cancelled=signal.SIGTERM;return
+        time.sleep(.005)
+    owned.cancelled=signal.SIGTERM
+watcher=threading.Thread(target=cancel_after_exit);watcher.start()
+script="require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'}).unref();process.exitCode=23"
+run=owned.windows_run if sys.platform=='win32' else owned.linux_run
+result=run([sys.argv[2],'-e',script],os.environ.copy(),.2,exit_evidence=evidence)
+watcher.join(11)
+assert not watcher.is_alive() and not errors,(errors,evidence)
+assert result[0]==143 and result[2] is True and isinstance(result[1],bool),result
+assert evidence=={'started':True,'exit_code':23},evidence
+print('original-cancel-verdict-preserved-with-root23')
+'''
+        p = subprocess.run([sys.executable, '-X', 'utf8', '-c', source, str(SUPERVISOR), shutil.which('node')],
+                           capture_output=True, text=True, timeout=20)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.strip(), 'original-cancel-verdict-preserved-with-root23')
+
+    def test_exit_evidence_rejects_callback_mappings_before_start(self):
+        class CallbackMapping(dict):
+            def clear(self):
+                raise AssertionError('a callback mapping must never execute')
+        for run in (WORKSPACE.linux_run, WORKSPACE.windows_run):
+            with self.subTest(run=run.__name__), self.assertRaises(TypeError):
+                run(['never-launch'], {}, .1, exit_evidence=CallbackMapping())
+
     def test_windows_namespace_preserves_drive_unc_and_extended_paths(self):
         for plain, expected in (
             (r'C:\owned\path', '\\\\?\\C:\\owned\\path'),

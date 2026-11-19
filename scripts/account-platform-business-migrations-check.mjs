@@ -24,6 +24,25 @@ function migrationFor(workload, domain) {
   return workload.kind === 'compose' ? workload.id === `${domain}-migrate`
     : workload.resource.kind === 'Job' && workload.resource.spec?.template?.metadata?.labels?.['app.kubernetes.io/component'] === `migrate-${domain}`;
 }
+// Shared semantic check over actual parsed/rendered migration workloads.
+// Compose waits for exit success (not just start); Helm waits for ordered hooks.
+export function checkMigrationSuccessOrder(all) {
+  const account = all.filter(w => migrationFor(w, 'account'));
+  const billing = all.filter(w => migrationFor(w, 'billing'));
+  check(account.length === 1 && billing.length === 1, 'migration_inventory');
+  const [a] = account, [b] = billing;
+  check(a.kind === b.kind, 'migration_order');
+  if (a.kind === 'compose') {
+    const dependency = a.service.depends_on?.['billing-migrate'];
+    check(dependency?.condition === 'service_completed_successfully' && dependency.required !== false
+      && !Object.hasOwn(b.service.depends_on || {}, 'account-migrate'), 'migration_order');
+  } else {
+    const aWeight = Number(a.resource.metadata?.annotations?.['helm.sh/hook-weight']);
+    const bWeight = Number(b.resource.metadata?.annotations?.['helm.sh/hook-weight']);
+    check(Number.isSafeInteger(aWeight) && Number.isSafeInteger(bWeight) && bWeight < aWeight, 'migration_order');
+  }
+}
+
 function strictMount(workload, path) {
   return mountedSource(workload, path);
 }
@@ -81,6 +100,7 @@ export function checkRuntimeDatabases(all, inventory, render) {
 }
 export function checkBusinessMigrations(render, inventory, now = Date.now()) {
   const all = approvedRender(render, inventory);
+  checkMigrationSuccessOrder(all);
   const domains = render.kind === 'compose' && render.recipe.profile === 'personal' ? ['account', 'billing'] : Object.keys(roles);
   check(same(Object.keys(inventory.databases || {}).sort(), domains.slice().sort()), 'database_inventory');
   const backup = inventory.backup;
@@ -125,7 +145,7 @@ export function checkBusinessMigrations(render, inventory, now = Date.now()) {
     } else {
       const annotations = workload.resource.metadata?.annotations;
       check(annotations?.['helm.sh/hook'] === 'pre-install,pre-upgrade'
-        && annotations['helm.sh/hook-weight'] === { account: '-30', billing: '-20', token: '-10' }[domain]
+        && annotations['helm.sh/hook-weight'] === { billing: '-30', account: '-20', token: '-10' }[domain]
         && annotations['helm.sh/hook-delete-policy'] === 'before-hook-creation,hook-succeeded'
         && workload.pod.restartPolicy === 'Never', 'migration_hook');
       // The current scratch migrate image contains system CA roots. A specific
