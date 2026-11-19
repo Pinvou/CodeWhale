@@ -19,6 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
+from functools import lru_cache
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = os.environ.get('CI_REUSE_WORKFLOW', '.github/workflows/pr-check.yml')
@@ -29,10 +30,12 @@ PROFILES = {
 }
 if WORKFLOW not in PROFILES:
     raise ValueError('unsupported workflow proof profile')
-POLICY = (WORKFLOW, 'scripts/ci-test-reuse.py', 'scripts/ci-reuse-policy.py')
+JOB_SCOPED = WORKFLOW == '.github/workflows/pr-check.yml'
+POLICY = (WORKFLOW, 'scripts/ci-test-reuse.py', 'scripts/ci-reuse-policy.py') + (('scripts/ci-job-inputs.py',) if JOB_SCOPED else ())
 MAX_AGE = 24 * 60 * 60
 MAX_BYTES = 65536
 PLAN = runpy.run_path(str(ROOT / 'scripts/ci-reuse-policy.py'))
+INPUTS = runpy.run_path(str(ROOT / 'scripts/ci-job-inputs.py')) if JOB_SCOPED else None
 WORKFLOW_SOURCE = (ROOT / WORKFLOW).read_text(encoding='utf-8')
 GATE_NAME, PROFILE_JOBS = PROFILES[WORKFLOW]
 JOBS = PLAN['catalog'](WORKFLOW_SOURCE, jobs=PROFILE_JOBS)
@@ -79,6 +82,29 @@ def fingerprint(tested, base, configuration, routing=None):
             'policy': {path: sha(git('rev-parse', f'{tested}:{path}')) for path in POLICY}}
 
 
+@lru_cache(maxsize=8)
+def tree_entries(revision):
+    rows = []
+    for record in git('ls-tree', '-rz', '--full-tree', sha(revision)).split('\0'):
+        if record:
+            header, path = record.split('\t', 1)
+            mode, kind, oid = header.split()
+            rows.append((mode, kind, sha(oid), path))
+    return rows
+
+
+@lru_cache(maxsize=8)
+def changed_entries(base, tested):
+    fields = git('diff', '--raw', '--no-abbrev', '--no-renames', '-z', sha(base), sha(tested)).split('\0')
+    return [(fields[i], fields[i+1]) for i in range(0, len(fields)-1, 2)]
+
+
+def job_inputs(tested, base, configuration, routing):
+    entries, changed = tree_entries(tested), changed_entries(base, tested)
+    return {name: INPUTS['fingerprint'](name, WORKFLOW_SOURCE, entries, changed, configuration, routing)
+            for name in JOBS}
+
+
 def output(**values):
     with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as stream:
         for name, value in values.items():
@@ -109,12 +135,15 @@ def record(event, configuration, needs):
     # Event/API PR associations can retain an older base SHA. The tested Git
     # object is the immutable source of the base actually covered by this run.
     base = tested_parents[0]
-    value = {'schema': 1, 'repository': repository, 'pr': number(pr['number']),
+    routing = needs.get('changes', {}).get('outputs', {})
+    value = {'schema': 2 if JOB_SCOPED else 1, 'repository': repository, 'pr': number(pr['number']),
              'run': number(os.environ['GITHUB_RUN_ID']), 'attempt': number(os.environ['GITHUB_RUN_ATTEMPT']),
              'head': head, 'tested': tested, 'base_ref': pr['base']['ref'],
-             'fingerprint': fingerprint(tested, base, configuration, needs.get('changes', {}).get('outputs', {})),
+             'fingerprint': fingerprint(tested, base, configuration, routing),
              'created': datetime.now(timezone.utc).isoformat(),
              'jobs': sorted(name for name in JOBS if needs.get(name, {}).get('result') == 'success')}
+    if JOB_SCOPED:
+        value['job_inputs'] = job_inputs(tested, base, configuration, routing)
     directory = Path(tempfile.mkdtemp(prefix='ci-success-proof-', dir=os.environ['RUNNER_TEMP']))
     (directory / 'proof.json').write_text(json.dumps(value, sort_keys=True) + '\n', encoding='utf-8')
     output(directory=str(directory))
@@ -179,10 +208,13 @@ def read_proof(raw):
 
 
 def verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, configuration, routing, head_ref):
-    if (proof.get('schema') != 1 or proof.get('repository') != repository
+    modern = JOB_SCOPED and proof.get('schema') == 2
+    if (proof.get('schema') not in (1, 2) or proof.get('repository') != repository
+            or (proof.get('schema') == 2 and not JOB_SCOPED)
             or proof.get('pr') != pr_number or proof.get('run') != run['id']
             or proof.get('attempt') != run['run_attempt'] or proof.get('head') != head
-            or proof.get('fingerprint') != expected):
+            or (not modern and proof.get('fingerprint') != expected)
+            or (modern and proof.get('fingerprint', {}).get('policy') != expected['policy'])):
         return []
     age = (now - datetime.fromisoformat(proof['created'])).total_seconds()
     if not 0 <= age <= MAX_AGE or not isinstance(proof.get('jobs'), list) or len(set(proof['jobs'])) != len(proof['jobs']):
@@ -191,9 +223,13 @@ def verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, 
     if len(gates) != 1 or gates[0].get('conclusion') != 'success':
         return []
     result = []
+    inputs = job_inputs(os.environ['TESTED_SHA'], expected['base'], configuration, routing) if modern else {}
     for name in proof['jobs']:
         if name not in JOBS:
             return []
+        if modern and (inputs.get(name) is None or proof.get('job_inputs', {}).get(name) != inputs[name]):
+            print(f'Queue reuse: {name}: execute (inputs_changed_or_unclassified)')
+            continue
         candidates = [job for job in jobs if PLAN['matches'](JOBS[name], job.get('name', '')) is not None]
         if (candidates and all(job.get('run_id') == run['id'] for job in candidates)
                 and PLAN['complete_group'](JOBS[name], candidates, routing, head_ref, configuration)):
@@ -257,12 +293,37 @@ def lookup(event, configuration, api, *, now=None):
         if proof.get('base_ref') != branch:
             continue
         # PR associations above establish ownership, not an immutable base.
-        # The producer's tested Git object must identify the exact base and tree.
+        # The producer's tested Git object identifies its own immutable base/tree;
+        # schema 2 compares the queue's inputs separately for each job below.
         # Fetching it through the API is read-only; no PR-controlled URL is used.
         commit = api.request(f'git/commits/{sha(proof["tested"])}')
-        if (commit.get('tree', {}).get('sha') != expected['tree']
-                or [item.get('sha') for item in commit.get('parents', [])] != [base, head]):
+        source = proof.get('fingerprint', {})
+        source_base = source.get('base') if proof.get('schema') == 2 else base
+        source_tree = source.get('tree') if proof.get('schema') == 2 else expected['tree']
+        if (commit.get('tree', {}).get('sha') != source_tree
+                or [item.get('sha') for item in commit.get('parents', [])] != [source_base, head]):
             continue
+        if proof.get('schema') == 2:
+            if not JOB_SCOPED:
+                continue
+            # Read immutable source objects, never an artifact-controlled URL.
+            # A shallow queue checkout need not have the earlier PR merge.
+            try:
+                git('cat-file', '-e', sha(proof['tested']) + '^{commit}')
+                git('cat-file', '-e', sha(source_base) + '^{commit}')
+            except subprocess.CalledProcessError:
+                git('fetch', '--no-tags', '--depth=2', 'origin', sha(proof['tested']))
+            if (parents(proof['tested']) != [source_base, head]
+                    or fingerprint(proof['tested'], source_base, configuration, routing)['policy'] != expected['policy']
+                    or any(git('rev-parse', f'{source_base}:{path}') != expected['policy'][path] for path in POLICY)):
+                continue
+            # The artifact cannot lie about a source tree or dependency digest.
+            # Recompute source file/diff inputs using current configuration and
+            # routing. Equality with the recorded digest additionally establishes
+            # that those effective settings did not change for this job.
+            source_inputs = job_inputs(proof['tested'], source_base, configuration, routing)
+            proof = dict(proof, job_inputs={name: value for name, value in proof.get('job_inputs', {}).items()
+                                         if value is not None and source_inputs.get(name) == value})
         jobs = api.pages(f'actions/runs/{run_id}/attempts/{attempt}/jobs', 'jobs')
         reusable = verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, configuration, routing, group['head_ref'])
         if reusable:
@@ -284,6 +345,8 @@ def main():
             if jobs:
                 output(reused_jobs=json.dumps(jobs, separators=(',', ':')), reuse_verified='true', reuse_source=str(source))
                 print(f'Verified identical test inputs against successful PR run {source}: ' + ', '.join(jobs))
+            else:
+                print('::notice::No compatible PR success proof; retained gates will execute normally')
     except Exception:
         # Do not print remote responses, configuration or exception text: they
         # can contain credentials or operator-specific runtime configuration.

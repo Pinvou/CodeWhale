@@ -119,6 +119,81 @@ class ReuseTests(unittest.TestCase):
         self.assertNotEqual(self.tested, self.queued)
         self.assertEqual(self.lookup(), (sorted(TARGETS), 12))
 
+    def scoped_queue(self, path):
+        """Real main advance and real two-parent merge, same original PR head."""
+        self.git('checkout', '--detach', self.base)
+        file = self.root/path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text('new main input\n', encoding='utf-8')
+        self.git('add', '--', path)
+        self.git('commit', '-qm', 'main input changed')
+        advanced = self.git('rev-parse', 'HEAD')
+        self.git('merge', '--no-ff', self.head, '-m', 'queue combined tree')
+        queued = self.git('rev-parse', 'HEAD')
+        group = self.event['merge_group']
+        group.update(head_sha=queued, base_sha=advanced,
+                     head_ref=f'refs/heads/gh-readonly-queue/main/pr-7-{advanced}')
+        environment = patch.dict(os.environ, {'TESTED_SHA': queued})
+        environment.start(); self.addCleanup(environment.stop)
+        self.proof.update(schema=2, jobs=['rust-test', 'account-platform-test'])
+        self.proof['job_inputs'] = REUSE.job_inputs(self.tested, self.base, self.config, {})
+        self.jobs = self.jobs[:1] + [
+            {'name': name, 'conclusion': 'success', 'run_id': 12, 'labels': ['ubuntu-22.04'],
+             'steps': [{'name': step['name'], 'conclusion': 'success'}
+                       for step in REUSE.JOBS[name]['steps'] if step['name']]}
+            for name in self.proof['jobs']]
+        return queued, advanced
+
+    def test_main_account_change_reuses_rust_but_revalidates_account(self):
+        queued, advanced = self.scoped_queue('account-platform/internal/queue-input.go')
+        self.assertNotEqual(REUSE.fingerprint(queued, advanced, self.config)['tree'], self.tree)
+        self.assertEqual(self.lookup(), (['rust-test'], 12))
+
+    def test_main_rust_lock_and_shared_script_and_unknown_path_revalidate(self):
+        for path in ('pinvou3-app/src-tauri/Cargo.lock', 'pinvou-cli/Cargo.toml',
+                     'scripts/new-fixture.py', 'new-product-domain/input.txt', 'scripts/ci-job-inputs.py'):
+            with self.subTest(path=path):
+                self.scoped_queue(path)
+                self.assertEqual(self.lookup(), ([], None))
+
+    def test_job_config_and_unknown_image_epoch_revalidate(self):
+        self.scoped_queue('account-platform/internal/queue-input.go')
+        for changes in ({'PINVOU_LINUX_HEAVY_RUNNER': '["other-pool"]'},
+                        {'PINVOU_CI_REUSE_EPOCH': 'runner-image-2'},
+                        {'NEW_UNKNOWN_RUNTIME_SETTING': 'changed'}):
+            with self.subTest(changes=changes):
+                self.assertEqual(self.lookup({**self.config, **changes}), ([], None))
+        # Another job's light runner setting does not change Rust's own pool.
+        self.assertEqual(self.lookup({**self.config, 'PINVOU_WINDOWS_LIGHT_RUNNER': '["other-light"]'}),
+                         (['rust-test'], 12))
+
+    def test_artifact_cannot_claim_current_digest_for_a_changed_source(self):
+        queued, advanced = self.scoped_queue('pinvou3-app/src-tauri/Cargo.lock')
+        self.proof['job_inputs'] = REUSE.job_inputs(queued, advanced, self.config, {})
+        self.assertEqual(self.lookup(), ([], None))
+
+    def test_scoped_reuse_still_rejects_partial_failed_or_skipped_execution(self):
+        self.scoped_queue('account-platform/internal/queue-input.go')
+        for verdict in ('failure', 'cancelled', 'skipped'):
+            self.jobs[1]['conclusion'] = verdict
+            self.assertEqual(self.lookup(), ([], None))
+        self.jobs[1]['conclusion'] = 'success'
+        self.jobs[1]['steps'][0]['conclusion'] = 'skipped'
+        self.assertEqual(self.lookup(), ([], None))
+
+    def test_scoped_proofs_preserve_age_attempt_fork_and_matrix_fences(self):
+        self.scoped_queue('account-platform/internal/queue-input.go')
+        original = copy.deepcopy(self.proof)
+        for key, value in (('created', (NOW-timedelta(days=2)).isoformat()),
+                           ('created', (NOW+timedelta(seconds=1)).isoformat()),
+                           ('attempt', 2), ('repository', 'fork/repository')):
+            with self.subTest(key=key, value=value):
+                self.proof = {**original, key: value}
+                self.assertEqual(self.lookup(), ([], None))
+        self.proof = original
+        self.jobs.append(copy.deepcopy(self.jobs[1]))
+        self.assertEqual(self.lookup(), ([], None))  # duplicate execution evidence
+
     def test_browser_matrix_lookup_requires_all_four_successful_shards(self):
         name = 'frontend-browser-test'
         policy = REUSE.JOBS[name]

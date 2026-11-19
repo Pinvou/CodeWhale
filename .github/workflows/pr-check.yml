@@ -344,6 +344,8 @@ jobs:
             account_platform:
               - 'scripts/ci-test-reuse.py'
               - 'scripts/ci-reuse-policy.py'
+              - 'scripts/ci-job-inputs.py'
+              - 'scripts/tests/test_ci_job_inputs.py'
               - 'scripts/tests/test_ci_reuse_policy.py'
               - 'scripts/tests/test_ci_test_reuse.py'
               - 'account-platform/**'
@@ -847,6 +849,8 @@ jobs:
               - 'scripts/tests/test_ci_transfer_deadline.py'
               - 'scripts/ci-test-reuse.py'
               - 'scripts/ci-reuse-policy.py'
+              - 'scripts/ci-job-inputs.py'
+              - 'scripts/tests/test_ci_job_inputs.py'
               - 'scripts/tests/test_ci_reuse_policy.py'
               - 'scripts/tests/test_ci_test_reuse.py'
               - 'scripts/tests/account-platform-invocation-environment.test.mjs'
