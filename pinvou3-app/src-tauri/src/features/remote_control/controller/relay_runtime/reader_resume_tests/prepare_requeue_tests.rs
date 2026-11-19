@@ -1,4 +1,4 @@
-//! Actual socket/worker regeneration after an unaccepted write or Legacy epoch.
+//! Strict terminal loss after a real unaccepted prepare write or Legacy close.
 use super::*;
 
 pub(super) async fn receive_prepare(socket: &mut Socket) -> Value {
@@ -26,15 +26,26 @@ pub(super) async fn receive_prepare(socket: &mut Socket) -> Value {
     .expect("successor socket did not receive regenerated prepare")
 }
 
-pub(super) async fn successor_socket(
+pub(super) async fn fault_ends_candidate(
     listener: &TcpListener,
-    relay: &RemoteControlManager,
     manager: &ControlledDeviceManager,
+    lane: &ControlledLaneState,
+    outbound: &ControlledOutboundState,
+    owned: &mut OwnedLane,
     completion: &mut tokio::sync::mpsc::Receiver<Value>,
     case: &str,
-) -> Socket {
-    let frozen = manager.watchdog_deadline_for_test();
+) {
+    let relay = owned.relay.clone();
+    let frozen = manager.watchdog_deadline_for_test().unwrap();
+    assert_eq!(
+        manager.resume_phase_for_test(),
+        Some(super::super::super::resume::ResumePhase::Prepared)
+    );
+    assert!(lane.is_installed() && lane.is_suspended());
+    assert!(frozen > controlled_monotonic_millis() + 3_000);
+    let observation = second_disconnect_tests::observe_terminal_loss(manager);
     if case == "prepare_write" {
+        assert!(relay.failed_prepare_digest_for_test().is_none());
         let mut failed = accept(listener).await;
         // No setup-ACK send races the deliberate close. The real client has
         // already written registration before opening controller authority.
@@ -60,7 +71,7 @@ pub(super) async fn successor_socket(
             }
         })
         .await
-        .expect("actual failed prepare write did not reconnect");
+        .expect("actual failed prepare writer did not close its socket");
         assert!(
             relay.failed_prepare_digest_for_test().is_some(),
             "fault must hit the real prepared-frame writer"
@@ -76,6 +87,12 @@ pub(super) async fn successor_socket(
         registered(&mut legacy).await;
         let connected = json!({"type":"desktop_relay_connection", "endpoint_id":relay.controller_endpoint_id().unwrap(), "connected":true, "error":null});
         processed(completion, &connected).await;
+        assert_eq!(manager.watchdog_deadline_for_test(), Some(frozen));
+        assert_eq!(
+            manager.resume_phase_for_test(),
+            Some(super::super::super::resume::ResumePhase::Prepared)
+        );
+        assert!(lane.is_installed() && lane.is_suspended());
         // The worker has finished handling connectivity. A Ping/Pong read
         // barrier also drains already queued outgoing frames before success.
         let marker = vec![17, 72];
@@ -101,12 +118,24 @@ pub(super) async fn successor_socket(
         .expect("Legacy traffic barrier failed");
         legacy.close(None).await.unwrap();
     }
-    assert_eq!(
-        manager.resume_phase_for_test(),
-        Some(super::super::super::resume::ResumePhase::Prepared)
-    );
-    assert_eq!(manager.watchdog_deadline_for_test(), frozen);
-    let mut successor = accept(listener).await;
-    registered(&mut successor).await;
-    successor
+    // Keep the join window strictly before the original watchdog cutoff.
+    assert!(frozen > controlled_monotonic_millis() + 3_000);
+    // The actual fault/close has now produced the second owned false.
+    // Reuse the existing real-worker/key/outbound/single-cleanup assertions;
+    // no cleanup callback in this fixture mutates product state.
+    second_disconnect_tests::assert_terminal_loss(manager, lane, outbound, owned, &observation)
+        .await;
+
+    // Only after the old candidate is terminal may a new intent bind. Exercise
+    // the real reader/channel, not just a successful allocation, on its socket.
+    let next = manager.start(None, Vec::new()).unwrap();
+    let mut next_channel = relay
+        .start_controller_relay(next.generation())
+        .await
+        .unwrap();
+    let mut next_socket = lifecycle_registered(listener).await;
+    assert_lifecycle_route(&mut next_socket, &mut next_channel).await;
+    drop(next_channel);
+    manager.stop();
+    next_socket.close(None).await.unwrap();
 }
