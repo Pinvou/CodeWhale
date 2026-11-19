@@ -34,6 +34,8 @@ Windows Schannel 的证书链补全、OCSP 和 CRL 查询有独立的系统/用�
 
 部署前保存旧脚本和服务属性，使用独立空闲 loopback 端口验证新实现；只对本次拥有的规则进行连接切换，不刷新宿主机/Docker 网络规则，不新建浏览器可见网卡。保留旧连接直至排空；若需要维护切换，记录准确时段，避免把由维护造成的断连计作原始故障。失败时恢复原脚本及本次规则，既有服务身份、Runner 数量和配额不变。
 
+切换前检查 systemd 的双向依赖。Runner 若通过 `Requires=` 依赖代理，显式 `systemctl restart` 会传播停止事务并重启 Runner；即使当前代理连接只剩 Listener，也不能据此认定切换无影响。支持 `RestartMode=direct` 的主机应先用独立测试服务验证自动恢复不会停掉依赖者，再配合原有自动重启策略执行进程级切换；此模式不保护显式的服务停止/重启事务。前后核对全部 Runner 容器的启动时间、数量及配额，不能只看服务已恢复或 PID 变化。已中断的任务应通过实际 Runner 断联记录单独登记及补跑，不能归因给原网络问题。
+
 ## 验证
 
 运行网络策略守卫、`scripts/tests/ci-artifact-*.test.cjs` 和 `test_ci_{download,https,egress_proxy,apt_prepare,network_environment}.py`，以及 frontend bundle、结果复用、发布契约回归。Linux shell/符号链接契约在 Linux 验证；Windows 原生传输通过实际工作流验证。对照保留同一来源、TLS 策略、冷/暖下载耗时、哈希与服务器代理阶段日志，不能以一次重跑绿灯代替根因证据。
