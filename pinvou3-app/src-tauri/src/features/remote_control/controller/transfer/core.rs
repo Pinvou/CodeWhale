@@ -12,8 +12,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::limits::{
-    MAX_FILE_NAME_CHARS, MAX_MIME_CHARS, MAX_TRANSFER_BYTES, MAX_TRANSFER_CHUNKS,
-    MAX_TRANSFER_ID_CHARS, TransferLimits,
+    MAX_FILE_NAME_CHARS, MAX_MIME_CHARS, MAX_TRANSFER_CHUNKS, MAX_TRANSFER_ID_CHARS, TransferLimits,
 };
 use crate::features::remote_control::controller::protocol::LeaseContext;
 
@@ -748,6 +747,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::limits::MAX_TRANSFER_BYTES;
     use super::*;
 
     fn context(generation: &str) -> LeaseContext {
@@ -893,10 +893,7 @@ mod tests {
             ..metadata("huge.bin", b"x")
         };
         assert_eq!(
-            registry
-                .begin(context, oversized, 1_000)
-                .unwrap_err()
-                .code,
+            registry.begin(context, oversized, 1_000).unwrap_err().code,
             "transfer_size_invalid"
         );
         let small = vec![0u8; 1024];

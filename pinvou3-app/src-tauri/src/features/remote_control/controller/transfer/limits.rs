@@ -89,7 +89,10 @@ mod tests {
         let limits = TransferLimits::default();
         // 与宿主摄入预算同源：共享核心不得窄于 host staging 放行的单文件上限
         // （community PR #894 把该预算提到 50 MiB），也不得宽于 64 MiB 连接总量。
-        assert_eq!(limits.max_transfer_bytes, crate::features::files::file_ingest::MAX_FILE_BYTES);
+        assert_eq!(
+            limits.max_transfer_bytes,
+            crate::features::files::file_ingest::MAX_FILE_BYTES
+        );
         assert_eq!(limits.max_connection_bytes, 64 * 1024 * 1024);
         assert_eq!(limits.max_in_flight, 4);
         assert_eq!(limits.chunk_bytes, MAX_TRANSFER_CHUNK_BYTES);
