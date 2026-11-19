@@ -2856,7 +2856,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_main_fixture(schema_leftover_phase="owner-schema")
         self.assertEqual(self.fixture_writes, [])
-        self.assertEqual(self.fixture_phases, ["owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema"])
+        self.assertEqual(self.fixture_phases, ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema"])
 
 if __name__ == "__main__":
     unittest.main()
