@@ -445,8 +445,28 @@ function assertWorkflowFailurePolicy(workflowText) {
       "            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json",
       "            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json",
       "            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json",
+      "            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json",
       "          if-no-files-found: warn",
       "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
+    const receipt = namedStep(jobBlock("relay-test", text), "保留 Relay 进程作用域原始回执");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: 保留 Relay 进程作用域原始回执",
+      "        if: always()",
+      "        continue-on-error: true",
+      "        timeout-minutes: 3",
+      "        uses: actions/upload-artifact@v7",
+      "        with:",
+      "          name: relay-process-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/",
+      "          retention-days: 7",
+      "          if-no-files-found: warn",
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
@@ -516,6 +536,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     ["windows-rust-test", "Windows atomic lifecycle receipts"],
     ["windows-relay-tools-test", "Preserve Windows relay tools process receipt"],
     ["release-contract-test", "Preserve Windows release contract process receipts"],
+    ["relay-test", "保留 Relay 进程作用域原始回执"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,
@@ -561,7 +582,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   ]) mutants.push(original.replace(releaseReceipt, releaseReceipt.replace(old, replacement)));
   mutants.push(original.replace(releaseReceipt, releaseReceipt + releaseReceipt));
   const withoutReleaseExemption = original.replace(releaseReceipt, releaseReceipt.replace("        continue-on-error: true\n", ""));
-  for (const name of ["Windows 原生命令退出码回归", "Windows 远控发布与安全契约"]) {
+  for (const name of ["Windows 原生命令退出码回归", "Windows 远控发布与安全契约", "Windows 共享进程监督器兼容回归"]) {
     const mandatory = namedStep(jobBlock("release-contract-test", original), name);
     for (const variant of [original, withoutReleaseExemption]) {
       mutants.push(variant.replace(mandatory, mandatory.replace("      - name: " + name + "\n", "      - name: " + name + "\n        continue-on-error: true\n")));

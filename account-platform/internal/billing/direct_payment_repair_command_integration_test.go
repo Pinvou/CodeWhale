@@ -275,11 +275,38 @@ func TestDirectPaymentRepairCommandReceiptPostgres(t *testing.T) {
 			t.Fatal("independent command identity did not recover", err)
 		}
 	})
+	t.Run("pre-admission-fixture-rejects-current-schema", func(t *testing.T) {
+		r, ctx := retainedFinanceRepository(t)
+		c, order, provider := directRepairFixture(t, r, ctx)
+		before := directRepairFacts(t, r, ctx)
+		tx, err := r.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		if _, _, err := c.mergePreAdmissionFixturePayment(ctx, tx, order, "QUERY", "forbidden-modern-legacy-seed", nil, provider.result, false, r.now()); !errors.Is(err, errPreAdmissionFixtureSchema) {
+			t.Fatal("historical seed model accepted the current schema", err)
+		}
+		if err := tx.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.repairPreAdmissionFixtureOrder(ctx, order.ID, uuid.New(), "forbidden modern legacy repair", "forbidden-modern-legacy-repair"); !errors.Is(err, errPreAdmissionFixtureSchema) {
+			t.Fatal("historical repair model accepted the current schema", err)
+		}
+		if directRepairFacts(t, r, ctx) != before {
+			t.Fatal("rejected historical fixture changed current financial facts")
+		}
+	})
 	t.Run("runtime-immutable-command-and-exact-prefix-down", func(t *testing.T) {
 		r, ctx := retainedFinanceRepository(t, 900031)
 		c, order, historicalProvider := directRepairHistoricalFixtureBefore900046(t, r, ctx)
 		actor, reason, key := uuid.New(), "controlled retained direct command", "direct-down-"+uuid.NewString()
-		originalReceipt, err := c.RepairReviewedOrder(ctx, order.ID, actor, reason, key)
+		// Main's payment-credit era made the modern repair entry consult
+		// payment_credit_attempts, which does not exist at this exact prefix;
+		// the frozen pre-admission repair flow is the credit-era-compatible
+		// writer for the same immutable command, and the full-schema replay
+		// below exercises the modern entry through readDirectPaymentRepair.
+		originalReceipt, err := c.repairPreAdmissionFixtureOrder(ctx, order.ID, actor, reason, key)
 		if err != nil {
 			t.Fatal(err)
 		}

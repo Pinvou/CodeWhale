@@ -954,7 +954,7 @@ func instructionCreateFixture(t *testing.T, r *PostgresRepository, ctx context.C
 		t.Fatal(err)
 	}
 	provider := &instructionCreateProvider{retainedFinancialProvider: &retainedFinancialProvider{}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
