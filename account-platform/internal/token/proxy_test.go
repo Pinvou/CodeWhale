@@ -46,6 +46,11 @@ func (r *streamRepositoryFake) GetUsage(context.Context, uuid.UUID) (UsageReques
 	return UsageRequest{DeliveryStatus: "DELIVERING"}, nil
 }
 
+func (r *streamRepositoryFake) GetUsageStreamState(ctx context.Context, id uuid.UUID) (UsageStreamState, error) {
+	usage, err := r.GetUsage(ctx, id)
+	return UsageStreamState{Status: usage.Status, DeliveryStatus: usage.DeliveryStatus}, err
+}
+
 func (r *streamRepositoryFake) MarkDelivery(_ context.Context, _ uuid.UUID, status string) error {
 	r.deliveries = append(r.deliveries, status)
 	return nil
