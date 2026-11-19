@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import react from '@vitejs/plugin-react';
-import { createServer } from './helpers/vite-fixture.mjs';
+import { createServer, prepareFixtureModules } from './helpers/vite-fixture.mjs';
 import * as puppeteer from './helpers/puppeteer-fixture.mjs';
 import { accountAuthCopy, accountPlatformCopy } from '../src/shared/i18n.js';
 
@@ -13,6 +13,7 @@ const server = await createServer({ root, configFile: false, plugins: [react()],
 let browser, cases = 0;
 try {
   await server.listen();
+  await prepareFixtureModules(server, ['/@vite/client', '/tests/fixtures/account-auth-ui.jsx']);
   browser = await puppeteer.launch({ executablePath: chrome, headless: true, args: ['--disable-gpu', '--no-first-run', '--no-sandbox'] });
   const page = await browser.newPage(); page.setDefaultTimeout(12000);
   const errors = []; page.on('pageerror', error => errors.push(error.message));

@@ -241,6 +241,15 @@ function pinvouSharedweb() {
     artifactChange: { seq: 0, path: "", event: "", sessionId: "", at: 0 },
     // 多 session 并发:每个 session 是否正在生成 { session_id: bool }，会话列表显示「工作中」转圈
     sessionBusy: {},
+    // Sessions with a compaction in flight, { session_id: set-at epoch ms }.
+    // chat:compaction start sets it and done/fail/cancel clears it; the main
+    // lane's compact entry disables off it (the same mechanism as the code
+    // lane's lane.compacting). Outside the working set (not among
+    // saveWorkingSetTo's explicit fields), so session swaps don't touch it;
+    // session deletion/eviction clears it together with turnUsageDirty.
+    compactingSessions: {},
+    compactionStarts: {},
+    compactionSeq: 0,
     // 排队式输入:当前 session 生成中时积压的待发消息 [{ id, text, displayText, attachments }]
     queued: [],
     // 输入框待发附件 [{ id, basename, status:'parsing'|'ready'|'error', result, error }]
@@ -468,7 +477,10 @@ function pinvouSharedweb() {
       sessionModelStale: id => `The model selected for this conversation is no longer available (missing saved model: ${id}). Please pick a model again in this conversation.`,
       modelSelectionRequired: "No model is selected yet. Pick a model in model settings before sending.",
       attachStillUploading: "⚠️ Attachment still uploading, try again shortly",
-      deviceUploadTooLarge: name => `⚠️ ${name} exceeds the 20 MB attachment limit`,
+      deviceUploadTooLarge: name => `⚠️ ${name} exceeds the 50 MB attachment limit`,
+      deviceUploadCacheFull: "⚠️ Upload buffer is full: a large attachment is still uploading. Wait for it to finish, then retry",
+      deviceParsedTooLarge: "⚠️ The parsed attachment exceeds the 32 MB remote-desktop cache limit and cannot be added",
+      deviceCacheFull: "⚠️ Too many attachments are cached on the remote desktop. Remove one, then retry",
       archiveTooManyEntries: "the archive contains more than 50 entries and cannot be attached",
       archiveExpandedTooLarge: "the archive expands beyond 100 MB and cannot be attached",
       archiveUnsafeEntry: "the archive contains unsafe links or paths and cannot be attached",
@@ -615,7 +627,10 @@ function pinvouSharedweb() {
       sessionModelStale: id => `この会話で選択したモデルの設定は無効になりました（見つからない設定: ${id}）。会話でモデルを選び直してください。`,
       modelSelectionRequired: "モデルがまだ選択されていません。送信する前にモデル設定でモデルを選んでください。",
       attachStillUploading: "⚠️ 添付ファイルをアップロード中です。少し待ってから送信してください",
-      deviceUploadTooLarge: name => `⚠️ ${name} は添付の上限 20 MB を超えています`,
+      deviceUploadTooLarge: name => `⚠️ ${name} は添付の上限 50 MB を超えています`,
+      deviceUploadCacheFull: "⚠️ アップロードバッファがいっぱいです：別の大きな添付ファイルをアップロード中です。完了してから再試行してください",
+      deviceParsedTooLarge: "⚠️ 解析後の添付ファイルがリモートデスクトップのキャッシュ上限 32 MB を超えているため追加できません",
+      deviceCacheFull: "⚠️ リモートデスクトップの添付キャッシュがいっぱいです。1つ削除してから再試行してください",
       archiveTooManyEntries: "アーカイブに 50 個を超える項目が含まれているため添付できません",
       archiveExpandedTooLarge: "アーカイブの展開後サイズが 100 MB を超えるため添付できません",
       archiveUnsafeEntry: "アーカイブに安全でないリンクまたはパスが含まれているため添付できません",
@@ -762,7 +777,10 @@ function pinvouSharedweb() {
       sessionModelStale: id => `当前会话选择的模型配置已失效（缺失配置：${id}），请在对话中重新选择模型。`,
       modelSelectionRequired: "尚未选择模型。请先在模型设置中选择模型后再发送。",
       attachStillUploading: "⚠️ 附件还在上传,请稍后再发",
-      deviceUploadTooLarge: name => `⚠️ ${name} 超过附件 20 MB 上限`,
+      deviceUploadTooLarge: name => `⚠️ ${name} 超过附件 50 MB 上限`,
+      deviceUploadCacheFull: "⚠️ 上传缓存已满：另一批大附件还在上传，请等待其完成后再试",
+      deviceParsedTooLarge: "⚠️ 解析后的附件超过远程桌面缓存上限 32 MB，无法添加",
+      deviceCacheFull: "⚠️ 远程桌面附件缓存已满，请移除一个附件后重试",
       archiveTooManyEntries: "压缩包包含超过 50 个条目，无法添加",
       archiveExpandedTooLarge: "压缩包解压后超过 100 MB，无法添加",
       archiveUnsafeEntry: "压缩包包含不安全的链接或路径，无法添加",
@@ -1058,6 +1076,8 @@ function isProtectedScheduledBuffer(id, buf) { return pinvouSharedweb().isProtec
       cancelStreamTimers(id);
       delete sessionStates[id];
       delete turnUsageDirty[id];
+      delete state.compactingSessions[id];
+      delete state.compactionStarts[id];
       // personaPlaceholderTitles is lightweight session metadata (the marker
       // for placeholder titles that auto-rename may override); rehydration
       // never restores it, so capacity eviction must keep it and only real
@@ -1101,6 +1121,8 @@ function touchSessionBuffer(id, buf, scheduled) { return pinvouSharedweb().touch
       cancelStreamTimers(id);
       delete sessionStates[id];
       delete turnUsageDirty[id];
+      delete state.compactingSessions[id];
+      delete state.compactionStarts[id];
       // personaPlaceholderTitles survives capacity eviction (see the
       // comment at the scheduled eviction site); only purgeSessionBuffer
       // (real deletion) cleans it.
@@ -1118,6 +1140,8 @@ function touchSessionBuffer(id, buf, scheduled) { return pinvouSharedweb().touch
     // Real session deletion: any stashed draft is invalidated too and must not flow back into a rebuilt buffer with the same id.
     delete evictedSessionDrafts[id];
     delete turnUsageDirty[id];
+    delete state.compactingSessions[id];
+    delete state.compactionStarts[id];
     delete personaPlaceholderTitles[id];
     delete scheduledRunSessionOwners[id];
     // The scene-events localStorage key is cleaned together with session deletion, avoiding unbounded accumulation across historical sessions.
@@ -5210,6 +5234,7 @@ function presentArtifactAbsPath(toolResultContent, fallbackPath) { return pinvou
     }
   }); });
 
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- 终态分支（start/prune-done/rewrite-done/fail/cancel）本就贴着 30 上限；r7 M2 的计数基线重置以单个条件位并入 done 腿（与 tauri 车道逐字同文，bridge-messages 计数器原语旁），内聚高于拆分
   listen("chat:compaction", function (e) { onSessionEvent(e, function () {
     if (e.payload && e.payload.session_id) turnUsageDirty[e.payload.session_id] = true; // 压缩轮 usage 含摘要请求
     var phase = e.payload && e.payload.phase;
@@ -5226,11 +5251,69 @@ function presentArtifactAbsPath(toolResultContent, fallbackPath) { return pinvou
       before === after &&
       looksLikePruneOnly &&
       msg.indexOf("Emergency compaction") !== 0;
+    // The compaction in-flight marker: start sets it, a terminal
+    // (done/fail/cancel) clears it, and the main lane's compact entry
+    // disables off it (the same mechanism as the code lane's
+    // lane.compacting). start stores a timestamp: the terminal event may
+    // never arrive (evicting the engine aborts its forwarder — see the
+    // reclaim_engine_entry comment in engine_pool.rs; a desktop restart on
+    // the web side loses it the same way), so the read side heals after 15
+    // minutes, the same fallback as Rust's MAX_COMPACTION_LATCH_AGE, and
+    // the entry is not disabled forever. The fallback reads the wall clock
+    // (Date.now), not a Rust-side monotonic Instant: a clock jump or resume
+    // from sleep re-enables early, and a compaction running past 15 minutes
+    // re-enables the entry before the engine finishes — the cost of a
+    // duplicate enqueue equals the Rust latch expiring (pool.compact_now
+    // does not coalesce enqueues), which is accepted; no extra
+    // monotonic-clock alignment machinery is introduced for it.
+    // The post_tokens carried by done is a post-compaction usage estimate
+    // (the forwarder gained it to refresh the usage bar; the Rust side
+    // computes it as a conservative estimated_input_tokens). The compaction
+    // turn already set turnUsageDirty, so subsequent usage accumulations
+    // are untrustworthy and the usage bar can only be refreshed by this
+    // post_tokens — it must not be swallowed by the dirty semantics.
+    const sid = e.payload && e.payload.session_id;
+    // The compactionStarts signal is persistent BY DESIGN: it survives the
+    // terminal and prune-only merges, so the UI can reconcile a manual
+    // compact marker whose start and terminal coalesced before any render
+    // (review 5874108926 follow-up) — cleared with the session.
+    // The compactionStarts signal carries the bridge's monotonic
+    // compaction sequence (NOT a wall-clock time — review 5876783763:
+    // timestamp ordering of persistent events breaks on
+    // same-millisecond collisions and clock rollbacks). It survives
+    // the terminal and prune-only merges, so the UI can reconcile a
+    // manual compact marker whose start and terminal coalesced before
+    // any render (review 5874108926 follow-up) — cleared with the
+    // session.
+    if (sid) {
+      if (phase === "start") {
+        state.compactingSessions[sid] = Date.now();
+        state.compactionSeq = (state.compactionSeq || 0) + 1;
+        state.compactionStarts[sid] = state.compactionSeq;
+      } else delete state.compactingSessions[sid];
+      notify();
+    }
     if (phase === "start") addSystemItem(bt("compactStart") + auto + " " + msg, { compactId: compactId, compactPhase: "start" });
     else if (phase === "done" && pruneOnlyAuto) addOrMergePruneCompaction(compactId);
     else if (phase === "done") addSystemItem(bt("compactDone") + auto + " " + msg);
     else if (phase === "fail") addSystemItem(bt("compactFail") + auto + ": " + msg);
     else if (phase === "cancel") addSystemItem(bt("compactCancel") + auto + (msg ? ": " + msg : ""), { compactId, compactPhase: "cancel" });
+    if (phase === "done") {
+      // <context_update> 计数基线在真重写（after < before）后重置（r7 M2）：
+      // 压缩把旧漂移增量从磁盘转写里摘除，而客户端气泡仍携带压缩前的
+      // 老 vintage——不重置的话权威重同步会被老消费量钳在 0（序号整体
+      // 低计）。实现与 prune-only 语义见 bridge-messages 的
+      // healRuntimeContextUpdatesVintageAfterCompaction；返回是否有改动。
+      const sid = e.payload && e.payload.session_id; // 来源 #836 以 payload 绑定会话
+      if (sid && window.PinvouBridgeMessages?.healRuntimeContextUpdatesVintageAfterCompaction?.(getBuffer(sid), state.chatItems, before, after)) {
+        notify();
+      }
+      const postTokens = Number(e.payload && e.payload.post_tokens);
+      if (Number.isFinite(postTokens) && postTokens > 0 && postTokens <= state.tokens.max) {
+        state.tokens = { input: postTokens, max: state.tokens.max };
+        notify();
+      }
+    }
   }); });
 
   // chat:tool_gate_decision 是 Web lane 的 never-emitted 事件（不在
@@ -5622,11 +5705,24 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
   // {id,name,preset,context_window_tokens,max_output_tokens,reasoning_effort,model,base_url,api_key,credential_action,provider_kind,vendor,endpoint_mode,auth_mode,image_capability_override,vision_model_id,alias}
   // （round-7 review：这 17 个是保存载荷的字段集——credential_ref /
   // credential_state / has_secret 由后端按 credential_action 派生，前端不发送。）
- async function saveModel(model) {
+ async function saveModel(model, options) {
+
+   // options.deferRefresh (round-1 review M9, same semantics as the tauri
+   // lane): the batch add-all loop skips the per-row reload tail and the
+   // caller refreshes once via reloadSavedModels(). Default keeps the
+   // save-then-refresh chain single-row callers rely on.
    await invoke("save_model", { model: model });
+   if (options && options.deferRefresh) return;
    await loadModels();
    await loadEffectiveModelConfig();
  }
+// Post-batch refresh twin of saveModel's reload tail (round-1 review M9):
+// the web save chain reloads models + effective config, so the batch refresh
+// runs exactly those two loaders once for the whole confirmed add-all batch.
+async function reloadSavedModels() {
+  await loadModels();
+  await loadEffectiveModelConfig();
+}
 async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKey(id); }
  async function deleteModel(id) {
    await invoke("delete_model", { id: id });
@@ -5721,6 +5817,9 @@ async function testModelConnection(baseUrl, apiKey, modelId, noAuth) { return pi
   // 测试图片输入能力(设计 §7.3):用当前表单的 model/base_url/key 发一张内置纯色图,
   // 仅由模型编辑弹窗主动点击触发,无任何启动/定时自动测试。
 async function testImageInputCapability(model, baseUrl, apiKey, modelId, noAuth) { return pinvouSharedweb().testImageInputCapability(model, baseUrl, apiKey, modelId, noAuth); }
+// 端点模型自动发现(冻结契约 §2.5):probe_endpoint_models。失败必须 reject
+// 穿透(web 白名单未放行/老桌面),由 SettingsView 归一为三语提示。
+async function probeEndpointModels(request) { return pinvouSharedweb().probeEndpointModels(request); }
   async function probeLocalServerKind(baseUrl, apiKey, modelId, noAuth) {
     // 本地/内网 OpenAI 兼容端点的服务类型探测（vllm/ollama/lmstudio/generic）。
     // Rust 侧按 base_url TTL 缓存；命令失败（web 白名单不含该命令/老版本桌面）
@@ -6571,7 +6670,14 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
       var result = await invoke(IS_WEB ? "web_access_ingest_file" : "ingest_file", { path: path });
       att.status = "ready"; att.result = result;
       finishAttachmentTelemetry(att, true);
-    } catch (e) { att.status = "error"; att.error = String(e); finishAttachmentTelemetry(att, false, attachmentErrorCategory(e)); }
+    } catch (e) {
+      // Limit failures (oversize, parsed-result cache overflow) arrive as
+      // stable wire codes; map them so the chip shows localized copy
+      // instead of raw single-language desktop text.
+      const limitError = attachmentLimitDisplayError(e, att.basename);
+      att.status = "error"; att.error = limitError ? limitError.code : String(e);
+      finishAttachmentTelemetry(att, false, attachmentErrorCategory(e));
+    }
     notify();
   }
 
@@ -6579,6 +6685,12 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
     const raw = String(error && error.message ? error.message : error);
     if ((error && error.code === "device_upload_too_large") || raw === "attachment_file_too_large") {
       return { code: "attachment_file_too_large", message: bt("deviceUploadTooLarge")(fileName) };
+    }
+    if (raw === "web_attachment_parsed_cache_too_large") {
+      return { code: raw, message: bt("deviceParsedTooLarge") };
+    }
+    if (raw === "web_attachment_cache_full") {
+      return { code: raw, message: bt("deviceCacheFull") };
     }
     if (raw === "attachment_archive_too_many_entries") {
       return { code: raw, message: bt("archiveTooManyEntries") };
@@ -6597,16 +6709,18 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
     if (limitError) return limitError;
     const rawUploadError = String(error && error.message ? error.message : error);
     if (error && error.code === "device_upload_empty") {
-      const message = bt("deviceUploadEmpty")(fileName);
-      return { code: message, message };
+      // Store the stable wire code on the chip too — the localized sentence
+      // is rendered from bt() where needed, never frozen into the code field.
+      return { code: error.code, message: bt("deviceUploadEmpty")(fileName) };
     }
     if (rawUploadError === "web_attachment_digest_invalid") {
-      const message = bt("deviceUploadDigestInvalid");
-      return { code: message, message };
+      return { code: rawUploadError, message: bt("deviceUploadDigestInvalid") };
     }
     if (rawUploadError === "web_attachment_integrity_mismatch") {
-      const message = bt("deviceUploadIntegrityMismatch");
-      return { code: message, message };
+      return { code: rawUploadError, message: bt("deviceUploadIntegrityMismatch") };
+    }
+    if (rawUploadError === "web_attachment_upload_cache_full") {
+      return { code: rawUploadError, message: bt("deviceUploadCacheFull") };
     }
     return { code: rawUploadError, message: rawUploadError };
   }
@@ -7902,12 +8016,14 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     loadEffectiveModelConfig: loadEffectiveModelConfig,
    loadModels: loadModels,
    saveModel: saveModel,
+   reloadSavedModels: reloadSavedModels,
    revealModelApiKey: revealModelApiKey,
    deleteModel: deleteModel,
    deleteModelIfStoreLink: deleteModelIfStoreLink,
    deleteModelIfMatches: deleteModelIfMatches,
     getImageInputCapability: getImageInputCapability,
     testImageInputCapability: testImageInputCapability,
+    probeEndpointModels: probeEndpointModels,
     setActiveModel: setActiveModel,
     loadSessionModel: loadSessionModel,
     switchModel: switchModel,
