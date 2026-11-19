@@ -119,7 +119,7 @@ function ReconciliationList({ load, copy, routeVersion, onQueryChange, onOpen, h
       { key: 'q', label: copy.caseSearch, placeholder: copy.identifierPlaceholder },
       { key: 'status', label: copy.status, options: ['OPEN', 'RESOLVED', 'LONG_TERM_PLAN'] },
       { key: 'severity', label: copy.severity, options: ['P0', 'P1', 'P2'] },
-      { key: 'case_type', label: copy.caseType, options: ['USAGE_RECONCILIATION_REVIEW'] },
+      { key: 'case_type', label: copy.caseType, options: ['USAGE_RECONCILIATION_REVIEW', 'MODEL_EMERGENCY_CANCELLATION_REVIEW'] },
       { key: 'owner_id', label: copy.ownerID },
       { key: 'sla_overdue', label: copy.slaOverdue, options: ['true', 'false'] },
     ]} />

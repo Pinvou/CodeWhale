@@ -2023,6 +2023,13 @@ function emitPersonaAt(atOrAfter, isTail) { return pinvouSharedtauriMainN99856()
           return (t.indexOf("<turn_meta>") === 0 && t.endsWith("</turn_meta>")) || t === "<turn_meta_unchanged />";
         })) uitem2.steeredMidTurn = true;
       },
+      // <context_update> 运行时消息重放后的尾随计数回种（投影层不产生
+      // turn 但后端 era 口径计边界，见 bridge-shared-helpers 的计数说明）：
+      // 回种到会话 buffer，composer 下一气泡据此随气泡下发。
+      setRuntimeContextUpdatesPending: function (count) {
+        const buffer = getBuffer(state.activeSessionId);
+        if (buffer) buffer.runtimeContextUpdatesPending = count;
+      },
       carefulBlockedItem: function (c, tm, blockedMd) {
         return { type: "careful_blocked", args: tm.args, metadata: blockedMd, time: "" };
       },
@@ -2228,6 +2235,9 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var discoverLocalVllm = settingsFeature.discoverLocalVllm;
   var loadModels = settingsFeature.loadModels;
   var saveModel = settingsFeature.saveModel;
+  // Batch add-all post-loop refresh (round-1 review M9): one reload burst for
+  // up to 100 deferred saves instead of three loaders per row.
+  var reloadSavedModels = settingsFeature.reloadSavedModels;
   var revealModelApiKey = settingsFeature.revealModelApiKey;
   var deleteModel = settingsFeature.deleteModel;
   var deleteModelIfStoreLink = settingsFeature.deleteModelIfStoreLink;
@@ -2238,6 +2248,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var testModelConnection = settingsFeature.testModelConnection;
   var getImageInputCapability = settingsFeature.getImageInputCapability;
   var testImageInputCapability = settingsFeature.testImageInputCapability;
+  var probeEndpointModels = settingsFeature.probeEndpointModels;
   var probeLocalServerKind = settingsFeature.probeLocalServerKind;
   var testSearchProvider = settingsFeature.testSearchProvider;
   // Dedicated global-shortcut command (update_settings is never used);
@@ -2809,6 +2820,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       loadEffectiveModelConfig: loadEffectiveModelConfig,
       loadModels: loadModels,
       saveModel: saveModel,
+      reloadSavedModels: reloadSavedModels,
       revealModelApiKey: revealModelApiKey,
       deleteModel: deleteModel,
       deleteModelIfStoreLink: deleteModelIfStoreLink,
@@ -2820,6 +2832,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       testModelConnection: testModelConnection,
       getImageInputCapability: getImageInputCapability,
       testImageInputCapability: testImageInputCapability,
+      probeEndpointModels: probeEndpointModels,
       probeLocalServerKind: probeLocalServerKind,
     },
     interaction: { toggleSuperPerm: toggleSuperPerm,
