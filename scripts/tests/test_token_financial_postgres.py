@@ -588,9 +588,12 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_token_public_upgrade_phase_requires_retained_cleanup_and_publication_stages(self):
         root = "TestManagementPublicMigrationInstallation"
         self.assertEqual(RUNNER.TOKEN_SCHEMA_REQUIRED, {root})
+        self.assertIn("installed-published-42-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
         self.assertIn("installed-pre-dispatch-index-40-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
         self.assertIn("installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip", RUNNER.EXACT_REQUIRED_CHILDREN[root])
         self.assertIn("installed-pre-publication-41-upgrade", RUNNER.EXACT_REQUIRED_CHILDREN[root])
+        self.assertIn("installed-published-42-upgrade/retry-forward-only-public-prefix", RUNNER.EXACT_REQUIRED_CHILDREN[root])
+        self.assertIn("installed-pre-emergency-retry-40-upgrade/retry-forward-only-public-prefix", RUNNER.EXACT_REQUIRED_CHILDREN[root])
         self.run_main_fixture()
         index = self.fixture_phases.index("owner-token-schema")
         command = self.fixture_commands[index]
@@ -659,6 +662,11 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
 
     def test_model_terminal_observation_requires_all_windows_and_negative_probes(self):
         required = {
+            "TestEmergencyCancellationDurableRetryPostgres": {
+                "failure-backoff-and-manual-case", "expired-claim-and-stale-result",
+                "late-financial-review-is-independent", "settlement-does-not-close-emergency-case",
+                "unstarted-tail-does-not-spend-budget",
+            },
             "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
             "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
             "TestModelTerminalObservationPreservesExpiryProofPostgres": {
@@ -2349,6 +2357,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                 "TestCredentialFailurePersistenceBoundariesPostgres",
                 "TestCredentialRotationWindowReceiptPostgres",
                 "TestEmergencyCancellationClaimOwnershipPostgres",
+                "TestEmergencyCancellationDurableRetryPostgres",
                 "TestEmergencyCancellationRequestLocksClaimPostgres",
                 "TestGovernanceUsageResourcePrechecksPostgres",
                 "TestHoldAcknowledgementSurvivesDispatchPersistenceFailurePostgres",
