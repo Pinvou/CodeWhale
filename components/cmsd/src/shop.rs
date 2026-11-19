@@ -239,6 +239,32 @@ impl StoreClient {
         Ok(())
     }
 
+    /// Persist an exact-ID tombstone only after the receiver proves it is idle.
+    pub fn abandon_missing(
+        &self,
+        run_id: &str,
+        card: &str,
+        kind: &str,
+        created_at: u64,
+    ) -> Result<(), StoreErr> {
+        if !crate::store::safe_store_id(run_id)
+            || !crate::store::safe_store_id(card)
+            || !["download", "install_local"].contains(&kind)
+        {
+            return Err(StoreErr::Protocol("invalid lost-task reference".into()));
+        }
+        let body = serde_json::json!({"confirm":true,"card_id":card,"kind":kind,"original_created_at":created_at}).to_string();
+        let (status, text) =
+            self.request("POST", &format!("/v1/tasks/{run_id}/abandon"), Some(&body))?;
+        let value = self.parse_json(status, &text)?;
+        if value.get("run_id").and_then(Value::as_str) != Some(run_id)
+            || value.get("status").and_then(Value::as_str) != Some("cancelled")
+        {
+            return Err(StoreErr::Protocol("lost-task confirmation mismatch".into()));
+        }
+        Ok(())
+    }
+
     fn parse_json(&self, status: u16, text: &str) -> Result<Value, StoreErr> {
         let v =
             Value::parse(text).map_err(|e| StoreErr::Protocol(format!("应答不是 JSON：{e}")))?;

@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { invokeTauri, tauriEvents, listenManualModelSelection } from '../../platform/tauri/client.js';
+import { invokeTauri } from '../../platform/tauri/client.js';
 import { fetchCmsModels, fetchCmsStatus, fetchCmsTask } from './cms-api.js';
-import { createCmsdSwitchFollow } from './switch-follow.js';
 import { useCmsdTaskWatch } from './use-cmsd-tasks.js';
 import { mergeHandoffRecovery } from './handoff-recovery.js';
-import { publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput } from './runtime-task-events.js';
+import { publishRuntimeTask, runtimeTasksFromOutput } from './runtime-task-events.js';
 
 // Only current-fact confirmation. No operation, session choice or authority is
 // inferred from a historical task; explicit current selection can supersede it.
@@ -28,7 +27,7 @@ export function runtimeTaskState(task, value) {
   return targets.some(card => value.linked_runtime_pending.includes(card)) ? 'pending' : 'confirmed';
 }
 
-export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelStoreAvailable = false }) {
+export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, eventBuffer, modelStoreAvailable = false }) {
   const latest = useRef({ snapshot, copy, onNotice });
   latest.current = { snapshot, copy, onNotice };
   const follower = useRef(null);
@@ -68,7 +67,6 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
     const recover = () => { void follower.current?.recoverPending(); };
     const recoveryTimer = setInterval(recover, 3000);
     const runtimeCalls = new Map();
-    unlisten.push(subscribeRuntimeTasks(task => taskWatchRef.current?.observeAcceptedRuntimeTask(task)));
     const queued = [];
     const observeRuntimeTool = (method, payload) => {
       if (method === 'toolStarted' && /^(?:mcp_+megacube_admin_+)?cube_(?:start_model|get_task)$/.test(payload?.name || '')) {
@@ -92,20 +90,22 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
       if (follower.current) { void follower.current[method](payload, captured); }
       else if (queued.length < 50) queued.push([method, payload, captured]);
     };
-    for (const [event, method] of [['chat:tool_start', 'toolStarted'], ['chat:tool_end', 'toolEnded']]) {
-      void tauriEvents.listen(event, message => { observeRuntimeTool(method, message.payload); dispatch(method, message.payload); }).then(stop => {
-        if (disposed) stop(); else unlisten.push(stop);
-      }).catch(error => console.warn('[megacube] switch handoff listener unavailable', error));
-    }
-    unlisten.push(listenManualModelSelection(payload => dispatch('manualSelection', payload)));
-    void tauriEvents.listen('session:manual_model_selection', message =>
-      dispatch('manualSelection', { sessionId: message.payload?.session_id }))
-      .then(stop => { if (disposed) stop(); else unlisten.push(stop); })
-      .catch(error => console.warn('[megacube] manual selection listener unavailable', error));
+    unlisten.push(eventBuffer.subscribe((method, payload, captured) => {
+      if (method === 'runtimeTask') {
+        taskWatchRef.current?.observeAcceptedRuntimeTask(payload);
+        return;
+      }
+      observeRuntimeTool(method, payload);
+      dispatch(method, payload, captured);
+    }));
     const initialize = async () => {
       // The host key prevents WebKit/localStorage sharing between profiles or
       // different daemon endpoints from applying another profile's handoff.
-      const service = await invokeTauri('cms_service_status');
+      // Listeners and the bounded event queue above are installed before
+      // loading the rare handoff controller, preserving event-time snapshots.
+      const [service, { createCmsdSwitchFollow }] = await Promise.all([
+        invokeTauri('cms_service_status'), import('./switch-follow.js'),
+      ]);
       if (disposed) return;
       const key = /^[a-f0-9]{64}$/.test(service?.recoveryScope || '')
         ? `pinvou.cmsd.switch-follow.v1.${service.recoveryScope}` : null;
@@ -185,7 +185,7 @@ export function useCmsdSwitchFollow({ bridge, snapshot, copy, onNotice, modelSto
       for (const stop of unlisten) stop();
       follower.current?.dispose(); follower.current = null;
     };
-  }, [bridge]);
+  }, [bridge, eventBuffer]);
   const taskWatch = useCmsdTaskWatch({
     onRuntimeTasksSucceeded: async tasks => {
       const value = await refreshStoreRoutes({ fresh: true });

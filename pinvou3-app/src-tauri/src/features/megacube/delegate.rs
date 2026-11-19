@@ -167,7 +167,11 @@ fn wait_task(
 ) -> Result<(), String> {
     let mut seen_events = 0usize;
     loop {
+        if cancelled() {
+            return Err("已取消等待；设备任务状态仍待核实，未撤销设备侧操作".into());
+        }
         let task = client.task(task_id)?;
+        let status = observed_task_status(&task)?;
         let events = task
             .get("events")
             .and_then(|e| e.as_array())
@@ -179,10 +183,10 @@ fn wait_task(
             log(&format!("[cmsd] {stage}: {message}"));
         }
         seen_events = events.len();
-        match task.get("status").and_then(|s| s.as_str()) {
-            Some("succeeded") => return Ok(()),
-            Some("cancelled") => return Err("设备任务已取消".to_string()),
-            Some("failed") => {
+        match status {
+            "succeeded" => return Ok(()),
+            "cancelled" => return Err("设备任务已取消".to_string()),
+            "failed" => {
                 let error = task
                     .get("error")
                     .and_then(|e| e.as_str())
@@ -199,6 +203,31 @@ fn wait_task(
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
         }
+    }
+}
+
+/// A missing or malformed receipt is an unconfirmed outcome, never a
+/// running task. Keep ownership and the store record for later reconciliation.
+fn observed_task_status(task: &serde_json::Value) -> Result<&str, String> {
+    if task
+        .get("http_status")
+        .is_some_and(|code| code.as_u64() != Some(200))
+        || task
+            .get("error")
+            .is_some_and(|error| !error.is_null() && task["status"] != "failed")
+    {
+        return Err(
+            "cmsd_task_unconfirmed: 设备任务无法核实，请恢复设备服务后查看原任务；未重发操作"
+                .into(),
+        );
+    }
+    match task["status"].as_str() {
+        Some(
+            status @ ("queued" | "running" | "pending" | "succeeded" | "failed" | "cancelled"),
+        ) => Ok(status),
+        _ => Err(
+            "cmsd_task_unconfirmed: 设备任务回执缺失或状态未知；请核实原任务，未重发操作".into(),
+        ),
     }
 }
 
@@ -429,14 +458,29 @@ pub struct CmsdModelState {
 pub fn cmsd_states() -> Option<std::collections::BTreeMap<String, CmsdModelState>> {
     let client = Client::connect().ok()?;
     let value = client.models().ok()?;
+    cmsd_states_from_value(&value, &mut remember_ownership)
+}
+
+fn cmsd_states_from_value(
+    value: &serde_json::Value,
+    remember: &mut dyn FnMut(&str) -> Result<(), String>,
+) -> Option<std::collections::BTreeMap<String, CmsdModelState>> {
+    if value
+        .get("http_status")
+        .is_some_and(|code| code.as_u64() != Some(200))
+        || value.get("error").is_some_and(|error| !error.is_null())
+    {
+        return None;
+    }
     let models = value.get("models")?.as_array()?;
+    let bindings = super::client::store_bindings(value).ok()?;
     let mut out = std::collections::BTreeMap::new();
     for m in models {
         let Some(card) = m.get("card").and_then(|c| c.as_str()) else {
             continue;
         };
         if m.get("managed").and_then(|v| v.as_bool()) == Some(true) {
-            if remember_ownership(card).is_err() {
+            if remember(card).is_err() {
                 return None;
             }
         }
@@ -483,9 +527,9 @@ pub fn cmsd_states() -> Option<std::collections::BTreeMap<String, CmsdModelState
         );
     }
     let physical = out.clone();
-    for (logical, runtime) in super::client::store_bindings(&value).ok()? {
+    for (logical, runtime) in bindings {
         let state = physical.get(&runtime)?.clone();
-        if state.managed && remember_ownership(&logical).is_err() {
+        if state.managed && remember(&logical).is_err() {
             return None;
         }
         out.insert(logical, state);
@@ -496,6 +540,54 @@ pub fn cmsd_states() -> Option<std::collections::BTreeMap<String, CmsdModelState
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_and_error_task_receipts_do_not_keep_waiting() {
+        for task in [
+            serde_json::json!({"http_status":404,"error":{"code":"unknown_task"}}),
+            serde_json::json!({"status":"running","http_status":503}),
+            serde_json::json!({}),
+            serde_json::json!({"status":"unknown"}),
+        ] {
+            assert!(
+                observed_task_status(&task)
+                    .unwrap_err()
+                    .starts_with("cmsd_task_unconfirmed:")
+            );
+        }
+        assert_eq!(
+            observed_task_status(&serde_json::json!({"status":"failed","error":"reason"})).unwrap(),
+            "failed"
+        );
+        assert_eq!(
+            observed_task_status(&serde_json::json!({"status":"running"})).unwrap(),
+            "running"
+        );
+    }
+
+    #[test]
+    fn state_mapping_uses_ownership_and_rejects_unconfirmed_observations() {
+        let value = serde_json::json!({"models":[{"card":"physical","managed":true,"status":"running"}],"store_bindings":{"logical":"physical"}});
+        let mut remembered = Vec::new();
+        assert!(
+            cmsd_states_from_value(&value, &mut |id| {
+                remembered.push(id.to_owned());
+                Ok(())
+            })
+            .is_some()
+        );
+        assert_eq!(remembered, ["physical", "logical"]);
+        assert!(cmsd_states_from_value(&value, &mut |_| Err("disk full".into())).is_none());
+        for error in [
+            serde_json::json!({"models":[],"http_status":503}),
+            serde_json::json!({"models":[],"error":"invalid"}),
+        ] {
+            assert!(
+                cmsd_states_from_value(&error, &mut |_| panic!("must not grant ownership"))
+                    .is_none()
+            );
+        }
+    }
 
     #[test]
     fn specific_card_connections_require_a_confirmed_nonempty_model_identity() {
@@ -565,54 +657,7 @@ mod tests {
                 "status": "stopped"
             }]
         });
-        // 抽出纯判定逻辑单测（不连真 socket）：直接对 Value 跑映射
-        let models = value.get("models").unwrap().as_array().unwrap();
-        let mut out = std::collections::BTreeMap::new();
-        for m in models {
-            let card = m.get("card").and_then(|c| c.as_str()).unwrap();
-            let status = m
-                .get("status")
-                .and_then(|s| s.as_str())
-                .unwrap_or("stopped")
-                .to_string();
-            let degraded_reason = m
-                .get("degraded_reason")
-                .and_then(|r| r.as_str())
-                .map(|s| s.to_string());
-            out.insert(
-                card.to_string(),
-                CmsdModelState {
-                    managed: true,
-                    can_adopt: false,
-                    can_reserve_uninstall: true,
-                    model_id: m
-                        .get("model_id")
-                        .and_then(|x| x.as_str())
-                        .map(|s| s.to_string()),
-                    degraded: status == "degraded" || degraded_reason.is_some(),
-                    status,
-                    degraded_reason: m
-                        .get("degraded_reason")
-                        .and_then(|r| r.as_str())
-                        .map(|s| s.to_string()),
-                    healthy: m.get("healthy").and_then(|h| h.as_bool()),
-                    restart_count: m.get("restart_count").and_then(|r| r.as_u64()).unwrap_or(0),
-                    port: m.get("port").and_then(|p| p.as_u64()).map(|p| p as u16),
-                    measured_footprint_gib: m
-                        .get("measured_footprint_gib")
-                        .and_then(|f| f.as_f64()),
-                    max_model_len: m.get("max_model_len").and_then(|l| l.as_u64()),
-                    deployment_revision: m
-                        .get("deployment_revision")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_owned),
-                    version_id: m
-                        .get("version_id")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_owned),
-                },
-            );
-        }
+        let out = cmsd_states_from_value(&value, &mut |_| Ok(())).unwrap();
         let ornith = &out["ornith15-35b-a3b-nvfp4"];
         assert_eq!(ornith.status, "running");
         assert_eq!(ornith.healthy, Some(true));

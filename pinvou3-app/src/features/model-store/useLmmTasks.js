@@ -181,6 +181,15 @@ async function drainRun(runId, { onChunk, isAlive, replayLimit = null }) {
       await delay(POLL_RETRY_MS);
       continue;
     }
+    const retainedFrom = Number(chunk?.retained_from);
+    if (chunk?.history_truncated === true && Number.isSafeInteger(retainedFrom)
+      && retainedFrom > cursor && Number(chunk?.from) === retainedFrom) {
+      // The server explicitly retired this prefix. Start a fresh fragment at
+      // its absolute cursor rather than joining it onto an evicted line.
+      cursor = retainedFrom;
+      fromByte = 0;
+      partialLine = null;
+    }
     const next = Number(chunk?.next ?? cursor);
     const nextByte = Number(chunk?.next_byte ?? 0);
     let lines = chunk?.lines || [];
@@ -211,7 +220,7 @@ async function drainRun(runId, { onChunk, isAlive, replayLimit = null }) {
     }
     // A past prompt from a backlog page cannot be the current input request.
     onChunk(lines, { awaitingInput: more ? false : chunk?.awaiting_input,
-      backendPending: chunk?.backend_pending === true, unconfirmed: chunk?.unconfirmed === true });
+      backendPending: chunk?.backend_pending === true, unconfirmed: chunk?.unconfirmed === true, historyTruncated: chunk?.history_truncated === true });
     if (chunk?.done && !more && !partialLine) {
       // Legacy servers can take the line snapshot before publishing outcome.
       // New servers snapshot outcome first and expose total, so all terminal
@@ -257,9 +266,9 @@ function pumpRun(id, runId, { replayLimit = null } = {}) {
     // 几十 GB 的下载失去进度和取消入口。用户在面板上关掉任务卡才算真的不要了。
     isAlive: () => taskList.some((task) => task.id === id),
     onChunk: (lines, meta) => {
-      if (lines.length === 0 && !meta?.backendPending && !meta?.unconfirmed && !findTask(id)?.backendPending && !findTask(id)?.unconfirmed) return;
+      if (lines.length === 0 && !meta?.historyTruncated && !meta?.backendPending && !meta?.unconfirmed && !findTask(id)?.backendPending && !findTask(id)?.unconfirmed) return;
       patch(id, (task) => {
-        const next = { ...(lines.length ? reduceLogChunk(task, lines, Date.now()) : task), backendPending: meta?.backendPending === true, unconfirmed: meta?.unconfirmed === true };
+        const next = { ...(lines.length ? reduceLogChunk(task, lines, Date.now()) : task), historyTruncated: task.historyTruncated || meta?.historyTruncated === true, backendPending: meta?.backendPending === true, unconfirmed: meta?.unconfirmed === true };
         // 服务端说现在没人在等输入,那日志里这条提示就是**上一轮已经答过的**。
         // 回放时再弹一次不只是多点一下:用户填的答案会写进一个没人来取的应答槽,
         // 等脚本下一次真的提问时被这份陈答案顶掉(双机部署里那就是拿旧 IP 去连

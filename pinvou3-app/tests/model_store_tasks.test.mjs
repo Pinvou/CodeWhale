@@ -447,3 +447,21 @@ test('UTF-8和NUL超长行片段按byte游标无损重组，不冒充新行或�
   assert.deepEqual(outcome, { ok: false, error: 'original failure' });
   assert.deepEqual(taskByRunId('run-fragments').lines, [original, 'last line']);
 });
+
+test('retired log prefixes restart absolute fragment cursors and show retention state', async () => {
+  const calls = [];
+  scripts.set('retained-tail', (from, byte) => {
+    calls.push([from, byte]);
+    if (byte === 0) return { lines: [], from: 100, retained_from: 100, history_truncated: true,
+      next: 100, next_byte: 3, total: 101, fragment: { line: 100, offset: 0, text: '猫', complete: false },
+      done: true, ok: false, error: 'original failure' };
+    return { lines: [], from: 100, retained_from: 100, history_truncated: true,
+      next: 101, next_byte: 0, total: 101, fragment: { line: 100, offset: 3, text: '尾', complete: true },
+      done: true, ok: false, error: 'original failure' };
+  });
+  const result = await runTask({ title: 'retained', kind: 'download', key: 'retained', start: async () => ({ run_id: 'retained-tail' }) });
+  assert.equal(result.error, 'original failure');
+  assert.deepEqual(calls, [[0, 0], [100, 3]]);
+  assert.deepEqual(taskByRunId('retained-tail').lines, ['猫尾']);
+  assert.equal(taskByRunId('retained-tail').historyTruncated, true);
+});

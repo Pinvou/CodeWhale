@@ -1,5 +1,6 @@
 /** Same-webview/profile notifications of known enable task IDs; no control authority. */
-const listeners = new Set();
+import { emitRuntimeTask } from './runtime-task-bus.js';
+export { subscribeRuntimeTasks } from './runtime-task-bus.js';
 const id = value => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(value) && !['.', '..'].includes(value);
 export function normalizeRuntimeTask(value, fallback = {}) {
   if (!value || value.observation === 'unconfirmed' || (value.error && typeof value.error === 'object')) return null;
@@ -14,11 +15,7 @@ export function normalizeRuntimeTask(value, fallback = {}) {
 export function publishRuntimeTask(value, fallback) {
   const task = normalizeRuntimeTask(value, fallback);
   if (!task) return;
-  for (const listener of listeners) listener(task);
-}
-export function subscribeRuntimeTasks(listener) {
-  listeners.add(listener);
-  return () => listeners.delete(listener);
+  emitRuntimeTask(task);
 }
 export function runtimeTasksFromOutput(output, fallback = {}, depth = 0) {
   try {

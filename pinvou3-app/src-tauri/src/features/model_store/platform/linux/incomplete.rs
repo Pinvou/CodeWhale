@@ -42,7 +42,7 @@ impl Context {
     }
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct Receipt {
     card_id: String,
     kind: String,
@@ -89,6 +89,44 @@ fn read(id: &str) -> Result<Receipt, String> {
     Ok(receipt)
 }
 
+/// Cache parsed summaries by descriptor identity and change timestamps. Exact
+/// retry authorization always calls read() again, so this cache grants no rights.
+type ReceiptStamp = (u64, u64, u64, i64, i64, i64, i64);
+type ReceiptCache = BTreeMap<std::path::PathBuf, (ReceiptStamp, Receipt)>;
+static RECEIPT_CACHE: std::sync::LazyLock<parking_lot::Mutex<ReceiptCache>> =
+    std::sync::LazyLock::new(Default::default);
+fn cached_receipt(id: &str) -> Result<Receipt, String> {
+    safe_id(id)?;
+    let path = config::data_dir().join("runs").join(format!("{id}.json"));
+    let meta = std::fs::symlink_metadata(&path).map_err(|_| "installation_record_unavailable")?;
+    // SAFETY: geteuid only reads the effective process identity.
+    let uid = unsafe { libc::geteuid() };
+    if !meta.is_file() || meta.uid() != uid || meta.nlink() != 1 || meta.mode() & 0o077 != 0 {
+        return Err("installation_record_untrusted".into());
+    }
+    let stamp = (
+        meta.dev(),
+        meta.ino(),
+        meta.len(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+        meta.ctime(),
+        meta.ctime_nsec(),
+    );
+    if let Some((saved, receipt)) = RECEIPT_CACHE.lock().get(&path) {
+        if saved == &stamp {
+            return Ok(receipt.clone());
+        }
+    }
+    let receipt = read(id)?;
+    let mut cache = RECEIPT_CACHE.lock();
+    if cache.len() >= 4096 {
+        cache.clear();
+    }
+    cache.insert(path, (stamp, receipt.clone()));
+    Ok(receipt)
+}
+
 fn latest() -> Result<BTreeMap<String, (String, Receipt)>, String> {
     latest_excluding(None, None)
 }
@@ -116,7 +154,11 @@ fn latest_excluding(
         if accepted_run == Some(id) {
             continue;
         }
-        let receipt = read(id)?;
+        let receipt = if card_id.is_none() {
+            cached_receipt(id)?
+        } else {
+            read(id)?
+        };
         if card_id.is_some_and(|card| card != receipt.card_id) {
             continue;
         }

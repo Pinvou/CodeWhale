@@ -281,7 +281,7 @@ test('换胎选择：无标记时按 网关+真名 > 别名存量 > 裸名字 �
 test('接入行显示名：驭光卡带引擎标签，认不出引擎就不贴', () => {
   assert.equal(
     cmsdCardRowName('qwen38-27b-nvfp4-tachyon', 'Qwen3.8-27B-NVFP4'),
-    'Qwen3.8-27B-NVFP4 (驭光)');
+    'Qwen3.8-27B-NVFP4 (Tachyon)');
   assert.equal(cmsdCardRowName('ornith15-35b-a3b-nvfp4', 'Ornith-1.5-35B-A3B-NVFP4'),
     'Ornith-1.5-35B-A3B-NVFP4', '无引擎尾缀不硬贴');
   assert.equal(cmsdCardRowName('somecard', ''), 'somecard', 'modelId 缺失退回卡名');

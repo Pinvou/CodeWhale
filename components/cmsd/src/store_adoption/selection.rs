@@ -204,8 +204,65 @@ fn parse(value: &serde_json::Value) -> Result<Snapshot, String> {
     Ok(snapshot)
 }
 
+type Stamp = (u64, u64, u64, i64, i64, i64, i64, u32);
+#[derive(Default)]
+pub struct Cache(std::sync::Mutex<Option<(Stamp, Snapshot)>>);
+fn stamp(path: &Path) -> Result<Stamp, String> {
+    for ancestor in path.ancestors() {
+        if std::fs::symlink_metadata(ancestor).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err("linked_store_record".into());
+        }
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    let meta = file.metadata().map_err(|error| error.to_string())?;
+    if !meta.is_file()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.len() > LIMIT
+        || meta.mode() & 0o002 != 0
+        || (meta.mode() & 0o020 != 0 && meta.gid() != unsafe { libc::getegid() })
+    {
+        return Err("untrusted_store_record".into());
+    }
+    Ok((
+        meta.dev(),
+        meta.ino(),
+        meta.len(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+        meta.ctime(),
+        meta.ctime_nsec(),
+        meta.mode(),
+    ))
+}
+
 pub fn cached(app: &App) -> Result<Snapshot, String> {
     let path = app.config.state_dir.join("store-selection.json");
+    if let Ok(current) = stamp(&path) {
+        let mut cache = app
+            .selection_cache
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((saved, snapshot)) = &*cache {
+            if saved == &current {
+                return Ok(snapshot.clone());
+            }
+        }
+        let raw = trusted_file(&path, LIMIT)?;
+        let snapshot =
+            parse(&serde_json::from_slice(&raw).map_err(|_| "invalid_store_selection")?)?;
+        if stamp(&path)? != current {
+            return Err("store_selection_changed_during_read".into());
+        }
+        *cache = Some((current, snapshot.clone()));
+        return Ok(snapshot);
+    }
+    // Inaccessible, deleted, linked or re-permissioned entries cannot use an
+    // earlier snapshot; retain the original fail-closed absence policy.
     match trusted_file(&path, LIMIT) {
         Ok(raw) => parse(&serde_json::from_slice(&raw).map_err(|_| "invalid_store_selection")?),
         Err(_)

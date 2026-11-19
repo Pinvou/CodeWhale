@@ -169,11 +169,7 @@ const expectedProtocolHashes = {
   // Recomputed for the permission onboarding row: the new
   // computer_use_permission_status invoke (settings permissionStatus) joins
   // the domain's call set.
-  // 回流 community PR pinvou-agent#826：domain 新增 computer_use_set_virtual_display_preference
-  // invoke（设置页"优先使用隔离的虚拟显示器"开关；仅桌面端，与其余命令一样不在 web
-  // 访问策略 allowlist 上）。hash 由合并树实际运行本测试读回（actual 值，与来源 PR
-  // 记录一致）后写回。
-  computerUse: '6e06e71458a8f8e347e83abda1fc39cd04ecbf80c78168abf43f3d8873cf0d75',
+  computerUse: 'e0f4aadbba8ab68e1dd54f9ab172680657958d548e3c3da50a489931cf525388',
   // Recomputed for #308 follow-ups: prefillComposer(text, append) recovery
   // entry + comment translations touching `invoke(` mentions (the extractor
   // scans raw source, so comment wording is part of the digest). Recomputed

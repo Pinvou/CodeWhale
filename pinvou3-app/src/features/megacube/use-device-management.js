@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { canInvoke, onPlatformConnectionChange } from '../../shared/platform.js';
 import { invokeTauri, isTauriAvailable } from '../../platform/tauri/client.js';
-import { fetchCmsDeviceStatus } from './cms-api.js';
 import { INITIAL_DEVICE_MANAGEMENT, deviceManagementState } from './device-management-state.js';
 
 /** Shared by a window's navigation and page, including when onboarding is dismissed. */
@@ -19,7 +18,7 @@ export function useDeviceManagement({ enabled = true } = {}) {
         ? invokeTauri(command) : Promise.resolve({ supported: false });
       const [device, ...capabilities] = await Promise.allSettled([
         isTauriAvailable() && canInvoke('cms_device_status')
-          ? fetchCmsDeviceStatus(true) : Promise.resolve({ supported: false }),
+          ? import('./cms-api.js').then(api => api.fetchCmsDeviceStatus(true)) : Promise.resolve({ supported: false }),
         ...commands.map(query),
       ]);
       if (alive && ticket === generation) {

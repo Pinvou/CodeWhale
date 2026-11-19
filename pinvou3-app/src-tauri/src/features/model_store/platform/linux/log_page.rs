@@ -1,4 +1,5 @@
-//! Bounded log observations. Disk receipts retain the complete original lines.
+//! Bounded log observations with absolute cursors. Service retention may evict
+//! old lines; immutable task identity/outcome remains in the disk receipt.
 //! `next` is an absolute line cursor; `next_byte` continues one oversized line.
 use serde::{Deserialize, Serialize};
 

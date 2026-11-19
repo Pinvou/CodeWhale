@@ -494,6 +494,31 @@ fn route(req: &Request, service: &Arc<ModelStoreService>, test_mode: bool) -> Re
         ("POST", "/v1/install_local") => handle_install(req, service, test_mode, true),
         ("POST", "/v1/retry_install") => handle_retry_install(req, service),
         ("GET", "/v1/tasks") => handle_tasks(service),
+        ("POST", p) if p.starts_with("/v1/tasks/") && p.ends_with("/abandon") => {
+            let id = &p["/v1/tasks/".len()..p.len() - "/abandon".len()];
+            let body: Value = match serde_json::from_slice(&req.body) {
+                Ok(body) => body,
+                Err(_) => {
+                    return error_response(400, "bad_request", "需要明确确认与原卡片/任务类型");
+                }
+            };
+            if body["confirm"] != true {
+                return error_response(
+                    400,
+                    "confirmation_required",
+                    "需要确认放弃失踪任务的等待，保留现有文件",
+                );
+            }
+            match service.abandon_missing_run(
+                id,
+                body["card_id"].as_str().unwrap_or(""),
+                body["kind"].as_str().unwrap_or(""),
+                body["original_created_at"].as_u64().unwrap_or(0),
+            ) {
+                Ok(()) => ok_response(json!({"run_id":id,"status":"cancelled"})),
+                Err(error) => error_response(409, "abandon_unconfirmed", &error),
+            }
+        }
         ("POST", p) if p.starts_with("/v1/tasks/") && p.ends_with("/cancel") => {
             let id = &p["/v1/tasks/".len()..p.len() - "/cancel".len()];
             handle_cancel(service, id)

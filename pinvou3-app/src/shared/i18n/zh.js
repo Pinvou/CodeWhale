@@ -1,14 +1,12 @@
+import { CMS_MODEL_GUIDANCE_COPY } from './cms-model-guidance.js';
+import { CMS_LAYOUT_COPY } from './cms-layout.js';
+import { MEGACUBE_OWNERSHIP_COPY } from './megacube-ownership.js';
+import { CMSD_SERVICE_COPY } from './cmsd-service.js';
 import { trayLabels } from './tray/zh.js';
 // 中文 UI 词典。自启动预算拆分(round-41)起 zh 与 en/ja 一致走惰性装载
 // (ensureLanguage('zh'));各入口经 ensureLanguageWithZhFallback 在首选语言
 // 装载失败时以 zh 兜底。en/ja 对 zh 全部叶子 key 的覆盖由
 // tests/ui_language_coverage.test.mjs 强制(parity 断言)。
-import { CMS_MODEL_GUIDANCE_COPY } from './cms-model-guidance.js';
-import { CMS_LAYOUT_COPY } from './cms-layout.js';
-import { MEGACUBE_OWNERSHIP_COPY } from './megacube-ownership.js';
-import { CMSD_SERVICE_COPY } from './cmsd-service.js';
-// 中文 UI 词典。zh 全量内嵌:启动即用,不经 ensureLanguage。en/ja 对 zh 全部
-// 叶子 key 的覆盖由 tests/ui_language_coverage.test.mjs 强制(parity 断言)。
 // 维护约定:新增 key 三处同步;ja 以 en 兜底(i18n/ja.js 内 spread)。
 // i18n.js 聚合 shim 与 Node 契约测试(ui_language_coverage)静态 import 全部三语,拆分仅影响浏览器 chunk。
 
@@ -201,7 +199,6 @@ export const dictZh = {
         langTag: 'zh',
         acpAgent: 'ACP Agent',
         deviceMgr: '设备管理',
-        newChat: '新对话', currentChat: '当前对话', searchChats: '搜索对话', scheduledPlans: '定时任务', monitor: '运行状态', workflow: '工作流', multiAgent: '蜂群模式', multiAgentDesktopOnly: '此蜂群对话当前仅在桌面端可用。', toolStore: '插件中心', modelStore: '模型商店', cardPool: '专家池', recent: '历史对话', pinnedTasks: '置顶任务', regularTasks: '任务', sidebarTaskList: '任务列表', sidebarTaskFilter: '筛选', sidebarTaskFilterAll: '全部', sidebarTaskFilterPinned: '置顶', sidebarTaskFilterCode: '项目', sidebarTaskFilterCodeSessions: '代码会话', sidebarTaskFilterScheduled: '定时任务', sidebarTaskSort: '排序', sidebarTaskSortPinnedFirst: '置顶优先', sidebarTaskSortRecent: '最近更新', sidebarTaskEmpty: '暂无任务', sidebarViewAll: '查看全部', sidebarSection: '任务列表', sidebarDateGrouping: '按日期折叠', sidebarDateGroupingDesc: '任务列表按日期分组，今天默认展开', chatSection: '对话', chatStreamingAnimation: '流式回复淡入', chatStreamingAnimationDesc: 'AI 回复流式输出时，新内容淡入显示',  sidebarNavExpand: '展开导航', sidebarNavCollapse: '收起导航', sidebarCollapseAll: '折叠', sidebarExpandAll: '展开', sidebarTaskStyle: '样式', sidebarResize: '拖拽调整边栏宽度，双击复位', settings: '设置', localEnv: '本地环境', megacubeSite: '打开 MegaCube 官网', tearoffTitle: '撕离窗口', tearoffHint: '弹出为独立窗口', mobileMore: '更多',        previewTaskDailyBrief: '每日早报', previewTaskFollowUp: '事项督办', previewTaskSalesWeekly: '销售线索周报',
         newChat: '新对话', currentChat: '当前对话', searchChats: '搜索对话', scheduledPlans: '定时任务', deviceManagement:'设备管理', monitor: '运行状态', workflow: '工作流', multiAgent: '蜂群模式', multiAgentDesktopOnly: '此蜂群对话当前仅在桌面端可用。', toolStore: '插件中心', modelStore: '模型商店', cardPool: '专家池', recent: '历史对话', pinnedTasks: '置顶任务', regularTasks: '任务', sidebarTaskList: '任务列表', sidebarTaskFilter: '筛选', sidebarTaskFilterAll: '全部', sidebarTaskFilterPinned: '置顶', sidebarTaskFilterCode: '项目', sidebarTaskFilterCodeSessions: '代码会话', sidebarTaskFilterScheduled: '定时任务', sidebarTaskSort: '排序', sidebarTaskSortPinnedFirst: '置顶优先', sidebarTaskSortRecent: '最近更新', sidebarTaskEmpty: '暂无任务', sidebarViewAll: '查看全部', sidebarSection: '任务列表', sidebarDateGrouping: '按日期折叠', sidebarDateGroupingDesc: '任务列表按日期分组，今天默认展开', chatSection: '对话', chatStreamingAnimation: '流式回复淡入', chatStreamingAnimationDesc: 'AI 回复流式输出时，新内容淡入显示',  sidebarNavExpand: '展开导航', sidebarNavCollapse: '收起导航', sidebarCollapseAll: '折叠', sidebarExpandAll: '展开', sidebarTaskStyle: '样式', sidebarResize: '拖拽调整边栏宽度，双击复位', settings: '设置', localEnv: '本地环境', megacubeSite: '打开 MegaCube 官网', tearoffTitle: '撕离窗口', tearoffHint: '弹出为独立窗口', mobileMore: '更多',        previewTaskDailyBrief: '每日早报', previewTaskFollowUp: '事项督办', previewTaskSalesWeekly: '销售线索周报',
         archiveSession: '收纳', archiveConfirmTitle: '确认收纳任务', archiveConfirmMessage: '将该任务移出任务列表，存入【对话管理-已收纳】，需要时可找回。', archiveConfirmDetail: '', archiveConfirmAction: '确认收纳',
         archiveSuccess: '已收纳到【对话管理-已收纳】', archiveSuccessView: '前往查看',
@@ -413,15 +410,6 @@ export const dictZh = {
         uiChatExtra: { transferRevision:type=>`Pinvou · ${type} · 转交修订`, draftingScheduled:'⏰ 正在整理定时任务草稿…' },
         expertPoolIndividualTab:'个人专家', expertPoolTeamTab:'专家团队',
         uiWorkflow: { pick:'选择一个工作流模板开始', empty:'没有可用的工作流（请检查工作流资源）', workflow:'工作流', stopFailed:e=>`停止工作流失败：${e}`, completed:'🎉 工作流完成' },
-
-
-        uiPetSettings: { choose:'选择公仔', placeholder:'开发占位', preparing:'正在准备动画', animationFailed:'动画加载失败', coverFailed:'封面加载失败', retry:'重试', pets:{ lingling:{name:'灵灵',description:'星纹卷尾，灵动相伴'}, langlang:{name:'浪浪',description:'黑衫眼镜，从容同行'}, 'ace-taffy':{name:'Ace Taffy',description:'粉发皇冠，元气应援'} } },
-        uiScheduled: { title:'定时任务', subtitle:'让 PINVOU 按计划自动完成重复工作', newTask:'新建任务', templates:'推荐模板', myTasks:'我的任务', loading:'正在读取定时任务…', empty:'没有匹配的定时任务', view:n=>`查看定时任务：${n}`, useTemplate:n=>`使用${n}模板`, running:'任务正在运行', unread:'有未查看的运行对话', navUnreadAria:'定时任务有未查看的运行对话', closeError:'关闭错误提示', deleteTitle:'删除定时任务？', deleteDescription:n=>`“${n}”将停止后续执行并从任务列表移除，之前的执行记录会保留。`, cancel:'取消', delete:'删除', save:'保存', filterAll:'全部', filterActive:'已开启', filterPaused:'已暂停', active:'活跃', paused:'已暂停', enabled:'已开启', unknown:'未知', notScheduled:'未安排', noSchedule:'暂无计划', waitingDispatch:'等待调度', soon:'即将执行', nextRun:(time,remaining)=>`下次 ${time}（${remaining}）`, date:(month,day)=>`${month}月${day}日 `, daysAfter:(days,hours)=>`${days}天${hours ? `${hours}小时` : ''}后`, hoursAfter:(hours,minutes)=>`${hours}小时${minutes ? `${minutes}分` : ''}后`, minutesAfter:(minutes,seconds)=>`${minutes}分${seconds}秒后`, secondsAfter:seconds=>`${seconds}秒后`, runStatus:{ queued:'等待中', running:'运行中', completed:'已完成', failed:'失败', canceled:'已取消' }, weekdays:[['星期一','周一'],['星期二','周二'],['星期三','周三'],['星期四','周四'],['星期五','周五'],['星期六','周六'],['星期日','周日']], hourCount:n=>`${n} 小时`, choose:'请选择', autoModel:'自动选择', currentModel:'当前模型', reselectModel:n=>`重新选择模型 · ${n}`, repeatOptions:{ workdays:'工作日', daily:'每天', weekly:'每周', hourly:'每小时', once:'一次性', custom:'自定义' }, everyHours:n=>`每 ${n} 小时`, startsAt:time=>`${time} 起`, repeat:'重复', interval:'间隔', dateLabel:'日期', startTime:'起始时间', time:'时间', chooseRepeat:'选择重复频率', chooseInterval:'选择小时间隔', chooseDate:'选择运行日期', chooseStartTime:'选择起始时间', chooseRunTime:'选择运行时间', setStart:'设置起点', createFromTemplate:'基于模板创建任务', closeCreate:'关闭新建任务', taskName:'任务名称', taskNamePlaceholder:'例如：每日数据备份', taskPrompt:'执行内容', taskPromptPlaceholder:'描述每次运行时需要完成的工作…', saveTask:'保存任务', editTask:'编辑任务', closeDetail:'关闭任务详情', taskNameAria:'定时任务名称', taskPromptAria:'定时任务说明', aiModel:'AI 模型', chooseModel:'选择定时任务模型', runningStatus:'运行状态', nextExecution:'下次执行', enableTask:'启用任务', runNow:'立即运行', openFolder:'打开文件夹', runHistory:'执行历史', records:n=>`${n} 条记录`, noRecords:'暂无记录', openRun:'打开运行会话', noOpenRun:'此运行记录还没有可打开的会话', openRunLabel:s=>`打开运行记录：${s}`, runInProgress:'运行正在进行', viewRunResult:'打开对应会话查看结果', noRunSession:'暂无可打开的会话', noRunHistory:'还没有运行记录', saveState:{ saving:'正在保存…', saved:'已保存', invalid:'名称和说明不能为空', error:'保存失败' }, pause:n=>`暂停${n}`, resume:n=>`恢复${n}`, templateMap:{ 'daily-brief':{name:'每日早报',schedule:'每天 8:00',description:'汇总重要新闻、行业动态和已连接办公系统中的公司公告',prompt:'整理过去 24 小时的重要新闻和行业动态，注明来源和链接；已连接飞书或企微时，补充公司公告。不要扫描用户目录，结果保存到任务工作间。'}, 'follow-up-monitor':{name:'事项督办',schedule:'工作日 9:00',description:'整理逾期与临期事项，突出风险和建议下一步',prompt:'汇总已连接飞书或企微中的逾期、今日到期和未来 3 个工作日临期事项，按优先级给出风险与下一步。仅查询整理，不发送、审批或修改；不要扫描用户目录。'}, 'weekly-review':{name:'工作周报',schedule:'星期五 16:00',description:'根据本周办公记录生成结构清晰的工作周报',prompt:'根据已连接飞书或企微中的本周日程、待办和办公消息生成工作周报，包含进展、遗留、风险和下周计划。不要扫描用户目录或自动发送。'}, 'memory-organize':{name:'记忆整理',schedule:'工作日 9:30',description:'定期整理长期记忆：合并重复、清理过时、修正表述',prompt:'定期整理我的长期记忆：合并重复条目，删除过时或失效的内容，修正含糊表述，让记忆保持简洁准确。此任务自动运行，无需打开对话；仅整理记忆，不发送消息，不做其他修改。'} }, noDeliveryTarget:'投递目标记录不可用', targetSession:'投递目标会话', deliveredTo:id=>`已投递到会话 ${id}`  },
-        uiChat: { installedReady:'已安装 · 首次提问时自动开启', welcomeOptInFailed:'工具开启失败，本次提问将暂无该工具；可稍后在输入框工具列表中重试', ready:'系统已就绪', sceneModes:{ personalWorkbench:'个人工作台', documentWriting:'公文写作', poster:'海报', dataVisualization:'数据可视化', pptDesign:'PPT设计', clear:label=>`取消${label}` }, askMe:'试试问我', naturalQuestion:'自然语言提问即可。', backRuns:'返回定时任务运行历史', scheduledRun:'定时任务运行', runRecords:'运行记录', asrUnavailable:'语音识别组件尚未安装，请先在桌面端完成安装后再试。', gotIt:'知道了', asrDownloadTitle:'下载语音识别模型', asrEnableTitle:'启用本地语音识别', asrRuntimeMissing:'本地语音识别运行时缺失，请修复或重新安装应用；仅缺模型时可在这里下载。', asrReadyNotice:'语音模型已就绪，点击麦克风开始录音', asrFirstUse:(size,ffmpeg)=>`首次使用需要下载语音识别模型（${size}${ffmpeg ? ' + ffmpeg' : ''}），模型与语音识别均在本地运行、不上传音频；启用智能整理后，识别文本（连同输入框现有草稿）会发送到你配置的模型服务进行纠错与整理。`, sizeModelOnly:'约 254MB', sizeFull:'约 174-254MB', asrStages:{ ffmpeg:'正在安装 ffmpeg（可能弹系统授权框）…', verify:'正在校验模型完整性…', cancelling:'正在取消下载…', done:'完成', cancelled:'已取消', failed:'下载失败，可重试', preparing:'准备中…' }, downloadingModel:p=>`正在下载模型 ${p}`, cancelling:'正在取消…', cancelDownload:'取消下载', cancel:'取消', repairInstall:'需要修复安装', downloadModel:'下载模型', install:'安装', designingCard:'🃏 正在设计卡牌…', recordedRecent:'已记录近期动态', viewMemory:'可在记忆中心查看', memoryUpdated:'记忆已更新', processed:'已处理', candidate:'记忆候选', remember:'记住', ignoreOnce:'这次忽略', neverAsk:'不再提示', memoryMeta:{ current_focus:{label:'当前关注',prompt:'我可以记住这个当前关注',hint:'以后我会用它理解你最近正在推进的工作。',notice:'后续对话会参考这个近期事项。'}, recent_activity:{label:'近期动态',prompt:'我可以记住这个近期动态',hint:'以后我会用它理解你刚完成的工作。',notice:'后续对话会参考这次完成的事情。'}, work_context:{label:'工作背景',prompt:'我可以记住这条工作背景',hint:'以后我会用它理解你的长期工作上下文。',notice:'后续对话会参考这条长期背景。'}, profile:{label:'称呼',prompt:'我可以记住这个称呼',hint:'以后我会按这个称呼和你交流。',notice:'后续对话会按这个称呼交流。'}, preference:{label:'偏好',prompt:'我可以记住这条偏好',hint:'以后我会按这个偏好调整回复方式。',notice:'后续对话会参考这条偏好。'} } },
-
-        uiChatExtra: { transferRevision:type=>`Pinvou · ${type} · 转交修订`, draftingScheduled:'⏰ 正在整理定时任务草稿…' },
-        expertPoolIndividualTab:'个人专家', expertPoolTeamTab:'专家团队',
-        uiWorkflow: { pick:'选择一个工作流模板开始', empty:'没有可用的工作流（请检查工作流资源）', workflow:'工作流', stopFailed:e=>`停止工作流失败：${e}`, completed:'🎉 工作流完成' },
         uiMegacube: { ...CMS_LAYOUT_COPY.zh, ...MEGACUBE_OWNERSHIP_COPY.zh, service:CMSD_SERVICE_COPY.zh, guidance:CMS_MODEL_GUIDANCE_COPY.zh, adoptNote:'仅发现，暂无启停权。接管并启用将交由设备服务管理，允许启停与默认切换，并登记自动启动。', adoptModel:'接管并启用', hideInactive:'收起已停止的外部容器', showInactive:n=>`查看 ${n} 个已停止的外部容器`, loading:'正在读取设备数据…', queryFailed:'查询失败，请刷新重试', taskContinueBackground:'转到后台，前往设备面板查看进度', offlineHelp:'设备服务失联，已暂停管理操作。恢复后台服务后可在此刷新；已有模型可能仍在运行。', partialError:'部分设备查询失败，缺失数据不代表资源不存在，请刷新重试。', startModel:'启用 / 恢复', stopModel:'停用', setDefault:'设为默认', stopWarning:'停用会中断该模型的会话并撤销自启。模型文件保留。', confirmStop:'确认停用', keepRunning:'保持运行', sectionTasks:'后台任务', noTasks:'暂无后台任务', cancelTask:'取消安装（保留断点）', taskStatus:{running:'进行中',succeeded:'已完成',failed:'失败 / 中断',cancelled:'已取消',cancelling:'取消中'},  taskSwitching:c=>`正在切换到 ${c}…`, taskBusyNote:'切换期间该模型服务可能暂不可用。成功后自动复用或登记目标模型，并在本轮生成结束后切换发起会话的模型；手动选择其他模型会保留你的选择。', taskElapsed:s=>`已用时 ${s} 秒`, taskDone:'已完成', taskFailedTitle:'操作失败', taskOk:'知道了', switchAutoSelected:n=>`已切换到 ${n}`, linkAutoSelected:n=>`已接入并切换到 ${n}`, linkAutoSelectFailed:'自动切换未完成，请在模型列表手动选择', sectionStatus:'管理面状态', daemon:'管理服务', online:'在线', uptime:'运行时长', uptimeHours:n=>`${n} 小时`, uptimeMinutes:n=>`${n} 分钟`, uptimeSeconds:n=>`${n} 秒`, gateway:'固定端点', activeModel:'设备默认模型', noActiveModel:'尚未设置默认模型', degradedBanner:(card,reason)=>`${card} 已降级：${reason}`, unavailable:'管理能力不可用', sectionModels:'模型', noModels:'暂无登记模型', port:'端口', residentMemory:'常驻内存实测', restarts:(n,time)=>`重启 ${n} 次（最近 ${time}）`, bootEnabled:'开机自启', activeTag:'默认', status:{ running:'运行中', starting:'启动中', stopped:'已停止', degraded:'已降级' }, sectionEngines:'引擎注册表', noEngines:'暂无登记引擎', engineIdle:'未在运行', sourceExternal:'外部资源（只读）', sourceManaged:'Cube Manage Software 托管', instanceGone:'进程已消失', sectionCapacity:'内存容量', memoryTotal:'总内存', memoryAvailable:'当前可用', safetyMargin:'安全边际', residentRow:card=>`${card} 常驻`, refresh:'刷新', lastRefresh:t=>`更新于 ${t}`, notRefreshed:'尚未刷新' },
         uiModelStore: {
           title:'模型商店', subtitle:'浏览、下载并在本机部署大模型。',
@@ -485,7 +473,6 @@ export const dictZh = {
           operationResultUnavailable:"结果未完整取得；释放空间和残留路径尚未核实。",
           operationResultSummarized:"部分说明文字已摘要；记录的释放空间和残留路径保持原值。",
           operationUninstallRemaining:"模型已卸载，以下路径仍保留，请核对后自行清理。",
-          versionCleanupTitle:"旧版清理结果", versionRemaining:"以下目录或其他文件仍保留；本次只删除了已确认归属的旧版权重。",
           versionInterrupted:"上次下载已中断，可以重试或清理已下载的文件。",
           versionUpgradeNextStep:"下载将使用额外磁盘空间。验证通过后，先停用当前模型，再到「历史版本」切换并启用新版。",
           versionUpgradeBlocked:"暂时无法安全下载新版。请先处理上方原因，再点「检查更新」重试；已保存的版本可通过「历史版本」管理。",
@@ -518,17 +505,11 @@ export const dictZh = {
           compatibilityLegacyUnverified:"按旧卡来源匹配，未验证权重；仍可更新卡片配置。",
           compatibilityFields:{"source_repo_id": "模型来源", "source_filename": "权重文件", "quantization": "量化标记", "size_bytes": "权重大小（字节）", "deploy_topology": "设备拓扑"},
           versionTitle:n=>`「${n}」的版本`, versionTask:n=>`管理「${n}」版本`, versionDeleted:n=>`所选版本已清理，实际释放 ${n.toFixed(2)} GiB。`, versionDeleteCancel:'取消', versionDeleteConfirm:(n,s)=>`删除「${n}」（登记权重 ${s}）的独立文件？删除后不可回退到此版本。共享资源不会删除。`,
-          versionStates:{"current": "当前版本", "ready": "已验证，可切换", "history": "历史版本", "downloading": "下载中", "failed": "下载失败，可清理", "deleting": "清理中，可重试"},
-          compatibilityReasons:{"versioning_unsupported":"当前升级流程需要新旧版本均有完整的单文件校验，且新版支持原生隔离部署；此布局暂不支持。","cached_recipe_integrity":"旧版离线配方校验失败，不能保证可靠回退。","missing_cached_recipe": "旧版离线卡片不完整，无法保证回退；请先修复旧版卡片。", "weight_manifest_integrity": "权重清单校验失败，不能据此复用或回退。", "invalid_weight_manifest": "权重清单格式无效。", "invalid_weight_path": "权重清单包含不安全的路径。", "duplicate_weight_path": "权重清单包含重复路径，无法唯一确认文件。", "filename_not_in_manifest": "卡片声明的文件名不在经校验的权重清单中。", "artifact_selection_changed": "新版改为选择清单中的另一份权重，不能直接复用当前部署。", "missing_weight_evidence": "缺少新旧权重的完整校验依据。"},
-          compatibilityKinds:{"compatible": "权重身份一致，可以更新卡片。", "weights_changed": "新版权重与当前版本不同，当前版本保留。", "unverified": "现有证据不足以确认权重可复用，当前部署已保留。", "topology_changed": "新版需要不同的设备拓扑，不能直接替换当前部署。", "unsupported": "此卡片不支持从该来源原地更新。"},
-          compatibilityFields:{"source_repo_id": "模型来源", "source_filename": "权重文件", "quantization": "量化标记", "size_bytes": "权重大小（字节）", "deploy_topology": "设备拓扑"},
-          versionTitle:n=>`「${n}」的版本`, versionTask:n=>`管理「${n}」版本`, versionDeleted:n=>`旧版已清理，实际释放 ${n.toFixed(2)} GiB。`, versionDeleteConfirm:(n,s)=>`删除「${n}」（登记权重 ${s}）的独立文件？删除后不可回退到此版本。共享资源不会删除。`,
           cardUpdateCheck:'检查更新', cardUpdateApply:'更新卡片',
           cardUpdateTitle:n=>`检查「${n}」的卡片更新`,
           cardUpdateChecking:'正在连接模型商店检查更新…',
           cardUpdateAvailable:'发现卡片更新', cardUpdateCurrent:'当前卡片已是最新版本。',
           cardUpdateInstalled:'当前引擎', cardUpdateLatest:'新版引擎',
-          cardUpdateInstalled:'本地引擎', cardUpdateLatest:'新版引擎',
           cardUpdateHint:'更新将联网下载并校验卡片配置，保留已有模型权重。更新后请重新部署，按需更新引擎和运行配置，再启用模型。由设备管理软件启动的模型，还需在该软件中同步部署配置。',
           cardUpdateStopFirst:'模型正在运行，请先停用，再更新卡片。',
           cardUpdatePendingBadge:'待重新部署',
@@ -670,6 +651,7 @@ export const dictZh = {
           sourceTest: '测试商店',
 incompleteTitle:'未完成的模型安装',
 taskBackendPending:'设备任务已接单，正在等待商店建立运行记录…',
+taskLogRetained:'当前显示保留的最近日志；较早的内容已清理，任务结果和恢复记录仍保留。',
 taskBackendUnconfirmed:'设备任务的最新状态暂时无法核实，正在重新查询…',
 taskCancelUnconfirmed:'取消请求尚未确认，任务状态仍在查询。',
 incompleteHint:'安装在写入模型库前失败。保留已有文件，先核对当前安装包与存储设置，再按原任务类型重试。这里不授予模型托管或删除权限。',
@@ -1093,11 +1075,7 @@ dictZh.uiBuiltinPlugins = {
   versionNote:'随应用升级',
   dataAccessLabel:'数据访问范围',
   levels:{ L0:'只读：不修改任何状态，内容标注为不可信', L1:'写入：会产生用户可见的副作用（如发消息、建任务）', L2:'破坏性：删除/覆盖等不可逆操作，需显式授权' },
-  dataAccess:{ 'sessions.read':'本机会话存储（只读）', 'sessions.write':'向本机其他会话发送消息或创建会话（写入）', 'automations.read':'本机定时任务列表（只读）', 'automations.write':'创建、修改、删除本机定时任务（写入）' },
-  dataAccess:{ 'sessions.read':'本机会话存储（只读）', 'sessions.write':'向本机其他会话发送消息（写入）' ,
-'models.manage':'本机模型服务（查询/启停/切换/下载安装）',
-'network.download':'联网下载（模型商店与 HuggingFace 镜像）',
-},
+  dataAccess:{ 'sessions.read':'本机会话存储（只读）', 'sessions.write':'向本机其他会话发送消息或创建会话（写入）', 'automations.read':'本机定时任务列表（只读）', 'automations.write':'创建、修改、删除本机定时任务（写入）' , 'models.manage':'本机模型服务（查询/启停/切换/下载安装）', 'network.download':'联网下载（模型商店与 HuggingFace 镜像）' },
 };
 
 // Shared copy for builtin-feature degradation (docs/builtin-toolset-contract.md

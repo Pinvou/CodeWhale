@@ -283,7 +283,7 @@ fn mirror_worker(app: &Arc<App>, task_id: &str, card: &str, run_id: &str) {
                     app.task_event(
                         task_id,
                         "reconnect",
-                        "商店暂未返回对应任务，安装状态待核实，继续保留原关联及互斥",
+                        "商店暂未返回对应任务，保留原关联及互斥；若记录已丢失，可确认后调用任务 abandon 管理接口，商店须核实无存活脚本才能释放",
                     );
                 }
                 offline_streak = offline_streak.saturating_add(1);
@@ -334,6 +334,70 @@ fn mirror_worker(app: &Arc<App>, task_id: &str, card: &str, run_id: &str) {
         }
         std::thread::sleep(Duration::from_millis(app.config.store_poll_ms.max(50)));
     }
+}
+
+/// Explicit administrative recovery; ordinary cancel never abandons uncertainty.
+/// The receiver fences late submissions with a durable exact-ID tombstone.
+pub fn abandon(app: &Arc<App>, task_id: &str, body: &[u8]) -> Result<Value, ApiErr> {
+    let confirm: serde_json::Value = serde_json::from_slice(body).map_err(|_| {
+        api_err(
+            400,
+            "confirmation_required",
+            "需要 confirm=true 确认放弃失踪任务等待",
+        )
+    })?;
+    if confirm["confirm"] != true {
+        return Err(api_err(
+            400,
+            "confirmation_required",
+            "需要 confirm=true；文件保留，未确认的后台写入会阻止操作",
+        ));
+    }
+    let (run_id, card, kind, created_at) = {
+        let store = app.store.lock().unwrap_or_else(|e| e.into_inner());
+        let task = store
+            .state
+            .tasks
+            .get(task_id)
+            .ok_or_else(|| api_err(404, "unknown_task", "没有此任务"))?;
+        if task.kind != "install" || task.status.is_terminal() {
+            return Err(api_err(
+                409,
+                "abandon_not_applicable",
+                "只可恢复尚未结束的委托安装",
+            ));
+        }
+        let run = task
+            .store_run_id
+            .clone()
+            .ok_or_else(|| api_err(409, "store_reference_missing", "原任务关联缺失"))?;
+        let kind = task
+            .store_context
+            .as_ref()
+            .map(|context| context.kind.clone())
+            .ok_or_else(|| api_err(409, "store_reference_missing", "原任务类型缺失"))?;
+        (run, task.card.clone(), kind, task.created_at)
+    };
+    let client = StoreClient::new(&app.config.store_socket_path);
+    match client.task(&run_id) {
+        Err(StoreErr::Http(404, _, _)) => {}
+        Ok(_) => {
+            return Err(api_err(
+                409,
+                "task_still_recorded",
+                "原任务仍有回执，请查询或取消原任务",
+            ))
+        }
+        Err(error) => return Err(map_store_err(error, false)),
+    }
+    client
+        .abandon_missing(&run_id, &card, &kind, created_at)
+        .map_err(|error| map_store_err(error, false))?;
+    app.task_cancel(task_id, "管理员确认放弃失踪任务等待；商店已确认无存活脚本并保留原 ID 拒绝重发；现有文件保留，请核对后重新安装");
+    let mut value = Value::obj();
+    value.set("task_id", task_id.into());
+    value.set("status", "cancelled".into());
+    Ok(value)
 }
 
 /// POST /v1/tasks/{id}/cancel：install 类转发商店 cancel；其余类型维持原拒绝语义。
@@ -488,6 +552,77 @@ mod tests {
             "test".to_string(),
         );
         Arc::new(App::new(cfg, store, systemd))
+    }
+
+    #[test]
+    fn lost_install_recovery_requires_confirmation_and_receiver_proof() {
+        use std::os::unix::net::UnixListener;
+        let root = tmpdir("lost-install-recovery");
+        let app = make_app(&root);
+        let task = app
+            .task_create_install_context(
+                "card-a",
+                Some(crate::store::StoreContext {
+                    kind: "download".into(),
+                    retry: None,
+                    cancel_requested: false,
+                }),
+            )
+            .unwrap();
+        let run = format!("cmsd-{task}");
+        assert_eq!(
+            abandon(&app, &task, b"{}").unwrap_err().1,
+            "confirmation_required"
+        );
+        assert!(app.task_create_install_context("card-b", None).is_err());
+        let listener = UnixListener::bind(&app.config.store_socket_path).unwrap();
+        let receiver = std::thread::spawn(move || {
+            for stage in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let req = crate::http::read_request(&mut std::io::BufReader::new(
+                    stream.try_clone().unwrap(),
+                ))
+                .unwrap()
+                .unwrap();
+                if stage == 0 {
+                    assert_eq!(req.method, "GET");
+                    assert_eq!(req.path, format!("/v1/tasks/{run}"));
+                    crate::http::write_response(
+                        &mut stream,
+                        "404 Not Found",
+                        "application/json",
+                        br#"{"error":{"code":"task_not_found","message":"missing"}}"#,
+                        &[],
+                    )
+                    .unwrap();
+                } else {
+                    assert_eq!(req.method, "POST");
+                    assert_eq!(req.path, format!("/v1/tasks/{run}/abandon"));
+                    let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                    assert_eq!(body["card_id"], "card-a");
+                    assert_eq!(body["kind"], "download");
+                    assert!(body["original_created_at"].as_u64().unwrap() > 0);
+                    let body = serde_json::json!({"run_id":run,"status":"cancelled"}).to_string();
+                    crate::http::write_response(
+                        &mut stream,
+                        "200 OK",
+                        "application/json",
+                        body.as_bytes(),
+                        &[],
+                    )
+                    .unwrap();
+                }
+            }
+        });
+        assert_eq!(
+            abandon(&app, &task, br#"{"confirm":true}"#)
+                .unwrap()
+                .get("status")
+                .and_then(Value::as_str),
+            Some("cancelled")
+        );
+        receiver.join().unwrap();
+        assert!(app.task_create_install_context("card-b", None).is_ok());
     }
 
     #[test]

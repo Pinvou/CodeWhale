@@ -140,6 +140,7 @@ fn route(app: &Arc<App>, req: &Request, writer: &mut UnixStream, caller: crate::
                 .map(|tid| task_accepted(&tid, "install", card))
         }
         ("POST", ["v1", "tasks", id, "cancel"]) => install::cancel(app, id),
+        ("POST", ["v1", "tasks", id, "abandon"]) => install::abandon(app, id, &req.body),
         ("POST", ["v1", "switch"]) => switch_view(app, &req.body),
         ("GET", ["v1", "models", card, "logs"]) => logs_view(app, card, req.query_param("tail")),
         ("GET", ["v1", "tasks", id, "events"]) => {

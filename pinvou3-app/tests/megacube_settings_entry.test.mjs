@@ -104,3 +104,19 @@ test('verified board identity survives an unconfirmed runtime query without gran
   assert.equal(state.isCube, true);
   assert.equal(state.managementAvailable, true);
 });
+
+// The parent diagnostics and CMS recovery must remain reachable independently.
+test('device overview and CMS management coexist behind the same destination', () => {
+  for (const copy of [dictZh, dictEn, dictJa]) {
+    const props = { theme: 'light', t: copy, bs: {},
+      device: { isCube: true, managementAvailable: true }, onSectionChange() {},
+      statusContent: React.createElement('div', { 'data-testid': 'parent-device-overview' }, 'diagnostics'),
+    };
+    const overview = renderToStaticMarkup(React.createElement(DeviceManagementView, { ...props, section: 'status' }));
+    assert.match(overview, /data-testid="parent-device-overview"/);
+    assert.ok(overview.includes(copy.deviceMgr));
+    const management = renderToStaticMarkup(React.createElement(DeviceManagementView, { ...props, section: 'management' }));
+    assert.doesNotMatch(management, /data-testid="parent-device-overview"/);
+    assert.ok(management.includes(copy.uiMegacube.overviewHint));
+  }
+});

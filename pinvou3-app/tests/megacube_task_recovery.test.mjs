@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { createCmsdSwitchFollow } from '../src/features/megacube/switch-follow.js';
 import * as cmsApi from '../src/features/megacube/cms-api.js';
+import { createTaskEventBuffer } from '../src/features/megacube/task-event-buffer.js';
 import { mergeHandoffRecovery } from '../src/features/megacube/handoff-recovery.js';
 import { publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput } from '../src/features/megacube/runtime-task-events.js';
 
@@ -31,7 +32,9 @@ function fixture({ pending = [receipt()], queryTask = async () => ({ available: 
 }
 function hookSource(name) {
   return fs.readFileSync(new URL(`../src/features/megacube/${name}.js`, import.meta.url), 'utf8')
-    .replace(/^import .*;\n/gm, '').replace(/export function /g, 'function ');
+    .replace(/^import .*;\n/gm, '').replace(/export function /g, 'function ')
+    // VM fixtures inject the real controller; exercise both production hooks.
+    .replace("import('./switch-follow.js')", 'Promise.resolve({ createCmsdSwitchFollow: globalThis.createCmsdSwitchFollow })');
 }
 
 test('the real renderer recovery hook resolves an accepted switch absent from the latest-20 task index', async () => {
@@ -70,8 +73,8 @@ test('the real renderer recovery hook resolves an accepted switch absent from th
     setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; }, clearInterval: () => {},
     setTimeout, clearTimeout, console,
   };
-  Object.assign(context, { publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput }); vm.createContext(context);
-  vm.runInContext(hookSource('use-cmsd-tasks') + '\n' + hookSource('use-cmsd-switch-follow') + '\nthis.hook = useCmsdSwitchFollow;', context);
+  Object.assign(context, { createTaskEventBuffer, publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput }); vm.createContext(context);
+  vm.runInContext(hookSource('use-cmsd-event-buffer') + '\n' + hookSource('use-cmsd-tasks') + '\n' + hookSource('use-cmsd-switch-follow') + '\nthis.hook = props => useCmsdSwitchFollow({ ...props, eventBuffer: useCmsdEventBuffer(props) });', context);
   context.hook({ bridge: { available: true, state: { getMany: () => state }, models: {
     saveModel: async row => { rows.push(row); }, switchModel: async (_session, id) => { binding = id; selected.push(id); }, loadModels: async () => {},
   } }, snapshot: state, copy: { linkAutoSelected: () => '', switchAutoSelected: () => '' }, onNotice: () => {} });
@@ -206,7 +209,7 @@ test('recovered running tasks remain backgroundable and terminal details never r
   }, useRef: initial => refs[refIndex++] ||= { current: initial }, useEffect: effect => effects.push(effect),
   fetchCmsTasks: async () => ({ available: true, data: { tasks: [] } }), fetchCmsStatus: async () => ({ available: true, data: {} }), probeCmsAvailable: async () => true,
   setInterval, clearInterval, console };
-  Object.assign(context, { publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput }); vm.createContext(context); vm.runInContext(hookSource('use-cmsd-tasks') + '\nthis.hook = useCmsdTaskWatch;', context);
+  Object.assign(context, { createTaskEventBuffer, publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput }); vm.createContext(context); vm.runInContext(hookSource('use-cmsd-tasks') + '\nthis.hook = useCmsdTaskWatch;', context);
   const render = () => { stateIndex = 0; refIndex = 0; return context.hook({ onTaskSettled: () => { callbacks++; } }); };
   let state = render();
   state.observeRecoveredTask(task); state = render();
@@ -282,7 +285,7 @@ function routeRefreshHooks({ libraryRead = async () => ({}), indexIncludesTask =
     Date: class extends Date { static now() { return clock; } },
     setTimeout: () => {}, clearTimeout: () => {}, console: { warn: () => {} },
   };
-  Object.assign(context, { publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput }); vm.createContext(context); vm.runInContext(hookSource('use-cmsd-tasks') + '\n' + hookSource('use-cmsd-switch-follow') + '\nthis.hook = useCmsdSwitchFollow;', context);
+  Object.assign(context, { createTaskEventBuffer, publishRuntimeTask, subscribeRuntimeTasks, runtimeTasksFromOutput }); vm.createContext(context); vm.runInContext(hookSource('use-cmsd-event-buffer') + '\n' + hookSource('use-cmsd-tasks') + '\n' + hookSource('use-cmsd-switch-follow') + '\nthis.hook = props => useCmsdSwitchFollow({ ...props, eventBuffer: useCmsdEventBuffer(props) });', context);
   const render = () => {
     refIndex = stateIndex = effectIndex = callbackIndex = 0;
     const result = context.hook({ bridge, snapshot: state, modelStoreAvailable: storeAvailable, copy: { linkAutoSelected: () => 'selected', switchAutoSelected: () => 'selected', linkAutoSelectFailed: 'failed' }, onNotice: notice => notices.push(notice) });

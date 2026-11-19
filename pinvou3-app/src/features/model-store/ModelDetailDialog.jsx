@@ -204,7 +204,6 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
         // 每次都会被设为当前模型。接入与移除都只认后端确认的卡片关联，
         // 不复用用户自行配置或已经解除关联的同名本地接口。
         existingId: findCardLinkedRows(savedModels, cardId)[0]?.id,
-        storeCardId: record.card_id || null,
       });
       await bridge.models.saveModel(saved);
       // 选为当前模型。注意这只影响**新建的会话**，不会打断正在生成的那些。

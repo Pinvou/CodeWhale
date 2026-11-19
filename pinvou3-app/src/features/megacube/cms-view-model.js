@@ -209,12 +209,12 @@ export function pickLinkedRowForCard(rows, card, modelId, gatewayBase) {
 /**
  * cmsd 托管模型的接入行显示名推导（商店库记录缺位时——AI 对话内下载装的模型
  * 走不到商店的接入链路）。引擎标签只认卡片 id 尾缀这条可靠线索
- * （qwen38-27b-nvfp4-tachyon → 驭光）；认不出就不贴，宁缺毋滥。
+ * （qwen38-27b-nvfp4-tachyon → Tachyon）；认不出就不贴，宁缺毋滥。
  * @param {string} card - 卡片 id。
  * @param {string} modelId - 真实模型 id（/v1/models 报出的 wire id）。
  * @returns {string} 显示名主体（接入行不再加「本地 ·」前缀，名称即引擎/卡片名）。
  */
-const CARD_ENGINE_TAGS = { tachyon: '驭光' };
+const CARD_ENGINE_TAGS = { tachyon: 'Tachyon' };
 export function cmsdCardRowName(card, modelId) {
   const base = String(modelId || card || '');
   const parts = String(card || '').split('-');

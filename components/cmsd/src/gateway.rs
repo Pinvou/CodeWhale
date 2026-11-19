@@ -21,6 +21,63 @@ use std::time::{Duration, Instant};
 
 const RETRY_MS: u64 = 5000;
 
+type Proof = Arc<std::sync::Mutex<Option<(Instant, bool)>>>;
+#[derive(Default)]
+pub struct ProofCache(std::sync::Mutex<std::collections::BTreeMap<String, Proof>>);
+impl ProofCache {
+    fn verify(&self, key: String, probe: impl FnOnce() -> bool) -> bool {
+        let entry = {
+            let mut entries = self.0.lock().unwrap_or_else(|error| error.into_inner());
+            if entries.len() >= 128 && !entries.contains_key(&key) {
+                entries.clear();
+            }
+            Arc::clone(entries.entry(key).or_default())
+        };
+        // Coalesce concurrent requests for the same process generation. Never
+        // hold the global gateway or model-store mutex during Docker/proc IO.
+        let mut saved = entry.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some((at, result)) = *saved {
+            if at.elapsed() < Duration::from_secs(1) {
+                return result;
+            }
+        }
+        let result = probe();
+        *saved = Some((Instant::now(), result));
+        result
+    }
+}
+
+fn verified_runtime(app: &App, model: &crate::store::ModelState) -> bool {
+    let probe = || match model.engine_type.as_str() {
+        "container" => crate::container_runtime::routable(app, model),
+        "native" => crate::ops::find_card_raw(app, &model.card).is_ok_and(|card| {
+            crate::ops::native_instance_matches(app, &card, model.port, model.main_pid.unwrap_or(0))
+        }),
+        _ => false,
+    };
+    let Some(pid) = model.main_pid.filter(|pid| *pid > 0) else {
+        return probe();
+    };
+    let Some((pid, start)) = crate::store_adoption::runtime::instance_key(app, pid) else {
+        return probe();
+    };
+    let revision = app
+        .lifecycle_epoch
+        .load(std::sync::atomic::Ordering::Acquire);
+    // Ownership/status and current store selection are checked afresh before
+    // this function; lifecycle changes and PID reuse invalidate immediately.
+    let key = format!(
+        "{}:{}:{pid}:{start}:{revision}:{}:{}:{:?}:{:?}",
+        model.card,
+        model.port,
+        model.engine_type,
+        model.engine_sha8,
+        model.container_name,
+        model.image
+    );
+    app.gateway_proofs.verify(key, probe)
+}
+
 pub struct Runtime {
     phase: &'static str,
     bound: Option<String>,
@@ -259,18 +316,7 @@ fn handle_conn(app: &Arc<App>, stream: TcpStream) -> std::io::Result<()> {
                 && model.port > 0
                 && matches!(model.status, ModelStatus::Running | ModelStatus::Starting)
                 && selection.routable(&model.card)
-                && match model.engine_type.as_str() {
-                    "container" => crate::container_runtime::routable(app, model),
-                    "native" => crate::ops::find_card_raw(app, &model.card).is_ok_and(|card| {
-                        crate::ops::native_instance_matches(
-                            app,
-                            &card,
-                            model.port,
-                            model.main_pid.unwrap_or(0),
-                        )
-                    }),
-                    _ => false,
-                }
+                && verified_runtime(app, model)
         })
         .map(|model| (model.card, model.port, model.main_pid))
         .collect();
@@ -683,6 +729,26 @@ fn write_model_not_running(downstream: &mut TcpStream, name: &str) -> std::io::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_proofs_are_reused_only_for_the_same_generation_and_expire() {
+        let cache = ProofCache::default();
+        assert!(cache.verify("pid:1:start:1:revision:1".into(), || true));
+        assert!(cache.verify("pid:1:start:1:revision:1".into(), || panic!(
+            "repeated probe"
+        )));
+        assert!(!cache.verify("pid:1:start:2:revision:1".into(), || false));
+        assert!(!cache.verify("pid:1:start:1:revision:2".into(), || false));
+        let entry = cache
+            .0
+            .lock()
+            .unwrap()
+            .get("pid:1:start:1:revision:1")
+            .unwrap()
+            .clone();
+        entry.lock().unwrap().as_mut().unwrap().0 = Instant::now() - Duration::from_secs(2);
+        assert!(!cache.verify("pid:1:start:1:revision:1".into(), || false));
+    }
 
     #[test]
     fn excessive_structure_and_invalid_utf8_do_not_reach_engine() {

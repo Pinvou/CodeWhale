@@ -13,6 +13,7 @@ export function DeviceManagementView({
   section,
   onSectionChange,
   onOpenModelStore,
+  statusContent,
 }) {
   const discovered = useDeviceManagement({ enabled: !device });
   const state = device || discovered;
@@ -20,13 +21,13 @@ export function DeviceManagementView({
   const id = useId();
   const preferred = onSectionChange ? section : localSection;
   const active =
-    state.managementAvailable && (preferred === 'management' || (!preferred && state.isCube))
+    state.managementAvailable && (preferred === 'management' || (!preferred && state.isCube && !statusContent))
       ? 'management'
       : 'status';
   const select = onSectionChange || setLocalSection;
   const title = deviceManagementTitle(state, t);
   const tabs = [
-    ['status', t.monitor],
+    ['status', statusContent ? t.deviceMgr : t.monitor],
     ['management', t.uiSettings.megacube],
   ];
   const moveTab = (event, index) => {
@@ -80,7 +81,7 @@ export function DeviceManagementView({
         >
           {active === key &&
             (key === 'status' ? (
-              <MonitorView theme={theme} t={t} bs={bs} />
+              statusContent ?? <MonitorView theme={theme} t={t} bs={bs} />
             ) : (
               <div className="h-full overflow-y-auto bg-[#f6f7f9] p-4 dark:bg-[#131314] sm:p-6 lg:p-8 custom-scrollbar">
                 <div className="mx-auto max-w-6xl">

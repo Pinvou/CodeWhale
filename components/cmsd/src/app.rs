@@ -74,6 +74,8 @@ pub struct App {
     pub event_connections: std::sync::Arc<crate::limits::Slots>,
     pub gateway_connections: std::sync::Arc<crate::limits::Slots>,
     pub gateway_runtime: Mutex<crate::gateway::Runtime>,
+    pub gateway_proofs: crate::gateway::ProofCache,
+    pub selection_cache: crate::store_adoption::selection::Cache,
     pub store_adoption_requested: std::sync::atomic::AtomicBool,
     pub store_adoption_status: Mutex<crate::json::Value>,
 }
@@ -105,6 +107,8 @@ impl App {
             event_connections: crate::limits::Slots::new(16),
             gateway_connections: crate::limits::Slots::new(64),
             gateway_runtime: Mutex::new(crate::gateway::Runtime::default()),
+            gateway_proofs: Default::default(),
+            selection_cache: Default::default(),
             store_adoption_requested: std::sync::atomic::AtomicBool::new(false),
             store_adoption_status: Mutex::new(crate::json::Value::Null),
         }
