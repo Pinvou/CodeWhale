@@ -2697,7 +2697,19 @@ jobs:
 
       - name: Windows 共享进程监督器兼容回归
         if: ${{ runner.os == 'Windows' }}
-        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json" -- python -m unittest discover -s scripts/tests -p test_ci_fixture_process.py
+        run: |
+          python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json" -- python -m unittest discover -s scripts/tests -p test_ci_fixture_process.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test scripts/tests/ci-artifact-upload-diagnostics.test.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Configure bounded Windows upload diagnostics
+        if: ${{ always() && runner.os == 'Windows' }}
+        run: |
+          $module = Join-Path $env:GITHUB_WORKSPACE 'scripts/ci-artifact-upload-diagnostics.cjs'
+          $options = "$env:NODE_OPTIONS --require `"$module`""
+          if ($options -match "[\r\n]") { throw 'Invalid multiline Node options' }
+          "PINVOU_CI_UPLOAD_NODE_OPTIONS=$options" >> $env:GITHUB_ENV
 
       - name: Preserve Windows release contract process receipts
         id: windows_release_contract_receipts
@@ -2705,6 +2717,9 @@ jobs:
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+          NODE_OPTIONS: ${{ env.PINVOU_CI_UPLOAD_NODE_OPTIONS }}
         with:
           name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

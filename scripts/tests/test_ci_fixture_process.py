@@ -105,11 +105,13 @@ print('original-cancel-verdict-preserved-with-root23')
     @unittest.skipUnless(sys.platform == 'win32', 'actual Windows deep-path retirement')
     def test_supervisor_retires_deep_owned_workspace_after_process_exit(self):
         source = (
-            "import os,pathlib;"
+            "import os,pathlib,sys;"
             "root=pathlib.Path(os.environ['PINVOU_CI_FIXTURE_ROOT']);"
             "deep=root.joinpath(*(['deep-segment-0123456789']*12));"
             "raw='\\\\\\\\?\\\\'+str(deep);"
+            "print('fixture_child_phase=mkdir',file=sys.stderr,flush=True);"
             "os.makedirs(raw);"
+            "print('fixture_child_phase=write',file=sys.stderr,flush=True);"
             "pathlib.Path(raw,'proof.txt').write_text('owned');"
             "print(len(str(deep)),flush=True)"
         )
@@ -152,7 +154,15 @@ else process.kill(process.pid,'SIGTERM');
 
     def invoke(self, source, directory, name='receipt'):
         receipt = Path(directory) / (name + '.json')
-        p = subprocess.run([sys.executable, str(SUPERVISOR), '--receipt', str(receipt), '--cleanup-seconds', '0.2', '--', sys.executable, '-c', source], capture_output=True, text=True, timeout=15)
+        try:
+            p = subprocess.run([sys.executable, str(SUPERVISOR), '--diagnostics', '--receipt', str(receipt), '--cleanup-seconds', '0.2', '--', sys.executable, '-c', source], capture_output=True, text=True, timeout=15)
+        except subprocess.TimeoutExpired as error:
+            evidence = error.stderr or b''
+            if isinstance(evidence, bytes):
+                evidence = evidence.decode('utf-8', errors='replace')
+            # TimeoutExpired's normal traceback drops the captured diagnostic
+            # stderr. Preserve bounded stage/stack evidence without printing argv.
+            self.fail('supervisor exceeded unchanged 15-second limit; stage/stack evidence:\n' + evidence[-16000:])
         return p, json.loads(receipt.read_text()), receipt
 
     def test_success_preserves_output_and_confirms_tree_exit(self):
@@ -162,6 +172,14 @@ else process.kill(process.pid,'SIGTERM');
             self.assertIn('fixture actually executed', p.stdout)
             self.assertEqual(receipt['state'], 'released')
             self.assertFalse(receipt['cleanup_failed'])
+
+    def test_timeout_keeps_captured_stage_evidence_without_command_arguments(self):
+        error = subprocess.TimeoutExpired(['private-command-argument'], 15, stderr=b'fixture_phase=retire_workspace')
+        with tempfile.TemporaryDirectory() as directory, patch.object(subprocess, 'run', side_effect=error):
+            with self.assertRaises(AssertionError) as caught:
+                self.invoke('never runs', directory)
+        self.assertIn('fixture_phase=retire_workspace', str(caught.exception))
+        self.assertNotIn('private-command-argument', str(caught.exception))
 
     @unittest.skipUnless(sys.platform == 'linux', 'AF_UNIX Chrome path limit is Linux-specific')
     def test_long_runner_temp_cannot_overflow_chrome_singleton_socket(self):

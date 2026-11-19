@@ -201,6 +201,15 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   a private temporary directory. A killed Linux controller can be recovered only
   by the registered scope marker, UID, cgroup and pidfd identity. No PID/name
   sweep or shared Runner Job Object is used.
+  For stalled-process investigation, `--diagnostics` emits bounded phase names
+  and one Python stack snapshot after a phase has stalled for three seconds.
+  It never changes the command, cleanup deadline, cancellation or exit verdict.
+  The Windows supervisor regression preserves captured evidence when its
+  existing 15-second subprocess limit expires. The release-contract artifact
+  action additionally opts into bounded passive file/HTTP transport evidence;
+  it excludes signed URLs, headers, payloads, file paths and raw error messages.
+  These logs distinguish local receipt reads, TCP/TLS and response waits without
+  suppressing stream errors or extending the artifact's three-minute limit.
   The Windows atomic regression suite runs each original patched-executable
   filter in an independent scope and retains attempted-receipt inventory even
   on failure. Its capture-retention fixtures hand off the child's creation
