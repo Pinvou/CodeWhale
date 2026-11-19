@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,10 +20,7 @@ import (
 
 func realRedisStore(t *testing.T, identifiers ...string) *RedisStore {
 	t.Helper()
-	dsn := os.Getenv("PINVOU_PORTAL_TEST_REDIS_URL")
-	if dsn == "" {
-		t.Skip("PINVOU_PORTAL_TEST_REDIS_URL is required for real Redis tests")
-	}
+	dsn := checkedPortalFixture(t)
 	store, err := NewRedisStore(dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -292,7 +288,7 @@ func TestRealRedisTransportInterruptionReturns503WithoutLosingSession(t *testing
 	if err := base.SaveSession(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	options, err := redis.ParseURL(os.Getenv("PINVOU_PORTAL_TEST_REDIS_URL"))
+	options, err := redis.ParseURL(checkedPortalFixture(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +347,7 @@ func TestRealRedisTransportInterruptionReturns503WithoutLosingSession(t *testing
 	options.MaxRetries = -1
 	options.DialTimeout, options.ReadTimeout, options.WriteTimeout = 100*time.Millisecond, 100*time.Millisecond, 100*time.Millisecond
 	options.ContextTimeoutEnabled = true
-	proxyStore := &RedisStore{client: redis.NewClient(options)}
+	proxyStore := &RedisStore{client: redis.NewClient(options), transientClient: redis.NewClient(options), limits: DefaultAdmissionLimits()}
 	t.Cleanup(func() { proxyStore.Close() })
 	if _, err := proxyStore.GetSession(context.Background(), id); err != nil {
 		t.Fatalf("real Redis proxy did not first serve the session: %v", err)

@@ -194,11 +194,14 @@ while ((m = clusterRe.exec(helpers)) !== null) {
 }
 // Combined main adds the two internal-message classifiers; Account retains
 // compactNow. All are local calls without new cluster dependency keys.
+// raisePinvouSummonHighwater reads only `state`, which every consuming cluster
+// literal already provides, so it adds no cluster dependency key.
 const EXPECTED_SURFACE = {
   // cancelKbModel (kb_model_cancel chain) reads only `invoke`; the sole
   // consuming cluster (tauriKnowledgeModel) already passes it, so only the
-  // count moves.
-  sharedFnCount: 317,
+  // count moves. raisePinvouSummonHighwater (community #841 summon-seq
+  // alignment) joins the same shared base, so the union count is one higher.
+  sharedFnCount: 319,
 };
 
 assert.equal(
