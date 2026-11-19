@@ -3115,6 +3115,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # r7 P2-6：cmsd 依赖图此前完全绕过 cargo-deny（rust_dependencies 过滤
+      # 排除 components/cmsd/**）。钉同版安装器与四类检查，与知识库/主仓同口径。
+      - name: cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
       - name: 独立 CMS 格式与严格 lint
         run: |
           cargo fmt --manifest-path components/cmsd/Cargo.toml --all -- --check
@@ -3124,6 +3130,9 @@ jobs:
           cargo test --manifest-path components/cmsd/Cargo.toml --locked -- --test-threads=1
           python3 -m unittest discover -s components/cmsd/tests -p 'test_*.py'
           python3 -m unittest discover -s scripts/tests -p test_cmsd_release_policy.py
+      - name: 独立 CMS 依赖门禁（cargo-deny）
+        run: |
+          cargo deny --locked --manifest-path components/cmsd/Cargo.toml --config components/cmsd/deny.toml check advisories licenses bans sources
       - name: 从当前提交构建并验证原生组件
         run: |
           package="$RUNNER_TEMP/cmsd-component"

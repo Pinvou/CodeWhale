@@ -241,6 +241,8 @@ on:
       - 'pinvou3-app/tests/desktop_remote_*'
       - 'pinvou3-app/tests/connect_remote_device_*'
   pull_request:
+    branches:
+      - main
     # Stacked feature-base PRs need the same lightweight release contracts.
     paths:
       - 'VERSION'

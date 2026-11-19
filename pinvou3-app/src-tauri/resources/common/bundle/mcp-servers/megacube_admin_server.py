@@ -355,6 +355,9 @@ def _valid_repo(value):
     return _valid_name(owner) and _valid_name(name)
 
 
+_MAX_FETCH_BYTES = 16 * 1024 * 1024
+
+
 def _fetch(url, timeout=HTTP_TIMEOUT_S):
     """极简 http(s) GET：返回 (status, body_bytes)。
 
@@ -367,7 +370,9 @@ def _fetch(url, timeout=HTTP_TIMEOUT_S):
             current, headers={"User-Agent": "megacube-admin/1.0"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return getattr(resp, "status", 200) or 200, resp.read()
+                # r7 P2-3：与包内 16MiB 上限（state.py）同口径的有界读——超大或
+                # 被劫持的 store/HF 响应不允许 OOM 单线程 server 并阻塞 tools/list。
+                return getattr(resp, "status", 200) or 200, resp.read(_MAX_FETCH_BYTES + 1)
         except urllib.error.HTTPError as e:
             location = e.headers.get("Location") if e.headers else None
             if e.code in (301, 302, 303, 307, 308) and location:

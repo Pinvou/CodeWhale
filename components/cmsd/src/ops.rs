@@ -8,6 +8,7 @@ use crate::app::{api_err, log_line, ApiErr, App};
 use crate::capacity;
 use crate::cards::{scan_cards, Card};
 use crate::engine;
+use crate::redact::redact_text;
 use crate::store::{ExternalSighting, ModelState, ModelStatus};
 use crate::systemd::env_file_content;
 use crate::timeutil::now_epoch;
@@ -456,7 +457,7 @@ fn enable_inner(
             });
             return Err(format!(
                 "25 分钟内服务没有就绪，已停止等待并停掉引擎。最后日志：\n{}",
-                tail_lines(&logs, 30)
+                redact_text(&tail_lines(&logs, 30))
             ));
         }
         let us = app.systemd.show(&unit).unwrap_or_default();
@@ -466,13 +467,13 @@ fn enable_inner(
             let reason = if limit_hit {
                 format!(
                     "启动反复失败，systemd 已熔断（5 分钟内 3 次，不再自动拉起；修复后用 enable 恢复）。最后日志：\n{}",
-                    tail_lines(&logs, 30)
+                    redact_text(&tail_lines(&logs, 30))
                 )
             } else {
                 format!(
                     "引擎进程启动后退出（结果 {}）。最后日志：\n{}",
                     us.result,
-                    tail_lines(&logs, 30)
+                    redact_text(&tail_lines(&logs, 30))
                 )
             };
             upsert_model_state(app, &card.name, |m| {
@@ -499,7 +500,7 @@ fn enable_inner(
             let log_hint = app
                 .systemd
                 .journal_last_line(&unit)
-                .map(|l| format!("（引擎最近日志：{l}）"))
+                .map(|l| format!("（引擎最近日志：{}）", redact_text(&l)))
                 .unwrap_or_default();
             event(
                 "wait",
@@ -960,7 +961,7 @@ fn wait_container_ready(
             let logs = app.docker.logs_tail(name, 30).unwrap_or_default();
             return Err(format!(
                 "25 分钟内服务没有就绪（容器保留，可 docker logs {name} 排查）。最后日志：\n{}",
-                tail_lines(&logs, 30)
+                redact_text(&tail_lines(&logs, 30))
             ));
         }
         match app.docker.inspect(name) {
@@ -977,7 +978,7 @@ fn wait_container_ready(
                     } else {
                         ""
                     },
-                    tail_lines(&logs, 30)
+                    redact_text(&tail_lines(&logs, 30))
                 ));
             }
             Ok(None) => {

@@ -92,9 +92,10 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
     const stale = () => token !== loadTokenRef.current || viewToken !== viewTokenRef.current;
     try {
       // Key 拿不到不算致命:模型本身的信息照样该显示出来。
-      const modelDetail = await fetchModelDetail(cardId);
-      const keyList = modelDetail?.api_key_enforced === true
-        ? await fetchApiKeys(cardId).catch(() => []) : [];
+      const [modelDetail, keyList] = await Promise.all([
+        fetchModelDetail(cardId),
+        fetchApiKeys(cardId).catch(() => []),
+      ]);
       if (stale()) return;
       setDetail(modelDetail);
       setKeys(Array.isArray(keyList) ? keyList : []);
@@ -147,10 +148,6 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
   };
 
   const addKey = async () => {
-    if (detail?.api_key_enforced !== true) {
-      onToast(copy.keysUnavailable);
-      return;
-    }
     const viewToken = viewTokenRef.current;
     setBusy(true);
     try {
@@ -341,7 +338,7 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                 testId="model-store-access-url"
               />
 
-              {detail.api_key_enforced === true ? <div className="flex items-start gap-3">
+              <div className="flex items-start gap-3">
                 <span className={`w-20 shrink-0 pt-1.5 text-[13px] ${TEXT_SECONDARY}`}>{copy.accessApiKey}</span>
                 <div className="min-w-0 flex-1">
                   {keys.length === 0 ? (
@@ -369,19 +366,19 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
                   )}
                   <p className={`mt-1 text-[11px] ${TEXT_SECONDARY}`}>{copy.keysHint}</p>
                 </div>
-              </div> : <p data-testid="model-store-key-auth-unavailable" className={`text-[12px] ${TEXT_SECONDARY}`}>{copy.keysUnavailable}</p>}
+              </div>
             </div>
 
             {record.running ? null : (
               <p className="mt-2 text-[11px] text-[#A15C07] dark:text-[#FDD663]">{copy.notRunningHint}</p>
             )}
 
-            {detail.api_key_enforced === true && <div className="mt-3 flex flex-wrap items-center gap-2">
+            <div className="mt-3 flex flex-wrap items-center gap-2">
               <MsButton tone="ghost" busy={busy} onClick={addKey} data-testid="model-store-add-key">
                 <Plus size={14} />
                 {copy.addKey}
               </MsButton>
-            </div>}
+            </div>
           </div>
 
           {linkedModels.length > 0 ? (
