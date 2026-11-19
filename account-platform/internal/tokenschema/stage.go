@@ -86,6 +86,14 @@ func Up(ctx context.Context, c *pgx.Conn, loaded []migrations.Migration) error {
 	if err != nil {
 		return err
 	}
+	ctx, err = migrations.PinLedger(ctx, c)
+	if err != nil {
+		return err
+	}
+	ledger, err := migrations.LedgerTable(ctx, c)
+	if err != nil {
+		return err
+	}
 	if _, err = c.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou_account_platform_migrations'))`); err != nil {
 		return err
 	}
@@ -98,11 +106,11 @@ func Up(ctx context.Context, c *pgx.Conn, loaded []migrations.Migration) error {
 		return err
 	}
 	var exists bool
-	if err = c.QueryRow(ctx, `SELECT to_regclass('schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {
+	if err = c.QueryRow(ctx, `SELECT pg_catalog.to_regclass($1) IS NOT NULL`, ledger).Scan(&exists); err != nil {
 		return err
 	}
 	if exists {
-		rows, err := c.Query(ctx, `SELECT version,name,checksum FROM schema_migrations ORDER BY version`)
+		rows, err := c.Query(ctx, "SELECT version,name,checksum FROM "+ledger+" ORDER BY version")
 		if err != nil {
 			return err
 		}
@@ -177,8 +185,12 @@ func revokePinnedMigrationDDL(ctx context.Context, tx pgx.Tx, m migrations.Migra
 		return nil
 	}
 	if m.Version == 16 || m.Version == 17 || m.Version == 8 || m.Version == 9 {
+		ledger, err := migrations.LedgerTable(ctx, tx.Conn())
+		if err != nil {
+			return err
+		}
 		var previouslyRestricted bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=29)`).Scan(&previouslyRestricted); err != nil {
+		if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM "+ledger+" WHERE version=29)").Scan(&previouslyRestricted); err != nil {
 			return err
 		}
 		if !previouslyRestricted {

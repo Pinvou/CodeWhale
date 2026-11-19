@@ -33,16 +33,18 @@ func TestPinnedMigrationLedgerPostgresIntegration(t *testing.T) {
 	// Exercise identifier quoting rather than assuming a deployment schema is
 	// always a lower-case, unquoted SQL token.
 	schema, shadow := `ledger "original_`+suffix, "ledger_shadow_"+suffix
+	empty := "ledger_empty_" + suffix
 	quotedRole := pgx.Identifier{role}.Sanitize()
 	quotedSchema, quotedShadow := pgx.Identifier{schema}.Sanitize(), pgx.Identifier{shadow}.Sanitize()
+	quotedEmpty := pgx.Identifier{empty}.Sanitize()
 	password := strings.ReplaceAll(uuid.NewString(), "-", "") + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := control.Exec(ctx, "CREATE ROLE "+quotedRole+" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD '"+password+"'; CREATE SCHEMA "+quotedSchema+" AUTHORIZATION "+quotedRole+"; CREATE SCHEMA "+quotedShadow+" AUTHORIZATION "+quotedRole); err != nil {
+	if _, err := control.Exec(ctx, "CREATE ROLE "+quotedRole+" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD '"+password+"'; CREATE SCHEMA "+quotedSchema+" AUTHORIZATION "+quotedRole+"; CREATE SCHEMA "+quotedShadow+" AUTHORIZATION "+quotedRole+"; CREATE SCHEMA "+quotedEmpty+" AUTHORIZATION "+quotedRole); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
 		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
-		if _, err := control.Exec(cleanup, "DROP SCHEMA "+quotedSchema+" CASCADE; DROP SCHEMA "+quotedShadow+" CASCADE; DROP ROLE "+quotedRole); err != nil {
+		if _, err := control.Exec(cleanup, "DROP SCHEMA "+quotedSchema+" CASCADE; DROP SCHEMA "+quotedShadow+" CASCADE; DROP SCHEMA "+quotedEmpty+" CASCADE; DROP ROLE "+quotedRole); err != nil {
 			t.Error("retire owned ledger fixture", err)
 		}
 	}()
@@ -96,7 +98,9 @@ func TestPinnedMigrationLedgerPostgresIntegration(t *testing.T) {
 		if err := Up(ctx, writer, loaded); err != nil {
 			t.Fatal("search_path changed the migration bookkeeping target", err)
 		}
-		Unlock(ctx, writer)
+		if err := Unlock(ctx, writer); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := VerifyApplied(pinned, writer, loaded); err != nil {
 			t.Fatal("post-Up verification abandoned the pinned ledger", err)
 		}
@@ -118,7 +122,9 @@ func TestPinnedMigrationLedgerPostgresIntegration(t *testing.T) {
 		if err := Up(pinned, writer, loaded); err != nil {
 			t.Fatal("idempotent upgrade required schema CREATE or followed shadow", err)
 		}
-		Unlock(ctx, writer)
+		if err := Unlock(ctx, writer); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("verify-rejects-original-drift-despite-shadow", func(t *testing.T) {
 		if _, err := writer.Exec(ctx, "UPDATE "+ledger+" SET checksum='altered' WHERE version=2"); err != nil {
@@ -138,7 +144,9 @@ func TestPinnedMigrationLedgerPostgresIntegration(t *testing.T) {
 		if err := DownOne(pinned, writer, loaded); err != nil {
 			t.Fatal(err)
 		}
-		Unlock(ctx, writer)
+		if err := Unlock(ctx, writer); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := VerifyApplied(pinned, writer, []Migration{first}); err != nil {
 			t.Fatal(err)
 		}
@@ -149,7 +157,9 @@ func TestPinnedMigrationLedgerPostgresIntegration(t *testing.T) {
 		if err := Up(pinned, writer, loaded); err != nil {
 			t.Fatal("correct next invocation failed", err)
 		}
-		Unlock(ctx, writer)
+		if err := Unlock(ctx, writer); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("actual-cli-retains-bound-namespace", func(t *testing.T) {
 		directory := t.TempDir()
@@ -232,6 +242,124 @@ func TestPinnedMigrationLedgerPostgresIntegration(t *testing.T) {
 		}
 		if name, err := LedgerTable(other, writer); err != nil || name != shadowLedger {
 			t.Fatal("independent custom schema workflow inherited a sticky binding", name, err)
+		}
+	})
+	// Each temporary ledger belongs only to this writer session. Keep the
+	// negative facts readable through an explicit pg_temp name so the oracle
+	// cannot silently follow the same search_path bug as the implementation.
+	temporaryLedger := func(t *testing.T) (func() string, string) {
+		t.Helper()
+		if _, err := writer.Exec(ctx, `CREATE TEMP TABLE schema_migrations(version bigint PRIMARY KEY,name text,checksum text);
+INSERT INTO pg_temp.schema_migrations VALUES(39,'temporary-shadow','must-not-authorize')`); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
+			defer done()
+			if _, err := writer.Exec(cleanup, "DROP TABLE pg_temp.schema_migrations; SET search_path="+quotedShadow); err != nil {
+				t.Error("retire owned temporary ledger", err)
+			}
+		})
+		facts := func() string {
+			t.Helper()
+			var result string
+			if err := writer.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(x) ORDER BY version)::text FROM pg_temp.schema_migrations x`).Scan(&result); err != nil {
+				t.Fatal(err)
+			}
+			return result
+		}
+		return facts, facts()
+	}
+	t.Run("temporary-shadow-does-not-hide-later-permanent-ledger", func(t *testing.T) {
+		facts, before := temporaryLedger(t)
+		for _, path := range []string{quotedEmpty + "," + quotedSchema, "pg_temp," + quotedEmpty + "," + quotedSchema} {
+			if _, err := writer.Exec(ctx, "SET search_path="+path); err != nil {
+				t.Fatal(err)
+			}
+			fresh, err := PinLedger(ctx, writer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if table, err := LedgerTable(fresh, writer); err != nil || table != ledger {
+				t.Fatal("temporary shadow hid the later permanent ledger", table, err)
+			}
+			if _, err := VerifyApplied(fresh, writer, loaded); err != nil {
+				t.Fatal("fresh binding did not retain existing permanent history", err)
+			}
+		}
+		if _, err := VerifyApplied(pinned, writer, loaded); err != nil || facts() != before || shadowFacts() != beforeShadow {
+			t.Fatal("temporary shadow changed the original workflow or shadow facts", err)
+		}
+		var created bool
+		if err := writer.QueryRow(ctx, `SELECT pg_catalog.to_regclass($1) IS NOT NULL`, pgx.Identifier{empty, "schema_migrations"}.Sanitize()).Scan(&created); err != nil || created {
+			t.Fatal("binding created a new ledger instead of selecting existing history", err)
+		}
+	})
+	t.Run("temporary-shadow-does-not-capture-creation-schema", func(t *testing.T) {
+		facts, before := temporaryLedger(t)
+		if _, err := writer.Exec(ctx, "SET search_path=pg_temp,"+quotedEmpty); err != nil {
+			t.Fatal(err)
+		}
+		fresh, err := PinLedger(ctx, writer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		emptyLedger := pgx.Identifier{empty, "schema_migrations"}.Sanitize()
+		if table, err := LedgerTable(fresh, writer); err != nil || table != emptyLedger {
+			t.Fatal("fresh ledger creation selected a temporary or implicit schema", table, err)
+		}
+		if err := Up(fresh, writer, nil); err != nil {
+			t.Fatal("fresh permanent ledger could not be prepared", err)
+		}
+		if err := Unlock(ctx, writer); err != nil {
+			t.Fatal(err)
+		}
+		var count int
+		if err := writer.QueryRow(ctx, "SELECT count(*) FROM "+emptyLedger).Scan(&count); err != nil || count != 0 || facts() != before {
+			t.Fatal("preparation modified temporary history or created unexpected rows", err)
+		}
+		if _, err := VerifyApplied(pinned, writer, loaded); err != nil || shadowFacts() != beforeShadow {
+			t.Fatal("fresh workflow affected the existing permanent history", err)
+		}
+	})
+	t.Run("temporary-only-path-rejects-before-preparation", func(t *testing.T) {
+		facts, before := temporaryLedger(t)
+		if _, err := writer.Exec(ctx, `SET search_path=pg_temp`); err != nil {
+			t.Fatal(err)
+		}
+		permanentFacts := func() string {
+			t.Helper()
+			var result string
+			if err := writer.QueryRow(ctx, `SELECT coalesce(jsonb_agg(jsonb_build_array(n.oid,c.oid,c.relowner,c.relkind) ORDER BY n.oid,c.oid),'[]')::text
+FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+WHERE c.relname='schema_migrations' AND c.relpersistence<>'t'`).Scan(&result); err != nil {
+				t.Fatal(err)
+			}
+			facts := []string{result}
+			for _, table := range []string{ledger, pgx.Identifier{empty, "schema_migrations"}.Sanitize()} {
+				var exists bool
+				if err := writer.QueryRow(ctx, `SELECT pg_catalog.to_regclass($1) IS NOT NULL`, table).Scan(&exists); err != nil {
+					t.Fatal(err)
+				}
+				rows := "absent"
+				if exists {
+					if err := writer.QueryRow(ctx, "SELECT coalesce(jsonb_agg(to_jsonb(m) ORDER BY version),'[]')::text FROM "+table+" m").Scan(&rows); err != nil {
+						t.Fatal(err)
+					}
+				}
+				facts = append(facts, rows)
+			}
+			return strings.Join(facts, "\n")
+		}
+		permanentBefore := permanentFacts()
+		if _, err := PinLedger(ctx, writer); err == nil || !strings.Contains(err.Error(), "existing schema") {
+			t.Fatal("temporary-only path acquired ledger authority", err)
+		}
+		if err := Up(ctx, writer, nil); err == nil || !strings.Contains(err.Error(), "existing schema") {
+			t.Fatal("temporary-only path reached ledger preparation", err)
+		}
+		if facts() != before || permanentFacts() != permanentBefore || shadowFacts() != beforeShadow {
+			t.Fatal("rejected temporary-only workflow changed history or created a ledger")
 		}
 	})
 }

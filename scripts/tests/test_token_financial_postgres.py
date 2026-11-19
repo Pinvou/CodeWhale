@@ -488,8 +488,20 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "binding-cannot-cross-connections",
             "missing-search-path-schema-rejects-before-preparation",
             "another-workflow-selects-its-own-visible-ledger",
+            "temporary-shadow-does-not-hide-later-permanent-ledger",
+            "temporary-shadow-does-not-capture-creation-schema",
+            "temporary-only-path-rejects-before-preparation",
         }
         self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], required)
+        restricted = "TestRestrictedMigrationLedgerPostgresIntegration"
+        restricted_children = {
+            "existing_ledger_upgrade_and_down", "checksum_remains_closed",
+            "existing_ledger_without_permission", "trusted_owner_switch_keeps_ledger_identity",
+            "after_hook_starts_as_migration_role_and_rolls_back",
+            "down_hooks_pin_roles_and_rollback_atomically", "empty_schema_without_create",
+            "advisory_lock_still_serializes",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[restricted], restricted_children)
         self.run_main_fixture()
         self.assertEqual(self.fixture_phases[0], "owner-ledger")
         command = self.fixture_commands[0]
@@ -502,15 +514,16 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             invalid = [event for event in events if event.get("Test", "").split("/", 1)[0] != name]
             with self.subTest(missing=name), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(invalid, roots, **options)
-        for child in required:
-            name = root + "/" + child
-            for invalid in (
-                [event for event in events if event.get("Test") != name],
-                events + [{"Action": "skip", "Package": package, "Test": name}],
-                events + [{"Action": "fail", "Package": package, "Test": name}],
-            ):
-                with self.subTest(child=child), self.assertRaises(RuntimeError):
-                    RUNNER.verify_results(invalid, roots, **options)
+        for parent, children in ((root, required), (restricted, restricted_children)):
+            for child in children:
+                name = parent + "/" + child
+                for invalid in (
+                    [event for event in events if event.get("Test") != name],
+                    events + [{"Action": "skip", "Package": package, "Test": name}],
+                    events + [{"Action": "fail", "Package": package, "Test": name}],
+                ):
+                    with self.subTest(parent=parent, child=child), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(invalid, roots, **options)
 
 
     def test_payment_cleanup_boundary_and_clearance_are_selected_with_real_cases(self):
