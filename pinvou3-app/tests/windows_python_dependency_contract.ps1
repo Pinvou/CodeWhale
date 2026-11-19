@@ -105,7 +105,7 @@ New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
 
 # Behavioral coverage for the real ABI probe branch (no -AbiProbe injection). Windows
 # cannot fake an executable named python.exe without a real PE image, so copy the PATH
-# python and its bootstrap encodings, then stub its platform module: the probe prints to stdout with a
+# python and its standard library, then stub its platform module: the probe prints to stdout with a
 # controllable machine() result, which is exactly the stray-output case the
 # "$null = & $pythonExe" fix guards. Skipped when no runnable PATH python exists.
 $pathPython = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
@@ -119,6 +119,7 @@ if ($pathPython) {
       $realProbeRoot = Join-Path $fixtureRoot "real-probe-python"
       $pathPythonDir = Split-Path -Parent $pathPython
       New-Item -ItemType Directory -Path $realProbeRoot -Force | Out-Null
+      $copyClock = [Diagnostics.Stopwatch]::StartNew()
       Copy-Item -LiteralPath $pathPython -Destination (Join-Path $realProbeRoot "python.exe")
       Copy-Item -Path (Join-Path $pathPythonDir "python3*.dll") -Destination $realProbeRoot -ErrorAction SilentlyContinue
       Copy-Item -Path (Join-Path $pathPythonDir "vcruntime140*.dll") -Destination $realProbeRoot -ErrorAction SilentlyContinue
@@ -126,17 +127,36 @@ if ($pathPython) {
       # controlled platform.py. Copying Lib recursively also copied unrelated
       # site-packages (many thousands of files) and could consume the entire
       # CI job before the real assertions ran. Keep a real isolated PE/DLL
-      # interpreter and only the encodings needed to bootstrap it.
+      # interpreter and its standard library, excluding third-party packages.
+      # Keep the full stdlib: Python releases have different startup imports.
       $probeLib = Join-Path $realProbeRoot "Lib"
       New-Item -ItemType Directory -Path $probeLib -Force | Out-Null
-      Copy-Item -LiteralPath (Join-Path $pathPythonDir "Lib\encodings") -Destination $probeLib -Recurse
+      Get-ChildItem -LiteralPath (Join-Path $pathPythonDir "Lib") |
+        Where-Object { $_.Name -cne "site-packages" } |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $probeLib -Recurse }
+      Write-Host ("[test] Real ABI runtime copy: elapsed_ms={0}; site_packages_excluded=true" -f $copyClock.ElapsedMilliseconds)
+      # Pin the copied interpreter to the private library. No registry/CWD
+      # fallback or site-packages may make a broken fixture appear runnable.
+      [IO.File]::WriteAllText((Join-Path $realProbeRoot "python._pth"), "Lib`n", [Text.UTF8Encoding]::new($false))
       $realProbePython = Join-Path $realProbeRoot "python.exe"
       $probeVersion = ([string](& $realProbePython -I -S -B -c "import sys; print('%d.%d' % sys.version_info[:2])")).Trim()
+      if ($LASTEXITCODE -ne 0 -or $probeVersion -cnotmatch '^\d+\.\d+$') {
+        throw "The isolated real ABI interpreter failed to start."
+      }
+      & $realProbePython -I -S -B -c "import sys; raise SystemExit(0 if sys.path == [sys.argv[1]] and sys.prefix == sys.argv[2] else 17)" $probeLib $realProbeRoot
+      if ($LASTEXITCODE -ne 0) {
+        throw "The real ABI probe escaped its private standard library."
+      }
       $realProbeReady = $probeVersion -cmatch '^\d+\.\d+$'
+    } else {
+      throw "The selected PATH Python failed its native startup check."
     }
   } catch {
-    $realProbeReady = $false
+    throw "Unable to prepare the real Python ABI probe: $($_.Exception.Message)"
   }
+}
+if (-not $realProbeReady -and $env:GITHUB_ACTIONS -eq "true") {
+  throw "CI requires a runnable PATH Python for the real ABI probes."
 }
 if ($realProbeReady) {
   function Write-StubPlatform {
@@ -169,6 +189,7 @@ if ($realProbeReady) {
   $probeFailRoot = New-RealProbeManifestRoot -Name "real-probe-fail" -PythonVersion $probeVersion
   Write-StubPlatform -PythonRoot $realProbeRoot -Machine "i386"
   Assert-True -Condition (-not (Test-PythonDependencyTargets -PythonRoot $realProbeRoot -ManifestRoot $probeFailRoot)) -Message "a real ABI probe printing to stdout with a non-zero exit must be rejected"
+  Write-Host "[test] Real Python ABI probes: matching accepted, mismatch rejected; private library verified."
 }
 
 $wrongSha = New-ValidManifestFixture
