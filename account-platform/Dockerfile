@@ -23,6 +23,7 @@ COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifica
 COPY --from=build /out/service /service
 COPY --from=build /out/healthcheck /healthcheck
 COPY --from=build /src/migrations /migrations
+COPY ops/close-emergency-cancellation-case.sql /ops/close-emergency-cancellation-case.sql
 EXPOSE 8080
 USER 65532:65532
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=6 CMD ["/healthcheck"]
