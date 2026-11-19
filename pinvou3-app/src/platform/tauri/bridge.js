@@ -245,6 +245,15 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
     // 本 turn 已 present_artifact 出过成品卡的产物 path —— chat:done 兜底补卡时跳过,不重复。
     turnPresentedArtifacts: [],
     busy: false,
+    // Sessions with a compaction in flight, { session_id: set-at epoch ms }.
+    // chat:compaction start sets it and done/fail/cancel clears it; the main
+    // lane's compact entry disables off it (the same mechanism as the code
+    // lane's lane.compacting). Outside the working set (not among
+    // saveWorkingSetTo's explicit fields), so session swaps don't touch it;
+    // session deletion/eviction clears it together with turnUsageDirty.
+    compactingSessions: {},
+    compactionStarts: {},
+    compactionSeq: 0,
     monitor: null,
     // MegaCube 设备管理快照（bridge/device.js 轮询组装 _fmt）；非 MegaCube 平台恒 null。
     device: null,
@@ -277,6 +286,12 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
       globalShortcutsAvailable: false,
       // MegaCube 一体机（DMI product_name 含 megacube）：监控入口换成设备管理。
       megacubeDevice: false,
+      // Semantic selector for the computer-use virtual-display note row
+      // ("windows" | "macos" | "linux"). Fail-closed "": no per-platform
+      // note renders until load_platform_capabilities answers with the
+      // compiled target's selector — the notes are desktop product copy, so
+      // the web lane (which never loads the Tauri command) simply keeps "".
+      virtualDisplayNote: "",
     },
     settings: null,
     behaviorTelemetry: null,
@@ -316,6 +331,12 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
       // Defaults false (fail closed): on an unsupported OS the toggle must
       // not render enabled until the first get_status corrects the slice.
       platformSupported: false,
+      // The virtual-display projection defaults (virtualDisplayState/
+      // virtualDisplayDetail/preferVirtualDisplay/physicalSessionLive/
+      // sessionDisplayTarget/grantedTarget) are seeded by the computer_use
+      // feature itself at install time — bridge/computer_use.js is their
+      // single source (R13; previously both files carried copies and no
+      // test pinned either). Do not restate them here.
       sessionId: null,
       grantRequest: null,
       confirmRequest: null,
@@ -2002,6 +2023,13 @@ function emitPersonaAt(atOrAfter, isTail) { return pinvouSharedtauriMainN99856()
           return (t.indexOf("<turn_meta>") === 0 && t.endsWith("</turn_meta>")) || t === "<turn_meta_unchanged />";
         })) uitem2.steeredMidTurn = true;
       },
+      // <context_update> 运行时消息重放后的尾随计数回种（投影层不产生
+      // turn 但后端 era 口径计边界，见 bridge-shared-helpers 的计数说明）：
+      // 回种到会话 buffer，composer 下一气泡据此随气泡下发。
+      setRuntimeContextUpdatesPending: function (count) {
+        const buffer = getBuffer(state.activeSessionId);
+        if (buffer) buffer.runtimeContextUpdatesPending = count;
+      },
       carefulBlockedItem: function (c, tm, blockedMd) {
         return { type: "careful_blocked", args: tm.args, metadata: blockedMd, time: "" };
       },
@@ -2207,6 +2235,9 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var discoverLocalVllm = settingsFeature.discoverLocalVllm;
   var loadModels = settingsFeature.loadModels;
   var saveModel = settingsFeature.saveModel;
+  // Batch add-all post-loop refresh (round-1 review M9): one reload burst for
+  // up to 100 deferred saves instead of three loaders per row.
+  var reloadSavedModels = settingsFeature.reloadSavedModels;
   var revealModelApiKey = settingsFeature.revealModelApiKey;
   var deleteModel = settingsFeature.deleteModel;
   var deleteModelIfStoreLink = settingsFeature.deleteModelIfStoreLink;
@@ -2217,6 +2248,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
   var testModelConnection = settingsFeature.testModelConnection;
   var getImageInputCapability = settingsFeature.getImageInputCapability;
   var testImageInputCapability = settingsFeature.testImageInputCapability;
+  var probeEndpointModels = settingsFeature.probeEndpointModels;
   var probeLocalServerKind = settingsFeature.probeLocalServerKind;
   var testSearchProvider = settingsFeature.testSearchProvider;
   // Dedicated global-shortcut command (update_settings is never used);
@@ -2788,6 +2820,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       loadEffectiveModelConfig: loadEffectiveModelConfig,
       loadModels: loadModels,
       saveModel: saveModel,
+      reloadSavedModels: reloadSavedModels,
       revealModelApiKey: revealModelApiKey,
       deleteModel: deleteModel,
       deleteModelIfStoreLink: deleteModelIfStoreLink,
@@ -2799,6 +2832,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       testModelConnection: testModelConnection,
       getImageInputCapability: getImageInputCapability,
       testImageInputCapability: testImageInputCapability,
+      probeEndpointModels: probeEndpointModels,
       probeLocalServerKind: probeLocalServerKind,
     },
     interaction: { toggleSuperPerm: toggleSuperPerm,
@@ -2927,6 +2961,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       confirm: computerUseFeature.confirm,
       deny: computerUseFeature.deny,
       setEnabled: computerUseFeature.setEnabled,
+      setVirtualDisplayPreference: computerUseFeature.setVirtualDisplayPreference,
       requestPermissions: computerUseFeature.requestPermissions,
       permissionStatus: computerUseFeature.permissionStatus,
     },

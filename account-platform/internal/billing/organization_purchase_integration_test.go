@@ -48,7 +48,7 @@ func TestOrganizationPlanPurchaseActualClientPostgres(t *testing.T) {
 	r, ctx := retainedFinanceRepository(t)
 	simulator, _, _ := refundQuerySimulator(t, ctx)
 	provider := &organizationPurchaseProvider{Provider: simulator}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

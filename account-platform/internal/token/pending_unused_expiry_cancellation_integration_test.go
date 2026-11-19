@@ -195,6 +195,7 @@ func TestPendingUnusedExpiryCancellationOwnerPostgres(t *testing.T) {
 			if err := f.bp.QueryRow(f.ctx, `SELECT state FROM usage_hold_expiry_recovery WHERE hold_id=$1`, *u.HoldID).Scan(&state); err != nil || state != "COMPLETED" {
 				t.Fatal("original pending expiry did not complete", state, err)
 			}
+			makeEmergencyTestClaimDue(t, f.r, f.ctx, target)
 			for range 2 {
 				if err := worker.runOnce(f.ctx); err != nil {
 					t.Fatal(err)
