@@ -14,11 +14,23 @@ function global:Invoke-PinvouOwnedProcess {
         [Threading.CancellationToken]$CancellationToken = [Threading.CancellationToken]::None,
         [switch]$RetainSuccessfulScope
     )
+    function Write-PinvouOwnedProcessDiagnostic {
+        param([string]$Phase, [Diagnostics.Stopwatch]$Clock)
+        if ($env:PINVOU_CI_PROCESS_DIAGNOSTICS -ne '1') { return }
+        # Closed phase names only: never log paths, command arguments or output.
+        try { [Console]::Error.WriteLine('[pinvou-owned-phase] ' + $Phase + ' ' + $Clock.ElapsedMilliseconds) }
+        catch { } # Diagnostic delivery cannot change process ownership/results.
+    }
+    $phaseClock = [Diagnostics.Stopwatch]::StartNew()
+    Write-PinvouOwnedProcessDiagnostic 'source-validate-start' $phaseClock
     $source = Join-Path $PSScriptRoot 'windows-owned-process.cs'
     $item = Get-Item -LiteralPath $source -Force -ErrorAction Stop
     if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'e2e_process_source_invalid' }
+    Write-PinvouOwnedProcessDiagnostic 'source-validate-end' $phaseClock
     $expected = Get-Variable -Name PinvouE2EOwnedProcessSha256 -Scope Global -ErrorAction SilentlyContinue
+    Write-PinvouOwnedProcessDiagnostic 'source-hash-start' $phaseClock
     $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-PinvouOwnedProcessDiagnostic 'source-hash-end' $phaseClock
     if ($expected -and $sourceHash -ne $expected.Value) { throw 'e2e_process_source_hash_mismatch' }
     # Bind a cached CLR type to the actual staged source, rather than silently
     # reusing an assembly loaded by an earlier remoting run/version.
@@ -26,12 +38,18 @@ function global:Invoke-PinvouOwnedProcess {
     $typeName = $namespace + '.OwnedProcess'
     $runner = $typeName -as [type]
     if (-not $runner) {
+        Write-PinvouOwnedProcessDiagnostic 'source-read-start' $phaseClock
         $code = [IO.File]::ReadAllText($source)
+        Write-PinvouOwnedProcessDiagnostic 'source-read-end' $phaseClock
         if (-not $code.Contains('namespace Pinvou.Release {')) { throw 'e2e_process_source_invalid' }
+        Write-PinvouOwnedProcessDiagnostic 'compile-start' $phaseClock
         Add-Type -TypeDefinition $code.Replace('namespace Pinvou.Release {', ('namespace ' + $namespace + ' {')) -ErrorAction Stop
+        Write-PinvouOwnedProcessDiagnostic 'compile-end' $phaseClock
         $runner = $typeName -as [type]
     }
-    $result = $runner::Run($StartInfo, $TimeoutMilliseconds, $CancellationToken, $RetainSuccessfulScope.IsPresent)
+    Write-PinvouOwnedProcessDiagnostic 'native-run-start' $phaseClock
+    try { $result = $runner::Run($StartInfo, $TimeoutMilliseconds, $CancellationToken, $RetainSuccessfulScope.IsPresent) }
+    finally { Write-PinvouOwnedProcessDiagnostic 'native-run-settled' $phaseClock }
     if ($result.ExitCode -ne 0) {
         $result.StdOut = ''
         $result.StdErr = 'e2e_process_nonzero_exit'
