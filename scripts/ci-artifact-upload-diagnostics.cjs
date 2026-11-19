@@ -1,5 +1,17 @@
 'use strict';
 
+function preloadOptions(existing, filename) {
+  if (/[\r\n]/.test(existing || '') || /[\r\n"]/.test(filename)) throw new Error('Invalid multiline or quoted Node options path');
+  // NODE_OPTIONS has its own backslash-escape parser, including on Windows.
+  // Forward separators preserve drive/UNC paths and quoting preserves spaces.
+  return `${existing || ''} --require ${JSON.stringify(filename.replaceAll('\\', '/'))}`.trim();
+}
+module.exports = { preloadOptions };
+if (require.main === module && process.argv[2] === '--configure-env') {
+  const options = preloadOptions(process.env.NODE_OPTIONS, __filename);
+  require('node:fs').appendFileSync(process.env.GITHUB_ENV, `PINVOU_CI_UPLOAD_NODE_OPTIONS=${options}\n`, 'utf8');
+}
+
 // Opt-in passive diagnostics for the artifact action, never its signed URL,
 // headers, payload, local paths or raw error messages. No retries or deadlines.
 if (process.env.PINVOU_CI_ARTIFACT_DIAGNOSTICS === '1') {

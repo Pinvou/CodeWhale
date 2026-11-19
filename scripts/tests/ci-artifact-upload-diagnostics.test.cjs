@@ -32,6 +32,24 @@ test('passive receipt/network evidence preserves bytes and excludes signed URLs,
 
 function osTemp() { return require('node:os').tmpdir(); }
 
+test('generated NODE_OPTIONS really preloads a path with spaces and preserves existing options', () => {
+  const fs = require('node:fs');
+  const { preloadOptions } = require(helper);
+  const root = fs.mkdtempSync(path.join(osTemp(), 'artifact options '));
+  try {
+    const copy = path.join(root, 'trace module.cjs');
+    fs.copyFileSync(helper, copy);
+    const result = spawnSync(process.execPath, ['-e', 'console.log("preload-completed")'], {
+      env: { ...process.env, PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1', NODE_OPTIONS: preloadOptions('--max-old-space-size=4096', copy) },
+      encoding: 'utf8', timeout: 10000
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), 'preload-completed');
+    assert.match(result.stderr, /"phase":"enabled"/);
+    assert.throws(() => preloadOptions('bad\noption', copy));
+  } finally { fs.rmSync(root, { recursive: true }); }
+});
+
 test('error observation does not consume an unhandled stream error or make it successful', () => {
   const result = spawnSync(process.execPath, ['--require', helper, '-e', `require('node:fs').createReadStream('absent-owned-receipt.json')`], {
     env: { ...process.env, PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1' }, encoding: 'utf8', timeout: 10000

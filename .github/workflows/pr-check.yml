@@ -2705,11 +2705,7 @@ jobs:
 
       - name: Configure bounded Windows upload diagnostics
         if: ${{ always() && runner.os == 'Windows' }}
-        run: |
-          $module = Join-Path $env:GITHUB_WORKSPACE 'scripts/ci-artifact-upload-diagnostics.cjs'
-          $options = "$env:NODE_OPTIONS --require `"$module`""
-          if ($options -match "[\r\n]") { throw 'Invalid multiline Node options' }
-          "PINVOU_CI_UPLOAD_NODE_OPTIONS=$options" >> $env:GITHUB_ENV
+        run: node scripts/ci-artifact-upload-diagnostics.cjs --configure-env
 
       - name: Preserve Windows release contract process receipts
         id: windows_release_contract_receipts
