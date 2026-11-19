@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +50,7 @@ const productionCleanup = `$cleanupNode=@($ast.FindAll({param($n)$n -is [Managem
 for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : ['pwsh']) {
   test(`production completion marker serializes the authenticated interval [${shell}]`, () => {
     const evidenceRoot = mkdtempSync(join(tmpdir(), "pinvou-completion-"));
+    const evidenceIdentity = lstatSync(evidenceRoot);
     // Delete only this parent-owned fixture after the producer shell exits.
     let primaryError;
     let bodyFailed = false;
@@ -77,7 +78,7 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
         $artifact=$artifacts[0];$bytes=[IO.File]::ReadAllBytes((Join-Path $evidenceRoot $artifact.path));
         $marker=[Text.Encoding]::UTF8.GetString($bytes)|ConvertFrom-Json;
         if($marker.schema -cne 'pinvou-remote-control-run-completion' -or $marker.version -ne 1 -or $marker.source_commit_sha -cne $actualHead -or $marker.run_nonce -cne $runNonce){throw 'completion-fields-invalid'};
-        if($artifact.path -cne 'gates/run-completion.json' -or $artifact.kind -cne 'check' -or $artifact.machine_role -cne 'orchestrator' -or $artifact.signature -cne '' -or $completionSha -cne (Get-PinvouSha256Hex $bytes)){throw 'completion-artifact-invalid'};
+        if($artifact.path -cne 'gates/run-completion.json' -or $artifact.kind -cne 'check' -or $artifact.machine_role -cne 'orchestrator' -or $artifact.signature -cne '' -or $artifact.sha256 -cne $completionSha -or $completionSha -cne (Get-PinvouSha256Hex $bytes)){throw 'completion-artifact-invalid'};
         [ordered]@{interval=@([long]0,[long]$runClock.ElapsedMilliseconds);interval_sha256=$marker.monotonic_interval_sha256;marker_base64=[Convert]::ToBase64String($bytes);started_at=$runStartedAt;finished_at=$runFinishedAt}|ConvertTo-Json -Compress;
         # The same production block rejects overlong runs before publishing a marker.
         $runClock=[pscustomobject]@{ElapsedMilliseconds=[long]7200001};$runClock|Add-Member ScriptMethod Stop {};
@@ -98,11 +99,18 @@ for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : 
       primaryError = error;
       throw error;
     } finally {
+      // The parent owns this exact root and retires it after spawnSync has
+      // returned. Keep both failures if producer verification and cleanup fail.
       try {
-        rmSync(evidenceRoot, { recursive: true, force: true });
+        const current = lstatSync(evidenceRoot);
+        assert.ok(current.isDirectory() && !current.isSymbolicLink(), "completion root must remain an owned directory");
+        assert.equal(current.dev, evidenceIdentity.dev, "completion root device changed");
+        assert.equal(current.ino, evidenceIdentity.ino, "completion root identity changed");
+        rmSync(evidenceRoot, { recursive: true });
+        assert.equal(existsSync(evidenceRoot), false, "completion root must be retired");
       } catch (cleanupError) {
         if (bodyFailed) {
-          throw new AggregateError([primaryError, cleanupError], "completion fixture body and cleanup failed");
+          throw new AggregateError([primaryError, cleanupError], "completion verification and cleanup failed", { cause: primaryError });
         }
         throw cleanupError;
       }
