@@ -286,6 +286,12 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
       globalShortcutsAvailable: false,
       // MegaCube 一体机（DMI product_name 含 megacube）：监控入口换成设备管理。
       megacubeDevice: false,
+      // Semantic selector for the computer-use virtual-display note row
+      // ("windows" | "macos" | "linux"). Fail-closed "": no per-platform
+      // note renders until load_platform_capabilities answers with the
+      // compiled target's selector — the notes are desktop product copy, so
+      // the web lane (which never loads the Tauri command) simply keeps "".
+      virtualDisplayNote: "",
     },
     settings: null,
     behaviorTelemetry: null,
@@ -325,6 +331,12 @@ function renderMarkdown(text) { return pinvouSharedtauriMain().renderMarkdown(te
       // Defaults false (fail closed): on an unsupported OS the toggle must
       // not render enabled until the first get_status corrects the slice.
       platformSupported: false,
+      // The virtual-display projection defaults (virtualDisplayState/
+      // virtualDisplayDetail/preferVirtualDisplay/physicalSessionLive/
+      // sessionDisplayTarget/grantedTarget) are seeded by the computer_use
+      // feature itself at install time — bridge/computer_use.js is their
+      // single source (R13; previously both files carried copies and no
+      // test pinned either). Do not restate them here.
       sessionId: null,
       grantRequest: null,
       confirmRequest: null,
@@ -2949,6 +2961,7 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       confirm: computerUseFeature.confirm,
       deny: computerUseFeature.deny,
       setEnabled: computerUseFeature.setEnabled,
+      setVirtualDisplayPreference: computerUseFeature.setVirtualDisplayPreference,
       requestPermissions: computerUseFeature.requestPermissions,
       permissionStatus: computerUseFeature.permissionStatus,
     },
