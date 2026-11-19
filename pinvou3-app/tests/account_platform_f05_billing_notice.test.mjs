@@ -25,7 +25,9 @@ function liveBillingNotices() {
   const maps = [];
   const sets = [];
   const listeners = new Map();
-  const state = { activeSessionId: 'other', sessions: [{ id: 'deleted' }, { id: 'other' }], tokens: { max: 0 } };
+  // 手动压缩回流（community #834）后 purgeSessionBuffer 还会清理
+  // state.compactingSessions / state.compactionStarts 两个标记表，最小桩同步补齐。
+  const state = { activeSessionId: 'other', sessions: [{ id: 'deleted' }, { id: 'other' }], tokens: { max: 0 }, compactingSessions: {}, compactionStarts: {} };
   const sessionStates = { deleted: {}, other: {} };
   const scheduledRunSessionOwners = {};
   const bridge = readFileSync(new URL('../src/platform/tauri/bridge.js', import.meta.url), 'utf8');
