@@ -275,10 +275,32 @@ func TestDirectPaymentRepairCommandReceiptPostgres(t *testing.T) {
 			t.Fatal("independent command identity did not recover", err)
 		}
 	})
+	t.Run("pre-admission-fixture-rejects-current-schema", func(t *testing.T) {
+		r, ctx := retainedFinanceRepository(t)
+		c, order, provider := directRepairFixture(t, r, ctx)
+		before := directRepairFacts(t, r, ctx)
+		tx, err := r.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		if _, _, err := c.mergePreAdmissionFixturePayment(ctx, tx, order, "QUERY", "forbidden-modern-legacy-seed", nil, provider.result, false, r.now()); !errors.Is(err, errPreAdmissionFixtureSchema) {
+			t.Fatal("historical seed model accepted the current schema", err)
+		}
+		if err := tx.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.repairPreAdmissionFixtureOrder(ctx, order.ID, uuid.New(), "forbidden modern legacy repair", "forbidden-modern-legacy-repair"); !errors.Is(err, errPreAdmissionFixtureSchema) {
+			t.Fatal("historical repair model accepted the current schema", err)
+		}
+		if directRepairFacts(t, r, ctx) != before {
+			t.Fatal("rejected historical fixture changed current financial facts")
+		}
+	})
 	t.Run("runtime-immutable-command-and-exact-prefix-down", func(t *testing.T) {
 		r, ctx := retainedFinanceRepository(t, 900031)
 		c, order, _ := directRepairFixture(t, r, ctx)
-		if _, err := c.RepairReviewedOrder(ctx, order.ID, uuid.New(), "controlled retained direct command", "direct-down-"+uuid.NewString()); err != nil {
+		if _, err := c.repairPreAdmissionFixtureOrder(ctx, order.ID, uuid.New(), "controlled retained direct command", "direct-down-"+uuid.NewString()); err != nil {
 			t.Fatal(err)
 		}
 		before := directRepairFacts(t, r, ctx)

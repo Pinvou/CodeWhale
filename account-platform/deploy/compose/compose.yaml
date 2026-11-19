@@ -542,6 +542,8 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      billing-migrate:
+        condition: service_completed_successfully
 
   billing-migrate:
     <<: *service-defaults

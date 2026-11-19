@@ -226,7 +226,7 @@ func TestProviderHealthGlobalWindowIndexPostgres(t *testing.T) {
 			var r *PostgresRepository
 			var ctx context.Context
 			if scenario == "retained-upgrade" {
-				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second, 900038)
+				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second, 900032)
 			} else {
 				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second)
 			}
@@ -237,6 +237,12 @@ func TestProviderHealthGlobalWindowIndexPostgres(t *testing.T) {
 			for n := 0; n < 5; n++ {
 				_, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, true)
 				orders = append(orders, order)
+			}
+			if scenario == "retained-upgrade" {
+				// The frozen pre-admission writer remains restricted to31/32.
+				// Create real paid facts there, then install the real038 prefix
+				// before taking the original health-upgrade snapshot.
+				installBillingFixturePrefix(t, ctx, r, 900038)
 			}
 			originalFinancial := providerHealthFinancialFacts(t, ctx, r)
 			for n := 0; n < 5; n++ {

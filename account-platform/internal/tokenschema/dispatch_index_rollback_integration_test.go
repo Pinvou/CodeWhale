@@ -156,7 +156,7 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`, controlledUsage).Sca
 	// CLI Up reinstalls the index and installs pending later migrations from
 	// the complete current carrier. Every pre-existing predecessor row remains
 	// byte-identical; new identities must match the entire published package.
-	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version=ANY($1)`, predecessorVersions).Scan(&current); err != nil || current != retained {
+	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version=ANY($1)`, retainedVersions).Scan(&current); err != nil || current != retained {
 		t.Fatal("reinstallation changed historical predecessor ledger", err)
 	}
 	verified, err := VerifyApplied(ctx, connection, loaded)

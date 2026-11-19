@@ -44,6 +44,8 @@ Billing 的 `/metrics` 同时提供 `pinvou_payment_health_retained_storage_byte
 启用既有 `observability.prometheusRulesEnabled` 并保证原有 metrics 抓取链路工作。
 Helm 告警包含统计失败、成功时间过旧、支持域指标缺失，以及健康大小不可读。
 失效条件持续 2 分钟才触发，原有 backlog 和 dead-letter 告警继续生效。
+成功时间戳使用服务墙钟，时效比较使用 Prometheus 墙钟；部署应保持两者时钟同步。
+时钟漂移可能使过旧告警提前或延后，不改变业务期限或迁移预算。
 
 `observability.retainedOutboxWarningBytes` 和 `retainedHealthWarningBytes` 默认均为
 1,073,741,824 字节（1 GiB），可配置为 1 到 9,007,199,254,740,991 的整数。
