@@ -24,11 +24,39 @@ Each emergency claim returns its incremented attempts as an ownership token.
 Request and attempt recording lock the target before the usage row and require
 that exact token in LEASED state; retry resets only that same claim. A delayed
 worker cannot overwrite a reclaimed target, its usage, or its cancellation
-evidence. Lease expiry makes a target eligible for reclaim; it does not revoke
-an unchanged claim by itself. An external cancellation or idempotent hold release
+evidence. Lease expiry alone does not revoke an unchanged claim; another worker
+must durably reclaim or isolate the target. An external cancellation or idempotent hold release
 already started after an owned request commits may still finish after reclaim;
 this fencing does not promise exactly-once external effects. Existing USER and
 expiry ownership checks and financial confirmation requirements still apply.
+
+On a failed claim, the next automatic attempt is scheduled in Token storage:
+5, 10, 20, 40, 80, 160, then at most 300 seconds. If a worker disappears, a
+later worker observes the same cooldown after the 30-second lease. Targets in
+cooldown do not occupy a claim slot. A worker leases each target just before
+processing it, so time spent waiting behind other targets does not use its
+budget. Failure or lease expiry on the eighth
+automatic claim moves that target to `MANUAL_REVIEW` and records immutable task
+evidence with a stable diagnostic. Existing claim generations are preserved;
+historical claims do not count against the new retry budget.
+
+Operations can filter the Token reconciliation queue for emergency cancellation
+review. There is one such case per usage request. A financial reconciliation
+case for the same request has its own severity, deadlines, and resolution;
+even confirmed settlement cannot establish that the cancellation succeeded.
+For diagnosis, read `model_emergency_cancellations` by
+`usage_request_id` and its `MANUAL_REVIEW` evidence by task ID using an approved
+read-only connection. Reconcile only through the existing usage and Billing
+proof paths. The exhausted task is not retried automatically; exhaustion does
+not establish a provider outcome, change the usage state, or release a hold.
+Do not reset the task, run the model again, or release funds based on the
+retry counter. An already started external action may still finish.
+
+Before enabling this worker version, stop old Token gateway workers, apply and
+verify Token migration `900010_emergency_cancellation_retry` with the existing
+migration identity, then start the new workers. Old workers do not honor the
+new cooldown column. Migration 900010 preserves review evidence and refuses
+Down; recover using a corrected compatible version.
 
 The worker attempts local transport cancellation immediately. When another
 replica owns the connection, that owner also reads the immutable cancellation
@@ -63,3 +91,50 @@ On failure, remain in SAFE and inspect the original operation receipt. Do not
 delete policy3, rewrite a true plan to false, or run its forward-only Down.
 An old binary cannot safely take over writes after v3 effects. Use a corrected
 compatible release and the existing controlled SAFE activation procedure.
+
+
+## Controlled case-only operator closure
+
+After an independently authorized human review, use the shipped
+`ops/close-emergency-cancellation-case.sql` in an approved maintenance
+session authenticated as the existing `token_migrator` login. No runtime API,
+new database grant or task-reset operation is provided. Verify the operator's
+human actor UUID and approval/reason through the existing access-control and
+change-record process; the database login does not establish the human's
+identity. Use a nonblank single-line reason of at most 1000 characters. Do not put credentials, customer content or raw provider responses in
+the reason, terminal transcripts or audit details.
+
+First use the read-only investigation above to bind the exact TOKEN case,
+`MODEL_EMERGENCY_CANCELLATION_REVIEW` type, `USAGE_REQUEST` resource, cancellation
+task and immutable `MANUAL_REVIEW` evidence. Record the case/task/resource/evidence
+UUIDs and the authorized actor/reason in the review record. Then run the carrier
+with psql `-X` and `-v` values for the independently verified `expected_database`, `case_id`, `task_id`, `resource_id`, `evidence_id`,
+`actor_id` and `reason`, using the independently verified target database URL.
+Never copy an arbitrary database name or operator identity from a case payload.
+The script suppresses parameter result display and stops on the first error.
+
+The transaction locks the task before the case, rechecks all bindings, exhausted
+retry budget and exact evidence snapshot, and atomically writes only RESOLVED
+case metadata plus an immutable actor/reason/evidence audit event. Any mismatch,
+runtime login, empty reason or SQL/audit failure aborts the transaction. Inspect
+the committed case and `EMERGENCY_CANCELLATION_CASE_CLOSED` event afterward;
+a repeated command rejects the already-resolved case without another audit.
+If the transaction result is unknown, inspect that exact case/event before any
+retry. Existing Sync/SLA processing must retain the closed case rather than
+recreate it; the original cancellation task stays MANUAL_REVIEW.
+
+Closing this review does not establish supplier cancellation, reset an automatic
+retry, change usage/hold/funds, waive a separate financial case, or authorize a
+new payment or settlement action. Any remaining financial uncertainty follows
+its original independent process and evidence requirements.
+
+The version-matched Account Platform image carries the operator SQL at
+`/ops/close-emergency-cancellation-case.sql`, alongside its complete `/migrations`
+package. Use a DBA-controlled psql client and an exported copy from that exact
+image or the same reviewed source revision; the scratch service image does not
+add a psql executable or execute this file automatically. Appended migration
+900010 also supplies ordered status-filtered work indexes. Their ordinary
+transactional creation needs the existing stopped-worker maintenance window and
+sufficient index space; it is not a live deployment or capacity benchmark.
+
+操作载体在 DO 声明及 ROWTYPE 解析前固定事务内 `search_path=pg_catalog,public,pg_temp`，不继承调用会话中的影子 schema 或临时表优先级。

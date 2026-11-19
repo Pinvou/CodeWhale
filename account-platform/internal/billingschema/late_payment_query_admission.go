@@ -5,7 +5,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 )
 
-const latePaymentQueryAdmissionVersion int64 = 900046
+const latePaymentQueryAdmissionVersion int64 = 900047
 const latePaymentQueryAdmissionName = "late_payment_query_admission"
 const latePaymentQueryAdmissionUp = "5de84e5e0aa20f152aa63bd598fed1e5e7810031215ba43bfcccab241f6c9c1d"
 const latePaymentQueryAdmissionDown = "0525e581974cdd9b85cf7c2cbf46aa89a85b04b300c8405d814c31d9c778959a"

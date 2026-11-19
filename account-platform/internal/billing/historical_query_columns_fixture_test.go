@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// This oracle belongs only to an explicit pre-900046 -> complete upgrade.
+// This oracle belongs only to an explicit pre-900047 -> complete upgrade.
 // Ordinary current-writer snapshots keep all fields, including both new facts.
 type historicalQueryColumnUpgrade struct {
 	columns, authority, orders, ledger string

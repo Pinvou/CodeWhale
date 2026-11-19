@@ -2346,13 +2346,13 @@
         "sha256": "0d1b5cc17cce2342540c4c75d15c783f53f37177412247ca5eefcd24d942d961"
       },
       {
-        "file": "900046_late_payment_query_admission.down.sql",
-        "version": 900046,
+        "file": "900047_late_payment_query_admission.down.sql",
+        "version": 900047,
         "sha256": "0525e581974cdd9b85cf7c2cbf46aa89a85b04b300c8405d814c31d9c778959a"
       },
       {
-        "file": "900046_late_payment_query_admission.up.sql",
-        "version": 900046,
+        "file": "900047_late_payment_query_admission.up.sql",
+        "version": 900047,
         "sha256": "5de84e5e0aa20f152aa63bd598fed1e5e7810031215ba43bfcccab241f6c9c1d"
       }
     ],
@@ -2838,6 +2838,16 @@
         "file": "900009_governance_usage_resource_indexes.up.sql",
         "version": 900009,
         "sha256": "6ba3fb063eb36f50888456cb0c665ac6828dca795bce295a44997c1ecd3ccaad"
+      },
+      {
+        "file": "900010_emergency_cancellation_retry.down.sql",
+        "version": 900010,
+        "sha256": "d61e88656c378b7f06312b9d4db858c64f4a75cfd6e7b63e4259c7b09f2ff86e"
+      },
+      {
+        "file": "900010_emergency_cancellation_retry.up.sql",
+        "version": 900010,
+        "sha256": "cf366da4d34621f9728d79e8e30ba8b55940ad254cda7802888b7f9082abc24c"
       },
       {
         "file": "900011_outbox_publication_generation.down.sql",

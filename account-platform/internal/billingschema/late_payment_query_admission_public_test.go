@@ -84,7 +84,7 @@ func TestLatePaymentArchiveQueryAdmissionPublicMigration(t *testing.T) {
 		if stageValue(t, ctx, c, `SELECT (current_user='billing_service' AND session_user='billing_migrator' AND NOT pg_has_role('billing_service','billing_schema_owner','MEMBER') AND NOT has_schema_privilege('billing_service','public','CREATE') AND pg_get_userbyid(relowner)='billing_schema_owner' AND has_table_privilege('billing_service',oid,'SELECT,INSERT,UPDATE,DELETE'))::text FROM pg_class WHERE oid='public.payment_orders'::regclass`) != "true" {
 			t.Fatal("migration failed to restore exact runtime/schema-owner boundary")
 		}
-		if stageValue(t, ctx, c, `SELECT (count(*)=1 AND bool_and(name='late_payment_query_admission' AND checksum='`+latePaymentQueryAdmissionUp+`'))::text FROM schema_migrations WHERE version=900046`) != "true" {
+		if stageValue(t, ctx, c, `SELECT (count(*)=1 AND bool_and(name='late_payment_query_admission' AND checksum='`+latePaymentQueryAdmissionUp+`'))::text FROM schema_migrations WHERE version=900047`) != "true" {
 			t.Fatal("public migration identity ledger differs")
 		}
 	}
@@ -103,12 +103,93 @@ func TestLatePaymentArchiveQueryAdmissionPublicMigration(t *testing.T) {
 			}
 		}
 	})
-	t.Run("previous-full-upgrade-and-forward-only", func(t *testing.T) {
+	// Fixed version set from the authorized 2026-11-19 schema-only observation.
+	// The source package has new 081 instead of retained original053; a numeric
+	// ceiling alone therefore cannot reconstruct this historical deployment.
+	productionVersions := []int64{
+		1, 2, 3, 4, 5, 6, 7, 9,
+		10, 11, 12, 13, 14, 15, 16, 17,
+		18, 19, 20, 21, 22, 23, 24, 25,
+		26, 27, 28, 29, 30, 31, 32, 33,
+		34, 35, 36, 37, 38, 39, 40, 41,
+		42, 43, 44, 45, 46, 47, 48, 49,
+		50, 51, 52, 53, 54, 55, 56, 57,
+		58, 59, 60, 61, 62, 63, 64, 65,
+		66, 67, 68, 69, 70, 71, 72, 73,
+		74, 75, 76, 77, 78, 79, 80, 900001,
+		900002, 900003, 900004, 900005, 900006, 900007, 900008, 900009,
+		900010, 900011, 900012, 900013, 900014, 900015, 900016, 900017,
+		900018, 900019, 900020, 900021, 900022, 900023, 900024, 900025,
+		900026, 900027, 900028, 900029, 900030, 900031, 900032, 900033,
+		900037, 900038,
+	}
+	productionSet := make(map[int64]bool, len(productionVersions))
+	for _, version := range productionVersions {
+		productionSet[version] = true
+	}
+	var productionPrefix []migrations.Migration
+	for _, migration := range loaded {
+		if productionSet[migration.Version] {
+			productionPrefix = append(productionPrefix, migration)
+		}
+	}
+	if len(productionPrefix) != 113 {
+		t.Fatal("production-set fixture requires published original053 plus exactly113 current source entries")
+	}
+
+	upgradeFrom := func(t *testing.T, predecessor []migrations.Migration, legacy53 bool) {
+		t.Helper()
 		c := f.database(t, ctx, "billing", "billing_schema_owner")
-		if err := Up(ctx, c, previous); err != nil {
+		legacyLedgerBefore := ""
+		if legacy53 {
+			// The original053 deployment envelope owns this historical actor.
+			// Never adopt a preexisting role or grant it to billing_service.
+			var exists bool
+			if err := f.admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='billing_wallet_receipt_deployer')`).Scan(&exists); err != nil || exists {
+				t.Fatal("legacy actor must be absent", err)
+			}
+			if _, err := f.admin.Exec(ctx, `CREATE ROLE billing_wallet_receipt_deployer NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; GRANT billing_wallet_receipt_deployer TO billing_migrator`); err != nil {
+				t.Fatal(err)
+			}
+			f.roles = append(f.roles, "billing_wallet_receipt_deployer")
+			// Reuse the published 053 fixture, not a fabricated ledger INSERT.
+			// This models the observed production version set, not unqueried
+			// production 053 checksum/owner or production business rows.
+			var before53 []migrations.Migration
+			for _, migration := range predecessor {
+				if migration.Version <= 52 || (migration.Version >= 900001 && migration.Version <= 900012 && migration.Version != 900003) {
+					before53 = append(before53, migration)
+				}
+			}
+			if err := Up(ctx, c, before53); err != nil {
+				t.Fatal("published original053 predecessor", err)
+			}
+			migrations.Unlock(ctx, c)
+			legacy := migrations.Migration{Version: 53, Name: "token_account_wallet_provisioning_receipts", UpSQL: originalWalletReceiptSQL, Checksum: originalWalletReceiptChecksum}
+			if err := migrations.Up(ctx, c, []migrations.Migration{legacy}); err != nil {
+				t.Fatal("published original053 installation", err)
+			}
+			migrations.Unlock(ctx, c)
+		}
+		if err := Up(ctx, c, predecessor); err != nil {
 			t.Fatal("genuine full predecessor installation", err)
 		}
 		migrations.Unlock(ctx, c)
+		if legacy53 {
+			var observed []int64
+			if err := c.QueryRow(ctx, `SELECT array_agg(version ORDER BY version) FROM schema_migrations`).Scan(&observed); err != nil {
+				t.Fatal("observed production-version-set fixture", err)
+			}
+			if len(observed) != len(productionVersions) || len(observed) != 114 {
+				t.Fatal("historical fixture invented or omitted a production version")
+			}
+			for index, version := range productionVersions {
+				if observed[index] != version {
+					t.Fatal("historical fixture differs from observed production version set")
+				}
+			}
+			legacyLedgerBefore = stageValue(t, ctx, c, `SELECT to_jsonb(m)::text FROM schema_migrations m WHERE version=53`)
+		}
 		wallet, owner, order := uuid.New(), uuid.New(), uuid.New()
 		if _, err := c.Exec(ctx, `INSERT INTO wallets(id,owner_type,owner_id,status,created_at,updated_at) VALUES($1,'PERSONAL',$2,'ACTIVE',now(),now())`, wallet, owner); err != nil {
 			t.Fatal(err)
@@ -132,11 +213,15 @@ func TestLatePaymentArchiveQueryAdmissionPublicMigration(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), injected.Error()) {
 			t.Fatal("actual new DDL did not reach the rollback injection", err)
 		}
-		if stageValue(t, ctx, c, `SELECT (NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='public.payment_orders'::regclass AND attname IN ('archive_query_generation','archive_query_authoritative_unpaid') AND NOT attisdropped) AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=900046) AND NOT pg_has_role('billing_service','billing_schema_owner','MEMBER') AND NOT has_schema_privilege('billing_service','public','CREATE'))::text`) != "true" || old != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id)::text FROM payment_orders p`) {
+		if stageValue(t, ctx, c, `SELECT (NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='public.payment_orders'::regclass AND attname IN ('archive_query_generation','archive_query_authoritative_unpaid') AND NOT attisdropped) AND NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=900047) AND NOT pg_has_role('billing_service','billing_schema_owner','MEMBER') AND NOT has_schema_privilege('billing_service','public','CREATE'))::text`) != "true" || old != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id)::text FROM payment_orders p`) {
 			t.Fatal("failed new migration changed rows/ledger/schema or leaked DDL authority")
 		}
 		upCLI(t, c)
 		shape(t, c)
+		if legacy53 && legacyLedgerBefore != stageValue(t, ctx, c, `SELECT to_jsonb(m)::text FROM schema_migrations m WHERE version=53`) {
+			t.Fatal("complete upgrade rewrote original053 ledger identity")
+		}
+
 		if old != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(p)-ARRAY['archive_query_generation','archive_query_authoritative_unpaid'] ORDER BY p.id)::text FROM payment_orders p`) || stageValue(t, ctx, c, `SELECT bool_and(archive_query_generation IS NULL AND archive_query_authoritative_unpaid IS NULL)::text FROM payment_orders`) != "true" {
 			t.Fatal("historical authority timestamps were rewritten or current authority was backfilled")
 		}
@@ -180,5 +265,11 @@ func TestLatePaymentArchiveQueryAdmissionPublicMigration(t *testing.T) {
 		if err == nil || !strings.Contains(string(output), "MIGRATION_EXECUTION_FAILED") || before != retainedDataRollbackSnapshot(t, ctx, c) {
 			t.Fatal("actual CLI Down did not preserve exact current facts and ledger", err)
 		}
+	}
+	t.Run("previous-full-upgrade-and-forward-only", func(t *testing.T) {
+		upgradeFrom(t, previous, false)
+	})
+	t.Run("production-900038-version-set-upgrade-and-forward-only", func(t *testing.T) {
+		upgradeFrom(t, productionPrefix, true)
 	})
 }

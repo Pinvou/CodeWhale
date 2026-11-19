@@ -45,8 +45,15 @@ new command. Unupgraded actions receive no protocol marker.
 ## Deploy current-query archive admission
 
 Apply the complete Billing migration package, including
-`900046_late_payment_query_admission`, through the existing public deployment
+`900047_late_payment_query_admission`, through the existing public deployment
 identity before starting the new service. Verify the complete applied ledger.
+The independent outbox statistics migration owns Billing `900046`; this query
+migration owns `900047`. Their SQL contents and rollback contracts stay distinct.
+Do not reuse a migration number or edit an applied ledger checksum to combine them.
+If an earlier query artifact was already installed as `900046`, stop and plan
+compatibility against that installed identity rather than replaying the renamed
+package. The verified schema-only production observation for this change had
+no `900046` and neither feature schema; it does not attest every deployment.
 The migration appends nullable current-query generation/authority facts and does
 not reconstruct them from historical timestamps or immutable evidence. Existing
 orders therefore need a real new accepted query before a new archive is eligible;

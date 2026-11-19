@@ -130,7 +130,7 @@ func installBillingFixturePrefix(t *testing.T, ctx context.Context, r *PostgresR
 // carrier on the same real facts, including lower versions delivered after45.
 // New migration objects are legitimate; every pre-existing ledger row and
 // original financial/observation field must remain identical. The exact two
-// nullable 900046 additions have their own no-backfill/schema/ACL oracle.
+// nullable 900047 additions have their own no-backfill/schema/ACL oracle.
 func completeBillingMigrationContract(t *testing.T, ctx context.Context, r *PostgresRepository, source, staged, product string) {
 	t.Helper()
 	loaded, err := migrations.Load(source)

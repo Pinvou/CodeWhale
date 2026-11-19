@@ -196,6 +196,10 @@ services:
       TRUSTED_TIME_SOURCES: ${TRUSTED_TIME_SOURCES:?set at least three independently verified time sources}
       REDIS_CA_FILE: /run/pinvou/trust/ca.crt
       PORTAL_PRIVATE_CA_FILE: /run/pinvou/trust/ca.crt
+      PORTAL_OPERATION_RPS: ${PORTAL_OPERATION_RPS:-100}
+      PORTAL_OPERATION_BURST: ${PORTAL_OPERATION_BURST:-200}
+      PORTAL_LOGIN_FLOW_CAPACITY: ${PORTAL_LOGIN_FLOW_CAPACITY:-65536}
+      PORTAL_SESSION_HANDOFF_CAPACITY: ${PORTAL_SESSION_HANDOFF_CAPACITY:-8192}
       PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:?set exact public HTTPS origin}
       PORTAL_OIDC_ISSUER: ${USER_OIDC_ISSUER:?set exact public user realm issuer}
       PORTAL_OIDC_JWKS_URL: ${USER_OIDC_JWKS_URL:?set verified user JWKS endpoint}

@@ -299,7 +299,7 @@ func TestDirectPaymentRepairCommandReceiptPostgres(t *testing.T) {
 	})
 	t.Run("runtime-immutable-command-and-exact-prefix-down", func(t *testing.T) {
 		r, ctx := retainedFinanceRepository(t, 900031)
-		c, order, historicalProvider := directRepairHistoricalFixtureBefore900046(t, r, ctx)
+		c, order, historicalProvider := directRepairHistoricalFixtureBefore900047(t, r, ctx)
 		actor, reason, key := uuid.New(), "controlled retained direct command", "direct-down-"+uuid.NewString()
 		// Main's payment-credit era made the modern repair entry consult
 		// payment_credit_attempts, which does not exist at this exact prefix;

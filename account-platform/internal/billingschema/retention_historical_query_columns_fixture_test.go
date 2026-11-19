@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// This oracle belongs only to an explicit pre-900046 -> complete upgrade.
+// This oracle belongs only to an explicit pre-900047 -> complete upgrade.
 // Ordinary current-writer snapshots keep all fields, including both new facts.
 type retentionHistoricalQueryColumnUpgrade struct {
 	columns, authority, orders, ledger string

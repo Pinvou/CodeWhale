@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestEmergencyCancellationDurableRetryPostgres",
     "TestStreamStatePollingPublicPostgres",
     "TestGovernanceUsageResourcePrechecksPostgres",
     "TestEmergencyCancellationWorkerDiagnosticsPostgres",
@@ -144,6 +145,7 @@ ACCOUNT_LEAF_REQUIRED = {
 ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestEmergencyCancellationDurableRetryPostgres",
     "TestStreamStatePollingPublicPostgres",
     "TestGovernanceUsageResourcePrechecksPostgres",
     "TestOrganizationModelPolicyPublicPostgres",
@@ -346,7 +348,7 @@ EXACT_REQUIRED_CHILDREN = {
         "current-query-real-producer/older-CLOSED-cannot-clear-newer-failure",
         "current-query-real-producer/older-CLOSED-cannot-clear-newer-PENDING",
     },
-    "TestLatePaymentArchiveQueryAdmissionPublicMigration": {"fresh-public-cli", "previous-full-upgrade-and-forward-only"},
+    "TestLatePaymentArchiveQueryAdmissionPublicMigration": {"fresh-public-cli", "previous-full-upgrade-and-forward-only", "production-900038-version-set-upgrade-and-forward-only"},
     "TestBillingManualAdjustmentProofRollbackPostgres": {
         f"{state}/{entry}" for state in ("empty", "retained-proof") for entry in ("public-api", "actual-cli", "renamed-history-cli")
     },
@@ -511,6 +513,11 @@ EXACT_REQUIRED_CHILDREN = {
         "retention-purges-submission-snapshot-and-review-reason",
     },
     "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
+    "TestEmergencyCancellationDurableRetryPostgres": {
+        "failure-backoff-and-manual-case", "expired-claim-and-stale-result",
+        "late-financial-review-is-independent", "settlement-does-not-close-emergency-case",
+        "unstarted-tail-does-not-spend-budget",
+    },
     "TestReceivableSettlementGuardedWritesPostgres": {"recharge-and-write-off-lock-order"},
     "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
     "TestPasswordPreparationAuthorizationPostgres": {
@@ -535,17 +542,26 @@ EXACT_REQUIRED_CHILDREN = {
         "concurrent-new-order-does-not-shift-older-pages",
     },
     "TestManagementPublicMigrationInstallation": {
-        "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",
-        "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",
-        "installed-f07-36-upgrade", "installed-pre-runtime-37-upgrade",
-        "installed-pre-cleanup-39-upgrade",
-        "installed-pre-governance-index-40-upgrade",
-        "installed-pre-governance-index-40-upgrade/governance-index-public-cli-rollback",
+        "fresh",
+        "installed-29-upgrade",
+        "installed-30-upgrade",
+        "installed-f05-34-upgrade",
+        "installed-f07-36-upgrade",
         "installed-governance-before-dispatch-40-upgrade",
         "installed-governance-before-dispatch-40-upgrade/dispatch-index-public-cli-round-trip",
+        "installed-pre-cleanup-39-upgrade",
         "installed-pre-dispatch-index-40-upgrade",
         "installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip",
+        "installed-pre-emergency-retry-40-upgrade",
+        "installed-pre-emergency-retry-40-upgrade/retry-forward-only-public-prefix",
+        "installed-pre-governance-index-40-upgrade",
+        "installed-pre-governance-index-40-upgrade/governance-index-public-cli-rollback",
         "installed-pre-publication-41-upgrade",
+        "installed-pre-runtime-37-upgrade",
+        "installed-published-42-upgrade",
+        "installed-published-42-upgrade/retry-forward-only-public-prefix",
+        "legacy-upgrade",
+        "retained-management-lifecycle-upgrade",
     },
     "TestUserUnusedIntentCancellationOwnerPostgres": {
         "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",

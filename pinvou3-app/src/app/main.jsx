@@ -5182,7 +5182,7 @@ const App = () => {
                   activeModelId={bs && bs.activeModelId}
                   defaultModelRef={bs && bs.defaultModelRef}
                   accountPlatformClient={personalAccountClient}
-                  onSaveModel={(m) => bridge.available && bridge.models.saveModel(m)}
+                  onSaveModel={(m, options) => bridge.available && bridge.models.saveModel(m, options)}
                   onDeleteModel={(m) => { if (bridge.available) bridge.models.deleteModel(m.id); }}
                   onSetActiveModel={(id) => bridge.available && bridge.models.setActiveModel(id)}
                   onSaveSearchConfig={handleSaveSearchConfig}

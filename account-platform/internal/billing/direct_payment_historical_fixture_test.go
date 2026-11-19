@@ -8,10 +8,10 @@ import (
 
 // Only the exact 900031 historical rollback fixture uses the preserved original
 // supplier/strong-payment observation flow. The current public SyncOrder starts
-// the 900046 generation protocol and deliberately requires that migration first.
+// the 900047 generation protocol and deliberately requires that migration first.
 // This is not a production missing-column fallback or a claim that new SyncOrder
 // works on an old schema. Normal current fixtures keep the public entry point.
-func directRepairHistoricalFixtureBefore900046(t *testing.T, r *PostgresRepository, ctx context.Context) (*PaymentCoordinator, PaymentOrder, *directRepairProvider) {
+func directRepairHistoricalFixtureBefore900047(t *testing.T, r *PostgresRepository, ctx context.Context) (*PaymentCoordinator, PaymentOrder, *directRepairProvider) {
 	t.Helper()
 	var exact bool
 	if err := r.pool.QueryRow(ctx, `SELECT (SELECT max(version)=900031 FROM schema_migrations) AND NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='public.payment_orders'::regclass AND attname IN ('archive_query_generation','archive_query_authoritative_unpaid') AND NOT attisdropped)`).Scan(&exact); err != nil || !exact {
@@ -36,7 +36,7 @@ func directRepairHistoricalFixtureBefore900046(t *testing.T, r *PostgresReposito
 	review, err := c.syncOrderObservation(ctx, stored, false, &observation)
 	if err == nil {
 		// The frozen public SyncOrder wrapper reads the final database projection
-		// after the original financial flow; that read also predates 900046.
+		// after the original financial flow; that read also predates 900047.
 		review, err = c.currentPaymentOrderProjection(ctx, review)
 	}
 	if err != nil || review.Status != "MANUAL_REVIEW" || review.FulfillmentStatus != "MANUAL_REVIEW" || observation.Status != "SUCCESS" || observation.ChannelTransactionID == nil || observation.PaidAt == nil || provider.gets.Load() != 1 {

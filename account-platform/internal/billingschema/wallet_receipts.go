@@ -91,6 +91,9 @@ func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []migration
 	if err := validateUsageWaiverHistoryDelivery(loaded); err != nil {
 		return migrations.Verification{}, err
 	}
+	if err := validateLatePaymentQueryAdmission(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
 	var err error
 	loaded, err = expectedUsageWaiverHistory(ctx, connection, loaded)
 	if err != nil {

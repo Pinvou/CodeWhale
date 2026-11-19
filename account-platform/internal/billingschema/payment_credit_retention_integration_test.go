@@ -374,7 +374,7 @@ func TestPaymentCreditRetentionPublicPostgres(t *testing.T) {
 		migrations.Unlock(ctx, bc)
 	}
 	applyCurrent()
-	// Only this explicit pre-900046 seam admits two newly present NULL keys.
+	// Only this explicit pre-900047 seam admits two newly present NULL keys.
 	// Every old field, row, column attribute, owner/ACL and ledger row stays exact.
 	historicalUpgrade.assertAfter(t, ctx, bc)
 	assertRetentionHistoricalQueryFinancialSnapshot(t, factsBefore, retainedFacts(), "orders")
