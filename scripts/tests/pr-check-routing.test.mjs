@@ -412,6 +412,11 @@ function assertWorkflowFailurePolicy(workflowText) {
   }
   {
     const receipt = namedStep(jobBlock("release-contract-test", text), "Preserve Windows release contract process receipts");
+    assert.equal(namedStep(jobBlock("release-contract-test", text), "Configure bounded Windows upload diagnostics").trimEnd(), [
+      "      - name: Configure bounded Windows upload diagnostics",
+      "        if: ${{ always() && runner.os == 'Windows' }}",
+      "        run: node scripts/ci-artifact-upload-diagnostics.cjs --configure-env",
+    ].join("\n"));
     assert.equal(receipt.trimEnd(), [
       "      - name: Preserve Windows release contract process receipts",
       "        id: windows_release_contract_receipts",
@@ -419,6 +424,9 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_UPLOAD_NODE_OPTIONS }}",
       "        with:",
       "          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}",
       "          path: |",
@@ -484,6 +492,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   const withoutWindowsExemption = original.replace(windows,
     windows.replace("        continue-on-error: true\n", ""));
   const mutants = [
+    original.replace("scripts/ci-artifact-upload-diagnostics.cjs --configure-env", "scripts/unreviewed-upload.cjs --configure-env"),
     original.replace(relayReceipt, relayReceipt.replace("windows-relay-tools-process.json", "other-process.json")),
     original.replace("      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n",
       "      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n        continue-on-error: true\n"),
