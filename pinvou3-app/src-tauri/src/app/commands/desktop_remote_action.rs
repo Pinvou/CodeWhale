@@ -6,7 +6,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager as _};
-#[cfg(test)]
 use tokio::sync::oneshot;
 
 use crate::features::behavior_telemetry::{RemoteControlEvent, RemoteStage};
@@ -337,7 +336,7 @@ pub async fn desktop_remote_action_a(
         })?;
         // Retire/reserve/register inside the same current owner/lane and store
         // binding fence. A captured old context must never prune new identities.
-        let (receiver, identity) = with_current_dispatch_binding(&app, &live, || {
+        let (registration, receiver, identity) = with_current_dispatch_binding(&app, &live, || {
             store
                 .require_live_remote_mutation(&local_session_id, &remote_ref, &live)
                 .map_err(|_| "remote_binding_mismatch".to_owned())?;
@@ -361,7 +360,7 @@ pub async fn desktop_remote_action_a(
                         failure.code.to_owned()
                     })?;
                 actual_request_id = identity.request_id.clone();
-                let receiver = state
+                let (registration, receiver) = state
                     .register(
                         identity.request_id.clone(),
                         local_session_id.clone(),
@@ -372,7 +371,7 @@ pub async fn desktop_remote_action_a(
                         intent.transfer_id().map(str::to_owned),
                     )
                     .map_err(str::to_owned)?;
-                Ok::<_, String>((receiver, identity))
+                Ok::<_, String>((registration, receiver, identity))
             })())
         })
         .map_err(|error| error.code().to_owned())??;
@@ -391,7 +390,7 @@ pub async fn desktop_remote_action_a(
         identity.mark_dispatched();
         let result = send_action_encrypted(&app, &live, &payload);
         if result.is_err() {
-            state.detach_uncertain(&request_id);
+            state.detach_uncertain(&request_id, &registration);
             log_remote_action_event(
                 "controller",
                 "remote_action_failed",
@@ -401,23 +400,12 @@ pub async fn desktop_remote_action_a(
             return Err("result_unknown".to_owned());
         }
         log_remote_action_event("controller", "remote_action_sent", &operation, "sent");
-        match tokio::time::timeout(std::time::Duration::from_secs(15), receiver).await {
-            Ok(Ok(result)) => {
-                authoritative = !matches!(&result, Err(code) if code == "result_unknown");
-                identity.settle(authoritative);
-                result
-            }
-            _ => {
-                state.detach_uncertain(&request_id);
-                log_remote_action_event(
-                    "controller",
-                    "remote_action_timeout",
-                    &operation,
-                    "result_unknown",
-                );
-                Err("result_unknown".to_owned())
-            }
-        }
+        let result =
+            wait_for_action_response(&state, &request_id, &registration, receiver, &operation)
+                .await;
+        authoritative = !matches!(&result, Err(code) if code == "result_unknown");
+        identity.settle(authoritative);
+        result
     }
     .await;
     match &result {
@@ -458,6 +446,28 @@ pub async fn desktop_remote_action_a(
         request_id: actual_request_id,
         authoritative,
     })
+}
+
+async fn wait_for_action_response(
+    state: &DesktopRemoteActionState,
+    request_id: &str,
+    registration: &Arc<()>,
+    receiver: oneshot::Receiver<Result<Value, String>>,
+    operation: &str,
+) -> Result<Value, String> {
+    match tokio::time::timeout(std::time::Duration::from_secs(15), receiver).await {
+        Ok(Ok(result)) => result,
+        _ => {
+            state.detach_uncertain(request_id, registration);
+            log_remote_action_event(
+                "controller",
+                "remote_action_timeout",
+                operation,
+                "result_unknown",
+            );
+            Err("result_unknown".to_owned())
+        }
+    }
 }
 
 fn send_action_encrypted(
@@ -601,6 +611,16 @@ mod tests {
         task_id: Option<&str>,
         transfer_id: Option<&str>,
     ) -> oneshot::Receiver<Result<Value, String>> {
+        register_pending(state, request_id, operation, task_id, transfer_id).1
+    }
+
+    fn register_pending(
+        state: &DesktopRemoteActionState,
+        request_id: &str,
+        operation: &str,
+        task_id: Option<&str>,
+        transfer_id: Option<&str>,
+    ) -> (std::sync::Arc<()>, oneshot::Receiver<Result<Value, String>>) {
         state
             .register(
                 request_id.into(),
@@ -727,6 +747,98 @@ mod tests {
         let mut receiver = register(&state, "request-1", "permission_list", Some("task-1"), None);
         state.clear_all();
         assert_eq!(receiver.try_recv(), Err(TryRecvError::Closed));
+    }
+
+    #[test]
+    fn disconnect_cleanup_drops_only_the_original_connection_waiters() {
+        let state = DesktopRemoteActionState::default();
+        let mut original = register(
+            &state,
+            "request-original",
+            "permission_list",
+            Some("task-1"),
+            None,
+        );
+        let mut next = live();
+        next.connection_id = "connection-successor".to_owned();
+        let (_, mut successor) = state
+            .register(
+                "request-successor".into(),
+                "local-0001".into(),
+                "remote-0001".into(),
+                next,
+                "permission_list".into(),
+                Some("task-2".into()),
+                None,
+            )
+            .unwrap();
+        state.clear_connection("connection-0001");
+        assert_eq!(original.try_recv(), Err(TryRecvError::Closed));
+        assert_eq!(successor.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn delayed_waiter_cleanup_preserves_a_reused_request_id_and_next_reply() {
+        for cleanup in ["disconnect", "clear_all", "purge_stale", "task_retirement"] {
+            let state = DesktopRemoteActionState::default();
+            let (registration, original) = register_pending(
+                &state,
+                "request-reused",
+                "permission_list",
+                Some("task-1"),
+                None,
+            );
+            let mut next = live();
+            next.connection_id = "connection-successor".into();
+            match cleanup {
+                "disconnect" => state.clear_connection("connection-0001"),
+                "clear_all" => state.clear_all(),
+                "purge_stale" => state.purge_stale(&next),
+                "task_retirement" => state.discard_task_receipts("local-0001", "task-1"),
+                _ => unreachable!(),
+            }
+            let (successor_registration, mut successor) = state
+                .register(
+                    "request-reused".into(),
+                    "local-0001".into(),
+                    "remote-0001".into(),
+                    next.clone(),
+                    "permission_list".into(),
+                    Some("task-2".into()),
+                    None,
+                )
+                .unwrap();
+            // Poll the real command's wait continuation only after the next
+            // registration exists. Both the closed-wait and uncertain-send
+            // cleanup must compare registration identity, not just the wire ID.
+            assert_eq!(
+                wait_for_action_response(
+                    &state,
+                    "request-reused",
+                    &registration,
+                    original,
+                    "permission_list",
+                )
+                .await,
+                Err("result_unknown".into()),
+            );
+            state.detach_uncertain("request-reused", &registration);
+            assert_eq!(successor.try_recv(), Err(TryRecvError::Empty));
+            assert_eq!(state.pending_binding("request-reused").unwrap().2, next);
+            let mut next_lease = lease();
+            next_lease.connection_id = next.connection_id.clone();
+            let payload = json!({
+                "request_id": "request-reused", "session_id": "remote-0001",
+                "operation": "permission_list", "ok": true,
+                "body": {"permissions": []},
+            });
+            assert!(!state.settle_authenticated(&lease(), &live(), &payload));
+            assert!(state.settle_authenticated(&next_lease, &next, &payload));
+            assert_eq!(successor.await.unwrap().unwrap(), payload["body"]);
+            // A late duplicate detach remains harmless after settlement.
+            state.detach_uncertain("request-reused", &successor_registration);
+            assert!(state.pending_binding("request-reused").is_none());
+        }
     }
 
     #[test]
@@ -968,14 +1080,14 @@ mod tests {
             }),
         );
         assert!(begin.try_recv().unwrap().is_ok());
-        let _chunk = register(
+        let (registration, _chunk) = register_pending(
             &state,
             "request-2",
             "attachment_chunk",
             Some("task-1"),
             Some("transfer-1"),
         );
-        state.detach_uncertain("request-2");
+        state.detach_uncertain("request-2", &registration);
         assert!(state.inner.lock().uploads.contains_key("transfer-1"));
         assert_eq!(
             state.validate_completed_uploads(

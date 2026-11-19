@@ -16,10 +16,17 @@ import (
 // File authentication is explicit and never silently overrides another identity.
 // Legacy password-only URLs and JWT credentials remain supported.
 func natsAuthentication(rawURL, seedFile, credentialsFile string) ([]nats.Option, error) {
+	return natsAuthenticationWithExpectedIdentity(rawURL, seedFile, credentialsFile, "")
+}
+
+func natsAuthenticationWithExpectedIdentity(rawURL, seedFile, credentialsFile, expectedPublic string) ([]nats.Option, error) {
 	if seedFile != "" && credentialsFile != "" {
 		return nil, ErrNATSResources
 	}
 	if seedFile == "" && credentialsFile == "" {
+		if expectedPublic != "" {
+			return nil, ErrNATSResources
+		}
 		return nil, nil
 	}
 	for _, endpoint := range strings.Split(rawURL, ",") {
@@ -41,7 +48,7 @@ func natsAuthentication(rawURL, seedFile, credentialsFile string) ([]nats.Option
 		}
 		public, err := pair.PublicKey()
 		pair.Wipe()
-		if err != nil {
+		if err != nil || (expectedPublic != "" && public != expectedPublic) {
 			return nil, ErrNATSResources
 		}
 		// Both reconnect callbacks read a checked file. Pin the user key so a
@@ -84,7 +91,7 @@ func natsAuthentication(rawURL, seedFile, credentialsFile string) ([]nats.Option
 	}
 	public, err := pair.PublicKey()
 	pair.Wipe()
-	if err != nil {
+	if err != nil || (expectedPublic != "" && public != expectedPublic) {
 		return nil, ErrNATSResources
 	}
 	return []nats.Option{nats.Nkey(public, func(nonce []byte) ([]byte, error) {
