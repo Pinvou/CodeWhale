@@ -47,6 +47,7 @@ jobs:
       - uses: actions/setup-node@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
@@ -92,6 +93,7 @@ jobs:
         uses: actions/attest-build-provenance@v3
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           subject-path: ${{ steps.installer.outputs.path }}
@@ -105,6 +107,7 @@ jobs:
         uses: actions/attest-build-provenance@v3
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           subject-path: installer-sbom.spdx.json
@@ -142,6 +145,7 @@ jobs:
         uses: actions/upload-artifact@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: windows-remote-control-protected-build

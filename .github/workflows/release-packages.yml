@@ -499,6 +499,7 @@ jobs:
         uses: actions/setup-node@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
@@ -606,6 +607,7 @@ jobs:
         uses: actions/setup-node@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
@@ -666,6 +668,7 @@ jobs:
         uses: actions/download-artifact@v8
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           artifact-ids: ${{ steps.remote-evidence-identity.outputs.artifact-id }}
@@ -681,6 +684,7 @@ jobs:
       - uses: actions/setup-python@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         if: ${{ runner.environment == 'github-hosted' }}
         with:
@@ -831,6 +835,7 @@ jobs:
         uses: actions/setup-node@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
@@ -904,6 +909,7 @@ jobs:
         uses: actions/upload-artifact@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: pinvou3-linux-${{ needs.check-version-bump.outputs.version }}-x64
@@ -1038,6 +1044,7 @@ jobs:
         uses: actions/setup-node@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
@@ -1095,6 +1102,7 @@ jobs:
         uses: actions/upload-artifact@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: pinvou3-linux-${{ needs.check-version-bump.outputs.version }}-arm64
@@ -1199,6 +1207,7 @@ jobs:
         uses: actions/cache/restore@v6
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           path: ${{ env.PINVOU_LOONG64_CACHE_ROOT }}/cross-tools
@@ -1214,6 +1223,7 @@ jobs:
         uses: actions/cache/restore@v6
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           path: ${{ env.PINVOU_LOONG64_CACHE_ROOT }}/sysroot
@@ -1310,6 +1320,7 @@ jobs:
         uses: actions/upload-artifact@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: pinvou3-linux-${{ needs.check-version-bump.outputs.version }}-loong64
@@ -1343,6 +1354,7 @@ jobs:
         uses: actions/setup-node@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
@@ -1463,6 +1475,7 @@ jobs:
         uses: actions/setup-node@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
@@ -1524,6 +1537,7 @@ jobs:
         uses: actions/download-artifact@v8
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           artifact-ids: ${{ needs.remote-control-release-gate.outputs.evidence_artifact_id }}
@@ -1563,6 +1577,7 @@ jobs:
         uses: actions/upload-artifact@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: pinvou3-windows-${{ needs.check-version-bump.outputs.version }}-x64
@@ -1651,6 +1666,7 @@ jobs:
         uses: actions/setup-node@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
@@ -1742,6 +1758,7 @@ jobs:
         uses: actions/upload-artifact@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: pinvou3-macos-${{ needs.check-version-bump.outputs.version }}-universal

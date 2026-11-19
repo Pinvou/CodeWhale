@@ -3383,7 +3383,7 @@ python3() { fixture_mock python3 "$@"; }
             "- name: Cargo cache",
             "id: cli_lint_cache",
             "uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0",
-            "env:", "NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}",
+            "env:", "NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}", "PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}",
             "PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
             "with:", "workspaces: pinvou-cli", "shared-key: cli-lint",
             "cache-on-failure: false", "save-if: ${{ github.ref == 'refs/heads/main' }}",
@@ -3408,7 +3408,7 @@ python3() { fixture_mock python3 "$@"; }
         self.assertEqual(uncommented.count("GITHUB_ENV"), 1)
         # Job/step env overrides GITHUB_ENV for the post condition. This job
         # currently has no env mapping; pin that fact, including quoted keys.
-        uncommented = uncommented.replace("        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}\n"
+        uncommented = uncommented.replace("        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}\n          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}\n"
                                           "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'\n", '')
         self.assertNotRegex(uncommented, r"(?m)^\s*(?:env|['\"]env['\"])\s*:")
 
@@ -3661,7 +3661,7 @@ python3() { fixture_mock python3 "$@"; }
         body = re.sub(r'(?ms)^      - name: Prepare CI transfer runtime \(\d+\)\n'
                       r'(?:        (?:if|continue-on-error|timeout-minutes|working-directory):[^\n]*\n)*'
                       r'        run: node scripts/ci-network-node-options\.cjs\n', '', body)
-        body = body.replace("        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}\n"
+        body = body.replace("        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}\n          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}\n"
                             "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'\n", '')
         job_level = []
         step_level = []

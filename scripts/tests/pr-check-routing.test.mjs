@@ -23,7 +23,7 @@ function productPolicyText(text) {
   transportPolicy.checkWorkflow(text);
   return text.replace(/^      - [\s\S]*?(?=^      - |^  [A-Za-z0-9_-]+:|$(?![\s\S]))/gm, step => {
     if (/^        run: node scripts\/ci-network-node-options\.cjs$/m.test(step)) return '';
-    return step.replace("        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}\n          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'\n", '');
+    return step.replace("        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}\n          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}\n          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'\n", '');
   });
 }
 

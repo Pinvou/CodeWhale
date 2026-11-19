@@ -11,6 +11,19 @@ const workflow = fs.readFileSync(path.resolve(__dirname, '../../.github/workflow
 const stepPattern = /^      - [\s\S]*?(?=^      - |^  [A-Za-z0-9_-]+:|$(?![\s\S]))/gm;
 
 const { checkWorkflow } = require('../ci-network-policy.cjs');
+const { networkPath } = require('../ci-network-node-options.cjs');
+
+test('Windows archive utilities stay scoped and an existing archiver wins', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cache-tools-'));
+  try {
+    assert.equal(networkPath('original-path', 'linux', () => assert.fail('unexpected probe')), 'original-path');
+    fs.writeFileSync(path.join(root, 'tar.exe'), 'fixture');
+    assert.equal(networkPath(root, 'win32', () => assert.fail('existing archiver must win')), root);
+    assert.equal(networkPath('original-path', 'win32', () => root), `${root};original-path`);
+    assert.throws(() => networkPath('original-path', 'win32', () => null));
+    assert.throws(() => networkPath('path\nINJECTED=1'));
+  } finally { fs.rmSync(root, { recursive: true }); }
+});
 
 test('all workflows keep storage policies scoped, condition-matched and observable', () => {
   const directory = path.resolve(__dirname, '../../.github/workflows');
