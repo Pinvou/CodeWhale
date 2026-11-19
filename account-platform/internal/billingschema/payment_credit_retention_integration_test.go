@@ -362,6 +362,7 @@ func TestPaymentCreditRetentionPublicPostgres(t *testing.T) {
 	if count(ac, "account_payment_credit_admissions") != 4 || count(bc, "payment_credit_attempts") != 4 {
 		t.Fatal("refused rollback changed evidence")
 	}
+	historicalUpgrade := freezeRetentionHistoricalQueryUpgrade(t, ctx, bc)
 	applyCurrent := func() {
 		t.Helper()
 		if err := Up(ctx, bc, bm); err != nil {
@@ -371,16 +372,22 @@ func TestPaymentCreditRetentionPublicPostgres(t *testing.T) {
 			t.Fatal("verify current Billing upgrade or replay", err)
 		}
 		migrations.Unlock(ctx, bc)
-		if retainedFacts() != factsBefore || creditLedger() != ledgerBefore {
-			t.Fatal("current Billing upgrade or replay changed retained facts or historical ledger")
-		}
 	}
 	applyCurrent()
+	// Only this explicit pre-900046 seam admits two newly present NULL keys.
+	// Every old field, row, column attribute, owner/ACL and ledger row stays exact.
+	historicalUpgrade.assertAfter(t, ctx, bc)
+	assertRetentionHistoricalQueryFinancialSnapshot(t, factsBefore, retainedFacts(), "orders")
+	if creditLedger() != ledgerBefore {
+		t.Fatal("current Billing upgrade changed the original historical ledger")
+	}
+	currentFacts := retainedFacts()
 	currentLedger := stageValue(t, ctx, bc, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`)
 	currentShape := stageShape(t, ctx, bc)
 	applyCurrent()
-	if currentLedger != stageValue(t, ctx, bc, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) || currentShape != stageShape(t, ctx, bc) {
-		t.Fatal("current Billing replay changed its ledger or schema")
+	// A replay is current-to-current: compare ALL new and old fields without exclusion.
+	if retainedFacts() != currentFacts || currentLedger != stageValue(t, ctx, bc, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) || currentShape != stageShape(t, ctx, bc) {
+		t.Fatal("current Billing replay changed complete facts, ledger or schema")
 	}
 
 	t.Run("late-acknowledgement-survives-billing-retention", func(t *testing.T) {

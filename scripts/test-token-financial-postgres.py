@@ -341,6 +341,8 @@ EXACT_REQUIRED_CHILDREN = {
         "current-query-real-producer/older-PENDING-cannot-cover-newer-CLOSED",
         "current-query-real-producer/older-CLOSED-cannot-cover-newer-CLOSED",
         "current-query-real-producer/older-SUCCESS-cannot-cover-newer-CLOSED",
+        "current-query-real-producer/older-SUCCESS-newer-provider-CLOSED-Account-CLOSED",
+        "current-query-real-producer/older-SUCCESS-newer-provider-CLOSED-Account-SUBJECT_UNAVAILABLE",
         "current-query-real-producer/older-CLOSED-cannot-clear-newer-failure",
         "current-query-real-producer/older-CLOSED-cannot-clear-newer-PENDING",
     },

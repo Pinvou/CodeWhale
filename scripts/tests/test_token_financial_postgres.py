@@ -2975,6 +2975,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "current-query-real-producer/older-PENDING-cannot-cover-newer-CLOSED",
             "current-query-real-producer/older-CLOSED-cannot-cover-newer-CLOSED",
             "current-query-real-producer/older-SUCCESS-cannot-cover-newer-CLOSED",
+            "current-query-real-producer/older-SUCCESS-newer-provider-CLOSED-Account-CLOSED",
+            "current-query-real-producer/older-SUCCESS-newer-provider-CLOSED-Account-SUBJECT_UNAVAILABLE",
             "current-query-real-producer/older-CLOSED-cannot-clear-newer-failure",
             "current-query-real-producer/older-CLOSED-cannot-clear-newer-PENDING",
         }
@@ -2986,6 +2988,12 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         missing = [event for event in events if event.get("Test") != root + "/current-query-real-producer/older-SUCCESS-cannot-cover-newer-CLOSED"]
         with self.assertRaises(RuntimeError):
             RUNNER.verify_results(missing, {root}, **options)
+
+        for child in {"current-query-real-producer/older-SUCCESS-newer-provider-CLOSED-Account-CLOSED", "current-query-real-producer/older-SUCCESS-newer-provider-CLOSED-Account-SUBJECT_UNAVAILABLE"}:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
 
     def test_profile_revocation_requires_every_closure_child(self):
         root = "TestProfileRevocationClosureRuntimePostgres"

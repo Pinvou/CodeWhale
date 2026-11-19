@@ -13,12 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcredit"
 	"github.com/google/uuid"
 )
 
-// Keep the real Create/query/PAY-12/HTTP/repository chain. Only the supplier
-// response and its explicit release barrier are controlled; no authority SQL
-// fixture supplies the positive observations below.
+// Keep the real Create/query/PAY-12/HTTP/repository and Billing money guards.
+// Supplier replies/barriers and Account admission responses are controlled;
+// no authority SQL supplies the current-query observations. Provider CLOSED
+// is not Account identity cleanup. Real Account cleanup is tested separately.
 type archiveAdmissionProvider struct {
 	*instructionCreateProvider
 	response ProviderOrder
@@ -46,6 +48,21 @@ func (p *archiveAdmissionProvider) Get(ctx context.Context, _ string) (ProviderO
 		return ProviderOrder{}, p.failure
 	}
 	return p.response, nil
+}
+
+// This Billing-only fixture returns a matching Account refusal; it is not a
+// real Account database cleanup transition or a provider payment status.
+type archiveAccountAdmissionRefusal struct {
+	state string
+	calls atomic.Int64
+}
+
+func (a *archiveAccountAdmissionRefusal) Admit(_ context.Context, input paymentcredit.Request) (paymentcredit.Decision, error) {
+	a.calls.Add(1)
+	if !input.Valid() {
+		return paymentcredit.Decision{}, paymentcredit.ErrProtocol
+	}
+	return paymentcredit.Decision{ID: input.ID, Fingerprint: input.Fingerprint(), State: a.state}, nil
 }
 
 func (p *archiveAdmissionProvider) finish() {
@@ -87,7 +104,9 @@ func archiveCurrentQueryAdmission(t *testing.T, r *PostgresRepository, ctx conte
 		if held {
 			provider.entered, provider.release = make(chan struct{}, 1), make(chan struct{})
 		}
-		c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+		// Control only Account admission; retain the real Billing receipt and money guard.
+		// An older successful payment must still exercise the original financial merge.
+		c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -323,6 +342,91 @@ func archiveCurrentQueryAdmission(t *testing.T, r *PostgresRepository, ctx conte
 			} else {
 				archive(t, handler, item, "archive-"+uuid.NewString(), 200)
 			}
+		})
+	}
+	for _, accountState := range []string{"CLOSED", "SUBJECT_UNAVAILABLE"} {
+		t.Run("older-SUCCESS-newer-provider-CLOSED-Account-"+accountState, func(t *testing.T) {
+			_, base, order, item := fixture(t)
+			input := LatePaymentQueryInput{1, order.ID, item.ProviderID, item.ProviderVersion, item.MerchantOrderNo}
+			older := base.result
+			older.Status, older.ProviderStatus = "SUCCESS", "SUCCESS"
+			older.PaymentURL, older.QRData = "", ""
+			transaction, paidAt := uuid.NewString(), order.ExpiresAt.Add(-time.Second)
+			older.ChannelTransactionID, older.PaidAt = &transaction, &paidAt
+			a, held := coordinator(t, base, older, nil, true)
+			refusal := &archiveAccountAdmissionRefusal{state: accountState}
+			a.WithPaymentCreditAdmission(refusal)
+			defer held.finish()
+			results, done := make(chan *httptest.ResponseRecorder, 1), make(chan struct{})
+			go func() {
+				defer close(done)
+				results <- query(makeHandler(a), item.ID, "query-"+uuid.NewString(), input, ctx)
+			}()
+			defer func() {
+				held.finish()
+				select {
+				case <-done:
+				case <-ctx.Done():
+					t.Error("owned old query did not exit")
+				}
+			}()
+			select {
+			case <-held.entered:
+			case <-ctx.Done():
+				t.Fatal("old query did not reach real supplier barrier")
+			}
+			closed := base.result
+			closed.Status, closed.ProviderStatus = "CLOSED", "PAY_CLOSED"
+			closed.PaymentURL, closed.QRData = "", ""
+			b, _ := coordinator(t, base, closed, nil, false)
+			handler := makeHandler(b)
+			requireLateQueryState(t, query(handler, item.ID, "query-"+uuid.NewString(), input, ctx), "COMPLETED")
+			generation, authority := current(t, order.ID)
+			if authority == nil || !*authority {
+				t.Fatal("newer provider query did not establish authority")
+			}
+			rejected(t, handler, item)
+			moneyFacts := func() map[string]string {
+				facts := entitlementFinancialFactsSnapshot(t, ctx, r)
+				var accounts string
+				if err := r.pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY to_jsonb(a)::text),'[]'::jsonb)::text FROM ledger_accounts a`).Scan(&accounts); err != nil {
+					t.Fatal("capture complete ledger accounts", err)
+				}
+				facts["ledger_accounts"] = accounts
+				return facts
+			}
+			before := moneyFacts()
+			held.finish()
+			select {
+			case response := <-results:
+				requireLateQueryState(t, response, "COMPLETED")
+			case <-ctx.Done():
+				t.Fatal("old query did not complete")
+			}
+			if refusal.calls.Load() == 0 || held.gets.Load() != 1 {
+				t.Fatal("test did not reach matching Account refusal or redispatched supplier")
+			}
+			afterGeneration, afterAuthority := current(t, order.ID)
+			if afterGeneration != generation || !reflect.DeepEqual(authority, afterAuthority) {
+				t.Fatal("old payment refusal replaced the newer query authority")
+			}
+			stored := instructionStoredOrder(t, r, ctx, order.ID)
+			if stored.Status != "MANUAL_REVIEW" || stored.FulfillmentStatus != "MANUAL_REVIEW" {
+				t.Fatal("Account refusal did not preserve original manual payment recovery")
+			}
+			after := moneyFacts()
+			for _, table := range []string{"wallets", "credit_lots", "entitlement_packages", "entitlement_components", "entitlement_component_corrections", "journal_entries", "ledger_postings", "ledger_accounts", "member_quota_grants", "usage_holds", "usage_hold_allocations", "refunds", "refund_component_reservations", "forced_refund_cases", "chargeback_cases", "receivables", "receivable_allocations"} {
+				left, leftOK := before[table]
+				right, rightOK := after[table]
+				if !leftOK || !rightOK || left != right {
+					t.Fatal("Account refusal changed complete financial rows", table)
+				}
+			}
+			var evidence, transactions, attempts, applied, manual int
+			if err := r.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM payment_evidence WHERE payment_order_id=$1 AND evidence_type='QUERY' AND payload_snapshot->>'status'='SUCCESS' AND merge_result='REVIEW_REQUIRED'),(SELECT count(*) FROM payment_transactions WHERE payment_order_id=$1 AND status='REVIEW_REQUIRED' AND fulfillment_status='REVIEW_REQUIRED'),(SELECT count(*) FROM payment_credit_attempts WHERE payment_order_id=$1),(SELECT count(*) FROM payment_credit_attempts WHERE payment_order_id=$1 AND state='APPLIED'),(SELECT count(*) FROM payment_anomaly_cases WHERE payment_order_id=$1 AND status='OPEN' AND resource_snapshot->>'reason_code'='PAYMENT_CREDIT_ADMISSION_UNCONFIRMED')`, order.ID).Scan(&evidence, &transactions, &attempts, &applied, &manual); err != nil || evidence != 1 || transactions != 1 || attempts != 0 || applied != 0 || manual != 1 {
+				t.Fatal("Account refusal lost original immutable evidence or admitted money", evidence, transactions, attempts, applied, manual, err)
+			}
+			rejected(t, handler, item)
 		})
 	}
 	for _, newerResult := range []string{"failure", "PENDING"} {
