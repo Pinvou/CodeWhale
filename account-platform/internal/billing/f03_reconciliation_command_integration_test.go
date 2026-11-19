@@ -53,7 +53,7 @@ func f03CommandCase(t *testing.T) (*PostgresRepository, context.Context, *Paymen
 	r, ctx := retainedFinanceRepository(t)
 	_, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, false)
 	provider := &f03BudgetProvider{trackedBillProvider: trackedBillProvider{reconciliationFixtureProvider: reconciliationFixtureProvider{rows: []ProviderBillEntry{pipelineRefundRow(order, r.now())}}}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

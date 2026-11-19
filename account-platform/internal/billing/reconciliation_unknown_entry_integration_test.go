@@ -69,7 +69,7 @@ func TestReconciliationUnknownProviderEntryPublicPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestReconciliationUnknownProviderEntryPublicPostgres(t *testing.T) {
 	})
 	t.Run("file-import-unknown-kind-keeps-existing-contract", func(t *testing.T) {
 		fileProvider := &reconciliationFixtureProvider{}
-		file, err := NewPaymentCoordinatorWithProvider(r, fileProvider, "test")
+		file, err := newBillingFixturePaymentCoordinator(r, fileProvider, "test")
 		if err != nil {
 			t.Fatal(err)
 		}

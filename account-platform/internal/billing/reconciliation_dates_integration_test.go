@@ -42,7 +42,7 @@ func TestF03ReversalOccurrenceDayDoesNotBecomeSettlementDay(t *testing.T) {
 		t.Fatal("unverified supplier date reported as missing money")
 	}
 	provider := &reconciliationFixtureProvider{retainedFinancialProvider: *original.provider.(*retainedFinancialProvider), rows: []ProviderBillEntry{{EntryType: "REFUND", ProviderReferenceID: reference, ChannelTransactionID: reference, MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: refund.AmountFen, Currency: order.Currency, Status: "SUCCESS", PaidAt: supplierOccurrence}}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

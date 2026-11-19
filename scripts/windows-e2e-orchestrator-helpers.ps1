@@ -61,7 +61,29 @@ function global:Invoke-PinvouTrustedGuard {
         if (-not $global:PinvouE2EExpectedFileHashes.ContainsKey($relative)) { throw 'e2e_process_dependency_not_attested' }
         $additionalExpected[$absoluteAdditional] = $global:PinvouE2EExpectedFileHashes[$relative]
     }
-    $result = Invoke-PinvouWhitelistedProcess -FilePath $target -ExpectedSha256 $global:PinvouE2EExpectedFileHashes[$targetRelative] -Arguments $Arguments -AdditionalExpectedSha256 $additionalExpected
+    # Only the two attested driver start commands intentionally create a
+    # long-lived run resource. Keep their exact Job handles under this run;
+    # ordinary commands and every failed/cancelled start retire their Job.
+    $retain = $Arguments.Count -gt 0 -and $Arguments[0] -in @('legacy-start', 'start-role')
+    $result = Invoke-PinvouWhitelistedProcess -FilePath $target -ExpectedSha256 $global:PinvouE2EExpectedFileHashes[$targetRelative] -Arguments $Arguments -AdditionalExpectedSha256 $additionalExpected -RetainSuccessfulScope:$retain
+    if ($result.OwnedScope) {
+        $retained = $false
+        $handoffFailure = $null
+        try {
+            $marker = Get-Content -LiteralPath (Join-Path $root '.pinvou-e2e-owner.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+            if ($marker.schema -ne 'pinvou-e2e-staging' -or $marker.run_nonce -notmatch '^[a-f0-9]{64}$' -or (Split-Path -Leaf $root) -cne $marker.run_nonce) { throw 'e2e_process_scope_owner_invalid' }
+            if (-not (Get-Variable -Name PinvouE2EOwnedProcessScopes -Scope Global -ErrorAction SilentlyContinue)) { $global:PinvouE2EOwnedProcessScopes = @() }
+            $global:PinvouE2EOwnedProcessScopes += $result.OwnedScope
+            $retained = $true
+        } catch {
+            $handoffFailure = $_
+            throw
+        } finally {
+            if (-not $retained) {
+                Invoke-PinvouCleanupPreservingFailure -Cleanup { $result.OwnedScope.Dispose() } -PrimaryFailure $handoffFailure -FailureCode 'e2e_process_scope_cleanup_failed'
+            }
+        }
+    }
     $global:LASTEXITCODE = $result.ExitCode
     if ($ReturnProcessResult) { $result } else { if ($result.StdErr) { [Console]::Error.Write($result.StdErr) }; $result.StdOut }
 }
@@ -88,6 +110,7 @@ function global:Assert-PinvouLegacyOwnershipRegistry {
     foreach ($pidValue in @($Registry.active) + @($Registry.terminated)) {
         if (($pidValue -isnot [int] -and $pidValue -isnot [long]) -or [int]$pidValue -le 0 -or -not $seen.Add([int]$pidValue)) { throw 'e2e_legacy_ownership_pid_invalid' }
     }
-    if ($null -ne $CallerObservedPid -and -not $seen.Contains($CallerObservedPid.Value)) { throw 'e2e_legacy_ownership_caller_pid_missing' }
+    # PowerShell boxes a populated Nullable[int] as Int32; it has no .Value.
+    if ($null -ne $CallerObservedPid -and -not $seen.Contains([int]$CallerObservedPid)) { throw 'e2e_legacy_ownership_caller_pid_missing' }
     [pscustomobject]@{ active = @($Registry.active | ForEach-Object { [int]$_ }); terminated = @($Registry.terminated | ForEach-Object { [int]$_ }) }
 }

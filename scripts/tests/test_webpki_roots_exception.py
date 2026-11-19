@@ -348,7 +348,8 @@ class WebpkiCiContractTests(unittest.TestCase):
                     ('windows-codex-runtime-test', 'Preserve ACP fixture exit receipt'),
                     ('windows-rust-test', 'Windows atomic lifecycle receipts'),
                     ('windows-relay-tools-test', 'Preserve Windows relay tools process receipt'),
-                    ('release-contract-test', 'Preserve Windows release contract process receipts')]
+                    ('release-contract-test', 'Preserve Windows release contract process receipts'),
+                    ('relay-test', '保留 Relay 进程作用域原始回执')]
         self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed) + len(functional))
         for job, name in functional:
             steps = job_block(workflow, job).split('\n      - ')
@@ -425,7 +426,9 @@ class WebpkiCiContractTests(unittest.TestCase):
                      'Windows browser wrapper lifecycle regression', 'Windows browser wrapper lazy regression',
                      'Windows ACP bridge runtime smoke', 'Windows 原子替换状态机回归',
                      'Confirm Windows atomic resource retirement',
-                     'Windows PowerShell 5.1 与实际工具回归（禁止跳过）']:
+                     'Windows PowerShell 5.1 与实际工具回归（禁止跳过）',
+                     'Relay 与部署脚本回归', 'Windows 远控发布与安全契约',
+                     'Windows 共享进程监督器兼容回归']:
             with self.subTest(step=name), self.assertRaises(AssertionError):
                 self.verify_diagnostic_uploads(workflow.replace(
                     f'      - name: {name}\n', f'      - name: {name}\n        continue-on-error: true\n'))
