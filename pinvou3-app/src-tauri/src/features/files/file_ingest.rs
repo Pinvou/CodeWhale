@@ -65,7 +65,7 @@ use ingest_core::{binary_placeholder, classify, estimate_tokens, redacted_secret
 mod published_attachment;
 pub(crate) use published_attachment::{AttachmentReadOwner, PublishedAttachment};
 
-/// 单文件硬上限 50 MB(定义与完整依据见 [`super::limits`]:
+/// 单文件硬上限 50 MB(定义与完整依据见 `super::limits` 模块文档:
 /// 原始体积与上下文占用解耦,进 prompt 的部分由内联预算按解析后文本封顶)。
 /// `pub` 供 remote_control 上传链路对齐硬上限(PR #213 审查 #5:mobile upload cap 必须
 /// ≤ 此值,否则超限文件会被 mobile 接受但 file_ingest 静默降级为 oversize 兜底)。
