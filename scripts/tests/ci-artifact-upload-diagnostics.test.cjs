@@ -62,7 +62,8 @@ test('error observation does not consume an unhandled stream error or make it su
 test('closed diagnostic stderr does not make a successful receipt read fail', () => {
   const source = `const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
     const root=fs.mkdtempSync(path.join(os.tmpdir(),'artifact-closed-stderr-'));const file=path.join(root,'receipt.json');fs.writeFileSync(file,'{}');
-    fs.closeSync(2);fs.createReadStream(file).resume().on('end',()=>{fs.rmSync(root,{recursive:true});console.log('read-completed');});`;
+    fs.closeSync(2);let ended=false;const stream=fs.createReadStream(file);
+    stream.on('end',()=>{ended=true;}).on('close',()=>{if(!ended)throw new Error('read ended without data completion');fs.rmSync(root,{recursive:true});console.log('read-completed');});stream.resume();`;
   const result = spawnSync(process.execPath, ['--require', helper, '-e', source], {
     env: { ...process.env, PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1' }, encoding: 'utf8', timeout: 10000
   });
