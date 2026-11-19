@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import runpy
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -22,6 +23,8 @@ import zipfile
 from functools import lru_cache
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts/lib'))
+from ci_https import storage_opener  # noqa: E402
 WORKFLOW = os.environ.get('CI_REUSE_WORKFLOW', '.github/workflows/pr-check.yml')
 PROFILES = {
     '.github/workflows/pr-check.yml': ('required-gate', None),
@@ -31,7 +34,10 @@ PROFILES = {
 if WORKFLOW not in PROFILES:
     raise ValueError('unsupported workflow proof profile')
 JOB_SCOPED = WORKFLOW == '.github/workflows/pr-check.yml'
-POLICY = (WORKFLOW, 'scripts/ci-test-reuse.py', 'scripts/ci-reuse-policy.py') + (('scripts/ci-job-inputs.py',) if JOB_SCOPED else ())
+POLICY = (WORKFLOW, 'scripts/ci-test-reuse.py', 'scripts/ci-reuse-policy.py', 'scripts/lib/ci_https.py',
+          'scripts/ci-network-node-options.cjs', 'scripts/ci-artifact-node-options.cjs',
+          'scripts/ci-artifact-upload-diagnostics.cjs', 'scripts/ci-rust-network.cjs',
+          'scripts/ci-network-environment.py', 'scripts/ci-download.py') + (('scripts/ci-job-inputs.py',) if JOB_SCOPED else ())
 MAX_AGE = 24 * 60 * 60
 MAX_BYTES = 65536
 PLAN = runpy.run_path(str(ROOT / 'scripts/ci-reuse-policy.py'))
@@ -164,7 +170,7 @@ class GitHub:
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
             raise ValueError('invalid repository')
         self.repository, self.token = repository, token
-        self.opener = urllib.request.build_opener(SafeRedirect())
+        self.opener = storage_opener(SafeRedirect())
         self.deadline = time.monotonic() + 90
 
     def request(self, path, *, binary=False):

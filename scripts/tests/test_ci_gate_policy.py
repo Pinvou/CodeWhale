@@ -3366,7 +3366,10 @@ python3() { fixture_mock python3 "$@"; }
         ]
         self.assertEqual([name for name in names if name in expected], expected)
         self.assertEqual(names.index("Set up zram and swap"), names.index(initial) + 1)
-        self.assertEqual(names.index("Cargo cache"), names.index(precache) + 1)
+        self.assertEqual(names.index("Cargo cache"), names.index(precache) + 2)
+        preparation = _step_named(job, names[names.index(precache) + 1])
+        self.assertIn('run: node scripts/ci-network-node-options.cjs', preparation)
+        self.assertNotIn('continue-on-error:', preparation)
         self.assertEqual(names.index(postcache), names.index("Cargo cache") + 1)
         self.assertEqual(
             names.index("cargo clippy (workspace, all targets)"),
@@ -3380,6 +3383,8 @@ python3() { fixture_mock python3 "$@"; }
             "- name: Cargo cache",
             "id: cli_lint_cache",
             "uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0",
+            "env:", "NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}",
+            "PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
             "with:", "workspaces: pinvou-cli", "shared-key: cli-lint",
             "cache-on-failure: false", "save-if: ${{ github.ref == 'refs/heads/main' }}",
         ])
@@ -3403,6 +3408,8 @@ python3() { fixture_mock python3 "$@"; }
         self.assertEqual(uncommented.count("GITHUB_ENV"), 1)
         # Job/step env overrides GITHUB_ENV for the post condition. This job
         # currently has no env mapping; pin that fact, including quoted keys.
+        uncommented = uncommented.replace("        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}\n"
+                                          "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'\n", '')
         self.assertNotRegex(uncommented, r"(?m)^\s*(?:env|['\"]env['\"])\s*:")
 
     def test_cli_lint_cache_guard_rejects_step_env_override(self):
@@ -3648,6 +3655,14 @@ python3() { fixture_mock python3 "$@"; }
         # header's prose and the "no continue-on-error" annotations on the
         # clippy gate do not count as settings.
         body = _without_yaml_comments(self.pr_workflow)
+        # The separate all-workflow network policy guard validates pairing,
+        # conditions and the exact helper. Keep this test's original product
+        # failure-policy assertions after removing only reviewed transport.
+        body = re.sub(r'(?ms)^      - name: Prepare CI transfer runtime \(\d+\)\n'
+                      r'(?:        (?:if|continue-on-error|timeout-minutes|working-directory):[^\n]*\n)*'
+                      r'        run: node scripts/ci-network-node-options\.cjs\n', '', body)
+        body = body.replace("        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}\n"
+                            "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'\n", '')
         job_level = []
         step_level = []
         for number, line in enumerate(body.splitlines(), start=1):

@@ -49,7 +49,14 @@ jobs:
               core.setOutput('artifact-id', String(artifact.id));
             } catch (error) { core.setFailed(error.code || 'protected_build_identity_invalid'); }
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/download-artifact@v8
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           artifact-ids: ${{ steps.protected-build.outputs.artifact-id }}
           github-token: ${{ github.token }}
@@ -137,8 +144,15 @@ jobs:
             -TrustedProviderRootCertificateSha256 $env:E2E_PROVIDER_ROOT_CERTIFICATE_SHA256 -TrustedProviderVerifierCertificateSha256 $env:E2E_PROVIDER_VERIFIER_CERTIFICATE_SHA256 `
             -EvidenceDirectory $env:EVIDENCE_DIRECTORY
 
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Upload immutable evidence bundle
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: remote-control-evidence
           path: ${{ env.EVIDENCE_DIRECTORY }}

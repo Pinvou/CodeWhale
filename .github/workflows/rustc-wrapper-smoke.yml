@@ -61,6 +61,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # Use the verified official source; do not inherit a failing runner mirror.
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
+
 jobs:
   # merge_group 不支持事件级 paths 过滤，先在一个轻量 Linux job 中判断组合
   # diff；无关 PR 入队时跳过后续三个平台 runner。PR/push 的事件级 paths 仍
@@ -132,6 +137,8 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -342,11 +349,20 @@ jobs:
           CI_REUSE_NEEDS: ${{ toJSON(needs) }}
         run: python3 scripts/ci-test-reuse.py record
 
+      - name: Prepare CI transfer runtime (1)
+        if: ${{ success() && steps.success_proof.outputs.directory != '' }}
+        continue-on-error: true
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: PR test success proof transport
         if: ${{ success() && steps.success_proof.outputs.directory != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: ci-success-proof-${{ github.run_attempt }}
           path: ${{ steps.success_proof.outputs.directory }}/proof.json

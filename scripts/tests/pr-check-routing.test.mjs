@@ -13,6 +13,19 @@ import { join, matchesGlob } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
+import transportPolicy from "../ci-network-policy.cjs";
+
+// Keep historical product/advisory contracts exact after validating the new
+// transport layer independently. Only the reviewed helper and exact scoped
+// environment are removed; arbitrary commands or environments still fail.
+function productPolicyText(text) {
+  if (!text.includes('PINVOU_CI_NETWORK_NODE_OPTIONS')) return text;
+  transportPolicy.checkWorkflow(text);
+  return text.replace(/^      - [\s\S]*?(?=^      - |^  [A-Za-z0-9_-]+:|$(?![\s\S]))/gm, step => {
+    if (/^        run: node scripts\/ci-network-node-options\.cjs$/m.test(step)) return '';
+    return step.replace("        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}\n          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'\n", '');
+  });
+}
 
 const workflow = await readFile(
   new URL("../../.github/workflows/pr-check.yml", import.meta.url),
@@ -140,6 +153,7 @@ function stepRun(job, name) {
 }
 
 function assertAccountFailurePolicy(job) {
+  job = productPolicyText(job);
   assert.doesNotMatch(job, /secrets\./);
   let mandatory = job;
   // Only these reviewed, bounded transport steps are advisory. Remove their
@@ -199,7 +213,7 @@ function pgIdentityEnvironment(service) {
 }
 
 function assertFinancialDiagnosticExemption(job) {
-  const text = job.replaceAll("\r\n", "\n");
+  const text = productPolicyText(job.replaceAll("\r\n", "\n"));
   const diagnostic = namedStep(text, "Financial group lifecycle receipts");
   const withoutComments = diagnostic.replace(/^ *#.*\n/gm, "").trimEnd();
   assert.equal(withoutComments, [
@@ -251,7 +265,7 @@ test("financial diagnostic exception rejects business and job exemptions", () =>
 // Match the Python gate policy across the complete workflow. Account-only
 // validation cannot detect a job/step exception added to a different leg.
 function assertWorkflowFailurePolicy(workflowText) {
-  const text = workflowText.replaceAll("\r\n", "\n").replace(/^ *#.*\n/gm, "");
+  const text = productPolicyText(workflowText.replaceAll("\r\n", "\n")).replace(/^ *#.*\n/gm, "");
   const financialJob = jobBlock("account-financial-test", text);
   assertFinancialDiagnosticExemption(financialJob);
   const financial = namedStep(financialJob, "Financial group lifecycle receipts");

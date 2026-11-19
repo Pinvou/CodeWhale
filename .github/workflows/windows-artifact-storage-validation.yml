@@ -20,12 +20,20 @@ jobs:
       run:
         shell: pwsh -NoLogo -NoProfile -NonInteractive -File "{0}"
     steps:
+      - uses: actions/checkout@v6
       - name: Create upload probe
         run: |
           $ErrorActionPreference = 'Stop'
           @{ run = $env:GITHUB_RUN_ID; runner = $env:RUNNER_NAME; os = $env:RUNNER_OS } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'artifact-connectivity.json') -Encoding utf8
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: windows-artifact-connectivity-${{ github.run_id }}
           path: ${{ runner.temp }}/artifact-connectivity.json

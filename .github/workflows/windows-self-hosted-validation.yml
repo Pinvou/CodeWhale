@@ -102,7 +102,14 @@ jobs:
             --peer-runner-name "$env:CI_RUNNER_PEER_NAME"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
 
