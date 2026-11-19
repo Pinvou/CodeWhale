@@ -172,6 +172,12 @@ pub(crate) const STRICT_REMOVAL_CONTEXT_NOTES: &[(&str, &str)] = &[
 /// and each name's length are bounded before assembly.
 const STRICT_NOTE_MAX_NAMES: usize = 20;
 const STRICT_NOTE_MAX_NAME_CHARS: usize = 120;
+/// Cap on how many branch groups the composition note lists: each group's
+/// label is already name- and width-capped, but the group count itself was
+/// unbounded, so a hostile root composition with thousands of branches
+/// could render a note of unbounded size onto the tool description on
+/// every request — the same class the removal note's name cap closed.
+const STRICT_NOTE_MAX_GROUPS: usize = 20;
 
 /// Structural and conditional keywords outside the documented strict
 /// subset. Their constraints cannot be expressed by the reshaping — the
@@ -591,7 +597,7 @@ fn strict_schema_supported(schema: &Value) -> Option<(Value, Vec<String>)> {
     {
         return None;
     }
-    if has_strict_incompatible_composition(&normalized, true) {
+    if has_strict_incompatible_composition(&normalized, &normalized, true) {
         return None;
     }
     removed_optionals.sort();
@@ -700,7 +706,7 @@ fn has_unrepresentable_stripped_constraint(schema: &Value, ships: bool) -> bool 
 /// all. It runs on the enforced clone, so it judges only shapes that
 /// ship; `is_root` selects the root-only arms (root `anyOf`, the root
 /// rules living in `strict_schema_supported`).
-fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
+fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bool) -> bool {
     if let Some(obj) = schema.as_object() {
         if obj.contains_key("oneOf")
             || obj.contains_key("allOf")
@@ -742,28 +748,42 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
             return true;
         }
         // A union node that is itself an object carries the enforce pass's
-        // `additionalProperties: false` over its own (optionals-stripped)
-        // property set. A branch that requires a name outside that set
-        // therefore ships a shape no instance can satisfy: the union node
-        // forbids the extra name while the branch demands it, so every
-        // strict call rejects whatever the model sends — the same
-        // silent-400 class the root-`anyOf` arm above already fails
-        // closed. The trigger is the mainstream hand-authored
-        // discriminated-union shape where branches carry branch-specific
-        // fields, and the gate judges the enforced clone, where every
-        // surviving branch property is also in its `required`, so checking
-        // `required` names is exact. A bare union node (no `properties`)
-        // carries no closure of its own and stays judged per branch.
+        // `additionalProperties: false` beside a `required` naming its full
+        // (optionals-stripped) property set, so an instance satisfying the
+        // node must carry exactly that key set. A branch can match only if
+        // its own enforced closure admits the same key set: an object
+        // branch — or the definition a `$ref` branch stands for, resolved
+        // through the root the same way the reference walk resolves — whose
+        // property set equals the node's. A branch with a different set
+        // forbids the delta in one direction or the other (the branch
+        // demands a name the node's closure forbids, or demands every one
+        // of its own names while the instance carries only the node's), and
+        // a typed non-object branch admits no object instance at all. When
+        // no branch covers, no instance satisfies the shipped shape and
+        // every strict call is the documented server error — the
+        // silent-400 class — so the tool fails closed; one covering branch
+        // keeps the union satisfiable however sloppy its siblings are (the
+        // same partially-satisfiable leniency the enum arms apply). A bare
+        // union node (no `properties` of its own) pins no key set and stays
+        // judged per branch. (The arm this replaces checked only that no
+        // branch demanded names outside the node's set — necessary, not
+        // sufficient: it missed a `$ref` branch demanding an outside name
+        // through its definition and a node whose full set no branch
+        // covers, and it over-failed a satisfiable union one sloppy branch
+        // beside a covering one.)
         if obj
             .get("properties")
             .and_then(Value::as_object)
             .is_some_and(|union_properties| {
+                let node_set: std::collections::HashSet<&str> =
+                    union_properties.keys().map(String::as_str).collect();
                 obj.get("anyOf")
                     .and_then(Value::as_array)
                     .is_some_and(|branches| {
-                        branches
-                            .iter()
-                            .any(|branch| branch_requires_name_outside(branch, union_properties))
+                        !branches.iter().any(|branch| {
+                            branch_property_closure(branch, root)
+                                .is_some_and(|closure| closure == node_set)
+                        })
                     })
             })
         {
@@ -899,26 +919,48 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
             if crossed || zero_multiple {
                 return true;
             }
-            // An `enum` member must satisfy the declared type AND every
-            // documented bound, so a member set none of whose compatible
-            // members clears the bounds ships the same no-satisfiable-value
-            // shape as the crossing arms above (`{"type":"number",
-            // "enum":[1,2],"minimum":5,"maximum":10}` accepts nothing and
-            // every strict call is the documented server error). The
-            // single-compatible-member leniency of the enum-vs-type arm
-            // carries over: a partially satisfiable enum is the author's
-            // sloppiness, not a wire the model cannot use.
-            if obj
-                .get("enum")
-                .and_then(Value::as_array)
-                .is_some_and(|members| {
-                    !members
-                        .iter()
-                        .any(|member| enum_member_clears_bounds(member, obj, schema_type))
-                })
-            {
-                return true;
-            }
+        }
+        // An `enum` member must satisfy the declared type AND every
+        // documented bound, so a member set none of whose members clears
+        // the bounds ships the same no-satisfiable-value shape as the
+        // crossing arms above (`{"type":"number","enum":[1,2],
+        // "minimum":5,"maximum":10}` accepts nothing and every strict
+        // call is the documented server error). The check keys on each
+        // member's VALUE rather than on a declared numeric `type`: the
+        // bounds constrain numbers, so they bind exactly the members the
+        // model could send that live in the bounds' domain — an untyped
+        // node's numeric members (`{"enum":[1,2],"minimum":5}` accepts
+        // nothing either) are bound just as a typed node's are, while a
+        // non-numeric member is outside the domain and can satisfy the
+        // node. The single-compatible-member leniency of the enum-vs-type
+        // arm carries over: a partially satisfiable enum is the author's
+        // sloppiness, not a wire the model cannot use.
+        if obj
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|members| {
+                !members
+                    .iter()
+                    .any(|member| value_clears_bounds(member, obj))
+            })
+        {
+            return true;
+        }
+        // A numeric `const` is bound by the documented bounds exactly as
+        // an enum member is — the const pins the instance to one value,
+        // and `{"type":"number","const":42,"minimum":50}` accepts nothing.
+        // A non-numeric const is outside the bounds' domain and keeps
+        // shipping (the strip pass has already landed the non-numeric
+        // consts that had no enum to ride onto, so what reaches here
+        // unlanded is numeric or beside an enum). The same helper judges
+        // both keywords, so the const-vs-type check above plus this arm
+        // give a const the same declared-type-and-bounds conjunction an
+        // enum member gets.
+        if let Some(const_value) = obj.get("const")
+            && const_value.is_number()
+            && !value_clears_bounds(const_value, obj)
+        {
+            return true;
         }
         // A bound ships only in the numeric form the documents describe:
         // a string, boolean, object, or array value is a malformed keyword
@@ -1061,7 +1103,7 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
                     // entry that survives here ships.
                     if named_schemas.values().any(|named_schema| {
                         !named_schema.is_object()
-                            || has_strict_incompatible_composition(named_schema, false)
+                            || has_strict_incompatible_composition(named_schema, root, false)
                     }) {
                         return true;
                     }
@@ -1075,7 +1117,7 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
                 // keys never reach this loop (the pre-strip detector is
                 // where the live ships-nowhere skip lives).
                 _ => {
-                    if has_strict_incompatible_composition(value, false) {
+                    if has_strict_incompatible_composition(value, root, false) {
                         return true;
                     }
                 }
@@ -1085,7 +1127,7 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
     }
     schema.as_array().is_some_and(|arr| {
         arr.iter()
-            .any(|value| has_strict_incompatible_composition(value, false))
+            .any(|value| has_strict_incompatible_composition(value, root, false))
     })
 }
 
@@ -1197,19 +1239,48 @@ fn is_null_type(v: &Value) -> bool {
 /// `null` literal, and this cross-check does not guess which undocumented
 /// spellings a server might accept — the same line the type junk arm's
 /// own comment draws.
-/// Whether one `enum` member satisfies the node's declared type AND every
-/// documented bound the node carries — the conjunction a strict endpoint
-/// enforces on a required value. The bounds are the documented numeric
-/// forms only; `multipleOf` divisibility is judged exclusively on the
+fn value_satisfies_declared_type(value: &Value, schema_type: &str) -> bool {
+    match schema_type {
+        "string" => value.is_string(),
+        "number" => value.is_number(),
+        // JSON Schema defines `integer` as a number with zero fractional
+        // part, and serde_json hands `5.0` over as an f64 — rejecting the
+        // representational spelling would fail a satisfiable schema
+        // closed for free, so the fractional check covers it.
+        "integer" => {
+            value.is_i64()
+                || value.is_u64()
+                || value
+                    .as_f64()
+                    .is_some_and(|number| number.is_finite() && number.fract() == 0.0)
+        }
+        "boolean" => value.is_boolean(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        _ => true,
+    }
+}
+
+/// Whether one pinned value — an `enum` member or a `const` — satisfies
+/// the node's declared type AND every documented bound the node carries,
+/// the conjunction a strict endpoint enforces on any value the schema
+/// admits. The bounds constrain numbers, so the check keys on the value
+/// being numeric: a non-numeric value (a string beside an untyped or
+/// string-typed enum) is outside the bounds' domain and clears them by
+/// not being bound, exactly as it would on the server. The bounds are
+/// the documented numeric forms only; `multipleOf: 0` admits no number
+/// at all; `multipleOf` divisibility is judged exclusively on the
 /// integral pair, where the modulo test is exact — float modulo on
 /// fractional multiples would guess at representation error rather than
-/// at the wire, so that combination keeps shipping.
-fn enum_member_clears_bounds(member: &Value, obj: &Map<String, Value>, schema_type: &str) -> bool {
-    if !value_satisfies_declared_type(member, schema_type) {
+/// at the wire, so that combination keeps shipping (disclosed).
+fn value_clears_bounds(value: &Value, obj: &Map<String, Value>) -> bool {
+    if let Some(schema_type) = obj.get("type").and_then(Value::as_str)
+        && !value_satisfies_declared_type(value, schema_type)
+    {
         return false;
     }
-    let Some(number) = member.as_f64() else {
-        return false;
+    let Some(number) = value.as_f64() else {
+        return true;
     };
     if obj
         .get("minimum")
@@ -1239,56 +1310,57 @@ fn enum_member_clears_bounds(member: &Value, obj: &Map<String, Value>, schema_ty
     {
         return false;
     }
-    if let (Some(multiple), Some(value)) = (
-        obj.get("multipleOf").and_then(Value::as_i64),
-        member.as_i64(),
-    ) && multiple != 0
-        && value % multiple != 0
-    {
-        return false;
+    if let Some(multiple) = obj.get("multipleOf").and_then(Value::as_f64) {
+        if multiple == 0.0 {
+            return false;
+        }
+        if let (Some(multiple), Some(value)) = (
+            obj.get("multipleOf").and_then(Value::as_i64),
+            value.as_i64(),
+        ) && value % multiple != 0
+        {
+            return false;
+        }
     }
     true
 }
 
-fn value_satisfies_declared_type(value: &Value, schema_type: &str) -> bool {
-    match schema_type {
-        "string" => value.is_string(),
-        "number" => value.is_number(),
-        // JSON Schema defines `integer` as a number with zero fractional
-        // part, and serde_json hands `5.0` over as an f64 — rejecting the
-        // representational spelling would fail a satisfiable schema
-        // closed for free, so the fractional check covers it.
-        "integer" => {
-            value.is_i64()
-                || value.is_u64()
-                || value
-                    .as_f64()
-                    .is_some_and(|number| number.is_finite() && number.fract() == 0.0)
-        }
-        "boolean" => value.is_boolean(),
-        "array" => value.is_array(),
-        "object" => value.is_object(),
-        _ => true,
+/// The enforced property closure of one `anyOf` branch: the key set an
+/// instance must carry for the branch to match, on the enforced clone. An
+/// object-schema branch pins the instance to exactly its own property
+/// names (`required` names all of them beside `additionalProperties:
+/// false`), and a `$ref` branch stands for its definition — resolved
+/// through the root with the same pointer machinery the reference walk
+/// uses, since the instance has to satisfy what the reference names. A
+/// branch that is not an object schema (a typed `string`/`number`
+/// branch) admits no object instance and cannot carry the union node's
+/// closure at all: `None`, never covering. The reference walk has
+/// already failed dangling, external, malformed, and cyclic references
+/// closed before the gate runs, so resolution succeeds in practice; the
+/// hop cap keeps a detector regression from turning into a
+/// non-terminating gate.
+fn branch_property_closure<'a>(
+    branch: &'a Value,
+    root: &'a Value,
+) -> Option<std::collections::HashSet<&'a str>> {
+    let mut target = branch;
+    for _ in 0..16 {
+        let obj = target.as_object()?;
+        let Some(reference) = obj.get("$ref").and_then(Value::as_str) else {
+            break;
+        };
+        target = resolve_local_ref(root, reference)?;
     }
-}
-
-/// Whether an enforced `anyOf` branch requires a name the union node's own
-/// property set does not contain. The gate runs on the enforced clone,
-/// where the union node carries `additionalProperties: false` over that
-/// set and every surviving branch property is in the branch's `required`:
-/// such a name is simultaneously demanded (by the branch) and forbidden
-/// (by the union node's closure), so no instance can satisfy the shipped
-/// shape.
-fn branch_requires_name_outside(branch: &Value, union_properties: &Map<String, Value>) -> bool {
-    branch
-        .get("required")
-        .and_then(Value::as_array)
-        .is_some_and(|required| {
-            required
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|name| !union_properties.contains_key(name))
-        })
+    let obj = target.as_object()?;
+    if !is_object_schema(obj) {
+        return None;
+    }
+    Some(
+        obj.get("properties")
+            .and_then(Value::as_object)
+            .map(|properties| properties.keys().map(String::as_str).collect())
+            .unwrap_or_default(),
+    )
 }
 
 /// Whether an `anyOf` branch is a schema the strict documents describe: a
@@ -1763,9 +1835,18 @@ fn root_composition_constraint_note(obj: &Map<String, Value>) -> Option<String> 
         groups.sort();
         groups.dedup();
         if groups.len() >= 2 {
+            // The per-group labels are name- and width-capped; the group
+            // count gets its own cap with a counted remainder, so a
+            // hostile schema with thousands of branches renders a bounded
+            // note — the same treatment the removal note's name cap gets.
+            let total = groups.len();
+            groups.truncate(STRICT_NOTE_MAX_GROUPS);
+            let mut list = groups.join(" | ");
+            if total > groups.len() {
+                list.push_str(&format!(" ... (+{} more groups)", total - groups.len()));
+            }
             return Some(format!(
-                "{prefix} of these parameter groups must be provided: {}.",
-                groups.join(" | ")
+                "{prefix} of these parameter groups must be provided: {list}."
             ));
         }
     }
@@ -5841,6 +5922,195 @@ mod tests {
     }
 
     #[test]
+    fn strict_mode_fails_closed_on_a_nested_union_whose_ref_branches_escape_the_node_closure() {
+        // A `$ref` branch carries no top-level `required`, so the closure
+        // can only be judged through the definition it stands for. The
+        // union node's enforced closure (`additionalProperties: false`
+        // over its property set) forbids exactly what both definitions
+        // demand: no instance satisfies the shipped shape, so the tool
+        // fails closed instead of shipping strict.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}},
+                        "required": ["action"],
+                        "anyOf": [
+                            {"$ref": "#/$defs/a_variant"},
+                            {"$ref": "#/$defs/b_variant"}
+                        ]
+                    }
+                },
+                "required": ["spec"],
+                "$defs": {
+                    "a_variant": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}, "a_only": {"type": "string"}},
+                        "required": ["action", "a_only"]
+                    },
+                    "b_variant": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}, "b_only": {"type": "string"}},
+                        "required": ["action", "b_only"]
+                    }
+                }
+            }),
+        );
+        let authored = tool.input_schema.clone();
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a ref branch demanding a name outside the union node closure must fail closed"
+        );
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_nested_union_whose_ref_branch_covers_the_node_closure() {
+        // Keep-side: a `$ref` branch whose definition carries exactly the
+        // union node's property set covers the closure and the union ships
+        // strict — the mainstream Pydantic-style ref union that actually
+        // satisfies the node.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}},
+                        "required": ["action"],
+                        "anyOf": [
+                            {"$ref": "#/$defs/a_variant"},
+                            {"$ref": "#/$defs/b_variant"}
+                        ]
+                    }
+                },
+                "required": ["spec"],
+                "$defs": {
+                    "a_variant": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}},
+                        "required": ["action"]
+                    },
+                    "b_variant": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}, "b_only": {"type": "string"}},
+                        "required": ["action", "b_only"]
+                    }
+                }
+            }),
+        );
+        assert!(
+            prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a covering ref branch must keep the union strict"
+        );
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_when_no_branch_covers_the_union_node_closure() {
+        // The union node's enforced `required` names its FULL property set
+        // beside `additionalProperties: false`, and each branch enforces
+        // its own closure the same way: an instance must carry exactly the
+        // node's key set and exactly some branch's key set, so a union
+        // whose branches all demand a different key set accepts no value
+        // — every strict call is the documented server error. (The
+        // authored shape looks satisfiable because the authored branches
+        // carry no `additionalProperties`; the enforce pass creates the
+        // unsatisfiability, which is exactly what the gate must judge.)
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}, "shared": {"type": "string"}},
+                        "required": ["action", "shared"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"action": {"type": "string"}}, "required": ["action"]},
+                            {"type": "object", "properties": {"shared": {"type": "string"}}, "required": ["shared"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        let authored = tool.input_schema.clone();
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a union no branch covers must fail closed"
+        );
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_union_when_one_branch_covers_despite_a_sloppy_sibling() {
+        // The partially-satisfiable leniency the enum arms apply carries
+        // over to the union closure: one branch covering the node's key
+        // set keeps the union satisfiable no matter what a sibling
+        // demands — the sibling is unreachable on strict routes but the
+        // union as shipped accepts the covering branch's instances, so
+        // failing the tool closed would only strip a working strict flag.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}, "shared": {"type": "string"}},
+                        "required": ["action", "shared"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"action": {"type": "string"}, "shared": {"type": "string"}}, "required": ["action", "shared"]},
+                            {"type": "object", "properties": {"action": {"type": "string"}, "b_only": {"type": "string"}}, "required": ["action", "b_only"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        assert!(
+            prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a covering branch must keep the union strict despite a sloppy sibling"
+        );
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_when_an_object_union_has_no_object_branch() {
+        // A typed non-object branch admits no object instance at all: the
+        // union node requires an object carrying its property set, and a
+        // `string` branch can never match one. With no object branch to
+        // cover the closure the union accepts nothing.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}},
+                        "required": ["action"],
+                        "anyOf": [{"type": "string"}, {"type": "number"}]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a union with no object branch must fail closed"
+        );
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
     fn strict_mode_fails_closed_on_an_enum_no_member_of_which_clears_the_bounds() {
         for fixture in [
             json!({"type": "number", "enum": [1, 2], "minimum": 5, "maximum": 10}),
@@ -5887,6 +6157,108 @@ mod tests {
             tool.input_schema["properties"]["n"]["enum"],
             json!([1, 2, 6])
         );
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_when_a_numeric_const_conflicts_with_the_bounds() {
+        // The const pins the instance to one value, and the documented
+        // bounds constrain that value exactly as they constrain an enum
+        // member: `{"type":"number","const":42,"minimum":50}` accepts
+        // nothing and every strict call is the documented server error.
+        // The same holds without a declared type (the bounds bind the
+        // numeric value regardless), and through `multipleOf`. A
+        // non-numeric const is outside the bounds' domain and keeps
+        // shipping.
+        for fixture in [
+            json!({"type": "number", "const": 42, "minimum": 50}),
+            json!({"type": "number", "const": 10, "multipleOf": 3}),
+            json!({"const": 42, "minimum": 50}),
+        ] {
+            let mut tool = test_tool(
+                "probe",
+                json!({
+                    "type": "object",
+                    "properties": {"n": fixture},
+                    "required": ["n"]
+                }),
+            );
+            assert!(
+                !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+                "a const the bounds rule out must fail closed: {:?}",
+                tool.input_schema["properties"]["n"]
+            );
+            assert_eq!(tool.strict, None);
+        }
+        for fixture in [
+            json!({"type": "number", "const": 42, "minimum": 40}),
+            json!({"const": "a", "minimum": 5}),
+        ] {
+            let mut tool = test_tool(
+                "probe",
+                json!({
+                    "type": "object",
+                    "properties": {"n": fixture},
+                    "required": ["n"]
+                }),
+            );
+            assert!(
+                prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+                "a const the bounds admit (or do not bind) must keep strict: {:?}",
+                tool.input_schema["properties"]["n"]
+            );
+            assert_eq!(tool.strict, Some(true));
+        }
+    }
+
+    #[test]
+    fn strict_mode_judges_an_untyped_node_members_against_the_bounds() {
+        // The bounds constrain numbers, so they bind a node's numeric
+        // members whether or not the node declares a numeric type —
+        // `{"enum":[1,2],"minimum":5}` (no `type`) accepts nothing, and
+        // `multipleOf: 0` admits no numeric member at all. A non-numeric
+        // member is outside the domain and can satisfy the node, so a
+        // mixed enum keeps shipping, as does a fractional member beside an
+        // integral `multipleOf` it does not divide (the disclosed
+        // representation-error corner: float modulo would guess).
+        for fixture in [
+            json!({"enum": [1, 2], "minimum": 5}),
+            json!({"enum": [1], "multipleOf": 0}),
+        ] {
+            let mut tool = test_tool(
+                "probe",
+                json!({
+                    "type": "object",
+                    "properties": {"n": fixture},
+                    "required": ["n"]
+                }),
+            );
+            assert!(
+                !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+                "an untyped enum no member of which clears the bounds must fail closed: {:?}",
+                tool.input_schema["properties"]["n"]
+            );
+            assert_eq!(tool.strict, None);
+        }
+        for fixture in [
+            json!({"enum": [1, "a"], "minimum": 5}),
+            json!({"enum": ["a"], "minimum": 5}),
+            json!({"type": "number", "enum": [4.2], "multipleOf": 2}),
+        ] {
+            let mut tool = test_tool(
+                "probe",
+                json!({
+                    "type": "object",
+                    "properties": {"n": fixture},
+                    "required": ["n"]
+                }),
+            );
+            assert!(
+                prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+                "a member outside the bounds' domain must keep strict: {:?}",
+                tool.input_schema["properties"]["n"]
+            );
+            assert_eq!(tool.strict, Some(true));
+        }
     }
 
     #[test]
@@ -6082,6 +6454,56 @@ mod tests {
         assert!(
             note.contains(" ... (+7 more)"),
             "the cap counts the remainder instead of rendering it: {note}"
+        );
+    }
+
+    #[test]
+    fn composition_note_caps_the_group_count_with_a_counted_remainder() {
+        // The per-group labels are name- and width-capped, but the group
+        // count itself was unbounded: a hostile root composition with
+        // thousands of branches could render a note of unbounded size onto
+        // the tool description on every request. The list caps at
+        // STRICT_NOTE_MAX_GROUPS with a counted remainder, mirroring the
+        // removal note's name cap.
+        let branches: Vec<Value> = (0..30)
+            .map(|index| {
+                json!({
+                    "type": "object",
+                    "properties": {format!("k{index:02}"): {"type": "string"}},
+                    "required": [format!("k{index:02}")]
+                })
+            })
+            .collect();
+        let mut schema = json!({ "oneOf": branches });
+        let note = sanitize_for_responses(&mut schema).expect("root composition note must render");
+        assert!(
+            note.contains("(+10 more groups)"),
+            "the group cap counts its remainder: {note}"
+        );
+        assert!(
+            !note.contains("k25"),
+            "groups past the cap are not rendered: {note}"
+        );
+        assert!(note.len() < 4_000, "the note stays bounded: {}", note.len());
+
+        // Keep-side: a composition under the cap renders every group.
+        let branches: Vec<Value> = (0..3)
+            .map(|index| {
+                json!({
+                    "type": "object",
+                    "properties": {format!("k{index:02}"): {"type": "string"}},
+                    "required": [format!("k{index:02}")]
+                })
+            })
+            .collect();
+        let mut schema = json!({ "oneOf": branches });
+        let note = sanitize_for_responses(&mut schema).expect("root composition note must render");
+        assert!(
+            note.contains("k00")
+                && note.contains("k01")
+                && note.contains("k02")
+                && !note.contains("more groups"),
+            "a composition under the cap renders every group: {note}"
         );
     }
 }

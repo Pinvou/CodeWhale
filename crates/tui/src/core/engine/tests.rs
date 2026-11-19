@@ -36703,6 +36703,30 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
          catalog closed wholesale"
     );
 
+    // The pipeline must reach the wire through the surface itself, not
+    // only through this census's manual application: `surface.active` is
+    // the exact initial `tools` field, built by the same
+    // `active_tools_for_request` funnel the per-step rebuild uses. At
+    // least one active tool carries the strict flag straight off the
+    // surface — deleting the funnel block there keeps everything below
+    // green (it applies the pipeline manually) while the wire silently
+    // loses every reshaped schema, so this assert is the pin that makes
+    // that regression red.
+    let surface_active = build
+        .surface
+        .active
+        .as_ref()
+        .expect("the initial tools field is present on a tool-bearing surface");
+    assert!(
+        !surface_active.is_empty(),
+        "the initial surface carries the active tools"
+    );
+    assert!(
+        surface_active.iter().any(|tool| tool.strict == Some(true)),
+        "no active tool ships strict straight off the surface — the strict \
+         funnel in `active_tools_for_request` is dead"
+    );
+
     for (before, after) in original.iter().zip(&processed) {
         assert_eq!(
             before.name, after.name,
