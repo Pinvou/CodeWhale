@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
-import { createServer } from './helpers/vite-fixture.mjs';
+import { createServer, prepareFixtureModules } from './helpers/vite-fixture.mjs';
 import { launch } from './helpers/puppeteer-fixture.mjs';
 const executablePath = process.env.CHROME || ['C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium', '/usr/bin/google-chrome'].find(fs.existsSync);
 assert.ok(executablePath, 'A browser is required');
@@ -11,6 +11,7 @@ let browser;
 let passed = 0;
 try {
   await server.listen();
+  await prepareFixtureModules(server, ['/@vite/client', '/tests/fixtures/model-access.jsx']);
   browser = await launch({ executablePath, headless: true, args: ['--no-sandbox', '--disable-gpu'] });
   const run = async (query, test, viewport = { width: 1100, height: 700 }) => {
     const page = await browser.newPage(); const errors = [];
