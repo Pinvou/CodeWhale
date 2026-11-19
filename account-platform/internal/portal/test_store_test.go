@@ -22,6 +22,12 @@ type memoryStore struct {
 func newMemoryStore() *memoryStore {
 	return &memoryStore{classifications: map[string]ApprovalClassification{}, flows: map[string]LoginFlow{}, sessions: map[string]Session{}, locks: map[string]string{}, roots: map[string]string{}, markers: map[string]time.Time{}, handoffs: map[string]SessionHandoff{}}
 }
+
+// Authentication/transport fixtures do not model shared admission. Dedicated
+// integration scenarios exercise its actual Redis scripts and concurrent clients.
+func (*memoryStore) AdmitOperation(context.Context, PortalOperation) error          { return nil }
+func (*memoryStore) ReserveSessionHandoff(context.Context, string, time.Time) error { return nil }
+func (*memoryStore) ReleaseSessionHandoffReservation(context.Context, string) error { return nil }
 func (s *memoryStore) SaveFlow(_ context.Context, key string, value LoginFlow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

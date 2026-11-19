@@ -665,6 +665,9 @@ struct LedgerInner {
     // Process-local evidence of durable boot closure, consumed after hooks attach.
     // Never persisted or inferred from historical terminal records.
     pending_recovery: Vec<RemoteTaskRecord>,
+    // Process-local execution fence, bounded by the retained task records.
+    // Retirement must stop transient work even if its terminal cannot persist.
+    retired: HashMap<String, u64>,
 }
 
 pub(crate) struct RemoteTaskTicket {
@@ -758,6 +761,15 @@ impl RemoteTaskLedger {
 
     fn require_sequence(&self, task_id: &str, sequence: u64) -> Result<()> {
         if self.record(task_id)?.sequence != sequence {
+            return Err(error("task_binding_stale"));
+        }
+        Ok(())
+    }
+
+    fn require_resource_sequence(&self, task_id: &str, sequence: u64) -> Result<()> {
+        let inner = self.inner.lock();
+        let record = self.record_locked(&inner, task_id)?;
+        if record.sequence != sequence || inner.retired.get(task_id) == Some(&sequence) {
             return Err(error("task_binding_stale"));
         }
         Ok(())
@@ -1005,6 +1017,9 @@ impl RemoteTaskLedger {
         if previous.is_terminal() {
             return Err(error("task_state_conflict"));
         }
+        if inner.retired.get(task_id) == Some(&previous.sequence) {
+            return Err(error("task_binding_stale"));
+        }
         let allowed = matches!(
             (previous.state, next),
             (RemoteTaskState::Admitted, RemoteTaskState::Running)
@@ -1036,7 +1051,7 @@ impl RemoteTaskLedger {
         if resource.get() {
             return Err(error("task_cleanup_busy"));
         }
-        self.require_sequence(task_id, sequence)?;
+        self.require_resource_sequence(task_id, sequence)?;
         Ok(action())
     }
 
@@ -1270,6 +1285,7 @@ impl RemoteTaskLedger {
             let Some(mut updated) = inner.tasks.get(&id).cloned() else {
                 continue;
             };
+            inner.retired.insert(id.clone(), updated.sequence);
             updated.state = RemoteTaskState::Interrupted;
             updated.terminal_reason = Some(bounded_reason(reason));
             updated.outcome_unknown = updated.dispatch_committed;
@@ -1282,6 +1298,21 @@ impl RemoteTaskLedger {
                 Err(error) => report.failed.push((id, error)),
             }
         }
+    }
+
+    fn failed_retirements(&self, generation: Option<&str>) -> Vec<RemoteTaskRecord> {
+        let inner = self.inner.lock();
+        inner
+            .tasks
+            .values()
+            .filter(|record| {
+                !record.is_terminal()
+                    && inner.retired.get(&record.task_id) == Some(&record.sequence)
+                    && generation
+                        .is_none_or(|value| record.lease.remote_control_generation == value)
+            })
+            .cloned()
+            .collect()
     }
 
     fn record_locked(&self, inner: &LedgerInner, task_id: &str) -> Result<RemoteTaskRecord> {
@@ -1348,6 +1379,7 @@ fn prune_terminal(inner: &mut LedgerInner) {
     }
     for id in removed {
         if let Some(record) = inner.tasks.remove(&id) {
+            inner.retired.remove(&id);
             if inner
                 .by_client_request
                 .get(&record.client_request_id)
@@ -3420,7 +3452,9 @@ impl RemoteTaskService {
         now_b: u64,
     ) -> TaskInterruptionReport {
         let records = self.ledger.interrupt_generation(generation, reason, now_b);
-        self.finish_interrupted(records)
+        let records = self.finish_interrupted(records);
+        self.cleanup_failed_retirements(Some(generation));
+        records
     }
 
     /// End one controlled-device lifecycle and invalidate every ephemeral
@@ -3436,19 +3470,25 @@ impl RemoteTaskService {
         self.forget_pending_session_modes(Some(generation));
         self.sessions.clear_generation(generation);
         drop(_guard);
-        self.finish_interrupted(records)
+        let records = self.finish_interrupted(records);
+        self.cleanup_failed_retirements(Some(generation));
+        records
     }
 
     pub(crate) fn interrupt_all(&self, reason: &str, now_b: u64) -> TaskInterruptionReport {
         let records = self.ledger.interrupt_all(reason, now_b);
-        self.finish_interrupted(records)
+        let records = self.finish_interrupted(records);
+        self.cleanup_failed_retirements(None);
+        records
     }
 
     pub(crate) fn recover_after_restart(&self, now_b: u64) -> TaskInterruptionReport {
         let recovered = self.ledger.recover_after_restart(now_b);
         self.forget_pending_session_modes(None);
         self.sessions.clear();
-        self.finish_interrupted(recovered)
+        let recovered = self.finish_interrupted(recovered);
+        self.cleanup_failed_retirements(None);
+        recovered
     }
 
     pub(crate) fn status(&self, task_id: &str) -> Result<RemoteTaskRecord> {
@@ -3562,6 +3602,32 @@ impl RemoteTaskService {
             active: &_resource,
             previous: _resource.replace(true),
         };
+        self.release_resources(record);
+        contain_cleanup_panic(|| self.publish_with_reason(record, reason));
+    }
+
+    fn cleanup_failed_retirements(&self, generation: Option<&str>) {
+        for record in self.ledger.failed_retirements(generation) {
+            let gate = self.ledger.resource_gate(&record.task_id);
+            let resource = gate.lock();
+            // A delayed failure cleanup cannot cancel a replacement admission.
+            if !self
+                .ledger
+                .record(&record.task_id)
+                .is_ok_and(|current| current.sequence == record.sequence && !current.is_terminal())
+            {
+                continue;
+            }
+            let _active = CleanupActive {
+                active: &resource,
+                previous: resource.replace(true),
+            };
+            self.release_resources(&record);
+            // No persisted terminal succeeded: do not publish a terminal event.
+        }
+    }
+
+    fn release_resources(&self, record: &RemoteTaskRecord) {
         if let Some(token) = self.cancel_tokens.lock().remove(&record.task_id) {
             token.cancel();
         }
@@ -3589,7 +3655,6 @@ impl RemoteTaskService {
                 scope.abort_transfers_for_task(record);
             });
         }
-        contain_cleanup_panic(|| self.publish_with_reason(record, reason));
     }
 
     fn publish(&self, record: &RemoteTaskRecord) {
@@ -5688,6 +5753,104 @@ mod tests {
     }
 
     #[test]
+    fn failed_retirement_fences_queued_dispatch_and_preserves_another_generation() {
+        struct SwitchStore(AtomicBool);
+        impl RemoteTaskLedgerStore for SwitchStore {
+            fn persist(&self, _: &[RemoteTaskRecord]) -> std::result::Result<(), String> {
+                if self.0.load(Ordering::SeqCst) {
+                    Err("fixture-write-failed".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let store = Arc::new(SwitchStore(AtomicBool::new(false)));
+        let ledger = Arc::new(RemoteTaskLedger::new(store.clone()));
+        let service = RemoteTaskService::new(ledger.clone());
+        let ticket = admitted(
+            &service,
+            &payload("session-old", "task-old", "client-old", &digest(1)),
+            1_000,
+        );
+        let mut other = payload("session-other", "task-other", "client-other", &digest(2));
+        other["remote_control_generation"] = json!("generation-other");
+        service
+            .submit(&context("generation-other"), &other, 1_001)
+            .unwrap();
+        let other_cancel = CancellationToken::new();
+        service
+            .cancel_tokens
+            .lock()
+            .insert("task-other".into(), other_cancel.clone());
+        let before = ledger.record("task-old").unwrap();
+        store.0.store(true, Ordering::SeqCst);
+        assert!(
+            service
+                .interrupt_generation_and_clear_sessions(
+                    "generation-0001",
+                    "remote_control_stopped",
+                    1_100
+                )
+                .committed
+                .is_empty()
+        );
+        assert_eq!(ledger.record("task-old").unwrap().state, before.state);
+        assert_eq!(
+            ledger.record("task-old").unwrap().transition_sequence,
+            before.transition_sequence
+        );
+        let entered = AtomicBool::new(false);
+        assert_eq!(
+            ledger
+                .with_task_resources("task-old", before.sequence, || entered
+                    .store(true, Ordering::SeqCst))
+                .unwrap_err()
+                .code,
+            "task_binding_stale"
+        );
+        assert!(!entered.load(Ordering::SeqCst));
+        store.0.store(false, Ordering::SeqCst);
+        // A previously issued ticket must not revive after storage recovery.
+        match service.prepare_dispatch(
+            ticket,
+            Vec::new(),
+            Arc::new(NoopSink),
+            CancellationToken::new(),
+            1_200,
+        ) {
+            Err(error) => assert_eq!(error.code, "task_binding_stale"),
+            Ok(_) => panic!("retired ticket prepared an execution"),
+        }
+        assert!(!other_cancel.is_cancelled());
+        let other_record = ledger.record("task-other").unwrap();
+        assert!(
+            ledger
+                .with_task_resources("task-other", other_record.sequence, || ())
+                .is_ok()
+        );
+        assert_eq!(
+            service
+                .interrupt_generation("generation-0001", "remote_control_stopped", 1_300)
+                .committed
+                .len(),
+            1
+        );
+        assert!(ledger.record("task-old").unwrap().is_terminal());
+        assert!(!other_cancel.is_cancelled());
+        assert!(
+            service
+                .interrupt_generation("generation-0001", "remote_control_stopped", 1_400)
+                .committed
+                .is_empty()
+        );
+        assert!(!other_cancel.is_cancelled());
+        // The volatile fence occupies one slot per retained record, not a
+        // growing history of generations or externally supplied identifiers.
+        let inner = ledger.inner.lock();
+        assert!(inner.retired.len() <= inner.tasks.len());
+    }
+
+    #[test]
     fn interrupted_batch_reports_failed_persistence_and_retries_only_uncommitted_tasks() {
         #[derive(Default)]
         struct SelectiveStore {
@@ -5745,7 +5908,7 @@ mod tests {
                 RemoteTaskState::Running
             );
             assert!(ledger.active_for_session("session-0001").is_some());
-            assert_eq!(hooks.model.load(Ordering::SeqCst), 1);
+            assert_eq!(hooks.model.load(Ordering::SeqCst), 2);
             store.fail.store(false, Ordering::SeqCst);
             let retry = close(1_200);
             assert!(retry.failed.is_empty());
@@ -5754,7 +5917,7 @@ mod tests {
             assert!(retry.committed[0].outcome_unknown);
             assert!(ledger.active_for_session("session-0001").is_none());
             assert!(close(1_300).committed.is_empty());
-            assert_eq!(hooks.model.load(Ordering::SeqCst), 2);
+            assert_eq!(hooks.model.load(Ordering::SeqCst), 3);
         }
     }
 

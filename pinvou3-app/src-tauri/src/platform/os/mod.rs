@@ -57,3 +57,9 @@ pub use interface::{
 // Retain the OS interface for compatibility with inactive legacy source.
 #[allow(unused_imports)]
 pub use interface::bios_serial_number;
+// The raw volume fold (not one of the host-adaptive path_component_*
+// aliases): the archive import/export member ledger in features/sessions
+// folds unconditionally like the strictest target volume an archive may move
+// to (NTFS/APFS), so it consumes the primitive directly instead of the
+// host-adaptive surface.
+pub(crate) use interface::volume_fold_spelling;
