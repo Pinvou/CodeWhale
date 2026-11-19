@@ -7,8 +7,11 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import runpy
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -371,6 +374,99 @@ class ReuseTests(unittest.TestCase):
         self.assertEqual(proof['jobs'],['account-platform-test'])
         self.assertNotIn(self.config['PRIVATE_CONFIGURATION'],json.dumps(proof))
         self.assertEqual(proof['fingerprint'],self.expected)
+
+    def test_real_workflow_shallow_checkout_records_a_consumable_proof(self):
+        source = Path(self.temp.name)/'producer-source'
+        source.mkdir()
+        def git_at(repo, *args):
+            return subprocess.check_output(['git', *args], cwd=repo, text=True,
+                                           encoding='utf-8', stderr=subprocess.PIPE, timeout=60).strip()
+        git_at(source, 'init', '-q', '-b', 'main')
+        git_at(source, 'config', 'user.name', 'Fixture')
+        git_at(source, 'config', 'user.email', 'fixture@example.invalid')
+        for path in REUSE.POLICY:
+            target = source/path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT/path, target)
+        git_at(source, 'add', '.')
+        git_at(source, 'commit', '-qm', 'baseline policy')
+        base = git_at(source, 'rev-parse', 'HEAD')
+        git_at(source, 'switch', '-qc', 'feature')
+        (source/'product.txt').write_text('PR input\n', encoding='utf-8')
+        git_at(source, 'add', 'product.txt')
+        git_at(source, 'commit', '-qm', 'PR input')
+        head = git_at(source, 'rev-parse', 'HEAD')
+        git_at(source, 'switch', '-q', 'main')
+        git_at(source, 'merge', '--no-ff', '-qm', 'tested merge', 'feature')
+        tested = git_at(source, 'rev-parse', 'HEAD')
+        tree = git_at(source, 'rev-parse', 'HEAD^{tree}')
+        queue = git_at(source, 'commit-tree', tree, '-p', base, '-p', head, '-m', 'queue merge')
+        git_at(source, 'update-ref', 'refs/heads/queue', queue)
+        workflow = (source/REUSE.WORKFLOW).read_text(encoding='utf-8')
+        gate = re.search(r'^  required-gate:\n(.*?)(?=^  [\w-]+:|\Z)', workflow, re.M | re.S)[1]
+        checkout = re.search(r'^      - name: Checkout\n(.*?)(?=^      - |\Z)', gate, re.M | re.S)[1]
+        depth_match = re.search(r'^          fetch-depth: (\d+)$', checkout, re.M)
+        depth = int(depth_match[1]) if depth_match else 1  # checkout@v7 default
+        producer = Path(self.temp.name)/'producer-checkout'
+        # A transport clone genuinely omits parent objects at depth 1. Merely
+        # writing .git/shallow in a complete repository does not reproduce that.
+        git_at(source, 'clone', '-q', '--no-local', '--depth', str(depth), '--branch', 'main', source.as_uri(), str(producer))
+        event_file = Path(self.temp.name)/'producer-event.json'
+        pr = {'number': 7, 'draft': False, 'head': {'sha': head, 'repo': {'full_name': self.repository}},
+              'base': {'sha': base, 'ref': 'main'}}
+        event_file.write_text(json.dumps({'pull_request': pr}), encoding='utf-8')
+        record_output = Path(self.temp.name)/'producer-output'
+        env = {**os.environ, 'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_EVENT_PATH': str(event_file),
+               'GITHUB_REPOSITORY': self.repository, 'TESTED_SHA': tested,
+               'GITHUB_RUN_ID': '12', 'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_OUTPUT': str(record_output),
+               'RUNNER_TEMP': self.temp.name, 'CI_REUSE_CONFIGURATION': '{}',
+               'CI_REUSE_WORKFLOW': REUSE.WORKFLOW, 'CI_REUSE_ROUTING': '{}',
+               'CI_REUSE_NEEDS': json.dumps({'changes': {'outputs': {}}, 'rust-test': {'result': 'success'}})}
+        result = subprocess.run([sys.executable, str(producer/'scripts/ci-test-reuse.py'), 'record'],
+                                env=env, capture_output=True, text=True, encoding='utf-8', timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        proofs = list(Path(self.temp.name).glob('ci-success-proof-*/proof.json'))
+        self.assertEqual(len(proofs), 1, result.stdout)
+        self.assertIn('directory='+str(proofs[0].parent), record_output.read_text(encoding='utf-8'))
+        proof = json.loads(proofs[0].read_text(encoding='utf-8'))
+        self.assertEqual(proof['schema'], 2)
+        self.assertEqual(proof['fingerprint']['base'], base)
+        # Bridge the actual producer JSON to an independently checked-out queue.
+        # GitHub transport and the successful product-step list remain fixtures;
+        # this does not claim that real Rust tests or Actions scheduling ran here.
+        consumer = Path(self.temp.name)/'queue-checkout'
+        git_at(source, 'clone', '-q', '--no-local', '--depth', '2', '--branch', 'queue', source.as_uri(), str(consumer))
+        module = runpy.run_path(str(consumer/'scripts/ci-test-reuse.py'))
+        policy = module['JOBS']['rust-test']
+        run = {'id': 12, 'run_attempt': 1, 'event': 'pull_request', 'conclusion': 'success', 'head_sha': head,
+               'path': REUSE.WORKFLOW, 'head_repository': {'full_name': self.repository},
+               'pull_requests': [{'number': 7, 'head': {'sha': head}, 'base': {'ref': 'main'}}],
+               'updated_at': proof['created']}
+        jobs = [{'name': 'required-gate', 'run_id': 12, 'conclusion': 'success'},
+                {'name': 'rust-test', 'run_id': 12, 'conclusion': 'success', 'labels': ['ubuntu-22.04'],
+                 'steps': [{'name': step['name'], 'conclusion': 'success'} for step in policy['steps'] if step['name']]}]
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('proof.json', proofs[0].read_bytes())
+        class API:
+            def request(inner, path, **kwargs):
+                if path == 'pulls/7': return pr
+                if path.startswith('actions/workflows/'): return {'workflow_runs': [run]}
+                if path == 'actions/artifacts/99/zip': return archive.getvalue()
+                if path == 'git/commits/'+tested:
+                    return {'tree': {'sha': tree}, 'parents': [{'sha': base}, {'sha': head}]}
+                raise AssertionError(path)
+            def pages(inner, path, field):
+                if field == 'jobs': return jobs
+                if field == 'artifacts':
+                    return [{'id': 99, 'name': 'ci-success-proof-1', 'expired': False,
+                             'size_in_bytes': len(archive.getvalue()), 'workflow_run': {'id': 12, 'head_sha': head}}]
+                raise AssertionError(path)
+        event = {'merge_group': {'head_sha': queue, 'base_sha': base, 'base_ref': 'refs/heads/main',
+                                'head_ref': f'refs/heads/gh-readonly-queue/main/pr-7-{base}'}}
+        with patch.dict(os.environ, {'TESTED_SHA': queue, 'CI_REUSE_ROUTING': '{}'}):
+            self.assertEqual(module['lookup'](event, {}, API(), now=datetime.fromisoformat(proof['created'])+timedelta(seconds=1)),
+                             (['rust-test'], 12))
 
     def test_record_uses_tested_merge_parent_when_event_base_is_stale(self):
         self.pr['base']['sha'] = 'f'*40
