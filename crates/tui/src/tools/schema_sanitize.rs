@@ -362,15 +362,17 @@ fn strict_removal_note(removed: &[String], narrowed_maps: usize) -> String {
 
 /// Line/paragraph separators and the bidi format characters: U+2028/U+2029
 /// render as line breaks without being `char::is_control`, and the
-/// direction marks (LRM/RLM U+200E/U+200F, the explicit embedding controls
-/// U+202A–U+202E, the isolates U+2066–U+2069) visually reorder the
-/// surrounding text — a hostile name carrying one could split the code
-/// span or flip the note's reading direction while the characters
-/// themselves stay invisible. They neutralize to spaces alongside the
-/// control-character map.
+/// direction marks (LRM/RLM U+200E/U+200F, the Arabic letter mark
+/// U+061C, the explicit embedding controls U+202A–U+202E, the isolates
+/// U+2066–U+2069) visually reorder the surrounding text — a hostile name
+/// carrying one could split the code span or flip the note's reading
+/// direction while the characters themselves stay invisible. They
+/// neutralize to spaces alongside the control-character map.
 fn is_line_or_bidi_separator(c: char) -> bool {
-    matches!(c, '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}')
-        || ('\u{202A}'..='\u{202E}').contains(&c)
+    matches!(
+        c,
+        '\u{2028}' | '\u{2029}' | '\u{200E}' | '\u{200F}' | '\u{061C}'
+    ) || ('\u{202A}'..='\u{202E}').contains(&c)
         || ('\u{2066}'..='\u{2069}').contains(&c)
 }
 
@@ -451,6 +453,13 @@ fn count_strict_map_narrowings(schema: &Value, ships: bool) -> usize {
 /// is returned here so the caller can surface the removal.
 ///
 /// Returns the removed optional property names, sorted and deduplicated.
+///
+/// Production callers go through
+/// [`prepare_tools_for_strict_mode`]/[`strict_schema_supported`], which
+/// gate before they reshape; this notes-only variant stays public for the
+/// in-crate tests (sub-agent strict assertions) and for the strip pass's
+/// defensive null-const drop — direct callers bypass the usability gate,
+/// so the pass carries its own null-const defense.
 pub fn sanitize_for_strict(schema: &mut Value) -> Vec<String> {
     sanitize(schema);
     let mut removed_optionals = Vec::new();
@@ -732,6 +741,34 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         {
             return true;
         }
+        // A union node that is itself an object carries the enforce pass's
+        // `additionalProperties: false` over its own (optionals-stripped)
+        // property set. A branch that requires a name outside that set
+        // therefore ships a shape no instance can satisfy: the union node
+        // forbids the extra name while the branch demands it, so every
+        // strict call rejects whatever the model sends — the same
+        // silent-400 class the root-`anyOf` arm above already fails
+        // closed. The trigger is the mainstream hand-authored
+        // discriminated-union shape where branches carry branch-specific
+        // fields, and the gate judges the enforced clone, where every
+        // surviving branch property is also in its `required`, so checking
+        // `required` names is exact. A bare union node (no `properties`)
+        // carries no closure of its own and stays judged per branch.
+        if obj
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|union_properties| {
+                obj.get("anyOf")
+                    .and_then(Value::as_array)
+                    .is_some_and(|branches| {
+                        branches
+                            .iter()
+                            .any(|branch| branch_requires_name_outside(branch, union_properties))
+                    })
+            })
+        {
+            return true;
+        }
         // The documented subset's union mechanism is `anyOf`; a `type` array
         // is a draft-4-style union the documents never describe, and `null`
         // is not a supported type anywhere — neither bare nor as an array
@@ -841,10 +878,9 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
         // string, and the array/junk `type` forms already failed above.
         // The finer integer-vs-fractional intersections (`minimum: 10`
         // beside `maximum: 10.5` under `integer`) are not chased here.
-        if matches!(
-            obj.get("type").and_then(Value::as_str),
-            Some("number") | Some("integer")
-        ) {
+        if let Some(schema_type) = obj.get("type").and_then(Value::as_str)
+            && matches!(schema_type, "number" | "integer")
+        {
             let minimum = obj.get("minimum").and_then(Value::as_f64);
             let exclusive_minimum = obj.get("exclusiveMinimum").and_then(Value::as_f64);
             let maximum = obj.get("maximum").and_then(Value::as_f64);
@@ -863,6 +899,45 @@ fn has_strict_incompatible_composition(schema: &Value, is_root: bool) -> bool {
             if crossed || zero_multiple {
                 return true;
             }
+            // An `enum` member must satisfy the declared type AND every
+            // documented bound, so a member set none of whose compatible
+            // members clears the bounds ships the same no-satisfiable-value
+            // shape as the crossing arms above (`{"type":"number",
+            // "enum":[1,2],"minimum":5,"maximum":10}` accepts nothing and
+            // every strict call is the documented server error). The
+            // single-compatible-member leniency of the enum-vs-type arm
+            // carries over: a partially satisfiable enum is the author's
+            // sloppiness, not a wire the model cannot use.
+            if obj
+                .get("enum")
+                .and_then(Value::as_array)
+                .is_some_and(|members| {
+                    !members
+                        .iter()
+                        .any(|member| enum_member_clears_bounds(member, obj, schema_type))
+                })
+            {
+                return true;
+            }
+        }
+        // A bound ships only in the numeric form the documents describe:
+        // a string, boolean, object, or array value is a malformed keyword
+        // value the endpoint may reject the schema itself for — the same
+        // junk family the `type`/`enum`/`items` arms fail closed. The
+        // draft-4 boolean exclusive spellings were already stripped as
+        // widening before this gate runs, so any non-number surviving here
+        // is malformed; a negative `multipleOf` is a form the documents
+        // never describe (the keyword is defined strictly positive) and
+        // joins the junk family beside the zero case judged above.
+        for bound in ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"] {
+            if obj.get(bound).is_some_and(|value| !value.is_number()) {
+                return true;
+            }
+        }
+        if let Some(multiple) = obj.get("multipleOf")
+            && (!multiple.is_number() || multiple.as_f64().is_some_and(|f| f < 0.0))
+        {
+            return true;
         }
         // A malformed `anyOf` — a map or scalar instead of the branch
         // array — is likewise a keyword the documents never describe in
@@ -1058,6 +1133,28 @@ fn collapse_nullable_unions(schema: &mut Value) {
             _ => None,
         };
         if let Some(survivor) = collapse {
+            // Merging the survivor's keys over the parent is only honest
+            // when nothing is lost: a key both sides carry with differing
+            // values means the parent's constraint and the branch's
+            // disagree (the parent's own `properties`/`required` beside a
+            // branch with its own, a differing `type`), and overwriting
+            // would silently delete the parent's constraint while the
+            // collapse's `nullable` annotation claims the schema still
+            // says what it said. An empty parent container constrains
+            // nothing (see `is_empty_container`), so it never collides. A
+            // collision keeps the authored union: the strict gate then
+            // judges it like any other union, and non-strict callers keep
+            // the authored semantics instead of a schema that lost a
+            // required property.
+            let collides = survivor.as_object().is_some_and(|inner| {
+                inner.iter().any(|(k, v)| {
+                    obj.get(k)
+                        .is_some_and(|parent| parent != v && !is_empty_container(parent))
+                })
+            });
+            if collides {
+                continue;
+            }
             obj.remove(key);
             if let Value::Object(non_obj) = survivor {
                 for (k, v) in non_obj {
@@ -1068,6 +1165,21 @@ fn collapse_nullable_unions(schema: &mut Value) {
             }
             obj.insert("nullable".into(), Value::Bool(true));
         }
+    }
+}
+
+/// Whether a parent-side keyword value asserts nothing: an empty object
+/// carries no property constraints and an empty array no required names.
+/// Such a value never collides with a merged branch value — the branch's
+/// constraint is strictly more specific — so the merge is lossless. This
+/// is what lets the injected empty `properties` on a bare object node
+/// merge with a properties-bearing single branch instead of blocking the
+/// documented lossless collapse.
+fn is_empty_container(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        _ => false,
     }
 }
 
@@ -1085,16 +1197,98 @@ fn is_null_type(v: &Value) -> bool {
 /// `null` literal, and this cross-check does not guess which undocumented
 /// spellings a server might accept — the same line the type junk arm's
 /// own comment draws.
+/// Whether one `enum` member satisfies the node's declared type AND every
+/// documented bound the node carries — the conjunction a strict endpoint
+/// enforces on a required value. The bounds are the documented numeric
+/// forms only; `multipleOf` divisibility is judged exclusively on the
+/// integral pair, where the modulo test is exact — float modulo on
+/// fractional multiples would guess at representation error rather than
+/// at the wire, so that combination keeps shipping.
+fn enum_member_clears_bounds(member: &Value, obj: &Map<String, Value>, schema_type: &str) -> bool {
+    if !value_satisfies_declared_type(member, schema_type) {
+        return false;
+    }
+    let Some(number) = member.as_f64() else {
+        return false;
+    };
+    if obj
+        .get("minimum")
+        .and_then(Value::as_f64)
+        .is_some_and(|minimum| number < minimum)
+    {
+        return false;
+    }
+    if obj
+        .get("exclusiveMinimum")
+        .and_then(Value::as_f64)
+        .is_some_and(|minimum| number <= minimum)
+    {
+        return false;
+    }
+    if obj
+        .get("maximum")
+        .and_then(Value::as_f64)
+        .is_some_and(|maximum| number > maximum)
+    {
+        return false;
+    }
+    if obj
+        .get("exclusiveMaximum")
+        .and_then(Value::as_f64)
+        .is_some_and(|maximum| number >= maximum)
+    {
+        return false;
+    }
+    if let (Some(multiple), Some(value)) = (
+        obj.get("multipleOf").and_then(Value::as_i64),
+        member.as_i64(),
+    ) && multiple != 0
+        && value % multiple != 0
+    {
+        return false;
+    }
+    true
+}
+
 fn value_satisfies_declared_type(value: &Value, schema_type: &str) -> bool {
     match schema_type {
         "string" => value.is_string(),
         "number" => value.is_number(),
-        "integer" => value.is_i64() || value.is_u64(),
+        // JSON Schema defines `integer` as a number with zero fractional
+        // part, and serde_json hands `5.0` over as an f64 — rejecting the
+        // representational spelling would fail a satisfiable schema
+        // closed for free, so the fractional check covers it.
+        "integer" => {
+            value.is_i64()
+                || value.is_u64()
+                || value
+                    .as_f64()
+                    .is_some_and(|number| number.is_finite() && number.fract() == 0.0)
+        }
         "boolean" => value.is_boolean(),
         "array" => value.is_array(),
         "object" => value.is_object(),
         _ => true,
     }
+}
+
+/// Whether an enforced `anyOf` branch requires a name the union node's own
+/// property set does not contain. The gate runs on the enforced clone,
+/// where the union node carries `additionalProperties: false` over that
+/// set and every surviving branch property is in the branch's `required`:
+/// such a name is simultaneously demanded (by the branch) and forbidden
+/// (by the union node's closure), so no instance can satisfy the shipped
+/// shape.
+fn branch_requires_name_outside(branch: &Value, union_properties: &Map<String, Value>) -> bool {
+    branch
+        .get("required")
+        .and_then(Value::as_array)
+        .is_some_and(|required| {
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|name| !union_properties.contains_key(name))
+        })
 }
 
 /// Whether an `anyOf` branch is a schema the strict documents describe: a
@@ -1309,9 +1503,17 @@ fn collapse_single_element_unions(schema: &mut Value) {
             // keyword keeps the authored constraint.
             continue;
         };
-        let collides = inner
-            .iter()
-            .any(|(k, v)| obj.get(k).is_some_and(|parent| parent != v));
+        // The collision test is the lossless-merge contract: differing
+        // shared keys keep the keyword, equal keys and parent keys the
+        // branch lacks merge. An empty parent container asserts nothing,
+        // so it does not collide — without that, the `properties: {}` the
+        // bare-object injection leaves on `{"type":"object"}` would block
+        // the merge against a properties-bearing single branch and fail a
+        // schema closed that the documented lossless collapse serves.
+        let collides = inner.iter().any(|(k, v)| {
+            obj.get(k)
+                .is_some_and(|parent| parent != v && !is_empty_container(parent))
+        });
         if collides {
             continue;
         }
@@ -1435,11 +1637,11 @@ fn strip_unsupported_strict_keywords(obj: &mut Map<String, Value>) {
     // disjoint enum would make the pair unsatisfiable, in which case it
     // yields to the enum (the compatibility gate's const arm cross-checks
     // only `type`, so `{"type":"integer","enum":[1,2],"const":3}` would
-    // otherwise ship a schema no value satisfies). An enum that contains
-    // the const keeps it verbatim: both keywords agree and the shipped
-    // intersection is faithful. A non-numeric const beside an existing
-    // enum yields the same way — the accepted values widen to the whole
-    // enum even when the const disagreed, the deliberate disclosed
+    // otherwise ship a schema no value satisfies). A numeric const that a
+    // present enum contains keeps it verbatim: both keywords agree and the
+    // shipped intersection is faithful. A non-numeric const beside an
+    // existing enum always yields — even when the enum contains it — the
+    // accepted values widening to the whole enum, the deliberate disclosed
     // widening (every documented alternative is worse). A `const: null` is
     // dropped outright — null is not a supported type, and landing it on
     // `enum` would ship a null member (the compatibility gate already
@@ -1614,21 +1816,46 @@ fn strip_dependent_keywords(schema: &mut Value) -> bool {
     }
 }
 
+/// The `required` names of one root-composition branch, as a code-span
+/// label list for the composition note. Names are schema-controlled —
+/// hostile MCP schemas reach the pipeline verbatim — so each gets the
+/// same treatment the removal note applies: control/line/bidi characters
+/// neutralized to spaces, backticks swapped for apostrophes so they
+/// cannot break out of the code span, per-name truncation, and a cap on
+/// how many names one group contributes (the remainder is counted, not
+/// rendered).
 fn required_group_label(item: &Value) -> Option<String> {
-    let mut names: Vec<String> = item
-        .get("required")?
-        .as_array()?
+    let required = item.get("required")?.as_array()?;
+    let total: Vec<&str> = required.iter().filter_map(Value::as_str).collect();
+    let mut names: Vec<String> = total
         .iter()
-        .filter_map(Value::as_str)
-        .map(|name| format!("`{name}`"))
+        .take(STRICT_NOTE_MAX_NAMES)
+        .map(|name| {
+            let truncated: String = name
+                .chars()
+                .take(STRICT_NOTE_MAX_NAME_CHARS)
+                .map(|c| {
+                    if c.is_control() || is_line_or_bidi_separator(c) {
+                        ' '
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            format!("`{}`", truncated.replace('`', "'"))
+        })
         .collect();
     if names.is_empty() {
-        None
-    } else {
-        names.sort();
-        names.dedup();
-        Some(names.join(" + "))
+        return None;
     }
+    names.sort();
+    names.dedup();
+    let mut label = names.join(" + ");
+    if total.len() > STRICT_NOTE_MAX_NAMES {
+        let remainder = total.len() - STRICT_NOTE_MAX_NAMES;
+        label.push_str(&format!(" ... (+{remainder} more)"));
+    }
+    Some(label)
 }
 
 #[cfg(test)]
@@ -5510,6 +5737,352 @@ mod tests {
         assert!(note.contains("`c d e f`"), "separators neutralized: {note}");
         assert!(!note.contains('\u{202A}'));
         assert!(!note.contains('\u{200F}'));
+    }
+
+    // ---- Strict-gate closure gaps (review round 14) ----
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_nested_union_whose_branches_escape_the_node_closure() {
+        // Branch-specific fields demanded by the branches are forbidden by
+        // the union node's enforced `additionalProperties: false`: no
+        // instance satisfies the shipped shape, so the tool fails closed
+        // instead of shipping strict.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}},
+                        "required": ["action"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"action": {"type": "string"}, "a_only": {"type": "string"}}, "required": ["action", "a_only"]},
+                            {"type": "object", "properties": {"action": {"type": "string"}, "b_only": {"type": "string"}}, "required": ["action", "b_only"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        let authored = tool.input_schema.clone();
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a branch requiring names outside the union node closure must fail closed"
+        );
+        assert_eq!(tool.strict, None);
+        assert_eq!(
+            tool.input_schema, authored,
+            "fail-closed ships the authored schema"
+        );
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_when_the_union_node_requires_across_its_branches() {
+        // The union node itself carries all branch fields: the removal
+        // pass strips the optional ones from the node while the branches
+        // keep requiring them, so the union node's closure forbids exactly
+        // what its branches demand.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string"},
+                            "a_only": {"type": "string"},
+                            "b_only": {"type": "string"}
+                        },
+                        "required": ["action"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"action": {"type": "string"}, "a_only": {"type": "string"}}, "required": ["action", "a_only"]},
+                            {"type": "object", "properties": {"action": {"type": "string"}, "b_only": {"type": "string"}}, "required": ["action", "b_only"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_nested_union_whose_branches_stay_inside_the_node_closure() {
+        // Keep-side: branch requirements covered by the union node's own
+        // property set are satisfiable and ship strict.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"action": {"type": "string"}, "a_only": {"type": "string"}},
+                        "required": ["action", "a_only"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"action": {"type": "string"}, "a_only": {"type": "string"}}, "required": ["action", "a_only"]},
+                            {"type": "object", "properties": {"action": {"type": "string"}}, "required": ["action"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        assert!(
+            prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a satisfiable nested union must keep strict mode"
+        );
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_an_enum_no_member_of_which_clears_the_bounds() {
+        for fixture in [
+            json!({"type": "number", "enum": [1, 2], "minimum": 5, "maximum": 10}),
+            json!({"type": "integer", "enum": [3, 5], "multipleOf": 2}),
+            json!({"type": "number", "enum": [5], "exclusiveMinimum": 5}),
+        ] {
+            let mut tool = test_tool(
+                "probe",
+                json!({
+                    "type": "object",
+                    "properties": {"n": fixture},
+                    "required": ["n"]
+                }),
+            );
+            assert!(
+                !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+                "an enum no member of which clears the bounds must fail closed: {:?}",
+                tool.input_schema["properties"]["n"]
+            );
+            assert_eq!(tool.strict, None);
+        }
+    }
+
+    #[test]
+    fn strict_mode_keeps_an_enum_with_a_member_inside_the_bounds() {
+        // Keep-side: the single-compatible-member leniency of the
+        // enum-vs-type arm carries over — a partially satisfiable enum is
+        // the author's sloppiness, not a wire the model cannot use.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "n": {"type": "integer", "enum": [1, 2, 6], "minimum": 5, "maximum": 10, "multipleOf": 2}
+                },
+                "required": ["n"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+        assert_eq!(
+            tool.input_schema["properties"]["n"]["enum"],
+            json!([1, 2, 6])
+        );
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_malformed_bound_values() {
+        for fixture in [
+            json!({"type": "number", "minimum": "abc"}),
+            json!({"type": "number", "multipleOf": "x"}),
+            json!({"type": "number", "multipleOf": -2}),
+            json!({"type": "integer", "exclusiveMinimum": "x"}),
+            json!({"type": "number", "maximum": [5]}),
+        ] {
+            let mut tool = test_tool(
+                "probe",
+                json!({
+                    "type": "object",
+                    "properties": {"n": fixture},
+                    "required": ["n"]
+                }),
+            );
+            assert!(
+                !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+                "a malformed bound value must fail closed: {:?}",
+                tool.input_schema["properties"]["n"]
+            );
+            assert_eq!(tool.strict, None);
+        }
+    }
+
+    #[test]
+    fn strict_mode_accepts_an_integral_float_enum_member() {
+        // JSON Schema defines `integer` by fractional part, not by
+        // representation: serde_json hands `5.0` over as an f64, and a
+        // schema no value can match is the author's sloppiness the
+        // strict flag need not punish.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"n": {"type": "integer", "enum": [5.0]}},
+                "required": ["n"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"n": {"type": "integer", "enum": [5.5]}},
+                "required": ["n"]
+            }),
+        );
+        assert!(!prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn sanitize_keeps_a_nullable_union_whose_branch_collides_with_the_parent() {
+        // A branch key differing from the parent's means the merge would
+        // delete the parent's constraint: keep the authored union instead
+        // of silently un-requiring the parent's property.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"parent_only": {"type": "string"}},
+            "required": ["parent_only"],
+            "anyOf": [
+                {"type": "object", "properties": {"branch_only": {"type": "string"}}, "required": ["branch_only"]},
+                {"type": "null"}
+            ]
+        });
+        sanitize(&mut schema);
+        assert_eq!(
+            schema["properties"]["parent_only"],
+            json!({"type": "string"}),
+            "the parent's property must survive the collapse: {schema}"
+        );
+        assert_eq!(schema["required"], json!(["parent_only"]));
+        assert!(schema.get("nullable").is_none(), "the union stays intact");
+        assert!(schema.get("anyOf").is_some());
+    }
+
+    #[test]
+    fn sanitize_still_collapses_when_branch_keys_agree_or_the_parent_asserts_nothing() {
+        // Equal-value keys merge losslessly, and an empty parent container
+        // asserts nothing — both keep collapsing.
+        let mut agreeing = json!({
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "anyOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}},
+                {"type": "null"}
+            ]
+        });
+        sanitize(&mut agreeing);
+        assert_eq!(agreeing["nullable"], true);
+        assert!(agreeing.get("anyOf").is_none());
+
+        let mut asserting_nothing = json!({
+            "type": "object",
+            "properties": {},
+            "anyOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
+                {"type": "null"}
+            ]
+        });
+        sanitize(&mut asserting_nothing);
+        assert_eq!(asserting_nothing["nullable"], true);
+        assert_eq!(
+            asserting_nothing["properties"]["a"],
+            json!({"type": "string"})
+        );
+        assert_eq!(asserting_nothing["required"], json!(["a"]));
+    }
+
+    #[test]
+    fn sanitize_merges_a_single_element_union_into_a_bare_object() {
+        // The empty `properties` the bare-object injection leaves behind
+        // must not block the documented lossless single-branch merge.
+        let mut schema = json!({
+            "type": "object",
+            "anyOf": [
+                {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}
+            ]
+        });
+        sanitize(&mut schema);
+        assert!(
+            schema.get("anyOf").is_none(),
+            "single branch must merge: {schema}"
+        );
+        assert_eq!(schema["properties"]["a"], json!({"type": "string"}));
+        assert_eq!(schema["required"], json!(["a"]));
+    }
+
+    #[test]
+    fn strict_mode_neutralizes_the_arabic_letter_mark_in_removal_notes() {
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "keep": {"type": "string"},
+                    "hidden\u{061C}name": {"type": "string"}
+                },
+                "required": ["keep"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert!(
+            tool.description.contains("`hidden name`"),
+            "U+061C neutralizes to a space: {}",
+            tool.description
+        );
+        assert!(!tool.description.contains('\u{061C}'));
+    }
+
+    #[test]
+    fn composition_note_labels_are_neutralized_truncated_and_capped() {
+        let mut names = vec![format!("{}{}", "x".repeat(500), '\u{061C}')];
+        names.push("bad`\nname".to_string());
+        for index in 0..25 {
+            names.push(format!("n{index}"));
+        }
+        let required: Vec<Value> = names
+            .iter()
+            .map(|name| Value::String(name.clone()))
+            .collect();
+        let mut schema = json!({
+            "oneOf": [
+                {"type": "object", "properties": {"keep": {"type": "string"}}, "required": ["keep"]},
+                {"type": "object", "properties": {}, "required": required}
+            ]
+        });
+        let note = sanitize_for_responses(&mut schema).expect("root composition note must render");
+        assert!(
+            !note.contains('\n'),
+            "a hostile name must not split the note across lines: {note}"
+        );
+        assert!(
+            !note.contains('\u{061C}'),
+            "bidi format characters neutralize: {note}"
+        );
+        assert!(
+            note.contains("`bad' name`"),
+            "backticks swap for apostrophes inside the code span: {note}"
+        );
+        assert!(
+            note.contains(" ... (+7 more)"),
+            "the cap counts the remainder instead of rendering it: {note}"
+        );
     }
 }
 /// Normalize a tool's function schema for Kimi / Moonshot API compatibility.

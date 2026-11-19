@@ -1720,7 +1720,7 @@ mod tests {
 
         assert!(
             crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools),
-            "retrieve_tool_result keeps strict mode: the `ref`+summary path              stays fully functional"
+            "retrieve_tool_result keeps strict mode: the `ref`+summary path stays fully functional"
         );
         let shipped = &tools[0];
         assert_eq!(shipped.strict, Some(true));
@@ -1737,7 +1737,7 @@ mod tests {
         let (_, note) = crate::tools::schema_sanitize::STRICT_REMOVAL_CONTEXT_NOTES
             .iter()
             .find(|(name, _)| *name == "retrieve_tool_result")
-            .expect("the context-note entry must exist — a deletion turns                      the census manifest and this expect red together");
+            .expect("the context-note entry must exist — a deletion turns the census manifest and this expect red together");
         assert!(
             shipped.description.contains(note),
             "the context note must render verbatim; got: {}",
