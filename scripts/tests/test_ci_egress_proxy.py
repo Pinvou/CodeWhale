@@ -23,6 +23,21 @@ def read_all(connection):
 
 
 class ProxyTests(unittest.TestCase):
+    def test_certificate_services_cover_observed_chain_without_becoming_an_open_proxy(self):
+        for host in ('crl.globalsign.com', 'ocsp.globalsign.com', 'ocsp2.globalsign.com', 'secure.globalsign.com'):
+            self.assertEqual(PROXY.pki_target('http://' + host + '/signed-object').hostname, host)
+        for url in ('http://internal.invalid/a', 'http://127.0.0.1/a',
+                    'http://user:password@crl.globalsign.com/a', 'http://crl.globalsign.com:443/a',
+                    'https://crl.globalsign.com:80/a', 'http://crl.globalsign.com/a#fragment'):
+            with self.assertRaises(ValueError):
+                PROXY.pki_target(url)
+
+    def test_pki_redirect_is_rejected_before_an_unapproved_fetch(self):
+        handler = PROXY.PKIRedirect()
+        request = PROXY.urllib.request.Request('http://crl.globalsign.com/signed.crl')
+        with self.assertRaises(ValueError):
+            handler.redirect_request(request, None, 302, 'redirect', {}, 'http://127.0.0.1/private')
+
     def test_half_closed_request_still_receives_complete_large_response(self):
         client, left = socket.socketpair()
         right, backend = socket.socketpair()

@@ -16,6 +16,28 @@ GITHUB = ('github.com', 'githubusercontent.com', 'githubassets.com', 'github.io'
 PUBLIC = GITHUB + ('rust-lang.org', 'crates.io', 'rsproxy.cn', 'deepin.com', 'blob.core.windows.net',
                    'llvm.org', 'freedesktop.org', 'npmjs.org', 'nodejs.org', 'golang.org')
 
+# The Windows PKI HTTP bridge imports this policy and the same relay. These
+# are public signed certificate/revocation services, never arbitrary HTTP.
+PKI_HOSTS = frozenset(('cdp.rapidssl.com', 'status.rapidssl.com', 'cacerts.rapidssl.com',
+    'crl3.digicert.com', 'crl4.digicert.com', 'ocsp.digicert.com', 'cacerts.digicert.com',
+    'crl.microsoft.com', 'www.microsoft.com', 'ctldl.windowsupdate.com', 'ocsp.msocsp.com',
+    'crl.globalsign.com', 'ocsp.globalsign.com', 'ocsp2.globalsign.com', 'secure.globalsign.com'))
+
+
+def pki_target(url):
+    target = urllib.parse.urlsplit(url)
+    if (target.scheme not in ('http', 'https') or target.hostname not in PKI_HOSTS
+            or target.username or target.password or target.fragment
+            or target.port not in (None, 80 if target.scheme == 'http' else 443)):
+        raise ValueError('unapproved certificate-service destination')
+    return target
+
+
+class PKIRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        pki_target(newurl)  # Validate before following, not after fetching it.
+        return super().redirect_request(request, fp, code, message, headers, newurl)
+
 
 def label(host):
     return host if any(host == suffix or host.endswith('.' + suffix) for suffix in PUBLIC) else 'other'
