@@ -229,8 +229,9 @@ code 1008. Five informational codes leave the connection open:
 `bad_json`, `bad_message`, `binary_unsupported`, `unsupported_message_type`,
 and `desktop_offline`. A sixth informational send exists on the controller
 lane: when a `desktop_endpoint_register` conflicts with an already-reserved
-controller role, the router replies with a `bad_desktop_endpoint_register`
-error frame and leaves the socket open, so the incumbent registration stays
+controller role, the registration handler replies with a
+`bad_desktop_endpoint_register` error frame after the router's reservation
+check fails and leaves the socket open, so the incumbent registration stays
 live. Graceful closes wait for the peer's close handshake so
 queued messages are delivered, and frames that arrive after the close are
 ignored; a peer that withholds the handshake is terminated unconditionally
@@ -252,7 +253,7 @@ after 5 seconds, so the drain cannot outlive ws's own 30-second close timeout.
 | `invalid_access_token` | Desktop re-registration whose access token hash does not match the endpoint. |
 | `invalid_desktop_secret` | Desktop re-registration or revoke whose desktop secret hash does not match the endpoint. |
 | `enrollment_required` | Desktop registration found no enrollment registry entry for the endpoint (the same code is also the fallback when an enrollment failure carries no registry code); the endpoint must enroll first. |
-| `endpoint_id_invalid` | A self-registration claim named an endpoint ID outside the native `ep_` form self-registration reserves for freshly enrolled endpoints. |
+| `endpoint_id_invalid` | A self-registration claim named an endpoint ID outside the native `ep_` form self-registration reserves for freshly enrolled endpoints, or a persisted registry entry whose endpoint ID fails the same validation (read path). |
 | `enrollment_credential_invalid` | Desktop registration whose access credential falls outside the registry's accepted credential byte window (32..4096 UTF-8 bytes) or does not round-trip as UTF-8. |
 | `desktop_credential_invalid` | Desktop registration whose desktop secret fails the same credential validation as the access credential. |
 | `invalid_enrollment_credential` | Desktop registration whose access credential or desktop secret does not match the enrolled digest; self-registration also rejects a desktop secret equal to the access credential. |
@@ -299,10 +300,10 @@ claimant validates the endpoint's absence synchronously before its
 compare-and-swap, so a racing re-claim resolves to
 `invalid_enrollment_credential` (mismatched credentials) or succeeds
 (identical claim); that code is reserved for the registry's administrative
-enroll interface. These rejections are observable only by the offending
+enroll and batch interfaces. These rejections are observable only by the offending
 client — the error frame plus the 1008 close; unlike the contained socket
-failures documented above, they emit no fixed stderr line, no audit record,
-and no healthz counter. Note that the
+failures documented under HTTP and operational behavior, they emit no fixed
+stderr line, no audit record, and no healthz counter. Note that the
 `receiver_error_terminations` healthz counter bounds receiver-side protocol
 violations from above rather than counting them exactly: ws emits `error`
 from the sender path too, so a write failure on an already-dropping client
