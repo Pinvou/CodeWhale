@@ -246,7 +246,10 @@ const expectedProtocolHashes = {
   // without the per-request field the meter froze at "—/…·0%" on every
   // tool-using conversation). Same event surface — no new invoke or listen
   // entries.
-  chat: 'a24529dea3d0dbd5b4abe08539abb6808c4e7197f448518aecec985f52e9083f',
+  // 834 回流重钉：chat:compaction 监听体新增 in-flight 标记维护块（含
+  // compactionStarts/compactionSeq 与 post_tokens 消费）；官方侧 addSystemItem
+  // 行保留 `compactId: compactId` 写法，与社区 shorthand 不同，故哈希为本仓实算值。
+  chat: '457c465bd8f365864f9e9988e369eba1258086bd18dfd85077d406b0d7f6c278',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -258,6 +261,20 @@ const expectedProtocolHashes = {
   // T0-b (#701 桥接面对齐) 重算：confirm/ignore/never 三支 invoke 移入
   // shared/bridge-shared-helpers.js 的 resolveMemoryCandidate（memory.js 留
   // 参数化薄包装），命令面无增删。
+  // Recomputed for the PR #834 review-fix wave: the chat:compaction listener
+  // now stores a timestamp (not a boolean) at start so the read side can
+  // expire a lost-terminal in-flight flag with the same 15-minute backstop
+  // as the Rust MAX_COMPACTION_LATCH_AGE latch, and the comment wording no
+  // longer calls post_tokens "accurate" (Rust emits a conservative estimate).
+  // Event names, invoke shapes and the payload contract unchanged; the web
+  // twin carries the identical body.
+  // Recomputed for review 5874108926 follow-up: the chat:compaction
+  // marker-maintenance block also records the persistent per-session
+  // compactionStarts signal (no invoke/listen surface change — the body
+  // text is part of the pinned call argument).
+  // Recomputed again for review 5876783763: the marker-maintenance block
+  // also advances the monotonic compactionSeq counter (no invoke/listen
+  // surface change).
   memory: 'ca88a71d9f0f9b15f1df52cf80218694f76b2295add98e65a0d167fc88b627c8',
   monitor: 'e63e8d5d4edf813640e08c9951a12abdbc3cad4991763d3dd956e883e277fb1c',
   // New domain: MegaCube 设备管理 (device manager). Six commands —
