@@ -21,7 +21,7 @@ func testReconciliationRepairRecurrence(t *testing.T, ctx context.Context, r *Po
 		MerchantOrderNo: "repair-recurrence-" + uuid.NewString(), ChannelTransactionID: uuid.NewString(),
 		Channel: "ALIPAY", AmountFen: 1500, Currency: "CNY", Status: "SUCCESS", PaidAt: now}
 	provider := &reconciliationFixtureProvider{rows: []ProviderBillEntry{row}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

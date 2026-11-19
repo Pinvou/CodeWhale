@@ -615,6 +615,14 @@ jobs:
               - 'scripts/tests/test_release_size_policy.py'
               - 'scripts/run-windows-remote-control-e2e.ps1'
               - 'scripts/windows-e2e-process-guard.ps1'
+              - 'scripts/ci-fixture-process.py'
+              - 'scripts/windows-owned-process.cs'
+              - 'scripts/release-owned-process.py'
+              - 'remote-control-relay/scripts/release-process.mjs'
+              - 'remote-control-relay/test/release-process.test.js'
+              - 'remote-control-relay/test/windows-release-owned-service.test.js'
+              - 'remote-control-relay/test/fixtures/windows-owned-driver.cs'
+              - 'scripts/tests/test_ci_fixture_process.py'
               - 'scripts/windows-e2e-orchestrator-helpers.ps1'
               - 'scripts/create-installer-spdx.mjs'
               - 'scripts/check-enrollment-gated-v2-rollback.mjs'
@@ -942,6 +950,8 @@ jobs:
               - '.github/workflows/pr-check.yml'
             relay:
               - 'remote-control-relay/**'
+              - 'scripts/ci-fixture-process.py'
+              - 'scripts/release-owned-process.py'
               - 'scripts/deploy-remote-relay.sh'
               - 'scripts/deploy-remote-relay-test.sh'
               - 'scripts/run-windows-relay-dacl.mjs'
@@ -1229,6 +1239,12 @@ jobs:
 
       - name: fork-guard 指纹层 (秒级,不编译)
         run: ./scripts/fork-guard.sh --fast
+
+      - name: unicode-width patch guard
+        # The CJK-aware patch tables in pinvou-cli and pinvou3-app/src-tauri
+        # point into the CodeWhale submodule (#4479 follow-up): fail loudly
+        # if a table, the patched copy, or the lock resolution regresses.
+        run: python3 scripts/guard-unicode-width-patch.py
 
       - name: fork 合规联动 (gitlink ↔ fork-modifications)
         run: |
@@ -1777,7 +1793,20 @@ jobs:
         run: |
           bash -n scripts/deploy-remote-relay.sh
           bash -n scripts/deploy-remote-relay-test.sh
-          npm --prefix remote-control-relay test
+          python3 scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}.json" -- npm --prefix remote-control-relay test
+
+      - name: 保留 Relay 进程作用域原始回执
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/upload-artifact@v7
+        with:
+          name: relay-process-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/
+          retention-days: 7
+          if-no-files-found: warn
 
   account-financial-test:
     name: account-financial-test (${{ matrix.group }})
@@ -2648,6 +2677,11 @@ jobs:
           npm --prefix pinvou3-app run test:knowledge-host-packaging
           npm --prefix pinvou3-app run test:linux-asr-runtime
 
+      - uses: actions/setup-python@v7
+        if: ${{ runner.os == 'Windows' && runner.environment == 'github-hosted' }}
+        with:
+          python-version: "3.13"
+
       - name: Windows 原生命令退出码回归
         if: ${{ runner.os == 'Windows' }}
         run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test remote-control-relay/test/windows-release-exit-code.test.js
@@ -2662,11 +2696,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           npm --prefix remote-control-relay run release:gate
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/release-evidence-artifacts.test.js remote-control-relay/test/controller-release-source-binding.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
+          python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/release-evidence-artifacts.test.js remote-control-relay/test/controller-release-source-binding.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js remote-control-relay/test/release-process.test.js remote-control-relay/test/windows-release-owned-service.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+
+      - name: Windows 共享进程监督器兼容回归
+        if: ${{ runner.os == 'Windows' }}
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json" -- python -m unittest discover -s scripts/tests -p test_ci_fixture_process.py
 
       - name: Preserve Windows release contract process receipts
         id: windows_release_contract_receipts
@@ -2681,6 +2719,8 @@ jobs:
             ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json
             ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json
             ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json
+            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json
           if-no-files-found: warn
           retention-days: 7
 
@@ -2787,6 +2827,14 @@ jobs:
         run: |
           cargo check --manifest-path pinvou-knowledge/Cargo.toml --tests --no-default-features --features client --locked
           cargo test --manifest-path pinvou-knowledge/Cargo.toml --lib --no-default-features --features client --locked -- embedding::stub_tests
+
+      # App-facing consumption combo (pinvou3-tauri -> knowledge
+      # default-features = false, features = ["client","discovery"]):
+      # compile lib + tests under exactly that pair so a dependency wired
+      # into only one side of the client/server split breaks here instead
+      # of in an app build.
+      - name: cargo check (app combo client,discovery)
+        run: cargo check --manifest-path pinvou-knowledge/Cargo.toml --tests --no-default-features --features client,discovery --locked
 
       - name: 部署脚本 shell 语法
         run: bash -n pinvou-knowledge/deploy/install.sh

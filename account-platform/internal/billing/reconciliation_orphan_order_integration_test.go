@@ -49,7 +49,7 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer tx.Rollback(ctx)
-				if _, _, err := normal.mergeSuccessfulPaymentWithinTransaction(ctx, tx, normalOrder, "QUERY", "normal-payment", []byte(`{"controlled":true}`), normalProvider.result, false, r.now()); err != nil {
+				if _, _, err := mergeRetainedFixturePayment(ctx, tx, normal, normalOrder, "QUERY", "normal-payment", []byte(`{"controlled":true}`), normalProvider.result, false, r.now()); err != nil {
 					t.Fatal("create real normal transaction", err)
 				}
 				if err := tx.Commit(ctx); err != nil {
@@ -68,7 +68,7 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 			if upgrade {
 				provider.rows = []ProviderBillEntry{{EntryType: "PAYMENT", ProviderReferenceID: reference, ChannelTransactionID: reference, MerchantOrderNo: normalOrder.MerchantOrderNo, Channel: normalOrder.Channel, AmountFen: normalOrder.AmountFen, Currency: normalOrder.Currency, Status: "SUCCESS", PaidAt: *normalProvider.result.PaidAt}}
 			}
-			coordinator, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+			coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -241,7 +241,7 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 				}
 				// Each later boundary owns its refusal. Never ask the current
 				// highest migration to return 900033's SQLSTATE or message.
-				assertLaterRefusal := func(input []migrations.Migration, version int64, message string) {
+				assertLaterRefusal := func(input []migrations.Migration, version int64, sqlstate, message string) {
 					t.Helper()
 					var highest int64
 					if err := operator.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&highest); err != nil || highest != version {
@@ -253,7 +253,7 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 					}
 					var refused *pgconn.PgError
 					err := billingschema.DownOne(ctx, operator, input)
-					if !errors.As(err, &refused) || refused.Code != "P0001" || refused.Message != message {
+					if !errors.As(err, &refused) || refused.Code != sqlstate || refused.Message != message {
 						t.Fatal("later migration must preserve its own exact rollback refusal", version, err)
 					}
 					if _, err := billingschema.VerifyApplied(ctx, operator, input); err != nil {
@@ -272,20 +272,29 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 				if err := billingschema.Up(ctx, operator, materialsPrefix); err != nil {
 					t.Fatal("official materials boundary upgrade", err)
 				}
-				assertLaterRefusal(materialsPrefix, 900037, "product admission originals are retained; rollback requires an independently reviewed data-preserving plan")
-				// Later migrations own their rollback refusals. Check manual
-				// admission at its exact boundary before the complete upgrade.
-				var admissionPrefix []migrations.Migration
+				assertLaterRefusal(materialsPrefix, 900037, "P0001", "product admission originals are retained; rollback requires an independently reviewed data-preserving plan")
+				var manualPrefix []migrations.Migration
 				for _, migration := range all {
 					if migration.Version <= 900038 {
-						admissionPrefix = append(admissionPrefix, migration)
+						manualPrefix = append(manualPrefix, migration)
 					}
 				}
-				if err := billingschema.Up(ctx, operator, admissionPrefix); err != nil {
+				if err := billingschema.Up(ctx, operator, manualPrefix); err != nil {
 					t.Fatal("official manual admission boundary upgrade", err)
 				}
-				assertLaterRefusal(admissionPrefix, 900038, "manual admission facts cannot be rolled back; restore a compatible application version")
-				// Retain the complete current upgrade and replay independently.
+				assertLaterRefusal(manualPrefix, 900038, "P0001", "manual admission facts cannot be rolled back; restore a compatible application version")
+				var creditPrefix []migrations.Migration
+				for _, migration := range all {
+					if migration.Version <= 900039 {
+						creditPrefix = append(creditPrefix, migration)
+					}
+				}
+				if err := billingschema.Up(ctx, operator, creditPrefix); err != nil {
+					t.Fatal("official payment credit boundary upgrade", err)
+				}
+				assertLaterRefusal(creditPrefix, 900039, "55000", "payment credit attempts are forward-only; preserve financial effects and abort tombstones")
+				// Check 900033's refusal at its exact boundary, then retain the
+				// complete current upgrade and replay contract independently.
 				if err := billingschema.Up(ctx, operator, all); err != nil {
 					t.Fatal("official complete forward upgrade", err)
 				}

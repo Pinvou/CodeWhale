@@ -53,7 +53,7 @@ func TestForcedRefundMemberGrantTerminalStatePostgres(t *testing.T) {
 					t.Fatal(err)
 				}
 				provider := &retainedCreateRaceProvider{retainedFinancialProvider: &retainedFinancialProvider{}}
-				coordinator, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+				coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 				if err != nil {
 					t.Fatal(err)
 				}

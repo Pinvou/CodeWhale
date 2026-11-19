@@ -110,6 +110,8 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected := router.Group("")
 	protected.Use(serviceauth.GinMiddleware(serviceToken))
 	protected.GET("/internal/v1/users/:user_id/account-closure-assessment", serviceauth.Require("internal.billing.account-closure.assess"), httpserver.AdaptFunc(s.accountClosureAssessment))
+	protected.POST("/internal/v1/payment-credit-attempts/resolve", serviceauth.Require("internal.billing.payment-credit.resolve"), httpserver.AdaptFunc(s.resolvePaymentCredit))
+	protected.POST("/internal/v1/payment-credit-attempts/acknowledge", serviceauth.Require("internal.billing.payment-credit.resolve"), httpserver.AdaptFunc(s.acknowledgePaymentCredit))
 	protected.POST("/internal/v1/users/:user_id/account-closure-grants/isolate", serviceauth.Require("internal.billing.account-closure.isolate"), httpserver.AdaptFunc(s.isolateAccountClosedGrants))
 	if s.payments != nil {
 		protected.POST("/internal/v1/reconciliation/runs", serviceauth.Require("internal.billing.reconciliation.run"), httpserver.AdaptFunc(s.runReconciliation))

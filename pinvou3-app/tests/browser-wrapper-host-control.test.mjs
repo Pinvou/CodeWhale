@@ -36,7 +36,7 @@ async function waitFor(predicate) {
 
 test('pending directory I/O does not block control, and stop waits for the owned I/O', async () => {
   const barrier = heldBarrier();
-  const f = await fixture({ requestReadBarrier: barrier.shared });
+  const f = await fixture({ requestReadBarrier: barrier.shared, phaseDiagnostics: true });
   try {
     await waitFor(() => f.host.diagnostic().phase === 'directory');
     await f.host.deferOperation('prepare', true);
@@ -54,7 +54,7 @@ test('pending directory I/O does not block control, and stop waits for the owned
 
 test('late configure acknowledgement keeps stale mutations rejected but cannot prevent owned retirement', async () => {
   const barrier = heldBarrier();
-  const f = await fixture({ configurationReplyBarrier: barrier.shared });
+  const f = await fixture({ configurationReplyBarrier: barrier.shared, phaseDiagnostics: true });
   try {
     await assert.rejects(f.host.deferOperation('prepare', true), /configure acknowledgement timed out/u);
     barrier.release();

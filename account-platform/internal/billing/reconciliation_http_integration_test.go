@@ -21,7 +21,7 @@ func TestF03AdminReconciliationExactWire(t *testing.T) {
 	c, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, true)
 	base := c.provider.(*retainedFinancialProvider)
 	provider := &reconciliationFixtureProvider{retainedFinancialProvider: *base}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestF03ImportHTTPPendingReceiptResumesSameDurableRun(t *testing.T) {
 	actor := uuid.New()
 	row := ProviderBillEntry{EntryType: "PAYMENT", ProviderReferenceID: ref, ChannelTransactionID: ref, MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Status: "SUCCESS", PaidAt: now}
 	provider := &recoveryBillProvider{reconciliationFixtureProvider: reconciliationFixtureProvider{rows: []ProviderBillEntry{row}}, failing: map[string]bool{order.MerchantOrderNo: true}, orders: map[string]ProviderOrder{order.MerchantOrderNo: {MerchantOrderNo: order.MerchantOrderNo, Status: "SUCCESS", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, ChannelTransactionID: &ref, PaidAt: &now, ExternalCustomerKey: order.RequesterID.String()}}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
