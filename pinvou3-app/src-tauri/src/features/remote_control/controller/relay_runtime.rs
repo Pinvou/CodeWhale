@@ -1908,7 +1908,10 @@ impl ControlledRelayWorker {
         // Exact operation validation precedes all cleanup. A retired worker
         // must not clear the replacement generation's keys or projection.
         let result = match self.transport_owner.as_ref() {
-            Some(owner) => manager.fail_owned_transport(owner, sanitize_error(error)),
+            Some(owner) => {
+                let lane = self.app.state::<ControlledLaneState>();
+                manager.fail_owned_transport(owner, sanitize_error(error), || lane.clear())
+            }
             None => manager.fail_operation(self.operation.clone(), sanitize_error(error)),
         };
         if let Ok(status) = result {
@@ -2825,6 +2828,15 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
         || manager.with_transport_owner(&owner, || ()).is_err()
     {
         return ControlledResumeOutcome::Ignored;
+    }
+    // This notice is synthesized by the current local reader, not a wire
+    // protocol message (the manager rejects wire imitations). It deliberately
+    // has no lease tuple. The captured transport owner above supplies the
+    // authority; a second loss terminates this candidate without a new budget.
+    if kind == "desktop_relay_connection"
+        && message.get("connected").and_then(Value::as_bool) == Some(false)
+    {
+        return ControlledResumeOutcome::Failed;
     }
     let advance = |step, now| manager.advance_owned_resume(&owner, step, now);
     if kind == "desktop_relay_connection"
