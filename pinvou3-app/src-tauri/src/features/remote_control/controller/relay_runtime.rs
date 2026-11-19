@@ -2813,12 +2813,10 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
     // protocol message (the manager rejects wire imitations). It deliberately
     // has no lease tuple. The captured transport owner above supplies the
     // authority; a second loss terminates this candidate without a new budget.
-    if kind == "desktop_relay_connection" {
-        return if message.get("connected").and_then(Value::as_bool) == Some(false) {
-            ControlledResumeOutcome::Failed
-        } else {
-            ControlledResumeOutcome::Ignored
-        };
+    if kind == "desktop_relay_connection"
+        && message.get("connected").and_then(Value::as_bool) == Some(false)
+    {
+        return ControlledResumeOutcome::Failed;
     }
     let advance = |step, now| manager.advance_owned_resume(&owner, step, now);
     if kind == "desktop_relay_connection"

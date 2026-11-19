@@ -235,7 +235,14 @@ const expectedProtocolHashes = {
   // Stream bubbles now carry htmlSource for native selection provenance.
   // This additive local state field is inside the hashed delta listener;
   // invoke payloads and event names are unchanged.
-  chat: '684b43170fd9f7a311b8f2e7d36270a3662324b5875abb77f7c4de2b2e21fa1d',
+  // Recomputed for the usage-meter occupancy fix: the chat:usage listener
+  // body gains the per-request context_input_tokens consumption ahead of the
+  // cumulative-input dirty guard (chat:usage fires once per turn at
+  // TurnComplete and any tool_start latches the guard until the next send —
+  // without the per-request field the meter froze at "—/…·0%" on every
+  // tool-using conversation). Same event surface — no new invoke or listen
+  // entries.
+  chat: 'a24529dea3d0dbd5b4abe08539abb6808c4e7197f448518aecec985f52e9083f',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -343,7 +350,10 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // T0-b 重算：helpers 新增 3 个 invoke 面（get_session_persona_events /
 // get_session_pinvou_reviews / resolveMemoryCandidate 的 invoke(command, args)
 // 参数化入口），合计 74 个签名。
-const expectedSharedBaseHash = 'f92d9e73a2ed12655bf7516b894c7d3283b5634cd1774e933320ed122d889013';
+// kb_model_cancel 回流：共享知识模型 helper 新增取消命令，合计 75 个签名。
+// 社区 #841 回流：评审快照串行链在 record 时捕获 owning sid，避免排队写漂到
+// 切换后的会话；并集后按当前共享桥接面重算协议指纹。
+const expectedSharedBaseHash = '704c9375f0cc90d0a94c64c186ccaff688d193c155df7d6f6596de50bf3a7d44';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),

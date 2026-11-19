@@ -18,15 +18,18 @@ func TestRequiredSupervisorCancellationStopsHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = reservation.Close() })
 	port := reservation.Addr().(*net.TCPAddr).Port
-	_ = reservation.Close()
 	t.Setenv("PORT", strconv.Itoa(port))
 	t.Setenv("APP_ENV", "test")
 	metricsReservation, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = metricsReservation.Close() })
 	metricsAddress := metricsReservation.Addr().String()
+	// Choose both ports before releasing either owned listener.
+	_ = reservation.Close()
 	_ = metricsReservation.Close()
 	t.Setenv("METRICS_ADDRESS", metricsAddress)
 	t.Setenv("SHUTDOWN_TIMEOUT", "1s")

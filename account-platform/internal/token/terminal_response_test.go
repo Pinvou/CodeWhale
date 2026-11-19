@@ -30,6 +30,11 @@ func (r *terminalResponseRepository) GetUsage(context.Context, uuid.UUID) (Usage
 	}
 	return current, nil
 }
+
+func (r *terminalResponseRepository) GetUsageStreamState(ctx context.Context, id uuid.UUID) (UsageStreamState, error) {
+	usage, err := r.GetUsage(ctx, id)
+	return UsageStreamState{Status: usage.Status, DeliveryStatus: usage.DeliveryStatus}, err
+}
 func (r *terminalResponseRepository) PreserveMissingReferenceLateUsage(context.Context, uuid.UUID, Usage) (bool, error) {
 	if r.afterAuthorization {
 		r.terminal = true

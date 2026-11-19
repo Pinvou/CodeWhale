@@ -69,6 +69,10 @@ func testGovernanceIndexPublicRollback(t *testing.T, ctx context.Context, connec
 	if err = connection.QueryRow(ctx, snapshot).Scan(&after); err != nil || before != after {
 		t.Fatal("denied rollback changed persistent usage facts", err)
 	}
+	var retainedVersions []int64
+	if err = connection.QueryRow(ctx, `SELECT array_agg(version ORDER BY version) FROM schema_migrations WHERE version<>900009`).Scan(&retainedVersions); err != nil || len(retainedVersions) == 0 {
+		t.Fatal("capture immutable historical predecessor versions", err)
+	}
 	var retained string
 	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900009`).Scan(&retained); err != nil {
 		t.Fatal(err)
@@ -110,10 +114,10 @@ func testGovernanceIndexPublicRollback(t *testing.T, ctx context.Context, connec
 	}
 	// Ledger installation timestamps legitimately change on re-install. Check
 	// original rows separately and verify every current published SQL identity.
-	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900009`).Scan(&current); err != nil || current != retained {
+	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version=ANY($1)`, retainedVersions).Scan(&current); err != nil || current != retained {
 		t.Fatal("reinstallation changed predecessor ledger", err)
 	}
-	if _, err = VerifyApplied(ctx, connection, loaded); err != nil {
+	if verified, err := VerifyApplied(ctx, connection, loaded); err != nil || verified.AppliedCount != len(loaded) {
 		t.Fatal("reinstalled public package failed identity verification", err)
 	}
 	t.Log("token_migrator session: gateway Down denied atomically; owner CLI Down and gateway CLI Up passed")

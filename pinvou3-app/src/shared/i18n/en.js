@@ -265,7 +265,7 @@ export const dictEn = {
         kbModelDownloadBtn: 'Download & deploy', kbModelFoot: 'Install once, then offline · keep using other features while it downloads',
         kbModelRetryBtn: 'Retry loading', kbModelRepairBtn: 'Download & repair', kbModelLoading: 'Loading model…',
         kbModelNotLoadedTitle: 'Model installed · not loaded yet', kbModelNotLoadedDesc: 'The embedding model is on this device but has not been loaded into memory yet (nothing needed semantic search yet; an interrupted install also stops here). Load it now, or just import files — loading starts automatically.', kbModelLoadNowBtn: 'Load now',
-        kbModelStageDownload: 'Downloading model files…', kbModelStageVerify: 'Verifying…', kbModelStagePrepare: 'Preparing model…', kbModelStageDone: 'Done',
+        kbModelStageDownload: 'Downloading model files…', kbModelStageVerify: 'Verifying…', kbModelStagePrepare: 'Preparing model…', kbModelStageDone: 'Done', kbModelCancelBtn: 'Cancel download', kbModelCancelling: 'Cancelling…', kbModelCancelled: 'Download cancelled',
         sysStatus: 'System Status', sysDesc: 'Real-time performance metrics', gpu: 'GPU', gpuUnavail: 'Unavailable', noSmi: 'nvidia-smi not found',
         cpu: 'CPU', cpuUnavail: 'CPU info unavailable', cpuTotal: 'Total Usage', cpuProcess: 'App Usage', cpuLogical: 'logical processors',
         vram: 'VRAM Usage', core: 'Core Usage', temp: 'Temp', power: 'Power', unifiedMem: 'Unified Memory',
@@ -877,7 +877,7 @@ export const dictEn = {
         // Pinvou review card. 品/悟 glyphs are brand marks, kept; surrounding text follows language.
         pvLoadingPin: 'Pinvou 品 · Review', pvLoadingWu: 'Pinvou 悟 · Explore',
         pvLoadingPinSub: 'Checking point by point, hunting for issues', pvLoadingWuSub: 'Comparing completeness dimensions, finding gaps',
-        pvLoadingHint: isLocal => isLocal ? 'Local model is thinking, usually 5–30s, hang tight…' : 'The model is thinking, usually a few seconds…',
+        pvLoadingHint: isLocal => isLocal ? 'Local model is thinking, usually 5–30s, hang tight…' : 'The model is thinking; reasoning models can take a few minutes, hang tight…',
         pvFail: 'Failed: ', pvSkipped: 'Skipped', pvPerspective: ' view', pvAlsoInvolves: 'also covers',
         pvVerdictPass: '✓ Passed, ready to ship', pvFramework: 'Completeness framework', pvDims: ' dims', pvSuggest: 'Suggest ', pvNeedsVerify: 'Needs check',
         pvActAdopt: 'Adopt', pvActAsk: 'Have AI ask me', pvActVerify: 'Have AI verify', pvActConfirmed: "It's fine",

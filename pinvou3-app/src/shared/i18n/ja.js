@@ -251,7 +251,7 @@ const jaBase = {
         kbModelDownloadBtn: 'ダウンロードしてセットアップ', kbModelFoot: '一度インストールすればオフラインで利用可 · ダウンロード中も他機能を利用可能',
         kbModelRetryBtn: '再読み込み', kbModelRepairBtn: '再ダウンロードして修復', kbModelLoading: 'モデルを読み込み中…',
         kbModelNotLoadedTitle: 'モデルはインストール済み · 未読み込み', kbModelNotLoadedDesc: 'Embedding モデルはこの端末にありますが、まだメモリに読み込まれていません（意味検索の需要がまだなかったため。インストール途中の中断でもこの状態で止まります）。今すぐ読み込むか、ファイルを取り込むと自動的に読み込まれます。', kbModelLoadNowBtn: '今すぐ読み込む',
-        kbModelStageDownload: 'モデルファイルをダウンロード中…', kbModelStageVerify: '検証中…', kbModelStagePrepare: 'モデルを準備中…', kbModelStageDone: '完了',
+        kbModelStageDownload: 'モデルファイルをダウンロード中…', kbModelStageVerify: '検証中…', kbModelStagePrepare: 'モデルを準備中…', kbModelStageDone: '完了', kbModelCancelBtn: 'ダウンロードをキャンセル', kbModelCancelling: 'キャンセル中…', kbModelCancelled: 'ダウンロードをキャンセルしました',
         kbEmbedUnsupported: 'このプラットフォームではローカル Embedding モデルは利用できません',
         kbEmbedWebTitle: 'ローカル Embedding モデルはデスクトップアプリでセットアップしてください', kbEmbedWebDesc: 'Web クライアントはローカルモデルをダウンロード・配置できません。ペアリングされたデスクトップアプリでインストールすると、ここでもセマンティック検索を利用できます。',
         kbStep1: 'ローカルファイル選択', kbStep2: 'AI 解析とインデックス', kbStep3: '会話で自動引用',
@@ -871,7 +871,7 @@ const jaBase = {
         // 品悟レビューカード。品/悟 の字はブランド表記として保持、周囲の文言は言語に追従。
         pvLoadingPin: 'Pinvou 品 · レビュー', pvLoadingWu: 'Pinvou 悟 · 発散補完',
         pvLoadingPinSub: '一つずつ照合し、問題を洗い出し中', pvLoadingWuSub: '完全性の観点を比較し、補強点を発散中',
-        pvLoadingHint: isLocal => isLocal ? 'ローカルモデルが推論中です。通常 5〜30 秒、お待ちください…' : 'モデルが推論中です。通常数秒〜十数秒、お待ちください…',
+        pvLoadingHint: isLocal => isLocal ? 'ローカルモデルが推論中です。通常 5〜30 秒、お待ちください…' : 'モデルが推論中です。思考型モデルは数分かかることもあります、お待ちください…',
         pvFail: '失敗：', pvSkipped: 'スキップ済み', pvPerspective: 'の視点', pvAlsoInvolves: '関連',
         pvVerdictPass: '✓ 合格・納品可能', pvFramework: '完全性フレームワーク', pvDims: '項目', pvSuggest: '提案 ', pvNeedsVerify: '要確認',
         pvActAdopt: '提案を採用', pvActAsk: 'AI に質問させる', pvActVerify: 'AI に確認させる', pvActConfirmed: '問題ないと確認',

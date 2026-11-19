@@ -266,7 +266,7 @@ export const dictZh = {
         kbModelDownloadBtn: '下载并部署资源包', kbModelFoot: '一次安装，后续离线可用 · 下载期间可继续使用其他功能',
         kbModelRetryBtn: '重试加载', kbModelRepairBtn: '重新下载并修复', kbModelLoading: '正在加载模型…',
         kbModelNotLoadedTitle: '模型已安装 · 尚未加载', kbModelNotLoadedDesc: 'Embedding 模型已在本机，但尚未加载进内存（暂时没有语义检索需求；安装中途被中断也会停在这个状态）。可立即加载，导入文件时也会自动加载。', kbModelLoadNowBtn: '立即加载',
-        kbModelStageDownload: '正在下载模型文件…', kbModelStageVerify: '正在校验完整性…', kbModelStagePrepare: '正在准备模型…', kbModelStageDone: '部署完成',
+        kbModelStageDownload: '正在下载模型文件…', kbModelStageVerify: '正在校验完整性…', kbModelStagePrepare: '正在准备模型…', kbModelStageDone: '部署完成', kbModelCancelBtn: '取消下载', kbModelCancelling: '取消中…', kbModelCancelled: '已取消下载',
         sysStatus: '系统状态', sysDesc: '实时性能与资源指标', gpu: '图形处理器 (GPU)', gpuUnavail: '状态不可用', noSmi: '未检测到 nvidia-smi',
         cpu: '处理器 (CPU)', cpuUnavail: 'CPU 信息不可用', cpuTotal: '总体使用率', cpuProcess: '应用占用', cpuLogical: '逻辑处理器',
         vram: '显存占用', core: '计算核心', temp: '温度', power: '功耗', unifiedMem: '统一内存架构',
@@ -903,7 +903,7 @@ export const dictZh = {
         // 品悟检阅卡(PinvouSummonCard/Rows/Loading)。品/悟 字形是品牌、保留;周边文案随语言。
         pvLoadingPin: 'Pinvou 品·查错检阅', pvLoadingWu: 'Pinvou 悟·发散补全',
         pvLoadingPinSub: '正在逐条核对、揪问题', pvLoadingWuSub: '正在比对完整性维度、发散补点',
-        pvLoadingHint: isLocal => isLocal ? '本地模型推理中，通常 5–30 秒，稍候～' : '模型推理中，通常几秒到十几秒，稍候～',
+        pvLoadingHint: isLocal => isLocal ? '本地模型推理中，通常 5–30 秒，稍候～' : '模型推理中，思考型模型可能要几分钟，稍候～',
         pvFail: '失败：', pvSkipped: '已跳过', pvPerspective: '视角', pvAlsoInvolves: '也涉及',
         pvVerdictPass: '✓ 通过，可交付', pvFramework: '完整性框架', pvDims: '维', pvSuggest: '建议 ', pvNeedsVerify: '需核实',
         pvActAdopt: '采纳建议', pvActAsk: '让 AI 问我', pvActVerify: '让 AI 核实', pvActConfirmed: '我确认没问题',

@@ -2,6 +2,8 @@ package billingschema
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"net/url"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/simulatorschema"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // This fixture requires exclusively absent deployment actors. It never alters
@@ -242,6 +245,48 @@ type stageFixture struct {
 	connections    []*pgx.Conn
 }
 
+// brokerAdmissionFacts comes from one read-only admission query. Callers must
+// reject a query error before using clean; a partial scan is not evidence.
+type brokerAdmissionFacts struct {
+	Roles, Databases, Clients, Relations, Functions int64
+}
+
+func (facts brokerAdmissionFacts) clean() bool {
+	return facts.Roles == 0 && facts.Databases == 0 && facts.Clients == 0 && facts.Relations == 0 && facts.Functions == 0
+}
+
+func readBrokerAdmission(ctx context.Context, admin *pgx.Conn) (brokerAdmissionFacts, error) {
+	var facts brokerAdmissionFacts
+	err := admin.QueryRow(ctx, `SELECT
+ (SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>'postgres'),
+ (SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres','template0','template1')),
+ (SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend'),
+ (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema'),
+ (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema')`).Scan(&facts.Roles, &facts.Databases, &facts.Clients, &facts.Relations, &facts.Functions)
+	return facts, err
+}
+
+func brokerAdmissionErrorDiagnostic(err error) string {
+	category, sqlstate := "other", "unavailable"
+	var postgresError *pgconn.PgError
+	switch {
+	case errors.Is(err, context.Canceled):
+		category = "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		category = "deadline"
+	case errors.As(err, &postgresError) && postgresError != nil:
+		category = "postgres"
+		// Only the bounded SQLSTATE is diagnostic data. Never include
+		// server error messages, query text, identifiers or credentials.
+		if len(postgresError.Code) == 5 && strings.IndexFunc(postgresError.Code, func(r rune) bool {
+			return !(r >= '0' && r <= '9' || r >= 'A' && r <= 'Z')
+		}) == -1 {
+			sqlstate = postgresError.Code
+		}
+	}
+	return fmt.Sprintf("broker fixture admission query failed: class=%s sqlstate=%s", category, sqlstate)
+}
+
 func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixture {
 	t.Helper()
 	if strings.TrimSpace(raw) == "" {
@@ -253,10 +298,14 @@ func newStageFixture(t *testing.T, ctx context.Context, raw string) *stageFixtur
 	}
 	// The broker CI service is pristine; a short fixed-actor list alone is not ownership.
 	if os.Getenv("PINVOU_ACCOUNT_CI_PG_DIRECTORY") == "/var/lib/postgresql/18/docker" {
-		var outside int
-		if err := admin.QueryRow(ctx, `SELECT (SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname<>'postgres') + (SELECT count(*) FROM pg_database WHERE datname NOT IN ('postgres','template0','template1')) + (SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend') + (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema') + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema')`).Scan(&outside); err != nil || outside != 0 {
+		facts, err := readBrokerAdmission(ctx, admin)
+		if err != nil {
 			admin.Close(ctx)
-			t.Fatal("outside actors/databases/clients prohibit broker fixture writes")
+			t.Fatal(brokerAdmissionErrorDiagnostic(err))
+		}
+		if !facts.clean() {
+			admin.Close(ctx)
+			t.Fatalf("outside actors/databases/clients prohibit broker fixture writes: roles=%d databases=%d clients=%d relations=%d functions=%d", facts.Roles, facts.Databases, facts.Clients, facts.Relations, facts.Functions)
 		}
 	}
 	config, err := pgx.ParseConfig(raw)

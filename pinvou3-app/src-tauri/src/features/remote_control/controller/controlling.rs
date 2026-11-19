@@ -42,6 +42,12 @@ pub(crate) struct ControllerOperation {
     registration: Option<ControllerRegistration>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ControllerDisconnectProjection {
+    intent: u64,
+    pub(crate) status: ControllingStatus,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum ControllerRegistration {
     Attempt(ControllerTransportOwner),
@@ -783,13 +789,22 @@ impl ControllingDeviceManager {
         Ok(terminal_status_with_retired_identity(&inner, retired))
     }
 
+    pub(crate) fn publish_disconnect_if_current(
+        &self,
+        projection: &ControllerDisconnectProjection,
+        publish: impl FnOnce(),
+    ) -> bool {
+        let inner = self.inner.lock();
+        if inner.intent != projection.intent || status_locked(&inner) != projection.status {
+            return false;
+        }
+        publish();
+        true
+    }
+
+    #[cfg(test)]
     pub(crate) fn disconnect(&self) -> ControllingStatus {
-        let mut inner = self.inner.lock();
-        let retired = inner.lease.as_ref().map(|lease| lease.context.clone());
-        clear_live_context(&mut inner);
-        inner.phase = ControllingStatusKind::Disconnected;
-        inner.error_code = None;
-        terminal_status_with_retired_identity(&inner, retired)
+        disconnect_locked(&mut self.inner.lock())
     }
 
     pub(crate) fn live_lease(&self) -> Result<LeaseContext> {
@@ -1026,29 +1041,9 @@ impl ControllingDeviceManager {
     }
 
     /// E2E-06：尽力发送显式断开帧（失败不影响本地断开，本地状态始终权威）。
+    #[cfg(test)]
     pub(crate) fn send_disconnect(&self, reason: &str) -> bool {
-        self.send_disconnect_with_receipt(reason).is_some()
-    }
-
-    pub(crate) fn send_disconnect_with_receipt(
-        &self,
-        reason: &str,
-    ) -> Option<tokio::sync::oneshot::Receiver<()>> {
-        let inner = self.inner.lock();
-        if inner.phase != ControllingStatusKind::Connected {
-            return None;
-        }
-        let Some(lease) = inner.lease.as_ref() else {
-            return None;
-        };
-        let request_id = format!("request-disconnect-{}", Uuid::new_v4().simple());
-        let Ok(frame) = build_controller_disconnect(&lease.context, &request_id, reason) else {
-            return None;
-        };
-        let Some(transport) = inner.transport.as_ref() else {
-            return None;
-        };
-        transport.send_control_with_receipt(&frame).ok()
+        send_disconnect_locked(&self.inner.lock(), reason).is_some()
     }
 
     pub(crate) fn status(&self) -> ControllingStatus {
@@ -1063,6 +1058,30 @@ impl ControllingDeviceManager {
             .as_ref()
             .map(|gate| gate.phase())
     }
+}
+
+#[cfg(test)]
+fn disconnect_locked(inner: &mut Inner) -> ControllingStatus {
+    let retired = inner.lease.as_ref().map(|lease| lease.context.clone());
+    clear_live_context(inner);
+    inner.phase = ControllingStatusKind::Disconnected;
+    inner.error_code = None;
+    terminal_status_with_retired_identity(inner, retired)
+}
+
+#[cfg(test)]
+fn send_disconnect_locked(
+    inner: &Inner,
+    reason: &str,
+) -> Option<tokio::sync::oneshot::Receiver<()>> {
+    if inner.phase != ControllingStatusKind::Connected {
+        return None;
+    }
+    let lease = inner.lease.as_ref()?;
+    let transport = inner.transport.as_ref()?;
+    let request_id = format!("request-disconnect-{}", Uuid::new_v4().simple());
+    let frame = build_controller_disconnect(&lease.context, &request_id, reason).ok()?;
+    transport.send_control_with_receipt(&frame).ok()
 }
 
 impl Drop for ControllingDeviceManager {
@@ -2673,6 +2692,79 @@ mod tests {
     }
 
     /// E2E-02：在途 worker 只能在自己的尝试仍然待决时收尾为 error。
+    #[test]
+    fn disconnect_completion_keeps_the_successor_and_returns_only_the_old_scope() {
+        let manager = ControllingDeviceManager::default();
+        let sessions = super::super::controlling_session::ControllingSessionManager::default();
+        let business = super::super::encrypted_lane::ControllingLaneState::default();
+        let old = manager.connect("2345678").unwrap();
+        manager.complete_reserved(old.clone()).unwrap();
+        manager.complete_connected(old.clone(), lease()).unwrap();
+        let (transport, _receiver) = super::super::relay_transport::transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0001",
+            2,
+            2,
+            8192,
+            1024,
+        );
+        transport
+            .install_authenticated_lease(super::super::relay_transport::AuthenticatedLease {
+                context: lease().context,
+                negotiated_capabilities: lease().negotiated_capabilities,
+            })
+            .unwrap();
+        manager.replace_transport(transport.clone());
+        let disconnect = manager.disconnect_business(&sessions, &business, |retired| {
+            assert_eq!(retired, Some(&lease().context));
+        });
+        let projection = disconnect.projection();
+        let duplicate = manager.disconnect_business(&sessions, &business, |_| {});
+        let duplicate_projection = duplicate.projection();
+        assert_eq!(manager.status().status, ControllingStatusKind::Disconnected);
+        assert!(!transport.is_stopped());
+        let next = manager.connect("3456789").unwrap();
+        assert_eq!(manager.status().status, ControllingStatusKind::Connecting);
+        assert!(!manager.publish_disconnect_if_current(&projection, || panic!("old projection")));
+        assert_eq!(manager.current_operation(), Some(next.clone()));
+
+        manager.complete_reserved(next.clone()).unwrap();
+        let mut replacement = lease();
+        replacement.context.connection_id = "connection-successor".to_owned();
+        manager.complete_connected(next, replacement).unwrap();
+        drop(disconnect);
+        drop(duplicate);
+        assert!(transport.is_stopped());
+        assert_eq!(manager.status().status, ControllingStatusKind::Connected);
+        for old in [projection, duplicate_projection] {
+            assert!(!manager.publish_disconnect_if_current(&old, || panic!("old projection")));
+        }
+        assert_eq!(
+            manager.live_lease().unwrap().connection_id,
+            "connection-successor"
+        );
+    }
+
+    #[test]
+    fn disconnect_without_receipt_is_locally_authoritative_and_idempotent() {
+        let manager = ControllingDeviceManager::default();
+        let sessions = super::super::controlling_session::ControllingSessionManager::default();
+        let business = super::super::encrypted_lane::ControllingLaneState::default();
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager.complete_connected(operation, lease()).unwrap();
+        let first = manager.disconnect_business(&sessions, &business, |retired| {
+            assert_eq!(retired, Some(&lease().context));
+        });
+        let status = manager.status();
+        assert_eq!(status.status, ControllingStatusKind::Disconnected);
+        assert!(manager.publish_disconnect_if_current(&first.projection(), || {}));
+        let second = manager.disconnect_business(&sessions, &business, |_| {});
+        drop(first);
+        drop(second);
+        assert_eq!(manager.status(), status);
+    }
+
     #[test]
     fn pending_attempt_is_the_only_owner_of_failure_projection() {
         let manager = ControllingDeviceManager::default();

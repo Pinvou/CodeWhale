@@ -66,3 +66,15 @@ manager、密码通道和生产事件适配器，投递与时钟受控；B 使�
 
 Windows linked exe 的独立非零筛选及 Linux 全 lib 门禁须实际运行；本地 GNU
 验证不能替代正式 MSVC/Linux 和 Merge Queue。发布仍受 #1428 独立安全前置约束。
+
+本修复采用严格的逻辑 owner 口径：候选已进入恢复后，匹配归属的下一次可信本地
+断线即终止。重连中 prepare 尚未被接受的写入失败、或回退 Legacy socket 后的
+关闭也包括在内；这两类失败不再在同一候选内继续尝试第三个 socket，需重新发起
+连接。此处 Legacy 指恢复连接尝试的 socket 模式，不改变 Legacy Web v2 线协议。
+健康的 controller socket connected:true 仍按原 request/challenge 和冻结截止重发
+prepare，重复通知不能增加发送次数或续期。A 端自动重连快速失败产生的匹配本地
+Disconnected 同样立即收口；A 端连接超时本身不产生该事件，仍受原冻结预算约束。
+B 端连接尝试失败（包括超时）产生当前 reader 的可信 false 时，按严格策略终止。
+实际业务密钥退休的声明仅限本次匹配归属的再次断线终态路径，不代表所有既有
+watchdog 或其它终态路径都由本次重构。真实回归分别验证两类失败的即时 Error、
+密钥和出站退休、一次清理，以及新意图能重新登记并使用实际通道。

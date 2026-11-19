@@ -63,12 +63,45 @@ pub(super) async fn end_current_candidate(
         "fixture must distinguish immediate loss from watchdog expiry"
     );
     wire_notice_is_not_local_authority(manager, &owned.relay, &mut socket, completion).await;
-    let observer = std::sync::Arc::new(CleanupObserver::default());
-    manager.register_cleanup_sink(observer.clone());
-    let generation = manager.current_operation().unwrap().generation().to_owned();
+    let observation = observe_terminal_loss(manager);
     // Only the real socket close produces the authority-bearing local notice.
     socket.close(None).await.unwrap();
     drop(socket);
+    assert_terminal_loss(manager, lane, outbound, owned, &observation).await;
+    // Keep the existing three-stage test's next-intent assertion unchanged.
+    let next = manager.start(None, Vec::new()).unwrap();
+    let next_channel = owned
+        .relay
+        .start_controller_relay(next.generation())
+        .await
+        .unwrap();
+    drop(next_channel);
+    manager.stop();
+}
+
+// Register before accepting the fault-producing socket, not after its local
+// false can have committed cleanup. Keep this strong reference through join.
+pub(super) struct TerminalLossObservation {
+    observer: std::sync::Arc<CleanupObserver>,
+    generation: String,
+}
+
+pub(super) fn observe_terminal_loss(manager: &ControlledDeviceManager) -> TerminalLossObservation {
+    let observer = std::sync::Arc::new(CleanupObserver::default());
+    manager.register_cleanup_sink(observer.clone());
+    TerminalLossObservation {
+        observer,
+        generation: manager.current_operation().unwrap().generation().to_owned(),
+    }
+}
+
+pub(super) async fn assert_terminal_loss(
+    manager: &ControlledDeviceManager,
+    lane: &ControlledLaneState,
+    outbound: &ControlledOutboundState,
+    owned: &mut OwnedLane,
+    observation: &TerminalLossObservation,
+) {
     let mut worker = owned.worker.take().unwrap();
     let completed = tokio::time::timeout(Duration::from_secs(3), &mut worker).await;
     if completed.is_err() {
@@ -92,13 +125,13 @@ pub(super) async fn end_current_candidate(
         "terminal loss retained the actual session cipher"
     );
     assert!(outbound.sender().is_none());
-    let calls = observer.0.lock().unwrap().clone();
+    let calls = observation.observer.0.lock().unwrap().clone();
     assert_eq!(
         calls.len(),
         1,
         "terminal loss cleaned the candidate more than once"
     );
-    assert_eq!(calls[0].0, generation);
+    assert_eq!(calls[0].0, observation.generation);
     let scope = calls[0].1;
     assert!(
         scope.session_keys
@@ -107,14 +140,4 @@ pub(super) async fn end_current_candidate(
             && scope.temporary_models
             && scope.workspace_grants
     );
-    // The real production adapter retired the lane; a fresh attempt must not
-    // remain busy. No test callback clears it or fabricates the terminal state.
-    let next = manager.start(None, Vec::new()).unwrap();
-    let next_channel = owned
-        .relay
-        .start_controller_relay(next.generation())
-        .await
-        .unwrap();
-    drop(next_channel);
-    manager.stop();
 }
