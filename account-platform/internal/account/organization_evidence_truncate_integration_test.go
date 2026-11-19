@@ -176,15 +176,27 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 					}
 				}
 				loaded = guardRelease
-				connection, err := pgx.ConnectConfig(ctx, r.pool.Config().ConnConfig.Copy())
+				configuration := r.pool.Config().ConnConfig.Copy()
+				configuration.User, configuration.Password = "account_migrator", ""
+				connection, err := pgx.ConnectConfig(ctx, configuration)
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer connection.Close(context.Background())
 				defer migrations.Unlock(context.Background(), connection)
+				if _, err := connection.Exec(ctx, "SET ROLE account_service"); err != nil {
+					t.Fatal(err)
+				}
+				var actor, session string
+				var super bool
+				if err := connection.QueryRow(ctx, `SELECT current_user,session_user,(SELECT rolsuper FROM pg_roles WHERE rolname=current_user)`).Scan(&actor, &session, &super); err != nil || actor != "account_service" || session != "account_migrator" || super {
+					t.Fatal("public Down requires the genuine non-superuser migration identity", err)
+				}
+				assertHistoricalForwardOnlyMigration(t, r, loaded, 900015, "organization evidence truncate protection is forward-only")
+				wanted := "organization evidence truncate protection is forward-only"
 				err = accountschema.DownOne(ctx, connection, loaded)
 				var databaseError *pgconn.PgError
-				if !errors.As(err, &databaseError) || databaseError.Code != "55000" || !strings.Contains(err.Error(), "truncate protection is forward-only") {
+				if !errors.As(err, &databaseError) || databaseError.Code != "55000" || databaseError.Message != wanted {
 					t.Fatal("public Down removed the statement protection", err)
 				}
 				migrations.Unlock(ctx, connection)

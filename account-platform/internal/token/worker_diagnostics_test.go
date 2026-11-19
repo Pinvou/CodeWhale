@@ -126,9 +126,10 @@ func TestEmergencyCancellationWorkerDiagnosticsPostgres(t *testing.T) {
 	config := f.r.pool.Config()
 	config.ConnConfig.Tracer = &cancellationFaultTracer{stages: []string{
 		"INSERT INTO model_emergency_cancellations(",
+		"WITH expired AS (",
 		"WITH candidates AS (",
 		"SELECT usage_request_id FROM model_emergency_cancellations",
-		"UPDATE model_emergency_cancellations SET status='PENDING'",
+		"WITH changed AS (\n    UPDATE model_emergency_cancellations SET status=CASE WHEN retry_attempts",
 	}}
 	pool, err := pgxpool.NewWithConfig(f.ctx, config)
 	if err != nil {
@@ -140,7 +141,7 @@ func TestEmergencyCancellationWorkerDiagnosticsPostgres(t *testing.T) {
 	records := captureWorkerDiagnostics(t)
 	worker := NewEmergencyModelCancellationWorker(&repository, f.service, 20*time.Millisecond)
 	stop := runDiagnosticWorker(t, f.ctx, worker.Run)
-	for _, stage := range []string{"sync_targets", "claim_targets", "request_cancellation", "persist_retry"} {
+	for _, stage := range []string{"sync_targets", "review_expired_claims", "claim_targets", "request_cancellation", "persist_retry"} {
 		records.expect(t, "model_emergency_cancellation_failed", stage, "WORKER_CANCELED")
 	}
 	var status string
@@ -148,7 +149,7 @@ func TestEmergencyCancellationWorkerDiagnosticsPostgres(t *testing.T) {
 	if err = f.r.pool.QueryRow(f.ctx, `SELECT status,attempts FROM model_emergency_cancellations WHERE id=$1`, target).Scan(&status, &attempts); err != nil || status != "LEASED" || attempts != 1 {
 		t.Fatalf("failed retry changed lease ownership: %s %d %v", status, attempts, err)
 	}
-	if _, err := f.r.pool.Exec(f.ctx, `UPDATE model_emergency_cancellations SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1`, target); err != nil {
+	if _, err := f.r.pool.Exec(f.ctx, `UPDATE model_emergency_cancellations SET lease_until=statement_timestamp()-interval '1 second',next_attempt_at=statement_timestamp()-interval '1 second' WHERE id=$1`, target); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)

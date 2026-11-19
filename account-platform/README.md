@@ -50,6 +50,8 @@ Billing 的本地与部署初始化、升级角色前置见 [数据库运行说�
 
 迁移包的身份校验、已知旧快照的实际拒绝条件和核验限制见[迁移准入与快照识别](docs/migration-snapshot-admission.md)。该说明不替代历史库升级实证，也不撤销已有兼容承诺。
 
+Portal 的跨实例速率、未过期票据容量、首次旧数据盘点与失败恢复见 [Portal 共享准入手册](docs/portal-shared-admission.md)。默认阈值按全站总量计算，所有副本应保持一致。
+
 Breakglass 结束后的专用临时凭据、在线/离线会话、桌面及 Portal 收尾见 [应急访问回收手册](deploy/runbooks/breakglass-retirement.md)。Account 角色到期不代替凭据回收，不自动停用既有正常 Keycloak 用户。
 
 ## 密码预检的同一 grant 等待

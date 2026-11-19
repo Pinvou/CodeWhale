@@ -123,7 +123,7 @@ test('production Account main consumes its complete registry at main scope', asy
   const wallet = walletLines[0];
   assert.equal(text.split(startup).length, 2);
   assert.equal(text.split(merge).length, 2);
-  assert.equal(authorizationTasks(source, text).length, 8);
+  assert.equal(authorizationTasks(source, text).length, 9);
   for (const replacement of [
     text.replace(startup, 'workersDone := make(chan struct{})'),
     text.replace(startup, 'workersDone := startAccountBackground(ctx, []accountBackgroundTask{})'),
@@ -154,7 +154,7 @@ test('Account approval worker producer binding cannot be shadowed or aliased', a
 test('supervised Account catalog identities remain exact and required', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
   for (const [file, names] of [
-    ['main.go', ['mobile-retention', 'audit-export', 'wallet-provisioning', 'role-binding-expiry', 'account-closure', 'profile-change', 'registration-recovery', 'commerce-customer-sync']],
+    ['main.go', ['mobile-retention', 'audit-export', 'wallet-provisioning', 'role-binding-expiry', 'payment-credit-recovery', 'account-closure', 'profile-change', 'registration-recovery', 'commerce-customer-sync']],
     ['approval_runtime.go', ['approval-expiry', 'approval-pagination-cleanup', 'approval-delivery-terminal-recovery', 'manual-review-sla']],
   ]) {
     const source = `account-platform/cmd/account-service/${file}`;
@@ -209,7 +209,10 @@ test('authorization release gate classifies every HTTP task event callback and C
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
   // Preserve the independently declared entrypoints of both parents.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 421, tasks: 33, events: 18, cli: 28 });
+  // The existing complete graph includes the reconciliation repair-context GET.
+  // It also includes the two profile-revocation receipt claim/confirm routes.
+  // Also retain main's approval delivery terminal recovery worker.
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 425, tasks: 35, events: 18, cli: 28 });
 });
 
 test('existing grant inventory CLI retains its bounded read-only Account identity', async () => {

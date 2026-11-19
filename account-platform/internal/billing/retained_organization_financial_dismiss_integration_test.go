@@ -32,7 +32,7 @@ func retainedOrganizationFinanceOrder(t *testing.T, r *PostgresRepository, ctx c
 	}
 	id := uuid.NewString()
 	provider := &retainedFinancialProvider{result: ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Status: "SUCCESS", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, ChannelTransactionID: &id, PaidAt: &now, ExternalCustomerKey: owner.String()}}
-	c, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	c, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

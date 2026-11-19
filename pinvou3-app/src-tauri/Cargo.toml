@@ -180,6 +180,9 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 md5 = "0.7"
 flate2 = "1"
 tar = "0.4"
+# 会话归档导入（import_session_archive）的 xz 解码；与底座 session_export
+# 的编码端同用 liblzma static（版本对齐，复用同一锁定版本）。
+liblzma = { version = "0.4", features = ["static"] }
 
 # Session store 用：阻塞式 RwLock（sync 不需要 .await 拿读写锁）
 parking_lot = "0.12"
@@ -374,7 +377,26 @@ uiautomation = "0.25"
 # which uiautomation's plain `TreeScope` enum cannot express: the flag is set
 # on the underlying `IUIAutomationCacheRequest`, and that interface has to be
 # the type from this exact `windows` version.
-windows = { version = "0.62", features = ["Win32_UI_Accessibility"] }
+# The Win32_* features beyond Accessibility serve the computer-use virtual
+# display (features/computer_use/platform/windows_virtual): hidden-desktop
+# creation (StationsAndDesktops; the API is Security-gated upstream, so
+# Win32_Security is declared here explicitly instead of riding another
+# crate's feature unification), the hidden-desktop composite capture
+# (Graphics_Gdi), the kill-on-close job object wrapping launched apps
+# (JobObjects + Threading + Security), the message-level input posts
+# (UI_Input_KeyboardAndMouse + UI_WindowsAndMessaging), and the cloaked-
+# window filter for the composite (Graphics_Dwm).
+windows = { version = "0.62", features = [
+    "Win32_UI_Accessibility",
+    "Win32_System_StationsAndDesktops",
+    "Win32_Security",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_System_JobObjects",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }
 
 # Process liveness probe using kill(pid, 0) semantics; see process_alive in
 # platform/os/posix.rs. Browser watch uses it to guard stale port-file
@@ -432,6 +454,17 @@ zbus = { version = "5.5", default-features = false, features = ["async-io"] }
 # dedicated WebKit context with automation enabled. Keep this exact version
 # aligned with Tauri's resolved runtime so the unstable runtime API cannot drift.
 tauri-runtime-wry = "=2.12.3"
+# Computer Use virtual display (features/computer_use/platform/linux_virtual):
+# pure-Rust X11 connection for Xvfb readiness polling and full-screen GetImage
+# capture. default-features = false keeps the pure-Rust RustConnection path —
+# libxcb is NOT needed and the dl-libxcb/allow-unsafe-code features must stay
+# off (a hidden Xvfb with no libxcb dependency is the point of this backend).
+# Already in the lock (global-hotkey pulls it), so this adds no new crate.
+# NOTE: x11rb 0.13 has no connect_to_display_with_auth helper; the explicit
+# cookie path is parse_display → DefaultStream::connect →
+# RustConnection::connect_to_stream_with_auth_info (see the linux_virtual
+# module docs for the verified recipe).
+x11rb = { version = "0.13", default-features = false }
 
 # =============================================================================
 # Lint gates — hard-gate design: deny only lints with a measured zero
@@ -647,3 +680,10 @@ overflow-checks = true
 # 依赖在 dev 下也做轻量优化(否则全 debug 编译,运行太慢影响本地调试体验)。
 [profile.dev.package."*"]
 opt-level = 2
+
+# 与根工作区相同的 CJK 感知 unicode-width 补丁(#4479):本应用通过 path 依赖
+# 编译 CodeWhale 的 codewhale-tui,原版 width() 对等宽歧义字符按 1 列测量,
+# CJK 终端下造成单元格错位。补丁取自子模块内的同一份拷贝,保证嵌入式 TUI
+# 与依赖它的各工作区行为一致。
+[patch.crates-io]
+unicode-width = { path = "../../CodeWhale/patches/unicode-width-0.2.2" }
