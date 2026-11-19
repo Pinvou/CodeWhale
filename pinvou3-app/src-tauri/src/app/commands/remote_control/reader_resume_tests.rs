@@ -1,4 +1,7 @@
 //! Process-private Windows host driver for the feature's real reader regression.
+#[path = "controlled_admission_tests.rs"]
+mod controlled_admission_tests;
+
 use std::io::Read;
 use std::time::{Duration, Instant};
 use tauri::Manager as _;
@@ -52,6 +55,45 @@ fn real_controller_start_lifecycle_fences() {
             "zero-match child is not evidence"
         );
         println!("controller-start {case}: isolated real host passed");
+    }
+}
+
+#[test]
+fn real_controlled_operation_admission_fences() {
+    const CASE: &str = "PINVOU_CONTROLLED_ADMISSION_CASE";
+    if let Ok(case) = std::env::var(CASE) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(controlled_admission_tests::run(&case));
+        return;
+    }
+    let module = module_path!().split_once("::").unwrap().1;
+    let filter = format!("{module}::real_controlled_operation_admission_fences");
+    for case in [
+        "stop-first",
+        "refresh-first",
+        "admission-first",
+        "setup-error",
+    ] {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &filter, "--nocapture"])
+            .env(CASE, case)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let (status, output, errors) = collect_reader_child(child, Duration::from_secs(30));
+        assert!(
+            status.success(),
+            "Controlled admission {case} failed: {output}\n{errors}"
+        );
+        assert!(
+            output.contains("test result: ok. 1 passed;"),
+            "zero-match child is not evidence"
+        );
+        println!("Controlled admission {case}: isolated real host passed");
     }
 }
 

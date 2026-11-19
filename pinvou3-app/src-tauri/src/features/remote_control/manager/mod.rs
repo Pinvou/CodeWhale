@@ -1,5 +1,8 @@
 #[cfg(test)]
 mod controller_start_tests;
+
+#[cfg(test)]
+mod controlled_start_tests;
 mod persistence;
 mod rpc;
 mod startup;
@@ -1420,6 +1423,16 @@ impl RemoteControlManager {
     /// Relay's interaction slot, not a second socket, enforces client mutual
     /// exclusion. A controller generation owns exactly one inbound channel.
     pub async fn start_controller_relay(
+        &self,
+        generation: &str,
+    ) -> Result<ControllerRelayChannel, String> {
+        self.start_controller_relay_sync(generation)
+    }
+
+    /// Synchronous installation lets the real ControlledOperation owner keep
+    /// its admission guard through every startup side effect. Registration and
+    /// subsequent protocol work run only after that owner releases the guard.
+    pub(crate) fn start_controller_relay_sync(
         &self,
         generation: &str,
     ) -> Result<ControllerRelayChannel, String> {
