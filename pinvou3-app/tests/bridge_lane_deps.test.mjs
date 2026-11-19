@@ -201,7 +201,7 @@ const EXPECTED_SURFACE = {
   // consuming cluster (tauriKnowledgeModel) already passes it, so only the
   // count moves. raisePinvouSummonHighwater (community #841 summon-seq
   // alignment) joins the same shared base, so the union count is one higher.
-  sharedFnCount: 318,
+  sharedFnCount: 319,
 };
 
 assert.equal(

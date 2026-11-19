@@ -760,6 +760,7 @@ command_protocol!(
         "get_image_input_capability",
         "test_search_provider",
         "test_model_connection",
+        "probe_endpoint_models",
         "test_image_input_capability",
         "update_settings",
         "update_search_settings",
