@@ -19,9 +19,14 @@ for key in ("financial_token", *(f"financial_billing_{index}" for index in range
     original = SERVICES["financial"]
     SERVICES[key] = (key.replace("_", "-") + "-postgres", *original[1:])
 CLOSURE_SERVICES = {'financial': SERVICES['financial']}
+OWNER_SERVICES = {**CLOSURE_SERVICES,
+                  **{key: (name, *SERVICES['financial'][1:]) for key, name in (
+                      ('owner_account', 'financial-owner-account-postgres'),
+                      ('owner_wallet', 'financial-owner-wallet-postgres'))}}
 CORE_SERVICES = {key: SERVICES[key] for key in ('audit', 'broker')}
 SERVICE_PROFILES = {'full': SERVICES, 'closure': CLOSURE_SERVICES,
-                    'core': CORE_SERVICES, 'financial': CLOSURE_SERVICES}
+                    'core': CORE_SERVICES, 'financial': CLOSURE_SERVICES,
+                    'owners': OWNER_SERVICES}
 
 IDENTITY_SQL = "SELECT system_identifier::text,current_setting('data_directory'),current_setting('port'),session_user,current_user,current_database(),(SELECT rolsuper FROM pg_roles WHERE rolname=session_user),current_setting('server_version_num') FROM pg_control_system()"
 
@@ -164,6 +169,7 @@ def main(*, services=None):
     ids, ports, volumes, systems = set(), set(), set(), set()
     outputs = []
     financial = {}
+    owners = {}
     for key, (name, image, directory, major) in services.items():
         meta = metadata[name]
         identifier = meta.get('id', '')
@@ -173,6 +179,11 @@ def main(*, services=None):
         if len(items) != 1:
             raise ValueError('ambiguous Docker service')
         port, volume = inspect_service(meta, items[0], image)
+        if services == OWNER_SERVICES:
+            limits = items[0]['HostConfig']
+            if (limits.get('NanoCpus') != (2 if key == 'financial' else 1) * 10**9
+                    or limits.get('Memory') != 1024**3 or limits.get('MemorySwap') != 1024**3):
+                raise ValueError('owners PostgreSQL resource bounds mismatch')
         url = f'postgres://postgres@127.0.0.1:{port}/postgres?sslmode=disable'
         direct = run(['docker', 'exec', identifier, 'psql', '-U', 'postgres', '-d', 'postgres', '-XAt', '-v', 'ON_ERROR_STOP=1', '-c', IDENTITY_SQL])
         endpoint = run(['psql', url, '-XAt', '-v', 'ON_ERROR_STOP=1', '-c', IDENTITY_SQL])
@@ -184,10 +195,14 @@ def main(*, services=None):
         if key in FINANCIAL_GROUPS.values():
             group = next(group for group, service in FINANCIAL_GROUPS.items() if service == key)
             financial[group] = dict(url=url, port=port, system=system, directory=directory)
+        if services == OWNER_SERVICES:
+            lane = {'financial': 'schema', 'owner_account': 'account', 'owner_wallet': 'wallet'}[key]
+            owners[lane] = dict(url=url, port=port, system=system, directory=directory, id=identifier)
         print(f'Account CI {key}: exact service ID, loopback port, anonymous volume and PostgreSQL identity verified')
     with Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8') as output:
         output.write('\n'.join(outputs) + '\n')
         output.write('financial_services=' + json.dumps(financial, separators=(',', ':')) + '\n')
+        output.write('owners_services=' + json.dumps(owners, separators=(',', ':')) + '\n')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)

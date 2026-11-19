@@ -98,6 +98,11 @@ func (r *chatBudgetRepository) LoadDispatchPreparation(context.Context, uuid.UUI
 func (r *chatBudgetRepository) GetUsage(context.Context, uuid.UUID) (UsageRequest, error) {
 	return r.usage, nil
 }
+
+func (r *chatBudgetRepository) GetUsageStreamState(ctx context.Context, id uuid.UUID) (UsageStreamState, error) {
+	usage, err := r.GetUsage(ctx, id)
+	return UsageStreamState{Status: usage.Status, DeliveryStatus: usage.DeliveryStatus}, err
+}
 func (r *chatBudgetRepository) MarkCommitted(_ context.Context, _ uuid.UUID, actual int64, snapshot map[string]any) error {
 	r.committed, r.commitSnapshot = true, snapshot
 	r.usage.ActualMicrocredits = &actual

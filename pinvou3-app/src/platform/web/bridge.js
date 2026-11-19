@@ -317,6 +317,8 @@ function pinvouSharedweb() {
     depsChecking: false,
     depsInstalling: false,    // 一键安装进行中(pkexec apt)
     depsInstallError: null,   // 安装失败原因(apt stderr 透传/取消/pkexec 不可用)
+    // Same-shape desktop-slice stub: install progress events occur only during a desktop one-click install; always null on the web.
+    depsInstallProgress: null,
     voiceInput: {
       status: "idle",         // idle | requesting_permission | recording | transcribing | completed | cancelled | failed
       message: "",
@@ -475,6 +477,7 @@ function pinvouSharedweb() {
       deviceUploadDigestInvalid: "the attachment integrity digest was invalid. Try again.",
       deviceUploadIntegrityMismatch: "the attachment content was corrupted in transit. Upload it again.",
       turnAlreadyInProgress: "⚠️ This chat is already processing a turn. The duplicate send was not executed.",
+      webSessionUnavailable: "This session is no longer available on the desktop. Reopen it from the session list.",
       compactStart: "⏳ Compacting context", compactDone: "✓ Context compacted", compactFail: "⚠️ Compaction failed", compactCancel: "Context compaction canceled", compactAuto: " (auto)",
       compactPruneMerged: "Auto-compaction: tool-result cleanup, messages unchanged",
       compactInactive: "The session engine is not running yet. Send a message before compacting the context",
@@ -514,6 +517,7 @@ function pinvouSharedweb() {
       unknownReason: "unknown reason",
       materialsAdded: (count, names) => "✅ Added " + count + " materials to run materials: " + names.join(", "),
       pickFolderTitle: "Choose a working directory",
+      fileMediaFilterName: "Images and videos",
       kbPickFolderTitle: "Choose a folder to import into the knowledge base",
       rebindPickFolderTitle: "Choose the folder to rebind this project to",
       gateApproveFailed: "⚠️ Approval failed: ",
@@ -550,6 +554,7 @@ function pinvouSharedweb() {
       attachIncomplete: "The attachment download is incomplete. Please try again",
       attachNoData: "Attachment download returned no data",
       attachNoProgress: "Attachment download made no progress",
+      artifactNoData: "Artifact download returned no data",
       artifactNoProgress: "Artifact download made no progress",
       newChatFallbackTitle: "New chat",
       echoOtherPrefix: "(Other) ",
@@ -579,6 +584,18 @@ function pinvouSharedweb() {
       voiceNeedSession: "Select or start a session before using voice input.",
       voiceAudioStartBlocked: "The browser did not allow audio capture to start. Click the microphone again.",
       voiceRecording: "Recording… press again to stop",
+      webChatFailed: "The desktop could not admit this turn. Reopen the conversation and try again.",
+      webSessionCreateFailed: "The desktop could not create this chat. Reopen the conversation list and try again.",
+      editStaleRevision: "This conversation changed on the desktop since it was loaded. Reopen the conversation, then edit again.",
+      editRevisionUnavailable: "The conversation state could not be verified for this edit. Reopen the conversation and try again.",
+      artifactTooLarge: "This artifact is too large to preview over remote control. Download it instead.",
+      artifactPreviewTooLarge: "The rendered preview exceeds the remote-control response limit. Download the artifact instead.",
+      artifactEditTooLarge: "This markdown is too large to edit over remote control. Download it instead.",
+      artifactReadFailed: "The artifact could not be read on the desktop.",
+      attachReadFailed: "This attachment could not be read on the desktop.",
+      betaVersionSuffix: " (Beta)",
+      voiceEditNoChange: "Voice edit made no changes; original text kept",
+      voiceEditPostprocessFailed: "Voice edit processing failed; your input was not changed. Please try again.",
     },
     ja: {
       newChatFailed: "⚠️ 新規チャットの作成に失敗: ", loadChatFailed: "⚠️ チャットの読み込みに失敗: ", deleteFailed: "⚠️ 削除に失敗: ",
@@ -607,6 +624,7 @@ function pinvouSharedweb() {
       deviceUploadDigestInvalid: "添付ファイルの整合性ダイジェストが無効です。もう一度お試しください。",
       deviceUploadIntegrityMismatch: "添付ファイルの内容が転送中に破損しました。再度アップロードしてください。",
       turnAlreadyInProgress: "⚠️ このチャットでは別のターンを処理中です。重複した送信は実行されませんでした。",
+      webSessionUnavailable: "このセッションはデスクトップ側で利用できなくなりました。セッション一覧から開き直してください。",
       compactStart: "⏳ コンテキストを圧縮中", compactDone: "✓ コンテキスト圧縮完了", compactFail: "⚠️ 圧縮に失敗", compactCancel: "コンテキストの圧縮をキャンセルしました", compactAuto: "（自動）",
       compactPruneMerged: "自動圧縮: ツール結果を整理、メッセージ数は不変",
       compactInactive: "セッション Engine はまだ起動していません。メッセージを送信してからコンテキストを圧縮してください",
@@ -646,6 +664,7 @@ function pinvouSharedweb() {
       unknownReason: "不明な原因",
       materialsAdded: (count, names) => "✅ 素材を " + count + " 件、配套材料に追加しました：" + names.join("、"),
       pickFolderTitle: "作業ディレクトリを選択",
+      fileMediaFilterName: "画像と動画",
       kbPickFolderTitle: "知識ベースにインポートするフォルダーを選択",
       rebindPickFolderTitle: "このプロジェクトの再バインド先フォルダーを選択",
       gateApproveFailed: "⚠️ 承認に失敗: ",
@@ -682,6 +701,7 @@ function pinvouSharedweb() {
       attachIncomplete: "添付ファイルのダウンロードが不完全です。もう一度お試しください",
       attachNoData: "添付ファイルのダウンロードがデータを返しませんでした",
       attachNoProgress: "添付ファイルのダウンロードが進みませんでした",
+      artifactNoData: "成果物のダウンロードがデータを返しませんでした",
       artifactNoProgress: "成果物のダウンロードが進みませんでした",
       newChatFallbackTitle: "新しいチャット",
       echoOtherPrefix: "(その他) ",
@@ -711,6 +731,18 @@ function pinvouSharedweb() {
       voiceNeedSession: "音声入力を使う前に、セッションを選択または新規作成してください。",
       voiceAudioStartBlocked: "ブラウザーが音声キャプチャの開始を許可しませんでした。マイクをもう一度クリックしてください。",
       voiceRecording: "録音中です。もう一度押すと終了します",
+      webChatFailed: "デスクトップがこのターンを受理できませんでした。会話を開き直してから再試行してください。",
+      webSessionCreateFailed: "デスクトップでこのチャットを作成できませんでした。会話一覧を開き直してから再試行してください。",
+      editStaleRevision: "この会話は読み込み後にデスクトップで更新されています。会話を開き直してから編集してください。",
+      editRevisionUnavailable: "この編集では会話の状態を検証できませんでした。会話を開き直してから再試行してください。",
+      artifactTooLarge: "この成果物はリモートコントロールのプレビュー上限を超えています。代わりにダウンロードしてください。",
+      artifactPreviewTooLarge: "レンダリングされたプレビューがリモートコントロールの応答上限を超えました。成果物をダウンロードしてください。",
+      artifactEditTooLarge: "この Markdown はリモートコントロールで編集できる上限を超えています。代わりにダウンロードしてください。",
+      artifactReadFailed: "デスクトップで成果物を読み取れませんでした。",
+      attachReadFailed: "この添付ファイルはデスクトップで読み取れませんでした。",
+      betaVersionSuffix: " (ベータ版)",
+      voiceEditNoChange: "音声編集による変更はありません。原文を保持しました",
+      voiceEditPostprocessFailed: "音声編集の処理に失敗しました。入力は変更されていません。再試行してください。",
     },
     zh: {
       newChatFailed: "⚠️ 新建对话失败: ", loadChatFailed: "⚠️ 加载对话失败: ", deleteFailed: "⚠️ 删除失败: ",
@@ -739,6 +771,7 @@ function pinvouSharedweb() {
       deviceUploadDigestInvalid: "附件完整性校验值无效，请重试",
       deviceUploadIntegrityMismatch: "附件内容在传输中损坏，请重新上传",
       turnAlreadyInProgress: "⚠️ 当前会话已有一轮正在处理，本次重复发送未执行。",
+      webSessionUnavailable: "该会话在桌面端已不可用，请从会话列表重新打开。",
       compactStart: "⏳ 正在压缩上下文", compactDone: "✓ 上下文压缩完成", compactFail: "⚠️ 压缩失败", compactCancel: "已取消上下文压缩", compactAuto: "（自动）",
       compactPruneMerged: "自动压缩：已整理工具结果，消息数不变",
       compactInactive: "会话引擎尚未运行。请先发送一条消息，再压缩上下文",
@@ -778,6 +811,7 @@ function pinvouSharedweb() {
       unknownReason: "未知原因",
       materialsAdded: (count, names) => "✅ 已添加 " + count + " 个素材到配套材料：" + names.join("、"),
       pickFolderTitle: "选择工作目录",
+      fileMediaFilterName: "图片和视频",
       kbPickFolderTitle: "选择要导入知识库的文件夹",
       rebindPickFolderTitle: "选择重绑定项目的新文件夹",
       gateApproveFailed: "⚠️ 通过失败: ",
@@ -814,6 +848,7 @@ function pinvouSharedweb() {
       attachIncomplete: "附件下载不完整，请重试",
       attachNoData: "附件下载未返回数据",
       attachNoProgress: "附件下载没有进展",
+      artifactNoData: "产物下载未返回数据",
       artifactNoProgress: "产物下载没有进展",
       newChatFallbackTitle: "新对话",
       echoOtherPrefix: "(其他) ",
@@ -843,6 +878,18 @@ function pinvouSharedweb() {
       voiceNeedSession: "请先选择或新建一个会话，再使用语音输入。",
       voiceAudioStartBlocked: "浏览器未允许启动音频采集，请再次点击麦克风。",
       voiceRecording: "正在录音，再按一次结束",
+      webChatFailed: "桌面端未能受理这一轮消息，请重新打开会话后重试。",
+      webSessionCreateFailed: "桌面端未能创建这个对话，请重新打开会话列表后重试。",
+      editStaleRevision: "该会话在桌面端已有更新，当前视图已过期。请重新打开会话后再编辑重发。",
+      editRevisionUnavailable: "无法校验会话当前状态，编辑未执行。请重新打开会话后重试。",
+      artifactTooLarge: "产物过大，无法在远程控制中预览，请改为下载。",
+      artifactPreviewTooLarge: "产物预览超过远程控制响应上限，请改为下载。",
+      artifactEditTooLarge: "Markdown 过大，无法在远程控制中编辑，请改为下载。",
+      artifactReadFailed: "桌面端无法读取该产物。",
+      attachReadFailed: "桌面端无法读取该附件。",
+      betaVersionSuffix: " (内测版)",
+      voiceEditNoChange: "语音编辑无变化，已保留原文",
+      voiceEditPostprocessFailed: "语音编辑整理失败，当前输入未修改，请重试。",
     },
   };
 function bt(key) { return pinvouSharedweb().bt(key); }
@@ -971,6 +1018,8 @@ function savePinvouSceneEventsForSession(sid, events) { return pinvouSharedweb()
   // readers so a durable-data defect cannot pose as "no data".
   function loadPersonaEventsForSession(sid) { return pinvouSharedweb().loadPersonaEventsForSession(sid); }
   function loadPinvouReviewsForSession(sid) { return pinvouSharedweb().loadPinvouReviewsForSession(sid); }
+  /** @param {any[]} reviews */
+  function raisePinvouSummonHighwater(reviews) { return pinvouSharedweb().raisePinvouSummonHighwater(reviews); }
 function recordPinvouSceneForMessage(sid, pos, scene) { return pinvouSharedweb().recordPinvouSceneForMessage(sid, pos, scene); }
   function recordPinvouSceneForBufferMessage(sid, buffer, pos, scene) {
     scene = normalizePinvouScene(scene);
@@ -1386,6 +1435,7 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedweb().ro
     hydrateWorkingSetFromSaved(buf, saved);
     buf.personaEvents = await loadPersonaEventsForSession(sid);
     buf.pinvouReviews = await loadPinvouReviewsForSession(sid);
+    raisePinvouSummonHighwater(buf.pinvouReviews); // 后台缓冲提交即验收抬底(r5 审 M1)
     buf.pinvouSceneEvents = await syncPinvouSceneEventsForSession(sid);
     try { buf.turnTimeline = await invoke("get_session_timeline", { sessionId: sid }) || []; } catch (e) { buf.turnTimeline = []; }
     // 手机可能在桌面仍停留草稿页/其他 session 时先唤醒这个后台 session。
@@ -2410,7 +2460,7 @@ async function createNewSession() { return pinvouSharedweb().createNewSession();
       } catch (e) {
         if (ownsDraft()) {
           if (pendingModelRef) draftOutcome.rollbackEpoch = draftOutcome.epoch;
-          addSystemItem(bt("newChatFailed") + e);
+          addSystemItem(wireLaneError(e, "newChatFailed"));
         }
         return null;
       }
@@ -2708,6 +2758,7 @@ function pinvouSharedwebN158313() {
       reportSessionSwitchFailure(new Error(bt("sessionDataInvalid")), errorScope);
       return false;
     }
+    raisePinvouSummonHighwater(pinvouReviews); // 验收后才抬底:被拒导航不得抬账目底(JensenChen28 审 P2)
 
     // load_session 与必要的直接会话数据均成功后，才一次性提交 active/context。
     if (state.activeSessionId) saveWorkingSetTo(getBuffer(state.activeSessionId));
@@ -2904,7 +2955,7 @@ async function exitScheduledRunChat() { return pinvouSharedweb().exitScheduledRu
       applyDeletedSession(id);
       return true;
     } catch (e) {
-      addSystemItem(bt("deleteFailed") + e);
+      addSystemItem(wireLaneError(e, "deleteFailed"));
       return false;
     }
   }
@@ -3280,6 +3331,32 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
   // src-tauri chat.rs IMAGE_INPUT_*_ERROR 对应)按码替换为三语指引,而非剥前缀
   // 透传后端硬编码中文——英/日界面不该看到中文结论;文案与 ChatView 前置警告
   // (t.uiAttachments.*)同源语义。与 tauri bridge chat.js 同一口径。
+  // 远端折叠错误码(remote_control.rs 折叠族,原生错误链只留在桌面日志)与
+  // edit_last_turn 乐观并发护栏码在此映射为三语文案;未识别文本仍走下方
+  // 脱敏兜底。码表与 Rust 侧 stable_web_error_codes_are_locked 同步演进;
+  // 官方 Rust 已实发 web_artifact_* 折叠族与带 web_ 前缀的 turn-in-progress
+  // 码(web_session_turn_in_progress),均经本表精确命中,无前缀兜底规则。
+  const WEB_TURN_ERROR_KEYS = {
+    web_session_chat_failed: "webChatFailed",
+    // 专属完整句文案:复用 newChatFailed(供 wireLaneError 拼接细节的前缀串)
+    // 会渲染成悬空冒号。
+    web_session_create_session_failed: "webSessionCreateFailed",
+    web_session_turn_in_progress: "turnAlreadyInProgress",
+    session_revision_conflict: "editStaleRevision",
+    session_revision_unavailable: "editRevisionUnavailable",
+    web_artifact_too_large: "artifactTooLarge",
+    web_artifact_preview_too_large: "artifactPreviewTooLarge",
+    web_artifact_edit_too_large: "artifactEditTooLarge",
+    web_artifact_read_failed: "artifactReadFailed",
+    web_session_read_artifact_chunk_failed: "artifactReadFailed",
+    web_session_artifact_access_failed: "artifactReadFailed",
+    web_session_read_conversation_attachment_chunk_failed: "attachReadFailed",
+    // Round-9 复审:下载车道可达的 admission 层码——瞬态的
+    // web_session_unavailable 与确定态的 invalid_web_session_id 此前落兜
+    // 底,渲染原始码或后端语言的 admission 文案。
+    web_session_unavailable: "webSessionUnavailable",
+    invalid_web_session_id: "webSessionUnavailable",
+  };
   function displayTurnError(err) {
     // Web RPC wraps rejections in Error; normalize before stable-code
     // localization and the shared model-service redaction fallback.
@@ -3297,6 +3374,9 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       // recovery copy is fully localized, so drop the raw tail.
       return bt("modelSelectionRequired");
     }
+    if (Object.prototype.hasOwnProperty.call(WEB_TURN_ERROR_KEYS, text)) {
+      return bt(WEB_TURN_ERROR_KEYS[text]);
+    }
     // Same policy as the tauri bridge: redact raw submit-failure bodies
     // before display (classification may miss, credentials must not). Pass
     // state so the placeholder matches the UI language. If the helper is
@@ -3305,6 +3385,20 @@ function formatAttachmentDisplayText(text, attachments) { return pinvouSharedweb
       return window.PinvouBridgeMessages.redactRawError(text, state);
     }
     return text;
+  }
+
+  // 侧车道(建聊/删除/打开产物与附件)的同一码表消费:折叠码替换为三语
+  // 文案而非拼接原始机器码;未识别文本保持「前缀 + 原文」的既有行为。
+  // 与 displayTurnError 的差别仅在兜底:侧车道保留各自的失败前缀文案。
+  // 查表与 displayTurnError 同款 hasOwnProperty 守卫:裸原型链查找会把
+  // 恰好同名的错误文本("constructor"/"valueOf"/…)映射成非字符串真值,
+  // 渲染出 "undefined" 并吞掉真实错误(Round-11 复审 minor)。
+  function wireLaneError(err, prefixKey) {
+    const text = String(err && err.message ? err.message : err || "");
+    if (Object.prototype.hasOwnProperty.call(WEB_TURN_ERROR_KEYS, text)) {
+      return bt(WEB_TURN_ERROR_KEYS[text]);
+    }
+    return bt(prefixKey) + text;
   }
 
   function trackSceneSubmitted(sid, scene) {
@@ -5092,6 +5186,21 @@ function presentArtifactAbsPath(toolResultContent, fallbackPath) { return pinvou
       state.tokens.max = windowTok; // 云端真实窗口，替代 32K 假分母
       notify(); // 窗口变化也要通知 UI（即使本轮 input 不可信）
     }
+    // 逐请求占用口径（context_input_tokens：本轮最后一次父请求的 reported
+    // input = 回合结束时真实上下文占用）。chat:usage 每轮只在 TurnComplete
+    // 发一次，而本轮任意 tool_start 都会把 turnUsageDirty 锁到下一轮发送才
+    // 解——只消费累计口径意味着工具轮的读数永远冻结在「— / … · 0%」，只有
+    // 手动压缩的 post_tokens 能刷新。逐请求值不是累加值，dirty 口径保护不
+    // 适用：先于 dirty guard 消费，且消费后不得再让累计口径覆写。
+    const ctxInput = Number(e.payload && e.payload.context_input_tokens || 0);
+    if (ctxInput > 0) {
+      // 超窗同累计口径的守卫：分母声明失真时不透出超上限数字，保留上个准确值。
+      if (ctxInput <= state.tokens.max) {
+        state.tokens = { input: ctxInput, max: state.tokens.max };
+        notify();
+      }
+      return;
+    }
     if (sid && turnUsageDirty[sid]) return; // 本轮多请求，累加 input 不可信，保留上个准确值
     var input = Number(e.payload && e.payload.input_tokens || 0);
     // 累加值超过窗口说明仍有多请求（内部重试等无事件轮），跳过避免显示超上限
@@ -6096,7 +6205,7 @@ async function submitUserInput(itemId, toolCallId, answers, questions) { return 
       if (concurrentTurn && editBuffer && !deferredApplied) {
         markRemoteTurn(sid, editBuffer, false, "edit_last_turn_concurrent_turn");
       }
-      runSyncOnSession(sid, function () { addSystemItem("⚠️ " + e); });
+      runSyncOnSession(sid, function () { addSystemItem("⚠️ " + displayTurnError(e)); });
       notify();
       flushQueued(sid);
     }
@@ -6149,7 +6258,7 @@ function openScheduledTaskFolder(automationId) { return pinvouSharedweb().openSc
         var opened = window.open(parsed.href, "_blank", "noopener,noreferrer");
         return Promise.resolve(!!opened);
       }
-      return invoke("open_user_external_url", { url: parsed.href }).catch(function (e) { addSystemItem(bt("openFailed") + e); });
+      return invoke("open_user_external_url", { url: parsed.href }).catch(function (e) { addSystemItem(wireLaneError(e, "openFailed")); });
     } catch (_) {
       return Promise.reject(new Error("invalid external link"));
     }
@@ -6169,7 +6278,7 @@ function currentMemoryArtifacts() { return pinvouSharedweb().currentMemoryArtifa
     if (IS_WEB) return downloadArtifact(path, sessionId);
     var ext = (String(path).split(".").pop() || "").toLowerCase();
     var cmd = (ext === "html" || ext === "htm") ? "open_artifact_window" : "open_in_system";
-    return invoke(cmd, { path: path, sessionId: sessionId || null }).catch(function (e) { addSystemItem(bt("openFailed") + e); });
+    return invoke(cmd, { path: path, sessionId: sessionId || null }).catch(function (e) { addSystemItem(wireLaneError(e, "openFailed")); });
   }
 
   var MAX_WEB_ARTIFACT_DOWNLOAD_BYTES = 256 * 1024 * 1024;
@@ -6221,7 +6330,10 @@ function currentMemoryArtifacts() { return pinvouSharedweb().currentMemoryArtifa
       if (downloaded) trackArtifactExported(path, sessionId);
       return downloaded;
     } catch (e) {
-      addSystemItem(bt("downloadFailed") + String((e && e.message) || e));
+      // 稳定错误码在此折叠为三语文案(与 turn-error 车道同一 displayTurnError
+      // 映射);裸 String 兜底会渲染机器码,EN/JA 界面还会泄漏 zh-only admission
+      // 文案(open round-9)。
+      addSystemItem(bt("downloadFailed") + displayTurnError(e));
       return false;
     }
   }
@@ -6250,7 +6362,7 @@ function currentMemoryArtifacts() { return pinvouSharedweb().currentMemoryArtifa
         offset: offset,
         limit: 262144,
       });
-      if (!part) throw new Error("Artifact download returned no data");
+      if (!part) throw new Error(bt("artifactNoData"));
       var partOffset = Number(part.offset);
       var partSize = Number(part.size);
       if (!Number.isSafeInteger(partOffset) || partOffset !== offset ||
@@ -6368,7 +6480,7 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
       }
       return await downloadConversationAttachment(reference);
     } catch (e) {
-      addSystemItem(bt("openFailed") + e);
+      addSystemItem(wireLaneError(e, "openFailed"));
       return false;
     }
   }
@@ -6378,7 +6490,7 @@ function conversationAttachmentArgs(reference) { return pinvouSharedweb().conver
       await invoke("reveal_conversation_attachment", conversationAttachmentArgs(reference));
       return true;
     } catch (e) {
-      addSystemItem(bt("openFailed") + e);
+      addSystemItem(wireLaneError(e, "openFailed"));
       return false;
     }
   }
@@ -7592,7 +7704,7 @@ function appendVoiceText(base, text) { return pinvouSharedweb().appendVoiceText(
     var selected = await dialogOpen({
       multiple: true,
       filters: [
-        { name: "Images and videos", extensions: ["png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "webm"] },
+        { name: bt("fileMediaFilterName"), extensions: ["png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "webm"] },
       ],
     });
     if (!selected) return [];

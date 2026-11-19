@@ -470,13 +470,16 @@ function eventRelayConsumers(sourceName, main, approval) {
   exactly(mainView, /source:=strings\.TrimSpace\(environment\("EVENT_SOURCE"\)\)/g);
   exactly(mainView, /ifsource==""\{source="account"\}/g);
   exactly(mainView, /source="account"/g);
-  exactly(mainView, /ifsource!="account"&&source!="billing"\{returnerrors\.New\("ACCOUNT_EVENT_SOURCE_REQUIRED"\)\}/g);
+  exactly(mainView, /ifsource!="account"&&source!="billing"&&source!="token"\{returnerrors\.New\("ACCOUNT_EVENT_SOURCE_REQUIRED"\)\}/g);
   const references = [...goSource(main).masked.matchAll(/\bsource\b/g)];
-  const closed = matches(mainView, /source(?::=strings\.TrimSpace\(environment\("EVENT_SOURCE"\)\)|==""|="account"|!="account"|!="billing"|=="account"|=="billing"|\+"-outbox-relay:"|\+"-outbox-relay"|\+"-event-relay"|\+"\.>")|newRelayMetrics\(source\)/g);
+  const closed = matches(mainView, /source(?::=strings\.TrimSpace\(environment\("EVENT_SOURCE"\)\)|==""|="account"|!="account"|!="billing"|!="token"|=="account"|=="billing"|=="token"|\+"-outbox-relay:"|\+"-outbox-relay"|\+"-event-relay"|\+"\.>")|newRelayMetrics\(source\)/g);
   if (references.length !== closed.length) throw new Error(`unrecognized_event_relay:${sourceName}:source-references`);
   const brokerConfigs = matches(runView, /events\.NewNATSBroker\(setup,environment\("NATS_URL"\),source\+"-outbox-relay",events\.NATSConfig\{([^{}]*)\}\)/g);
   if (brokerConfigs.length !== 1) throw new Error(`unrecognized_event_relay:${sourceName}:broker-config`);
   exactly(view(brokerConfigs[0][1]), /RequireExplicitAuthentication:true/g);
+  exactly(view(brokerConfigs[0][1]), /ExpectedPublicKey:expectedPublicKey/g);
+  exactly(runView, /expectedPublicKey,err=identity\.TokenOutboxPublicKey\(time\.Now\(\)\.UTC\(\)\)/g);
+  exactly(runView, /events\.NewOwnedPostgresStore\(setup,environment\("DATABASE_URL"\),"token_schema_owner"\)/g);
   exactly(mainView, /RequireExplicitAuthentication:true/g);
   exactly({ text: mainView.mask, mask: mainView.mask }, /events\.NewNATSBroker\(/g);
   exactly({ text: mainView.mask, mask: mainView.mask }, /serviceauth\.ContextForJob\(/g);

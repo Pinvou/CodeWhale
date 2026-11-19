@@ -140,73 +140,88 @@ func retainedManagementTokenRepository(t *testing.T) (*PostgresRepository, conte
 }
 func retainedManagementBillingRepository(t *testing.T) (*billing.PostgresRepository, context.Context, *pgxpool.Pool) {
 	t.Helper()
+	workloadBudget, cleanupBudget := 60*time.Second, 30*time.Second
 	raw := os.Getenv("PINVOU_TEST_BILLING_DATABASE_URL")
 	if raw == "" {
 		t.Skip("PINVOU_TEST_BILLING_DATABASE_URL is required for actual PostgreSQL")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), workloadBudget)
 	t.Cleanup(cancel)
 	control, err := cifixture.Connect(ctx, raw)
 	if err != nil {
 		t.Fatal("cannot connect to fixture database")
 	}
-	database := "retained_finance_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	var fixtureDatabase *cifixture.Database
-	quoted := pgx.Identifier{database}.Sanitize()
-	var exists bool
-	if err = control.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)`, database).Scan(&exists); err != nil || exists {
-		control.Close(context.Background())
-		t.Fatal("new UUID database must not already exist")
-	}
-	fixtureDatabaseCreated, creationError := cifixture.CreateDatabase(ctx, control, database, "CREATE DATABASE "+quoted+" OWNER billing_schema_owner")
-	fixtureDatabase = fixtureDatabaseCreated
-	if err := creationError; err != nil {
-		control.Close(context.Background())
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		// DROP DATABASE checkpoints may exceed ten seconds on a Windows test disk.
-		// Keep cleanup bounded while retaining the exact UUID/owner/zero-client
-		// guards below; this budget applies only to this disposable fixture.
-		cleanup, done := context.WithTimeout(context.Background(), 30*time.Second)
-		defer done()
-		if _, err := cifixture.DropDatabase(cleanup, control, fixtureDatabase, "billing_schema_owner"); err != nil {
-			t.Error("own-database cleanup failed")
-		}
-		control.Close(cleanup)
-	})
-	configuration, err := pgx.ParseConfig(raw)
-	if err != nil {
-		t.Fatal("cannot parse fixture connection configuration")
-	}
-	configuration.Database = database
-	configuration.User = "billing_migrator"
-	configuration.Password = ""
-	connection, err := pgx.ConnectConfig(ctx, configuration)
-	if err != nil {
-		t.Fatal("cannot connect to own UUID database")
-	}
-	t.Cleanup(func() { connection.Close(context.Background()) })
-	if _, err = connection.Exec(ctx, `SET ROLE billing_schema_owner; ALTER SCHEMA public OWNER TO billing_schema_owner; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE,CREATE ON SCHEMA public TO billing_service; SET ROLE billing_service`); err != nil {
-		t.Fatal("owned deployment migration actor setup failed")
-	}
+	t.Cleanup(func() { control.Close(context.Background()) })
 	loaded, err := migrations.Load("../../migrations/billing")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = billingschema.Up(ctx, connection, loaded); err != nil {
+	key, err := cifixture.TemplateKey("retained-billing-v1", loaded)
+	if err != nil {
 		t.Fatal(err)
 	}
-	// Installation is complete. Retaining its session lock until fixture cleanup
-	// would prevent an independent migration connection from validating recovery.
-	migrations.Unlock(ctx, connection)
+	configuration, err := pgx.ParseConfig(raw)
+	if err != nil {
+		t.Fatal("cannot parse fixture connection configuration")
+	}
+	configuration.User, configuration.Password = "billing_migrator", ""
+	open := func(ctx context.Context, name string, install bool) (*pgx.Conn, error) {
+		config := configuration.Copy()
+		config.Database = name
+		c, err := pgx.ConnectConfig(ctx, config)
+		if err != nil {
+			return nil, err
+		}
+		if install {
+			_, err = c.Exec(ctx, `SET ROLE billing_schema_owner; ALTER SCHEMA public OWNER TO billing_schema_owner; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE,CREATE ON SCHEMA public TO billing_service; SET ROLE billing_service`)
+			if err == nil {
+				done := cifixture.Measure("migration-initialize")
+				err = billingschema.Up(ctx, c, loaded)
+				done()
+			}
+		} else {
+			_, err = c.Exec(ctx, `SET ROLE billing_service`)
+		}
+		if err != nil {
+			c.Close(context.Background())
+			return nil, err
+		}
+		if install {
+			migrations.Unlock(ctx, c)
+		}
+		return c, nil
+	}
+	database := "retained_finance_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	fixtureDatabase, prepared, err := retainedBillingTemplates.Create(ctx, control, database, "billing_schema_owner", key, func(ctx context.Context, name string) error {
+		c, err := open(ctx, name, true)
+		if c != nil {
+			c.Close(context.Background())
+		}
+		return err
+	})
+	if err != nil {
+		control.Close(context.Background())
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cleanup, done := context.WithTimeout(context.Background(), cleanupBudget)
+		defer done()
+		if _, err := cifixture.DropDatabase(cleanup, control, fixtureDatabase, "billing_schema_owner"); err != nil {
+			t.Error("own-database cleanup failed:", err)
+		}
+		control.Close(cleanup)
+	})
+	connection, err := open(ctx, database, !prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { connection.Close(context.Background()) })
 	config, err := pgxpool.ParseConfig(raw)
 	if err != nil {
 		t.Fatal("cannot parse fixture database configuration")
 	}
 	config.ConnConfig.Database = database
-	config.ConnConfig.User = "billing_service"
-	config.ConnConfig.Password = ""
+	config.ConnConfig.User, config.ConnConfig.Password = "billing_service", ""
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatal("cannot open fixture pool")

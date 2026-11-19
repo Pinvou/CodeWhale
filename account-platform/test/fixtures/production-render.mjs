@@ -33,7 +33,8 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
   const rendererSHA256 = bytesDigest(readFileSync(binary));
   const options = { binary, binarySHA256: rendererSHA256 };
   if (kind === 'compose') {
-    const texts = composeCompositions[profile].map(name => readFileSync(resolve(repositoryRoot, `account-platform/deploy/production/compose.${name}.yaml`), 'utf8'));
+    const overlays = settings.tokenEvents ? ['token-events'] : [];
+    const texts = [...composeCompositions[profile], ...overlays].map(name => readFileSync(resolve(repositoryRoot, `account-platform/deploy/production/compose.${name}.yaml`), 'utf8'));
     const variables = [...new Set(texts.flatMap(text => [...text.matchAll(/\$\{([A-Z0-9_]+)/g)].map(m => m[1])))];
     const env = {};
     let ip = 10;
@@ -88,6 +89,7 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
       raw.BILLING_RELAY_PRIVATE_ENV_FILE = { DATABASE_URL: dbURL('billing', 'billing_service') };
       raw.APPROVAL_INITIALIZER_PRIVATE_ENV_FILE = { DATABASE_URL: dbURL('account', 'account_migrator') };
       raw.TOKEN_CREDENTIAL_PRIVATE_ENV_FILE = { DATABASE_URL: dbURL('token', 'token_gateway') };
+      if (settings.tokenEvents) raw.TOKEN_RELAY_PRIVATE_ENV_FILE = { DATABASE_URL: dbURL('token', 'token_gateway') };
     }
     for (const [key, values] of Object.entries(raw)) if (env[key]) writeFileSync(env[key], Object.entries(values).map(([k, v]) => `${k}=${v}`).join('\n') + '\n');
     const configs = { ACCOUNT: 'account-service', IDENTITY: 'identity-service', BILLING: 'billing-service', TOKEN: 'token-gateway',
@@ -104,7 +106,7 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
     const logins = { ACCOUNT_MIGRATION: ['account', 'account_migrator'], BILLING_MIGRATION: ['billing', 'billing_migrator'],
       TOKEN_MIGRATION: ['token', 'token_migrator'], ACCOUNT_SERVICE: ['account', 'account_service'], BILLING_SERVICE: ['billing', 'billing_service'],
       TOKEN: ['token', 'token_gateway'], EVENT_RELAY: ['account', 'account_service'], BILLING_RELAY: ['billing', 'billing_service'],
-      APPROVAL_INITIALIZER: ['account', 'account_migrator'] };
+      APPROVAL_INITIALIZER: ['account', 'account_migrator'], TOKEN_RELAY: ['token', 'token_gateway'] };
     for (const [prefix, [domain, login]] of Object.entries(logins)) {
       const path = env[`${prefix}_DATABASE_DIRECTORY`];
       if (path) writeFileSync(join(path, 'pgpass'), `postgres.fixture.invalid:5432:account_platform_${domain}:${login}:public-fixture-password\n`, { mode: 0o600 });
@@ -118,12 +120,14 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
       ['APPROVAL_PUBLIC_RECEIPT_DIRECTORY', 'receipt.json', 'APPROVAL_RECEIPT_SHA256'],
     ]) {
       if (!env[variable]) continue;
-      const bytes = JSON.stringify({ fixture: 'configuration-only', artifact: filename });
+      const bytes = JSON.stringify(settings.tokenEvents && filename === 'current.json'
+        ? { version: 2, purpose: 'pinvou-nats-service-identities', public_keys: { 'token-outbox-relay': 'U' + 'A'.repeat(55) }, fixture: 'shape-only; not an authentication key' }
+        : { fixture: 'configuration-only', artifact: filename });
       writeFileSync(join(env[variable], filename), bytes, { mode: 0o444 });
       env[hash] = bytesDigest(bytes);
     }
     const envFile = file('compose.env', Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n') + '\n');
-    fixture.recipe = { kind, profile, envFile, overlays: [] };
+    fixture.recipe = { kind, profile, envFile, overlays };
     fixture.env = env; fixture.raw = raw;
     fixture.updateEnv = (key, value) => {
       env[key] = value;
@@ -142,6 +146,7 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
           : { repository: `registry.fixture.invalid/${key.toLowerCase()}`, tag: 'fixture', digest: `sha256:${'a'.repeat(64)}` }]));
     fixture.recipe = { kind, namespace: 'public-fixture', release: 'public-fixture',
       valuesFile: file('helm-values.json', JSON.stringify({ images, external,
+        tokenEventRelay: { enabled: Boolean(settings.tokenEvents) },
         global: { manualReviewOnCallUserIds: [subjects['account-service']] },
         ...(settings.credentialPortal ? { public: { portalUrl: 'https://account.pinvou.com' },
           tokenGateway: { runtimeSecret: 'public-fixture-gateway' },
@@ -177,6 +182,7 @@ export function currentRenderFixture(kind, profile = 'personal', settings = {}) 
         else if (ref.key === 'migration-backup-sha256') value = backup.sha256;
         // Independent config-only digest values; no public artifact or resource readiness is asserted.
         else if (/^BILLING_APPROVAL_CONSUMER_.*_SHA256$/.test(env.name)) value = 'a'.repeat(64);
+        else if (env.name === 'TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256') value = 'a'.repeat(64);
         else if (/REDIS_URL/.test(env.name)) value = 'rediss://fixture:fixture@redis.fixture.invalid:6379/0';
         else if (env.name === 'NATS_URL') value = 'tls://nats.fixture.invalid:4222';
         else if (env.name.endsWith('_BASE64URL')) value = Buffer.alloc(32, 'f').toString('base64url');
