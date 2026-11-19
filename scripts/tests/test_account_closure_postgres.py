@@ -23,6 +23,17 @@ def stream(*events, package="fixture"):
 
 
 class ClosurePostgresResults(unittest.TestCase):
+
+    def test_payment_credit_f12_requires_both_behavior_cases(self):
+        root=runner.PAYMENT_CREDIT_F12_ROOT
+        children={root+"/"+child for child in runner.PAYMENT_CREDIT_F12_CHILDREN}
+        rows=[{"Action":"pass","Test":name} for name in sorted(children|{root})]
+        runner.verify_results(stream(*rows),{root})
+        for child in children:
+            for invalid in ([row for row in rows if row["Test"]!=child],rows+[{"Action":"skip","Test":child}]):
+                with self.subTest(child=child),self.assertRaises(RuntimeError):runner.verify_results(stream(*invalid),{root})
+
+
     def test_real_pagination_root_is_required_once_and_cannot_skip(self):
         root = "TestAccountClosurePaginationPostgres"
         selected = [row for row in runner.CONTRACTS if row[0] == "account-pagination"]
@@ -187,6 +198,8 @@ class ClosurePostgresResults(unittest.TestCase):
             rows = [{"Action": "pass", "Test": root} for root in sorted(roots) if root != runner.MIGRATION_IDENTITY_ROOT]
             if runner.MIGRATION_IDENTITY_ROOT in roots:
                 rows += self.identity_rows()
+            if runner.PAYMENT_CREDIT_F12_ROOT in roots:
+                rows += [{"Action":"pass","Test":runner.PAYMENT_CREDIT_F12_ROOT+"/"+child} for child in sorted(runner.PAYMENT_CREDIT_F12_CHILDREN)]
             if "TestMigrationCLIBudgetRecovery" in roots:
                 rows += [{"Action": "pass", "Test": "TestMigrationCLIBudgetRecovery/" + suffix} for suffix in (
                     "invalid_budget_before_database", "domain_lock_wait", "partial_up_timeout",
@@ -275,7 +288,7 @@ class ClosurePostgresResults(unittest.TestCase):
 
     def test_ledger_repair_public_phase_and_result_cannot_be_omitted_or_skipped(self):
         roots = runner.LEDGER_REPAIR_APPROVAL_ROOTS
-        self.assertEqual(roots, {runner.LEDGER_REPAIR_APPROVAL_ROOT, runner.LEDGER_REPAIR_PAYMENT_E2E_ROOT})
+        self.assertEqual(roots, {runner.LEDGER_REPAIR_APPROVAL_ROOT, runner.LEDGER_REPAIR_PAYMENT_E2E_ROOT, runner.PAYMENT_CREDIT_F12_ROOT})
         self.assertEqual([x for x in runner.CONTRACTS if x[0] == "ledger-repair-approval-proof"],
                          [("ledger-repair-approval-proof", "./internal/account", roots, {})])
         for missing in roots:

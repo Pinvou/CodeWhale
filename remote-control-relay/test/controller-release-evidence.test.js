@@ -866,19 +866,36 @@ test("enabled release gate checks authenticated evidence before and after extern
       const invalidateMarker = () => writeFile(markerPath, "{}");
       // Only subprocess boundaries are substituted. The imported gate and its
       // deep reader retain actual file hashing, signatures, trust pins and time.
-      t.mock.method(childProcess, "spawn", (command, args) => {
-        calls.push({ command, args: [...args] });
+      t.mock.method(childProcess, "spawn", () => {
         const child = new EventEmitter();
+        child.stdin = new PassThrough();
         child.stdout = new PassThrough();
         child.stderr = new PassThrough();
-        queueMicrotask(async () => {
-          try {
-            if (args[0]?.endsWith("check-enrollment-gated-v2-rollback.mjs")) {
-              if (scenario === "changed-after-prerequisites") await invalidateMarker();
-              if (scenario === "expired-after-prerequisites") now += 86_400_001;
-            }
-            child.stdout.end(); child.stderr.end(); child.emit("close", 0);
-          } catch (error) { child.emit("error", error); }
+        let input = "";
+        let handled = false;
+        // The supervisor receives its request before EOF and keeps stdin open
+        // for receipt acknowledgement. Record the inner business command.
+        child.stdin.on("data", (chunk) => {
+          input += chunk.toString();
+          if (handled || !input.includes("\n")) return;
+          handled = true;
+          queueMicrotask(async () => {
+            try {
+              const request = JSON.parse(input.split("\n", 1)[0]);
+              const [command, ...args] = request.command;
+              calls.push({ command, args });
+              if (args[0]?.endsWith("check-enrollment-gated-v2-rollback.mjs")) {
+                if (scenario === "changed-after-prerequisites") await invalidateMarker();
+                if (scenario === "expired-after-prerequisites") now += 86_400_001;
+              }
+              const receipt = { nonce: request.nonce, exit_code: 0, forced: false,
+                root_exit_code: 0, primary_exit_code: null, execution_error: null,
+                cleanup_confirmed: true, reason: null };
+              child.stdout.end();
+              child.stderr.end(`\nPINVOU_RELEASE_PROCESS ${JSON.stringify(receipt)}\n`);
+              child.emit("close", 0);
+            } catch (error) { child.emit("error", error); }
+          });
         });
         return child;
       });
