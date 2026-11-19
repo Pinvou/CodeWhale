@@ -10,6 +10,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -17,6 +18,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'lib'))
+from ci_transfer_deadline import DeadlineExceeded, command_deadline  # noqa: E402
 
 MAX_BLOB = 128 * 1024**2
 
@@ -76,7 +80,7 @@ def publish(path):
                                          method="PUT")
         client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
-            with path.open("rb") as stream:
+            with command_deadline(time.monotonic() + 65), path.open("rb") as stream:
                 request.data = stream
                 # Request.data clears a previously supplied content length.
                 # Restore it so file-backed uploads never switch to chunked.
@@ -89,7 +93,7 @@ def publish(path):
             if replicas < 2:
                 raise OSError("cache redundancy unavailable")
             transport = "lan"
-        except (OSError, ValueError, urllib.error.URLError) as error:
+        except (OSError, ValueError, urllib.error.URLError, DeadlineExceeded) as error:
             # Fallback changes only delivery, never the tested bytes or gates.
             event("cache-publication-fallback", error=type(error).__name__, http_status=getattr(error, "code", None))
             if isinstance(error, urllib.error.HTTPError):
@@ -109,6 +113,11 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def github_zip(destination, deadline):
+    with command_deadline(deadline):
+        return _github_zip(destination, deadline)
+
+
+def _github_zip(destination, deadline):
     token = os.environ.get("GITHUB_TOKEN", "")
     run = os.environ.get("GITHUB_RUN_ID", "")
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
@@ -120,6 +129,8 @@ def github_zip(destination, deadline):
     root = api + "/repos/" + repository() + "/actions/"
     candidates = []
     for poll in range(3):
+        if time.monotonic() >= deadline:
+            raise DeadlineExceeded('artifact total transfer budget exhausted')
         try:
             with client.open(urllib.request.Request(root + "runs/" + run + "/artifacts?per_page=100", headers=headers), timeout=15) as response:
                 rows = json.load(response)["artifacts"]
@@ -143,7 +154,7 @@ def github_zip(destination, deadline):
         raise ValueError("invalid artifact size")
     for attempt in range(3):
         if time.monotonic() >= deadline:
-            raise TimeoutError("artifact total transfer budget exhausted")
+            raise DeadlineExceeded("artifact total transfer budget exhausted")
         offset = destination.stat().st_size if destination.exists() else 0
         try:
             request = urllib.request.Request(root + "artifacts/" + str(int(artifact["id"])) + "/zip", headers=headers)
@@ -172,8 +183,10 @@ def github_zip(destination, deadline):
                 with destination.open("ab" if offset else "wb") as stream:
                     while True:
                         if time.monotonic() >= deadline:
-                            raise TimeoutError("artifact total transfer budget exhausted")
+                            raise DeadlineExceeded("artifact total transfer budget exhausted")
                         block = response.read(128 * 1024)
+                        if time.monotonic() >= deadline:
+                            raise DeadlineExceeded("artifact total transfer budget exhausted")
                         if not block:
                             break
                         stream.write(block)
@@ -191,6 +204,11 @@ def github_zip(destination, deadline):
 
 
 def fetch(args):
+    with command_deadline(time.monotonic() + (90 if args.transport == 'lan' else 180)) as budget:
+        return _fetch(args, budget)
+
+
+def _fetch(args, budget):
     start = time.monotonic()
     validate_identity(args.commit, args.sha256)
     if tested_commit() != args.commit or not 0 < args.size <= MAX_BLOB:
@@ -222,6 +240,7 @@ def fetch(args):
                         if time.monotonic() - start >= 90:
                             raise TimeoutError("host cache transfer budget exhausted")
                         block = response.read(min(256 * 1024, remaining))
+                        budget.check()
                         if not block:
                             raise ValueError("incomplete cache response")
                         output.write(block)
@@ -229,7 +248,7 @@ def fetch(args):
         else:
             archive = temporary.with_suffix(".zip")
             try:
-                github_zip(archive, time.monotonic() + 180)
+                github_zip(archive, budget.end)
                 with zipfile.ZipFile(archive) as value:
                     members = value.infolist()
                     if len(members) != 1 or members[0].filename != "frontend-setup-bundle.tar.gz" or members[0].file_size != args.size:
@@ -240,6 +259,7 @@ def fetch(args):
                 archive.unlink(missing_ok=True)
         if temporary.stat().st_size != args.size or checksum(temporary) != args.sha256:
             raise ValueError("downloaded bundle checksum mismatch")
+        budget.check()
         os.replace(temporary, args.output)
         event("bundle-fetched", source=source, commit=args.commit, sha256=args.sha256,
               bytes=args.size, seconds=round(time.monotonic() - start, 3))

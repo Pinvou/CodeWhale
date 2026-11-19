@@ -351,7 +351,9 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // get_session_pinvou_reviews / resolveMemoryCandidate 的 invoke(command, args)
 // 参数化入口），合计 74 个签名。
 // kb_model_cancel 回流：共享知识模型 helper 新增取消命令，合计 75 个签名。
-const expectedSharedBaseHash = 'da3b8334d74117e2d1c1d6ba80df6fb8780915c6b9a8dca75e90682dea343398';
+// 社区 #841 回流：评审快照串行链在 record 时捕获 owning sid，避免排队写漂到
+// 切换后的会话；并集后按当前共享桥接面重算协议指纹。
+const expectedSharedBaseHash = '704c9375f0cc90d0a94c64c186ccaff688d193c155df7d6f6596de50bf3a7d44';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),

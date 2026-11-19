@@ -5,7 +5,7 @@
   image: {{ include "pinvou.imageRef" (dict "image" .image) | quote }}
   imagePullPolicy: {{ .image.pullPolicy }}
   command: ["/service"]
-  args: ["prepare-nats-credentials", {{ .client | quote }}]
+  args: [{{ if .seed }}"prepare-nats-seed"{{ else }}"prepare-nats-credentials"{{ end }}, {{ .client | quote }}]
   securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
   resources: { requests: { cpu: 10m, memory: 16Mi }, limits: { cpu: 100m, memory: 32Mi } }
   volumeMounts:
@@ -18,5 +18,5 @@
   secret:
     secretName: {{ .secret }}
     defaultMode: 288
-    items: [{ key: {{ .key }}, path: {{ .client }}.creds }]
+    items: [{ key: {{ .key }}, path: {{ .client }}.{{ if .seed }}seed{{ else }}creds{{ end }} }]
 {{- end -}}

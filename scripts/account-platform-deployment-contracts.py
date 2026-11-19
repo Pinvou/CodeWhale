@@ -6,6 +6,7 @@ external network during verification. Source/CLI hashes and raw no-skip results
 are retained; dependency preparation is the only network-enabled tools step.
 """
 import argparse
+from collections import OrderedDict, deque
 import hashlib
 import json
 import os
@@ -35,6 +36,113 @@ MANAGED_CONTRACT_ROOTS = {
 }
 
 
+def redact_diagnostic(text):
+    # Share the same boundary for early Go failures and the ordinary log tail.
+    for name, value in os.environ.items():
+        if len(value) >= 4 and re.search(r"TOKEN|PASSWORD|SECRET|CREDENTIAL|API_KEY", name, re.I):
+            forms = {value, *(json.dumps(value, ensure_ascii=ascii_only)[1:-1] for ascii_only in (False, True))}
+            # Go encoding/json's default HTML escaping differs from Python's
+            # JSON spelling. This also covers JSON embedded inside Output.
+            forms.update(form.replace("<", r"\u003c").replace(">", r"\u003e").replace("&", r"\u0026")
+                         .replace("\u2028", r"\u2028").replace("\u2029", r"\u2029") for form in tuple(forms))
+            for form in sorted(forms, key=len, reverse=True):
+                text = text.replace(form, "[redacted]")
+    text = re.sub(r"(?i)\b(?:https?|git\+https?|postgres(?:ql)?)://[^\s<>\"']+", "[URL redacted]", text)
+    text = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)\S+", r"\1[redacted]", text)
+    return re.sub(r"(?i)((?:_authToken|password|token|secret)\s*[:=]\s*)\S+", r"\1[redacted]", text)
+
+
+def redact_json_line(line):
+    """Decode Go JSON before masking, rather than matching its wire spelling."""
+    try:
+        event = json.loads(line)
+    except (ValueError, RecursionError):
+        return redact_diagnostic(line)
+
+    def clean(value, depth=0):
+        if depth > 32:
+            return "[diagnostic nesting limit]"
+        if isinstance(value, str):
+            return redact_diagnostic(value)
+        if isinstance(value, dict):
+            return {redact_diagnostic(key): clean(item, depth + 1) for key, item in value.items()}
+        if isinstance(value, list):
+            return [clean(item, depth + 1) for item in value]
+        return value
+
+    return json.dumps(clean(event), ensure_ascii=True)
+
+
+def redact_json_tail(text):
+    # test2json can split and interleave each test's output. Mask its whole
+    # bounded tail stream before publishing it, including event boundaries.
+    # This presentation never replaces the raw stream used by verify_results.
+    lines, groups = [], {}
+    for line in text.split("\n"):
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            event = None
+        if (isinstance(event, dict) and event.get("Action") == "output"
+                and isinstance(event.get("Output"), str) and isinstance(event.get("Package"), str)
+                and (event.get("Test") is None or isinstance(event.get("Test"), str))):
+            key = (event["Package"], event.get("Test"))
+            if key not in groups:
+                groups[key] = (event, [])
+                lines.append(event)
+            groups[key][1].append(event["Output"])
+        else:
+            lines.append(line)
+    for event, parts in groups.values():
+        event["Output"] = "".join(parts)
+    return "\n".join(redact_json_line(json.dumps(line, ensure_ascii=False))
+                     if isinstance(line, dict) else redact_json_line(line) for line in lines)
+
+
+def first_go_failures(logfile):
+    """Retain bounded first-failure context, even after many later passing tests.
+
+    The complete private log remains untouched. Only complete, bounded JSON
+    events are considered; oversized lines cannot supply a partial secret or
+    a made-up event. Redact before truncating individual output fields.
+    """
+    contexts, failures, used = OrderedDict(), [], 0
+    with logfile.open("rb") as source:
+        while line := source.readline(65537):
+            if len(line) > 65536:
+                while line and not line.endswith(b"\n"):
+                    line = source.readline(65537)
+                continue
+            try:
+                event = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            package, test = event.get("Package"), event.get("Test")
+            if not all(isinstance(value, str) and 0 < len(value) <= 512 for value in (package, test)):
+                continue
+            key = (package, test)
+            if event.get("Action") == "output" and isinstance(event.get("Output"), str):
+                context = contexts.setdefault(key, deque(maxlen=4))
+                context.append(redact_diagnostic(event["Output"])[-2048:])
+                contexts.move_to_end(key)
+                if len(contexts) > 64:
+                    contexts.popitem(last=False)
+            elif event.get("Action") == "fail":
+                summary = "GO_TEST_FAILURE " + json.dumps({
+                    "Package": redact_diagnostic(package)[:256], "Test": redact_diagnostic(test)[:256],
+                    "Output": redact_diagnostic("".join(contexts.get(key, ())))[-1024:],
+                }, ensure_ascii=True)
+                if used + len(summary) + 1 > 16384:
+                    break
+                failures.append(summary)
+                used += len(summary) + 1
+                if len(failures) == 5:
+                    break
+    return "\n".join(failures)
+
+
 def run_logged_command(arguments, logfile, *, cwd=None, dependency_preparation=False):
     """Keep the complete private log; emit bounded, redacted failure evidence."""
     try:
@@ -52,16 +160,12 @@ def run_logged_command(arguments, logfile, *, cwd=None, dependency_preparation=F
             boundary = tail_bytes.find(b"\n")
             tail_bytes = tail_bytes[boundary + 1:] if boundary >= 0 else b""
         tail = tail_bytes.decode("utf-8", errors="replace")
-        # A caller may configure an authenticated registry or proxy.
-        for name, value in os.environ.items():
-            if len(value) >= 4 and re.search(r"TOKEN|PASSWORD|SECRET|CREDENTIAL|API_KEY", name, re.I):
-                tail = tail.replace(value, "[redacted]")
-        tail = re.sub(r"(?i)\b(?:https?|git\+https?|postgres(?:ql)?)://[^\s<>\"']+", "[URL redacted]", tail)
-        tail = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)\S+", r"\1[redacted]", tail)
-        tail = re.sub(r"(?i)((?:_authToken|password|token|secret)\s*[:=]\s*)\S+", r"\1[redacted]", tail)
+        tail = redact_json_tail(tail) if logfile.suffix == ".jsonl" else redact_diagnostic(tail)
         tail = "\n".join(tail.splitlines()[-100:])[-24000:]
         label = "DEPENDENCY_PREPARATION_FAILED" if dependency_preparation else "CONTRACT_COMMAND_FAILED"
         print(label + " exit=" + str(error.returncode) + " log=" + logfile.name, file=sys.stderr)
+        if logfile.suffix == ".jsonl":
+            print(first_go_failures(logfile), file=sys.stderr)
         print(tail, file=sys.stderr)
         # CalledProcessError includes argv, which can contain GOPROXY secrets.
         message = "dependency preparation failed; mandatory contracts did not run" if dependency_preparation else "deployment contract command failed; see redacted diagnostic"

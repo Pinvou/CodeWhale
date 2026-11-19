@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -14,6 +15,35 @@ TRANSIENT = frozenset({
     'ENETUNREACH', 'EHOSTUNREACH', 'E408', 'E429', 'E500', 'E502', 'E503', 'E504',
 })
 SEVERITIES = ('info', 'low', 'moderate', 'high', 'critical')
+
+
+def transport_code(report):
+    error = report.get('error')
+    if not isinstance(error, dict):
+        return None
+    status = report.get('statusCode')
+    if type(status) is int:
+        return 'E' + str(status)
+    code = error.get('code')
+    if isinstance(code, str) and code in TRANSIENT:
+        return code
+    # npm audit-error omits the underlying transport code in several supported
+    # npm versions. Recognize only these node-fetch-generated reason forms;
+    # arbitrary server text, TLS errors and unknown JSON remain fail closed.
+    message = report.get('message')
+    if status is not None or not isinstance(message, str):
+        return None
+    if re.fullmatch(r'network timeout at: https?://\S+', message):
+        return 'ETIMEDOUT'
+    matched = re.fullmatch(r'request to https?://\S+ failed, reason: (.+)', message)
+    if matched:
+        reason = matched[1]
+        if reason == 'socket hang up':
+            return 'ECONNRESET'
+        matched = re.match(r'^(?:connect|read|write|getaddrinfo) (E[A-Z_]+)(?:\s|$)', reason)
+        if matched and matched[1] in TRANSIENT:
+            return matched[1]
+    return None
 
 
 def invoke(command, environment, timeout):
@@ -74,8 +104,7 @@ def audit(prefix, *, run=invoke, clock=time.monotonic, sleep=time.sleep,
                 emit(json.dumps(report))
                 return 1
             return 0 if status == 0 else 1
-        error = report.get('error')
-        code = error.get('code') if isinstance(error, dict) else None
+        code = transport_code(report)
         retry = isinstance(code, str) and code in TRANSIENT and attempt < 3
         # Do not forward raw network errors, headers, URLs or npm debug logs.
         safe_code = code if isinstance(code, str) and code in TRANSIENT else 'unclassified'
