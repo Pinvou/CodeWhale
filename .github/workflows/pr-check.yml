@@ -1223,6 +1223,12 @@ jobs:
       - name: fork-guard 指纹层 (秒级,不编译)
         run: ./scripts/fork-guard.sh --fast
 
+      - name: unicode-width patch guard
+        # The CJK-aware patch tables in pinvou-cli and pinvou3-app/src-tauri
+        # point into the CodeWhale submodule (#4479 follow-up): fail loudly
+        # if a table, the patched copy, or the lock resolution regresses.
+        run: python3 scripts/guard-unicode-width-patch.py
+
       - name: fork 合规联动 (gitlink ↔ fork-modifications)
         run: |
           base_ref="${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}"
@@ -2780,6 +2786,14 @@ jobs:
         run: |
           cargo check --manifest-path pinvou-knowledge/Cargo.toml --tests --no-default-features --features client --locked
           cargo test --manifest-path pinvou-knowledge/Cargo.toml --lib --no-default-features --features client --locked -- embedding::stub_tests
+
+      # App-facing consumption combo (pinvou3-tauri -> knowledge
+      # default-features = false, features = ["client","discovery"]):
+      # compile lib + tests under exactly that pair so a dependency wired
+      # into only one side of the client/server split breaks here instead
+      # of in an app build.
+      - name: cargo check (app combo client,discovery)
+        run: cargo check --manifest-path pinvou-knowledge/Cargo.toml --tests --no-default-features --features client,discovery --locked
 
       - name: 部署脚本 shell 语法
         run: bash -n pinvou-knowledge/deploy/install.sh
