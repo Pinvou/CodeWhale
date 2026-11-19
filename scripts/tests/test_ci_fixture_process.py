@@ -124,7 +124,7 @@ print('original-cancel-verdict-preserved-with-root23')
         )
         # Bounded stress, not retries: every iteration must satisfy the same
         # 15-second limit and confirmed process/workspace retirement.
-        for iteration in range(20):
+        for iteration in range(100):
             with tempfile.TemporaryDirectory() as directory:
                 p, receipt, _ = self.invoke(source, directory)
                 self.assertEqual(p.returncode, 0, p.stderr)
@@ -132,6 +132,8 @@ print('original-cancel-verdict-preserved-with-root23')
                 self.assertEqual(receipt['state'], 'released')
                 self.assertFalse(receipt['cleanup_failed'])
                 self.assertFalse(Path(receipt['workspace']['path']).exists())
+            if (iteration + 1) % 20 == 0:
+                print(f'fixture_stress_completed={iteration + 1}/100', file=sys.stderr, flush=True)
 
     @unittest.skipUnless(shutil.which('node'), 'Node is required for the actual JavaScript signal hook')
     def test_failed_fixture_signal_keeps_receipt_and_supervisor_retires_owned_descendant(self):
