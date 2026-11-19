@@ -1679,6 +1679,9 @@ pub fn run() {
                         handle.manage(CapabilitySnapshotManager::default());
                         let temporary_models = commands::desktop_remote_model::shared_model_store();
                         handle.manage(temporary_models.clone());
+                        temporary_models.register_controlled_cleanup(
+                            &handle.state::<ControlledDeviceManager>(),
+                        );
                         let permission_authority = std::sync::Arc::new(PermissionAuthority::default());
                         permission_authority.register_controlled_cleanup(
                             &handle.state::<ControlledDeviceManager>(),
