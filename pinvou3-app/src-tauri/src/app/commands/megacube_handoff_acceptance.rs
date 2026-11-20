@@ -111,6 +111,9 @@ async fn dispatch(
                     format!("http://127.0.0.1:{port}/v1"),
                     String::new(),
                     None,
+                    // 验收端点固定本机回环且不携带凭据：与 noAuth 声明一致的
+                    // 显式传入，不依赖默认推导。
+                    Some(true),
                 )
                 .await
                 .map_err(anyhow::Error::msg)?,
