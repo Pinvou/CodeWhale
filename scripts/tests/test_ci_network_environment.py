@@ -78,7 +78,7 @@ class NetworkEnvironmentTests(unittest.TestCase):
             result = subprocess.run([__import__('sys').executable,
                 str(Path(__file__).parents[1] / 'ci-network-environment.py'),
                 '--cargo-home', str(cargo), '--cache', str(root / 'cache'), '--dist-cache'],
-                env={**os.environ, 'GITHUB_ACTIONS': 'true', 'RUNNER_TEMP': str(root),
+                env={**os.environ, 'PINVOU_CI_RUST_MIRROR': 'official', 'GITHUB_ACTIONS': 'true', 'RUNNER_TEMP': str(root),
                      'GITHUB_ENV': str(environment), 'NO_PROXY': 'example.invalid'},
                 capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -122,6 +122,20 @@ class NetworkEnvironmentTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('RUSTUP_DIST_SERVER=https://static.rust-lang.org\n', environment.read_text())
             self.assertEqual((rustup / 'sentinel').read_bytes(), b'installed-toolchain')
+
+    @unittest.skipUnless(__import__('sys').platform == 'linux', 'Linux self-hosted mirror policy')
+    def test_linux_self_hosted_default_selects_domestic_source_and_keeps_locked_origin_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); cargo = root / 'cargo'
+            env = {key: value for key, value in os.environ.items() if key != 'PINVOU_CI_RUST_MIRROR'}
+            result = subprocess.run([__import__('sys').executable,
+                str(Path(__file__).parents[1] / 'ci-network-environment.py'),
+                '--cargo-home', str(cargo), '--cache', str(root / 'cache')],
+                env={**env, 'RUNNER_ENVIRONMENT': 'self-hosted', 'GITHUB_ACTIONS': 'false',
+                     'GITHUB_ENV': str(root / 'github-env')}, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('PINVOU_CI_CARGO_SOURCE=rsproxy', (root / 'github-env').read_text())
+            self.assertIn('sparse+https://rsproxy.cn/index/', (cargo / 'config.toml').read_text())
 
     def test_only_known_mirror_is_removed_and_every_other_setting_survives(self):
         with tempfile.TemporaryDirectory() as directory:

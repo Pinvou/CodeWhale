@@ -1,5 +1,5 @@
 'use strict';
-// Only the cache action sees portable aliases. Each container still owns its
+// Compilation and caching use portable aliases. Each container still owns its
 // original toolchain/cache directories; no mutable home is shared across jobs.
 const path = require('node:path');
 const os = require('node:os');
@@ -20,7 +20,8 @@ function prepare(env = process.env, base = '/tmp/pinvou-rust-cache-v1') {
   // Normalize only our known compiler wrapper. Forward to its real pathname so
   // its argv[0], sibling lookups and any future path-dependent behavior survive.
   const wrapper = path.join(root, 'pinvou3-app/src-tauri/scripts/rustc-stack-wrapper');
-  const knownWrapper = env.RUSTC_WRAPPER === wrapper && fs.statSync(wrapper).isFile();
+  const knownWrapper = (env.RUSTC_WRAPPER === wrapper || env.RUSTC_WRAPPER === path.join(base, 'rustc-stack-wrapper'))
+    && fs.existsSync(wrapper) && fs.statSync(wrapper).isFile();
   if (knownWrapper && isolated) {
     aliases.wrapper = path.join(base, 'rustc-stack-wrapper');
   }
@@ -95,6 +96,12 @@ if (require.main === module) {
   const values = prepare();
   for (const [key, value] of Object.entries(values)) {
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `${key}<<PINVOU_CACHE_EOF\n${value}\nPINVOU_CACHE_EOF\n`);
+  }
+  if (values.portable === 'true') {
+    for (const [key, value] of Object.entries({ CARGO_HOME: values['cargo-home'], RUSTUP_HOME: values['rustup-home'],
+      ...(values['wrapper-sha256'] ? { RUSTC_WRAPPER: values['rustc-wrapper'] } : {}) })) {
+      fs.appendFileSync(process.env.GITHUB_ENV, `${key}=${value}\n`);
+    }
   }
   console.log(`[ci-rust-cache] portable=${values.portable}; instance-owned homes preserved`);
 }

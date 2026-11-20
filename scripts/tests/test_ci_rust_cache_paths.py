@@ -99,6 +99,11 @@ class RustCachePathsTests(unittest.TestCase):
             two = json.loads(self.prepare(root, RUSTC_WRAPPER=str(wrapper)).stdout)
             self.assertEqual(one['rustc-wrapper'], two['rustc-wrapper'])
             self.assertNotEqual(one['wrapper-sha256'], two['wrapper-sha256'])
+            # A later cache probe/restore sees the exported alias, not the old
+            # instance pathname. Its compatibility identity must stay equal.
+            three = json.loads(self.prepare(root, RUSTC_WRAPPER=two['rustc-wrapper'],
+                               CARGO_HOME=two['cargo-home'], RUSTUP_HOME=two['rustup-home']).stdout)
+            self.assertEqual(two, three)
 
     def test_private_cargo_build_configuration_is_not_lost_when_homes_are_normalized(self):
         with tempfile.TemporaryDirectory() as directory:
