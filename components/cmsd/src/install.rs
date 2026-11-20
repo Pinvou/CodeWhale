@@ -17,6 +17,7 @@
 
 use crate::app::{api_err, log_line, ApiErr, App};
 use crate::json::Value;
+use crate::redact::redact_text;
 use crate::shop::{StoreClient, StoreErr};
 use std::path::Path;
 use std::sync::Arc;
