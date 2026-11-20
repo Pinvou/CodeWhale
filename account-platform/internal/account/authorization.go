@@ -17,6 +17,9 @@ import (
 )
 
 const (
+	PermissionCommerceRepairsRead           = "platform.commerce.repairs.read"
+	PermissionCommerceRepairsRequest        = "platform.commerce.repairs.request"
+	PermissionCommerceRepairsApprove        = "platform.commerce.repairs.approve"
 	PermissionPlatformAuditRead             = "platform.audit.read"
 	PermissionPlatformAuditExport           = "platform.audit.export"
 	PermissionPlatformAuditPIIExport        = "platform.audit.pii.export"

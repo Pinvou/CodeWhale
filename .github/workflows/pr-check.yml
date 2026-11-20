@@ -2525,12 +2525,12 @@ jobs:
           # Fixed actor names are exclusive to this ephemeral service. Keep
           # package execution serial and run only the bounded audit fixtures.
           go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/accountschema -run '^Test(AuditExport(RollbackRoleStorageGuard|PublicDownRetainsOriginalHistory|GuardedRollbackTransactions)|Account039RollbackInventoryPostgres|MembershipInvitationLegacyRollbackPublicPostgres)$' | tee "$RUNNER_TEMP/f17-audit-schema.jsonl"
-          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/account -run '^TestAuditExportPersistedBoundaries$' | tee "$RUNNER_TEMP/f17-audit-account.jsonl"
+          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/account -run '^Test(AuditExportPersistedBoundaries|CommerceSyncLifecycleFence)$' | tee "$RUNNER_TEMP/f17-audit-account.jsonl"
           python3 - "$RUNNER_TEMP/f17-audit-schema.jsonl" "$RUNNER_TEMP/f17-audit-account.jsonl" <<'PY'
           import json, pathlib, sys
           expected = [
               {"TestAuditExportRollbackRoleStorageGuard", "TestAuditExportPublicDownRetainsOriginalHistory", "TestAuditExportGuardedRollbackTransactions", "TestAccount039RollbackInventoryPostgres", "TestMembershipInvitationLegacyRollbackPublicPostgres"},
-              {"TestAuditExportPersistedBoundaries"},
+              {"TestAuditExportPersistedBoundaries", "TestCommerceSyncLifecycleFence"},
           ]
           for filename, required in zip(sys.argv[1:], expected, strict=True):
               events = [json.loads(line) for line in pathlib.Path(filename).read_text().splitlines() if line.strip()]
@@ -2539,6 +2539,10 @@ jobs:
               assert all(event["Action"] == "pass" for event in terminal), "finite PostgreSQL tests failed or skipped"
               roots = {event["Test"] for event in terminal if "/" not in event["Test"]}
               assert roots == required, "required finite PostgreSQL test selection did not execute"
+              commerce = "TestCommerceSyncLifecycleFence"
+              if commerce in required:
+                  cases = {event["Test"].removeprefix(commerce + "/") for event in terminal if event["Test"].startswith(commerce + "/")}
+                  assert cases == {"current_generation_completes", "stale_pending_not_claimed", "late_completion_rejects_old_lifecycle_without_effects", "late_retry_cannot_write_new_lifecycle_mapping", "mapping_version_drift_records_stale_in_same_lifecycle", "temporary_disable_preserves_same_generation_retry"}, "Commerce lifecycle cases did not execute"
               history = "TestAuditExportPublicDownRetainsOriginalHistory"
               if history in required:
                   prefix = history + "/"

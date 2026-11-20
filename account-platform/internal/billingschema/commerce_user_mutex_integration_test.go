@@ -81,6 +81,15 @@ func TestF02CommerceClaimWaitStartsFreshLease(t *testing.T) {
 	}
 	for _, locked := range []string{"user", "mapping"} {
 		t.Run(locked, func(t *testing.T) {
+			// Each freshness probe starts a genuinely new producer generation.
+			// An expired previous call is no longer automatically redispatched.
+			adapterVersion := locked + "-wait"
+			if err = r.ConfigureCommerceProvider("controlled-commerce", adapterVersion); err != nil {
+				t.Fatal(err)
+			}
+			if err = r.EnsureCommerceProviderMappings(ctx); err != nil {
+				t.Fatal(err)
+			}
 			gate, err := c.Begin(ctx)
 			if err != nil {
 				t.Fatal(err)
@@ -101,7 +110,7 @@ func TestF02CommerceClaimWaitStartsFreshLease(t *testing.T) {
 			}
 			done := make(chan response, 1)
 			go func() {
-				j, e := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", "v1", 200*time.Millisecond)
+				j, e := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", adapterVersion, 200*time.Millisecond)
 				done <- response{j, e}
 			}()
 			wait(func() bool {
@@ -136,7 +145,13 @@ func TestF02CommerceClaimWaitStartsFreshLease(t *testing.T) {
 		})
 	}
 	// Both original public paths now wait in the same mapping-before-job order.
-	old, err := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", "v1", 200*time.Millisecond)
+	if err = r.ConfigureCommerceProvider("controlled-commerce", "callback-wait"); err != nil {
+		t.Fatal(err)
+	}
+	if err = r.EnsureCommerceProviderMappings(ctx); err != nil {
+		t.Fatal(err)
+	}
+	old, err := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", "callback-wait", 200*time.Millisecond)
 	if err != nil || old == nil {
 		t.Fatal("old lease", err)
 	}
@@ -161,7 +176,7 @@ func TestF02CommerceClaimWaitStartsFreshLease(t *testing.T) {
 	}()
 	claimed := make(chan error, 1)
 	go func() {
-		j, e := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", "v1", time.Minute)
+		j, e := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", "callback-wait", time.Minute)
 		if e == nil && j == nil {
 			e = account.ErrConflict
 		}
@@ -197,8 +212,12 @@ func TestF02CommerceClaimWaitStartsFreshLease(t *testing.T) {
 	if err = <-complete; err != account.ErrConflict {
 		t.Fatal("expired callback authority", err)
 	}
-	if err = <-claimed; err != nil {
-		t.Fatal("claim/callback same-order progress", err)
+	if err = <-claimed; err != account.ErrConflict {
+		t.Fatal("unknown claim/callback same-order quarantine", err)
+	}
+	var cases int
+	if err = c.QueryRow(ctx, `SELECT count(*) FROM commerce_customer_repair_cases WHERE job_id=$1 AND attempts=$2 AND status='OPEN'`, old.ID, old.Attempts).Scan(&cases); err != nil || cases != 1 {
+		t.Fatal("expired original lacks one manual case", cases, err)
 	}
 }
 
