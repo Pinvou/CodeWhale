@@ -2296,6 +2296,68 @@ impl ModelManager {
     /// 服务的是部署/启用/停用/卸载，**没有一个走 root**，所以
     /// `may_run_as_root` 判定不到它头上；真要按 root 那档要求哈希，用户手上那
     /// 些老模型会连卸载都卸不掉，几百 GB 从任何界面都回收不了。
+    /// r43 P1-3：老库内置卡的一次性迁移（应用启动时跑，幂等）。
+    ///
+    /// 背景：2026-09-30 之前内置测试商店卡片由 `refresh_builtin_cards` 在启动时把
+    /// 二进制内嵌脚本固化进 `scripts_content_json`；测试商店整体移除后该兜底消失，
+    /// 老设备直升级后可能留下 `card_source='builtin'` 且六类脚本缓存为空/半套的行
+    /// ——`local_scripts_source` 对空缓存回落到行内登记的本地路径，生产
+    /// `local_script_paths=false` 一律拒绝，运行中的老模型就此死锁：停用要脚本、
+    /// 更新脚本又要求先停用（`require_stopped_for_script_update`）。
+    ///
+    /// 迁移源=**旧版应用落在 `data_dir()/test_store_scripts/` 的文件**（老版启动时
+    /// 写盘的物料，应用自己的数据目录）。只按行内 `scripts` 登记的 URL 逐个读——
+    /// 路径先验证落在该应用私有目录内（行数据可能损坏，不放宽到任意路径），缺哪
+    /// 类补哪类（半套缓存只补缺），全套已在的行零成本跳过。文件已不存在的行保持
+    /// 原状（无源可迁）。附属资产在行上没有 URL 登记（老内置卡的资产不走行内
+    /// URL），无从迁移；停用/卸载只需六类入口脚本，死锁因此解除。
+    pub fn migrate_legacy_builtin_scripts() -> Vec<String> {
+        let mut migrated = Vec::new();
+        let Ok(rows) = db::list_store_models() else {
+            return migrated;
+        };
+        let base = config::data_dir().join("test_store_scripts");
+        for rec in rows {
+            if rec.card_source != "builtin" {
+                continue;
+            }
+            let mut scripts = rec.scripts_content.clone();
+            let mut filled = 0usize;
+            for (key, url) in &rec.scripts {
+                if scripts.contains_key(key) {
+                    continue;
+                }
+                let Some(url) = url else { continue };
+                let path = std::path::Path::new(url);
+                if !path.starts_with(&base) {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                scripts.insert(
+                    key.clone(),
+                    db::ScriptBlob {
+                        sha256: script_runner::sha256_hex(&content),
+                        content,
+                    },
+                );
+                filled += 1;
+            }
+            if filled == 0 {
+                continue;
+            }
+            if db::set_scripts_content(&rec.card_id, &scripts, &rec.assets_content).is_ok() {
+                eprintln!(
+                    "[model-store] 老库内置卡迁移：{} 补齐 {} 类脚本缓存（源=旧版落盘物料）",
+                    rec.card_name, filled
+                );
+                migrated.push(rec.card_name.clone());
+            }
+        }
+        migrated
+    }
+
     fn local_scripts_source(
         &self,
         rec: &db::StoreModelRecord,
@@ -6415,6 +6477,105 @@ exit 0
             card_source: "store",
         })
         .unwrap();
+    }
+
+    /// r43 P1-3：老库内置卡直升级回归。老行=card_source='builtin'、六类脚本 URL 指
+    /// 向旧版落盘物料、scripts_content 为空（半套形态另验）；迁移后脚本副本
+    /// 已固化、local_scripts_source 走 Local 分支——「停用要脚本 vs 更新要先停」
+    /// 的死锁就此解除。目录外的 URL 一律不读（行数据可能损坏）。
+    #[test]
+    fn legacy_builtin_row_migrates_from_disk_and_unblocks_local_source() {
+        // 跨模块环境锁：prefs 系测试用 paths::tests::ENV_LOCK 护 HOME，模型商店
+        // 用 config::ENV_TEST_LOCK——两把锁护同一个全局变量，谁都不知道对方在
+        // （config.rs 注释明载的已知缝隙）。本测试同时动 db 和 data_dir，把
+        // 两把都握住：先 paths 锁再 TempHome（无环——prefs 侧从不取我们这把）。
+        let _paths_lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _home = setup_temp_db();
+        let base = config::data_dir()
+            .join("test_store_scripts")
+            .join("legacy-card");
+        std::fs::create_dir_all(&base).unwrap();
+        let stop_body = "#!/bin/bash
+echo stopping legacy
+";
+        std::fs::write(base.join("stop.sh"), stop_body).unwrap();
+        std::fs::write(
+            base.join("uninstall.sh"),
+            "#!/bin/bash
+echo cleanup
+",
+        )
+        .unwrap();
+        // 目录外的诱饵：迁移绝不读。
+        let outside = config::data_dir().join("evil.sh");
+        std::fs::write(
+            &outside,
+            "#!/bin/bash
+echo pwned
+",
+        )
+        .unwrap();
+
+        let scripts = std::collections::BTreeMap::from([
+            (
+                "stop".to_string(),
+                Some(base.join("stop.sh").to_string_lossy().into_owned()),
+            ),
+            (
+                "uninstall".to_string(),
+                Some(base.join("uninstall.sh").to_string_lossy().into_owned()),
+            ),
+            // 目录外的登记：必须被拒。
+            (
+                "enable".to_string(),
+                Some(outside.to_string_lossy().into_owned()),
+            ),
+        ]);
+        db::add_store_model(db::AddStoreModelParams {
+            card_id: "legacy-builtin",
+            model_name: "legacy-builtin",
+            card_name: "Legacy Builtin",
+            org: None,
+            description: None,
+            engine_name: "vllm",
+            engine_version: None,
+            size_bytes: 1,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &scripts
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone().unwrap_or_default()))
+                .collect(),
+            status: "deployed",
+            profiles: &[],
+            deploy_topology: DeployTopology::Single,
+            card_source: "builtin",
+        })
+        .unwrap();
+
+        let migrated = ModelManager::migrate_legacy_builtin_scripts();
+        assert_eq!(migrated, vec!["Legacy Builtin".to_string()]);
+
+        let rec = db::get_store_model("legacy-builtin").unwrap().unwrap();
+        let stop_blob = rec.scripts_content.get("stop").expect("stop 已固化");
+        assert_eq!(stop_blob.content, stop_body);
+        assert!(rec.scripts_content.contains_key("uninstall"));
+        // 目录外登记不迁。
+        assert!(!rec.scripts_content.contains_key("enable"));
+        // 幂等：再跑一遍零迁移。
+        assert!(ModelManager::migrate_legacy_builtin_scripts().is_empty());
+
+        // 死锁解除的判据：local_scripts_source 不再走「本地 URL 被生产策略拒绝」
+        // 的 Remote 分支，而是 Local 副本分支。
+        let mgr = ModelManager::new(None, None);
+        let source = mgr.local_scripts_source(&rec).unwrap();
+        assert!(
+            matches!(source, ScriptsSource::Local { .. }),
+            "迁移后应走 Local 副本分支"
+        );
     }
 
     fn manager_with_models_dir(dir: &std::path::Path) -> ModelManager {

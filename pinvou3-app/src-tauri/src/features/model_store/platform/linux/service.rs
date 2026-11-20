@@ -1369,6 +1369,17 @@ pub fn create_api_key(card_id: String, label: Option<String>) -> Result<Value, S
 /// 同步跑而不是丢后台：这一步只是读一个登记文件、对着 `/proc` 核对几条记录再发信号，
 /// 代价是毫秒级；而放后台就会跟前端 `take` 抢时序，用户可能永远看不到那条提示。
 pub fn run_startup_cleanup(service: &Arc<ModelStoreService>) {
+    // r43 P1-3：老库内置卡一次性迁移必须先于孤儿清理——迁移后行才有脚本副本，
+    // 用户随后的停用/卸载不再撞「本地路径被拒」死锁。幂等：全套已补齐的行
+    // 零成本跳过；迁移失败不阻断启动（行保持原状，与迁移前行为一致）。
+    let migrated = ModelManager::migrate_legacy_builtin_scripts();
+    if !migrated.is_empty() {
+        eprintln!(
+            "[model-store] 老库内置卡迁移完成：{} 张（{}）",
+            migrated.len(),
+            migrated.join("、")
+        );
+    }
     let report = super::orphans::cleanup_on_startup();
     if report.is_empty() {
         return;
