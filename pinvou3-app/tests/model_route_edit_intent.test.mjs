@@ -5,9 +5,9 @@ import vm from 'node:vm';
 import { isModelRouteUnchanged, modelRouteSnapshot } from '../src/features/settings/model-route-intent.js';
 
 const source = fs.readFileSync(new URL('../src/features/settings/SettingsView.jsx', import.meta.url), 'utf8');
-const start = source.indexOf('      async function doSave() {');
+const start = source.indexOf('      function cloudCredentialAction() {');
 const end = source.indexOf('\n      // 视觉模型选择:', start);
-assert.ok(start >= 0 && end > start, 'the real model-form save handler must exist');
+assert.ok(start >= 0 && end > start, 'the real model-form save handler and credential-action helper must exist');
 const handler = source.slice(start, end);
 const route = {
   preset: 'openai_compatible', provider_kind: 'custom', vendor: '', endpoint_mode: '',
@@ -28,7 +28,8 @@ async function submit(original, changes = {}, {
     model: current.model, baseUrl: current.base_url,
     providerKind: current.provider_kind, vendor: current.vendor, endpointMode: current.endpoint_mode,
     storeRouteAtOpen: { existing, route: modelRouteSnapshot(original) }, isModelRouteUnchanged,
-    isLocalPreset: false, localKeyEnabled: false, apiKey: '', hasSavedKey: true,
+    isLocalPreset: false, isCodingPlan: false, noAuth: false, noAuthActive: false,
+    localKeyEnabled: false, apiKey: '', hasSavedKey: true,
     imageCapability: 'pinvou', visionModelId: '',
     setSavingModel() {}, setSaveError(error) { assert.equal(error, ''); }, onCancel() {},
     async onSave(value) { payload = value; },
