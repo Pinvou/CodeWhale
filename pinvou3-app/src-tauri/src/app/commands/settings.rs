@@ -1073,10 +1073,6 @@ pub(super) fn delete_model_if_matches_inner(
 /// 时的模型,想换在该会话的 chip 里切。
 #[tauri::command]
 pub async fn set_active_model(id: String, app: AppHandle) -> Result<(), String> {
-    let _ = app.emit(
-        "session:manual_model_selection",
-        serde_json::json!({"session_id":null}),
-    );
     // Round-51 review: same cross-process settings-lock rationale as
     // [`save_model`] — join the blocking transaction on a worker.
     join_blocking("set_active_model", {
@@ -1091,6 +1087,11 @@ pub async fn set_active_model(id: String, app: AppHandle) -> Result<(), String> 
         }
     })
     .await?;
+    // r10 P2-A：手动选择意图在事务成功后广播（失败不登记抑制状态）。
+    let _ = app.emit(
+        "session:manual_model_selection",
+        serde_json::json!({"session_id":null}),
+    );
     if let Some(model) = UserPrefs::load().model_by_id(&id) {
         crate::features::behavior_telemetry::track_model_selected(
             &app,

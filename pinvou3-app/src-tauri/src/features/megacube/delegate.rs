@@ -77,7 +77,7 @@ fn managed_by_cmsd(client: &Client, card_id: &str) -> Result<bool, String> {
 fn remember_ownership(card: &str) -> Result<(), String> {
     let binding = ownership_path(card)?;
     super::authority::remember_local_device()?;
-    crate::platform::filesystem::atomic_write_private_anchored(&binding, b"cmsd\n")
+    super::authority::write_receipt_if_changed(&binding)
         .map_err(|e| format!("ownership_persist_failed: {e}"))
 }
 

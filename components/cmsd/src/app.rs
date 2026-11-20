@@ -305,8 +305,10 @@ impl App {
 
     pub fn task_event(&self, task_id: &str, stage: &str, message: &str) {
         let mut guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        guard.state.task_event(task_id, stage, message);
-        guard.mark_dirty();
+        // r10 P2-C：触顶后丢弃的事件不再触发全量 serialize+双 fsync。
+        if guard.state.task_event(task_id, stage, message) {
+            guard.mark_dirty();
+        }
         // 事件不落盘也行，但落盘让 SSE 断线重连能补全；存盘失败不阻塞任务
         let _ = guard.save_if_dirty();
     }

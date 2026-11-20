@@ -369,13 +369,19 @@ fn reconcile_model(
             return;
         };
         if !m.lifecycle_owned {
-            m.status = if us.is_active() {
+            // r10 P2-C：观察路径先 diff 再标脏——状态与 PID 均未变化时
+            // 不做每 2s tick 的全量落盘。
+            let next_status = if us.is_active() {
                 ModelStatus::Running
             } else {
                 ModelStatus::Stopped
             };
-            m.main_pid = Some(us.main_pid).filter(|pid| *pid > 0);
-            guard.mark_dirty();
+            let next_pid = Some(us.main_pid).filter(|pid| *pid > 0);
+            if m.status != next_status || m.main_pid != next_pid {
+                m.status = next_status;
+                m.main_pid = next_pid;
+                guard.mark_dirty();
+            }
             return;
         }
         let prev_status = m.status;

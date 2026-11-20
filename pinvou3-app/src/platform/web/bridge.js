@@ -5748,8 +5748,9 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
    return deleted;
   }
   async function setActiveModel(id) {
-    if (typeof window.CustomEvent === 'function') window.dispatchEvent(new window.CustomEvent('pinvou:manual-model-selection', { detail: { sessionId: null } }));
     await invoke("set_active_model", { id: id });
+    // r10 P2-A：成功后广播（失败不登记）。
+    if (typeof window.CustomEvent === 'function') window.dispatchEvent(new window.CustomEvent('pinvou:manual-model-selection', { detail: { sessionId: null } }));
     await loadModels();
     await loadSettings();
     await loadEffectiveModelConfig();
@@ -5795,7 +5796,6 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
   // 切当前会话模型；草稿态只寄存到首条消息物化，不改全局默认。
   async function switchModelRef(sessionId, modelRef) {
     if (!modelRef || !modelRef.source) throw new Error("model selection is required");
-    if (typeof window.CustomEvent === 'function') window.dispatchEvent(new window.CustomEvent('pinvou:manual-model-selection', { detail: { sessionId: sessionId || null } }));
     if (!sessionId) {
       state.pendingDraftModelRef = modelRef;
       notify();
@@ -5810,6 +5810,8 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
     } else {
       throw new Error("unsupported model selection source");
     }
+    // r10 P2-A：切换成功后才广播手动选择意图（失败不登记抑制状态）。
+    if (typeof window.CustomEvent === 'function') window.dispatchEvent(new window.CustomEvent('pinvou:manual-model-selection', { detail: { sessionId: sessionId || null } }));
     await loadSessionModel(sessionId);
   }
   async function switchModel(sessionId, modelId, options) {

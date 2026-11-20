@@ -407,7 +407,9 @@ impl State {
     }
 
     /// 追加任务事件（带界：单任务 500 条，总量 100 个任务）。
-    pub fn task_event(&mut self, task_id: &str, stage: &str, message: &str) {
+    /// 返回 false 表示事件被丢弃（触顶且提示已落、或任务不存在），调用方
+    /// 据此跳过 mark_dirty，消除触顶后每行输出的零信息落盘（r10 P2-C）。
+    pub fn task_event(&mut self, task_id: &str, stage: &str, message: &str) -> bool {
         if let Some(t) = self.tasks.get_mut(task_id) {
             if t.events.len() < MAX_EVENTS_PER_TASK {
                 t.events.push(TaskEvent {
@@ -415,7 +417,9 @@ impl State {
                     stage: stage.to_string(),
                     message: bounded_text(message, 512),
                 });
-            } else if t.events.last().map(|e| e.stage.as_str()) != Some("events_capped") {
+                return true;
+            }
+            if t.events.last().map(|e| e.stage.as_str()) != Some("events_capped") {
                 // r9 P2-2：触顶静默丢事件会让 SSE 流「假死」（progress 仍更新
                 // 而事件静止）。落一条终结性提示，只落一次。
                 t.events.push(TaskEvent {
@@ -426,8 +430,10 @@ impl State {
                         MAX_EVENTS_PER_TASK
                     ),
                 });
+                return true;
             }
         }
+        false
     }
 
     pub fn prune_tasks(&mut self) {
@@ -831,6 +837,48 @@ impl StateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// r10 P2-A：触顶后恰好一条 events_capped，其后丢弃且返回 false。
+    #[test]
+    fn task_event_caps_once_then_reports_dropped() {
+        let mut state = sample_state();
+        state.tasks.clear();
+        state.tasks.insert(
+            "t".into(),
+            TaskRecord {
+                id: "t".into(),
+                kind: "enable".into(),
+                card: "c".into(),
+                status: TaskStatus::Running,
+                created_at: 0,
+                finished_at: None,
+                result: None,
+                error: None,
+                progress_done_bytes: None,
+                progress_total_bytes: None,
+                store_run_id: None,
+                store_context: None,
+                selection: None,
+                events: Vec::new(),
+            },
+        );
+        let task = state.tasks.get_mut("t").unwrap();
+        for i in 0..MAX_EVENTS_PER_TASK {
+            task.events.push(TaskEvent {
+                ts: i as u64,
+                stage: "s".into(),
+                message: format!("m{i}"),
+            });
+        }
+        assert!(state.task_event("t", "s", "over"));
+        let t = state.tasks.get("t").unwrap();
+        assert_eq!(t.events.len(), MAX_EVENTS_PER_TASK + 1);
+        assert_eq!(t.events.last().unwrap().stage, "events_capped");
+        assert!(!state.task_event("t", "s", "dropped"));
+        assert!(!state.task_event("t", "s", "dropped again"));
+        let t = state.tasks.get("t").unwrap();
+        assert_eq!(t.events.len(), MAX_EVENTS_PER_TASK + 1, "提示只落一次");
+    }
 
     #[test]
     fn legacy_discovery_does_not_gain_lifecycle_authority() {

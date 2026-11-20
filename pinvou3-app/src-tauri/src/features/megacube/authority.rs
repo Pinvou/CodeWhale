@@ -101,8 +101,21 @@ pub(super) fn remember_local_device() -> Result<(), String> {
     let path = crate::platform::paths::pinvou3_home()
         .join("megacube")
         .join(LOCAL_RECEIPT);
-    crate::platform::filesystem::atomic_write_private_anchored(&path, b"cmsd\n")
+    write_receipt_if_changed(&path)
         .map_err(|error| format!("device_record_failed: {error}"))
+}
+
+/// r10 P2-C：回执内容恒为常量 `cmsd\n`；5s 库轮询每 tick 逐卡重写会造成
+/// 纯写放大（每天数十万次 fsync 打同一块单板 flash）。内容相同则跳过，
+/// 原子性与权限语义不变。
+pub(super) fn write_receipt_if_changed(path: &std::path::Path) -> Result<(), String> {
+    const CONTENT: &[u8] = b"cmsd\n";
+    match std::fs::read(path) {
+        Ok(existing) if existing == CONTENT => return Ok(()),
+        _ => {}
+    }
+    crate::platform::filesystem::atomic_write_private_anchored(path, CONTENT)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

@@ -557,6 +557,21 @@ mod tests {
         Arc::new(App::new(cfg, store, systemd))
     }
 
+    /// r10 P2-A：终态守卫——已终态任务不被迟到的 task_finish 改写
+    /// （abandon 墓碑不被 mirror 覆盖为 Failed）。
+    #[test]
+    fn task_finish_does_not_overwrite_a_terminal_task() {
+        let root = tmpdir("terminal-guard");
+        let app = make_app(&root);
+        let id = app.task_create("enable", "c");
+        app.task_cancel(&id, "用户取消");
+        app.task_finish(&id, Err("mirror 迟到失败".into()));
+        let guard = app.store.lock().unwrap();
+        let t = guard.state.tasks.get(&id).unwrap();
+        assert_eq!(t.status, TaskStatus::Cancelled, "Cancelled 回执不被覆盖");
+        assert_eq!(t.result.as_deref(), Some("用户取消"));
+    }
+
     #[test]
     fn lost_install_recovery_requires_confirmation_and_receiver_proof() {
         use std::os::unix::net::UnixListener;
