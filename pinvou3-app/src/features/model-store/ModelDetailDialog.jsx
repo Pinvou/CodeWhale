@@ -371,7 +371,8 @@ function ModelDetailDialog({ cardId, card, copy, theme, onClose, onRedeploy, onT
             {record.endpoint_url ? <MsRow label={copy.detailEndpoint}>{record.endpoint_url}</MsRow> : null}
           </div>
 
-          {/* 只在服务器确实有新版脚本时才渲染更新入口——自动检测替代手动检查 */}
+          {/* 「检查更新」入口见下方 secondary 按钮区（非 builtin 卡恒可达，
+              自动徽章为主信号、手动为兜底——与正文 r42 修订后的描述一致）。 */}
 
 
           <div className="mt-5">

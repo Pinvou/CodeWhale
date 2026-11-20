@@ -537,14 +537,33 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     [copy, runLifecycle]
   );
 
-  const handleVersionAction = useCallback(async (record, action, versionId) => {
-    const result = await runLifecycle({ record, kind: `version_${action}`,
+  const executeVersionAction = useCallback(
+    (record, action, versionId, memoryConfirmed = false) => runLifecycle({ record, kind: `version_${action}`,
       title: copy.versionTask(record.card_name),
-      start: () => startVersionAction(record.card_id, action, versionId),
+      start: () => startVersionAction(record.card_id, action, versionId, memoryConfirmed),
       doneText: (outcome) => action === 'delete' ? copy.versionDeleted((outcome?.freed_bytes || 0) / 1024 ** 3) : (action === 'stage' ? copy.versionStaged : copy.versionSwitched),
-    });
-    return result;
-  }, [copy, runLifecycle]);
+    }),
+    [copy, runLifecycle]
+  );
+
+  const handleVersionAction = useCallback(async (record, action, versionId) => {
+    // r42 P1-1：switch 会走到 deploy（部署脚本可能自行启动运行时）——与
+    // 部署/启用同一把内存准入尺，需要确认时弹同一个确认框。预检只是 UX
+    // 尽力而为：失败不拦截（放行后由服务端同一准入给出规范报错），权威
+    // 门在 Rust 侧 start_version_action。
+    if (action === 'switch') {
+      try {
+        const admission = await fetchMemoryAdmission(record.card_id);
+        if (admission?.requires_confirmation) {
+          setMemoryConfirm({ record, admission, action: 'switch', versionId });
+          return;
+        }
+      } catch {
+        // 预检不可用（如测试桩未覆盖）：交给服务端准入。
+      }
+    }
+    return executeVersionAction(record, action, versionId, false);
+  }, [executeVersionAction]);
 
   const handleDeploy = useCallback(
     (record) => {
@@ -588,9 +607,10 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     setMemoryConfirm(null);
     if (pending?.record) {
       if (pending.action === 'deploy') await executeDeploy(pending.record, pending.profileId, true);
+      else if (pending.action === 'switch') await executeVersionAction(pending.record, 'switch', pending.versionId, true);
       else await startEnabledModel(pending.record, true);
     }
-  }, [executeDeploy, memoryConfirm, startEnabledModel]);
+  }, [executeDeploy, executeVersionAction, memoryConfirm, startEnabledModel]);
 
   const handleStop = useCallback(
     (record) => runLifecycle({

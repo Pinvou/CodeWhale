@@ -115,6 +115,7 @@ pub fn start_version_action(
     _card_id: String,
     _action: String,
     _version_id: String,
+    _memory_confirmed: bool,
 ) -> Result<Value, String> {
     nope()
 }

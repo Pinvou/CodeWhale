@@ -844,6 +844,7 @@ pub fn start_version_action(
     card_id: String,
     action: String,
     version_id: String,
+    memory_confirmed: bool,
 ) -> Result<Value, String> {
     let op = match action.as_str() {
         "stage" => CardOp {
@@ -860,9 +861,19 @@ pub fn start_version_action(
         },
         _ => return Err("不支持的版本操作".into()),
     };
+    // r42 P1-1：switch 的 deploy 臂可能与部署脚本一样自行启动运行时（同一
+    // 理由见 start_deploy_checked 的守卫注释）——必须走与 enable/deploy 同一
+    // 内存准入 + 启动槽位，否则版本切换成为绕过门禁的模型启动入口。
+    // stage/delete 不启动运行时，不占启动槽。guard 在 spawn_op 之前获取
+    // （锁序与 start_deploy_checked 一致：StartupGuard → ActiveCardOps），
+    // 并 move 进任务闭包持有全程。
+    let startup_guard = (action == "switch")
+        .then(|| prepare_model_start(&card_id, memory_confirmed))
+        .transpose()?;
     let card = card_id.clone();
     let queue = Arc::clone(&service.queue);
     spawn_op(service, &card_id, op, move |log, control, run_id| {
+        let _startup_guard = startup_guard;
         if action == "stage" {
             let ticket = queue.enqueue(run_id);
             while !queue.try_start(ticket, config::load_settings().max_concurrent_downloads()) {

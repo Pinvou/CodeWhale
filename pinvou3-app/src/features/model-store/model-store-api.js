@@ -348,4 +348,4 @@ export function fetchVersions(cardId, opts) {
   const measure = !!(opts && opts.measure);
   return invokeTauri("model_store_versions", measure ? { cardId, measure } : { cardId });
 }
-export function startVersionAction(cardId, action, versionId) { return invokeTauri("model_store_start_version_action", { cardId, action, versionId }); }
+export function startVersionAction(cardId, action, versionId, memoryConfirmed = false) { return invokeTauri("model_store_start_version_action", { cardId, action, versionId, memoryConfirmed: memoryConfirmed === true }); }

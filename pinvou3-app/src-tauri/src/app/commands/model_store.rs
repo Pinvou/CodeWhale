@@ -108,8 +108,9 @@ pub fn model_store_start_version_action(
     card_id: String,
     action: String,
     version_id: String,
+    memory_confirmed: bool,
 ) -> Result<Value, String> {
-    model_store::start_version_action(&service, card_id, action, version_id)
+    model_store::start_version_action(&service, card_id, action, version_id, memory_confirmed)
 }
 
 #[tauri::command]
