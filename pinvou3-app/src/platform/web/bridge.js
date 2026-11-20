@@ -5825,9 +5825,9 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
       await loadSessionModel(sessionId);
     }
   }
-  async function testModelConnection(baseUrl, apiKey, modelId) {
-    return await invoke("test_model_connection", { baseUrl: baseUrl, apiKey: apiKey, modelId: modelId || null });
-  }
+  // r11 walk-in ruling 3: delete the old 3-parameter declaration of the same name
+  // (JS same-name hoisting with the later definition taking effect——it is dead code, and keeping it
+  // would make one mistakenly think the invoke version is still effective).
 async function testModelConnection(baseUrl, apiKey, modelId, noAuth) { return pinvouSharedweb().testModelConnection(baseUrl, apiKey, modelId, noAuth); }
   // 测试图片输入能力(设计 §7.3):用当前表单的 model/base_url/key 发一张内置纯色图,
   // 仅由模型编辑弹窗主动点击触发,无任何启动/定时自动测试。

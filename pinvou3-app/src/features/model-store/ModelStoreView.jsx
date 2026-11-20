@@ -174,6 +174,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
   const cardsTokenRef = useRef(0);
   const libraryTokenRef = useRef(0);
   const libraryInFlight = useRef(0);
+  const linkSyncErrorRef = useRef(null);
 
   const showToast = useCallback((text) => {
     setToast({ text });
@@ -242,7 +243,17 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       // MegaCube 管理面融合纠正单独提示：事实源是 cmsd 实况而非容器探测
       const cmsdCorrected = libraryList?.cmsd_corrected ?? [];
       if (cmsdCorrected.length > 0) showToast(copy.cmsdCorrected(cmsdCorrected[0]));
-      if (libraryList?.link_sync_error) showToast(copy.linkSyncFailed(libraryList.link_sync_error));
+      // r11 P2-11：持久 link_sync_error 在 5s 轮询下每轮重弹同一条 toast，
+      // 故障持续时无法关闭。轮询路径按错误文本去重（仅弹一次）。
+      if (libraryList?.link_sync_error) {
+        const message = String(libraryList.link_sync_error);
+        if (!quiet || linkSyncErrorRef.current !== message) {
+          linkSyncErrorRef.current = message;
+          showToast(copy.linkSyncFailed(libraryList.link_sync_error));
+        }
+      } else {
+        linkSyncErrorRef.current = null;
+      }
     } catch (error) {
       if (!stale()) setLibraryError(String(error?.message || error));
     } finally {

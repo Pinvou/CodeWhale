@@ -1075,8 +1075,20 @@ async fn switch_idle_session_model_cas_arms_are_enforced() {
     );
 
     // 无会话模型时走默认模型期望臂：与临时 home 的空默认失配同样拒绝。
+    // r11 P2-9：此臂此前用带显式模型的会话构造，第一条件恒真、默认比较
+    // 从未执行——补真正无会话模型（create_new(..., None, ...)）的两臂。
+    let no_model_session = store
+        .create_new(
+            "fixture-model".into(),
+            None,
+            home.directory.path().to_path_buf(),
+        )
+        .unwrap();
+    let no_model_id = no_model_session.metadata.id.clone();
+    assert_eq!(store.session_model_id(&no_model_id), None);
+    // 临时 home 的全局默认为 None：期望 Some("m-default") 失配拒绝。
     let stale_default = core(
-        &session_id,
+        &no_model_id,
         Some("m-new".into()),
         None,
         Some("m-default".into()),
@@ -1086,6 +1098,24 @@ async fn switch_idle_session_model_cas_arms_are_enforced() {
         matches!(&stale_default, Err(error) if error.to_string() == "session_model_changed"),
         "stale default expectation must be rejected, got {:?}",
         stale_default.map_err(|error| error.to_string())
+    );
+    // 期望 None 命中：默认指针按实际值传入（临时 home 可能种子了内置
+    // 默认模型，读实际值而不是假设 None）——默认臂的唯一允许写入路径。
+    let actual_default = crate::platform::prefs::UserPrefs::load()
+        .advanced
+        .active_model_id;
+    let default_applied = core(
+        &no_model_id,
+        Some("m-handoff".into()),
+        None,
+        actual_default.clone(),
+    )
+    .await;
+    assert!(default_applied.is_ok(), "matching default expectation must apply: {:?}",
+        default_applied.map_err(|error| error.to_string()));
+    assert_eq!(
+        store.session_model_id(&no_model_id).as_deref(),
+        Some("m-handoff")
     );
 
     // 已删除会话：持久化 handoff 不得复活被删除的对话。

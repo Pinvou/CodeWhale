@@ -210,6 +210,12 @@ def open_url(url, credential_env=None, headers=None, method=None, body=None, *, 
     if credential_env:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", credential_env):
             raise ToolError("INVALID_CREDENTIAL_REF", "凭据引用必须是环境变量名，不能传 Token 本身。")
+        # r11 P2-3：命名空间白名单——被注入的模型可指定本机任意密钥环境
+        # 变量作 Bearer 发往任意 https URL；仅允许项目前缀。
+        if not (credential_env.startswith(("PINVOU3_", "MEGACUBE_"))
+                or credential_env in ("LMM_HF_TOKEN", "HF_TOKEN")):
+            raise ToolError("INVALID_CREDENTIAL_REF",
+                            "凭据环境变量必须在 PINVOU3_/MEGACUBE_ 命名空间（或 HF 令牌）内。")
         token = os.environ.get(credential_env)
         if not token:
             raise ToolError("AUTH_REQUIRED", "凭据环境变量未设置；请使用安全凭据配置或已有终端工具。")

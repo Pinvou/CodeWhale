@@ -359,6 +359,13 @@ fn reconcile_model(
     if crate::recovery::owns(app, card) {
         return;
     }
+    // r11 P1-1：start_limit_hit 在 failed 态会跑 journalctl 子进程（上限
+    // 10s）——它只依赖单元名与 UnitState，不依赖锁内状态，必须在取锁前
+    // 算好，否则任一受管单元 failed 时每 2s tick 持全局 store 互斥阻塞
+    // 全部 API/网关/install。
+    let start_limit_hit = app
+        .systemd
+        .start_limit_hit(&app.systemd.unit_name_for(card), us);
     // 绕开管理面停（手动关闭）的判定要在持锁改状态之前算好（disable 要在锁外做）
     let mut manual_stop = false;
     // 刚转 degraded 时锁外补一句预算复核（恢复集超内存的可见性，语义边界 2）
@@ -389,10 +396,7 @@ fn reconcile_model(
         let prev_pid = m.main_pid;
 
         // 熔断识别优先（D4：转 degraded 不再拉起，留痕）
-        if app
-            .systemd
-            .start_limit_hit(&app.systemd.unit_name_for(card), us)
-        {
+        if start_limit_hit {
             if m.status != ModelStatus::Degraded {
                 m.status = ModelStatus::Degraded;
                 m.degraded_reason = Some(format!(

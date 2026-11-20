@@ -356,6 +356,22 @@ def _valid_repo(value):
 
 
 _MAX_FETCH_BYTES = 16 * 1024 * 1024
+_FETCH_ALLOWED_SCHEMES = ("http", "https")
+
+
+def _fetch_redirect_target(current, location):
+    """r11 P1-2：重定向目标校验——只允许 http(s)，拒绝 file:/data: 等跨
+    scheme（裸 urlopen 的默认 opener 含 FileHandler，`Location: file:///`
+    可读本地文件并把片段反射进工具输出）。与 megacube_tools.state 的
+    RedirectHandler 同口径；不降级 https。
+    """
+    target = urllib.parse.urljoin(current, location)
+    scheme = urllib.parse.urlsplit(target).scheme
+    if scheme not in _FETCH_ALLOWED_SCHEMES:
+        raise _NetError("重定向目标不是 http(s)（%s:），已拒绝。" % (scheme or "无"))
+    if urllib.parse.urlsplit(current).scheme == "https" and scheme != "https":
+        raise _NetError("拒绝 HTTPS 降级重定向。")
+    return target
 
 
 def _fetch(url, timeout=HTTP_TIMEOUT_S):
@@ -379,7 +395,7 @@ def _fetch(url, timeout=HTTP_TIMEOUT_S):
         except urllib.error.HTTPError as e:
             location = e.headers.get("Location") if e.headers else None
             if e.code in (301, 302, 303, 307, 308) and location:
-                current = urllib.parse.urljoin(current, location)
+                current = _fetch_redirect_target(current, location)
                 continue
             try:
                 # r8 P2-3：错误分支同样有界（原 OOM 面保留在此）。
@@ -2638,8 +2654,10 @@ def _tool_set_default(args):
 
 def _tool_switch(args):
     card = (args.get("card") or "").strip()
-    if not card:
-        return {"summary": "缺少参数 card（目标卡片名）。", "data": None, "next": "先调 cube_list_models 拿卡片名。"}
+    # r11 P2-2：card 进 JSON body（POST 非 URL 路径），但仍与 start/stop/
+    # set_default 同口径过白名单——保持"统一 fullmatch"声明成立。
+    if not _valid_name(card):
+        return {"summary": "缺少或非法参数 card（目标卡片名）。", "data": None, "next": "先调 cube_list_models 拿卡片名。"}
     return _task_reply(_api_post("/v1/switch", {"target": card}), "切换到 %s " % card)
 
 
