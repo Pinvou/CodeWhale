@@ -237,7 +237,12 @@ func projectProviderHealth038FixtureOrder(ctx context.Context, tx pgx.Tx, orderI
 	if err := requireProviderHealth038Schema(ctx, tx); err != nil {
 		return PaymentOrder{}, err
 	}
+	return projectPrePrincipalFixtureOrder(ctx, tx, orderID, now)
+}
 
+// Frozen projection from before 900044. Only callers that have first checked
+// their exact historical schema may use it.
+func projectPrePrincipalFixtureOrder(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, now time.Time) (PaymentOrder, error) {
 	_, err := tx.Exec(ctx, `WITH facts AS (
 SELECT count(*) FILTER (WHERE status IN ('PAID','LATE_PAID')) paid_count,
        COALESCE(sum(amount_fen) FILTER (WHERE status IN ('PAID','LATE_PAID')),0) paid_amount_fen,

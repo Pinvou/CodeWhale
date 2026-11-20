@@ -12,7 +12,7 @@ import (
 )
 
 func TestOrganizationChargebackDeletionEvidencePostgres(t *testing.T) {
-	for _, scenario := range []string{"dismissed", "open", "claimed", "confirmed", "confirmed-without-ledger", "confirmed-legacy-version-one", "confirmed-legacy-no-ledger", "confirmed-legacy-version-one-modern-anomaly", "confirmed-contradictory-disposition", "confirmed-review-open", "confirmed-review-financial-pending", "confirmed-without-receipt", "confirmed-corrupt-receipt", "confirmed-misbound-anomaly", "confirmed-manual-review-open", "confirmed-receipt-owner-mismatch", "dismissed-without-receipt", "dismissed-corrupt-receipt", "dismissed-with-revocation", "dismissed-with-pending-financial-action", "legacy-resolved", "balance-remains", "hold-remains", "receivable-remains", "dismissed-with-journal", "confirmed-open-receivable"} {
+	for _, scenario := range []string{"dismissed", "open", "claimed", "confirmed", "confirmed-without-ledger", "confirmed-legacy-version-one", "confirmed-legacy-no-ledger", "confirmed-legacy-late-full-principal", "confirmed-legacy-late-partial-principal", "confirmed-legacy-version-one-modern-anomaly", "confirmed-contradictory-disposition", "confirmed-review-open", "confirmed-review-financial-pending", "confirmed-without-receipt", "confirmed-corrupt-receipt", "confirmed-misbound-anomaly", "confirmed-manual-review-open", "confirmed-receipt-owner-mismatch", "dismissed-without-receipt", "dismissed-corrupt-receipt", "dismissed-with-revocation", "dismissed-with-pending-financial-action", "legacy-resolved", "balance-remains", "hold-remains", "receivable-remains", "dismissed-with-journal", "confirmed-open-receivable"} {
 		t.Run(scenario, func(t *testing.T) {
 			r, ctx := retainedFinanceRepository(t)
 			_, order, transaction, pack := retainedOrganizationFinanceOrder(t, r, ctx, 1000000, true)
@@ -81,7 +81,7 @@ func TestOrganizationChargebackDeletionEvidencePostgres(t *testing.T) {
 			switch scenario {
 			case "confirmed-contradictory-disposition":
 				fault(`UPDATE chargeback_cases SET resolution_code='DISMISS' WHERE id=$1`, item.ID)
-			case "confirmed-legacy-version-one", "confirmed-legacy-no-ledger":
+			case "confirmed-legacy-version-one", "confirmed-legacy-no-ledger", "confirmed-legacy-late-full-principal", "confirmed-legacy-late-partial-principal":
 				// Synthetic retained pre-029 shape, not a migration or a modern
 				// pending review disguised by only resetting its version.
 				if _, err = retainedFinanceOwnerExec(t, r, ctx, `
@@ -99,6 +99,25 @@ ALTER TABLE manual_review_case_events ENABLE TRIGGER manual_review_case_events_i
 				if scenario == "confirmed-legacy-no-ledger" {
 					if _, err = retainedFinanceOwnerExec(t, r, ctx, `ALTER TABLE journal_entries DISABLE TRIGGER journal_entries_immutable; UPDATE journal_entries SET business_reference='controlled-corrupt-'||id::text WHERE entry_type='CHARGEBACK'; ALTER TABLE journal_entries ENABLE TRIGGER journal_entries_immutable`); err != nil {
 						t.Fatal(err)
+					}
+				}
+				if scenario == "confirmed-legacy-late-full-principal" || scenario == "confirmed-legacy-late-partial-principal" {
+					var reference string
+					if err := r.pool.QueryRow(ctx, `SELECT provider_transaction_id FROM payment_transactions WHERE id=$1`, transaction).Scan(&reference); err != nil {
+						t.Fatal(err)
+					}
+					wantReview := scenario == "confirmed-legacy-late-partial-principal"
+					amount := "100"
+					if wantReview {
+						amount = "40"
+					}
+					moneyBefore := principalMoneySnapshot(t, r, ctx)
+					got := principalSupplierHTTPFixture(t, ctx, r, transaction, item.ProviderChargebackID, amount, reference, "CNY")
+					replay := principalSupplierHTTPFixture(t, ctx, r, transaction, item.ProviderChargebackID, amount, reference, "CNY")
+					if got.ID != item.ID || got.Version != 2 || replay.Version != got.Version ||
+						got.CashPrincipal.ObservationCount != 1 || replay.CashPrincipal.ObservationCount != 1 ||
+						got.CashPrincipal.ManualReviewRequired != wantReview || moneyBefore != principalMoneySnapshot(t, r, ctx) {
+						t.Fatal("late evidence or replay changed the source, review fence, or retained funds")
 					}
 				}
 			case "confirmed-legacy-version-one-modern-anomaly":
@@ -183,7 +202,8 @@ ALTER TABLE manual_review_case_events ENABLE TRIGGER manual_review_case_events_i
 			if before != organizationChargebackRetainedFacts(t, r, ctx) {
 				t.Fatal("assessment changed financial or review evidence")
 			}
-			settled := scenario == "dismissed" || scenario == "confirmed" || scenario == "confirmed-legacy-version-one"
+			settled := scenario == "dismissed" || scenario == "confirmed" || scenario == "confirmed-legacy-version-one" ||
+				scenario == "confirmed-legacy-late-full-principal"
 			if settled {
 				if !a.Ready || len(a.Blockers) != 0 {
 					t.Fatalf("fully settled history blocked deletion: %+v", a)

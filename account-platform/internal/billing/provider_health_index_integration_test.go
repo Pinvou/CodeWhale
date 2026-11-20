@@ -246,12 +246,7 @@ func TestProviderHealthGlobalWindowIndexPostgres(t *testing.T) {
 				}
 			}
 			for n := 0; n < 5; n++ {
-				var order PaymentOrder
-				if scenario == "retained-upgrade" {
-					_, order, _, _ = providerHealth038FixtureOrder(t, r, ctx, 1000000, true)
-				} else {
-					_, order, _, _ = retainedFinanceOrder(t, r, ctx, 1000000, true)
-				}
+				_, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, true)
 				orders = append(orders, order)
 			}
 			if scenario == "retained-upgrade" {

@@ -171,7 +171,17 @@ func (p *PaymentCoordinator) mergeProviderObservationWithinTransaction(ctx conte
 // mergeSuccessfulPaymentWithinTransaction is the single convergence path used
 // by callbacks, queries and audited repairs. Every distinct provider money
 // movement owns its transaction and, when fulfilled, its own entitlement package.
+type paymentOrderProjection func(context.Context, pgx.Tx, uuid.UUID, time.Time) (PaymentOrder, error)
+
 func (p *PaymentCoordinator) mergeSuccessfulPaymentWithinTransaction(ctx context.Context, tx pgx.Tx, order PaymentOrder, evidenceType, evidenceKey string, payload []byte, provider ProviderOrder, repair bool, now time.Time) (PaymentOrder, uuid.UUID, error) {
+	project := p.paymentOrderProjection
+	if project == nil {
+		project = projectPaymentOrderWithinTransaction
+	}
+	return p.mergeSuccessfulPaymentWithProjection(ctx, tx, order, evidenceType, evidenceKey, payload, provider, repair, now, project)
+}
+
+func (p *PaymentCoordinator) mergeSuccessfulPaymentWithProjection(ctx context.Context, tx pgx.Tx, order PaymentOrder, evidenceType, evidenceKey string, payload []byte, provider ProviderOrder, repair bool, now time.Time, project paymentOrderProjection) (PaymentOrder, uuid.UUID, error) {
 	if provider.Status != "SUCCESS" || provider.ChannelTransactionID == nil || provider.PaidAt == nil {
 		return order, uuid.Nil, ErrConflict
 	}
@@ -250,7 +260,7 @@ FROM payment_transactions WHERE provider_transaction_id=$1 FOR NO KEY UPDATE`, *
 				return order, evidenceID, err
 			}
 		}
-		order, err = projectPaymentOrderWithinTransaction(ctx, tx, order.ID, now)
+		order, err = project(ctx, tx, order.ID, now)
 		return order, evidenceID, err
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -336,7 +346,7 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),$13,$14,$14,$14)`,
 	if err := reopenArchivedLatePaymentCase(ctx, tx, order.ID, now); err != nil {
 		return order, evidenceID, err
 	}
-	order, err = projectPaymentOrderWithinTransaction(ctx, tx, order.ID, now)
+	order, err = project(ctx, tx, order.ID, now)
 	return order, evidenceID, err
 }
 

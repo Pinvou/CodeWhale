@@ -38,11 +38,19 @@ func requirePreAdmissionFixtureSchema(ctx context.Context, q preAdmissionFixture
 }
 
 func mergeRetainedFixturePayment(ctx context.Context, tx pgx.Tx, p *PaymentCoordinator, order PaymentOrder, evidenceType, evidenceKey string, payload []byte, provider ProviderOrder, repair bool, now time.Time) (PaymentOrder, uuid.UUID, error) {
-	var current bool
-	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.payment_credit_attempts') IS NOT NULL`).Scan(&current); err != nil {
+	var current, hasPrincipal bool
+	var version int64
+	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.payment_credit_attempts') IS NOT NULL,
+ to_regclass('public.chargeback_cash_principals') IS NOT NULL,COALESCE(max(version),0)
+ FROM public.schema_migrations`).Scan(&current, &hasPrincipal, &version); err != nil {
 		return order, uuid.Nil, err
 	}
 	if current {
+		// The expiry carrier was deployed after admission and before principal.
+		// Keep the real current admission and money writes, and use its own projection.
+		if version == 900043 && !hasPrincipal {
+			return p.mergeSuccessfulPaymentWithProjection(ctx, tx, order, evidenceType, evidenceKey, payload, provider, repair, now, projectPrePrincipalFixtureOrder)
+		}
 		return p.mergeSuccessfulPaymentWithinTransaction(ctx, tx, order, evidenceType, evidenceKey, payload, provider, repair, now)
 	}
 	return p.mergePreAdmissionFixturePayment(ctx, tx, order, evidenceType, evidenceKey, payload, provider, repair, now)
@@ -121,7 +129,7 @@ FROM payment_transactions WHERE provider_transaction_id=$1 FOR NO KEY UPDATE`, *
 				return order, evidenceID, err
 			}
 		}
-		order, err = projectPaymentOrderWithinTransaction(ctx, tx, order.ID, now)
+		order, err = projectPrePrincipalFixtureOrder(ctx, tx, order.ID, now)
 		return order, evidenceID, err
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -184,7 +192,7 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),$13,$14,$14,$14)`,
 	if err := reopenArchivedLatePaymentCase(ctx, tx, order.ID, now); err != nil {
 		return order, evidenceID, err
 	}
-	order, err = projectPaymentOrderWithinTransaction(ctx, tx, order.ID, now)
+	order, err = projectPrePrincipalFixtureOrder(ctx, tx, order.ID, now)
 	return order, evidenceID, err
 }
 

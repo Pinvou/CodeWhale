@@ -755,7 +755,7 @@ func (p *PaymentCoordinator) auditedReconciliationFacts(ctx context.Context, q r
 		return nil, err
 	}
 	start, end := reconciliationBusinessDateRange(date)
-	facts, err := listFourWayFactsForProvider(ctx, q, run.Channel, start, end, run.ProviderID, run.ProviderVersion, providerRows)
+	facts, err := p.loadReconciliationFacts(ctx, q, run, start, end, providerRows)
 	if err != nil {
 		return nil, err
 	}

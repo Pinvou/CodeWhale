@@ -79,7 +79,7 @@ func principalRechargeWalletFixture(t *testing.T, ctx context.Context, r *Postgr
 	}
 	reference := uuid.NewString()
 	provider := &retainedFinancialProvider{result: ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Status: "SUCCESS", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, ChannelTransactionID: &reference, PaidAt: &now, ExternalCustomerKey: owner.String()}}
-	coordinator, err := NewPaymentCoordinatorWithProvider(r, provider, "test")
+	coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

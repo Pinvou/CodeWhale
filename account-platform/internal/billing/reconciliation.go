@@ -366,6 +366,15 @@ func (p *PaymentCoordinator) listFourWayReconciliationFacts(ctx context.Context,
 // the established strings.TrimSpace reference contract (including non-ASCII).
 const reconciliationReferenceTrimCharacters = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 
+type reconciliationFactsLoader func(context.Context, reconciliationQuerier, string, time.Time, time.Time, string, string, ...[]ProviderBillEntry) ([]ReconciliationInternalFact, error)
+
+func (p *PaymentCoordinator) loadReconciliationFacts(ctx context.Context, q reconciliationQuerier, run ReconciliationRun, start, end time.Time, rows []ProviderBillEntry) ([]ReconciliationInternalFact, error) {
+	if p.reconciliationFacts != nil {
+		return p.reconciliationFacts(ctx, q, run.Channel, start, end, run.ProviderID, run.ProviderVersion, rows)
+	}
+	return listFourWayFactsForProvider(ctx, q, run.Channel, start, end, run.ProviderID, run.ProviderVersion, rows)
+}
+
 func listFourWayFactsForProvider(ctx context.Context, querier reconciliationQuerier, channel string, start, end time.Time, providerID, providerVersion string, externalRows ...[]ProviderBillEntry) ([]ReconciliationInternalFact, error) {
 	var supplied []ProviderBillEntry
 	if len(externalRows) > 0 {
