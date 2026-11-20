@@ -55,6 +55,23 @@ pub fn canonicalize_schema(value: &mut Value) {
                 if INSTANCE_DATA_KEYS.contains(&k.as_str()) {
                     continue;
                 }
+                // A name→schema map: the keys are names, not keywords, so a
+                // property literally named `enum` is NOT instance data — its
+                // schema must still canonicalize (two schemas differing only
+                // in `properties.enum.required` order otherwise keep
+                // different bytes, regressing the cache-stability contract,
+                // review 5986025535). Walk each VALUE as a schema node; the
+                // map's own keys are sorted by the rebuild below.
+                if matches!(
+                    k.as_str(),
+                    "properties" | "patternProperties" | "$defs" | "definitions"
+                ) {
+                    if let Some(name_map) = v.as_object_mut() {
+                        for (_name, prop_schema) in name_map.iter_mut() {
+                            canonicalize_schema(prop_schema);
+                        }
+                    }
+                }
                 canonicalize_schema(v);
             }
             // Rebuild the map with sorted keys so serialization is deterministic.
@@ -124,6 +141,36 @@ mod tests {
             serde_json::to_string(&a).unwrap(),
             serde_json::to_string(&b).unwrap(),
             "logically equivalent schemas must produce identical bytes"
+        );
+    }
+
+    #[test]
+    fn property_named_enum_still_canonicalizes() {
+        // Review 5986025535 (P3): `enum` inside the properties map is a
+        // property NAME, not the instance-data keyword. The name-blind skip
+        // left such property schemas uncanonicalized, so two schemas
+        // differing only in `properties.enum.required` order kept different
+        // bytes. The map's values are walked as schema nodes; the
+        // literal-data exclusions stay at schema-node level.
+        let mut a = json!({
+            "type": "object",
+            "properties": {"enum": {"required": ["b", "a"], "type": "array"}}
+        });
+        let mut b = json!({
+            "type": "object",
+            "properties": {"enum": {"type": "array", "required": ["a", "b"]}}
+        });
+        canonicalize_schema(&mut a);
+        canonicalize_schema(&mut b);
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap(),
+            "schemas differing only in properties.enum.required order must match byte-for-byte"
+        );
+        assert_eq!(
+            a["properties"]["enum"]["required"],
+            json!(["a", "b"]),
+            "the property schema's required order is canonicalized"
         );
     }
 

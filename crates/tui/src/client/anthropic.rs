@@ -1528,6 +1528,58 @@ mod tests {
     }
 
     #[test]
+    fn keyword_named_property_reaches_the_native_lane_verbatim() {
+        // Review 5986025535: a property literally named `dependentSchemas`
+        // is a name in the properties map, not the keyword. The generic
+        // walk dispatched the name as the keyword, treated the property's
+        // schema as a dependency map, and pruned the enum literal's
+        // `required` into `{}` — the advertised enum changed and the
+        // original argument stopped validating. The literal must reach the
+        // native Messages wire byte-for-byte.
+        let mcp_like_tool = crate::models::Tool {
+            tool_type: None,
+            name: "mcp__inspector__deps".to_string(),
+            description: "deps probe".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "dependentSchemas": {"enum": [{"required": ["x"]}]}
+                }
+            }),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        };
+
+        let client = test_client();
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.tools = Some(vec![mcp_like_tool]);
+
+        let body = client.build_anthropic_body(&request, true);
+
+        let schema = &body["tools"][0]["input_schema"];
+        assert_eq!(
+            schema["properties"]["dependentSchemas"]["enum"],
+            json!([{"required": ["x"]}]),
+            "the enum literal under a keyword-shaped property name must ship verbatim: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(schema)
+            .expect("the shipped schema must compile");
+        assert!(
+            validator.is_valid(&json!({"dependentSchemas": {"required": ["x"]}})),
+            "the original enum-admitted argument must validate against the shipped schema: {schema}"
+        );
+        assert!(
+            !validator.is_valid(&json!({"dependentSchemas": {}})),
+            "the corruption-admitted value must stay rejected: {schema}"
+        );
+    }
+
+    #[test]
     fn object_valued_root_enum_reaches_the_native_lane_verbatim() {
         // Review 5911391551: discovered live MCP tools clone their
         // inputSchema into the catalog WITHOUT registry preprocessing, so

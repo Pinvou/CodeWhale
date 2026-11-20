@@ -119,6 +119,26 @@ fn sanitize_in_instance(schema: &mut Value, enclosing_properties: &[String]) {
                 // all-accepting `{}` — excluding an argument the original
                 // contract admitted and advertising a different one (review
                 // 5911391551).
+            } else if matches!(
+                key.as_str(),
+                "properties" | "patternProperties" | "$defs" | "definitions"
+            ) {
+                // A name→schema map: the keys route names and are never
+                // keywords. The generic walk dispatched a property
+                // literally named `dependentSchemas` as the keyword, treated
+                // its schema as a dependency map, walked the enum literal
+                // inside as schemas, and pruned the literal object's
+                // `required` into an all-accepting `{}` — reversing what
+                // the contract accepts (review 5986025535). Walk each VALUE
+                // as a schema node in its own right; the empty context
+                // matches the previous treatment of property subtrees.
+                if let Some(name_map) = v.as_object_mut() {
+                    for (_name, prop_schema) in name_map.iter_mut() {
+                        sanitize_in_instance(prop_schema, &[]);
+                    }
+                } else {
+                    sanitize_in_instance(v, &[]);
+                }
             } else {
                 sanitize_in_instance(v, &[]);
             }
@@ -1157,6 +1177,43 @@ mod tests {
         assert!(
             validator.is_valid(&json!({"confirm": true})),
             "the dependency must stay inactive without its trigger key: {schema}"
+        );
+    }
+
+    #[test]
+    fn keyword_named_property_schemas_are_walked_as_schemas_not_keyword_payloads() {
+        // Review 5986025535: a property literally named `dependentSchemas`
+        // is a NAME in the properties map, not the keyword. The generic walk
+        // dispatched the name as the keyword, treated the property's schema
+        // as a dependency map, walked the enum literal inside as schemas,
+        // and pruned the literal object's `required` into an all-accepting
+        // `{}` — the advertised enum changed from `[{"required": ["x"]}]`
+        // to `[{}]`, so the original argument stopped validating while `{}`
+        // started. The map keys must never be dispatched as keywords; each
+        // property schema is a schema node in its own right.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "dependentSchemas": {"enum": [{"required": ["x"]}]}
+            }
+        });
+        sanitize(&mut schema);
+        assert_eq!(
+            schema["properties"]["dependentSchemas"]["enum"],
+            json!([{"required": ["x"]}]),
+            "the enum literal under a keyword-shaped property name must stay verbatim: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the sanitized schema must compile");
+        assert!(
+            validator.is_valid(&json!({"dependentSchemas": {"required": ["x"]}})),
+            "the original enum-admitted argument must stay valid: {schema}"
+        );
+        assert!(
+            !validator.is_valid(&json!({"dependentSchemas": {}})),
+            "the corrupted-admission value must stay rejected: {schema}"
         );
     }
 
