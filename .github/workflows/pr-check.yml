@@ -2319,7 +2319,7 @@ jobs:
           printf '%s  %s\n' fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179 "$tools/helm.tar.gz" | sha256sum --check --strict
           tar -xzf "$tools/helm.tar.gz" -C "$tools" linux-amd64/helm
           python3 scripts/ci-download.py https://github.com/docker/compose/releases/download/v5.4.0/docker-compose-linux-x86_64 \
-            --output "$tools/docker-compose" --sha256 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be
+            --output "$tools/docker-compose" --sha256 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be --seconds 360
           printf '%s  %s\n' 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be "$tools/docker-compose" | sha256sum --check --strict
           chmod 0755 "$tools/docker-compose"
           # Test-only promtool; does not start or upgrade a Prometheus server.
