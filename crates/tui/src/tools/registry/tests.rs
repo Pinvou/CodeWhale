@@ -1724,3 +1724,302 @@ fn classic_truncation_footer_teaches_a_followable_retry() {
         "the classic truncation footer must keep naming the followable retrieval route"
     );
 }
+
+#[test]
+fn registered_apply_patch_schema_keeps_its_required_only_branch_groups() {
+    // The builtin apply_patch schema declares root properties beside
+    // `oneOf: [{required: [patch]}, {required: [replace]}, {required:
+    // [changes]}]` — required-only branches resolving against the
+    // ENCLOSING properties. Pruning those groups (the pre-context walk
+    // did) left `oneOf: [{}, {}, {}]`, whose every branch matches every
+    // instance: under exactly-one semantics the advertised builtin
+    // contract admits no instance at all, and the verbatim Messages lanes
+    // forwarded the damage verbatim (review 5885719142). The registry
+    // catalog must carry the intact branch groups instead.
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let registry = ToolRegistryBuilder::new().with_patch_tools().build(ctx);
+    let tools = registry.to_api_tools();
+    let patch = tools
+        .iter()
+        .find(|tool| tool.name == "apply_patch")
+        .expect("apply_patch registered");
+    assert_eq!(
+        patch.input_schema["oneOf"],
+        json!([
+            {"required": ["patch"]},
+            {"required": ["replace"]},
+            {"required": ["changes"]}
+        ]),
+        "the registered apply_patch union must keep every required-only branch: {}",
+        patch.input_schema
+    );
+    for field in ["patch", "replace", "changes"] {
+        assert!(
+            patch.input_schema["properties"].get(field).is_some(),
+            "every branch name stays declared at the root: {field}"
+        );
+    }
+}
+
+struct TypedRequiredOnlyUnionTool;
+
+#[async_trait::async_trait]
+impl ToolSpec for TypedRequiredOnlyUnionTool {
+    fn name(&self) -> &str {
+        "typed_union_probe"
+    }
+
+    fn description(&self) -> &str {
+        "typed required-only union fixture"
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "string"}
+            },
+            "oneOf": [
+                {"type": "object", "required": ["a"]},
+                {"type": "object", "required": ["b"]}
+            ]
+        })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+
+    async fn execute(
+        &self,
+        _input: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("ok"))
+    }
+}
+
+#[test]
+fn registered_typed_required_only_union_keeps_its_branch_groups() {
+    // A plugin-provided TYPED union — each branch carries its own
+    // `type: "object"` beside the required group — must survive the
+    // registry sanitize/canonicalize pass with its contract intact. The
+    // bare-object injection used to add a synthetic empty `properties`
+    // map that the pruner then read as the branch's own declaration, so
+    // both branches collapsed into identical all-accepting
+    // `{type: "object"}` schemas and the union admitted nothing (review
+    // 5910284697). Mirrors the untyped builtin pin above with the typed
+    // shape the builtin's untyped branches never exercised.
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let registry = ToolRegistryBuilder::new()
+        .with_tool(Arc::new(TypedRequiredOnlyUnionTool))
+        .build(ctx);
+    let tool = registry
+        .to_api_tools()
+        .into_iter()
+        .find(|tool| tool.name == "typed_union_probe")
+        .expect("typed union tool registered");
+    assert_eq!(
+        tool.input_schema["oneOf"],
+        json!([
+            {"type": "object", "required": ["a"]},
+            {"type": "object", "required": ["b"]}
+        ]),
+        "the registered typed union must keep every required group: {}",
+        tool.input_schema
+    );
+}
+
+struct OrderedEnumLiteralTool;
+
+#[async_trait::async_trait]
+impl ToolSpec for OrderedEnumLiteralTool {
+    fn name(&self) -> &str {
+        "ordered_enum_probe"
+    }
+
+    fn description(&self) -> &str {
+        "ordered enum literal fixture"
+    }
+
+    fn input_schema(&self) -> Value {
+        // A property deliberately named `required` beside an object-valued
+        // enum literal whose data array order matters (review 5915330170):
+        // the canonicalizer used to sort the literal's `["b","a"]` into
+        // `["a","b"]`, replacing the only permitted argument value.
+        json!({
+            "type": "object",
+            "properties": {
+                "required": {"type": "array", "items": {"type": "string"}}
+            },
+            "enum": [{"required": ["b", "a"]}]
+        })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+
+    async fn execute(
+        &self,
+        _input: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("ok"))
+    }
+}
+
+#[test]
+fn registered_enum_literal_data_survives_the_canonicalize_pass() {
+    // The registry pipeline is sanitize then canonicalize; the sanitizer's
+    // enum/const instance-data rule keeps the literal, and the canonicalizer
+    // must not descend into it either — the advertised schema through
+    // build_api_tools must carry the literal exactly as the plugin declared
+    // it, order included (review 5915330170).
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let registry = ToolRegistryBuilder::new()
+        .with_tool(Arc::new(OrderedEnumLiteralTool))
+        .build(ctx);
+    let tool = registry
+        .to_api_tools()
+        .into_iter()
+        .find(|tool| tool.name == "ordered_enum_probe")
+        .expect("ordered enum tool registered");
+    assert_eq!(
+        tool.input_schema["enum"],
+        json!([{"required": ["b", "a"]}]),
+        "the registered enum literal must keep its declared data order: {}",
+        tool.input_schema
+    );
+}
+
+struct KeywordNamedPropertyTool;
+
+#[async_trait::async_trait]
+impl ToolSpec for KeywordNamedPropertyTool {
+    fn name(&self) -> &str {
+        "keyword_named_probe"
+    }
+
+    fn description(&self) -> &str {
+        "keyword-shaped property name fixture"
+    }
+
+    fn input_schema(&self) -> Value {
+        // A property literally named `properties` whose schema carries an
+        // enum literal with order-sensitive data (reviews 5986731697 /
+        // 5986738054): the canonicalizer's value walk must be exclusive of
+        // the generic recursion, or the name re-dispatches as the keyword
+        // and the literal's `required` reorders.
+        json!({
+            "type": "object",
+            "properties": {
+                "properties": {"enum": [{"required": ["b", "a"]}]}
+            }
+        })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+
+    async fn execute(
+        &self,
+        _input: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("ok"))
+    }
+}
+
+struct DependencyTriggerNamedPropertiesTool;
+
+#[async_trait::async_trait]
+impl ToolSpec for DependencyTriggerNamedPropertiesTool {
+    fn name(&self) -> &str {
+        "dep_trigger_probe"
+    }
+
+    fn description(&self) -> &str {
+        "dependency trigger named properties fixture"
+    }
+
+    fn input_schema(&self) -> Value {
+        // Review 5987169388: `dependentSchemas` is a name→schema map whose
+        // keys are trigger names; a trigger literally named `properties`
+        // dispatched as the keyword and walked the dependency schema's
+        // const literal as a schema, reordering its `required`.
+        json!({
+            "type": "object",
+            "properties": {"properties": {}, "required": {}},
+            "dependentSchemas": {
+                "properties": {
+                    "const": {"properties": true, "required": ["b", "a"]}
+                }
+            }
+        })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+
+    async fn execute(
+        &self,
+        _input: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("ok"))
+    }
+}
+
+#[test]
+fn dependency_trigger_named_properties_literal_survives_the_registry_pipeline() {
+    // The registry pipeline is sanitize then canonicalize; both name-map
+    // aware walks must keep the dependency schema's const literal
+    // byte-for-byte through build_api_tools (review 5987169388).
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let registry = ToolRegistryBuilder::new()
+        .with_tool(Arc::new(DependencyTriggerNamedPropertiesTool))
+        .build(ctx);
+    let tool = registry
+        .to_api_tools()
+        .into_iter()
+        .find(|tool| tool.name == "dep_trigger_probe")
+        .expect("dependency trigger probe registered");
+    assert_eq!(
+        tool.input_schema["dependentSchemas"]["properties"]["const"],
+        json!({"properties": true, "required": ["b", "a"]}),
+        "the dependency schema's const literal must ship verbatim: {}",
+        tool.input_schema
+    );
+}
+
+#[test]
+fn keyword_named_property_literal_survives_the_registry_pipeline() {
+    // The registry pipeline is sanitize then canonicalize; the sanitizer's
+    // name-map branch and the canonicalizer's exclusive value walk must
+    // both keep the literal byte-for-byte through build_api_tools (reviews
+    // 5986731697 / 5986738054).
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let registry = ToolRegistryBuilder::new()
+        .with_tool(Arc::new(KeywordNamedPropertyTool))
+        .build(ctx);
+    let tool = registry
+        .to_api_tools()
+        .into_iter()
+        .find(|tool| tool.name == "keyword_named_probe")
+        .expect("keyword-named probe registered");
+    assert_eq!(
+        tool.input_schema["properties"]["properties"]["enum"],
+        json!([{"required": ["b", "a"]}]),
+        "the keyword-named property's enum literal must ship verbatim: {}",
+        tool.input_schema
+    );
+}
