@@ -22,6 +22,7 @@ LANES = FIN["OWNER_LANES"]
 # Map by phase identity: main's schema partition adds a phase without changing
 # the original root sets or shifting another lane's coverage requirement.
 REQUIRED = {
+    "owner-ledger": FIN["MIGRATIONS_REQUIRED"],
     "owner-account": FIN["ACCOUNT_REQUIRED"],
     "owner-wallet": FIN["OWNER_REQUIRED"],
     "owner-token-schema": FIN["TOKEN_SCHEMA_REQUIRED"],
@@ -186,7 +187,7 @@ def main():
             except Exception as error:
                 results.append({"lane": lane, "exit_code": -1, "error_class": type(error).__name__})
     summary = {"schema": 1, **plan, "seconds": time.monotonic() - started, "results": results,
-               "coverage": "all original owners roots across seven phases; race and required child-case gates unchanged"}
+               "coverage": "all declared owners roots and phases; race and required child-case gates unchanged"}
     # .json is reserved for resource ownership leases in this directory.
     (ledger / "owners-summary.txt").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print("Owners result: " + json.dumps(summary), flush=True)

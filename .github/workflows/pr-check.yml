@@ -2527,6 +2527,11 @@ jobs:
               assert all(event["Action"] == "pass" for event in terminal), "finite PostgreSQL tests failed or skipped"
               roots = {event["Test"] for event in terminal if "/" not in event["Test"]}
               assert roots == required, "required finite PostgreSQL test selection did not execute"
+              history = "TestAuditExportPublicDownRetainsOriginalHistory"
+              if history in required:
+                  prefix = history + "/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"three_scope_public_down", "three_scope_public_down/LF", "three_scope_public_down/CRLF", "unbound_public_down_forbids_incomplete_inverse", "expired_binding_public_down_retains_evidence", "public_governance_down_preserves_audit_history", "public_governance_down_preserves_audit_history/pinned_ledger_ignores_temp_shadow"}, "public rollback and pinned ledger cases did not execute"
               audit = "TestAuditExportPersistedBoundaries"
               if audit in required:
                   prefix = audit + "/generation_renews_and_recovers/"
