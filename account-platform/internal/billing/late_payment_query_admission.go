@@ -26,6 +26,13 @@ func (p *PaymentCoordinator) beginArchiveQueryObservation(ctx context.Context, o
 // facts. Losing this fence suppresses only their current admission projection.
 func (p *PaymentCoordinator) completeArchiveQueryObservation(ctx context.Context, order PaymentOrder, generation uuid.UUID, observation ProviderOrder, authoritative bool) error {
 	unpaid := authoritative && (observation.Status == "CLOSED" || observation.Status == "FAILED") && providerMatchesOrder(observation, order)
-	_, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET archive_query_authoritative_unpaid=$3 WHERE id=$1 AND archive_query_generation=$2`, order.ID, generation, unpaid)
+	if p.archiveQueryObservationCommit != nil {
+		return p.archiveQueryObservationCommit(ctx, order.ID, generation, unpaid)
+	}
+	return p.persistArchiveQueryObservation(ctx, order.ID, generation, unpaid)
+}
+
+func (p *PaymentCoordinator) persistArchiveQueryObservation(ctx context.Context, orderID, generation uuid.UUID, unpaid bool) error {
+	_, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET archive_query_authoritative_unpaid=$3 WHERE id=$1 AND archive_query_generation=$2`, orderID, generation, unpaid)
 	return err
 }

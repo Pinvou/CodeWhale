@@ -89,7 +89,12 @@ func (r *PostgresRepository) archiveLatePaymentReviewOnce(ctx context.Context, c
 		COALESCE(payment.archive_query_authoritative_unpaid IS TRUE AND $2>=final_archive_eligible_at AND last_successful_query_at>=final_archive_eligible_at AND last_authoritative_unpaid_at>=final_archive_eligible_at
 		AND NOT (payment.provider_capability_snapshot @> '{"authoritative_unpaid_terminal":false}'::jsonb)
 		AND NOT EXISTS(SELECT 1 FROM late_payment_review_cases frozen WHERE frozen.id=$1 AND frozen.provider_capability_snapshot @> '{"authoritative_unpaid_terminal":false}'::jsonb)
-		AND NOT EXISTS(SELECT 1 FROM late_payment_query_commands pending WHERE pending.case_id=$1 AND pending.completed_at IS NULL)
+		AND NOT EXISTS(SELECT 1 FROM late_payment_query_commands pending JOIN late_payment_query_generations binding ON binding.idempotency_key=pending.idempotency_key
+		 WHERE pending.case_id=$1 AND pending.completed_at IS NULL AND binding.generation=payment.archive_query_generation)
+		AND (NOT EXISTS(SELECT 1 FROM late_payment_query_commands pending WHERE pending.case_id=$1 AND pending.completed_at IS NULL)
+		 OR EXISTS(SELECT 1 FROM late_payment_query_commands completed JOIN late_payment_query_generations binding ON binding.idempotency_key=completed.idempotency_key
+		 WHERE completed.case_id=$1 AND completed.payment_order_id=payment.id AND binding.generation=payment.archive_query_generation
+		 AND completed.completed_at IS NOT NULL AND completed.result_snapshot IS NOT NULL))
 		AND NOT EXISTS(SELECT 1 FROM payment_transactions WHERE payment_order_id=payment.id AND status IN ('PAID','LATE_PAID','REVIEW_REQUIRED'))
 		AND NOT EXISTS(SELECT 1 FROM payment_evidence evidence WHERE evidence.payment_order_id=payment.id AND
             (evidence.merge_result='REVIEW_REQUIRED' OR

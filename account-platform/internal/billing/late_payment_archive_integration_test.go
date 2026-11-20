@@ -240,12 +240,36 @@ func TestLatePaymentArchiveCommandReplayPostgres(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		provider := &instructionCreateProvider{retainedFinancialProvider: &retainedFinancialProvider{result: ProviderOrder{
+			MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen,
+			Currency: order.Currency, ExternalCustomerKey: order.RequesterID.String(), ExternalSKU: order.ProviderSKU,
+			Status: "CLOSED", ProviderStatus: "PAY_CLOSED",
+		}}, authoritative: true}
+		coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		coordinator.now = r.now
+		order, err = coordinator.syncReviewedQueryCommand(ctx, order.ID, receipt.generation)
+		if err != nil {
+			t.Fatal("real accepted query failed", err)
+		}
+		var generation uuid.UUID
+		var unpaid bool
+		if err := r.pool.QueryRow(ctx, `SELECT archive_query_generation,archive_query_authoritative_unpaid FROM payment_orders WHERE id=$1`, order.ID).Scan(&generation, &unpaid); err != nil || generation != receipt.generation || !unpaid {
+			t.Fatal("query republished a different generation or failed to prove unpaid", err)
+		}
+		// Even after real authority exists, this exact current receipt is pending.
+		beforeCompletion := facts(t, item.ID)
+		call(t, item, actor.String(), "archive-"+uuid.NewString(), 409)
+		if beforeCompletion != facts(t, item.ID) {
+			t.Fatal("current pending rejection changed complete archive facts")
+		}
 		completed, err := r.CompleteLatePaymentQuery(ctx, item.ID, actor, queryKey, input, order, nil)
 		if err != nil || completed.State != "COMPLETED" {
 			t.Fatal("rejected archive prevented original query completion", err)
 		}
-		// Completing an accepted review removes only the in-flight obstacle;
-		// this controlled fixture still supplies its original authority facts.
+		// The exact accepted receipt now accompanies the real producer's proof.
 		call(t, item, actor.String(), "archive-"+uuid.NewString(), 200)
 	})
 	t.Run("archive-sql-cancellation-retains-database-error-not-business-conflict", func(t *testing.T) {
@@ -443,6 +467,38 @@ func TestLatePaymentArchiveCommandReplayPostgres(t *testing.T) {
 	})
 	t.Run("prepare-commit-invalidates-old-archive-snapshot", func(t *testing.T) {
 		archivePendingSnapshotBarrier(t, r, ctx, fixture(t), actor, facts)
+	})
+	t.Run("new-Prepare-fences-a-previously-completed-current-command", func(t *testing.T) {
+		item := fixture(t)
+		input := LatePaymentQueryInput{1, item.PaymentOrderID, item.ProviderID, item.ProviderVersion, item.MerchantOrderNo}
+		key := "query-" + uuid.NewString()
+		accepted, err := r.PrepareLatePaymentQuery(ctx, item.ID, actor, key, input)
+		if err != nil || !accepted.dispatch || accepted.generation == uuid.Nil {
+			t.Fatal("initial explicit command", err)
+		}
+		order, err := getPaymentOrderByID(ctx, r.pool, item.PaymentOrderID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		provider := &instructionCreateProvider{retainedFinancialProvider: &retainedFinancialProvider{result: ProviderOrder{
+			MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency,
+			ExternalCustomerKey: order.RequesterID.String(), ExternalSKU: order.ProviderSKU, Status: "CLOSED", ProviderStatus: "PAY_CLOSED",
+		}}, authoritative: true}
+		coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		coordinator.now = r.now
+		order, err = coordinator.syncReviewedQueryCommand(ctx, order.ID, accepted.generation)
+		if err != nil {
+			t.Fatal("initial complete authoritative query", err)
+		}
+		if receipt, err := r.CompleteLatePaymentQuery(ctx, item.ID, actor, key, input, order, nil); err != nil || receipt.State != "COMPLETED" {
+			t.Fatal("initial current receipt", err)
+		}
+		// The old Serializable snapshot starts with a real completed binding,
+		// then must retry and reject the next atomically accepted pending one.
+		archivePendingSnapshotBarrier(t, r, ctx, item, actor, facts)
 	})
 	t.Run("current-query-real-producer", func(t *testing.T) {
 		archiveCurrentQueryAdmission(t, r, ctx, actor, func(c *PaymentCoordinator) http.Handler {

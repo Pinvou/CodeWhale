@@ -15,6 +15,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -46,12 +47,12 @@ func TestLatePaymentArchiveQueryAdmissionPublicMigration(t *testing.T) {
 	}
 	var previous []migrations.Migration
 	for _, migration := range loaded {
-		if migration.Version != latePaymentQueryAdmissionVersion {
+		if migration.Version != latePaymentQueryAdmissionVersion && migration.Version != latePaymentQueryGenerationsVersion {
 			previous = append(previous, migration)
 		}
 	}
-	if len(previous)+1 != len(loaded) {
-		t.Fatal("exact current-query migration must be present")
+	if len(previous)+2 != len(loaded) {
+		t.Fatal("exact admission and dependent binding migrations must both be present")
 	}
 	directory, err := filepath.Abs("../../migrations/billing")
 	if err != nil {
@@ -258,8 +259,19 @@ func TestLatePaymentArchiveQueryAdmissionPublicMigration(t *testing.T) {
 		before := retainedDataRollbackSnapshot(t, ctx, c)
 		err = DownOne(ctx, c, loaded)
 		migrations.Unlock(ctx, c)
-		if err == nil || !strings.Contains(err.Error(), "late payment query admission facts are forward-only") || before != retainedDataRollbackSnapshot(t, ctx, c) {
-			t.Fatal("public Down did not preserve exact current facts and ledger", err)
+		if err == nil || !strings.Contains(err.Error(), "late payment query generation bindings are forward-only") || before != retainedDataRollbackSnapshot(t, ctx, c) {
+			t.Fatal("latest public Down did not preserve exact current facts and ledger", err)
+		}
+		// 48 is now the latest package entry. Keep independent proof that the
+		// original published 47 Down bytes still refuse without changing data.
+		for _, migration := range loaded {
+			if migration.Version == latePaymentQueryAdmissionVersion {
+				_, err := c.Exec(ctx, migration.DownSQL)
+				var rejected *pgconn.PgError
+				if !errors.As(err, &rejected) || rejected.Code != "P0001" || rejected.Message != "late payment query admission facts are forward-only" || before != retainedDataRollbackSnapshot(t, ctx, c) {
+					t.Fatal("original published 47 rollback refusal changed", err)
+				}
+			}
 		}
 		output, err := runRetainedBillingDownCLI(t, ctx, binary, directory, f.serviceURL(t, c, "billing_migrator"))
 		if err == nil || !strings.Contains(string(output), "MIGRATION_EXECUTION_FAILED") || before != retainedDataRollbackSnapshot(t, ctx, c) {

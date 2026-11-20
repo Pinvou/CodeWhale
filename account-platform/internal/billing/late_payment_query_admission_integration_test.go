@@ -15,6 +15,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcredit"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // Keep the real Create/query/PAY-12/HTTP/repository and Billing money guards.
@@ -149,7 +150,12 @@ func archiveCurrentQueryAdmission(t *testing.T, r *PostgresRepository, ctx conte
 		if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object('order',to_jsonb(payment),'late',to_jsonb(late),'manual',to_jsonb(manual),'events',(SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.id),'[]'::jsonb) FROM manual_review_case_events e WHERE e.case_id=late.id),'archive_commands',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.id),'[]'::jsonb) FROM late_payment_review_archive_commands c WHERE c.case_id=late.id),'query_commands',(SELECT COALESCE(jsonb_agg(to_jsonb(c) ORDER BY c.idempotency_key),'[]'::jsonb) FROM late_payment_query_commands c WHERE c.case_id=late.id),'review_evidence',(SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.id),'[]'::jsonb) FROM late_payment_review_evidence e WHERE e.case_id=late.id),'payment_evidence',(SELECT COALESCE(jsonb_agg(to_jsonb(e) ORDER BY e.id),'[]'::jsonb) FROM payment_evidence e WHERE e.payment_order_id=payment.id))::text FROM late_payment_review_cases late JOIN manual_review_cases manual ON manual.id=late.id JOIN payment_orders payment ON payment.id=late.payment_order_id WHERE late.id=$1`, item.ID).Scan(&value); err != nil {
 			t.Fatal(err)
 		}
-		return value
+		var bindings string
+		if err := r.pool.QueryRow(ctx, `SELECT COALESCE(jsonb_agg(to_jsonb(binding) ORDER BY binding.idempotency_key),'[]'::jsonb)::text
+			FROM late_payment_query_generations binding JOIN late_payment_query_commands command ON command.idempotency_key=binding.idempotency_key WHERE command.case_id=$1`, item.ID).Scan(&bindings); err != nil {
+			t.Fatal("capture complete immutable command generation bindings", err)
+		}
+		return value + "\n" + bindings
 	}
 	rejected := func(t *testing.T, handler http.Handler, item LatePaymentReviewCase) {
 		t.Helper()
@@ -263,7 +269,240 @@ func archiveCurrentQueryAdmission(t *testing.T, r *PostgresRepository, ctx conte
 			t.Fatal("unknown replay redispatched or changed protected facts")
 		}
 		rejected(t, handler, item)
+		legacy := func() string {
+			t.Helper()
+			var snapshot string
+			if err := r.pool.QueryRow(ctx, `SELECT jsonb_build_array(to_jsonb(command),to_jsonb(binding))::text
+				FROM late_payment_query_commands command JOIN late_payment_query_generations binding USING(idempotency_key)
+				WHERE command.idempotency_key=$1`, key).Scan(&snapshot); err != nil {
+				t.Fatal(err)
+			}
+			return snapshot
+		}
+		originalUnknown := legacy()
+		freshClosed := base.result
+		freshClosed.Status, freshClosed.ProviderStatus = "CLOSED", "PAY_CLOSED"
+		freshClosed.PaymentURL, freshClosed.QRData = "", ""
+		fresh, actual := coordinator(t, base, freshClosed, nil, false)
+		freshHandler := makeHandler(fresh)
+		requireLateQueryState(t, query(freshHandler, item.ID, "query-"+uuid.NewString(), input, ctx), "COMPLETED")
+		currentGeneration, unpaid := current(t, order.ID)
+		if currentGeneration == generation || unpaid == nil || !*unpaid || actual.gets.Load() != 1 || held.gets.Load() != 1 {
+			t.Fatal("fresh explicit recovery failed or repeated an old external call")
+		}
+		archive(t, freshHandler, item, "archive-"+uuid.NewString(), 200)
+		requireLateQueryState(t, query(freshHandler, item.ID, key, input, ctx), "UNKNOWN")
+		if legacy() != originalUnknown || actual.gets.Load() != 1 || held.gets.Load() != 1 {
+			t.Fatal("successful recovery forged or redispatched the canceled command")
+		}
 	})
+	t.Run("completion-fault-keeps-current-pending-until-new-explicit-success", func(t *testing.T) {
+		_, base, order, item := fixture(t)
+		input := LatePaymentQueryInput{1, order.ID, item.ProviderID, item.ProviderVersion, item.MerchantOrderNo}
+		closed := base.result
+		closed.Status, closed.ProviderStatus = "CLOSED", "PAY_CLOSED"
+		closed.PaymentURL, closed.QRData = "", ""
+		c, provider := coordinator(t, base, closed, nil, false)
+		handler := makeHandler(c)
+		failLateQueryCompletion(t, r, ctx)
+		faultInstalled := true
+		removeFault := func() error {
+			t.Helper()
+			if !faultInstalled {
+				return nil
+			}
+			if _, err := retainedFinanceOwnerExec(t, r, ctx, `DROP TRIGGER fail_query_receipt ON late_payment_query_commands; DROP FUNCTION fail_query_receipt_fixture()`); err != nil {
+				return err
+			}
+			faultInstalled = false
+			return nil
+		}
+		defer func() {
+			if err := removeFault(); err != nil {
+				t.Error("owned receipt fault removal", err)
+			}
+		}()
+		key := "query-" + uuid.NewString()
+		requireLateQueryState(t, query(handler, item.ID, key, input, ctx), "UNKNOWN")
+		oldGeneration, unpaid := current(t, order.ID)
+		if unpaid == nil || !*unpaid || provider.gets.Load() != 1 {
+			t.Fatal("completion fault did not follow a real authoritative query")
+		}
+		rejected(t, handler, item)
+		var original string
+		if err := r.pool.QueryRow(ctx, `SELECT to_jsonb(command)::text FROM late_payment_query_commands command WHERE idempotency_key=$1`, key).Scan(&original); err != nil {
+			t.Fatal(err)
+		}
+		if err := removeFault(); err != nil {
+			t.Fatal("owned receipt fault removal", err)
+		}
+		requireLateQueryState(t, query(handler, item.ID, "query-"+uuid.NewString(), input, ctx), "COMPLETED")
+		newGeneration, unpaid := current(t, order.ID)
+		if newGeneration == oldGeneration || unpaid == nil || !*unpaid || provider.gets.Load() != 2 {
+			t.Fatal("new explicit command did not establish its independent current proof")
+		}
+		archive(t, handler, item, "archive-"+uuid.NewString(), 200)
+		requireLateQueryState(t, query(handler, item.ID, key, input, ctx), "UNKNOWN")
+		var retained string
+		if err := r.pool.QueryRow(ctx, `SELECT to_jsonb(command)::text FROM late_payment_query_commands command WHERE idempotency_key=$1`, key).Scan(&retained); err != nil || retained != original || provider.gets.Load() != 2 {
+			t.Fatal("new proof changed or redispatched the uncertain old completion", err)
+		}
+	})
+	for _, mode := range []string{"current", "stale"} {
+		t.Run("committed-authority-ACK-loss-failed-completion-"+mode, func(t *testing.T) {
+			_, base, order, item := fixture(t)
+			input := LatePaymentQueryInput{1, order.ID, item.ProviderID, item.ProviderVersion, item.MerchantOrderNo}
+			unknownKey := "query-original-unknown-" + uuid.NewString()
+			if accepted, err := r.PrepareLatePaymentQuery(ctx, item.ID, actor, unknownKey, input); err != nil || !accepted.dispatch {
+				t.Fatal("real pre-existing UNKNOWN admission", err)
+			}
+			commandFacts := func(key string) string {
+				t.Helper()
+				var snapshot string
+				if err := r.pool.QueryRow(ctx, "SELECT jsonb_build_array(to_jsonb(command),to_jsonb(binding))::text FROM late_payment_query_commands command JOIN late_payment_query_generations binding USING(idempotency_key) WHERE command.idempotency_key=$1", key).Scan(&snapshot); err != nil {
+					t.Fatal(err)
+				}
+				return snapshot
+			}
+			unknownBefore := commandFacts(unknownKey)
+			closed := base.result
+			closed.Status, closed.ProviderStatus = "CLOSED", "PAY_CLOSED"
+			closed.PaymentURL, closed.QRData = "", ""
+			c, provider := coordinator(t, base, closed, nil, false)
+			type committedObservation struct {
+				generation  uuid.UUID
+				authority   bool
+				err         error
+				contextLive bool
+			}
+			observed := make(chan committedObservation, 1)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			defer unblock()
+			var confirmations atomic.Int64
+			// State-boundary fault model, not a PostgreSQL protocol proxy.
+			// Default production autocommit really commits; a separate connection
+			// observes TRUE before this instance reports a synthetic ACK error.
+			c.archiveQueryObservationCommit = func(callCtx context.Context, paymentID, generation uuid.UUID, unpaid bool) error {
+				confirmations.Add(1)
+				if err := c.persistArchiveQueryObservation(callCtx, paymentID, generation, unpaid); err != nil {
+					observed <- committedObservation{err: err}
+					return err
+				}
+				probe, err := pgx.ConnectConfig(callCtx, r.pool.Config().ConnConfig.Copy())
+				var actual uuid.UUID
+				var authoritative bool
+				if err == nil {
+					err = probe.QueryRow(callCtx, "SELECT archive_query_generation,archive_query_authoritative_unpaid IS TRUE FROM payment_orders WHERE id=$1", paymentID).Scan(&actual, &authoritative)
+					closeErr := probe.Close(callCtx)
+					if err == nil {
+						err = closeErr
+					}
+				}
+				observed <- committedObservation{actual, authoritative, err, callCtx.Err() == nil}
+				if err != nil {
+					return err
+				}
+				if mode == "stale" {
+					select {
+					case <-release:
+					case <-callCtx.Done():
+						return callCtx.Err()
+					}
+				}
+				return errors.New("controlled committed query acknowledgement lost")
+			}
+			handler := makeHandler(c)
+			key := "query-lost-ack-" + uuid.NewString()
+			responses, done := make(chan *httptest.ResponseRecorder, 1), make(chan struct{})
+			go func() { defer close(done); responses <- query(handler, item.ID, key, input, ctx) }()
+			defer func() {
+				unblock()
+				select {
+				case <-done:
+				case <-ctx.Done():
+					t.Error("owned ACK-boundary query did not exit")
+				}
+			}()
+			var committed committedObservation
+			select {
+			case committed = <-observed:
+			case <-ctx.Done():
+				t.Fatal("real committed projection was not independently observed")
+			}
+			if committed.err != nil || !committed.authority || !committed.contextLive || committed.generation == uuid.Nil {
+				t.Fatal("fault did not follow independently visible committed TRUE and live context", committed)
+			}
+			fresh, freshProvider := coordinator(t, base, closed, nil, false)
+			freshHandler := makeHandler(fresh)
+			freshKey := "query-success-after-ack-" + uuid.NewString()
+			var freshReceipt string
+			var freshGeneration uuid.UUID
+			completeFresh := func() {
+				t.Helper()
+				requireLateQueryState(t, query(freshHandler, item.ID, freshKey, input, ctx), "COMPLETED")
+				var authority *bool
+				freshGeneration, authority = current(t, order.ID)
+				if freshGeneration == committed.generation || authority == nil || !*authority || freshProvider.gets.Load() != 1 {
+					t.Fatal("new explicit full query did not establish independent current authority")
+				}
+				freshReceipt = commandFacts(freshKey)
+			}
+			if mode == "stale" {
+				completeFresh()
+				unblock()
+			}
+			select {
+			case response := <-responses:
+				requireLateQueryState(t, response, "COMPLETED")
+			case <-ctx.Done():
+				t.Fatal("real error completion did not finish")
+			}
+			if ctx.Err() != nil || confirmations.Load() != 1 || provider.gets.Load() != 1 {
+				t.Fatal("fault cancelled context or repeated provider/commit")
+			}
+			var completed, evidence bool
+			if err := r.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM late_payment_query_commands WHERE idempotency_key=$1 AND completed_at IS NOT NULL AND result_snapshot IS NOT NULL), EXISTS(SELECT 1 FROM late_payment_review_evidence WHERE case_id=$2 AND evidence_type='MANUAL_QUERY' AND payload_snapshot->>'query_succeeded'='false')", key, item.ID).Scan(&completed, &evidence); err != nil || !completed || !evidence {
+				t.Fatal("must prove committed error receipt/evidence, not leave command pending", err)
+			}
+			failedBefore := commandFacts(key)
+			if mode == "current" {
+				generation, authority := current(t, order.ID)
+				if generation != committed.generation || authority != nil {
+					t.Fatal("current error completion retained TRUE eligibility or changed generation")
+				}
+				rejected(t, handler, item)
+				completeFresh()
+			} else {
+				generation, authority := current(t, order.ID)
+				if generation != freshGeneration || authority == nil || !*authority || commandFacts(freshKey) != freshReceipt {
+					t.Fatal("stale failed completion cleared newer authority or rewrote receipt")
+				}
+			}
+			archiveKey := "archive-after-ack-" + uuid.NewString()
+			originalArchive := archive(t, freshHandler, item, archiveKey, 200)
+			beforeReplay := protected(t, item)
+			if again := archive(t, freshHandler, item, archiveKey, 200); !bytes.Equal(originalArchive, again) || beforeReplay != protected(t, item) {
+				t.Fatal("recovery changed committed archive receipt or replay facts")
+			}
+			for _, originalKey := range []string{unknownKey, key} {
+				state := "COMPLETED"
+				if originalKey == unknownKey {
+					state = "UNKNOWN"
+				}
+				requireLateQueryState(t, query(handler, item.ID, originalKey, input, ctx), state)
+				receipt, err := r.ReadLatePaymentQuery(ctx, item.ID, actor, originalKey, input)
+				if err != nil || receipt.State != state || receipt.dispatch {
+					t.Fatal("original key recovery changed invocation state", err)
+				}
+			}
+			if unknownBefore != commandFacts(unknownKey) || failedBefore != commandFacts(key) || freshReceipt != commandFacts(freshKey) ||
+				provider.gets.Load() != 1 || freshProvider.gets.Load() != 1 || confirmations.Load() != 1 {
+				t.Fatal("recovery replaced original receipts or redispatched")
+			}
+		})
+	}
 	for _, oldResult := range []string{"failure", "PENDING", "CLOSED", "SUCCESS"} {
 		t.Run("older-"+oldResult+"-cannot-cover-newer-CLOSED", func(t *testing.T) {
 			_, base, order, item := fixture(t)
@@ -311,13 +550,18 @@ func archiveCurrentQueryAdmission(t *testing.T, r *PostgresRepository, ctx conte
 			if allowed == nil || !*allowed {
 				t.Fatal("newer query did not establish authority")
 			}
-			// The accepted older durable marker still blocks new archives even
-			// after the newer generation's query has completed successfully.
-			rejected(t, handler, item)
+			// A completed explicit current command supersedes only admission;
+			// the old in-flight invocation/evidence and dispatch identity remain.
+			archiveKey := "archive-" + uuid.NewString()
+			originalArchive := archive(t, handler, item, archiveKey, 200)
 			held.finish()
 			select {
 			case response := <-results:
-				requireLateQueryState(t, response, "COMPLETED")
+				state := "UNKNOWN"
+				if oldResult == "SUCCESS" {
+					state = "COMPLETED" // Strong evidence reopens the real case.
+				}
+				requireLateQueryState(t, response, state)
 			case <-ctx.Done():
 				t.Fatal("old query did not complete")
 			}
@@ -339,8 +583,13 @@ func archiveCurrentQueryAdmission(t *testing.T, r *PostgresRepository, ctx conte
 					t.Fatal("old strong payment lost exact wallet credit", err)
 				}
 				rejected(t, handler, item)
-			} else {
-				archive(t, handler, item, "archive-"+uuid.NewString(), 200)
+			}
+			beforeReplay := protected(t, item)
+			if replay := archive(t, handler, item, archiveKey, 200); !bytes.Equal(originalArchive, replay) || beforeReplay != protected(t, item) {
+				t.Fatal("late old response changed the original archive receipt or replay facts")
+			}
+			if oldResult != "SUCCESS" {
+				rejected(t, handler, item) // A different command cannot re-archive a terminal case.
 			}
 		})
 	}
@@ -385,7 +634,8 @@ func archiveCurrentQueryAdmission(t *testing.T, r *PostgresRepository, ctx conte
 			if authority == nil || !*authority {
 				t.Fatal("newer provider query did not establish authority")
 			}
-			rejected(t, handler, item)
+			archiveKey := "archive-" + uuid.NewString()
+			originalArchive := archive(t, handler, item, archiveKey, 200)
 			moneyFacts := func() map[string]string {
 				facts := entitlementFinancialFactsSnapshot(t, ctx, r)
 				var accounts string
@@ -425,6 +675,16 @@ func archiveCurrentQueryAdmission(t *testing.T, r *PostgresRepository, ctx conte
 			var evidence, transactions, attempts, applied, manual int
 			if err := r.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM payment_evidence WHERE payment_order_id=$1 AND evidence_type='QUERY' AND payload_snapshot->>'status'='SUCCESS' AND merge_result='REVIEW_REQUIRED'),(SELECT count(*) FROM payment_transactions WHERE payment_order_id=$1 AND status='REVIEW_REQUIRED' AND fulfillment_status='REVIEW_REQUIRED'),(SELECT count(*) FROM payment_credit_attempts WHERE payment_order_id=$1),(SELECT count(*) FROM payment_credit_attempts WHERE payment_order_id=$1 AND state='APPLIED'),(SELECT count(*) FROM payment_anomaly_cases WHERE payment_order_id=$1 AND status='OPEN' AND resource_snapshot->>'reason_code'='PAYMENT_CREDIT_ADMISSION_UNCONFIRMED')`, order.ID).Scan(&evidence, &transactions, &attempts, &applied, &manual); err != nil || evidence != 1 || transactions != 1 || attempts != 0 || applied != 0 || manual != 1 {
 				t.Fatal("Account refusal lost original immutable evidence or admitted money", evidence, transactions, attempts, applied, manual, err)
+			}
+			var reopened string
+			if err := r.pool.QueryRow(ctx, `SELECT late.review_status||'/'||manual.status||'/'||payment.archive_status
+				FROM late_payment_review_cases late JOIN manual_review_cases manual ON manual.id=late.id
+				JOIN payment_orders payment ON payment.id=late.payment_order_id WHERE late.id=$1`, item.ID).Scan(&reopened); err != nil || reopened != "REVIEW_REQUIRED_LATE_PAYMENT/OPEN/ACTIVE" {
+				t.Fatal("late strong evidence failed to reopen the archived case", err)
+			}
+			beforeReplay := protected(t, item)
+			if replay := archive(t, handler, item, archiveKey, 200); !bytes.Equal(originalArchive, replay) || beforeReplay != protected(t, item) {
+				t.Fatal("Account refusal or late strong evidence changed the committed archive receipt")
 			}
 			rejected(t, handler, item)
 		})

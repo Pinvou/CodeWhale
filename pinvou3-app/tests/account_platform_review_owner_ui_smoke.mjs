@@ -117,6 +117,90 @@ try {
       assert.deepEqual(errors, []); passed++;
     }
   }
+  for (const language of ['zh', 'en', 'ja']) {
+    for (const scenario of ['recovery', 'later-old-receipt', 'legacy']) {
+      const query = { language, owner: 'self', archive: 'transport', twoCases: 'true',
+        ...(scenario === 'legacy' ? { legacyQuery: 'true' } : { queryRecovery: scenario }) };
+      await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-review-owner.html?${new URLSearchParams(query)}`);
+      await page.waitForSelector('tbody tr'); await click('details'); await page.waitForSelector('article');
+      const begin = async key => {
+        await click(key, 'article button'); await page.waitForSelector('[role="alertdialog"]');
+        await click('confirmQueryAction', '[role="alertdialog"] button');
+      };
+      const retryOriginal = async key => {
+        const clicked = await page.evaluate(key => {
+          const row = [...document.querySelectorAll('[role="alert"]')].find(node => node.querySelector('code')?.textContent.includes(key));
+          const button = row?.querySelector('button');
+          if (!button || button.disabled) return false;
+          button.click(); return true;
+        }, key);
+        assert.ok(clicked, 'original query recovery was not available');
+      };
+      let retainedLegacy;
+      if (scenario === 'legacy') {
+        await page.waitForSelector('[data-retained-finance-command] code');
+        retainedLegacy = await page.$eval('[data-retained-finance-command] code', node => node.textContent);
+        assert.equal(await enabledAction('query'), false);
+        assert.equal(await enabledAction('newQuery'), true, 'legacy UNKNOWN must permit an explicit new confirmed intent');
+        await begin('newQuery');
+      } else {
+        await begin('query');
+        await page.waitForFunction(() => window.reviewOwnerProbe.state.queryRows.length === 1 &&
+          [...document.querySelectorAll('[role="alert"] code')].some(node => node.textContent.includes(window.reviewOwnerProbe.state.queryRows[0].key)));
+        const firstKey = await page.evaluate(() => window.reviewOwnerProbe.state.queryRows[0].key);
+        assert.equal(await enabledAction('archive'), false);
+        assert.equal(await enabledAction('newQuery'), true, 'query UNKNOWN must not disable the explicit new-query button');
+        await retryOriginal(firstKey);
+        await page.waitForFunction(() => window.reviewOwnerProbe.calls.some(call => call.url.endsWith('/query-command-results')) &&
+          [...document.querySelectorAll('[role="alert"] button')].some(node => !node.disabled));
+        assert.equal(await page.evaluate(() => window.reviewOwnerProbe.calls.filter(call => call.url.endsWith('/query-commands')).length), 1);
+        await begin('newQuery');
+        if (scenario === 'later-old-receipt') {
+          await page.waitForFunction(() => window.reviewOwnerProbe.state.queryRows.length === 2 &&
+            [...document.querySelectorAll('[role="alert"] button')].some(node => !node.disabled));
+          await page.evaluate(() => window.reviewOwnerProbe.completeOriginalQuery());
+          await retryOriginal(firstKey);
+          await page.waitForFunction(() => [...document.querySelectorAll('[role="status"]')]
+            .some(node => node.textContent === window.reviewOwnerProbe.copy.queryRecorded));
+          assert.equal(await enabledAction('archive'), false, 'late completion of an older begin cannot replace the latest UNKNOWN');
+          assert.equal(await page.evaluate(() => window.reviewOwnerProbe.calls.filter(call => call.url.endsWith('/query-commands')).length), 2);
+          await begin('newQuery');
+        }
+      }
+      await page.waitForFunction(() => [...document.querySelectorAll('[role="status"]')]
+        .some(node => node.textContent === window.reviewOwnerProbe.copy.queryArchiveRecovery));
+      assert.equal(await enabledAction('archive'), true);
+      assert.equal(await enabledAction('schedule'), false);
+      assert.equal(await enabledAction('escalate'), false);
+      // A's confirmation never releases B's archive, even though both are owned.
+      await page.evaluate(() => document.querySelectorAll('tbody tr')[1].querySelector('button').click());
+      await page.waitForFunction(() => document.querySelector('article')?.textContent.includes('33333333-3333-4333-8333-333333333333'));
+      assert.equal(await enabledAction('archive'), false, 'another case inherited the confirmed query');
+      await page.evaluate(() => document.querySelectorAll('tbody tr')[0].querySelector('button').click());
+      await page.waitForFunction(() => [...document.querySelectorAll('article button')]
+        .some(node => node.textContent === window.reviewOwnerProbe.copy.archive && !node.disabled));
+      const commands = await page.evaluate(() => window.reviewOwnerProbe.calls.filter(call => call.url.endsWith('/query-commands')));
+      assert.equal(new Set(commands.map(call => call.key)).size, commands.length, 'explicit begin reused an UNKNOWN key');
+      await click('archive', 'article button');
+      await page.waitForSelector('[data-retained-query-archive-command] button');
+      await page.waitForFunction(() => { const button = document.querySelector('[data-retained-query-archive-command] button'); return button && !button.disabled; });
+      const retried = await page.evaluate(() => { const button = document.querySelector('[data-retained-query-archive-command] button'); if (button.disabled) return false; button.click(); return true; });
+      assert.ok(retried, 'new archive receipt recovery unavailable');
+      await page.waitForFunction(() => document.querySelector('article')?.textContent.includes('ARCHIVED_CONFIRMED_UNPAID'));
+      const writes = await page.evaluate(() => window.reviewOwnerProbe.calls.filter(call => call.url.endsWith('/archive-command')));
+      assert.equal(writes.length, 2); assert.equal(writes[0].key, writes[1].key);
+      assert.equal(await page.evaluate(() => window.reviewOwnerProbe.state.archiveEffects), 1);
+      assert.equal(await page.evaluate(() => window.reviewOwnerProbe.calls.filter(call => call.url.endsWith('/query-commands')).length), commands.length);
+      assert.equal(await page.$('[data-retained-query-archive-command]'), null);
+      if (scenario === 'legacy') {
+        assert.equal(await page.$eval('[data-retained-finance-command] code', node => node.textContent), retainedLegacy);
+        assert.ok(!writes.some(call => retainedLegacy.includes(call.key)), 'archive replaced the old legacy invocation');
+      } else {
+        assert.ok(await page.$$eval('[role="alert"] code', nodes => nodes.length > 0), 'old UNKNOWN journal was discarded');
+      }
+      assert.deepEqual(errors, []); passed++;
+    }
+  }
   console.log(`Review ownership UI: ${passed} passed; 0 failed (controlled backend, actual React and admin client)`);
 } finally {
   if (browser) await browser.close();

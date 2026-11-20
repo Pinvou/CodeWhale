@@ -1164,6 +1164,16 @@
         "sha256": "bb646987572a659091d293bdf781a39874e82d16aadd8346d9d740da7298fd10"
       },
       {
+        "file": "900024_financial_json_object_contracts.down.sql",
+        "version": 900024,
+        "sha256": "d3a0e4b0e826c1ae512e9011c387dd33992c30b10c52500aff50fe5ac7e41108"
+      },
+      {
+        "file": "900024_financial_json_object_contracts.up.sql",
+        "version": 900024,
+        "sha256": "2ae6887caa0f1641e54b1b953f9e949fd35482e0242ba26fadd3bf4c35f99694"
+      },
+      {
         "file": "900026_approval_delivery_terminal_recovery.down.sql",
         "version": 900026,
         "sha256": "6c27277197eea78b54e959bbf48793cf0dad004f6b1f19336076481b8475660c"
@@ -2326,6 +2336,16 @@
         "sha256": "722e0334e4072c841704015f1f0a5b40e412f6b4a82a7c8477c4b1f6600df7e9"
       },
       {
+        "file": "900042_financial_json_object_contracts.down.sql",
+        "version": 900042,
+        "sha256": "a95c55e4e8a7bb566f15df7fc3b4d0ee9a268587221329c5d5757dc6c26e0fdc"
+      },
+      {
+        "file": "900042_financial_json_object_contracts.up.sql",
+        "version": 900042,
+        "sha256": "a25714955d96b06f5cfec08a412618bc4e9dc16ed7b91dabdfc51a3ee0cb7d10"
+      },
+      {
         "file": "900043_package_expiry_scan.down.sql",
         "version": 900043,
         "sha256": "0a2edbe127d2abfdbe978298cf6b1e84bbef14e217fd7fbf9a653810fac334d6"
@@ -2354,6 +2374,16 @@
         "file": "900047_late_payment_query_admission.up.sql",
         "version": 900047,
         "sha256": "5de84e5e0aa20f152aa63bd598fed1e5e7810031215ba43bfcccab241f6c9c1d"
+      },
+      {
+        "file": "900048_late_payment_query_generations.down.sql",
+        "version": 900048,
+        "sha256": "03d2e6a42a8113a6c8d5b4bacdd549aa07226df4b2dd10563b4ad7cf7df480ae"
+      },
+      {
+        "file": "900048_late_payment_query_generations.up.sql",
+        "version": 900048,
+        "sha256": "f233f8a00a12014ce65542e71d10903d16ae58ae2df881fd934c7e47440f8558"
       }
     ],
     "payment-simulator": [

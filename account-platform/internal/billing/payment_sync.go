@@ -256,6 +256,19 @@ func (p *PaymentCoordinator) ConfirmProviderFailed(ctx context.Context, caseID, 
 }
 
 func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, reviewed bool) (PaymentOrder, error) {
+	return p.syncOrderWithArchiveGeneration(ctx, orderID, reviewed, uuid.Nil)
+}
+
+// Only the fresh command's private execution receipt supplies this generation.
+// Replays never reach here; old in-flight results still merge all paid evidence.
+func (p *PaymentCoordinator) syncReviewedQueryCommand(ctx context.Context, orderID, generation uuid.UUID) (PaymentOrder, error) {
+	if generation == uuid.Nil {
+		return PaymentOrder{}, ErrConflict
+	}
+	return p.syncOrderWithArchiveGeneration(ctx, orderID, true, generation)
+}
+
+func (p *PaymentCoordinator) syncOrderWithArchiveGeneration(ctx context.Context, orderID uuid.UUID, reviewed bool, generation uuid.UUID) (PaymentOrder, error) {
 	if !p.Capabilities().OrderQuerySupported {
 		return PaymentOrder{}, payment.ErrUnsupported
 	}
@@ -269,9 +282,11 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 	if p.Capabilities().ProviderID != order.ProviderID || p.Capabilities().Version != order.ProviderVersion {
 		return PaymentOrder{}, ErrConflict
 	}
-	generation, err := p.beginArchiveQueryObservation(ctx, order)
-	if err != nil {
-		return PaymentOrder{}, err
+	if generation == uuid.Nil {
+		generation, err = p.beginArchiveQueryObservation(ctx, order)
+		if err != nil {
+			return PaymentOrder{}, err
+		}
 	}
 	// Capture the accepted provider declaration, not a later mutable adapter
 	// value. Failed/canceled attempts retain the committed unknown fact.

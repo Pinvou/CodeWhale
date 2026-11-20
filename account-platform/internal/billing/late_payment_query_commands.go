@@ -38,6 +38,7 @@ type LatePaymentQueryReceipt struct {
 	State           string                 `json:"state"`
 	Result          *LatePaymentReviewCase `json:"result,omitempty"`
 	dispatch        bool
+	generation      uuid.UUID
 }
 
 type latePaymentQueryRepository interface {
@@ -129,7 +130,10 @@ func (r *PostgresRepository) lockLatePaymentQuery(ctx context.Context, tx pgx.Tx
 	var originalActor, originalCase uuid.UUID
 	var fingerprint string
 	var response []byte
-	err = tx.QueryRow(ctx, `SELECT actor_id,case_id,request_hash,result_snapshot FROM late_payment_query_commands WHERE idempotency_key=$1`, key).Scan(&originalActor, &originalCase, &fingerprint, &response)
+	var generation *uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT command.actor_id,command.case_id,command.request_hash,command.result_snapshot,binding.generation
+		FROM late_payment_query_commands command LEFT JOIN late_payment_query_generations binding ON binding.idempotency_key=command.idempotency_key
+		WHERE command.idempotency_key=$1`, key).Scan(&originalActor, &originalCase, &fingerprint, &response, &generation)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return item, receipt, false, nil
 	}
@@ -139,6 +143,9 @@ func (r *PostgresRepository) lockLatePaymentQuery(ctx context.Context, tx pgx.Tx
 	expected, _ := latePaymentQueryFingerprint(input)
 	if originalActor != actorID || originalCase != caseID || fingerprint != expected {
 		return item, receipt, false, ErrConflict
+	}
+	if generation != nil {
+		receipt.generation = *generation
 	}
 	if len(response) != 0 {
 		var result LatePaymentReviewCase
@@ -171,10 +178,25 @@ func (r *PostgresRepository) PrepareLatePaymentQuery(ctx context.Context, caseID
 	if err != nil {
 		return receipt, err
 	}
+	// The execution marker and the current unknown generation are committed
+	// together. There is no post-Prepare window retaining an older admission.
+	generation := uuid.New()
+	_, err = tx.Exec(ctx, `INSERT INTO late_payment_query_generations(idempotency_key,generation) VALUES($1,$2)`, key, generation)
+	if err != nil {
+		return receipt, err
+	}
+	command, err := tx.Exec(ctx, `UPDATE payment_orders SET archive_query_generation=$2,archive_query_authoritative_unpaid=NULL
+		WHERE id=$1 AND provider_id=$3 AND provider_version=$4 AND merchant_order_no=$5`, input.PaymentOrderID, generation, input.ProviderID, input.ProviderVersion, input.MerchantOrderNo)
+	if err != nil {
+		return receipt, err
+	}
+	if command.RowsAffected() != 1 {
+		return receipt, ErrConflict
+	}
 	// A Serializable archive can have acquired its snapshot before waiting on
 	// these case locks. A physical row version forces that old snapshot to retry
 	// and observe this accepted marker; no public value or event is changed.
-	command, err := tx.Exec(ctx, `UPDATE late_payment_review_cases SET updated_at=updated_at WHERE id=$1`, caseID)
+	command, err = tx.Exec(ctx, `UPDATE late_payment_review_cases SET updated_at=updated_at WHERE id=$1`, caseID)
 	if err != nil {
 		return receipt, err
 	}
@@ -187,6 +209,7 @@ func (r *PostgresRepository) PrepareLatePaymentQuery(ctx context.Context, caseID
 		return receipt, err
 	}
 	receipt.dispatch = true
+	receipt.generation = generation
 	return receipt, nil
 }
 
@@ -209,6 +232,14 @@ func (r *PostgresRepository) CompleteLatePaymentQuery(ctx context.Context, caseI
 	if order.ID != uuid.Nil && order.ID != input.PaymentOrderID || queryErr == nil && order.ID != input.PaymentOrderID ||
 		(item.ReviewStatus != "REVIEW_REQUIRED_LATE_PAYMENT" && item.ReviewStatus != "PROVIDER_BLIND") {
 		return receipt, ErrConflict
+	}
+	// An autocommit current-query projection can commit even when its ACK is
+	// lost. Completing that invocation as an error must atomically invalidate
+	// only its own still-current eligibility, never a newer query's result.
+	if queryErr != nil && receipt.generation != uuid.Nil {
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET archive_query_authoritative_unpaid=NULL WHERE id=$1 AND archive_query_generation=$2`, input.PaymentOrderID, receipt.generation); err != nil {
+			return receipt, err
+		}
 	}
 	result, err := r.recordLatePaymentReviewQueryLocked(ctx, tx, item, actorID, order, queryErr)
 	if err != nil {
@@ -272,7 +303,7 @@ func (s *Service) serveLatePaymentQueryCommand(w http.ResponseWriter, r *http.Re
 		// No transaction or database lock spans the existing Provider flow.
 		// A canceled request cannot be detached to run another external call.
 		if r.Context().Err() == nil {
-			order, queryErr := s.payments.SyncReviewedOrder(r.Context(), input.PaymentOrderID)
+			order, queryErr := s.payments.syncReviewedQueryCommand(r.Context(), input.PaymentOrderID, receipt.generation)
 			if completed, err := repository.CompleteLatePaymentQuery(r.Context(), caseID, actorID, key, input, order, queryErr); err == nil {
 				receipt = completed
 			}

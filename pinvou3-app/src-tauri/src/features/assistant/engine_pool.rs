@@ -7275,6 +7275,7 @@ mod scheduled_model_tests {
 
         let store = SessionStore::boot().expect("session store");
         let model = SavedModel {
+            auth_mode: None,
             id: "affinity-wiring-model".into(),
             name: "Affinity Wiring".into(),
             alias: None,
@@ -7890,6 +7891,7 @@ mod scheduled_model_tests {
 
     fn model(id: &str, wire_name: &str) -> SavedModel {
         SavedModel {
+            auth_mode: None,
             id: id.to_string(),
             name: id.to_string(),
             alias: None,
@@ -12203,6 +12205,7 @@ mod probed_facts_wiring_tests {
 
     fn saved_model(preset: ModelPreset, model: &str, provider_kind: Option<&str>) -> SavedModel {
         SavedModel {
+            auth_mode: None,
             id: "wiring-model".into(),
             name: "Wiring".into(),
             alias: None,

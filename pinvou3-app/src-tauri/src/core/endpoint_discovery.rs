@@ -2052,9 +2052,10 @@ mod tests {
     /// 阶段(TLS 握手在内)归入 Connect kind,reqwest 的 `is_connect()` 沿
     /// source 链找到它——真 TLS 失败按旧顺序(connect 在前)永远落不到
     /// tls 臂。reqwest::Error 没有公开构造器(monitor 同款结论),用真实
-    /// 拨号驱动:https 指向一个「读完 ClientHello 即关闭」的明文 TCP
-    /// socket,tokio-rustls 在握手中途读到 EOF,错误链内层是其固定文本
-    /// "tls handshake eof"(tokio-rustls 0.26 固定行为)——该错误同时满足
+    /// 拨号驱动:https 指向一个读完 ClientHello 后回送 TLS fatal
+    /// bad_certificate alert 的 TCP socket。不能依赖 FIN/EOF 恰好被
+    /// rustls 表述为 TLS：并发 CI 已出现它只被表述成普通 connect 错误。
+    /// 显式证书 alert 保证错误链含有真正 TLS 协议事实——该错误同时满足
     /// is_connect()(hyper-util Connect kind)与 TLS 关键词,正是 M1 描述
     /// 的「connect kind 里藏着 TLS 事实」形态;旧顺序下分类 connect,
     /// 本测试变红。
@@ -2066,14 +2067,23 @@ mod tests {
             let (mut stream, _) = listener.accept().expect("accept probe connection");
             // 精确排干一条完整 TLS 记录(5 字节记录头 type/version/length +
             // 其声明的负载 = 整个 ClientHello,rustls 把首飞并成单记录):
-            // 保证关闭时 socket 无未读数据——带未读数据的 close 走 RST,
-            // 客户端会拿到 connection reset(无 TLS 关键词,分类落 connect),
-            // 钉不住 tls 臂;排干后关闭走优雅 FIN,客户端握手中途读 EOF。
+            // 先读完 ClientHello，再发送真实 TLS alert；分类钉住协议事实，
+            // 不依赖内核关闭时序、EOF 文案或共享代理的状态。
             let mut header = [0u8; 5];
             std::io::Read::read_exact(&mut stream, &mut header).expect("read tls record header");
             let payload_len = u16::from_be_bytes([header[3], header[4]]) as usize;
             let mut payload = vec![0u8; payload_len];
             std::io::Read::read_exact(&mut stream, &mut payload).expect("read client hello");
+            // TLS alert record(version 1.2): fatal(2), bad_certificate(42).
+            std::io::Write::write_all(&mut stream, &[21, 3, 3, 0, 2, 2, 42])
+                .expect("send fatal TLS certificate alert");
+            stream
+                .shutdown(std::net::Shutdown::Write)
+                .expect("finish TLS alert write");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .expect("bound fixture retirement");
+            let _ = std::io::copy(&mut stream, &mut std::io::sink());
             drop(stream);
             drop(listener);
         });
@@ -2086,7 +2096,7 @@ mod tests {
             .send()
             .await
             .err()
-            .expect("plain-text socket must fail the TLS handshake");
+            .expect("fatal certificate alert must fail the TLS handshake");
         // 前提钉:M1 的依据成立——TLS 握手失败确实挂在 hyper-util 的
         // Connect kind 下。reqwest / hyper 若改变归类,这里是第一处报点。
         assert!(

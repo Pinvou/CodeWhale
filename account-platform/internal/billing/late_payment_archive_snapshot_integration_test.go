@@ -2,8 +2,11 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,11 +103,13 @@ func archivePendingSnapshotBarrier(t *testing.T, r *PostgresRepository, ctx cont
 	if err := blocker.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
+	var accepted LatePaymentQueryReceipt
 	select {
 	case result := <-preparedResult:
 		if result.err != nil || !result.receipt.dispatch || result.receipt.State != "UNKNOWN" {
 			t.Fatal("real Prepare did not commit its original accepted marker", result.err)
 		}
+		accepted = result.receipt
 	case <-ctx.Done():
 		t.Fatal("Prepare did not pass the released barrier")
 	}
@@ -116,8 +121,32 @@ func archivePendingSnapshotBarrier(t *testing.T, r *PostgresRepository, ctx cont
 	case <-ctx.Done():
 		t.Fatal("archive did not finish its original bounded retries")
 	}
-	if before != facts(t, item.ID) || !reflect.DeepEqual(financial, instructionCommandFactsSnapshot(t, r, ctx)) {
-		t.Fatal("physical query fence changed case values/events/financial or archive facts")
+	// Only this real Prepare seam changes the two private current-query facts.
+	// Keep every other complete JSON value, including exact numeric text.
+	decodeFacts := func(raw string) map[string]any {
+		t.Helper()
+		decoder := json.NewDecoder(strings.NewReader(raw))
+		decoder.UseNumber()
+		var value map[string]any
+		if err := decoder.Decode(&value); err != nil || decoder.Decode(new(any)) != io.EOF {
+			t.Fatal("invalid complete query-fence snapshot", err)
+		}
+		return value
+	}
+	expected := decodeFacts(before)
+	order, ok := expected["order"].(map[string]any)
+	if !ok || accepted.generation == uuid.Nil || order["archive_query_generation"] == accepted.generation.String() {
+		t.Fatal("Prepare did not create a distinct bound generation")
+	}
+	if _, present := order["archive_query_generation"]; !present {
+		t.Fatal("old snapshot omitted its full generation column")
+	}
+	if _, present := order["archive_query_authoritative_unpaid"]; !present {
+		t.Fatal("old snapshot omitted its full authority column")
+	}
+	order["archive_query_generation"], order["archive_query_authoritative_unpaid"] = accepted.generation.String(), nil
+	if !reflect.DeepEqual(expected, decodeFacts(facts(t, item.ID))) || !reflect.DeepEqual(financial, instructionCommandFactsSnapshot(t, r, ctx)) {
+		t.Fatal("query admission changed facts beyond its exact private UUID/UNKNOWN projection")
 	}
 	var markerVersion string
 	if err := r.pool.QueryRow(ctx, `SELECT xmin::text FROM late_payment_review_cases WHERE id=$1`, item.ID).Scan(&markerVersion); err != nil || markerVersion == originalVersion {
@@ -130,7 +159,7 @@ func archivePendingSnapshotBarrier(t *testing.T, r *PostgresRepository, ctx cont
 		} else {
 			receipt, err = r.PrepareLatePaymentQuery(ctx, item.ID, actor, key, input)
 		}
-		if err != nil || receipt.State != "UNKNOWN" || receipt.dispatch || receipt.Reference != key {
+		if err != nil || receipt.State != "UNKNOWN" || receipt.dispatch || receipt.Reference != key || receipt.generation != accepted.generation {
 			t.Fatal("unknown read/replay renewed dispatch or altered the invocation", err)
 		}
 	}
@@ -141,5 +170,9 @@ func archivePendingSnapshotBarrier(t *testing.T, r *PostgresRepository, ctx cont
 	var markers int
 	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM late_payment_query_commands WHERE case_id=$1 AND idempotency_key=$2 AND completed_at IS NULL AND result_snapshot IS NULL`, item.ID, key).Scan(&markers); err != nil || markers != 1 {
 		t.Fatal("original pending identity is not exactly once", err)
+	}
+	var bound uuid.UUID
+	if err := r.pool.QueryRow(ctx, `SELECT generation FROM late_payment_query_generations WHERE idempotency_key=$1`, key).Scan(&bound); err != nil || bound != accepted.generation {
+		t.Fatal("original command generation is not immutable and exactly bound", err)
 	}
 }

@@ -13,6 +13,15 @@ import { join, matchesGlob } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
+import transportPolicy from "../ci-network-policy.cjs";
+import artifactPolicySupport from "./ci-artifact-policy-support.cjs";
+
+// Keep historical product/advisory contracts exact after validating the new
+// transport layer independently. Only the reviewed helper and exact scoped
+// environment are removed; arbitrary commands or environments still fail.
+function productPolicyText(text) {
+  return artifactPolicySupport.legacyArtifactPolicy(text);
+}
 import "./ci-artifact-tls-policy.test.cjs";
 
 const workflow = await readFile(
@@ -160,6 +169,7 @@ function stepRun(job, name) {
 }
 
 function assertAccountFailurePolicy(job) {
+  job = productPolicyText(job);
   assert.doesNotMatch(job, /secrets\./);
   let mandatory = job;
   // Only these reviewed, bounded transport steps are advisory. Remove their
@@ -222,7 +232,7 @@ function pgIdentityEnvironment(service) {
 }
 
 function assertFinancialDiagnosticExemption(job) {
-  const text = job.replaceAll("\r\n", "\n");
+  const text = productPolicyText(job.replaceAll("\r\n", "\n"));
   const diagnostic = namedStep(text, "Financial group lifecycle receipts");
   const withoutComments = diagnostic.replace(/^ *#.*\n/gm, "").trimEnd();
   assert.equal(withoutComments, [
@@ -276,7 +286,7 @@ test("financial diagnostic exception rejects business and job exemptions", () =>
 // Match the Python gate policy across the complete workflow. Account-only
 // validation cannot detect a job/step exception added to a different leg.
 function assertWorkflowFailurePolicy(workflowText) {
-  const text = workflowText.replaceAll("\r\n", "\n").replace(/^ *#.*\n/gm, "");
+  const text = productPolicyText(workflowText.replaceAll("\r\n", "\n")).replace(/^ *#.*\n/gm, "");
   const financialJob = jobBlock("account-financial-test", text);
   assertFinancialDiagnosticExemption(financialJob);
   const financial = namedStep(financialJob, "Financial group lifecycle receipts");
@@ -544,7 +554,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   const withoutWindowsExemption = original.replace(windows,
     windows.replace("        continue-on-error: true\n", ""));
   const mutants = [
-    original.replace("scripts/ci-artifact-node-options.cjs --diagnostics", "scripts/unreviewed-upload.cjs --configure-env"),
+    original.replace("scripts/ci-artifact-node-options.cjs --network --diagnostics", "scripts/unreviewed-upload.cjs --configure-env"),
     original.replace(atomicConfig, atomicConfig.replace("scripts/ci-artifact-node-options.cjs", "scripts/unreviewed-upload.cjs")),
     original.replace(relayReceipt, relayReceipt.replace("windows-relay-tools-process.json", "other-process.json")),
     original.replace("      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n",

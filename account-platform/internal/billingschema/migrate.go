@@ -59,6 +59,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if err := validatePaymentDispatchProvenance(input); err != nil {
 		return nil, err
 	}
+	if err := validateFinancialJSONObjects(input); err != nil {
+		return nil, err
+	}
 	if err := validatePaymentCreditAttempts(input); err != nil {
 		return nil, err
 	}
@@ -66,6 +69,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 		return nil, err
 	}
 	if err := validateLatePaymentQueryAdmission(input); err != nil {
+		return nil, err
+	}
+	if err := validateLatePaymentQueryGenerations(input); err != nil {
 		return nil, err
 	}
 	if err := validateProviderHealthRecent(input); err != nil {
@@ -271,12 +277,20 @@ func Up(ctx context.Context, connection *pgx.Conn, input []migrations.Migration)
 	if err := validateUsageWaiverHistoryDelivery(ordered); err != nil {
 		return err
 	}
+	ctx, err = migrations.PinLedger(ctx, connection)
+	if err != nil {
+		return err
+	}
+	ledger, err := migrations.LedgerTable(ctx, connection)
+	if err != nil {
+		return err
+	}
 	return withLegacyEntitlementAdmission(ctx, connection, ordered, func() error {
-		expected, err := expectedUsageWaiverHistory(ctx, connection, ordered)
+		expected, err := expectedUsageWaiverHistory(ctx, connection, ordered, ledger)
 		if err != nil {
 			return err
 		}
-		if _, err := knownOriginalWalletReceiptHistory(ctx, connection); err != nil {
+		if _, err := knownOriginalWalletReceiptHistory(ctx, connection, ledger); err != nil {
 			return err
 		}
 		return migrations.UpWithHooks(ctx, connection, expected, migrations.UpHooks{BeforeApply: prepareBillingMigration, AfterApply: finishBillingMigration, ApplySQL: applyBillingMigration, LedgerRole: "billing_schema_owner"})

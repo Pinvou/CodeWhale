@@ -44,19 +44,20 @@ type walletReceiptHistoryQueryer interface {
 
 // Run before any durable migration, and again after the migration lock inside
 // BeforeApply. A missing original table never excuses an unknown 053 ledger.
-func knownOriginalWalletReceiptHistory(ctx context.Context, source walletReceiptHistoryQueryer) (bool, error) {
+// ledgerTable comes from migrations.LedgerTable on this workflow's connection.
+func knownOriginalWalletReceiptHistory(ctx context.Context, source walletReceiptHistoryQueryer, ledgerTable string) (bool, error) {
 	if sqlChecksum(originalWalletReceiptSQL) != originalWalletReceiptChecksum {
 		return false, errors.New("original wallet receipt history resource changed")
 	}
 	var ledger bool
-	if err := source.QueryRow(ctx, `SELECT to_regclass('schema_migrations') IS NOT NULL`).Scan(&ledger); err != nil {
+	if err := source.QueryRow(ctx, `SELECT pg_catalog.to_regclass($1) IS NOT NULL`, ledgerTable).Scan(&ledger); err != nil {
 		return false, err
 	}
 	if !ledger {
 		return false, nil
 	}
 	var checksum string
-	err := source.QueryRow(ctx, `SELECT checksum FROM schema_migrations WHERE version=53`).Scan(&checksum)
+	err := source.QueryRow(ctx, "SELECT checksum FROM "+ledgerTable+" WHERE version=53").Scan(&checksum)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -74,6 +75,9 @@ func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []migration
 		return migrations.Verification{}, err
 	}
 	if err := validatePaymentDispatchProvenance(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
+	if err := validateFinancialJSONObjects(loaded); err != nil {
 		return migrations.Verification{}, err
 	}
 	if err := validatePackageExpiryScan(loaded); err != nil {
@@ -94,12 +98,22 @@ func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []migration
 	if err := validateLatePaymentQueryAdmission(loaded); err != nil {
 		return migrations.Verification{}, err
 	}
-	var err error
-	loaded, err = expectedUsageWaiverHistory(ctx, connection, loaded)
+	if err := validateLatePaymentQueryGenerations(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
+	ctx, err := migrations.PinLedger(ctx, connection)
 	if err != nil {
 		return migrations.Verification{}, err
 	}
-	original, err := knownOriginalWalletReceiptHistory(ctx, connection)
+	ledger, err := migrations.LedgerTable(ctx, connection)
+	if err != nil {
+		return migrations.Verification{}, err
+	}
+	loaded, err = expectedUsageWaiverHistory(ctx, connection, loaded, ledger)
+	if err != nil {
+		return migrations.Verification{}, err
+	}
+	original, err := knownOriginalWalletReceiptHistory(ctx, connection, ledger)
 	if err != nil {
 		return migrations.Verification{}, err
 	}

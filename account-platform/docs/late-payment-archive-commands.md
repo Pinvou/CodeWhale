@@ -74,9 +74,31 @@ PENDING/CREATED is not authoritative unpaid. An older reply cannot replace a
 newer generation, while every strong payment and immutable observation still
 uses the existing financial merge. No database lock spans external I/O.
 
-New archives also reject an unfinished durable review-query command and an
-explicit false frozen capability on either the order or case. Missing old fields
+New archives also reject an unfinished current-generation durable review-query
+command and an explicit false frozen capability on either the order or case. A
+historical unfinished command remains UNKNOWN permanently, but a separately
+accepted, completed explicit command for the same case may restore admission
+only when its immutable binding is the current generation and that generation
+has a complete authoritative unpaid result. Background/non-command queries and
+older completed receipts cannot stand in for that current command. Missing old fields
 are not rewritten into a declared capability. These checks do not replace the
 original deadline, claim, conflict, financial-fact or current-owner requirements.
 Receipt recovery still requires the exact original actor/case/key and current
 authorization; it does not re-evaluate today's new-command admission facts.
+
+Apply `900048_late_payment_query_generations` as part of the complete package.
+Stop and drain affected old query/archive writers before migration, then start
+the compatible new writers. Its deferred constraint rejects a new unbound old
+writer command at COMMIT with SQLSTATE `23514`; it does not backfill old UNKNOWN
+rows or redispatch them. The published 900030 and 900047 SQL stays unchanged.
+900048 is forward-only: an old-binary rollback or mixed writer deployment cannot
+restore the former admission contract. Keep affected entrypoints disabled until
+a forward-compatible repair is available. No deployment is performed by these
+instructions.
+
+Prepare atomically reserves the command binding and current UNKNOWN generation
+before supplier I/O. Archive retains the physical case-update snapshot barrier:
+even a transaction that began with a previously completed eligible command must
+not admit after a newer Prepare commits. Original committed archive receipt
+recovery remains first and read-only, including after a late strong SUCCESS
+reopens the case. The original receipt does not authorize a new archive key.
