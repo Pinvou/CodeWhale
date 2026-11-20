@@ -88,6 +88,7 @@ ACCOUNT_REQUIRED = {
     "TestOrganizationStartupDiagnosticsPostgres",
     "TestApprovalDeliveryTerminalRecoveryPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
+    "TestAccountFinancialJSONObjectsPostgres",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
     "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
@@ -224,6 +225,7 @@ RETAINED_REQUIRED = {
     "TestF12PaymentRepairOrderLookupPostgres",
     "TestF12PaymentRepairDeployedBaselineUpgradePostgres",
     "TestRetainedOrganizationOrderHistoryPagination",
+    "TestBillingFinancialJSONObjectsPostgres",
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
     "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease",
     "TestExpiredHoldProofRetryDiagnosticsPostgres",
@@ -344,6 +346,8 @@ EXACT_REQUIRED_CHILDREN = {
         "pre-admission-fixture-rejects-current-schema",
         "runtime-immutable-command-and-exact-prefix-down",
     },
+    "TestAccountFinancialJSONObjectsPostgres": {"fresh-current-producer", "upgrade-current-producer", "dirty-critical-history", "dirty-financial-history"},
+    "TestBillingFinancialJSONObjectsPostgres": {"fresh-current-producer", "upgrade-current-producer", "dirty-details", "dirty-provider_capability_snapshot", "dirty-policy_snapshot", "dirty-evidence_summary", "dirty-payload_snapshot"},
     "TestStreamStatePollingPublicPostgres": {"complete", "cancel", "disconnect",
         "complete/concurrent-last-event-id-public-replay", "disconnect/concurrent-last-event-id-public-replay",
         "external-committed", "external-released"},
@@ -639,7 +643,7 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestReconciliationOrphanPaidOrderPostgres": {"fresh-install", "historical-upgrade"},
     "TestReconciliationUnknownDateOrphanLifecyclePostgres": {
-        "cross-date-concurrency", "legacy-and-ignore", "mixed-canonical-and-legacy", "observation-rollback",
+        "cross-date-concurrency", "legacy-and-ignore", "mixed-canonical-and-legacy", "resolved-cross-date-recurrence", "observation-rollback",
         "stale-review-binding", "query-index-upgrade", "case-identity-recovery-fence", "legacy-unbound-recovery-fence",
     },
     "TestRemoteModelCancellationOwnerLoopTransport": {

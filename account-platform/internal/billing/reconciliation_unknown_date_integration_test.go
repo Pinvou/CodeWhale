@@ -19,7 +19,7 @@ import (
 )
 
 func TestReconciliationUnknownDateOrphanLifecyclePostgres(t *testing.T) {
-	for _, scenario := range []string{"cross-date-concurrency", "legacy-and-ignore", "mixed-canonical-and-legacy", "observation-rollback", "stale-review-binding", "query-index-upgrade", "case-identity-recovery-fence", "legacy-unbound-recovery-fence"} {
+	for _, scenario := range []string{"cross-date-concurrency", "legacy-and-ignore", "resolved-cross-date-recurrence", "mixed-canonical-and-legacy", "observation-rollback", "stale-review-binding", "query-index-upgrade", "case-identity-recovery-fence", "legacy-unbound-recovery-fence"} {
 		t.Run(scenario, func(t *testing.T) {
 			if scenario == "case-identity-recovery-fence" || scenario == "legacy-unbound-recovery-fence" {
 				testUnknownDateCaseIdentityRecovery(t, scenario == "legacy-unbound-recovery-fence")
@@ -238,6 +238,38 @@ func TestReconciliationUnknownDateOrphanLifecyclePostgres(t *testing.T) {
 				migrations.Unlock(ctx, operator)
 				if item := read(observe(1), "OPEN"); item.ID != first.ID {
 					t.Fatal("indexed consumer replaced the original investigation")
+				}
+			case "resolved-cross-date-recurrence":
+				first := read(observe(0), "OPEN")
+				command(first.ID, "CLAIM")
+				// A known date outside the original bill day stops the unknown-date
+				// difference. Use the real clean observation to authorize RESOLVE.
+				if _, err := r.pool.Exec(ctx, `UPDATE payment_orders SET paid_at=$2 WHERE id=$1`, order.ID, date.AddDate(0, 0, 4)); err != nil {
+					t.Fatal(err)
+				}
+				resolution := ReconciliationCaseCommand{Action: "RESOLVE", ActorID: actor, IdempotencyKey: uuid.NewString(), Reason: "controlled verified date resolution", ReviewResult: "original business day is clean"}
+				if err := coordinator.prepareReconciliationResolution(ctx, first.ID, &resolution); err != nil {
+					t.Fatal("prepare resolution from a clean original-day run", err)
+				}
+				resolved, err := r.UpdateReconciliationCase(ctx, first.ID, resolution)
+				if err != nil || resolved.Status != "RESOLVED" {
+					t.Fatal("verified resolution did not close the case", resolved.Status, err)
+				}
+				clean := observe(1)
+				closed, err := r.AdminReconciliationCasesByIDs(ctx, []uuid.UUID{first.ID})
+				if err != nil || clean.Status != "COMPLETED" || clean.CaseCount != 0 || len(closed) != 1 || closed[0].Status != "RESOLVED" || closed[0].Version != resolved.Version {
+					t.Fatal("an unrelated clean day changed the resolved case", clean, closed, err)
+				}
+				if _, err := r.pool.Exec(ctx, `UPDATE payment_orders SET paid_at=NULL WHERE id=$1`, order.ID); err != nil {
+					t.Fatal(err)
+				}
+				reopened := read(observe(2), "OPEN")
+				if reopened.ID != first.ID || reopened.Version != resolved.Version+1 || reopened.OwnerID != nil || string(reopened.InternalSnapshot) != string(first.InternalSnapshot) {
+					t.Fatal("recurrence did not reopen the same investigation", reopened)
+				}
+				again, err := r.UpdateReconciliationCase(ctx, first.ID, resolution)
+				if err != nil || again.Status != "RESOLVED" || again.Version != resolved.Version {
+					t.Fatal("reopening changed the original RESOLVE receipt", again, err)
 				}
 			case "cross-date-concurrency":
 				var snapshot json.RawMessage
