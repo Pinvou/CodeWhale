@@ -1111,8 +1111,11 @@ async fn switch_idle_session_model_cas_arms_are_enforced() {
         actual_default.clone(),
     )
     .await;
-    assert!(default_applied.is_ok(), "matching default expectation must apply: {:?}",
-        default_applied.map_err(|error| error.to_string()));
+    assert!(
+        default_applied.is_ok(),
+        "matching default expectation must apply: {:?}",
+        default_applied.map_err(|error| error.to_string())
+    );
     assert_eq!(
         store.session_model_id(&no_model_id).as_deref(),
         Some("m-handoff")
