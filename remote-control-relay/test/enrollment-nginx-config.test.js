@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { WebSocket } from "ws";
 import { createEnrollmentGateway } from "../enrollment-gateway.js";
-import { loadEnrollmentNginxConfig, renderEnrollmentNginxConfig } from "../enrollment-nginx-config.js";
+import { ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS, loadEnrollmentNginxConfig, renderEnrollmentNginxConfig } from "../enrollment-nginx-config.js";
 import { main } from "../scripts/enrollment-nginx-config.js";
 
 const execFileAsync = promisify(execFile);
@@ -202,4 +202,16 @@ test("generated custom health and WS routes reach the real gateway and retain en
   assert.equal(code, 1008);
   assert.equal(authorizationCalls, 1);
   assert.equal(upstreamConnections, 0);
+});
+
+
+test("proxy budget documentation cannot drift from the generated public contract", async () => {
+  // Independent retained output contract: changing the source alone must fail.
+  assert.equal(ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS, 75);
+  const guide = await readFile(new URL("../ENROLLMENT.md", import.meta.url), "utf8");
+  assert.match(guide, new RegExp(`generated WS location explicitly uses ${ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS}-second read and send timeouts`, "u"));
+  const idleGuide = await readFile(new URL("../../docs/windows-desktop-remote-control-a05-gateway-idle.md", import.meta.url), "utf8");
+  for (const direction of ["read", "send"]) {
+    assert.ok(idleGuide.includes(`proxy_${direction}_timeout ${ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS}s`));
+  }
 });

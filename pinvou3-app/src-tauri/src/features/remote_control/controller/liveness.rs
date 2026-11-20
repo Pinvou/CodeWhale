@@ -340,7 +340,7 @@ impl ControllerLivenessWatchdog {
         let mut watchdog = Self::new(liveness_epoch_a)?;
         watchdog.deadline_b = Some(
             now_b
-                .checked_add(30_000)
+                .checked_add(LIVENESS_TOTAL_BUDGET_MS)
                 .ok_or_else(|| LivenessError::new("deadline_overflow", "candidate_deadline"))?,
         );
         watchdog.last_advanced_at_b = Some(now_b);

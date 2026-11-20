@@ -312,7 +312,7 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 			t.Fatal("detached late job became claimable", e)
 		}
 	})
-	t.Run("reclaimed-lease-rejects-previous-worker", func(t *testing.T) {
+	t.Run("quarantined-lease-rejects-previous-worker", func(t *testing.T) {
 		for _, action := range []string{"complete", "retry"} {
 			t.Run(action, func(t *testing.T) {
 				p := identity.Principal{Issuer: principal.Issuer, Subject: uuid.NewString(), SessionID: uuid.NewString()}
@@ -348,10 +348,8 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 					if e = c.QueryRow(ctx, `SELECT clock_timestamp()>lease_until,lease_until FROM commerce_customer_sync_jobs WHERE id=$1`, first.ID).Scan(&expired, &leaseUntil); e != nil {
 						t.Fatal(e)
 					}
-					// Claim uses the repository's real Go clock. PostgreSQL's
-					// clock alone can cross this 20ms boundary first on Windows.
-					// Require expiry in both clock domains without changing the
-					// lease or weakening the subsequent reclaim assertion.
+					// Observe expiry before exercising the current unknown-result
+					// policy: quarantine rather than dispatch another attempt.
 					applicationExpired := time.Now().After(leaseUntil)
 					if expired && !applicationExpired {
 						t.Log("database lease clock passed expiry before the application claim clock")
@@ -365,8 +363,8 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 					time.Sleep(time.Millisecond)
 				}
 				second, e := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", "v2", time.Minute)
-				if e != nil || second == nil || second.ID != first.ID || second.Attempts != first.Attempts+1 {
-					t.Fatal("expired lease was not actually reclaimed", e)
+				if e != nil || second != nil {
+					t.Fatal("expired unknown lease acquired another dispatch", e)
 				}
 				if action == "complete" {
 					e = r.CompleteCommerceCustomerSyncJob(ctx, *first, commerce.CustomerProvisionResult{ExternalReferenceRedacted: "***old-worker"})
@@ -378,14 +376,18 @@ func TestF02PublicCommerceCustomerLifecycle(t *testing.T) {
 				}
 				var status, mappingStatus string
 				var attempts, evidence int
-				if q := c.QueryRow(ctx, `SELECT j.status,j.attempts,m.status,(SELECT count(*) FROM commerce_customer_sync_evidence e WHERE e.job_id=j.id) FROM commerce_customer_sync_jobs j JOIN commerce_customer_mappings m ON m.id=j.mapping_id WHERE j.id=$1`, second.ID).Scan(&status, &attempts, &mappingStatus, &evidence); q != nil || status != "LEASED" || attempts != second.Attempts || mappingStatus != "IN_PROGRESS" || evidence != 0 {
+				if q := c.QueryRow(ctx, `SELECT j.status,j.attempts,m.status,(SELECT count(*) FROM commerce_customer_sync_evidence e WHERE e.job_id=j.id) FROM commerce_customer_sync_jobs j JOIN commerce_customer_mappings m ON m.id=j.mapping_id WHERE j.id=$1`, first.ID).Scan(&status, &attempts, &mappingStatus, &evidence); q != nil || status != "REPAIR_REQUIRED" || attempts != first.Attempts || mappingStatus != "REPAIR_REQUIRED" || evidence != 0 {
 					t.Fatalf("old %s modified current lease: job=%s attempts=%d mapping=%s evidence=%d err=%v", action, status, attempts, mappingStatus, evidence, q)
 				}
 				if e != account.ErrConflict {
 					t.Fatal("old worker authority was accepted")
 				}
-				if e = r.CompleteCommerceCustomerSyncJob(ctx, *second, commerce.CustomerProvisionResult{ExternalReferenceRedacted: "***current-worker"}); e != nil {
-					t.Fatal("current lease could not complete", e)
+				var cases int
+				if e = c.QueryRow(ctx, `SELECT count(*) FROM commerce_customer_repair_cases WHERE job_id=$1 AND attempts=$2 AND status='OPEN'`, first.ID, first.Attempts).Scan(&cases); e != nil || cases != 1 {
+					t.Fatal("original unknown result lacks one manual case", cases, e)
+				}
+				if repeated, e := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", "v2", time.Minute); e != nil || repeated != nil {
+					t.Fatal("quarantined lease was redispatched", e)
 				}
 			})
 		}
@@ -498,15 +500,20 @@ func TestF02CommerceLeaseExpiresWhileWaitingForMappingLock(t *testing.T) {
 			}
 			var status, mappingStatus string
 			var evidence int
-			if e = c.QueryRow(ctx, `SELECT j.status,m.status,(SELECT count(*) FROM commerce_customer_sync_evidence e WHERE e.job_id=j.id) FROM commerce_customer_sync_jobs j JOIN commerce_customer_mappings m ON m.id=j.mapping_id WHERE j.id=$1`, job.ID).Scan(&status, &mappingStatus, &evidence); e != nil || status != "LEASED" || mappingStatus != "IN_PROGRESS" || evidence != 0 {
-				t.Fatal("expired lock waiter wrote persistent result", e)
+			if e = c.QueryRow(ctx, `SELECT j.status,m.status,(SELECT count(*) FROM commerce_customer_sync_evidence e WHERE e.job_id=j.id) FROM commerce_customer_sync_jobs j JOIN commerce_customer_mappings m ON m.id=j.mapping_id WHERE j.id=$1`, job.ID).Scan(&status, &mappingStatus, &evidence); e != nil || status != "REPAIR_REQUIRED" || mappingStatus != "REPAIR_REQUIRED" || evidence != 0 {
+				t.Fatal("expired waiter changed business success instead of quarantining", e)
+			}
+			var observations int
+			if e = c.QueryRow(ctx, `SELECT count(*) FROM commerce_customer_repair_callbacks callback JOIN commerce_customer_repair_cases repair ON repair.id=callback.case_id WHERE repair.job_id=$1 AND callback.attempts=$2`, job.ID, job.Attempts).Scan(&observations); e != nil || observations != 1 {
+				t.Fatal("expired callback evidence not retained", observations, e)
 			}
 			current, e := r.ClaimCommerceCustomerSyncJob(ctx, "controlled-commerce", "v1", time.Minute)
-			if e != nil || current == nil || current.ID != job.ID || current.Attempts != job.Attempts+1 {
-				t.Fatal("rejected waiter lost recoverable job", e)
+			if e != nil || current != nil {
+				t.Fatal("rejected unknown waiter acquired new dispatch", e)
 			}
-			if e = r.CompleteCommerceCustomerSyncJob(ctx, *current, commerce.CustomerProvisionResult{ExternalReferenceRedacted: "***current"}); e != nil {
-				t.Fatal(e)
+			var cases int
+			if e = c.QueryRow(ctx, `SELECT count(*) FROM commerce_customer_repair_cases WHERE job_id=$1 AND attempts=$2 AND status='OPEN'`, job.ID, job.Attempts).Scan(&cases); e != nil || cases != 1 {
+				t.Fatal("rejected waiter lacks original evidence case", cases, e)
 			}
 		})
 	}
@@ -527,7 +534,9 @@ func TestF02CommerceOriginal15LateUpgradePreservesFacts(t *testing.T) {
 	}
 	var prior []migrations.Migration
 	for _, m := range all {
-		if m.Version != 15 && m.Version != 91 {
+		// The new completion carrier depends on original 015's job tables.
+		// This predecessor intentionally represents the release before 015.
+		if m.Version != 15 && m.Version != 91 && m.Version != 900025 {
 			prior = append(prior, m)
 		}
 	}

@@ -1,10 +1,8 @@
-//! Reusable session use-case boundaries.
+//! Active session use-case boundaries, independent of Tauri.
 //!
-//! These modules are ordinary Rust and must stay independent of Tauri. Each
-//! later implementation task owns one predeclared file, so adding behavior
-//! does not require editing this central export surface.
+//! Admission is owned by the real submit/reserve implementations; there is no
+//! second, placeholder admission policy. The export surface is architecture-guarded.
 
-pub(crate) mod admission;
 pub(crate) mod dispatch_remote;
 pub(crate) mod ports;
 pub(crate) mod project_remote;
@@ -12,7 +10,6 @@ pub(crate) mod submit_controlled;
 
 #[cfg(test)]
 mod tests {
-    use super::admission::AdmissionUseCase;
     use super::dispatch_remote::ReserveRemoteUseCase;
     use super::ports::{ApplicationEvent, ApplicationEventPort, UseCaseError, UseCaseFuture};
     use super::project_remote::ProjectRemoteUseCase;
@@ -33,7 +30,6 @@ mod tests {
         };
     }
 
-    fake_boundary!(AdmissionUseCase, admit);
     fake_boundary!(ReserveRemoteUseCase, reserve);
     fake_boundary!(ProjectRemoteUseCase, project);
     fake_boundary!(SubmitControlledUseCase, submit);
@@ -47,9 +43,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_predeclared_boundaries_are_callable_without_tauri() {
+    async fn active_boundaries_are_callable_without_tauri() {
         let boundary = FakeUseCases;
-        assert_eq!(boundary.admit(0).await.unwrap(), 1);
         assert_eq!(boundary.submit(1).await.unwrap(), 2);
         assert_eq!(boundary.reserve(2).await.unwrap(), 3);
         assert_eq!(boundary.project(3).await.unwrap(), 4);

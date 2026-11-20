@@ -8,11 +8,12 @@ const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
 test('identity cleanup is lifecycle-versioned, irreversible, and releases identifiers only after all cleanup proofs', async () => {
-  const [migration, cleanup, worker, commerce] = await Promise.all([
+  const [migration, cleanup, worker, commerce, callbacks] = await Promise.all([
     read('migrations/account/000028_account_closure_cleanup.up.sql'),
     read('internal/account/account_closure_cleanup.go'),
     read('internal/account/account_closure.go'),
     read('internal/account/commerce_mapping.go'),
+    read('internal/account/commerce_repair_callbacks.go'),
   ]);
   assert.match(migration, /subject_lifecycle_version/);
   assert.match(migration, /account_subject_retention_records/);
@@ -32,14 +33,29 @@ test('identity cleanup is lifecycle-versioned, irreversible, and releases identi
   assert.match(lifecyclePredicate, /subjectType == "USER" && actual != expected/);
   assert.match(lifecyclePredicate, /status == "DELETED"/);
   assert.match(lifecyclePredicate, /status == "ANONYMIZED"/);
+  const subjectWrapper = commerce.match(/func lockCommerceCallbackSubjectTx\([^\n]*\) \(string, int64, error\) \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(subjectWrapper, 'callbacks use the shared subject lock wrapper');
+  assert.match(subjectWrapper, /if subjectType != "ORGANIZATION" \{\s*return lockCommerceSubjectTx\(ctx, tx, subjectType, subjectID\)\s*\}/);
+  assert.match(subjectWrapper, /SELECT status FROM organizations WHERE id=\$1 FOR SHARE/);
+  const finish = callbacks.match(/func finishCommerceRepairCallback\([^\n]*\) \(bool, error\) \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(finish, 'late callbacks may retain evidence without completion authority');
+  assert.match(finish, /handled, err := retainCommerceRepairCallback\(ctx, tx, job, kind, reference\)/);
+  assert.match(finish, /if err != nil \|\| !handled \{\s*return handled, err\s*\}/);
+  assert.match(finish, /if err = tx\.Commit\(ctx\); err != nil \{\s*return true, err\s*\}/);
+  assert.match(finish, /return true, ErrConflict\s*$/);
   for (const callback of ['CompleteCommerceCustomerSyncJob', 'RetryCommerceCustomerSyncJob']) {
     const body = commerce.match(new RegExp(`func \\(r \\*PostgresRepository\\) ${callback}\\([^\\n]*\\) error \\{([\\s\\S]*?)\\n\\}`))?.[1];
     assert.ok(body, `${callback} is installed`);
-    const subjectLock = body.indexOf('lockCommerceSubjectTx');
+    const subjectLock = body.indexOf('lockCommerceCallbackSubjectTx');
     const generationFence = body.indexOf('commerceCallbackLifecycleConflict(');
     const mappingWrite = body.indexOf('UPDATE commerce_customer_mappings');
     assert.ok(subjectLock >= 0 && generationFence > subjectLock && mappingWrite > generationFence, `${callback} checks the locked subject generation before a mapping write`);
-    assert.match(body, /if commerceCallbackLifecycleConflict\(job\.SubjectType, job\.SubjectLifecycleVersion, lifecycle, (?:userStatus|status)\) \{\s*return ErrConflict\s*\}/);
+    const conflict = body.match(/if commerceCallbackLifecycleConflict\(job\.SubjectType, job\.SubjectLifecycleVersion, lifecycle, (?:userStatus|status)\) \{([\s\S]*?)\n\t\}/)?.[1];
+    assert.ok(conflict, `${callback} rejects a retired subject generation`);
+    const kind = callback === 'CompleteCommerceCustomerSyncJob' ? 'SUCCEEDED' : 'PROVIDER_ERROR';
+    assert.match(conflict, new RegExp(`finishCommerceRepairCallback\\(ctx, tx, job, "${kind}",`));
+    assert.match(conflict, /handled \|\| evidenceErr != nil \{\s*return evidenceErr\s*\}/);
+    assert.match(conflict, /return ErrConflict\s*$/);
   }
 });
 
