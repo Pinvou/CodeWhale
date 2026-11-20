@@ -59,6 +59,16 @@ def run_group(group, binding, artifacts):
             cwd=ROOT, env={**os.environ, **binding}, stdout=log, stderr=subprocess.STDOUT,
             check=False,
         )
+        if group == "owners" and result.returncode == 0:
+            # Original owner fixtures have restored their absent actors. The
+            # remaining original families must also pass on this same admitted
+            # service before the owners worker can report success.
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/test-account-financial-families-postgres.py")],
+                cwd=ROOT, env={**os.environ, **binding,
+                              "PINVOU_FINANCIAL_CHILD_ARTIFACTS": str(artifacts / "owners-families")},
+                stdout=log, stderr=subprocess.STDOUT, check=False,
+            )
     return {"group": group, "exit_code": result.returncode,
             "seconds": round(time.monotonic() - started, 3), "log": str(path)}
 
