@@ -49,6 +49,7 @@ pub(crate) mod desktop_remote_permission;
 pub(crate) mod desktop_remote_proxy;
 pub(crate) mod desktop_remote_state;
 pub(crate) mod desktop_remote_task;
+mod desktop_remote_validation;
 pub(crate) mod device;
 pub(crate) mod diagnostics;
 pub(crate) mod files;

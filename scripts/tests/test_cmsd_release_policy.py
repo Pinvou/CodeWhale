@@ -203,16 +203,14 @@ class CmsdCiRoutingTests(unittest.TestCase):
     def test_main_release_path_and_real_diff_regex_select_component_changes(self):
         patterns = re.findall(r"^      - '([^']+)'", self.release.split("  pull_request:")[0], re.M)
         pull_patterns = re.findall(r"^      - '([^']+)'", self.release.split("  pull_request:")[1].split("  workflow_dispatch:")[0], re.M)
-        line = next(line.strip() for line in self.release.splitlines() if line.strip().startswith("'^(components/cmsd/"))
-        pattern = line.split("'", 2)[1]
+        # main 已把 push/pull 的路径清单重构为 generate-remote-control-release-paths
+        # 生成的 BEGIN/END GENERATED 块（cmsd 条目经 EXTRA_PATHS 注入），旧的
+        # 单行大正则不再存在；路径命中断言保持，等价覆盖原 grep 验证。
         for path in ("components/cmsd/src/main.rs", "components/cmsd/Cargo.lock", "scripts/check-cmsd-bundled-package.py",
                      "scripts/release-deb.sh", "scripts/tests/test_cmsd_release_policy.py",
                      "pinvou3-app/scripts/tauri/cmsd-component.js", "pinvou3-app/tests/cmsd_bundled_packaging.test.js"):
             self.assertTrue(matches(path, patterns), path)
             self.assertTrue(matches(path, pull_patterns), path)
-            if shutil.which("grep"):
-                result = subprocess.run(["grep", "-Eq", pattern], input=path + "\n", text=True)
-                self.assertEqual(result.returncode, 0, path)
 
     def test_required_gate_rejects_applicable_skipped_cmsd_matrix(self):
         required = self.workflow.split("\n  required-gate:", 1)[1]

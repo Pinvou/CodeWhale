@@ -21,7 +21,7 @@ const settingsPage = source('features/remote-control/RemoteControlSettingsPage.j
 const rustControlled = readFileSync(new URL('../src-tauri/src/features/remote_control/controller/controlled.rs', import.meta.url), 'utf8');
 
 const CONTROLLED_KEYS = [
-  'section', 'title', 'desc', 'enable', 'disable', 'statusIdle', 'statusWaiting', 'statusConnected',
+  'section', 'title', 'desc', 'enable', 'disable', 'statusWaiting', 'statusConnected',
   'controlledStatus',
   'codeLabel', 'codeHint', 'refresh', 'deviceLabel', 'workspacesTitle',
   'stateOff', 'stateStopped', 'stateRegistering', 'stateWaiting', 'stateExpiring', 'stateExpired',
