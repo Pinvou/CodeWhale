@@ -59,8 +59,8 @@ rust_version="$(rustc --version | awk '{print $2}')"
 rust_major="${rust_version%%.*}"
 rust_remainder="${rust_version#*.}"
 rust_minor="${rust_remainder%%.*}"
-if ((rust_major < 1 || (rust_major == 1 && rust_minor < 89))); then
-  fail "需要 Rust 1.89 或更高版本，当前为 ${rust_version}。请先执行 source ~/.cargo/env"
+if ((rust_major < 1 || (rust_major == 1 && rust_minor < 90))); then
+  fail "需要 Rust 1.90 或更高版本，当前为 ${rust_version}。请先执行 source ~/.cargo/env"
 fi
 
 log "使用 $(rustc --version) / $(cargo --version)"

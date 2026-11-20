@@ -375,6 +375,8 @@ class WebpkiCiContractTests(unittest.TestCase):
                     '        timeout-minutes: 3',
                     '        continue-on-error: true',
                     '        uses: actions/upload-artifact@v7',
+                    '        env:',
+                    '          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}',
                     '        with:',
                     '          name: gate-resource-lifecycle-${{ github.run_attempt }}',
                     '          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/',
@@ -448,6 +450,8 @@ class WebpkiCiContractTests(unittest.TestCase):
             ('${{ env.PINVOU_CI_RESOURCE_LEDGER }}/', '${{ github.workspace }}/**/*'),
             ('retention-days: 7', 'retention-days: 30'),
             ('uses: actions/upload-artifact@v7', 'run: exit 37'),
+            ('NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}', 'NODE_OPTIONS: --tls-min-v1.0'),
+            ('        env:\n', '        env:\n          UNREVIEWED: yes\n'),
             ('name: Gate test resource lifecycle receipts', 'name: Unreviewed upload'),
         ]:
             with self.subTest(field=old), self.assertRaises(AssertionError):
