@@ -14,7 +14,9 @@ try {
   function New-RuntimeReleaseHttpClient {
     $script:transportHandler = [Pinvou.RuntimeRelease.Tests.Handler]::new($script:transportMode)
     $client = [Net.Http.HttpClient]::new($script:transportHandler)
-    $client.Timeout = [TimeSpan]::FromMilliseconds(300)
+    # Give normal fixture responses time for cold PowerShell/.NET startup.
+    # Deliberate stalls still exercise the original 300 ms deadline.
+    $client.Timeout = [TimeSpan]::FromMilliseconds($(if ($script:transportMode -in @('body-stall', 'headers-stall')) { 300 } else { 2000 }))
     return $client
   }
   foreach ($mode in @('ok', 'oversize', 'short', 'body-stall', 'headers-stall', 'redirect', 'unsafe', 'loop', '404', 'ok')) {
@@ -22,11 +24,12 @@ try {
     $destination = Join-Path $testRoot ('transport-' + [Guid]::NewGuid().ToString('N'))
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $failed = $false
+    $exceptionType = 'none'
     $previousTls = [Net.ServicePointManager]::SecurityProtocol
     try { Write-RuntimeReleaseDownload -Uri 'https://github.com/example/asset' -Destination $destination -ExpectedBytes 3 }
-    catch { $failed = $true }
+    catch { $failed = $true; $exceptionType = $_.Exception.GetBaseException().GetType().Name }
     $clock.Stop()
-    Assert-True ($failed -eq ($mode -notin @('ok', 'redirect'))) "Production transport outcome differs: $mode"
+    Assert-True ($failed -eq ($mode -notin @('ok', 'redirect'))) "Production transport outcome differs: $mode ($exceptionType, $($clock.ElapsedMilliseconds) ms)"
     Assert-True ($clock.Elapsed.TotalSeconds -lt 5) "Transport did not honor its deadline: $mode"
     Assert-True ($script:transportHandler.Disposed) "HTTP handler was not disposed: $mode"
     Assert-True ([Net.ServicePointManager]::SecurityProtocol -eq $previousTls) 'TLS state must be restored after all exits'

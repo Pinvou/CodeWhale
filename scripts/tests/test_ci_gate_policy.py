@@ -1,6 +1,7 @@
 import json
 import re
 from ci_routing_test_support import default_ci_routing
+from ci_artifact_policy_support import legacy_artifact_policy
 import os
 import shutil
 import subprocess
@@ -11,6 +12,8 @@ import unittest
 from fnmatch import fnmatchcase
 from pathlib import Path
 
+
+ARTIFACT_TLS_ENV = '        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n'
 
 ROOT = Path(__file__).resolve().parents[2]
 PR_WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
@@ -2864,6 +2867,17 @@ python3() { fixture_mock python3 "$@"; }
             "pet is exempted from rust_full like feedback/personas, so pet Rust "
             "changes must gate through the CLI suite too",
         )
+        # platform/prefs defines the SavedModel schema the CLI reads and
+        # writes (pinvou-cli path-depends on pinvou3-tauri and constructs
+        # SavedModel literals). Today the CLI legs fire transitively via
+        # rust_full for any src-tauri .rs change; the direct entry keeps the
+        # CLI suite gating schema changes even if rust_full ever gains a
+        # prefs exclusion like the leaf features above.
+        assert_extracted_entry(
+            "pinvou3-app/src-tauri/src/platform/prefs/**",
+            "prefs schema changes must gate through the CLI suite (the CLI "
+            "constructs SavedModel literals)",
+        )
         # Policy: the workflow file itself is deliberately excluded from
         # cli_rust — workflow edits must not link the full-app test suites
         # (this test enforces that). cli-test changes are instead validated
@@ -3366,7 +3380,10 @@ python3() { fixture_mock python3 "$@"; }
         ]
         self.assertEqual([name for name in names if name in expected], expected)
         self.assertEqual(names.index("Set up zram and swap"), names.index(initial) + 1)
-        self.assertEqual(names.index("Cargo cache"), names.index(precache) + 1)
+        self.assertEqual(names.index("Cargo cache"), names.index(precache) + 2)
+        preparation = _step_named(job, names[names.index(precache) + 1])
+        self.assertIn('run: node scripts/ci-network-node-options.cjs', preparation)
+        self.assertNotIn('continue-on-error:', preparation)
         self.assertEqual(names.index(postcache), names.index("Cargo cache") + 1)
         self.assertEqual(
             names.index("cargo clippy (workspace, all targets)"),
@@ -3380,6 +3397,8 @@ python3() { fixture_mock python3 "$@"; }
             "- name: Cargo cache",
             "id: cli_lint_cache",
             "uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0",
+            "env:", "NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}", "PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}",
+            "PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
             "with:", "workspaces: pinvou-cli", "shared-key: cli-lint",
             "cache-on-failure: false", "save-if: ${{ github.ref == 'refs/heads/main' }}",
         ])
@@ -3403,6 +3422,8 @@ python3() { fixture_mock python3 "$@"; }
         self.assertEqual(uncommented.count("GITHUB_ENV"), 1)
         # Job/step env overrides GITHUB_ENV for the post condition. This job
         # currently has no env mapping; pin that fact, including quoted keys.
+        uncommented = uncommented.replace("        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}\n          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}\n"
+                                          "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'\n", '')
         self.assertNotRegex(uncommented, r"(?m)^\s*(?:env|['\"]env['\"])\s*:")
 
     def test_cli_lint_cache_guard_rejects_step_env_override(self):
@@ -3648,6 +3669,10 @@ python3() { fixture_mock python3 "$@"; }
         # header's prose and the "no continue-on-error" annotations on the
         # clippy gate do not count as settings.
         body = _without_yaml_comments(self.pr_workflow)
+        # The separate all-workflow network policy guard validates pairing,
+        # conditions and the exact helper. Keep this test's original product
+        # failure-policy assertions after removing only reviewed transport.
+        body = legacy_artifact_policy(body)
         job_level = []
         step_level = []
         for number, line in enumerate(body.splitlines(), start=1):
@@ -3696,6 +3721,9 @@ python3() { fixture_mock python3 "$@"; }
             '        timeout-minutes: 3',
             '        continue-on-error: true',
             '        uses: actions/upload-artifact@v7',
+            '        env:',
+            "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+            '          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}',
             '        with:',
             '          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}',
             '          path: |',
@@ -3712,6 +3740,13 @@ python3() { fixture_mock python3 "$@"; }
         atomic_receipt = _step_named(
             _extract_job_block(body, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
         )
+        self.assertEqual(_step_named(_extract_job_block(body, 'windows-rust-test'),
+            'Configure bounded Windows atomic upload diagnostics').rstrip(), '\n'.join([
+                '      - name: Configure bounded Windows atomic upload diagnostics',
+                "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+                '        working-directory: ${{ github.workspace }}',
+                '        run: node scripts/ci-artifact-node-options.cjs --diagnostics',
+            ]))
         for name in reviewed_diagnostics:
             diagnostic_step = body.split(
                 "- name: " + name + "\n", maxsplit=1
@@ -3729,6 +3764,8 @@ python3() { fixture_mock python3 "$@"; }
               timeout-minutes: 3
               continue-on-error: true
               uses: actions/upload-artifact@v7
+              env:
+                NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
               with:
                 name: gate-resource-lifecycle-${{ github.run_attempt }}
                 path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -3756,12 +3793,14 @@ python3() { fixture_mock python3 "$@"; }
                         'name: windows-runtime-receipts-${{ github.run_id }}-${{ github.run_attempt }}',
                         'path: ${{ runner.temp }}/windows-runtime-${{ github.run_id }}-${{ github.run_attempt }}/'):
             self.assertIn(setting, runtime_receipt)
-        self.assertNotRegex(runtime_receipt, r'(?m)^        (?:run|env):')
+        self.assertIn(ARTIFACT_TLS_ENV, runtime_receipt)
+        self.assertNotRegex(runtime_receipt.replace(ARTIFACT_TLS_ENV, '', 1), r'(?m)^        (?:run|env):')
         transport = _step_named(_extract_job_block(body, 'required-gate'), 'PR test success proof transport')
         self.assertIn('timeout-minutes: 3', transport)
         self.assertIn('uses: actions/upload-artifact@v7', transport)
         self.assertIn('path: ${{ steps.success_proof.outputs.directory }}/proof.json', transport)
-        self.assertNotRegex(transport, r'(?m)^        (?:run|env):')
+        self.assertIn(ARTIFACT_TLS_ENV, transport)
+        self.assertNotRegex(transport.replace(ARTIFACT_TLS_ENV, '', 1), r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'windows-codex-runtime-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Preserve browser fixture exit receipts\n.*?(?=^      - |\Z)", diagnostic_job
@@ -3775,6 +3814,8 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}
                     retention-days: 7
@@ -3798,6 +3839,8 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: frontend-resource-lifecycle-${{ github.run_attempt }}
                     path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -3809,7 +3852,8 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn('timeout-minutes: 3', closure_receipt)
         self.assertIn('uses: actions/upload-artifact@v7', closure_receipt)
         self.assertIn('name: account-closure-resource-lifecycle-${{ github.run_attempt }}', closure_receipt)
-        self.assertNotRegex(closure_receipt, r'(?m)^        (?:run|env):')
+        self.assertIn(ARTIFACT_TLS_ENV, closure_receipt)
+        self.assertNotRegex(closure_receipt.replace(ARTIFACT_TLS_ENV, '', 1), r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'account-platform-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Account test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
@@ -3824,6 +3868,8 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: account-resource-lifecycle-${{ github.run_attempt }}
                     path: |
@@ -3847,6 +3893,8 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}
                     path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -3864,6 +3912,9 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
                     path: |
@@ -3915,6 +3966,10 @@ python3() { fixture_mock python3 "$@"; }
         atomic = _step_named(
             _extract_job_block(original, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
         )
+        atomic_config = _step_named(_extract_job_block(original, 'windows-rust-test'),
+            'Configure bounded Windows atomic upload diagnostics')
+        mutations['unreviewed atomic preload'] = original.replace(atomic_config,
+            atomic_config.replace('scripts/ci-artifact-node-options.cjs', 'scripts/unreviewed.cjs'), 1)
         for label, old, new in (
             ('atomic upload action', 'uses: actions/upload-artifact@v7', 'run: exit 37'),
             ('atomic upload id', 'id: windows_atomic_receipts_upload', 'id: unreviewed_upload'),
@@ -5156,6 +5211,7 @@ python3() { fixture_mock python3 "$@"; }
                 1,
             )
             self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('receipt="$(cygpath -w "$ledger/atomic-$index.json")"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5169,6 +5225,8 @@ python3() { fixture_mock python3 "$@"; }
             ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compile-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt', "echo bypass-supervisor --receipt"),
+            ('$ledger/atomic-$index.json', '$ledger/atomic-fixed.json'),
         ):
             with self.subTest(mutation=old):
                 mutant = regression.replace(old, new)
@@ -5193,6 +5251,7 @@ python3() { fixture_mock python3 "$@"; }
             for prefix in required:
                 self.assertEqual(filters.count(prefix), 1)
             self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('receipt="$(cygpath -w "$ledger/atomic-$index.json")"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5235,6 +5294,7 @@ python3() { fixture_mock python3 "$@"; }
             for required in required_filters:
                 self.assertEqual(filters.count(required), 1)
             self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('receipt="$(cygpath -w "$ledger/atomic-$index.json")"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)

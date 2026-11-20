@@ -452,6 +452,17 @@ assert.ok(
 assert.match(installerHook, /SetEnvironmentVariableW\(w "TEMP", w "\$WINDIR\\Temp"\)/);
 assert.match(installerHook, /IntCmp \$5 1632 pinvou_vc_redist_temp_failed/);
 assert.match(installerHook, /IntCmp \$5 -2147023264 pinvou_vc_redist_temp_failed/);
+// The exit-ladder pins carry the full jump targets, not just the compared
+// code: a one-letter drift in a target spelling is a makensis-dangling
+// label that no CI lane compiles away (no PR lane runs makensis), so the
+// prefix-only form cannot catch it. 1638 = ERROR_PRODUCT_VERSION: a newer
+// VC++ runtime already present must count as ready, not abort the install.
+assert.match(installerHook, /IntCmp \$5 3010 pinvou_vc_redist_reboot 0 0/);
+assert.match(installerHook, /IntCmp \$5 1638 pinvou_vc_redist_ready 0 0/);
+assert.match(
+  installerHook,
+  /IntCmp \$5 1641 pinvou_vc_redist_reboot pinvou_vc_redist_exit_failed pinvou_vc_redist_exit_failed/,
+);
 assert.match(installerHook, /Pinvou3-vcredist\.log/);
 for (const recoveryHint of [
   "释放系统盘空间",
@@ -979,7 +990,15 @@ function verifyRuntimePrSupervision(job) {
     "path: ${{ runner.temp }}/windows-runtime-pr-${{ github.run_id }}-${{ github.run_attempt }}/"]) {
     assert.ok(advisory[0].includes(field), `release PR resource receipts must preserve ${field}`);
   }
-  assert.doesNotMatch(advisory[0], /^        (?:run|env):/mu);
+  const transportEnv = [
+    "        env:",
+    "          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}",
+    "          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}",
+    "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+    "",
+  ].join("\n");
+  assert.ok(advisory[0].includes(transportEnv), "receipt upload must use the scoped storage transport");
+  assert.doesNotMatch(advisory[0].replace(transportEnv, ""), /^        (?:run|env):/mu);
 }
 verifyRuntimePrSupervision(prValidationJob);
 for (const mutant of [
@@ -1017,9 +1036,11 @@ assert.ok(
   "the pinned checkout must be selected before any submodule is initialized",
 );
 // All run steps that consume source or output must use the same checkout.
-// Toolchain actions have no project working directory; cleanup uses the original.
+// Runner transport helpers use the original checkout, as does cleanup.
+const runnerTransport = /^node scripts\/(?:ci-rust-network\.cjs(?: --report)?|ci-network-node-options\.cjs|ci-artifact-node-options\.cjs --network)$/u;
 for (const step of windowsBuildJob.split(/\n      - name:/u).slice(1)) {
-  if (!/\n        run:/u.test(step) || /id: windows-workspace| -Mode Cleanup/u.test(step)) continue;
+  const run = /\n        run: ([^\n]+)/u.exec(step);
+  if (!run || /id: windows-workspace| -Mode Cleanup/u.test(step) || runnerTransport.test(run[1])) continue;
   assert.match(
     step,
     /working-directory: \$\{\{ env\.PINVOU_WINDOWS_BUILD_ROOT \}\}/u,
