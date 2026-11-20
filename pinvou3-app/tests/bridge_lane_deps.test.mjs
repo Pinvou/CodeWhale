@@ -200,8 +200,8 @@ const EXPECTED_SURFACE = {
   // cancelKbModel (kb_model_cancel chain) reads only `invoke`; the sole
   // consuming cluster (tauriKnowledgeModel) already passes it, so only the
   // count moves. raisePinvouSummonHighwater (community #841 summon-seq
-  // alignment) joins the same shared base, so the union count is one higher.
-  sharedFnCount: 319,
+  // alignment) joins the same shared base; with the community #899/#900
+  // additions below the union count is two higher than the shared base.
   // probeEndpointModels (endpoint model auto-discovery wave) reads only
   // `invoke` as well; the settings cluster already passes it — count only.
   // scheduledTaskDraftCronReject (issue #821 round-3 M2: the chat draft
