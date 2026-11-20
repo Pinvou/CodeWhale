@@ -4429,6 +4429,7 @@ mod tests {
                 credential_action: None,
                 // Official SavedModel 字段(社区 #870 回流补齐;社区侧无这些字段):
                 model_store_card_id: None,
+                store_card_id: None,
                 model_store_link_detached: false,
                 model_store_link_requested: false,
                 model_store_link_only: false,
@@ -4459,6 +4460,7 @@ mod tests {
                 has_secret: false,
                 credential_action: None,
                 model_store_card_id: None,
+                store_card_id: None,
                 model_store_link_detached: false,
                 model_store_link_requested: false,
                 model_store_link_only: false,
