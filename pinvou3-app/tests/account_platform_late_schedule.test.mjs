@@ -66,7 +66,14 @@ test('a conflict remains an unresolved server outcome instead of undispatched ev
 });
 
 const actSource = queue.slice(queue.indexOf('  const act ='), queue.indexOf('  const item ='));
-const actFor = (operation, execute = () => {}, localReview = '2099-01-01T00:00:00Z') => new Function('query', 'operation', 'detail', 'reason', 'resolution', 'nextReview', 'paymentAnomalyResolutions', 'anomaly', 'copy', 'execute', 'open', 'load', `${actSource}\nreturn act;`)({ unknown: false, busy: false }, operation, { case: { case_id: id, anomaly_type: 'controlled' } }, 'controlled review reason', 'controlled', localReview, () => ['controlled'], false, { confirmAction: 'controlled confirmation' }, execute, async () => {}, async () => {});
+const createAct = new Function(
+  'query', 'recoveryArchive', 'operation', 'detail', 'reason', 'resolution', 'nextReview', 'paymentAnomalyResolutions', 'anomaly', 'copy', 'execute', 'open', 'load', `${actSource}\nreturn act;`,
+);
+const actFor = (operation, execute = () => {}, localReview = '2099-01-01T00:00:00Z') => createAct(
+  { unknown: false, busy: false },
+  { unknown: false, busy: false },
+  operation, { case: { case_id: id, anomaly_type: 'controlled' } }, 'controlled review reason', 'controlled', localReview, () => ['controlled'], false, { confirmAction: 'controlled confirmation' }, execute, async () => {}, async () => {},
+);
 
 test('actual fresh facts mark the three upgraded actions and leave unrelated actions unmarked', async () => {
   const previous = globalThis.confirm; globalThis.confirm = () => true;
