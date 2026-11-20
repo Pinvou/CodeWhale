@@ -98,10 +98,11 @@ func main() {
 			log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_ROLE_SELECTION_FAILED"))
 		}
 	}
-	ctx, err = migrations.PinLedger(ctx, connection)
+	pinnedCtx, err := migrations.PinLedger(ctx, connection)
 	if err != nil {
-		log.Fatal("MIGRATION_LEDGER_IDENTITY_INVALID")
+		log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_LEDGER_IDENTITY_INVALID"))
 	}
+	ctx = pinnedCtx
 
 	domain, err := migrationDomain(ctx, connection, loaded, *directory)
 	if err != nil {
