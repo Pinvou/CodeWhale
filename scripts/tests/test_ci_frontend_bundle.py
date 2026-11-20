@@ -245,7 +245,7 @@ class BundleTests(unittest.TestCase):
                                transport='github', output=fetched)
         with patch.object(BUNDLE, 'tested_commit', return_value=COMMIT), patch.object(
                 BUNDLE.urllib.request, 'build_opener', return_value=SimpleNamespace(open=api)), patch.object(
-                BUNDLE.urllib.request, 'urlopen', side_effect=storage), patch.dict(os.environ, {
+                BUNDLE, 'storage_open', side_effect=storage), patch.dict(os.environ, {
                 'GITHUB_REPOSITORY': 'fixture/repo', 'GITHUB_RUN_ID': '123', 'GITHUB_TOKEN': 'canary',
                 'GITHUB_API_URL': 'https://api.github.com', 'PINVOU_FRONTEND_CACHE_URL': ''}):
             BUNDLE.fetch(args)
@@ -333,7 +333,7 @@ class BundleTests(unittest.TestCase):
             response = io.BytesIO(body)
             response.status = 200
             return response
-        with patch.object(BUNDLE.urllib.request, "build_opener", return_value=SimpleNamespace(open=api)), patch.object(BUNDLE.urllib.request, "urlopen", side_effect=storage), patch.dict(os.environ, {"GITHUB_REPOSITORY": "fixture/repo", "GITHUB_RUN_ID": "123", "GITHUB_TOKEN": "canary", "GITHUB_API_URL": "https://api.github.com"}):
+        with patch.object(BUNDLE.urllib.request, "build_opener", return_value=SimpleNamespace(open=api)), patch.object(BUNDLE, "storage_open", side_effect=storage), patch.dict(os.environ, {"GITHUB_REPOSITORY": "fixture/repo", "GITHUB_RUN_ID": "123", "GITHUB_TOKEN": "canary", "GITHUB_API_URL": "https://api.github.com"}):
             BUNDLE.github_zip(self.root / "archive", BUNDLE.time.monotonic() + 10)
         self.assertEqual((self.root / "archive").read_bytes(), body)
 
@@ -428,7 +428,7 @@ class GithubResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "artifact.zip"
             with patch.object(BUNDLE.urllib.request, "build_opener", return_value=SimpleNamespace(open=api)), patch.object(
-                    BUNDLE.urllib.request, "urlopen", side_effect=storage), patch.dict(os.environ, {
+                    BUNDLE, "storage_open", side_effect=storage), patch.dict(os.environ, {
                         "GITHUB_REPOSITORY": "fixture/repo", "GITHUB_RUN_ID": "123",
                         "GITHUB_TOKEN": "fixture-token", "GITHUB_API_URL": "https://api.github.com"}):
                 if response_mode == "wrong":

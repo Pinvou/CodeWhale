@@ -184,6 +184,62 @@ class PrepareCodeWhale(unittest.TestCase):
         shutil.rmtree(self.checkout)
         self.assert_ready(self.run_prepare())
 
+    def create_unborn_module(self):
+        metadata = self.root / '.git/modules/CodeWhale'
+        metadata.parent.mkdir(parents=True, exist_ok=True)
+        self.git(self.root, 'init', '-q', '--separate-git-dir', metadata.as_posix(), self.checkout.as_posix())
+        self.git(self.checkout, 'config', 'core.worktree', self.checkout.as_posix())
+        self.git(self.checkout, 'config', 'remote.origin.url', 'https://github.com/Pinvou/CodeWhale.git')
+        # A partially initialized module can retain metadata before a commit.
+        # Match the Windows runner's placeholder, without public downloads.
+        (metadata / 'HEAD').write_text('ref: refs/heads/.invalid\n')
+        return metadata
+
+    def test_restores_owned_unborn_module_without_changing_the_parent_gitlink(self):
+        self.create_unborn_module()
+        before = self.git(self.root, 'ls-files', '--stage', '--', 'CodeWhale')
+        self.assert_ready(self.run_prepare())
+        self.assertEqual(self.git(self.root, 'ls-files', '--stage', '--', 'CodeWhale'), before)
+
+    def test_tree_only_unborn_recovery_fetches_only_the_indexed_snapshot(self):
+        self.create_unborn_module()
+        result = self.run_prepare(history=False)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.git(self.checkout, 'rev-parse', 'HEAD'), self.head)
+        self.assertEqual(self.git(self.checkout, 'rev-parse', '--is-shallow-repository'), 'true')
+        self.assertEqual(self.git(self.checkout, 'status', '--porcelain'), '')
+
+    def test_restores_owned_unresolvable_head_when_the_indexed_object_is_already_present(self):
+        self.assert_ready(self.run_prepare())
+        metadata = Path(self.git(self.checkout, 'rev-parse', '--absolute-git-dir'))
+        (metadata / 'HEAD').write_text('ref: refs/heads/.invalid\n')
+        self.assert_ready(self.run_prepare())
+
+    def test_unborn_recovery_never_substitutes_origin_head_for_an_unavailable_gitlink(self):
+        self.create_unborn_module()
+        missing = '1' * 40
+        self.git(self.root, 'update-index', '--cacheinfo', '160000,' + missing + ',CodeWhale')
+        before = self.git(self.root, 'ls-files', '--stage', '--', 'CodeWhale')
+        result = self.run_prepare()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn('CODEWHALE_CI_READY', result.stdout)
+        self.assertEqual(self.git(self.root, 'ls-files', '--stage', '--', 'CodeWhale'), before)
+
+    @unittest.skipUnless(os.name != 'nt', 'native symlink ownership is checked on Linux')
+    def test_refuses_foreign_mutable_head_before_recovery(self):
+        metadata = self.create_unborn_module()
+        foreign = self.root.parent / 'foreign-head'
+        original = (metadata / 'HEAD').read_bytes()
+        foreign.write_bytes(original)
+        (metadata / 'HEAD').unlink()
+        (metadata / 'HEAD').symlink_to(foreign)
+        result = self.run_prepare()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertRegex(result.stdout, r'Mutable Git metadata|Existing CodeWhale working tree is redirected')
+        self.assertNotIn('CODEWHALE_CI_RECOVERY', result.stdout)
+        self.assertEqual(foreign.read_bytes(), original)
+        self.assertTrue((metadata / 'HEAD').is_symlink())
+
     def test_reuses_discovered_owned_module_without_optional_worktree_key(self):
         self.assert_ready(self.run_prepare())
         self.git(self.checkout, "config", "--local", "--unset", "core.worktree")
