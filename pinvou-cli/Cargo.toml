@@ -15,8 +15,13 @@ license = "MIT"
 [workspace.dependencies]
 anyhow = "1.0"
 async-trait = "0.1.89"
+# Cross-process lock files (benchmark-core run execution, adapter-gaia
+# acquisition): try-lock, then hold the fd until the guard drops. fd-lock
+# is already in the graph (direct dependency of the cli crate) and wraps
+# the same OS primitives fs2 did — flock(unix) / LockFileEx(windows) — so
+# the swap removes a crate that had only these two call sites.
+fd-lock = "4"
 futures = "0.3"
-fs2 = "0.4"
 parquet = { version = "=59.1.0", default-features = false }
 rand = "0.9.4"
 serde = { version = "1.0.228", features = ["derive"] }
