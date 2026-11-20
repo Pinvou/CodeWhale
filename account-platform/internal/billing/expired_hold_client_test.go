@@ -80,10 +80,7 @@ func TestExpiredHoldHTTPProofPreservesTransportTimeoutAndCancellation(t *testing
 				if scenario == "canceled" {
 					cancel()
 				}
-				select {
-				case <-r.Context().Done():
-				case <-release:
-				}
+				<-release
 			}))
 			defer server.Close()
 			defer close(release)
