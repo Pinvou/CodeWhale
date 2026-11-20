@@ -201,10 +201,11 @@ func TestAccountFinancialJSONObjectsPostgres(t *testing.T) {
 				}
 			}
 			before = jsonContractAccountFacts(t, r)
-			err = accountschema.DownOne(ctx, operator, loaded)
-			var pg *pgconn.PgError
-			if !errors.As(err, &pg) || pg.Code != "55000" || pg.Message != "financial JSON object contracts are forward-only" || jsonContractAccountFacts(t, r) != before {
-				t.Fatal("down removed contract or facts", err)
+			// Later public migrations may be reversible; verify this release's
+			// exact historical Down without rolling back the current installation.
+			assertHistoricalRollbackRefusalContext(t, ctx, r, loaded, 900024, "55000", "financial JSON object contracts are forward-only")
+			if jsonContractAccountFacts(t, r) != before {
+				t.Fatal("historical rollback changed financial facts")
 			}
 		})
 	}
