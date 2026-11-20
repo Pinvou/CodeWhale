@@ -13,6 +13,16 @@ import { join, matchesGlob } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
+import transportPolicy from "../ci-network-policy.cjs";
+import artifactPolicySupport from "./ci-artifact-policy-support.cjs";
+
+// Keep historical product/advisory contracts exact after validating the new
+// transport layer independently. Only the reviewed helper and exact scoped
+// environment are removed; arbitrary commands or environments still fail.
+function productPolicyText(text) {
+  return artifactPolicySupport.legacyArtifactPolicy(text);
+}
+import "./ci-artifact-tls-policy.test.cjs";
 
 const workflow = await readFile(
   new URL("../../.github/workflows/pr-check.yml", import.meta.url),
@@ -140,6 +150,7 @@ function stepRun(job, name) {
 }
 
 function assertAccountFailurePolicy(job) {
+  job = productPolicyText(job);
   assert.doesNotMatch(job, /secrets\./);
   let mandatory = job;
   // Only these reviewed, bounded transport steps are advisory. Remove their
@@ -153,13 +164,16 @@ function assertAccountFailurePolicy(job) {
     assert.match(diagnostic, /^ {8}uses: actions\/upload-artifact@v7$/m);
     assert.match(diagnostic, /^ {8}timeout-minutes: 3$/m);
     assert.match(diagnostic, /^ {8}continue-on-error: true$/m);
-    assert.doesNotMatch(diagnostic, /^ {8}(?:run|env):/m);
+    assert.ok(diagnostic.includes(artifactTLSOptionsEnv));
+    assert.doesNotMatch(diagnostic.replace(artifactTLSOptionsEnv, ""), /^ {8}(?:run|env):/m);
     mandatory = mandatory.replace(diagnostic, "");
   }
   assert.doesNotMatch(mandatory, /continue-on-error:/);
 }
 
 
+
+const artifactTLSOptionsEnv = "        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n";
 
 const goStepName = "Test and vet all Account Platform Go modules";
 const goGatePhase = "PINVOU_GO_GATE_PHASE";
@@ -199,7 +213,7 @@ function pgIdentityEnvironment(service) {
 }
 
 function assertFinancialDiagnosticExemption(job) {
-  const text = job.replaceAll("\r\n", "\n");
+  const text = productPolicyText(job.replaceAll("\r\n", "\n"));
   const diagnostic = namedStep(text, "Financial group lifecycle receipts");
   const withoutComments = diagnostic.replace(/^ *#.*\n/gm, "").trimEnd();
   assert.equal(withoutComments, [
@@ -209,6 +223,8 @@ function assertFinancialDiagnosticExemption(job) {
     "        timeout-minutes: 3",
     "        continue-on-error: true",
     "        uses: actions/upload-artifact@v7",
+    "        env:",
+    "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
     "        with:",
     "          name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}",
     "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
@@ -251,7 +267,7 @@ test("financial diagnostic exception rejects business and job exemptions", () =>
 // Match the Python gate policy across the complete workflow. Account-only
 // validation cannot detect a job/step exception added to a different leg.
 function assertWorkflowFailurePolicy(workflowText) {
-  const text = workflowText.replaceAll("\r\n", "\n").replace(/^ *#.*\n/gm, "");
+  const text = productPolicyText(workflowText.replaceAll("\r\n", "\n")).replace(/^ *#.*\n/gm, "");
   const financialJob = jobBlock("account-financial-test", text);
   assertFinancialDiagnosticExemption(financialJob);
   const financial = namedStep(financialJob, "Financial group lifecycle receipts");
@@ -272,6 +288,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: ci-success-proof-${{ github.run_attempt }}",
       "          path: ${{ steps.success_proof.outputs.directory }}/proof.json",
@@ -288,6 +306,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}",
       "          path: ${{ runner.temp }}/windows-relay-tools-process.json",
@@ -304,6 +324,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: gate-resource-lifecycle-${{ github.run_attempt }}",
       "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
@@ -324,6 +346,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: " + artifact,
       "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
@@ -343,6 +367,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: " + artifact + "-${{ github.run_id }}-${{ github.run_attempt }}",
       "          retention-days: 7",
@@ -362,6 +388,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: account-resource-lifecycle-${{ github.run_attempt }}",
       "          path: |",
@@ -381,6 +409,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: account-closure-resource-lifecycle-${{ github.run_attempt }}",
       "          path: |",
@@ -392,6 +422,12 @@ function assertWorkflowFailurePolicy(workflowText) {
   }
   {
     const receipt = namedStep(jobBlock("windows-rust-test", text), "Windows atomic lifecycle receipts");
+    assert.equal(namedStep(jobBlock("windows-rust-test", text), "Configure bounded Windows atomic upload diagnostics").trimEnd(), [
+      "      - name: Configure bounded Windows atomic upload diagnostics",
+      "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        working-directory: ${{ github.workspace }}",
+      "        run: node scripts/ci-artifact-node-options.cjs --diagnostics",
+    ].join("\n"));
     assert.equal(receipt.trimEnd(), [
       "      - name: Windows atomic lifecycle receipts",
       "        id: windows_atomic_receipts_upload",
@@ -399,6 +435,9 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}",
       "          path: |",
@@ -412,6 +451,12 @@ function assertWorkflowFailurePolicy(workflowText) {
   }
   {
     const receipt = namedStep(jobBlock("release-contract-test", text), "Preserve Windows release contract process receipts");
+    assert.equal(namedStep(jobBlock("release-contract-test", text), "Configure bounded Windows upload diagnostics").trimEnd(), [
+      "      - name: Configure bounded Windows upload diagnostics",
+      "        if: ${{ always() && runner.os == 'Windows' }}",
+      "        working-directory: ${{ github.workspace }}",
+      "        run: node scripts/ci-artifact-node-options.cjs --diagnostics",
+    ].join("\n"));
     assert.equal(receipt.trimEnd(), [
       "      - name: Preserve Windows release contract process receipts",
       "        id: windows_release_contract_receipts",
@@ -419,6 +464,9 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}",
       "          path: |",
@@ -441,6 +489,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        continue-on-error: true",
       "        timeout-minutes: 3",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: relay-process-${{ github.run_id }}-${{ github.run_attempt }}",
       "          path: |",
@@ -481,9 +531,12 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   assertWorkflowFailurePolicy(original);
   const windows = namedStep(jobBlock("windows-rust-test", original), "Windows 测试二进制导入诊断");
   const relayReceipt = namedStep(jobBlock("windows-relay-tools-test", original), "Preserve Windows relay tools process receipt");
+  const atomicConfig = namedStep(jobBlock("windows-rust-test", original), "Configure bounded Windows atomic upload diagnostics");
   const withoutWindowsExemption = original.replace(windows,
     windows.replace("        continue-on-error: true\n", ""));
   const mutants = [
+    original.replace("scripts/ci-artifact-node-options.cjs --network --diagnostics", "scripts/unreviewed-upload.cjs --configure-env"),
+    original.replace(atomicConfig, atomicConfig.replace("scripts/ci-artifact-node-options.cjs", "scripts/unreviewed-upload.cjs")),
     original.replace(relayReceipt, relayReceipt.replace("windows-relay-tools-process.json", "other-process.json")),
     original.replace("      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n",
       "      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n        continue-on-error: true\n"),

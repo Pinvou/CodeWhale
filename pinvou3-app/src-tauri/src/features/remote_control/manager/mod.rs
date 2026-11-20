@@ -1,5 +1,11 @@
+#[cfg(test)]
+mod controller_start_tests;
+
+#[cfg(test)]
+mod controlled_start_tests;
 mod persistence;
 mod rpc;
+mod startup;
 mod transfer;
 mod workspace_grants;
 
@@ -552,6 +558,10 @@ pub struct RemoteControlManager {
     lifecycle: Arc<Mutex<()>>,
     policy: Arc<AccessPolicy>,
     policy_error: Option<String>,
+    #[cfg(test)]
+    controller_start_hook: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    #[cfg(test)]
+    reader_retired_hook: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
 }
 
 struct Inner {
@@ -1465,6 +1475,10 @@ impl RemoteControlManager {
             lifecycle: Arc::new(Mutex::new(())),
             policy: Arc::new(policy),
             policy_error,
+            #[cfg(test)]
+            controller_start_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            reader_retired_hook: Arc::new(Mutex::new(None)),
         };
         manager.start_web_session_transfer_reaper();
         manager
@@ -1497,79 +1511,21 @@ impl RemoteControlManager {
         &self,
         generation: &str,
     ) -> Result<ControllerRelayChannel, String> {
-        let (sender, receiver) = tokio::sync::mpsc::channel::<ControllerRelayFrame>(128);
-        let synthetic_registration;
-        {
-            let mut inner = self.inner.lock();
-            if inner.controller_inbound.is_some() {
-                return Err("desktop_controller_relay_busy".to_owned());
-            }
-            inner.controller_relay_generation = Some(generation.to_owned());
-            inner.controller_inbound = Some(sender.clone());
-            synthetic_registration = inner.endpoint.as_ref().map(|endpoint| {
-                json!({
-                    "v": 2,
-                    "type": "desktop_endpoint_registered",
-                    "endpoint_id": endpoint.config.endpoint_id,
-                    "web_client_connected": endpoint.web_client_connected,
-                    "lease_id": endpoint.lease_id,
-                })
-            });
-        }
+        self.start_controller_relay_sync(generation)
+    }
 
-        if let Err(error) = self.start(false) {
-            self.clear_controller_channel(generation);
-            return Err(error);
-        }
-        let (owner, binding, enqueue) = {
-            let mut inner = self.inner.lock();
-            if !inner
-                .controller_inbound
-                .as_ref()
-                .is_some_and(|active| active.same_channel(&sender))
-            {
-                return Err("desktop_controller_generation_stale".to_owned());
-            }
-            let Some(owner) = inner
-                .endpoint
-                .as_ref()
-                .map(|endpoint| endpoint.sender.clone())
-            else {
-                inner.controller_relay_generation = None;
-                inner.controller_inbound = None;
-                return Err("desktop_controller_authority_unavailable".to_owned());
-            };
-            let Some(binding) = owner.controller_authority.bind(generation) else {
-                inner.controller_relay_generation = None;
-                inner.controller_inbound = None;
-                return Err("desktop_controller_authority_unavailable".to_owned());
-            };
-            inner.controller_binding = Some(binding);
-            // An existing endpoint may already have registered. Do not await
-            // space before returning the only receiver to its consumer.
-            let already_registered = inner
-                .endpoint
-                .as_ref()
-                .is_some_and(|endpoint| endpoint.status != WebAccessStatusKind::ConnectingRelay);
-            let enqueue = if let Some(message) = synthetic_registration
-                && already_registered
-            {
-                enqueue_controller_inbound(
-                    &mut inner,
-                    ControllerRelayFrame {
-                        message,
-                        receipt: None,
-                    },
-                )
-            } else {
-                Ok(())
-            };
-            (owner, binding, enqueue)
-        };
-        if let Err(code) = enqueue {
-            report_controller_inbound_failure(code);
-            return Err(code.to_owned());
-        }
+    /// Synchronous installation lets the real ControlledOperation owner keep
+    /// its admission guard through every startup side effect. Registration and
+    /// subsequent protocol work run only after that owner releases the guard.
+    pub(crate) fn start_controller_relay_sync(
+        &self,
+        generation: &str,
+    ) -> Result<ControllerRelayChannel, String> {
+        let startup::ControllerRelayStart {
+            receiver,
+            owner,
+            binding,
+        } = self.begin_controller_relay(generation)?;
         Ok(ControllerRelayChannel {
             manager: self.clone(),
             generation: generation.to_owned(),
@@ -1794,53 +1750,7 @@ impl RemoteControlManager {
     /// instead of creating session-scoped rooms.
     pub fn start(&self, allow_host_workspace: bool) -> Result<WebAccessInfo, String> {
         let _lifecycle = self.lifecycle.lock();
-        self.ensure_policy()?;
-        self.ensure_process_ownership()?;
-        self.replay_pending_revocations()?;
-        let active_endpoint_id = self
-            .inner
-            .lock()
-            .endpoint
-            .as_ref()
-            .map(|endpoint| endpoint.config.endpoint_id.clone());
-        let (mut config, is_new) = match load_config()? {
-            Some(config) => {
-                validate_config(&config)?;
-                (config, false)
-            }
-            None if active_endpoint_id.is_some() => {
-                return Err("Web access endpoint configuration is missing".to_string());
-            }
-            None => (fresh_config(false), true),
-        };
-        if active_endpoint_id
-            .as_ref()
-            .is_some_and(|endpoint_id| endpoint_id != &config.endpoint_id)
-        {
-            return Err("Web access endpoint configuration changed".to_string());
-        }
-        let authorization_changed = allow_host_workspace && !config.allow_host_workspace;
-        config.allow_host_workspace |= allow_host_workspace;
-        if is_new || authorization_changed {
-            persist_config(&config)?;
-        }
-        if active_endpoint_id.is_some() {
-            let mut inner = self.inner.lock();
-            let endpoint = inner
-                .endpoint
-                .as_mut()
-                .ok_or_else(|| "Web access endpoint stopped while enabling access".to_string())?;
-            endpoint.config.allow_host_workspace = config.allow_host_workspace;
-            return Ok(pairing_info(endpoint));
-        }
-
-        self.activate(apply_runtime_relay_override(config))?;
-        let inner = self.inner.lock();
-        let endpoint = inner
-            .endpoint
-            .as_ref()
-            .ok_or_else(|| "Web access endpoint failed to start".to_string())?;
-        Ok(pairing_info(endpoint))
+        self.start_with_owner(allow_host_workspace, None)
     }
 
     /// Rotate both browser and desktop credentials. The previous endpoint is
@@ -1930,13 +1840,9 @@ impl RemoteControlManager {
         let latched = config.allow_host_workspace;
         if latched {
             config.allow_host_workspace = false;
-            // 并发 desktop_endpoint_revoked(消息泵臂,
-            // 不持生命周期锁)可能恰好在本读取与落盘之间删除了配置文件;
-            // 此时撤销目标已达成(relay 侧端点已入墓碑,本地凭据已清),
-            // 不得把 flag=false 的配置文件复活成「已配置」的幻影(否则下
-            // 次 start 拿墓碑端点空转一轮再被 handle_revoked 清理)。存在
-            // 性检查缩小而非闭合窗口(彻底闭合需泵臂持生命周期锁,死锁面
-            // 不划算);残余形状自愈且无访问增益,与本函数既有注释一致。
+            // Reader retirement now uses the same lifecycle commit. Keep this
+            // existence check for an externally removed file; it is not an
+            // atomicity promise against writers outside this manager.
             if config_path().exists() {
                 persist_config(&config)?;
             }
@@ -2997,68 +2903,33 @@ impl RemoteControlManager {
         }
     }
 
-    fn activate(&self, config: WebAccessConfig) -> Result<(), String> {
-        let rpc_ledger = load_or_initialize_rpc_ledger(&config.endpoint_id)?;
-        let url = public_url(&config);
-        let (sender, mut receiver) = relay_client::spawn(config.clone());
-        let reader_owner = sender.clone();
-        {
-            let mut inner = self.inner.lock();
-            inner.idle_error = None;
-            inner.idle_status = WebAccessStatusKind::Idle;
-            inner.rpc_ledger = rpc_ledger;
-            inner.rpc_cache.clear();
-            inner.rpc_order.clear();
-            // First controller startup installs its lane before this endpoint.
-            // Retire only a replaced socket, never the first pending lane.
-            if inner.endpoint.is_some()
-                && let Some(previous) = take_retired_endpoint(&mut inner)
-            {
-                let _ = previous.sender.try_send(RelayOutbound::Shutdown);
-            }
-            inner.endpoint = Some(ActiveEndpoint {
-                config: config.clone(),
-                url,
-                status: WebAccessStatusKind::ConnectingRelay,
-                web_client_connected: false,
-                client_ready: false,
-                lease_id: None,
-                last_lease_id: None,
-                fresh_baseline_seq: None,
-                last_error: None,
-                last_error_code: None,
-                sender,
-            });
-        }
+    fn start_endpoint_reader(&self, reader: startup::EndpointReader) {
         self.emit_status();
-
         let manager = self.clone();
         tauri::async_runtime::spawn(async move {
+            let startup::EndpointReader {
+                owner,
+                mut receiver,
+            } = reader;
             while let Some(inbound) = receiver.recv().await {
                 match inbound {
                     RelayInbound::Message(text) => match serde_json::from_str::<Value>(&text) {
-                        Ok(value) => manager.handle_relay_message(value, &reader_owner),
-                        Err(_) => {
-                            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
-                                "relay_message_rejected",
-                                "rejected",
-                            )
-                        }
+                        Ok(value) => manager.handle_relay_message(value, &owner),
+                        Err(_) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                            "relay_message_rejected", "rejected",
+                        ),
                     },
                     RelayInbound::ControllerMessage { text, receipt } => {
                         if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                            manager.handle_relay_message_with_receipt(value, &reader_owner, Some(receipt));
+                            manager.handle_relay_message_with_receipt(value, &owner, Some(receipt));
                         }
                     }
-                    RelayInbound::Connection {
-                        endpoint_id,
-                        connected,
-                        error,
-                    } => manager.handle_connection(&endpoint_id, connected, error, &reader_owner),
+                    RelayInbound::Connection { endpoint_id, connected, error } => {
+                        manager.handle_connection(&endpoint_id, connected, error, &owner);
+                    }
                 }
             }
         });
-        Ok(())
     }
 
     fn handle_connection(
@@ -3441,32 +3312,47 @@ impl RemoteControlManager {
     }
 
     fn handle_revoked(&self, endpoint_id: &str, reader_owner: &RelaySender) {
-        let revoked = {
-            let mut inner = self.inner.lock();
-            if inner.endpoint.as_ref().is_none_or(|endpoint| {
-                endpoint.config.endpoint_id != endpoint_id
-                    || !endpoint.sender.same_channel(reader_owner)
-            }) {
-                return;
+        let (config_remove_failed, ledger_remove_failed) = {
+            // Production callers release inner/authority before this boundary.
+            // The same lifecycle -> inner order as start/refresh serializes the
+            // entire retirement + unlink commit against their filesystem writes.
+            let _lifecycle = self.lifecycle.lock();
+            let revoked = {
+                let mut inner = self.inner.lock();
+                if inner.endpoint.as_ref().is_none_or(|endpoint| {
+                    endpoint.config.endpoint_id != endpoint_id
+                        || !endpoint.sender.same_channel(reader_owner)
+                }) {
+                    return;
+                }
+                let revoked = take_retired_endpoint(&mut inner);
+                inner.rpc_ledger = RpcLedger::default();
+                reset_web_state(&mut inner);
+                inner.stream.reset();
+                inner.idle_status = WebAccessStatusKind::Revoked;
+                inner.idle_error = None;
+                revoked
+            };
+            if let Some(endpoint) = revoked {
+                let _ = endpoint.sender.try_send(RelayOutbound::Shutdown);
             }
-            let revoked = take_retired_endpoint(&mut inner);
-            inner.rpc_ledger = RpcLedger::default();
-            reset_web_state(&mut inner);
-            inner.stream.reset();
-            inner.idle_status = WebAccessStatusKind::Revoked;
-            inner.idle_error = None;
-            revoked
+            #[cfg(test)]
+            {
+                let hook = self.reader_retired_hook.lock().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            (remove_config().is_err(), remove_rpc_ledger().is_err())
         };
-        if let Some(endpoint) = revoked {
-            let _ = endpoint.sender.try_send(RelayOutbound::Shutdown);
-        }
-        if remove_config().is_err() {
+        // No application callbacks or status emission while lifecycle is held.
+        if config_remove_failed {
             crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                 "revoked_config_remove_failed",
                 "failed",
             );
         }
-        if remove_rpc_ledger().is_err() {
+        if ledger_remove_failed {
             crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                 "revoked_ledger_remove_failed",
                 "failed",

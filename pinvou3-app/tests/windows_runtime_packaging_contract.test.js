@@ -448,6 +448,17 @@ assert.ok(
 assert.match(installerHook, /SetEnvironmentVariableW\(w "TEMP", w "\$WINDIR\\Temp"\)/);
 assert.match(installerHook, /IntCmp \$5 1632 pinvou_vc_redist_temp_failed/);
 assert.match(installerHook, /IntCmp \$5 -2147023264 pinvou_vc_redist_temp_failed/);
+// The exit-ladder pins carry the full jump targets, not just the compared
+// code: a one-letter drift in a target spelling is a makensis-dangling
+// label that no CI lane compiles away (no PR lane runs makensis), so the
+// prefix-only form cannot catch it. 1638 = ERROR_PRODUCT_VERSION: a newer
+// VC++ runtime already present must count as ready, not abort the install.
+assert.match(installerHook, /IntCmp \$5 3010 pinvou_vc_redist_reboot 0 0/);
+assert.match(installerHook, /IntCmp \$5 1638 pinvou_vc_redist_ready 0 0/);
+assert.match(
+  installerHook,
+  /IntCmp \$5 1641 pinvou_vc_redist_reboot pinvou_vc_redist_exit_failed pinvou_vc_redist_exit_failed/,
+);
 assert.match(installerHook, /Pinvou3-vcredist\.log/);
 for (const recoveryHint of [
   "释放系统盘空间",
