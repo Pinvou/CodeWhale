@@ -98,6 +98,10 @@ func VerifyApplied(ctx context.Context, c *pgx.Conn, input []migrations.Migratio
 	if err := validateOrganizationEvidenceGuard(input); err != nil {
 		return migrations.Verification{}, err
 	}
+	ctx, err := migrations.PinLedger(ctx, c)
+	if err != nil {
+		return migrations.Verification{}, err
+	}
 	expected, err := expectedEventDeliveryHistory(ctx, c, input)
 	if err != nil {
 		return migrations.Verification{}, err

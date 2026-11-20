@@ -171,6 +171,10 @@ func Up(ctx context.Context, connection *pgx.Conn, input []migrations.Migration)
 	if err != nil {
 		return err
 	}
+	ctx, err = migrations.PinLedger(ctx, connection)
+	if err != nil {
+		return err
+	}
 	if _, err = connection.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou_account_platform_migrations'))`); err != nil {
 		return err
 	}
@@ -189,8 +193,12 @@ func Up(ctx context.Context, connection *pgx.Conn, input []migrations.Migration)
 			if migration.Version != 27 && migration.Version != 28 && migration.Version != 33 {
 				return nil
 			}
+			ledger, err := migrations.LedgerTable(ctx, tx.Conn())
+			if err != nil {
+				return err
+			}
 			var mature bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=34) AND EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)`, metadataVersion).Scan(&mature); err != nil {
+			if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM "+ledger+" WHERE version=34) AND EXISTS(SELECT 1 FROM "+ledger+" WHERE version=$1)", metadataVersion).Scan(&mature); err != nil {
 				return err
 			}
 			if !mature {
@@ -294,11 +302,15 @@ func validateRetainedBridgeInput(ctx context.Context, tx pgx.Tx, migration migra
 			seedChecksum = item.Checksum
 		}
 	}
-	var installedSeed, installedScope string
-	if err := tx.QueryRow(ctx, `SELECT checksum FROM schema_migrations WHERE version=$1`, metadataVersion).Scan(&installedSeed); err != nil {
+	ledger, err := migrations.LedgerTable(ctx, tx.Conn())
+	if err != nil {
 		return err
 	}
-	if err := tx.QueryRow(ctx, `SELECT checksum FROM schema_migrations WHERE version=34`).Scan(&installedScope); err != nil {
+	var installedSeed, installedScope string
+	if err := tx.QueryRow(ctx, "SELECT checksum FROM "+ledger+" WHERE version=$1", metadataVersion).Scan(&installedSeed); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(ctx, "SELECT checksum FROM "+ledger+" WHERE version=34").Scan(&installedScope); err != nil {
 		return err
 	}
 	if installedSeed != seedChecksum || !slices.Contains(retainedScopeChecksums, installedScope) {

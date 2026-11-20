@@ -234,6 +234,7 @@ impl ExportRoute {
             _ => return Err(error("model_image_override_unsupported")),
         };
         Ok(SavedModel {
+            auth_mode: None,
             id: runtime_id,
             name: self.display_name.clone(),
             alias: None,
@@ -1261,6 +1262,7 @@ mod tests {
 
     fn saved_model() -> SavedModel {
         SavedModel {
+            auth_mode: None,
             id: "model-0001".into(),
             name: "My DeepSeek".into(),
             alias: None,

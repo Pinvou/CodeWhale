@@ -521,6 +521,17 @@ jobs:
               - 'pinvou3-app/src-tauri/src/features/feedback/**'
               - 'pinvou3-app/src-tauri/src/features/personas/**'
               - 'pinvou3-app/src-tauri/src/features/pet/**'
+              # platform/prefs/ defines the SavedModel schema the CLI reads
+              # and writes (pinvou-cli path-depends on pinvou3-tauri and
+              # constructs SavedModel literals in models.rs, so a schema
+              # field addition is a CLI compile input). Today a prefs change
+              # already fires the CLI legs transitively via rust_full (any
+              # src-tauri .rs matches); this entry asserts the coverage
+              # directly — same discipline as the feedback/personas/pet
+              # entries above — so the CLI suite keeps gating schema changes
+              # even if rust_full ever gains a prefs exclusion the way it
+              # excludes those leaf features.
+              - 'pinvou3-app/src-tauri/src/platform/prefs/**'
               # The CLI compiles the connector lock tables in with
               # `include_str!` (src-tauri/src/platform/connector_lock.rs), so
               # editing or deleting one is a CLI source change in all but
@@ -2398,6 +2409,11 @@ jobs:
               assert all(event["Action"] == "pass" for event in terminal), "finite PostgreSQL tests failed or skipped"
               roots = {event["Test"] for event in terminal if "/" not in event["Test"]}
               assert roots == required, "required finite PostgreSQL test selection did not execute"
+              history = "TestAuditExportPublicDownRetainsOriginalHistory"
+              if history in required:
+                  prefix = history + "/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"three_scope_public_down", "three_scope_public_down/LF", "three_scope_public_down/CRLF", "unbound_public_down_forbids_incomplete_inverse", "expired_binding_public_down_retains_evidence", "public_governance_down_preserves_audit_history", "public_governance_down_preserves_audit_history/pinned_ledger_ignores_temp_shadow"}, "public rollback and pinned ledger cases did not execute"
               audit = "TestAuditExportPersistedBoundaries"
               if audit in required:
                   prefix = audit + "/generation_renews_and_recovers/"

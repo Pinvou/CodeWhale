@@ -5702,8 +5702,11 @@ function enqueueSettingsWrite(write) { return pinvouSharedweb().enqueueSettingsW
   var modelsLoadSeq = 0;
   async function loadModels() { return pinvouSharedweb().loadModels(); }
   // model 对象字段须是 snake_case(SavedModel serde):
-  // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
+  // {id,name,preset,context_window_tokens,max_output_tokens,reasoning_effort,model,base_url,api_key,credential_action,provider_kind,vendor,endpoint_mode,auth_mode,image_capability_override,vision_model_id,alias}
+  // （round-7 review：这 17 个是保存载荷的字段集——credential_ref /
+  // credential_state / has_secret 由后端按 credential_action 派生，前端不发送。）
  async function saveModel(model, options) {
+
    // options.deferRefresh (round-1 review M9, same semantics as the tauri
    // lane): the batch add-all loop skips the per-row reload tail and the
    // caller refreshes once via reloadSavedModels(). Default keeps the
@@ -5810,14 +5813,14 @@ async function revealModelApiKey(id) { return pinvouSharedweb().revealModelApiKe
   async function switchModel(sessionId, modelId) {
     return switchModelRef(sessionId, { source: "LOCAL_CONFIG", saved_model_id: modelId });
   }
-async function testModelConnection(baseUrl, apiKey, modelId) { return pinvouSharedweb().testModelConnection(baseUrl, apiKey, modelId); }
+async function testModelConnection(baseUrl, apiKey, modelId, noAuth) { return pinvouSharedweb().testModelConnection(baseUrl, apiKey, modelId, noAuth); }
   // 测试图片输入能力(设计 §7.3):用当前表单的 model/base_url/key 发一张内置纯色图,
   // 仅由模型编辑弹窗主动点击触发,无任何启动/定时自动测试。
-async function testImageInputCapability(model, baseUrl, apiKey, modelId) { return pinvouSharedweb().testImageInputCapability(model, baseUrl, apiKey, modelId); }
+async function testImageInputCapability(model, baseUrl, apiKey, modelId, noAuth) { return pinvouSharedweb().testImageInputCapability(model, baseUrl, apiKey, modelId, noAuth); }
 // 端点模型自动发现(冻结契约 §2.5):probe_endpoint_models。失败必须 reject
 // 穿透(web 白名单未放行/老桌面),由 SettingsView 归一为三语提示。
 async function probeEndpointModels(request) { return pinvouSharedweb().probeEndpointModels(request); }
-  async function probeLocalServerKind(baseUrl, apiKey, modelId) {
+  async function probeLocalServerKind(baseUrl, apiKey, modelId, noAuth) {
     // 本地/内网 OpenAI 兼容端点的服务类型探测（vllm/ollama/lmstudio/generic）。
     // Rust 侧按 base_url TTL 缓存；命令失败（web 白名单不含该命令/老版本桌面）
     // 在这里 reject，由消费方 catch 降级为「未知」——吞错伪造成 generic 会让 UI
@@ -5825,11 +5828,14 @@ async function probeEndpointModels(request) { return pinvouSharedweb().probeEndp
     // apiKey/modelId follow testModelConnection: a freshly typed form key
     // wins, otherwise the saved credential is read — authenticated vLLM
     // (--api-key) 401s on /v1/models, so probing without credentials
-    // misclassifies the authenticated endpoint as generic.
+    // misclassifies the authenticated endpoint as generic. noAuth follows the
+    // same command: the form's keyless posture suppresses both credential
+    // sources for the automatic probe (same caliber as the two test buttons).
     return invoke("probe_local_server_kind", {
       baseUrl,
       apiKey: apiKey || null,
       modelId: modelId || null,
+      noAuth: !!noAuth,
     });
   }
   async function testSearchProvider(provider, apiKey) {

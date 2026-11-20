@@ -37,16 +37,17 @@ MANAGED_CONTRACT_ROOTS = {
 
 
 def redact_diagnostic(text):
-    # Share the same boundary for early Go failures and the ordinary log tail.
+    # Collect globally: a short credential must not destroy a longer match.
+    forms = set()
     for name, value in os.environ.items():
         if len(value) >= 4 and re.search(r"TOKEN|PASSWORD|SECRET|CREDENTIAL|API_KEY", name, re.I):
-            forms = {value, *(json.dumps(value, ensure_ascii=ascii_only)[1:-1] for ascii_only in (False, True))}
-            # Go encoding/json's default HTML escaping differs from Python's
-            # JSON spelling. This also covers JSON embedded inside Output.
-            forms.update(form.replace("<", r"\u003c").replace(">", r"\u003e").replace("&", r"\u0026")
-                         .replace("\u2028", r"\u2028").replace("\u2029", r"\u2029") for form in tuple(forms))
-            for form in sorted(forms, key=len, reverse=True):
-                text = text.replace(form, "[redacted]")
+            forms.update((value, json.dumps(value, ensure_ascii=True)[1:-1],
+                          json.dumps(value, ensure_ascii=False)[1:-1]))
+            go_json = json.dumps(value, ensure_ascii=False)[1:-1].replace(chr(0x2028), "\\u2028").replace(chr(0x2029), "\\u2029")
+            forms.add(go_json)
+            forms.add(go_json.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
+    for form in sorted(forms, key=len, reverse=True):
+        text = text.replace(form, "[redacted]")
     text = re.sub(r"(?i)\b(?:https?|git\+https?|postgres(?:ql)?)://[^\s<>\"']+", "[URL redacted]", text)
     text = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)\S+", r"\1[redacted]", text)
     return re.sub(r"(?i)((?:_authToken|password|token|secret)\s*[:=]\s*)\S+", r"\1[redacted]", text)
@@ -115,7 +116,7 @@ def first_go_failures(logfile):
                 continue
             try:
                 event = json.loads(line)
-            except (ValueError, UnicodeDecodeError):
+            except (ValueError, UnicodeDecodeError, RecursionError):
                 continue
             if not isinstance(event, dict):
                 continue
@@ -125,7 +126,13 @@ def first_go_failures(logfile):
             key = (package, test)
             if event.get("Action") == "output" and isinstance(event.get("Output"), str):
                 context = contexts.setdefault(key, deque(maxlen=4))
-                context.append(redact_diagnostic(event["Output"])[-2048:])
+                # Retain the last four complete bounded events until joined.
+                # Each physical line is <=65536 bytes; 64 identities x 4
+                # decoded Outputs bound retained text to <=16777216 characters
+                # (Python object/storage overhead is additional). Never cut a
+                # URL prefix or mask a short secret before matching a longer
+                # credential spanning two Output events.
+                context.append(event["Output"])
                 contexts.move_to_end(key)
                 if len(contexts) > 64:
                     contexts.popitem(last=False)
@@ -141,6 +148,41 @@ def first_go_failures(logfile):
                 if len(failures) == 5:
                     break
     return "\n".join(failures)
+
+
+def managed_failure_context(tail):
+    """Select complete original events from this bounded window, never raw slices."""
+    events = []
+    package = "github.com/Pinvou/pinvou3/account-platform/cmd/token-release-prepare"
+    for line in tail.splitlines():
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(event, dict) or event.get("Package") != package:
+            continue
+        name = event.get("Test")
+        if not isinstance(name, str) or not any(name == root or name.startswith(root + "/") for root in MANAGED_CONTRACT_ROOTS):
+            continue
+        action = event.get("Action")
+        if action == "output" and isinstance(event.get("Output"), str):
+            events.append((name, action, line))
+        elif action == "fail" and ("Output" not in event or isinstance(event["Output"], str)):
+            events.append((name, action, line))
+    selected, failed = [], set()
+    for index, (name, action, line) in enumerate(events):
+        if action != "fail" or name in failed:
+            continue
+        # First failure identities retain priority over later parent summaries.
+        failed.add(name)
+        selected += [previous for test, kind, previous in events[:index] if test == name and kind == "output"][-4:]
+        selected.append(line)
+        if len(failed) == 8:
+            break
+    if not selected:
+        return ""
+    return "\nMANAGED_FAILURE_CONTEXT\n" + "\n".join(selected)
+
 
 
 def run_logged_command(arguments, logfile, *, cwd=None, dependency_preparation=False):
@@ -160,12 +202,22 @@ def run_logged_command(arguments, logfile, *, cwd=None, dependency_preparation=F
             boundary = tail_bytes.find(b"\n")
             tail_bytes = tail_bytes[boundary + 1:] if boundary >= 0 else b""
         tail = tail_bytes.decode("utf-8", errors="replace")
+        # The user-approved channels have independent limits: <=5 early
+        # summaries / 16384 ASCII characters, and <=100 lines / 24000 tail
+        # characters. Both pass through the same privacy boundary; private
+        # logs and mandatory result verification are unchanged.
+        selected = managed_failure_context(tail) if logfile.name == "managed.jsonl" else ""
         tail = redact_json_tail(tail) if logfile.suffix == ".jsonl" else redact_diagnostic(tail)
+        # Redact selected events separately so grouping ordinary Output events
+        # cannot move their replay before the selected-context marker.
+        if selected:
+            tail += redact_json_tail(selected)
         tail = "\n".join(tail.splitlines()[-100:])[-24000:]
         label = "DEPENDENCY_PREPARATION_FAILED" if dependency_preparation else "CONTRACT_COMMAND_FAILED"
         print(label + " exit=" + str(error.returncode) + " log=" + logfile.name, file=sys.stderr)
         if logfile.suffix == ".jsonl":
             print(first_go_failures(logfile), file=sys.stderr)
+        print("CONTRACT_LOG_TAIL", file=sys.stderr)
         print(tail, file=sys.stderr)
         # CalledProcessError includes argv, which can contain GOPROXY secrets.
         message = "dependency preparation failed; mandatory contracts did not run" if dependency_preparation else "deployment contract command failed; see redacted diagnostic"

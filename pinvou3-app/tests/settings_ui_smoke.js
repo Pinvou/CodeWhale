@@ -493,10 +493,10 @@ assert.match(
 );
 // round-4 #851 收口 + m1-2(server_kind 闸):picker 添加的是全新记录
 // (fresh makeModelId()),但保存载荷必须与 doSave 同一口径——
-// - 凭据阶梯与 doSave 完全一致(Official 无 cloudCredentialAction,回流时内联),api_key 按同一口径
+// - 凭据阶梯与 doSave 共用 cloudCredentialAction，api_key 按同一口径
 //   丢弃:免鉴权声明生效时 picker 添加的记录不得再带 key/凭据要求(chat 门
 //   否则会被声明外的凭据需求挡住);
-// - auth_mode 字段随载荷落库(Official 表单无免鉴权声明,恒 null)、alias 与表单保存同为 null(字段对齐);
+// - auth_mode 随显式免鉴权声明落库，alias 与表单保存同为 null(字段对齐);
 // - listing 带 server_kind(serde snake_case)时 ollama / lm_studio 行的
 //   context_window_tokens 是运行时生效值(/api/ps 生效窗口、
 //   loaded_context_length),与 buildLocalModelPayload 同一教义只存 null——
@@ -509,13 +509,13 @@ const endpointPayloadSource = settingsViewSource.slice(
 );
 assert.match(
   endpointPayloadSource,
-  /const nextKeyAction = isLocalPreset\s*\? \(localKeyEnabled && apiKey\.trim\(\) \? 'replace' : 'keep_existing'\)\s*: \(apiKey\.trim\(\) \? 'replace' : \(initial\.__new \|\| !hasSavedKey \? 'replace' : 'keep_existing'\)\);/,
-  'the picker row payload must reuse the exact doSave credential ladder (inlined: Official has no cloudCredentialAction helper, #870 回流适配) so picker-added rows delete/replace stored credentials the same way a form save does',
+  /const nextKeyAction = isLocalPreset\s*\? \(localKeyEnabled && apiKey\.trim\(\) \? 'replace' : 'keep_existing'\)\s*: cloudCredentialAction\(\);/,
+  'picker additions must share the form credential contract, including explicit keyless removal',
 );
 assert.match(
   endpointPayloadSource,
-  /: \(apiKey\.trim\(\) \? apiKey\.trim\(\) : ''\)/,
-  'the picker row api_key must follow the same typed-key caliber as doSave (a typed key must never be silently discarded, #870 回流适配)',
+  /: \(!noAuthActive && apiKey\.trim\(\) \? apiKey\.trim\(\) : ''\)/,
+  'keyless picker additions must not retain the hidden typed key; normal additions preserve it',
 );
 assert.match(
   endpointPayloadSource,
@@ -524,8 +524,8 @@ assert.match(
 );
 assert.match(
   endpointPayloadSource,
-  /auth_mode: null,/,
-  'the picker row payload must carry the auth_mode field with the default-null declaration (Official form has no keyless toggle; the serde default keeps the record on the normal credential rules, #870 回流适配)',
+  /auth_mode: noAuthActive \? 'none' : null,/,
+  'picker additions must persist the same explicit keyless declaration as form saves',
 );
 assert.match(
   endpointPayloadSource,
@@ -647,6 +647,203 @@ for (const settingsI18nSource of settingsI18nSources) {
     settingsI18nSource,
     /localPortInvalid:/,
     'local model port validation message must be provided in every UI language',
+  );
+  assert.match(
+    settingsI18nSource,
+    /noAuthToggleLabel:/,
+    'the keyless-endpoint toggle label must be provided in every UI language',
+  );
+  assert.match(
+    settingsI18nSource,
+    /noAuthHint:/,
+    'the keyless-endpoint hint must be provided in every UI language',
+  );
+}
+// 「此端点无需鉴权」(auth_mode="none") 表单行为守卫：开关必须经
+// data-testid="model-form-no-auth-toggle" 驱动，且保存载荷必须携带
+// auth_mode（null=默认鉴权规则 / "none"=免鉴权声明，直通底座
+// auth_mode_disables_api_key）。缺任一即开关失效或声明丢失。凭据删除
+// 动作与全部三条探测路径（连接测试 / 图片能力测试 / 自动思考档位探测）
+// 必须与 auth_mode 载荷同口径排除托管档/免鉴权态，
+// URL 行的渲染点必须与赋值同在（防止中途加条件把字段藏掉）。
+{
+  const noAuthToggleSites = settingsViewSource.match(
+    /data-testid="model-form-no-auth-toggle"/g,
+  ) || [];
+  assert.strictEqual(
+    noAuthToggleSites.length,
+    1,
+    'the keyless-endpoint toggle must be rendered exactly once via its testid',
+  );
+  // The toggle's input wiring is pinned separately from its render: a
+  // regression that renders the row but detaches the flip (no onClick) keeps
+  // every payload/derivation guard green while the headline interaction
+  // breaks inert (round-6 review).
+  assert.match(
+    settingsViewSource,
+    /onClick=\{\(\) => setNoAuth\(v => !v\)\}/,
+    'the keyless toggle must actually flip the noAuth state on click',
+  );
+  // Same caliber for the port row: the row can render correctly while its
+  // onChange silently detaches from the URL — pin the draft/commit wiring
+  // itself. Typing must buffer into the draft (never rewrite base_url on
+  // input: WHATWG default-port normalization eats mid-typed ports like
+  // 8080/4430, review zhuowp 2026-11-18 P2); blur and Enter commit.
+  assert.match(
+    settingsViewSource,
+    /onChange: e => \{ setBaseUrlPortDraft\(e\.target\.value\); validateBaseUrlPortDraft\(e\.target\.value\); \}/,
+    'the port row must buffer keystrokes into the draft and validate without rewriting base_url on input',
+  );
+  assert.match(
+    settingsViewSource,
+    /onBlur: commitBaseUrlPortDraft/,
+    'the port row must commit the draft to base_url on blur',
+  );
+  assert.match(
+    settingsViewSource,
+    /onKeyDown: e => \{ if \(e\.key === 'Enter'\) e\.currentTarget\.blur\(\); \}/,
+    'the port row must commit the draft on Enter via blur',
+  );
+  assert.match(
+    settingsViewSource,
+    /auth_mode: !isLocalPreset && !isCodingPlan && noAuth \? 'none' : null/,
+    'model form save payload must persist the keyless declaration via auth_mode (never for managed coding plans)',
+  );
+  assert.match(
+    settingsViewSource,
+    /initial\.provider_kind !== PROVIDER_KIND_CODING_PLAN && initial\.auth_mode === 'none'/,
+    'the keyless toggle state must stay off for managed coding-plan entries',
+  );
+  assert.match(
+    settingsViewSource,
+    /if \(!isCodingPlan && noAuth\) return hasSavedKey \? 'delete' : 'replace'/,
+    'the stored-credential delete action must stay scoped to non-managed keyless declarations (a stale toggle over a live coding-plan URL must not delete the credential)',
+  );
+  // Check each actual handler independently: the discovery freshness mirror
+  // now legitimately uses the same posture, so a global occurrence count
+  // could hide a missing guard in one of these two request paths.
+  const imageHandlerStart = settingsViewSource.indexOf('async function handleImageCapabilityTest()');
+  assert.notStrictEqual(imageHandlerStart, -1);
+  const imageHandlerSource = settingsViewSource.slice(
+    imageHandlerStart, settingsViewSource.indexOf('function applyCandidate(', imageHandlerStart),
+  );
+  for (const [name, source] of [['connection', handleTestSource], ['image', imageHandlerSource]]) {
+    assert.match(
+      source,
+      /const testKey = !isLocalPreset && !isCodingPlan && noAuth\s*\?\s*''\s*:/,
+      `${name} tests must independently refuse a retained typed key under the keyless declaration`,
+    );
+  }
+  assert.match(
+    settingsViewSource,
+    /testModelConnection\(baseUrl\.trim\(\), testKey, initial\.__new \? null : initial\.id, !isLocalPreset && !isCodingPlan && noAuth\)/,
+    'the connection test must forward the keyless posture so the backend skips the saved-credential fallback (a pre-save probe must not transmit the stored key to the newly typed URL)',
+  );
+  assert.match(
+    settingsViewSource,
+    /testImageInputCapability\(model\.trim\(\), baseUrl\.trim\(\), testKey, initial\.__new \? null : initial\.id, !isLocalPreset && !isCodingPlan && noAuth\)/,
+    'the image-capability test must forward the keyless posture so the backend skips the saved-credential fallback',
+  );
+  // The automatic tier probe is the third probe path in the same form: under
+  // the keyless posture it must drop the retained form key AND forward the
+  // posture flag (the backend then skips the saved-credential fallback).
+  // Both halves are pinned — dropping either reopens the credential-to-keyless-URL leak.
+  assert.match(
+    settingsViewSource,
+    /trimInputs: true,\s*noAuth,\s*\}\)/,
+    'the model form must forward its keyless posture into the reasoning-tier probe hook (the automatic tier probe is a third credential path)',
+  );
+  assert.match(
+    localServerTiersSource,
+    /const probeApiKey = noAuth \? '' : trimInputs \? apiKey\.trim\(\) : apiKey;/,
+    'the tier probe must drop the retained form key while the keyless posture is active',
+  );
+  assert.match(
+    localServerTiersSource,
+    /probeLocalServerKind\(probeBaseUrl, probeApiKey, modelId, noAuth\)/,
+    'the tier probe must forward the keyless posture flag so the backend skips the saved-credential fallback',
+  );
+  // The keyless UI derivation must follow the same managed scope as the save
+  // payload: with the toggle ON and the URL edited to a managed host the
+  // toggle row disappears, so the hint/key-row/reveal-error gates must fall
+  // back to the undeclared shape too — otherwise the form deadlocks (hint
+  // visible, toggle gone, key row hidden, typed key silently dropped).
+  assert.match(
+    settingsViewSource,
+    /const noAuthActive = !isLocalPreset && !isCodingPlan && noAuth;/,
+    'the keyless UI derivation must scope the declaration out of managed endpoints exactly like the save payload does',
+  );
+  assert.match(
+    settingsViewSource,
+    /!noAuthActive && renderApiKeyField\(\{ withBorder: false \}\)/,
+    'the API key row must reappear when the live URL is a managed endpoint under a stale keyless toggle',
+  );
+  assert.match(
+    settingsViewSource,
+    /noAuthActive && <div className="px-4 pb-3/,
+    'the keyless hint must disappear when the live URL is a managed endpoint (the payload already stores a null declaration there)',
+  );
+  assert.match(
+    settingsViewSource,
+    /showBaseUrlField = !isCodingPlan/,
+    'the API base URL field (custom endpoint/port) must be visible for every non-coding-plan preset',
+  );
+  assert.match(
+    settingsViewSource,
+    /showBaseUrlField && renderInlineField/,
+    'the base URL field gate must hold at the render site, not only at the assignment',
+  );
+  assert.match(
+    settingsViewSource,
+    /parsed\.pathname === '\/' \? serialized\.replace/,
+    'port rewrites must only strip the slash WHATWG serialization adds, never a user-typed path slash',
+  );
+  assert.match(
+    settingsViewSource,
+    /testId: 'model-form-base-url-port'/,
+    'the form must expose an explicit port field for the API base URL',
+  );
+  // The port row shares the base-URL render gate (`showBaseUrlField`); the
+  // generic render-site regex above already matches TWO rows, so a plausible
+  // regression (the port gate narrowing to `isLocalPreset`) stays green
+  // there. Pin the port row with its own label-anchored gate.
+  assert.match(
+    settingsViewSource,
+    /showBaseUrlField && renderInlineField\(\{\s*label: settingsCopy\.localPortLabel/,
+    'the port row must render for every non-coding-plan preset via the same base-URL gate (a cloud preset silently losing the port row regresses the headline feature)',
+  );
+  // The custom-model key row follows the same noAuthActive caliber; without
+  // this pin, dropping `&& !noAuthActive` resurrects the "key row visible
+  // while the declaration drops the typed key" deadlock for custom entries
+  // (the non-custom row is pinned above).
+  assert.match(
+    settingsViewSource,
+    /const showCustomCloudKeyField = !isLocalPreset && customModel && !noAuthActive;/,
+    'the custom-model key row must hide while the keyless declaration is active (the save drops a typed key under the declaration)',
+  );
+  // Both preset-switch paths must reset the keyless declaration; a stale ON
+  // toggle from preset A would otherwise save preset B keyless with a
+  // credential delete. Count-pinned: either site regressing must fail here.
+  const keylessResetSites = settingsViewSource.match(
+    /setNoAuth\(false\);\s*setBaseUrlPortError\(null\);/g,
+  ) || [];
+  assert.strictEqual(
+    keylessResetSites.length,
+    2,
+    'both entry-switch paths (catalog apply + manual local add) must reset the keyless declaration and the port error (a stale ON toggle must not leak into the next entry)',
+  );
+  // The save-side gates must follow the same noAuthActive caliber as the
+  // derivation pin above: raw `noAuth` here would drop a typed key while the
+  // form shows it accepted (currently unreachable, latent divergence).
+  assert.match(
+    settingsViewSource,
+    /isLocalPreset \|\| noAuthActive \|\| hasSavedKey \|\| !!apiKey\.trim\(\)/,
+    'the can-save gate must follow the same noAuthActive caliber as the save payload',
+  );
+  assert.match(
+    settingsViewSource,
+    /: \(!noAuthActive && apiKey\.trim\(\) \? apiKey\.trim\(\) : ''\)/,
+    'the saved key payload must follow the same noAuthActive caliber as the derivation (a typed key must never be silently discarded under a stale toggle)',
   );
 }
 // Memory delete / feedback close must route through in-app confirm dialogs
@@ -841,7 +1038,7 @@ for (const settingsI18nSource of settingsI18nSources) {
 // (success and error) are pinned on both forms.
 assert.match(
   settingsViewSource,
-  /const probeAuthRef = useRef\(''\);\s*probeAuthRef\.current = keyAction === 'replace' \|\| \(isLocalPreset && localKeyEnabled\) \? apiKey\.trim\(\) : ''/,
+  /const probeAuthRef = useRef\(''\);\s*probeAuthRef\.current = !isLocalPreset && !isCodingPlan && noAuth \? '' : keyAction === 'replace' \|\| \(isLocalPreset && localKeyEnabled\) \? apiKey\.trim\(\) : ''/,
   'the chat lane must mirror the effective auth payload so an in-flight probe result can be discarded when the credentials moved on',
 );
 {
@@ -855,6 +1052,8 @@ assert.match(
     presetCount, 2,
     'both probe paths (success and error) must check the protocol preset dimension',
   );
+  const postureCount = (settingsViewSource.match(/if \(probeNoAuthRef\.current !== probedNoAuth\) return;/g) || []).length;
+  assert.strictEqual(postureCount, 2, 'success and rejection must both fence keyless posture changes even when both keys are empty');
 }
 assert.match(
   providerFormModalSource,
@@ -970,6 +1169,8 @@ function injectSource() {
     // glm-5.3-flash @ https://example.com/v1 重复的行,用于钉「已保存」标记与
     // 批量去重(此前的 cloud-deepseek 已被更早的删除流程移除,不能当重复锚点);
     // 其余为带端点事实的全新候选。
+    var holdNextEndpointProbe = false;
+    var pendingEndpointProbeResolve = null;
     var probeEndpointListing = {
       status: 'listed',
       http_status: 200,
@@ -1109,7 +1310,16 @@ function injectSource() {
           return Promise.resolve(null);
         case 'set_active_model': activeModelId = args.id; return Promise.resolve(null);
         case 'test_model_connection': return Promise.resolve(Object.assign({}, modelTestResponse));
-        case 'probe_endpoint_models': return Promise.resolve(JSON.parse(JSON.stringify(probeEndpointListing)));
+        case 'probe_endpoint_models': {
+          var endpointResultSnapshot = JSON.parse(JSON.stringify(probeEndpointListing));
+          if (holdNextEndpointProbe) {
+            holdNextEndpointProbe = false;
+            return new Promise(function (resolve) {
+              pendingEndpointProbeResolve = function () { resolve(endpointResultSnapshot); };
+            });
+          }
+          return Promise.resolve(endpointResultSnapshot);
+        }
         case 'test_image_input_capability':
           return new Promise(function (resolve) {
             setTimeout(function () { resolve(Object.assign({}, imageTestResponse)); }, imageTestDelay);
@@ -1231,6 +1441,13 @@ function injectSource() {
       setUpdateResponse: function (next) { updateResponse = Object.assign({}, updateResponse, next || {}); },
       setUpdateCheckFailure: function (message) { updateCheckFailure = message || null; },
       setModelTestResponse: function (next) { modelTestResponse = Object.assign({}, next || {}); },
+      holdNextEndpointProbe: function () { holdNextEndpointProbe = true; },
+      endpointProbeHeld: function () { return typeof pendingEndpointProbeResolve === 'function'; },
+      resolveEndpointProbe: function () {
+        var resolve = pendingEndpointProbeResolve;
+        pendingEndpointProbeResolve = null;
+        if (resolve) resolve();
+      },
       setProbeEndpointListing: function (next) { probeEndpointListing = JSON.parse(JSON.stringify(next || { status: 'listed', models: [] })); },
       setImageTestResponse: function (next) { imageTestResponse = Object.assign({}, next || {}); },
       setImageTestDelay: function (ms) { imageTestDelay = Number(ms) || 0; },
@@ -2593,6 +2810,64 @@ async function modalWidth(page, headingText) {
   rec('⑥.5k3 fetch button probes probe_endpoint_models with the form base URL and preset',
     !!endpointProbeCall && endpointProbeCall.baseUrl === 'https://example.com/v1' && endpointProbeCall.preset === 'openai_compatible' && endpointProbeCall.apiKey === null,
     JSON.stringify(endpointProbeCall));
+  // Integration: the newly merged discovery route must honor the existing
+  // keyless form even while a typed key is retained in hidden React state.
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => {
+    const root = document.querySelector('[data-testid="model-form-dialog"]');
+    const input = root.querySelector('input[placeholder="输入 API Key"]');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, 'synthetic-retained-before-keyless');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.click('[data-testid="model-form-no-auth-toggle"]');
+  await page.waitForFunction(() => document.querySelector('[data-testid="model-form-no-auth-toggle"]')?.getAttribute('aria-pressed') === 'true');
+  await clickModalExact(page, '获取模型列表');
+  await page.waitForSelector('[data-testid="endpoint-model-picker-dialog"]');
+  const keylessProbe = await page.evaluate(() => [...window.__SETTINGS_TEST__.calls].reverse().find(c => c.cmd === 'probe_endpoint_models')?.args);
+  rec('⑥.5k3a keyless discovery never transmits the retained hidden form key',
+    keylessProbe?.apiKey === null && keylessProbe?.baseUrl === 'https://example.com/v1', JSON.stringify(keylessProbe));
+  // Reject only the fixture persistence tail: inspect the real mounted row's
+  // emitted payload without changing later tests' saved-model roster.
+  const beforeKeylessAdd = await page.evaluate(() => window.__SETTINGS_TEST__.models().length);
+  await page.evaluate(() => {
+    window.__SETTINGS_TEST__.setSaveModelError('synthetic keyless save rejection');
+    const row = [...document.querySelectorAll('[data-testid="endpoint-model-row"]')].find(n => n.textContent.includes('glm-5-flash'));
+    row.querySelector('[data-testid="endpoint-model-row-add"]').click();
+  });
+  await page.waitForFunction(() => document.querySelector('[data-testid="endpoint-model-add-notice"]')?.textContent.includes('synthetic keyless save rejection'));
+  const keylessAdd = await page.evaluate(() => {
+    const call = [...window.__SETTINGS_TEST__.calls].reverse().find(c => c.cmd === 'save_model');
+    return { payload: call?.args?.model, count: window.__SETTINGS_TEST__.models().length };
+  });
+  rec('⑥.5k3b the real keyless picker save declares none and removes the hidden key',
+    keylessAdd.payload?.auth_mode === 'none' && keylessAdd.payload?.api_key === ''
+      && ['delete', 'replace'].includes(keylessAdd.payload?.credential_action) && keylessAdd.count === beforeKeylessAdd,
+    JSON.stringify(keylessAdd));
+  await page.evaluate(() => window.__SETTINGS_TEST__.setSaveModelError(null));
+  await page.keyboard.press('Escape');
+  await page.click('[data-testid="model-form-no-auth-toggle"]');
+  await page.waitForSelector('[data-testid="model-form-dialog"] input[placeholder="输入 API Key"]');
+  await page.evaluate(() => {
+    const input = document.querySelector('[data-testid="model-form-dialog"] input[placeholder="输入 API Key"]');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.click('[data-testid="model-form-no-auth-toggle"]');
+  await page.waitForFunction(() => document.querySelector('[data-testid="model-form-no-auth-toggle"]')?.getAttribute('aria-pressed') === 'true');
+  await page.evaluate(() => window.__SETTINGS_TEST__.holdNextEndpointProbe());
+  await clickModalExact(page, '获取模型列表');
+  await page.waitForFunction(() => window.__SETTINGS_TEST__.endpointProbeHeld());
+  // Both requests have an empty key. Only the posture fence distinguishes them.
+  await page.click('[data-testid="model-form-no-auth-toggle"]');
+  await page.waitForFunction(() => document.querySelector('[data-testid="model-form-no-auth-toggle"]')?.getAttribute('aria-pressed') === 'false');
+  await page.evaluate(() => window.__SETTINGS_TEST__.resolveEndpointProbe());
+  await page.waitForFunction(() => document.querySelector('[data-testid="settings-model-fetch-lists"]')?.disabled === false);
+  rec('⑥.5k3c a held empty-key result is discarded after the keyless posture changes',
+    await page.evaluate(() => !document.querySelector('[data-testid="endpoint-model-picker-dialog"]')));
+  // Restore the normal posture and listing for the existing full save suite.
+  await clickModalExact(page, '获取模型列表');
+  await page.waitForSelector('[data-testid="endpoint-model-picker-dialog"]');
   // 还原表单:关免鉴权、清残留 key——⑥.5k4 起的落库断言(credential ladder /
   // auth_mode)依赖默认形态,残留状态不得外溢。
   await sleep(150);
