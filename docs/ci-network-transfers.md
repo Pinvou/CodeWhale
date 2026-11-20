@@ -60,4 +60,6 @@ Action 源码下载发生在工作流准备步骤之前；仅让上传/缓存探
 
 ## 验证
 
+复用的 Actions 工作区可能残留只有 Git 元数据、但 HEAD 不能解析成 commit 的 CodeWhale 子模块；`git submodule sync/update` 会在有机会获取目标对象之前失败。这是本地准备状态问题，不是更改被测 gitlink 的理由。`ci-prepare-codewhale.sh` 在确认工作区身份、全部可变元数据归属（包括 HEAD）、公开源 URL 及唯一 indexed gitlink 后，仅对该状态获取原 indexed commit 并做 detached checkout，再继续原有递归准备和清理。只需代码树时保持浅获取；审计要求历史时仍完整验证历史。目标不可达就失败，不替换为 origin/main/HEAD，不删除共享对象缓存，不修复外部元数据或普通开发工作区。
+
 运行网络策略守卫、`scripts/tests/ci-artifact-*.test.cjs` 和 `test_ci_{download,https,egress_proxy,apt_prepare,network_environment}.py`，以及 frontend bundle、结果复用、发布契约回归。Linux shell/符号链接契约在 Linux 验证；Windows 原生传输通过实际工作流验证。对照保留同一来源、TLS 策略、冷/暖下载耗时、哈希与服务器代理阶段日志，不能以一次重跑绿灯代替根因证据。
