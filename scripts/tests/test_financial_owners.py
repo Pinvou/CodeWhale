@@ -36,13 +36,33 @@ class OwnersTests(unittest.TestCase):
         expected_count = sum(len(OWNER.FIN[key]) for key in (
             'ACCOUNT_REQUIRED', 'OWNER_REQUIRED', 'SCHEMA_REQUIRED',
             'TOKEN_SCHEMA_REQUIRED', 'PROVISIONING_REQUIRED',
-            'LIFECYCLE_RECONCILIATION_REQUIRED',
+            'LIFECYCLE_RECONCILIATION_REQUIRED', 'MIGRATIONS_REQUIRED',
         ))
         self.assertEqual(sum(len(roots) for roots in OWNER.REQUIRED.values()), expected_count)
+
+    def test_ledger_phase_preserves_pinned_and_restricted_roots_in_account_lane(self):
+        expected = {'TestPinnedMigrationLedgerPostgresIntegration',
+                    'TestRestrictedMigrationLedgerPostgresIntegration'}
+        self.assertEqual(OWNER.REQUIRED.get('owner-ledger'), expected)
+        self.assertEqual(OWNER.FIN['MIGRATIONS_REQUIRED'], expected)
+        self.assertEqual(OWNER.FIN['MIGRATIONS_PACKAGE'],
+                         'github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations')
+        self.assertEqual(OWNER.LANES['account'][0], 'owner-ledger')
+        self.assertEqual(OWNER.FIN['OWNER_ORDER'][0], 'owner-ledger')
+        self.assertEqual(sum(labels.count('owner-ledger') for labels in OWNER.LANES.values()), 1)
+        self.assertEqual(OWNER.FIN['EXACT_REQUIRED_CHILDREN']['TestPinnedMigrationLedgerPostgresIntegration'], {
+            'up-path-change-keeps-original-ledger', 'verify-rejects-original-drift-despite-shadow',
+            'down-path-change-removes-only-original-row', 'actual-cli-retains-bound-namespace',
+            'binding-cannot-cross-connections', 'missing-search-path-schema-rejects-before-preparation',
+            'another-workflow-selects-its-own-visible-ledger',
+            'temporary-shadow-does-not-hide-later-permanent-ledger',
+            'temporary-shadow-does-not-capture-creation-schema',
+            'temporary-only-path-rejects-before-preparation'})
 
     def test_schema_split_preserves_each_named_phase_and_all_original_roots(self):
         self.assertEqual(set(OWNER.REQUIRED), set(OWNER.FIN['OWNER_ORDER']))
         for label, key in (
+            ('owner-ledger', 'MIGRATIONS_REQUIRED'),
             ('owner-account', 'ACCOUNT_REQUIRED'), ('owner-wallet', 'OWNER_REQUIRED'),
             ('owner-token-schema', 'TOKEN_SCHEMA_REQUIRED'),
             ('owner-provisioning', 'PROVISIONING_REQUIRED'),

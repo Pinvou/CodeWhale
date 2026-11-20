@@ -64,8 +64,12 @@ func guardGovernancePermissionsRollback(ctx context.Context, tx pgx.Tx, m migrat
 	if err := validateGovernancePermissionsRollback(m); err != nil {
 		return err
 	}
+	ledger, err := migrations.LedgerTable(ctx, tx.Conn())
+	if err != nil {
+		return err
+	}
 	var name, checksum string
-	if err := tx.QueryRow(ctx, `SELECT name,checksum FROM schema_migrations WHERE version=$1 FOR UPDATE`, m.Version).Scan(&name, &checksum); err != nil {
+	if err := tx.QueryRow(ctx, "SELECT name,checksum FROM "+ledger+" WHERE version=$1 FOR UPDATE", m.Version).Scan(&name, &checksum); err != nil {
 		return err
 	}
 	// Preserve the migration engine's historical LF/CRLF checksum compatibility;

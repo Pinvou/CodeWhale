@@ -25,6 +25,7 @@ func TestThreeScopeRollbackIdentity(t *testing.T) {
 	if original.Version != 34 {
 		t.Fatal("original 034 absent")
 	}
+	ledgerCtx, connection := governanceRollbackLedgerFixture(t)
 	for _, sourceCRLF := range []bool{false, true} {
 		for _, ledger := range retainedScopeChecksums {
 			m := original
@@ -32,9 +33,12 @@ func TestThreeScopeRollbackIdentity(t *testing.T) {
 				m.UpSQL = strings.ReplaceAll(normalizedGovernanceSQL(m.UpSQL), "\n", "\r\n")
 				m.DownSQL = strings.ReplaceAll(normalizedGovernanceSQL(m.DownSQL), "\n", "\r\n")
 			}
-			tx := &governanceRollbackTx{row: governanceRollbackRow{name: m.Name, checksum: ledger}}
-			if err := retainedRollbackGuard(context.Background(), tx, m); err != nil {
+			tx := &governanceRollbackTx{connection: connection, row: governanceRollbackRow{name: m.Name, checksum: ledger}}
+			if err := retainedRollbackGuard(ledgerCtx, tx, m); err != nil {
 				t.Fatal(err)
+			}
+			if tx.connectionCalls != 1 || len(tx.queries) != 1 || !strings.Contains(tx.queries[0], governanceRollbackLedgerTable) {
+				t.Fatal("three-scope guard lost its real bound connection or original ledger namespace")
 			}
 			if err := applyAccountRollbackSQL(context.Background(), tx, m); err != nil || len(tx.executions) != 1 {
 				t.Fatal(err)
@@ -65,7 +69,7 @@ func TestThreeScopeRollbackIdentity(t *testing.T) {
 				t.Fatal("source drift accepted")
 			}
 			tx := &governanceRollbackTx{}
-			if err := guardThreeScopeRollback(context.Background(), tx, m); err == nil || len(tx.queries) != 0 || len(tx.executions) != 0 {
+			if err := guardThreeScopeRollback(context.Background(), tx, m); err == nil || len(tx.queries) != 0 || len(tx.executions) != 0 || tx.connectionCalls != 0 {
 				t.Fatal("drift reached database")
 			}
 		})
