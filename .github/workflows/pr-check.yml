@@ -2974,7 +2974,10 @@ jobs:
         run: node scripts/ci-rust-network.cjs
       - name: Rust（构建期开关的实际产物回归）
         uses: dtolnay/rust-toolchain@stable
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       - name: 桌面远控发布平台与构建期开关契约
         run: node --test remote-control-relay/test/release-path-policy.test.js pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/desktop_remote_loaded_capability.test.mjs
 
@@ -3104,6 +3107,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # rust-toolchain.toml lives under pinvou-knowledge, so it does not apply
       # to cargo invoked from the repo root via --manifest-path; set the
@@ -3312,7 +3319,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       - name: Prepare CI transfer runtime (1)
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
         timeout-minutes: 1
@@ -3657,6 +3667,10 @@ jobs:
         run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # rust-toolchain.toml 在 src-tauri 下,对从仓库根用 --manifest-path 调用的 cargo 不生效;
       # 把该文件锁定的工具链设为 default,保证 CI 与本地同一 pinned 版本(单一真相源是文件,
@@ -4061,6 +4075,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # rust-toolchain.toml lives under src-tauri and does not apply to cargo
       # invoked from the repo root with --manifest-path; like rust-test, make
@@ -4279,6 +4297,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # Same as cli-test: the version pinned by src-tauri/rust-toolchain.toml
       # must become the default so cargo invoked from the repo root with
@@ -4508,6 +4530,10 @@ jobs:
         run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # Same as rust-test: set the toolchain pinned by
       # src-tauri/rust-toolchain.toml as the default, so cargo invoked from
@@ -5158,6 +5184,8 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: 安装锁定的 Rust 工具链
         shell: pwsh
         run: |
@@ -5173,6 +5201,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "rustup toolchain install failed with exit code $LASTEXITCODE."
           }
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # scripts/ci/** 不在任何其它 job filter 里,因此本 job 是
       # ensure-rust-toolchain.ps1 改动触发的唯一门禁;frontend-test(Linux)
@@ -5351,6 +5383,10 @@ jobs:
         run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # Same as rust-test/windows-rust-test: set the toolchain resolved by
       # src-tauri/rust-toolchain.toml as default (currently floating stable), so
@@ -5989,7 +6025,10 @@ jobs:
         run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       - name: Align the toolchain pinned by rust-toolchain.toml
         working-directory: pinvou3-app/src-tauri
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
@@ -6198,7 +6237,10 @@ jobs:
         run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       - name: Align the toolchain pinned by rust-toolchain.toml
         working-directory: pinvou3-app/src-tauri
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"

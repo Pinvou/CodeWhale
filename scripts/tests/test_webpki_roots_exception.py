@@ -375,6 +375,10 @@ class WebpkiCiContractTests(unittest.TestCase):
                     '        timeout-minutes: 3',
                     '        continue-on-error: true',
                     '        uses: actions/upload-artifact@v7',
+                    '        env:',
+                    '          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}',
+                    '          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}',
+                    "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
                     '        with:',
                     '          name: gate-resource-lifecycle-${{ github.run_attempt }}',
                     '          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/',
@@ -387,7 +391,31 @@ class WebpkiCiContractTests(unittest.TestCase):
         for job in {job for job, _ in reviewed}:
             block = job_block(workflow, job)
             self.assertNotRegex(block, r'(?m)^    continue-on-error:')
-            for step in block.split('\n      - ')[1:]:
+            steps = block.split('\n      - ')[1:]
+            for index, step in enumerate(steps):
+                if ('\n        continue-on-error:' in step
+                        and '        run: node scripts/ci-network-node-options.cjs' in step):
+                    # The paired diagnostic upload already permits failure;
+                    # its bounded preparation must preserve that exact policy.
+                    # No business/test/cleanup step inherits this exception.
+                    target = steps[index + 1] if index + 1 < len(steps) else ''
+                    self.assertTrue(any(job == owner and target.startswith(f'name: {name}\n')
+                                        for owner, name in reviewed))
+                    self.assertIn('        uses: actions/upload-artifact@v7\n', target)
+                    self.assertIn('        continue-on-error: true\n', target)
+                    condition = re.findall(r'^        if: (.*)$', target, re.M)
+                    self.assertEqual(len(condition), 1)
+                    lines = [line for line in step.splitlines()
+                             if line.strip() and not line.lstrip().startswith('#')]
+                    self.assertRegex(lines[0], r'^name: Prepare CI transfer runtime \([0-9]+\)$')
+                    self.assertEqual(lines[1:], [
+                        '        if: ' + condition[0],
+                        '        continue-on-error: true',
+                        '        timeout-minutes: 1',
+                        '        working-directory: ${{ github.workspace }}',
+                        '        run: node scripts/ci-network-node-options.cjs',
+                    ])
+                    continue
                 if job == 'windows-rust-test' and step.startswith('name: Windows 测试二进制导入诊断\n'):
                     diagnostic = '\n'.join(line for line in step.splitlines()
                                            if line.strip() and not line.lstrip().startswith('#'))

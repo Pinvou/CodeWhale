@@ -30,6 +30,8 @@ Rustup 本身不继承存储 Action 的 Node TLS 策略，且 Runner 可能把�
 
 此 listener 不接受任意 URL、凭据或写请求，只有官方 dist 路径；不改写 manifest、工具链版本、组件或安装目录。只有后台官方源下载器收窄其自身的 `NO_PROXY`，业务进程的公共源绕行策略不变。Rustup 到 loopback 的明文段只在本机，外网段仍严格验证 HTTPS。监听器保留 Runner tracking/Windows Job Object，随 Job 清理；最长两小时作为额外回收边界。安全的下载阶段、命中及失败类型保存在 `PINVOU_CI_RUST_DIST_STATE` 同目录的有界 `statistics.json`，不保存原始错误、签名 URL 或认证信息。
 
+全部 Rust 初始化入口（包括手写的 Windows 安装步骤）随后以 `always()` 输出筛选后的诊断快照，使失败 Job 的临时目录被 Runner 回收前仍有阶段证据。报告只输出固定字段、数值错误码和受限枚举，不打印原始异常或环境；报告不可改变原安装步骤的判定。存储准备步骤保留所配对 Action 原有的条件及失败策略，诊断上传可非阻断，产品测试和资源回收始终阻断。Job 级预算与短步骤预算分开校验。
+
 ## APT 与代理部署
 
 `scripts/ci-apt-prepare.py --apply` 只处理启用的 LLVM 源，验证仓库内官方公钥的 SHA-256、主指纹和签名子密钥，然后在原 Signed-By 范围内合并证书。它不改变源、关闭签名检查或把其他 keyring 的身份复制到新的范围。公钥更新必须重新从官方源取证、核对身份及摘要并运行回归；不能按错误信息下载任意密钥。

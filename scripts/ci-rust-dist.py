@@ -102,6 +102,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     while block := source.read(256 * 1024):
                         self.wfile.write(block)
         except (ValueError, OSError, DOWNLOAD.DownloadError) as error:
+            DOWNLOAD.event('request-failed', error_type=type(error).__name__,
+                           errno=error.errno if isinstance(error, OSError) else 0)
             # Do not include exception text, source URLs, headers or secrets.
             if not sent and not self.wfile.closed:
                 try:

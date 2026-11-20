@@ -35,7 +35,10 @@ jobs:
       - name: Configure verified Rust download source
         run: node scripts/ci-rust-network.cjs
       - uses: dtolnay/rust-toolchain@stable
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       - name: Build Windows rustc stack wrapper
         shell: pwsh
         run: rustc -O pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.rs -o pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe

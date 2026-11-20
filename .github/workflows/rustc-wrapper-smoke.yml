@@ -141,6 +141,10 @@ jobs:
         run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # 1) 默认配置直接可用:不设任何覆盖,全新 clone 的默认 config.toml 必须
       #    三端直接 cargo check 通过。config.toml 已移除 [build] rustc-wrapper

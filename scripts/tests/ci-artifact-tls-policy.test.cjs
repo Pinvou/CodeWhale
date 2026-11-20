@@ -35,6 +35,8 @@ test('all workflows keep storage policies scoped, condition-matched and observab
   for (const mutant of [
     workflow.replace('NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}', 'NODE_OPTIONS: --tls-max-v1.2'),
     workflow.replace('run: node scripts/ci-network-node-options.cjs', 'run: node scripts/unreviewed.cjs'),
+    workflow.replace('      - name: Configure verified Rust download source\n        run: node scripts/ci-rust-network.cjs\n      - name: 安装锁定的 Rust 工具链', '      - name: 安装锁定的 Rust 工具链'),
+    workflow.replace('run: node scripts/ci-rust-network.cjs --report', 'run: node scripts/unreviewed-rust-report.cjs'),
     workflow.replace('working-directory: ${{ github.workspace }}', 'working-directory: wrong-directory'),
     workflow.replace("PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'", "PINVOU_CI_ARTIFACT_DIAGNOSTICS: '0'"),
     workflow.replace(/^env:$/m, 'env:\n  NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}'),

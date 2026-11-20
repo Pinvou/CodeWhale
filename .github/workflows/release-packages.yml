@@ -781,6 +781,10 @@ jobs:
         run: node scripts/ci-rust-network.cjs
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # No rust-cache here: releases are strictly read-only against the cache
       # (2026-10 quota policy, pinned by test_release_cache_policy). The
@@ -998,10 +1002,13 @@ jobs:
         run: node scripts/ci-rust-network.cjs
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # No rust-cache here — same read-only quota policy as build-linux-x64
       # (see that job's comment; pinned by test_release_cache_policy).
-
       - name: 装 Tauri + pinvou3 Linux 系统依赖
         run: |
           sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
@@ -1187,7 +1194,10 @@ jobs:
         run: node scripts/ci-rust-network.cjs
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       - name: Add the loongarch64 Rust target
         # 编排脚本内部会再跑一次(幂等);显式一步让 target 缺失在该步骤
         # 即红,而不是埋在十几分钟后的编排脚本里。
@@ -1407,6 +1417,10 @@ jobs:
         run: node scripts/ci-rust-network.cjs
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # [linker consistency, 2026-10-02] Select the bundled lld (lld-link) for
       # the shipped binary too, matching the windows-rust-test leg (#642).
@@ -1640,6 +1654,10 @@ jobs:
         run: node scripts/ci-rust-network.cjs
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # No rust-cache here — same read-only quota policy as build-linux-x64
       # (see that job's comment; pinned by test_release_cache_policy).

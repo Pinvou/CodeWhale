@@ -26,9 +26,15 @@ function checkWorkflow(source, filename = 'workflow') {
   const fail = message => { throw new Error(`${filename}: ${message}`); };
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
-    if (/^ {6}(?:- uses:|  uses:) dtolnay\/rust-toolchain@/m.test(step)) {
+    if (/^ {6}(?:- uses:|  uses:) dtolnay\/rust-toolchain@/m.test(step)
+        || /^          rustup toolchain install /m.test(step)) {
       if (field(steps[i - 1] || '', 'run') !== 'node scripts/ci-rust-network.cjs') fail('Rust setup lacks mirror retirement');
       if (field(steps[i - 1], 'if') !== field(step, 'if')) fail('Rust source preparation conditions differ');
+      const report = steps[i + 1] || '';
+      if (field(report, 'run') !== 'node scripts/ci-rust-network.cjs --report'
+          || field(report, 'if') !== '${{ always() }}' || field(report, 'timeout-minutes') !== '1') {
+        fail('Rust setup lacks bounded diagnostics on failure');
+      }
     }
     if (!storageAction(step)) continue;
     count++;

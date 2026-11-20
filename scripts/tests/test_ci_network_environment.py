@@ -14,6 +14,25 @@ SPEC.loader.exec_module(ENV)
 
 
 class NetworkEnvironmentTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node reports the actual safe download receipt')
+    def test_report_retains_stage_evidence_without_raw_errors_urls_or_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'statistics.json').write_text(json.dumps({'events':[
+                {'phase':'attempt', 'host':'static.rust-lang.org', 'exit':60,
+                 'stderr':'secret-raw-error', 'url':'https://example.invalid/?secret=query',
+                 'failure_stage':'tls-handshake'},
+                {'phase':'request-failed', 'error_type':'OSError', 'errno':2}]}))
+            result = subprocess.run([shutil.which('node'),
+                str(Path(__file__).parents[1] / 'ci-rust-network.cjs'), '--report'],
+                env={**os.environ, 'PINVOU_CI_RUST_DIST_STATE':str(root / 'ready.json')},
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('tls-handshake', result.stdout)
+            self.assertIn('"errno":2', result.stdout)
+            self.assertNotIn('secret', result.stdout)
+            self.assertNotIn('example.invalid', result.stdout)
+
     def test_ci_entry_starts_owned_cache_preserves_bypasses_and_retires_on_state_removal(self):
         with tempfile.TemporaryDirectory(prefix='rust CI ') as directory:
             root = Path(directory)
