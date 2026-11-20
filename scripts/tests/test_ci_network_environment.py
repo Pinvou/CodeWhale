@@ -21,7 +21,7 @@ class NetworkEnvironmentTests(unittest.TestCase):
             (root / 'statistics.json').write_text(json.dumps({'events':[
                 {'phase':'attempt', 'host':'static.rust-lang.org', 'exit':60,
                  'stderr':'secret-raw-error', 'url':'https://example.invalid/?secret=query',
-                 'failure_stage':'tls-handshake'},
+                 'failure_stage':'tls-handshake', 'http_connect':502},
                 {'phase':'request-failed', 'error_type':'OSError', 'errno':2}]}))
             result = subprocess.run([shutil.which('node'),
                 str(Path(__file__).parents[1] / 'ci-rust-network.cjs'), '--report'],
@@ -30,6 +30,7 @@ class NetworkEnvironmentTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('tls-handshake', result.stdout)
             self.assertIn('"errno":2', result.stdout)
+            self.assertIn('"http_connect":502', result.stdout)
             self.assertNotIn('secret', result.stdout)
             self.assertNotIn('example.invalid', result.stdout)
 

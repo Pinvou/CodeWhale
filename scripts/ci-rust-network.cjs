@@ -13,7 +13,7 @@ if (process.argv.includes('--report')) {
     const file = path.join(path.dirname(state), 'statistics.json');
     if (fs.statSync(file).size > 65536) throw new Error('oversized receipt');
     const receipt = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const allowed = new Set(['phase', 'host', 'attempt', 'tls_policy', 'http_code',
+    const allowed = new Set(['phase', 'host', 'attempt', 'tls_policy', 'http_code', 'http_connect',
       'time_namelookup', 'time_connect', 'time_appconnect', 'time_starttransfer',
       'size_download', 'num_redirects', 'exit', 'failure_stage', 'bytes', 'sha256', 'error_type', 'reason', 'errno']);
     const events = Array.isArray(receipt.events) ? receipt.events.slice(-32).map(event =>

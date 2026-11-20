@@ -1,11 +1,14 @@
 import contextlib
 import hashlib
+import http.server
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -57,7 +60,8 @@ class DownloadTests(unittest.TestCase):
 
     def fetch(self, **options):
         options.setdefault('transfer', self.successful)
-        DOWNLOAD.fetch(URL, self.root / 'result', SHA, cache=self.root / 'cache', **options)
+        options.setdefault('cache', self.root / 'cache')
+        DOWNLOAD.fetch(URL, self.root / 'result', SHA, **options)
 
     def test_verified_cache_hit_never_calls_network(self):
         self.fetch()
@@ -100,6 +104,72 @@ class DownloadTests(unittest.TestCase):
         self.fetch(transfer=transfer, sleep=lambda _: None, seconds=5)
         self.assertEqual(len(budgets), 2)
         self.assertTrue(0 < budgets[1] <= budgets[0] <= 5)
+
+    def test_connect_gateway_failure_retries_with_origin_000_inside_original_budget(self):
+        for code in (22, 56):
+            with self.subTest(curl=code):
+                budgets = []
+                def transfer(url, target, seconds, tls12, limit):
+                    budgets.append((seconds, tls12))
+                    if len(budgets) == 1:
+                        return {'exit':code, 'http_code':0, 'http_connect':502,
+                                'failure_stage':'proxy-connect'}
+                    return self.successful(url, target, seconds, tls12, limit)
+                # No cross-subcase cache hit may hide the transfer under test.
+                self.fetch(transfer=transfer, cache=None, sleep=lambda _: None, seconds=5)
+                self.assertEqual(len(budgets), 2)
+                self.assertTrue(0 < budgets[1][0] <= budgets[0][0] <= 5)
+                self.assertEqual([item[1]for item in budgets], [False, False])
+
+    def test_connect_refusal_and_certificate_failures_never_retry(self):
+        for code, proxy, origin in ((56,407,0), (22,403,0), (22,404,0),
+                                    (56,501,0), (60,502,0), (77,503,0),
+                                    (22,200,401), (22,200,404), (22,200,0)):
+            with self.subTest(curl=code, proxy=proxy, origin=origin):
+                calls=[]
+                def denied(*args):
+                    calls.append(True)
+                    return {'exit':code, 'http_code':origin, 'http_connect':proxy}
+                with self.assertRaises(DOWNLOAD.DownloadError):
+                    self.fetch(transfer=denied, cache=None, sleep=lambda _: self.fail('terminal failure slept'))
+                self.assertEqual(len(calls), 1)
+
+    def test_real_curl_connect_status_is_separate_and_retries_are_bounded(self):
+        try:
+            DOWNLOAD.curl_executable()
+        except DOWNLOAD.DownloadError:
+            self.skipTest('native curl is required for CONNECT wire validation')
+        for status, expected_calls in ((502,3), (503,3), (407,1)):
+            with self.subTest(proxy=status):
+                observations=[]
+                class Proxy(http.server.BaseHTTPRequestHandler):
+                    def log_message(self, *_):
+                        pass
+                    def do_CONNECT(self):
+                        observations.append(self.command)
+                        self.send_error(status)
+                        self.close_connection=True
+                server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Proxy)
+                thread=threading.Thread(target=server.serve_forever,daemon=True)
+                thread.start()
+                proxy=f'http://127.0.0.1:{server.server_port}'
+                try:
+                    with patch.dict(os.environ, {'HTTPS_PROXY':proxy,'https_proxy':proxy,
+                            'HTTP_PROXY':proxy,'http_proxy':proxy,'NO_PROXY':'','no_proxy':''}):
+                        with self.assertRaises(DOWNLOAD.DownloadError):
+                            self.fetch(cache=None, transfer=DOWNLOAD.curl_transfer,
+                                       sleep=lambda _:None, seconds=5)
+                finally:
+                    server.shutdown();server.server_close();thread.join(timeout=2)
+                self.assertEqual(len(observations),expected_calls)
+                self.assertFalse((self.root/'result').exists())
+                events=[json.loads(line.split(' ',1)[1])for line in self.output.getvalue().splitlines()]
+                attempts=[event for event in events if event['phase']=='attempt']
+                self.assertEqual(attempts[-1]['http_connect'],status)
+                self.assertEqual(attempts[-1]['http_code'],0)
+                self.assertEqual(attempts[-1]['failure_stage'],'proxy-connect')
+                self.assertNotIn('must-not-appear',self.output.getvalue())
+                self.output.seek(0);self.output.truncate()
 
     def test_certificate_authentication_and_missing_asset_fail_without_retry(self):
         for code, status in ((60, 0), (22, 401), (22, 403), (22, 404)):

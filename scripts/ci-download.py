@@ -66,7 +66,7 @@ def curl_executable(*, platform=os.name, which=shutil.which, environment=os.envi
 
 
 def curl_transfer(url, target, seconds, tls12, max_bytes):
-    fields = ('http_code', 'time_namelookup', 'time_connect', 'time_appconnect',
+    fields = ('http_code', 'http_connect', 'time_namelookup', 'time_connect', 'time_appconnect',
               'time_starttransfer', 'size_download', 'num_redirects')
     template = '{' + ','.join('"' + field + '":"%{' + field + '}"' for field in fields) + '}'
     args = [curl_executable(), '--disable', '--proto', '=https', '--proto-redir', '=https',
@@ -91,7 +91,9 @@ def curl_transfer(url, target, seconds, tls12, max_bytes):
     # must not conceal a later edge's SSL timeout. Classify locally; never
     # expose curl stderr, which can include credentials or a signed URL.
     error = process.stderr.decode('utf-8', errors='replace').lower()
-    if process.returncode and ('ssl connection timeout' in error or
+    if process.returncode and receipt.get('http_connect', 0) >= 400 and not receipt.get('http_code', 0):
+        receipt['failure_stage'] = 'proxy-connect'
+    elif process.returncode and ('ssl connection timeout' in error or
                                (process.returncode == 35 and 'ssl' in error)):
         receipt['failure_stage'] = 'tls-handshake'
     elif process.returncode == 6:
@@ -192,6 +194,7 @@ def fetch(url, destination, expected=None, *, cache=None, seconds=180,
             temporary.write_bytes(b'')
             result = transfer(url, temporary, remaining, tls12, max_bytes)
             code, status = result.get('exit', -1), int(result.get('http_code', 0))
+            proxy_status = int(result.get('http_connect', 0))
             event('attempt', host=host, attempt=attempt, tls_policy='1.2' if tls12 else '>=1.2', **result)
             if code == 0:
                 if not regular(temporary) or not 0 < temporary.stat().st_size <= max_bytes:
@@ -205,7 +208,16 @@ def fetch(url, destination, expected=None, *, cache=None, seconds=180,
                 break
             # Certificate errors, authentication, missing releases and malformed
             # URLs never become a retry loop or an insecure TLS fallback.
-            transient = code in (5, 6, 7, 18, 28, 35, 52, 55, 56, 92) or status in (408, 429, 500, 502, 503, 504)
+            # CONNECT has its own response code: curl can return 22 or 56
+            # with origin HTTP=000 when the proxy returns 502/503. Do not
+            # retry proxy authorization/policy refusals or a certificate
+            # failure merely because an earlier CONNECT was transient.
+            retry_statuses = (408, 429, 500, 502, 503, 504)
+            terminal = code in (51, 58, 60, 77, 83, 90, 91) or (
+                status >= 400 and status not in retry_statuses) or (
+                proxy_status >= 400 and proxy_status not in retry_statuses)
+            transient = not terminal and (code in (5, 6, 7, 18, 28, 35, 52, 55, 56, 92)
+                or status in retry_statuses or proxy_status in retry_statuses)
             if not transient or attempt == attempts:
                 raise DownloadError(f'HTTPS download failed (curl={code}, HTTP={status})')
             if result.get('failure_stage') == 'tls-handshake' or (
