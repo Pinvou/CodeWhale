@@ -239,6 +239,7 @@ mod tests {
 
     fn model() -> SavedModel {
         SavedModel {
+            auth_mode: None,
             id: "model-1".to_string(),
             name: "Model 1".to_string(),
             alias: None,
