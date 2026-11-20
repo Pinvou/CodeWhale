@@ -415,6 +415,17 @@ impl State {
                     stage: stage.to_string(),
                     message: bounded_text(message, 512),
                 });
+            } else if t.events.last().map(|e| e.stage.as_str()) != Some("events_capped") {
+                // r9 P2-2：触顶静默丢事件会让 SSE 流「假死」（progress 仍更新
+                // 而事件静止）。落一条终结性提示，只落一次。
+                t.events.push(TaskEvent {
+                    ts: now_epoch(),
+                    stage: "events_capped".to_string(),
+                    message: format!(
+                        "事件已达 {} 条上限，后续事件不再记录（任务仍在执行，进度字段不受影响）。",
+                        MAX_EVENTS_PER_TASK
+                    ),
+                });
             }
         }
     }

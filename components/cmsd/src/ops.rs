@@ -406,6 +406,8 @@ fn enable_inner(
     }
     std::fs::write(&env_path, environment)
         .map_err(|e| format!("写 {} 失败：{e}", env_path.display()))?;
+    // r9 P2-1：extra_flags 可含 --api-key 形态值（卡片脚本提取或管理员覆盖
+    // 文件），进持久事件与 SSE 前过脱敏——redact.rs 对该形态有掩码能力。
     event(
         "flags",
         &format!(
@@ -413,7 +415,7 @@ fn enable_inner(
             if extra_flags.is_empty() {
                 "（引擎默认）".to_string()
             } else {
-                extra_flags.clone()
+                redact_text(&extra_flags)
             }
         ),
     );
@@ -777,7 +779,7 @@ pub(crate) fn validate_container_config(
 
 fn enable_container_inner(app: &Arc<App>, task_id: &str, card: &Card) -> Result<String, String> {
     crate::store_adoption::selection::ensure_current(app, &card.name)?;
-    let started = now_epoch();
+    let mut started = now_epoch();
     let event = |stage: &str, msg: &str| app.task_event(task_id, stage, msg);
     let deploy = card
         .docker_deploy
@@ -934,6 +936,10 @@ fn enable_container_inner(app: &Arc<App>, task_id: &str, card: &Card) -> Result<
             }
             ensure_autostart(app, task_id, card)?;
             // enable.sh 自己等到 /health；cmsd 仍统一再过一遍等就绪+登记（口径一致）
+            // r9 P1-3：首装脚本（镜像拉取+依赖安装，硬上限 6h）的耗时不得计入
+            // 就绪预算——以脚本结束时刻重置等待起点，慢网首装成功不再被误判
+            // 「25 分钟内服务没有就绪」并连带 Degraded/不登记。
+            started = now_epoch();
         }
     }
     wait_container_ready(app, task_id, card, &name, port, started, baseline_available)

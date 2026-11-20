@@ -1134,12 +1134,6 @@ pub async fn set_session_model(
         .and_then(|id| prefs.model_by_id(id))
         .or_else(|| prefs.active_model())
         .cloned();
-    if if_idle != Some(true) {
-        let _ = app.emit(
-            "session:manual_model_selection",
-            serde_json::json!({"session_id":session_id}),
-        );
-    }
     let result = if if_idle == Some(true) {
         pool.switch_idle_session_model(
             &session_id,
@@ -1152,6 +1146,14 @@ pub async fn set_session_model(
         pool.switch_session_model(&session_id, model_id).await
     };
     result.map_err(|error| format!("set_session_model({session_id}): {error:#}"))?;
+    // r9 P2-5：手动选择意图在切换成功后再广播——失败时不得登记该意图，
+    // 否则 megacube switch-follow 的抑制状态与实际绑定不一致。
+    if if_idle != Some(true) {
+        let _ = app.emit(
+            "session:manual_model_selection",
+            serde_json::json!({"session_id":session_id}),
+        );
+    }
     super::sessions::emit_session_event(&app, "session:model_changed", &session_id, "model");
     if let Some(model) = selected_model {
         crate::features::behavior_telemetry::track_model_selected(

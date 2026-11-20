@@ -1334,6 +1334,12 @@ jobs:
       - name: Initialize gate test resource ledger
         run: python3 scripts/ci-resource-ledger.py --init
 
+      # r9 P1-2：jsonschema 的唯一消费者（megacube inventory 契约，经
+      # test_megacube_mcp 子进程运行）在本 suite 内执行，安装必须先行，
+      # 否则 skipIf 静默跳过且退出码为 0。
+      - name: Install gate suite python deps (jsonschema)
+        run: python3 -m pip install --quiet jsonschema
+
       # Full discovery includes cache server/deadline/checkout/npm contracts;
       # run them once, inside the same owned process tree as the other guards.
       - name: Gate policy test suite (scripts/tests)

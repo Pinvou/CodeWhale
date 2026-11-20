@@ -315,6 +315,15 @@ impl App {
         let mut guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let mut receipt = None;
         if let Some(t) = guard.state.tasks.get_mut(task_id) {
+            // r9 P2-3：终态不可改写——abandon 落墓碑后，在途 mirror 的迟到
+            // task_finish 不得把 Cancelled 回执覆盖成 Failed。
+            if t.status != TaskStatus::Running {
+                log_line(&format!(
+                    "task_finish 忽略迟到终态：{task_id} 已是 {}",
+                    t.status.as_str()
+                ));
+                return;
+            }
             t.status = match &outcome {
                 Ok(_) => TaskStatus::Succeeded,
                 Err(_) => TaskStatus::Failed,
@@ -396,6 +405,9 @@ impl App {
     pub fn task_cancel(&self, task_id: &str, message: &str) {
         let mut guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(t) = guard.state.tasks.get_mut(task_id) {
+            if t.status != TaskStatus::Running {
+                return;
+            }
             t.status = TaskStatus::Cancelled;
             t.finished_at = Some(now_epoch());
             t.result = Some(message.to_string());

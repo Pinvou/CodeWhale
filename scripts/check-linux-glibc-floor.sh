@@ -27,7 +27,10 @@ command -v dpkg-deb >/dev/null || { echo "missing required command: dpkg-deb" >&
 extract_dir="$(mktemp -d)"
 trap 'rm -rf -- "$extract_dir"' EXIT
 package_arch="$(dpkg-deb -f "$deb_path" Architecture)"
-[ "$package_arch" = "$expected_arch" ] || {
+# loong 系口径统一：deb control 字段是 loong64（package-deb-loongarch64.sh 的
+# DEB_ARCH），而 Rust target/调用方习惯写 loongarch64——两侧任一口径都接受。
+normalize_arch() { case "$1" in loongarch64) echo loong64 ;; *) echo "$1" ;; esac; }
+[ "$(normalize_arch "$package_arch")" = "$(normalize_arch "$expected_arch")" ] || {
   echo "FAIL: deb architecture $package_arch != expected $expected_arch" >&2
   exit 1
 }

@@ -84,6 +84,13 @@ class BundledCmsdDebTests(unittest.TestCase):
     def test_complete_native_package_passes(self):
         self.guard()
 
+    def test_loong_deb_control_field_uses_debian_arch_name(self):
+        # r9 P1-1：真实 loong64 deb 的 control 字段是 loong64（DEB_ARCH），调用
+        # 方传 Rust target 口径 loongarch64。归一化后架构门必须放行——后续组件
+        # 阶段因 loong 不随包 cmsd 而失败是另一码事，只断言不因架构口径卡死。
+        result = self.guard(expected=1, architecture="loongarch64", declared="loong64")
+        self.assertNotIn("deb architecture", result.stdout + result.stderr)
+
     def test_missing_and_partial_component_packages_fail_with_desktop_elf_present(self):
         binary = self.component / "cmsd"
         original = binary.read_bytes()
