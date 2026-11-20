@@ -160,7 +160,8 @@ pub(super) async fn sync(
         .iter()
         .map(|request| request.callback_id.clone())
         .collect::<HashSet<_>>();
-    if journal.project_missing(authority, tasks, events.as_ref(), &current)? > 0 {
+    journal.project_missing(authority, tasks, events.as_ref(), &current)?;
+    if journal.all_registered_projected() {
         resume_when_clear(tasks, owner, &remaining)?;
     }
     Ok(())

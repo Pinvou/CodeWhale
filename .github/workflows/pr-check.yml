@@ -112,6 +112,9 @@ concurrency:
 # across runs (each job restores a fresh cache), so they are pure cache-bloat
 # under the 10GB quota. CodeWhale CI sets the same value in every lane.
 env:
+  # Use the verified official source; do not inherit a failing runner mirror.
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
   CARGO_INCREMENTAL: "0"
 
 jobs:
@@ -195,8 +198,16 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
 
@@ -205,6 +216,8 @@ jobs:
           node --test
           scripts/tests/community-backflow-automation.test.mjs
           scripts/tests/community-backflow.test.mjs
+          scripts/tests/ci-artifact-tls-policy.test.cjs
+          scripts/tests/ci-artifact-upload-diagnostics.test.cjs
           scripts/tests/sync-version.test.mjs
           scripts/tests/select-frontend-smokes.test.mjs
           scripts/tests/run-frontend-smokes.test.mjs
@@ -521,6 +534,17 @@ jobs:
               - 'pinvou3-app/src-tauri/src/features/feedback/**'
               - 'pinvou3-app/src-tauri/src/features/personas/**'
               - 'pinvou3-app/src-tauri/src/features/pet/**'
+              # platform/prefs/ defines the SavedModel schema the CLI reads
+              # and writes (pinvou-cli path-depends on pinvou3-tauri and
+              # constructs SavedModel literals in models.rs, so a schema
+              # field addition is a CLI compile input). Today a prefs change
+              # already fires the CLI legs transitively via rust_full (any
+              # src-tauri .rs matches); this entry asserts the coverage
+              # directly — same discipline as the feedback/personas/pet
+              # entries above — so the CLI suite keeps gating schema changes
+              # even if rust_full ever gains a prefs exclusion the way it
+              # excludes those leaf features.
+              - 'pinvou3-app/src-tauri/src/platform/prefs/**'
               # The CLI compiles the connector lock tables in with
               # `include_str!` (src-tauri/src/platform/connector_lock.rs), so
               # editing or deleting one is a CLI source change in all but
@@ -1139,8 +1163,16 @@ jobs:
           }
           git fetch --no-tags --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
 
@@ -1189,7 +1221,7 @@ jobs:
       # installer code and a tampered artifact fails the gate here.
       - name: workflow lint (actionlint)
         run: |
-          curl --retry 3 -fsSL -o actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          python3 scripts/ci-download.py https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz --output actionlint.tar.gz --sha256 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum --check -
           tar -xzf actionlint.tar.gz actionlint
           ./actionlint -shellcheck= .github/workflows/*.yml
@@ -1205,6 +1237,17 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p test_ci_resource_ledger.py
           python3 -m unittest discover -s scripts/tests -p test_ci_fixture_docker.py
           python3 -m unittest discover -s scripts/tests -p test_ci_fixture_process.py
+
+      - name: CI network transfer and cache boundaries
+        run: |
+          node scripts/ci-network-policy.cjs
+          node --test scripts/tests/ci-artifact-tls-policy.test.cjs scripts/tests/ci-artifact-upload-diagnostics.test.cjs
+          python3 -m unittest discover -s scripts/tests -p test_ci_download.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_https.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_egress_proxy.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_apt_prepare.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_network_environment.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_rust_dist.py
 
       - name: 架构边界门禁
         run: |
@@ -1252,8 +1295,16 @@ jobs:
           base_ref="${base_ref#refs/heads/}"
           ./scripts/ci-fork-link-check.sh "origin/$base_ref"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Setup Python
         uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           python-version: "3.12"
 
@@ -1306,16 +1357,18 @@ jobs:
 
       - name: Configure artifact transport for Gate test resource lifecycle receipts
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Gate test resource lifecycle receipts
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: gate-resource-lifecycle-${{ github.run_attempt }}
           path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -1355,7 +1408,15 @@ jobs:
         # 本 job 只跑 ubuntu,无需 runner.os 门控;构建期峰 2-4GB,zram 先行。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -1410,14 +1471,16 @@ jobs:
 
       - name: Configure artifact transport for Upload frontend setup bundle
         if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Upload frontend setup bundle
         if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: frontend-setup-bundle
           path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
@@ -1429,14 +1492,16 @@ jobs:
       # 上传动作无内建重试;主上传失败时以 overwrite 重建同名工件,自动补试一次。
       - name: Configure artifact transport for Upload frontend setup bundle (retry)
         if: ${{ failure() && steps.frontend_bundle.outputs.transport == 'github' }}
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Upload frontend setup bundle (retry)
         if: ${{ failure() && steps.frontend_bundle.outputs.transport == 'github' }}
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: frontend-setup-bundle
           path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
@@ -1475,7 +1540,15 @@ jobs:
           PINVOU_TEST_NETWORK_ISOLATION: "1"
         run: timeout --kill-after=15 60 python3 -m unittest discover -s ../scripts/tests -p test_ci_browser_network.py -v
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -1587,9 +1660,9 @@ jobs:
 
       - name: Configure artifact transport for Test resource lifecycle receipts
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Test resource lifecycle receipts
         id: frontend_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -1598,7 +1671,9 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: frontend-resource-lifecycle-${{ github.run_attempt }}
           path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -1646,7 +1721,15 @@ jobs:
           PINVOU_TEST_NETWORK_ISOLATION: "1"
         run: timeout --kill-after=15 60 python3 -m unittest discover -s ../scripts/tests -p test_ci_browser_network.py -v
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -1755,9 +1838,9 @@ jobs:
 
       - name: Configure artifact transport for Browser shard resource lifecycle receipts
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Browser shard resource lifecycle receipts
         id: browser_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -1766,7 +1849,9 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: frontend-browser-${{ matrix.shard }}-resource-lifecycle-${{ github.run_attempt }}
           path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -1790,7 +1875,15 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           # No npm cache here: the install is seconds and setup-node would
@@ -1805,6 +1898,7 @@ jobs:
         # images may lack ss even though Node dependencies are installed.
         run: |
           if ! command -v ss >/dev/null 2>&1; then
+            sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends iproute2
           fi
@@ -1832,16 +1926,18 @@ jobs:
 
       - name: Configure artifact transport for 保留 Relay 进程作用域原始回执
         if: always()
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: 保留 Relay 进程作用域原始回执
         if: always()
         continue-on-error: true
         timeout-minutes: 3
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: relay-process-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -1928,8 +2024,16 @@ jobs:
       - name: Set up zram and swap
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Go toolchain
         uses: actions/setup-go@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           go-version-file: account-platform/go.mod
           cache-dependency-path: account-platform/**/go.sum
@@ -1940,8 +2044,16 @@ jobs:
           set -euo pipefail
           python3 scripts/check-account-financial-ci.py
 
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js for financial contract consumers
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           package-manager-cache: ${{ runner.environment == 'github-hosted' }}
@@ -1958,6 +2070,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends postgresql-client
           command -v psql
@@ -2002,9 +2115,9 @@ jobs:
 
       - name: Configure artifact transport for Financial group lifecycle receipts
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Financial group lifecycle receipts
         id: financial_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -2012,7 +2125,9 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}
           path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -2087,16 +2202,32 @@ jobs:
       - name: Set up zram and swap
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Go toolchain
         uses: actions/setup-go@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           go-version-file: account-platform/go.mod
           cache-dependency-path: account-platform/**/go.sum
           cache: ${{ runner.environment == 'github-hosted' }}
 
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Python for real PDF validator tests
         id: evidence_pdf_python
         uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           python-version: '3.12.14'
           update-environment: false
@@ -2135,8 +2266,16 @@ jobs:
           PY
           EVIDENCE_PDF_TEST_PYTHON="$pdf_child_python" EVIDENCE_PDF_AUDIT_DIR="$pdf_root/lxml-wheels" EVIDENCE_PDF_REQUIRE_SYMLINK=1 "$py" -I -B account-platform/cmd/evidence-image-validator/run_pdf_gate.py --strict
 
+      - name: Prepare CI transfer runtime (3)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js for Token authorization contracts
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           package-manager-cache: ${{ runner.environment == 'github-hosted' }}
@@ -2186,18 +2325,18 @@ jobs:
         run: |
           set -euo pipefail
           tools="$(mktemp -d "$RUNNER_TEMP/account-render.XXXXXX")"
-          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 180 \
-            https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz -o "$tools/helm.tar.gz"
+          python3 scripts/ci-download.py https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz \
+            --output "$tools/helm.tar.gz" --sha256 fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179
           printf '%s  %s\n' fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179 "$tools/helm.tar.gz" | sha256sum --check --strict
           tar -xzf "$tools/helm.tar.gz" -C "$tools" linux-amd64/helm
-          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 180 \
-            https://github.com/docker/compose/releases/download/v5.4.0/docker-compose-linux-x86_64 -o "$tools/docker-compose"
+          python3 scripts/ci-download.py https://github.com/docker/compose/releases/download/v5.4.0/docker-compose-linux-x86_64 \
+            --output "$tools/docker-compose" --sha256 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be
           printf '%s  %s\n' 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be "$tools/docker-compose" | sha256sum --check --strict
           chmod 0755 "$tools/docker-compose"
           # Test-only promtool; does not start or upgrade a Prometheus server.
           # SHA256 published at https://prometheus.io/download/ (3.13.5 LTS).
-          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 180 \
-            https://github.com/prometheus/prometheus/releases/download/v3.13.5/prometheus-3.13.5.linux-amd64.tar.gz -o "$tools/prometheus.tar.gz"
+          python3 scripts/ci-download.py https://github.com/prometheus/prometheus/releases/download/v3.13.5/prometheus-3.13.5.linux-amd64.tar.gz \
+            --output "$tools/prometheus.tar.gz" --sha256 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699
           printf '%s  %s\n' 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699 "$tools/prometheus.tar.gz" | sha256sum --check --strict
           tar -xzf "$tools/prometheus.tar.gz" -C "$tools" prometheus-3.13.5.linux-amd64/promtool
           printf 'PINVOU_TEST_PROMTOOL_BINARY=%s\n' "$tools/prometheus-3.13.5.linux-amd64/promtool" >> "$GITHUB_ENV"
@@ -2265,6 +2404,7 @@ jobs:
         run: |
           set -euo pipefail
           # Test-only official Ubuntu Lua5.1 CLI; no product Lua dependency.
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends lua5.1 postgresql-client
           command -v psql
@@ -2398,6 +2538,11 @@ jobs:
               assert all(event["Action"] == "pass" for event in terminal), "finite PostgreSQL tests failed or skipped"
               roots = {event["Test"] for event in terminal if "/" not in event["Test"]}
               assert roots == required, "required finite PostgreSQL test selection did not execute"
+              history = "TestAuditExportPublicDownRetainsOriginalHistory"
+              if history in required:
+                  prefix = history + "/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"three_scope_public_down", "three_scope_public_down/LF", "three_scope_public_down/CRLF", "unbound_public_down_forbids_incomplete_inverse", "expired_binding_public_down_retains_evidence", "public_governance_down_preserves_audit_history", "public_governance_down_preserves_audit_history/pinned_ledger_ignores_temp_shadow"}, "public rollback and pinned ledger cases did not execute"
               audit = "TestAuditExportPersistedBoundaries"
               if audit in required:
                   prefix = audit + "/generation_renews_and_recovers/"
@@ -2417,9 +2562,17 @@ jobs:
                   cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
                   assert cases == {"retained-link-refuses-down-without-fact-or-schema-loss", "forward-upgrade-replays-original-and-accepts-next-command"}, "retained invitation rollback cases did not execute"
           PY
+      - name: Prepare CI transfer runtime (4)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Python for financial runner policy regressions
         id: financial-policy-python
         uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           python-version: '3.12'
           update-environment: false
@@ -2461,9 +2614,9 @@ jobs:
 
       - name: Configure artifact transport for Account test resource lifecycle receipts
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Account test resource lifecycle receipts
         id: account_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -2471,7 +2624,9 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: account-resource-lifecycle-${{ github.run_attempt }}
           path: |
@@ -2522,15 +2677,25 @@ jobs:
       - name: Set up zram and swap
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Go toolchain
         uses: actions/setup-go@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           go-version-file: account-platform/go.mod
           cache-dependency-path: account-platform/**/go.sum
           cache: ${{ runner.environment == 'github-hosted' }}
 
       - name: Install PostgreSQL client
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client
+        run: |
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client
 
       - name: Verify account CI PostgreSQL service isolation
         id: account-pg
@@ -2567,9 +2732,9 @@ jobs:
 
       - name: Configure artifact transport for Account closure resource lifecycle receipts
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Account closure resource lifecycle receipts
         id: account_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -2577,7 +2742,9 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: account-closure-resource-lifecycle-${{ github.run_attempt }}
           path: |
@@ -2597,7 +2764,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -2616,7 +2791,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -2628,16 +2811,18 @@ jobs:
         run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs
       - name: Configure artifact transport for Preserve Windows relay tools process receipt
         if: always()
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Preserve Windows relay tools process receipt
         if: always()
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/windows-relay-tools-process.json
@@ -2672,7 +2857,15 @@ jobs:
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -2707,7 +2900,15 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: ${{ matrix.node-version }}
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -2755,7 +2956,15 @@ jobs:
         if: ${{ runner.os == 'Linux' }}
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           # No npm cache here: a PR-scoped copy is never shared cross-PR, so
@@ -2769,9 +2978,14 @@ jobs:
       - name: 安装 Relay 发布门禁依赖
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit --ignore-scripts
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust（构建期开关的实际产物回归）
         uses: dtolnay/rust-toolchain@stable
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       - name: 桌面远控发布平台与构建期开关契约
         run: node --test remote-control-relay/test/release-path-policy.test.js pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/desktop_remote_loaded_capability.test.mjs
 
@@ -2787,7 +3001,16 @@ jobs:
           npm --prefix pinvou3-app run test:knowledge-host-packaging
           npm --prefix pinvou3-app run test:linux-asr-runtime
 
+      - name: Prepare CI transfer runtime (2)
+        if: ${{ runner.os == 'Windows' && runner.environment == 'github-hosted' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         if: ${{ runner.os == 'Windows' && runner.environment == 'github-hosted' }}
         with:
           python-version: "3.13"
@@ -2822,9 +3045,9 @@ jobs:
 
       - name: Configure bounded Windows upload diagnostics
         if: ${{ always() && runner.os == 'Windows' }}
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs --diagnostics
-
+        run: node scripts/ci-artifact-node-options.cjs --network --diagnostics
       - name: Preserve Windows release contract process receipts
         id: windows_release_contract_receipts
         if: ${{ always() && runner.os == 'Windows' }}
@@ -2832,8 +3055,9 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -2888,10 +3112,16 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # rust-toolchain.toml lives under pinvou-knowledge, so it does not apply
       # to cargo invoked from the repo root via --manifest-path; set the
@@ -2903,8 +3133,16 @@ jobs:
         working-directory: pinvou-knowledge
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou-knowledge
           # v2:2026-09 CI 镜像统一到 ubuntu-22.04,旧 key 缓存由 24.04 构建,
@@ -2981,9 +3219,18 @@ jobs:
           # hard gate nondeterministically.
           tool: cargo-deny@0.20.2
 
+      - name: Prepare CI transfer runtime (2)
+        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Python for dependency exception guard
         if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}
         uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           python-version: '3.12'
 
@@ -3077,14 +3324,28 @@ jobs:
       # 本 step 只作 rustup 引导;实际工具链由 pinvou3-app/src-tauri/rust-toolchain.toml
       # 锁定具体版本(下方 cargo 步骤 working-directory 在 src-tauri,rustup 按该文件
       # 自动安装并使用 pinned 版本,本地与 CI 不漂移)。
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
+      - name: Prepare CI transfer runtime (1)
+        if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: |
             pinvou3-app/src-tauri
@@ -3113,6 +3374,7 @@ jobs:
       - name: 装 Tauri + pinvou3 Linux 系统依赖
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
         run: |
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
@@ -3225,9 +3487,18 @@ jobs:
           # nondeterministically. Keep in sync with the knowledge-rust
           # cargo-deny pin.
           tool: cargo-deny@0.20.2
+      - name: Prepare CI transfer runtime (2)
+        if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' && needs.changes.outputs.rust_dependencies == 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Python for dependency exception guard
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' && needs.changes.outputs.rust_dependencies == 'true' }}
         uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           python-version: '3.12'
       - name: cargo deny check (hard gate)
@@ -3362,6 +3633,7 @@ jobs:
       # library explicitly rather than relying on a hosted/self-hosted image.
       - name: 装 Tauri + pinvou3 Linux 系统依赖
         run: |
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update
           # 清单经 2026-09-15 探针逐包冗余审计(剔除单包模拟安装,安装集合
           # 不变即可移除):libgtk-3-dev/libsoup-3.0-dev/libx11-dev/libxi-dev/
@@ -3402,8 +3674,14 @@ jobs:
       # no runner-image drift. See scripts/ci-libpipewire-build.sh for the full rationale.
       - name: Build PipeWire 1.0.7 dev prefix (jammy SPA headers too old)
         run: bash scripts/ci-libpipewire-build.sh
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # rust-toolchain.toml 在 src-tauri 下,对从仓库根用 --manifest-path 调用的 cargo 不生效;
       # 把该文件锁定的工具链设为 default,保证 CI 与本地同一 pinned 版本(单一真相源是文件,
@@ -3419,9 +3697,18 @@ jobs:
       # remote_control 的真实 relay 下载 e2e 需要 node + relay 依赖,缺 node_modules/ws 时
       # 该 e2e 会自动 skip —— 装上依赖让 CI 真正执行它,而不是绿灯假过。
       # push(main) 只编译不执行测试(见下方 --no-run),不需要 relay/Chrome 运行时依赖。
+      - name: Prepare CI transfer runtime (1)
+        if: ${{ github.event_name != 'push' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js (relay e2e)
         if: ${{ github.event_name != 'push' }}
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -3459,9 +3746,17 @@ jobs:
       # Probe the test cache without downloading it. An exact hit makes the
       # separate lint-cache extraction redundant; a miss still takes the
       # existing lint fallback before restoring the test cache.
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: 检查 Rust test 缓存是否精确命中
         id: rust-test-cache-probe
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou3-app/src-tauri
           shared-key: rust-test-v2
@@ -3471,18 +3766,35 @@ jobs:
       # rust-test 的独立缓存缺失时，全冷测试会超过当前 runner 的执行窗口。
       # 先只读恢复同一工具链与锁文件下已由 main 保存的 rust-lint 目标缓存，
       # 再恢复/保存独立 rust-test 缓存；不降低测试范围，也不让 PR 写缓存。
+      - name: Prepare CI transfer runtime (3)
+        if: ${{ steps.rust-test-cache-probe.outputs.cache-hit != 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: 恢复 Rust lint 暖缓存
         if: ${{ steps.rust-test-cache-probe.outputs.cache-hit != 'true' }}
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou3-app/src-tauri
           # v2:镜像统一到 ubuntu-22.04 后与 24.04 时代缓存隔离(同 knowledge-rust)。
           shared-key: rust-lint-v2
           save-if: false
 
+      - name: Prepare CI transfer runtime (4)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo test cache
         id: rust-test-cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou3-app/src-tauri
           # 2026-08-29/30 incident: every test binary linked from a restored
@@ -3511,9 +3823,18 @@ jobs:
 
       # An entry can be evicted between lookup and restore. In that case the
       # skipped lint restore must still be attempted before compilation.
+      - name: Prepare CI transfer runtime (5)
+        if: ${{ steps.rust-test-cache-probe.outputs.cache-hit == 'true' && steps.rust-test-cache.outputs.cache-hit != 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: 恢复被淘汰缓存的 Rust lint 回退
         if: ${{ steps.rust-test-cache-probe.outputs.cache-hit == 'true' && steps.rust-test-cache.outputs.cache-hit != 'true' }}
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou3-app/src-tauri
           shared-key: rust-lint-v2
@@ -3700,6 +4021,7 @@ jobs:
       # library requirements as the rust-test job.
       - name: Install Tauri Linux system dependencies
         run: |
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update
           # 清单与 rust-test/release 同源,经 2026-09-15 探针逐包冗余审计:
           # libgtk-3-dev/libsoup-3.0-dev/libx11-dev/libxi-dev/libxtst-dev 均被
@@ -3758,10 +4080,16 @@ jobs:
       # Profiles are chosen by the top-level workspace, and the pinvou-cli
       # workspace has no [profile] section, so the same crate compiles at O0
       # in this job and the overflow trigger is absent.
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # rust-toolchain.toml lives under src-tauri and does not apply to cargo
       # invoked from the repo root with --manifest-path; like rust-test, make
@@ -3772,8 +4100,16 @@ jobs:
         working-directory: pinvou3-app/src-tauri
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou-cli
           # rust-test's 2026-08-29/30 restored-target incident was root-caused
@@ -3831,8 +4167,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
 
@@ -3927,6 +4271,7 @@ jobs:
       # and its computer_use capture headers need the same libraries).
       - name: Install Tauri Linux system dependencies
         run: |
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update
           # Package list audited per-package on 2026-09-15: gtk/soup/x11 are installed
           # transitively via webkit-dev — that transitive set is what covers the pure-Rust
@@ -3957,10 +4302,16 @@ jobs:
       - name: Build PipeWire 1.0.7 dev prefix (jammy SPA headers too old)
         run: bash scripts/ci-libpipewire-build.sh
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # Same as cli-test: the version pinned by src-tauri/rust-toolchain.toml
       # must become the default so cargo invoked from the repo root with
@@ -3987,11 +4338,19 @@ jobs:
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         id: cli_lint_cache
         # Pin the reviewed implementation to prevent action behavior drift;
         # the final disk gate enables failure caching only when safe to try.
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou-cli
           shared-key: cli-lint
@@ -4178,8 +4537,14 @@ jobs:
           echo "WINDOWS_RUST_TIMING phase=${{ matrix.phase }} step=codewhale-init elapsed_seconds=$((SECONDS-started)) status=$status"
           exit "$status"
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # Same as rust-test: set the toolchain pinned by
       # src-tauri/rust-toolchain.toml as the default, so cargo invoked from
@@ -4270,8 +4635,16 @@ jobs:
       # Node only for a dependency-free static updater contract, so setup-node
       # and npm ci remain unnecessary.
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           # This job compiles the CodeWhale Windows-only regression target,
           # the application workspace, AND the pinvou-cli workspace (the
@@ -4709,9 +5082,9 @@ jobs:
 
       - name: Configure bounded Windows atomic upload diagnostics
         if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs --diagnostics
-
+        run: node scripts/ci-artifact-node-options.cjs --network --diagnostics
       - name: Windows atomic lifecycle receipts
         id: windows_atomic_receipts_upload
         if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -4719,8 +5092,9 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
           path: |
@@ -4807,11 +5181,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: 安装锁定的 Rust 工具链
         shell: pwsh
         run: |
@@ -4827,6 +5211,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "rustup toolchain install failed with exit code $LASTEXITCODE."
           }
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # scripts/ci/** 不在任何其它 job filter 里,因此本 job 是
       # ensure-rust-toolchain.ps1 改动触发的唯一门禁;frontend-test(Linux)
@@ -4974,8 +5362,16 @@ jobs:
         with:
           submodules: false
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js (isolated macOS deployment regression)
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
 
@@ -4993,8 +5389,14 @@ jobs:
       - name: Init CodeWhale submodule
         run: bash "${{ github.workspace }}/scripts/ci-prepare-codewhale.sh"
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # Same as rust-test/windows-rust-test: set the toolchain resolved by
       # src-tauri/rust-toolchain.toml as default (currently floating stable), so
@@ -5109,8 +5511,16 @@ jobs:
             : > "$d/$f"
           done
 
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou3-app/src-tauri
           # Separate key: macOS artifacts are not interchangeable with Linux/Windows; do not
@@ -5240,9 +5650,18 @@ jobs:
       # PR legs (check + computer_use) are verified not to need
       # node_modules, so they skip the install to save time. Same two
       # steps as the old mac-build.yml.
+      - name: Prepare CI transfer runtime (3)
+        if: ${{ github.event_name == 'push' && needs.changes.outputs.bundle_chain == 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js (universal bundle smoke, push only)
         if: ${{ github.event_name == 'push' && needs.changes.outputs.bundle_chain == 'true' }}
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
           cache: 'npm'
@@ -5397,8 +5816,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -5429,16 +5856,18 @@ jobs:
 
       - name: Configure artifact transport for Preserve browser fixture exit receipts
         if: always()
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Preserve browser fixture exit receipts
         if: always()
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
@@ -5464,16 +5893,18 @@ jobs:
 
       - name: Configure artifact transport for Preserve ACP fixture exit receipt
         if: always()
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Preserve ACP fixture exit receipt
         if: always()
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: windows-acp-exit-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
@@ -5505,8 +5936,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
 
@@ -5590,9 +6029,14 @@ jobs:
       # bootstraps rustup; the version pinned by src-tauri/rust-toolchain.toml
       # must become the default so cargo invoked from the repo root with
       # --manifest-path uses the same toolchain as local development.
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       - name: Align the toolchain pinned by rust-toolchain.toml
         working-directory: pinvou3-app/src-tauri
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
@@ -5609,8 +6053,16 @@ jobs:
       # anti-death-loop rationale: save-on-success-only + eviction left a
       # failed main push with a cold cache namespace). Without it a failed
       # main push strands this cache cold, defeating the retention goal.
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou-cli
           shared-key: macos-cli-check
@@ -5728,11 +6180,10 @@ jobs:
         run: |
           set -euo pipefail
           sudo mkdir -p /etc/apt/keyrings
-          curl --proto '=https' --tlsv1.2 --location --silent --show-error --fail \
-            --retry 3 --retry-delay 2 https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | sudo gpg --dearmor --yes -o /etc/apt/keyrings/pinvou-llvm.gpg
+          # The checked-in public certificate is independently SHA-256 pinned.
           echo "deb [signed-by=/etc/apt/keyrings/pinvou-llvm.gpg] https://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" \
             | sudo tee /etc/apt/sources.list.d/pinvou-llvm-18.list > /dev/null
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config cmake libclang-18-dev file
@@ -5751,18 +6202,34 @@ jobs:
       # 配额策略:main 写、PR/MQ/发布只读;发布 job 只 restore 这两个键)。
       # 键把 setup 脚本内容 hash 进去,脚本(钉的 sha256/包清单)一变即换代,
       # 旧代由 scripts/cache-janitor.sh 规则 E 去重。
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Restore loong64 cross toolchain cache
         id: loong64-toolchain-cache
         uses: actions/cache/restore@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           path: ${{ github.workspace }}/.pinvou-loong64-cache/cross-tools
           key: release-linux-loong64-jammy-toolchain-${{ hashFiles('scripts/ci-loongarch64-toolchain.sh') }}
           restore-keys: |
             release-linux-loong64-jammy-toolchain-
 
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Restore loong64 sysroot cache
         id: loong64-sysroot-cache
         uses: actions/cache/restore@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           path: ${{ github.workspace }}/.pinvou-loong64-cache/sysroot
           key: release-linux-loong64-jammy-sysroot-${{ hashFiles('scripts/ci-loongarch64-sysroot.sh') }}
@@ -5774,9 +6241,14 @@ jobs:
       # rust-toolchain.toml must become the default so cargo invoked from the
       # repo root with --manifest-path (and rustup target add below) uses the
       # same toolchain as local development.
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       - name: Align the toolchain pinned by rust-toolchain.toml
         working-directory: pinvou3-app/src-tauri
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
@@ -5812,22 +6284,48 @@ jobs:
       # 缓存保存:仅 main push 且 setup 全部成功(success():两个 setup 脚本
       # 都会先 mkdir 目标目录再下载,setup 失败留下的半空树若被存进 exact
       # key,后续 restore 会永远命中这份空代;cache-hit 时无需重写同一键)。
+      - name: Prepare CI transfer runtime (3)
+        if: ${{ success() && github.ref == 'refs/heads/main' && steps.loong64-toolchain-cache.outputs.cache-hit != 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Save loong64 cross toolchain cache
         if: ${{ success() && github.ref == 'refs/heads/main' && steps.loong64-toolchain-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           path: ${{ github.workspace }}/.pinvou-loong64-cache/cross-tools
           key: release-linux-loong64-jammy-toolchain-${{ hashFiles('scripts/ci-loongarch64-toolchain.sh') }}
 
+      - name: Prepare CI transfer runtime (4)
+        if: ${{ success() && github.ref == 'refs/heads/main' && steps.loong64-sysroot-cache.outputs.cache-hit != 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Save loong64 sysroot cache
         if: ${{ success() && github.ref == 'refs/heads/main' && steps.loong64-sysroot-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           path: ${{ github.workspace }}/.pinvou-loong64-cache/sysroot
           key: release-linux-loong64-jammy-sysroot-${{ hashFiles('scripts/ci-loongarch64-sysroot.sh') }}
 
+      - name: Prepare CI transfer runtime (5)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           # 三个 workspace 的交叉产物共享一份缓存(交叉 target 目录都在各自
           # workspace 的 target 下;工具链/sysroot 在 target 之外,不被吞)。
@@ -6112,16 +6610,18 @@ jobs:
 
       - name: Configure artifact transport for PR test success proof transport
         if: ${{ success() && steps.success_proof.outputs.directory != '' }}
+        timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-artifact-node-options.cjs
-
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: PR test success proof transport
         if: ${{ success() && steps.success_proof.outputs.directory != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
-          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: ci-success-proof-${{ github.run_attempt }}
           path: ${{ steps.success_proof.outputs.directory }}/proof.json

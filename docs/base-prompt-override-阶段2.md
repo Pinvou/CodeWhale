@@ -4,25 +4,36 @@
 > CodeWhale submodule 对这些 prompt 的 fork drift → 0（hook 除外，hook 是上游 PR 候选）。
 > 方案="务实大头"：只迁 `base.md` + `LOCALE_PREAMBLE_ZH_HANS` + `AUTHORITY_RECAP` 三处；
 > mode/approval/compact 小文案留 fork（边际收益低于改造成本）。
+>
+> **2026-11 归档注记**：阶段 2 完成约两周后（2026-06-15），宪法层被并入 `instructions-*.md`
+> 分层：`compose_static_layers`（现行函数名，见 `features/runtime_bundle/platform/mod.rs`）不再装配 `base.md`、`AUTHORITY_RECAP` 清空，prompt 治理
+> 迁移到底座 `StaticPromptComposer` 合同。本文记录的 249 行 `base.md`、三个 override
+> 常量与 #28–#42 指纹清单是历史状态（残留说明见 `resources/common/bundle/base.md`
+> 文首注释），当前 prompt 链路以代码为准（现行入口：[`system-prompt-架构.md`](./system-prompt-架构.md) 与 `features/runtime_bundle/platform/mod.rs`）。另注：正文 `base.md` 路径在此前机械重构
+> （2026-07-22 拆分 `common/` 目录，`ed6636fcf`）中已改为现行 `resources/common/bundle/base.md`，
+> 回填按该已改写状态保留。
 
 ## 执行进度 — 阶段2 已完成（2026-05-29）
 
 全部落地并验证通过：
 
-**submodule（commit `af64e9f7`，在阶段1 `5f847284` 之上）**
-- `base.md` 回退上游原文（`git diff 54151a4b` = 0，字节一致）
+**submodule（commit `af64e9f7`，在阶段1 `5f847284` 之上；`af64e9f7` 可由父仓提交 `50752183b` 的 gitlink 佐证；`5f847284` 为 2026-07-24 重建前哈希，本地对象库不可解析、公开仓 Pinvou/CodeWhale 可解（`gh api repos/Pinvou/CodeWhale/commits/5f847284` 即可复核——该对象不随公开 clone 分发，勿以本地/克隆 `git show` 验证）。`54151a4b` 则为幸存于重建的上游 commit（2026-05-27 UTC，"#2235"；提交自带 -05:00 时区故当地为 05-26），现对象库可解析，本文下方 `git show 54151a4b` 指令至今可直接复核（`git diff 54151a4b`
+则因现树已分叉不再可比，见下行注））**
+- `base.md` 回退上游原文（当时验证 `git diff 54151a4b` = 0，字节一致；今现树与该 commit 已分叉，复核用下方 `git show 54151a4b:…` 直接取原文）
 - `prompts.rs` 品牌词回退 codewhale（locale / authority / doc 注释 3 处）
 - 删除 6 个内容 forkguard 测试（职责移到 pinvou3-app），authority 测试断言回退 CodeWhale
-- 全量测试 **3349 passed / 0 failed**；hook（3 个 `set_*_override`）完好
+- 全量测试 **3349 passed / 0 failed**；hook（3 个 `set_*_override`）完好（⚠️ 本节运行数字系重建前内部仓运行记录，现树不可复跑，姊妹篇同款注）
 
 **pinvou3-app（working tree，待父仓 commit）**
 - `resources/common/bundle/base.md` = pinvou3 版 base.md（249 行）
-- `bridge/bundle.rs` 3 常量（`BASE_PROMPT_MD` + `LOCALE_PREAMBLE_ZH_HANS` + `AUTHORITY_RECAP`）+ `install_prompt_overrides()` + 3 个新 forkguard 测试（内容锚点 + override 端到端生效）
+- `bridge/bundle.rs` 3 常量（`BASE_PROMPT_MD` + `LOCALE_PREAMBLE_ZH_HANS` + `AUTHORITY_RECAP`）+ `install_prompt_overrides()` + 3 个新 forkguard 测试（内容锚点 + override 端到端生效）（⚠️ 2026-11 注：父仓 `50752183b` 落地态 `bundle.rs` 实含 2 个 `#[test]`（`ensure_extracted_behavior`/`bundled_prompt_contracts_explain_append_file_tail_only`），与「3 个 forkguard 测试」的写档口径不符，以落地提交为准）
 - `bridge/mod.rs` `boot()` 调 `install_prompt_overrides()`（早于 ensure_dirs；dump_system_prompt bin 同经此 boot）
-- forkguard 测试 **4 passed / 0 failed**
+  （2026-11 注：上两条的 `bridge/bundle.rs`、`bridge/mod.rs` 路径已迁——常量与 `install_prompt_overrides()` 现位于 `features/runtime_bundle/platform/mod.rs`，boot 调用点现位于 `features/assistant/platform/bridge.rs`；`AUTHORITY_RECAP` 已随清空移除，不再以常量存在（见文首归档注）。）
+- forkguard 测试 **4 passed / 0 failed**（写档时点内部运行记录，现树不可复跑；落地提交态 `bundle.rs` 内 forkguard 名测试为 0，见上注）
 
 **fork-guard.sh + 文档**
 - 7 个品牌/内容指纹 retarget 到 pinvou3-app 文件 + 新增 #42 hook 存活指纹；`--fast` 指纹层全过
+  （2026-11-18 注：现行 `fork-guard.sh` 指纹层已重构为 T1/T3/APP 编号，`#42` 条目不复存在，hook 存活指纹现由 `set_static_prompt_composer_override` 条目承载）
 - `fork-modifications.md` prompts 段更新为 override 架构
 
 **端到端**：`dump_system_prompt` = 38746B，pinvou3 内容全在（CONSTITUTION OF PINVOU3 / running inside pinvou3 / 你正在 pinvou3 / authority pinvou3），上游内容全无（Brother Whale / RLM / CODEWHALE = 0）。与阶段1 渲染字节一致 → 行为零回退。
@@ -31,11 +42,11 @@
 
 ---
 
-## 阶段 1 已完成（commit `5f847284`，submodule pinvou3-patches 分支）
+## 阶段 1 已完成（commit `5f847284`，submodule pinvou3-patches 分支（内部仓分支、`fork` remote 指内部 fork，均不在本仓库）；重建前哈希，本地不可解析、公开仓可解）
 
 `crates/tui/src/prompts.rs` 加了 3 个 `OnceLock` override + setter + `effective_*()` getter，
 三处使用点改用 getter。**向后兼容**：override 未 set → 返回原 const，行为完全不变。
-验证：`cargo check` 0 error；36 个 prompt/forkguard 测试全过。
+验证：`cargo check` 0 error；36 个 prompt/forkguard 测试全过（同款注：重建前内部仓运行记录，现树不可复跑）。
 
 | override const | setter（pub） | effective getter | 使用点 |
 |---|---|---|---|
@@ -52,7 +63,10 @@
 1. **base.md 回退上游原文**：
    `git show 54151a4b:crates/tui/src/prompts/base.md > crates/tui/src/prompts/base.md`
    （`54151a4b` = merge-base(origin/main, HEAD)，即 fork 改动前的上游 base.md，297 行。
-   也可用 `origin/main:` 版，内容一致。回退后 submodule base.md fork drift = 0。）
+   也可用 `origin/main:` 版，内容一致。回退后 submodule base.md fork drift = 0。
+   2026-11 注：`origin/main:` 为当时本地仓引用；现行子模块 `origin/main` 上已无
+   `crates/tui/src/prompts/base.md` 路径（base.md 随上游重构移除），今复核以
+   `git show 54151a4b:crates/tui/src/prompts/base.md` 为准（亲验 297 行）。）
 
 2. **LOCALE_PREAMBLE_ZH_HANS 回退品牌词**：把常量里 `你正在 pinvou3 中运行` 改回
    `你正在 codewhale 中运行`（仅此 1 词差，其余文本两版相同）。
@@ -118,11 +132,11 @@
 - pinvou3-app：`cargo check -p pinvou3-tauri` + 新 forkguard 测试过
 - 端到端：`cargo run --bin dump_system_prompt`，确认渲染出的 prompt 含 pinvou3 brand（override 生效）
 - `./scripts/fork-guard.sh --fast`（指纹层）全绿
-- 预期 submodule fork drift 净降 ~160 行（base.md 全部 + 2 品牌词）
+- 预期 submodule fork drift 净降 ~160 行（base.md 全部 + 2 品牌词；⚠️ 计划期估算——事后实测 ~130，2026-11-19 r22 注）
 
 ## 上游 PR
 
-hook（`set_*_override` + `effective_*`）是通用 embedder 能力 → 按 fork-policy §2 Q2 提上游 PR。
+hook（`set_*_override` + `effective_*`）是通用 embedder 能力 → 按 fork-policy §2「所有 CodeWhale embedder 都受益」行提上游 PR（2026-11 注：原文写「§2 Q2」，现行 fork-policy §2 为决策表、无 Q 编号）。
 merge 后连 hook 那 ~45 行 fork drift 也归零 = prompt 终态零 fork。
 
 ## 注意（本次环境）

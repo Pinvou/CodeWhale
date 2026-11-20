@@ -1207,6 +1207,7 @@ mod tests {
 
     fn runtime_model(id: &str, wire_name: &str) -> SavedModel {
         SavedModel {
+            auth_mode: None,
             id: id.to_string(),
             name: id.to_string(),
             alias: None,

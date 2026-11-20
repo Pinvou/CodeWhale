@@ -4,6 +4,7 @@ use crate::features::codex_acp::{
     mint_remote_permission_in_maps, remote_permission_response_key,
 };
 use crate::features::remote_control::controller::{
+    journal::JournalKind,
     permission::{DecisionAuthority, PermissionDecision, PermissionDecisionOwner},
     protocol::LeaseContext,
     task::{RemoteTaskLedger, RemoteTaskRequest, RemoteTaskTerminal, task_input_digest_for_value},
@@ -24,6 +25,7 @@ struct Pool {
     pending: Mutex<HashMap<String, PendingPermission>>,
     response_fault: parking_lot::Mutex<Option<ResponseFault>>,
     cancel_before_mint: AtomicBool,
+    queued_during_response: parking_lot::Mutex<Option<&'static str>>,
     owners: parking_lot::Mutex<HashMap<String, RemotePermissionOwner>>,
 }
 impl Pool {
@@ -111,6 +113,12 @@ impl PermissionPool for Pool {
         approval: &str,
         _: bool,
     ) -> anyhow::Result<()> {
+        // Entering this responder proves sync has already captured its initial
+        // snapshot. Inject the later callback before the final pending read.
+        let queued = self.queued_during_response.lock().take();
+        if let Some(callback) = queued {
+            self.insert(owner, callback).await;
+        }
         let fault = self.response_fault.lock().take();
         let mut pending = self.pending.lock().await;
         let key = remote_permission_response_key(&pending, owner, approval)
@@ -125,9 +133,16 @@ impl PermissionPool for Pool {
         Ok(())
     }
 }
-struct Events;
+#[derive(Default)]
+struct Events(parking_lot::Mutex<Vec<Value>>);
 impl ControllerTaskEventSink for Events {
     fn emit(&self, _: Value) {}
+    fn emit_journal(&self, kind: JournalKind, session: &str, task: Option<&str>, payload: Value) {
+        assert!(matches!(kind, JournalKind::Permission));
+        assert_eq!(session, "session-wait");
+        assert_eq!(task, Some("task-wait"));
+        self.0.lock().push(payload);
+    }
 }
 struct Fixture {
     tasks: RemoteTaskService,
@@ -137,6 +152,8 @@ struct Fixture {
     pool: Pool,
     registered: HashMap<String, String>,
     journal: super::super::PermissionJournal,
+    request: RemoteTaskRequest,
+    events: Arc<Events>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -175,6 +192,7 @@ impl Fixture {
                 pending: Mutex::new(HashMap::new()),
                 response_fault: parking_lot::Mutex::new(None),
                 cancel_before_mint: AtomicBool::new(false),
+                queued_during_response: parking_lot::Mutex::new(None),
                 owners: parking_lot::Mutex::new(HashMap::from([(
                     owner.session_id.clone(),
                     owner.clone(),
@@ -184,10 +202,12 @@ impl Fixture {
             owner,
             clock,
             registered: HashMap::new(),
+            request,
+            events: Arc::new(Events::default()),
         }
     }
     async fn tick(&mut self) -> Result<(), String> {
-        let events: Arc<dyn ControllerTaskEventSink> = Arc::new(Events);
+        let events: Arc<dyn ControllerTaskEventSink> = self.events.clone();
         let result = sync(
             &self.pool,
             &self.authority,
@@ -206,6 +226,16 @@ impl Fixture {
     }
     fn state(&self) -> RemoteTaskState {
         self.tasks.status(&self.owner.task_id).unwrap().state
+    }
+    fn terminal_states(&self) -> Vec<String> {
+        self.events
+            .0
+            .lock()
+            .iter()
+            .filter_map(|event| event["status"].as_str())
+            .filter(|state| *state != "pending")
+            .map(str::to_owned)
+            .collect()
     }
     fn decide(&self, callback: &str, decision: PermissionDecision) {
         let id = &self.registered[callback];
@@ -297,7 +327,7 @@ async fn expiry_resumes_only_after_the_last_callback_and_never_revives_cancelled
 
 #[tokio::test]
 async fn late_resolution_rejects_changed_lease_session_or_admission_identity() {
-    let f = Fixture::new();
+    let mut f = Fixture::new();
     f.tasks
         .enter_waiting_permission(&f.owner.task_id, f.owner.task_sequence, 3)
         .unwrap();
@@ -318,6 +348,134 @@ async fn late_resolution_rejects_changed_lease_session_or_admission_identity() {
         );
         assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
     }
+    // No registered approval means there is no completion evidence, even
+    // when the same task is already waiting for another reason.
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+}
+
+#[tokio::test]
+async fn cancelled_unminted_tail_resumes_after_the_previous_decision_was_projected() {
+    for decision in [PermissionDecision::Allow, PermissionDecision::Deny] {
+        let mut f = Fixture::new();
+        f.pool.insert(&f.owner, "first").await;
+        f.tick().await.unwrap();
+        f.decide("first", decision);
+        *f.pool.queued_during_response.lock() = Some("queued-tail");
+        f.tick().await.unwrap();
+        let tail = f.pool.pending_remote_permissions(&f.owner).await;
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].callback_id, "queued-tail");
+        assert!(
+            tail[0].approval_id.is_none(),
+            "tail arrived after the initial snapshot"
+        );
+        assert_eq!(f.registered.len(), 1);
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        assert_eq!(f.authority.active_count(), 0);
+        let projected = f.terminal_states();
+        assert_eq!(
+            projected,
+            vec![if decision == PermissionDecision::Allow {
+                "allowed"
+            } else {
+                "denied"
+            }]
+        );
+
+        // Controlled request-cancellation seam: the actual SDK watcher is
+        // covered separately by remote_permission_receipt_requires_the_actual_sdk_response_queue.
+        let removed = f.pool.pending.lock().await.remove("queued-tail").unwrap();
+        assert_eq!(removed.remote_owner.as_ref(), Some(&f.owner));
+        assert!(removed.remote_approval_id.is_none());
+        f.tick().await.unwrap();
+        assert_eq!(
+            f.state(),
+            RemoteTaskState::Running,
+            "completed approvals must resume after the unminted tail is cancelled"
+        );
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::Running);
+        assert_eq!(
+            f.terminal_states(),
+            projected,
+            "empty ticks cannot reproject a decision"
+        );
+        assert_eq!(f.authority.active_count(), 0);
+
+        f.pool.insert(&f.owner, "successor").await;
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        assert_eq!(f.authority.active_count(), 1);
+        f.decide("successor", PermissionDecision::Deny);
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::Running);
+        assert_eq!(f.terminal_states().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn completed_old_journal_cannot_resume_a_reused_task_admission() {
+    let mut f = Fixture::new();
+    f.pool.insert(&f.owner, "old").await;
+    f.tick().await.unwrap();
+    f.decide("old", PermissionDecision::Deny);
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::Running);
+    let projected = f.terminal_states();
+    f.tasks
+        .ledger()
+        .complete(&f.owner.task_id, RemoteTaskTerminal::Interrupted, None, 20)
+        .unwrap();
+    // Exercise real retained-ledger eviction before reusing the same wire ID.
+    for index in 0..256 {
+        let mut request = f.request.clone();
+        request.task_id = format!("wait-filler-{index}");
+        request.client_request_id = format!("wait-client-{index}");
+        f.tasks
+            .ledger()
+            .admit(&f.owner.lease, &request, 21)
+            .unwrap();
+        f.tasks
+            .ledger()
+            .complete(&request.task_id, RemoteTaskTerminal::Succeeded, None, 22)
+            .unwrap();
+    }
+    f.tasks
+        .ledger()
+        .admit(&f.owner.lease, &f.request, 23)
+        .unwrap();
+    let record = f
+        .tasks
+        .ledger()
+        .begin_dispatch(&f.owner.task_id, 24)
+        .unwrap();
+    assert_ne!(record.sequence, f.owner.task_sequence);
+    let mut next = f.owner.clone();
+    next.task_sequence = record.sequence;
+    f.pool
+        .owners
+        .lock()
+        .insert(next.session_id.clone(), next.clone());
+    f.tasks
+        .enter_waiting_permission(&next.task_id, next.task_sequence, 25)
+        .unwrap();
+    f.pool.insert(&next, "next-admission").await;
+    assert_eq!(f.tick().await.unwrap_err(), "permission_binding_stale");
+    assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+    assert_eq!(f.terminal_states(), projected);
+    let pending = f.pool.pending_remote_permissions(&next).await;
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].approval_id.is_none());
+
+    f.owner = next;
+    f.journal = super::super::PermissionJournal::new(f.owner.clone());
+    f.registered.clear();
+    f.tick().await.unwrap();
+    assert_eq!(f.authority.active_count(), 1);
+    f.decide("next-admission", PermissionDecision::Deny);
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::Running);
 }
 
 #[tokio::test]
@@ -498,41 +656,67 @@ async fn dispatch_deferred_keeps_waiting_and_terminal_codes_are_preserved() {
 
 #[tokio::test]
 async fn lost_allow_delivery_cannot_resume_when_the_callback_disappears() {
-    let mut f = Fixture::new();
-    f.pool.insert(&f.owner, "lost-allow").await;
-    f.tick().await.unwrap();
-    let id = f.registered["lost-allow"].clone();
-    // A decision alone is not an accepted provider response. Unlike decide(),
-    // deliberately leave this real authority entry awaiting delivery.
-    f.authority
-        .decide_for_owner(
-            DecisionAuthority::ControllerA,
-            &f.owner.lease,
-            &f.owner.task_id,
-            &id,
-            PermissionDecision::Allow,
-            &PermissionDecisionOwner {
-                session_id: f.owner.session_id.clone(),
-                task_sequence: f.owner.task_sequence,
-            },
-        )
-        .unwrap();
-    assert_eq!(f.authority.view(&id).unwrap().state, "allowed");
-    assert!(
-        !f.authority
-            .allow_delivery_observed(&f.owner.lease, &f.owner.task_id, &id)
-    );
-    assert!(
-        !f.authority
-            .callback_was_cancelled(&f.owner.lease, &f.owner.task_id, &id)
-    );
-    *f.pool.response_fault.lock() = Some(ResponseFault {
-        code: "controlled_delivery_failed",
-        remove_callback: true,
-    });
-    assert_eq!(f.tick().await.unwrap_err(), "permission_dispatch_failed");
-    assert!(f.pool.pending_remote_permissions(&f.owner).await.is_empty());
-    assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+    for projected_prefix in [false, true] {
+        let mut f = Fixture::new();
+        if projected_prefix {
+            f.pool.insert(&f.owner, "projected-prefix").await;
+            f.tick().await.unwrap();
+            f.decide("projected-prefix", PermissionDecision::Deny);
+            f.tick().await.unwrap();
+            assert_eq!(f.terminal_states(), vec!["denied"]);
+        }
+        f.pool.insert(&f.owner, "lost-allow").await;
+        f.tick().await.unwrap();
+        let id = f.registered["lost-allow"].clone();
+        // A decision alone is not an accepted provider response. Unlike decide(),
+        // deliberately leave this real authority entry awaiting delivery.
+        f.authority
+            .decide_for_owner(
+                DecisionAuthority::ControllerA,
+                &f.owner.lease,
+                &f.owner.task_id,
+                &id,
+                PermissionDecision::Allow,
+                &PermissionDecisionOwner {
+                    session_id: f.owner.session_id.clone(),
+                    task_sequence: f.owner.task_sequence,
+                },
+            )
+            .unwrap();
+        assert_eq!(f.authority.view(&id).unwrap().state, "allowed");
+        assert!(
+            !f.authority
+                .allow_delivery_observed(&f.owner.lease, &f.owner.task_id, &id)
+        );
+        assert!(
+            !f.authority
+                .callback_was_cancelled(&f.owner.lease, &f.owner.task_id, &id)
+        );
+        let projected = f.terminal_states();
+        let dispatch_state = f.authority.view(&id).unwrap().dispatch_state;
+        *f.pool.response_fault.lock() = Some(ResponseFault {
+            code: "controlled_delivery_failed",
+            remove_callback: true,
+        });
+        assert_eq!(f.tick().await.unwrap_err(), "permission_dispatch_failed");
+        assert!(f.pool.pending_remote_permissions(&f.owner).await.is_empty());
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        // The first tick returned before checking recovery. Later empty ticks
+        // must still refuse both a sole uncommitted Allow and a mixed journal.
+        for _ in 0..2 {
+            f.tick().await.unwrap();
+            assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+            assert_eq!(f.terminal_states(), projected);
+            assert_eq!(
+                f.authority.view(&id).unwrap().dispatch_state,
+                dispatch_state
+            );
+            assert!(
+                !f.authority
+                    .allow_delivery_observed(&f.owner.lease, &f.owner.task_id, &id)
+            );
+        }
+    }
 }
 
 #[tokio::test]
