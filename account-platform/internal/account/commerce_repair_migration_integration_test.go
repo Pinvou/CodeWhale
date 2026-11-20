@@ -177,9 +177,11 @@ FROM approval_command_policies WHERE command_type=$1 ORDER BY policy_version DES
 				t.Fatal("upgrade rewrote original synchronization or identity facts")
 			}
 			installedLedger := ledger()
-			err = accountschema.DownOne(ctx, connection, all)
-			if !errors.As(err, &pgerr) || pgerr.Code != "55000" || pgerr.Message != "commerce manual completion is forward-only" || facts() != before || ledger() != installedLedger {
-				t.Fatal("forward-only completion guard", err)
+			// Keep the complete current upgrade while checking the exact
+			// published release's refusal, not a later migration's Down.
+			assertHistoricalRollbackRefusalContext(t, ctx, r, all, guard.Version, "55000", "commerce manual completion is forward-only")
+			if facts() != before || ledger() != installedLedger {
+				t.Fatal("historical completion rollback changed facts or ledger")
 			}
 			var roles int
 			if err = r.pool.QueryRow(ctx, `SELECT count(*) FROM roles WHERE code IN ('PLATFORM_COMMERCE_OPERATOR','PLATFORM_COMMERCE_REVIEWER')`).Scan(&roles); err != nil || roles != 2 {
