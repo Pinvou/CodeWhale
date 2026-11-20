@@ -1042,6 +1042,23 @@ pub fn replace_card_package(
     Ok(true)
 }
 
+/// r43 P1-5：脚本-only 更新允许引擎身份变化（避免「先卸载再更新」死锁复燃），
+/// 但记录的引擎字段必须随之更新——否则重部署导出旧 LMM_ENGINE_NAME/VERSION、
+/// 安装登记也落在旧 (name, version) 键下，部署/探测/登记三方身份漂移。
+pub fn update_engine_identity(
+    card_id: &str,
+    engine_name: &str,
+    engine_version: Option<&str>,
+) -> Result<(), String> {
+    let conn = connect().map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE store_models SET engine_name=?2, engine_version=?3 WHERE card_id=?1",
+        params![card_id, engine_name, engine_version],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Commit metadata, profiles and the verified file package together. Keep model
 /// identity, credentials, weights, endpoints and deployment history intact.
 pub fn commit_card_update_package(

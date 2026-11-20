@@ -2414,6 +2414,7 @@ impl ModelManager {
         if control.cancelled() {
             return Err(ModelManagerError::new("已取消，原脚本未修改。"));
         }
+        let mut new_engine_identity: Option<(String, Option<String>)> = None;
         let pkg = {
             let card = self.store.get_card(card_id)?;
             let empty = BTreeMap::new();
@@ -2452,6 +2453,18 @@ impl ModelManager {
             // 又可能被危险旧脚本拦截器/旧运行时结构/组可写目录卡住，形成设备无
             // 自助出路的死锁（用户设备实锤三连）。更新脚本会重置
             // deployed_script_sha256，界面据此提示重新部署。
+            //
+            // r43 P1-5：允许变更的前提是**记录身份随之同步**——旧实现只换
+            // 脚本不换记录里的 engine_name/version，重部署导出旧身份环境、
+            // 安装登记落旧键。差异在此捕获，持久化脚本包后一并落库。
+            if card.summary.engine_name != rec.engine_name
+                || card.summary.engine_version != rec.engine_version
+            {
+                new_engine_identity = Some((
+                    card.summary.engine_name.clone(),
+                    card.summary.engine_version.clone(),
+                ));
+            }
             pkg
         };
         let urls = |files: &BTreeMap<String, db::ScriptBlob>| {
@@ -2482,7 +2495,13 @@ impl ModelManager {
             return Err(ModelManagerError::new("已取消，原脚本未修改。"));
         }
         self.require_stopped_for_script_update(&rec)?;
-        db::replace_card_package(&rec, &pkg.scripts, &pkg.assets).map_err(ModelManagerError::new)
+        let changed =
+            db::replace_card_package(&rec, &pkg.scripts, &pkg.assets).map_err(ModelManagerError::new)?;
+        if let Some((name, version)) = new_engine_identity {
+            db::update_engine_identity(&rec.card_id, &name, version.as_deref())
+                .map_err(ModelManagerError::new)?;
+        }
+        Ok(changed)
     }
 
     fn require_stopped_for_script_update(
@@ -2824,7 +2843,24 @@ impl ModelManager {
             return Ok(());
         }
         let probe = self.engine_probe(source, &rec.card_id, env);
-        if probe.installed {
+        // r43 P1-6：探针通过≠安装器没变。安装脚本会刷新依赖/交付文件——与
+        // 全新下载路径同一把尺（见本文件 script_changed 比对）：缓存的
+        // install_engine 哈希与登记的 install_script_sha256 不一致时必须
+        // 重跑安装，否则「改了安装器但引擎二进制还在」的更新被静默跳过。
+        // 登记无哈希（老版本装的）不强制重跑，与下载路径口径一致。
+        let installer_changed = probe.installed
+            && source
+                .script_hash("install_engine")
+                .zip(
+                    db::get_installed_engine(&rec.engine_name, rec.engine_version.as_deref())
+                        .ok()
+                        .flatten()
+                        .and_then(|r| r.install_script_sha256),
+                )
+                .is_some_and(|(cur, old)| cur != old);
+        if installer_changed {
+            on_progress("检测到引擎安装脚本有更新，重新执行一次安装以刷新部署依赖…");
+        } else if probe.installed {
             return Ok(());
         }
         if rec.running {
@@ -4083,6 +4119,30 @@ impl ModelManager {
         let candidate = db::get_store_model(card_id)
             .map_err(|e| ModelManagerError::new(format!("读取模型记录失败：{e}")))?
             .ok_or_else(|| ModelManagerError::new("模型不存在，请先下载并部署"))?;
+        self.memory_admission_eval(candidate)
+    }
+
+    /// r43 P1-4：版本切换的准入必须按**切换目标**的记录与预算评估——active
+    /// 记录属于即将被替换的版本，拿它的（更小的）画像放行一次切向更大
+    /// 目标的切换，等于门禁查错了对象。目标版本记录来自 version_store。
+    pub fn memory_admission_for_version(
+        &self,
+        card_id: &str,
+        version_id: &str,
+    ) -> Result<MemoryAdmission, ModelManagerError> {
+        let target = super::version_store::get(card_id, version_id)
+            .map_err(|e| ModelManagerError::new(format!("读取目标版本记录失败：{e}")))?
+            .ok_or_else(|| ModelManagerError::new("目标版本不存在"))?;
+        let candidate = target
+            .record
+            .ok_or_else(|| ModelManagerError::new("目标版本缺少模型记录，无法评估内存风险"))?;
+        self.memory_admission_eval(candidate)
+    }
+
+    fn memory_admission_eval(
+        &self,
+        candidate: db::StoreModelRecord,
+    ) -> Result<MemoryAdmission, ModelManagerError> {
         let ram =
             current_ram_snapshot().filter(|ram| ram.total_kib > 0 && ram.used_kib <= ram.total_kib);
         let total_bytes = ram.as_ref().map(|ram| ram.total_kib.saturating_mul(1024));

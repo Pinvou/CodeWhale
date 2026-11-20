@@ -760,11 +760,15 @@ pub async fn local_resources() -> Result<Value, String> {
 
 /// 启用前内存准入快照。前端据此决定是否需要给用户二次确认，真正开始启用时还会在
 /// `start_lifecycle` 里复算一次，避免用户打开确认框后内存状态已变化。
-pub async fn memory_admission(card_id: String) -> Result<Value, String> {
+pub async fn memory_admission(card_id: String, version_id: Option<String>) -> Result<Value, String> {
+    // r43 P1-4：带 version_id 时按切换目标版本的记录评估（版本切换预检用），
+    // 否则按 active 记录（启用/部署预检用）。
     tokio::task::spawn_blocking(move || {
-        ModelManager::new(None, None)
-            .memory_admission(&card_id)
-            .map_err(|e| e.to_string())
+        let eval = match version_id.as_deref() {
+            Some(vid) => ModelManager::new(None, None).memory_admission_for_version(&card_id, vid),
+            None => ModelManager::new(None, None).memory_admission(&card_id),
+        };
+        eval.map_err(|e| e.to_string())
             .and_then(|admission| serde_json::to_value(admission).map_err(|e| e.to_string()))
     })
     .await
@@ -795,6 +799,23 @@ pub async fn delete_engine(
     tokio::task::spawn_blocking(move || {
         // 由工作线程持有直到清理完成，即使调用方断开也不提前放开互斥。
         let _cleanup_guard = cleanup_guard;
+        // r43 P1-7：ActiveCardOps 只互斥**本进程**的操作；下载/部署持有的是
+        // 跨进程资源锁（wait_resource_operation_lock 共享档）——另一进程正在
+        // 下载首个模型（尚未写 store_models 绑定行）时，本进程按"无绑定"删
+        // 引擎会抽掉对方末尾要复用的运行环境（Ollama 形态甚至删整个数据目录）。
+        // 取独占档：与所有持共享档的资源操作互斥，绑定复核+删除全程持锁。
+        let _cross_process_resources = super::version_store::wait_resource_operation_lock(
+            true,
+            || false,
+            || {
+                let _ = std::io::Write::write(
+                    &mut std::io::stderr(),
+                    b"[engine-cleanup] waiting for cross-process resource operations...
+",
+                );
+            },
+        )
+        .map_err(|e| e.to_string())?;
         let manager = ModelManager::new(None, None);
         let current = manager.list_installed_engines();
         let engine = current
@@ -861,14 +882,14 @@ pub fn start_version_action(
         },
         _ => return Err("不支持的版本操作".into()),
     };
-    // r42 P1-1：switch 的 deploy 臂可能与部署脚本一样自行启动运行时（同一
-    // 理由见 start_deploy_checked 的守卫注释）——必须走与 enable/deploy 同一
-    // 内存准入 + 启动槽位，否则版本切换成为绕过门禁的模型启动入口。
-    // stage/delete 不启动运行时，不占启动槽。guard 在 spawn_op 之前获取
-    // （锁序与 start_deploy_checked 一致：StartupGuard → ActiveCardOps），
-    // 并 move 进任务闭包持有全程。
+    // r42 P1-1 + r43 P1-4：switch 的 deploy 臂可能与部署脚本一样自行启动运行时
+    // （同一理由见 start_deploy_checked 的守卫注释）——必须走与 enable/deploy 同一
+    // 内存准入 + 启动槽位，且准入按**切换目标版本**的记录评估（active 记录属于
+    // 即将被替换的版本）。stage/delete 不启动运行时，不占启动槽。guard 在
+    // spawn_op 之前获取（锁序与 start_deploy_checked 一致：StartupGuard →
+    // ActiveCardOps），并 move 进任务闭包持有全程。
     let startup_guard = (action == "switch")
-        .then(|| prepare_model_start(&card_id, memory_confirmed))
+        .then(|| prepare_model_start_for_version(&card_id, &version_id, memory_confirmed))
         .transpose()?;
     let card = card_id.clone();
     let queue = Arc::clone(&service.queue);
@@ -1044,6 +1065,26 @@ fn prepare_model_start(
     if admission.requires_confirmation && !memory_confirmed {
         return Err(format!(
             "启动前需要确认内存风险：{} 请重新发起操作，确认后继续。",
+            admission.message
+        ));
+    }
+    Ok(guard)
+}
+
+/// r43 P1-4：版本切换的准入按目标版本评估（active 记录属于即将被替换的
+/// 版本，画像可能远小于切换目标——拿它放行等于查错了对象）。
+fn prepare_model_start_for_version(
+    card_id: &str,
+    version_id: &str,
+    memory_confirmed: bool,
+) -> Result<super::runtime_guard::StartupGuard, String> {
+    let guard = super::runtime_guard::StartupGuard::acquire()?;
+    let admission = ModelManager::new(None, None)
+        .memory_admission_for_version(card_id, version_id)
+        .map_err(|e| e.to_string())?;
+    if admission.requires_confirmation && !memory_confirmed {
+        return Err(format!(
+            "启动前需要确认内存风险（按切换目标版本评估）：{} 请重新发起操作，确认后继续。",
             admission.message
         ));
     }

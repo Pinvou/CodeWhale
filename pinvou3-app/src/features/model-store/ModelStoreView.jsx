@@ -553,7 +553,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     // 门在 Rust 侧 start_version_action。
     if (action === 'switch') {
       try {
-        const admission = await fetchMemoryAdmission(record.card_id);
+        const admission = await fetchMemoryAdmission(record.card_id, versionId);
         if (admission?.requires_confirmation) {
           setMemoryConfirm({ record, admission, action: 'switch', versionId });
           return;

@@ -69,8 +69,9 @@ function fetchLocalResources() {
 }
 
 /** 启用模型前的内存准入快照。 */
-function fetchMemoryAdmission(cardId) {
-  return invokeTauri('model_store_memory_admission', { cardId });
+function fetchMemoryAdmission(cardId, versionId) {
+  // r43 P1-4：版本切换预检传 versionId，准入按切换目标版本评估。
+  return invokeTauri('model_store_memory_admission', versionId ? { cardId, versionId } : { cardId });
 }
 
 /** 删除一个未被模型绑定、且客户端能安全清理的推理引擎。 */

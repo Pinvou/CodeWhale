@@ -62,8 +62,11 @@ pub async fn model_store_local_resources() -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn model_store_memory_admission(card_id: String) -> Result<Value, String> {
-    model_store::memory_admission(card_id).await
+pub async fn model_store_memory_admission(
+    card_id: String,
+    version_id: Option<String>,
+) -> Result<Value, String> {
+    model_store::memory_admission(card_id, version_id).await
 }
 
 #[tauri::command]
