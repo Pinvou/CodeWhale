@@ -446,7 +446,10 @@
       "target": "./internal/account",
       "package": "github.com/Pinvou/pinvou3/account-platform/internal/account",
       "roots": {
-        "TestPaymentFinancialRepairCrossDomainActivationPostgresIntegration": [],
+        "TestPaymentFinancialRepairCrossDomainActivationPostgresIntegration": [
+          "active-subject-and-legacy-closed-receipt-replay",
+          "closed-subject-cannot-create-a-new-repair-effect"
+        ],
         "TestRefundExceptionRepairCrossDomainActivationPostgresIntegration": [],
         "TestChargebackFinancialRepairCrossDomainActivationPostgresIntegration": [],
         "TestReconciliationFinancialRepairCrossDomainActivationPostgresIntegration": [],

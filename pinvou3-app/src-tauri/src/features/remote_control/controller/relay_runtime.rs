@@ -1174,7 +1174,12 @@ impl ControlledRelayWorker {
     ) -> Result<ControlledRegistrationTask, String> {
         let code_wrap = CodeWrapKeyPair::generate().map_err(|_| "pairing_key_invalid")?;
         let handshake = HandshakeKeyPair::generate().map_err(|_| "handshake_key_invalid")?;
-        let channel = relay.start_controller_relay(operation.generation()).await?;
+        let channel = {
+            let manager = app.state::<ControlledDeviceManager>();
+            manager.with_registration_start(&operation, || {
+                relay.start_controller_relay_sync(operation.generation())
+            })?
+        };
         log_controlled_event("worker_started", "channel_ready");
         let (done_tx, done_rx) = oneshot::channel();
         let mut worker = Self {
