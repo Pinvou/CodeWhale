@@ -57,7 +57,6 @@
       connectedDurationMs: null,
       workspaceCount: 0,
       codeModeAllowed: false,
-      workspaces: [],
       lastError: null,
     };
   }
@@ -251,7 +250,6 @@
             ? payload.pairingRemainingMs : null),
       connectedDurationMs: Number.isSafeInteger(payload.connectedDurationMs)
         && payload.connectedDurationMs >= 0 ? payload.connectedDurationMs : null,
-      workspaces: Array.isArray(payload.workspaces) ? payload.workspaces.slice(0, 32) : current.workspaces,
       lastError: payload.errorCode || payload.error || null,
     };
     if (generation && !CONTROLLED_TERMINAL[status]) {

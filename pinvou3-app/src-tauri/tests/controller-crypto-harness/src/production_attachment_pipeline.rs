@@ -6,8 +6,8 @@ mod tests {
     use std::sync::Arc;
     #[test]
     fn rejected_chunk_can_be_reconciled_as_absent_before_next_upload() {
+        use crate::app::commands::desktop_remote_action::action_state::DesktopRemoteActionState;
         use crate::crypto::ControllerRole;
-        use crate::desktop_remote_action_state::DesktopRemoteActionState;
         use crate::encrypted_lane::EncryptedLane;
         use crate::features::remote_control::controller::transfer::{
             TransferContext, TransferDirection, TransferMetadata, TransferRegistry,
@@ -390,9 +390,10 @@ mod tests {
         )
         .unwrap();
         const TWENTY_MIB: usize = 20 * 1024 * 1024;
+        // The ingest limit is independent of the fixed upload fixture size.
         assert_eq!(
             crate::features::files::file_ingest::MAX_FILE_BYTES,
-            TWENTY_MIB as u64
+            50 * 1024 * 1024
         );
         let mut bytes = vec![b'a'; TWENTY_MIB];
         bytes[..12].copy_from_slice(b"start-marker");

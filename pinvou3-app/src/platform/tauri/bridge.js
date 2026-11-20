@@ -102,7 +102,6 @@ function pinvouSharedtauriMain() {
         desktopRemoteControl: false,
       });
       console.warn("[platform] capability detection failed", error);
-      state.platformCapabilities = Object.assign({}, state.platformCapabilities, { loaded: false, desktopRemoteControl: false });
     }
     notify();
     if (state.platformCapabilities.desktopRemoteControl === true && desktopRemoteControlFeature) {

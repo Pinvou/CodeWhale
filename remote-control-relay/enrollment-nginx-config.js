@@ -1,3 +1,6 @@
+// Public proxy transport budget, independent of authorization and task liveness.
+export const ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS = 75;
+
 // Offline rollback deployment contract. Never reads credentials or manages nginx.
 function fail(code) {
   const error = new Error(code);
@@ -62,8 +65,8 @@ location = ${basePath}/ws {
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     # Explicit transport budget; keepalive does not renew authorization.
-    proxy_read_timeout 75s;
-    proxy_send_timeout 75s;
+    proxy_read_timeout ${ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS}s;
+    proxy_send_timeout ${ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS}s;
     proxy_set_header Host $host;
     # Overwrite rather than append the immediate proxy source.
     proxy_set_header X-Forwarded-For $remote_addr;

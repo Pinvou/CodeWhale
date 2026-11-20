@@ -65,8 +65,21 @@ mod state;
 #[path = "production_attachment_pipeline.rs"]
 mod production_attachment_pipeline;
 
-#[path = "../../../src/app/commands/desktop_remote_action_state.rs"]
-mod desktop_remote_action_state;
+// Preserve the production parent boundary for the actual shared validator.
+#[path = "../../../src/app"]
+mod app {
+    #[path = "commands"]
+    pub(crate) mod commands {
+        #[path = "desktop_remote_validation.rs"]
+        mod desktop_remote_validation;
+
+        #[path = "."]
+        pub(crate) mod desktop_remote_action {
+            #[path = "desktop_remote_action_state.rs"]
+            pub(crate) mod action_state;
+        }
+    }
+}
 
 // Actual ACP instance fence and callback identity helpers; this is not a
 // provider/child-process/EventBridge integration test.
@@ -197,7 +210,7 @@ mod features {
         }
 
         pub(crate) mod controller {
-            pub(crate) use crate::state::{controlled, controlling, task};
+            pub(crate) use crate::state::{controlled, controlling, controlling_session, task};
             pub(crate) mod relay_runtime {
                 pub(crate) fn log_controlled_event(_event: &str, _outcome: &str) {}
                 pub(crate) fn log_controller_event(_event: &str, _outcome: &str) {}
