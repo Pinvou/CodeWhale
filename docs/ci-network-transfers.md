@@ -24,6 +24,12 @@
 
 Rust 工具链使用官方源，避免继承故障镜像；既有每实例独立的 Cargo/Rustup home 保留。`scripts/ci-network-environment.py` 只撤销已知的 `rsproxy-ci` 替换片段，保留无关配置并备份原文件；自定义注册表不擅自改写，混合来源策略需人工检查。Linux 服务器在下一 Job 的预启动钩子执行，不改写运行中编译的配置。各工作流还在 Rust 初始化前经 `scripts/ci-rust-network.cjs` 调用同一迁移，包括继承了旧镜像环境的 Windows Listener；无需为修复下载源而中断运行中的 Listener。
 
+Rustup 本身不继承存储 Action 的 Node TLS 策略，且 Runner 可能把官方源列在 `NO_PROXY` 中。CI 的 Rust 准备入口因此启动本 Job 所有的 loopback 分发缓存：后台下载器只访问固定官方 HTTPS origin，先认证并读取 SHA-256，再校验 manifest/组件内容；组件进入上述内容缓存，Rustup 自己的摘要校验也保留。每个 Job 首次重新认证 channel 的 SHA，不跨 Job 冻结 floating stable；同一 Job 固定其 channel 快照，避免 SHA 与 manifest 来自不同更新时刻。
+
+官方 Rust 后台下载采用与现场对照验证一致的 TLS 1.2 兼容策略，保留证书和主机名验证；不改变业务 HTTP 客户端的协议。下载总预算不延长。新缓存应通过真实 Rustup 的全新 home 冷安装和第二个全新 home 的暖安装验证，不能只验证下载器自身：manifest、cargo、std、rustc 都须经过校验路径，暖安装须有相应内容命中。
+
+此 listener 不接受任意 URL、凭据或写请求，只有官方 dist 路径；不改写 manifest、工具链版本、组件或安装目录。只有后台官方源下载器收窄其自身的 `NO_PROXY`，业务进程的公共源绕行策略不变。Rustup 到 loopback 的明文段只在本机，外网段仍严格验证 HTTPS。监听器保留 Runner tracking/Windows Job Object，随 Job 清理；最长两小时作为额外回收边界。安全的下载阶段、命中及失败类型保存在 `PINVOU_CI_RUST_DIST_STATE` 同目录的有界 `statistics.json`，不保存原始错误、签名 URL 或认证信息。
+
 ## APT 与代理部署
 
 `scripts/ci-apt-prepare.py --apply` 只处理启用的 LLVM 源，验证仓库内官方公钥的 SHA-256、主指纹和签名子密钥，然后在原 Signed-By 范围内合并证书。它不改变源、关闭签名检查或把其他 keyring 的身份复制到新的范围。公钥更新必须重新从官方源取证、核对身份及摘要并运行回归；不能按错误信息下载任意密钥。

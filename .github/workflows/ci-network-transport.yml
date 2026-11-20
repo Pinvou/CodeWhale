@@ -8,6 +8,7 @@ on:
       - 'scripts/ci-network-*'
       - 'scripts/ci-artifact-*'
       - 'scripts/ci-download.py'
+      - 'scripts/ci-rust-*'
       - 'scripts/ci-egress-proxy.py'
       - 'scripts/lib/ci_https.py'
 

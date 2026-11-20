@@ -1236,6 +1236,7 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p test_ci_egress_proxy.py
           python3 -m unittest discover -s scripts/tests -p test_ci_apt_prepare.py
           python3 -m unittest discover -s scripts/tests -p test_ci_network_environment.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_rust_dist.py
 
       - name: 架构边界门禁
         run: |

@@ -116,7 +116,7 @@ def publication_lock(cache):
 
 def fetch(url, destination, expected=None, *, cache=None, seconds=180,
           attempts=3, capacity=DEFAULT_CAPACITY, max_bytes=MAX_OBJECT,
-          transfer=curl_transfer, sleep=time.sleep):
+          transfer=curl_transfer, sleep=time.sleep, force_tls12=False):
     host = check_url(url)
     if expected is not None and not re.fullmatch('[0-9a-f]{64}', expected):
         raise DownloadError('invalid expected SHA-256')
@@ -156,7 +156,7 @@ def fetch(url, destination, expected=None, *, cache=None, seconds=180,
         if stored.exists() or stored.is_symlink():
             event('cache-rejected', host=host, sha256=expected)
     deadline = time.monotonic() + seconds
-    tls12 = host.endswith('.blob.core.windows.net')
+    tls12 = force_tls12 or host.endswith('.blob.core.windows.net')
     fd, name = tempfile.mkstemp(prefix='.ci-download-', dir=destination.parent)
     os.close(fd)
     temporary = Path(name)

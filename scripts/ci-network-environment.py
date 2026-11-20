@@ -2,6 +2,7 @@
 """Retire only the known CI rsproxy override; preserve isolated Rust homes."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -44,23 +45,35 @@ def retire_mirror(path):
     return True
 
 
-def prepare(cargo, cache, environment):
+def prepare(cargo, cache, environment, *, dist_cache=False):
     changed = [name for name in ('config', 'config.toml') if retire_mirror(Path(cargo) / name)]
     values = {'RUSTUP_DIST_SERVER': 'https://static.rust-lang.org',
               'RUSTUP_UPDATE_ROOT': 'https://static.rust-lang.org/rustup',
               'PINVOU_CI_DOWNLOAD_CACHE': str(cache)}
+    if dist_cache and os.environ.get('GITHUB_ACTIONS') == 'true':
+        spec = importlib.util.spec_from_file_location('ci_rust_dist', Path(__file__).with_name('ci-rust-dist.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        url, state, _child = module.start(cache, os.environ.get('RUNNER_TEMP'))
+        values.update(RUSTUP_DIST_SERVER=url, PINVOU_CI_RUST_DIST_STATE=str(state),
+                      PINVOU_CI_RUST_DIST_ORIGIN=module.ORIGIN)
+        for name in ('NO_PROXY', 'no_proxy'):
+            entries = [entry.strip() for entry in os.environ.get(name, '').split(',') if entry.strip()]
+            values[name] = ','.join(dict.fromkeys([*entries, 'localhost', '127.0.0.1', '::1']))
     if any('\n' in value or '\r' in value for value in values.values()):
         raise ValueError('Invalid network environment value')
     with Path(environment).open('a', encoding='utf-8') as out:
         for key, value in values.items():
             out.write(f'{key}={value}\n')
     print(json.dumps({'phase': 'network-environment', 'retired_mirror_configs': changed,
-                      'rust_source': 'official', 'isolated_toolchains_preserved': True}))
+                      'rust_source': 'verified-official-cache' if 'PINVOU_CI_RUST_DIST_STATE' in values else 'official',
+                      'isolated_toolchains_preserved': True}))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cargo-home', required=True, type=Path)
     parser.add_argument('--cache', required=True, type=Path)
+    parser.add_argument('--dist-cache', action='store_true')
     args = parser.parse_args()
-    prepare(args.cargo_home, args.cache, os.environ['GITHUB_ENV'])
+    prepare(args.cargo_home, args.cache, os.environ['GITHUB_ENV'], dist_cache=args.dist_cache)

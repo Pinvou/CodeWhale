@@ -12,7 +12,7 @@ const commands = process.platform === 'win32' ? ['python', 'python3'] : ['python
 let result;
 for (const executable of commands) {
   result = spawnSync(executable, [path.join(__dirname, 'ci-network-environment.py'),
-    '--cargo-home', cargo, '--cache', cache], { stdio: 'inherit', shell: false, timeout: 30000 });
+    '--cargo-home', cargo, '--cache', cache, '--dist-cache'], { stdio: 'inherit', shell: false, timeout: 30000 });
   if (result.error?.code !== 'ENOENT') break;
 }
 if (result.error || result.status !== 0) {

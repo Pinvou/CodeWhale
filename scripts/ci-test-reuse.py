@@ -37,7 +37,8 @@ JOB_SCOPED = WORKFLOW == '.github/workflows/pr-check.yml'
 POLICY = (WORKFLOW, 'scripts/ci-test-reuse.py', 'scripts/ci-reuse-policy.py', 'scripts/lib/ci_https.py',
           'scripts/ci-network-node-options.cjs', 'scripts/ci-artifact-node-options.cjs',
           'scripts/ci-artifact-upload-diagnostics.cjs', 'scripts/ci-rust-network.cjs',
-          'scripts/ci-network-environment.py', 'scripts/ci-download.py') + (('scripts/ci-job-inputs.py',) if JOB_SCOPED else ())
+          'scripts/ci-network-environment.py', 'scripts/ci-rust-dist.py',
+          'scripts/ci-download.py') + (('scripts/ci-job-inputs.py',) if JOB_SCOPED else ())
 MAX_AGE = 24 * 60 * 60
 MAX_BYTES = 65536
 PLAN = runpy.run_path(str(ROOT / 'scripts/ci-reuse-policy.py'))

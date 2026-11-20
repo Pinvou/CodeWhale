@@ -1,9 +1,11 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 SPEC = importlib.util.spec_from_file_location('network_env', Path(__file__).parents[1] / 'ci-network-environment.py')
@@ -12,6 +14,41 @@ SPEC.loader.exec_module(ENV)
 
 
 class NetworkEnvironmentTests(unittest.TestCase):
+    def test_ci_entry_starts_owned_cache_preserves_bypasses_and_retires_on_state_removal(self):
+        with tempfile.TemporaryDirectory(prefix='rust CI ') as directory:
+            root = Path(directory)
+            cargo = root / 'cargo'; cargo.mkdir()
+            environment = root / 'github-env'
+            result = subprocess.run([__import__('sys').executable,
+                str(Path(__file__).parents[1] / 'ci-network-environment.py'),
+                '--cargo-home', str(cargo), '--cache', str(root / 'cache'), '--dist-cache'],
+                env={**os.environ, 'GITHUB_ACTIONS': 'true', 'RUNNER_TEMP': str(root),
+                     'GITHUB_ENV': str(environment), 'NO_PROXY': 'example.invalid'},
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            values = dict(line.split('=', 1) for line in environment.read_text().splitlines())
+            state = Path(values['PINVOU_CI_RUST_DIST_STATE'])
+            ready = json.loads(state.read_text())
+            try:
+                self.assertEqual(values['RUSTUP_DIST_SERVER'], f"http://127.0.0.1:{ready['port']}")
+                self.assertEqual(values['NO_PROXY'], 'example.invalid,localhost,127.0.0.1,::1')
+                self.assertEqual(values['PINVOU_CI_RUST_DIST_ORIGIN'], 'https://static.rust-lang.org')
+            finally:
+                state.unlink(missing_ok=True)
+            # This integration path makes no upstream request and leaves no
+            # listener behind even without a real Runner's orphan cleanup.
+            import socket
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    with socket.create_connection(('127.0.0.1', ready['port']), timeout=.2):
+                        pass
+                except OSError:
+                    break
+                time.sleep(.05)
+            else:
+                self.fail('owned Rust listener did not retire')
+
     def test_actual_node_entry_preserves_the_toolchain_and_exports_job_sources(self):
         node = shutil.which('node')
         if not node:
@@ -23,7 +60,7 @@ class NetworkEnvironmentTests(unittest.TestCase):
             (rustup / 'sentinel').write_bytes(b'installed-toolchain')
             environment = root / 'github-env'
             result = subprocess.run([node, str(Path(__file__).parents[1] / 'ci-rust-network.cjs')],
-                env={**os.environ, 'CARGO_HOME':str(cargo), 'RUSTUP_HOME':str(rustup),
+                env={**os.environ, 'GITHUB_ACTIONS': 'false', 'CARGO_HOME':str(cargo), 'RUSTUP_HOME':str(rustup),
                      'GITHUB_ENV':str(environment), 'PINVOU_CI_DOWNLOAD_CACHE':str(root / 'cache')},
                 capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
