@@ -13804,6 +13804,32 @@ fn strict_pipeline_scope_is_official_deepseek_family_routes() {
 }
 
 #[test]
+fn official_host_gate_rejects_query_and_fragment_urls() {
+    // The client splices its path suffix directly after the configured
+    // URL, so a query or fragment would build a request path the endpoint
+    // 404s on while the gate and doctor still reported the pipeline as
+    // acting — such a URL degrades to out of scope.
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta?x=1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com#frag"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseeki.com/v1?debug"
+    ));
+    assert!(!strict_tool_mode_for_route(
+        true,
+        ApiProvider::Deepseek,
+        "https://api.deepseek.com/beta?x=1"
+    ));
+    // The canonical URLs stay admitted.
+    assert!(url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta"
+    ));
+}
+
+#[test]
 fn deepseek_canonical_url_sets_stay_inside_the_official_host_gate() {
     // The chat strip, the beta routing, and the doctor's classifier all
     // read `DEEPSEEK_CANONICAL_*`; every canonical URL must keep passing

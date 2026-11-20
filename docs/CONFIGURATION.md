@@ -752,9 +752,12 @@ alias and the Anthropic-compatible Messages route) also set
 strict contract: optional parameters are removed from the schema (each removal
 is reported in the tool description), non-numeric `const` values land on
 `enum`, and conditional-requirement tables (`dependentRequired`) are stripped.
-One carve-out: on thinking-enabled chat requests to the DeepSeek dialect the
-`tool_choice` key is omitted entirely (the wire rejects the combination), so
-`required` applies to every other request on the route.
+Two carve-outs: on thinking-enabled chat requests to the DeepSeek dialect the
+`tool_choice` key is omitted entirely (the wire rejects the combination), and
+on routes whose model resolves to the Responses endpoint the wire hardcodes
+`strict: false` per tool and sends `tool_choice: "auto"` (the doctor's
+`responses_dialect` verdict reports this). `required` applies to every other
+request on the route.
 
 Tools whose schema cannot be represented faithfully under the strict subset —
 root alternatives, required nullables, or tools whose runtime demands
@@ -768,8 +771,13 @@ sub-agent surface requests with `auto` regardless.
 The setting is inert on every other route (third-party gateways, OpenAI
 wires, non-official hosts): their schemas ship unchanged, because the
 reshaping follows DeepSeek's documents and would strip keywords other
-providers document. `run_doctor`'s strict-mode verdict reports whether the
-current route is in scope.
+providers document. Two schema tightenings apply on every route (including
+strict-off ones) because the strict contract needs them: the shared schema
+sanitizer no longer corrupts literal values or keyword-named properties, and
+the `remember` tool's schema marks `note` required (its runtime already
+rejects a missing `note` for append and revise, and an all-optional schema
+would leave strict mode nothing to keep). `run_doctor`'s strict-mode verdict
+reports whether the current route is in scope.
 
 ## Workshop output budgets
 

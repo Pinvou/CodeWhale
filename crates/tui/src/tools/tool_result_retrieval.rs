@@ -640,7 +640,9 @@ fn build_summary_payload(
         "signal_lines": signal_lines,
         "head": head,
         "tail": tail,
-        "hint": "Use mode=head, tail, lines, or query to retrieve a narrower slice."
+        "hint": "This is the summary slice; call again with this ref to retrieve more. The \
+                 available modes on this session are listed in this tool's description \
+                 (unrestricted sessions also offer mode=head, tail, lines, or query)."
     }))
 }
 

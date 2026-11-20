@@ -104,9 +104,10 @@ effect here per that rule: it is **frozen-prefix-compatible**. The removal
 note appended to a tool's description is a deterministic pure function of the
 pinned catalog and the route, so on a stable strict route the tools bytes are
 identical every step; the shaping runs on a per-request clone and never
-mutates the registry. A provider change re-pins as a declared
-`change:provider` header change, and a token-budget change as `change:route`.
-A `base_url`-only flip is not a declared header field today. A flip that
+mutates the registry. Provider and token-budget changes re-pin through the
+header changes the header set actually declares (`change:model` for the
+resolved model, `change:route` for a re-planned route); provider identity by
+itself is not a declared header field today. A flip that
 changes the gate's verdict — official host ↔ foreign host, a padded URL, or a
 provider retype — changes the shaped tool bytes and surfaces as undeclared
 drift unless another pending change masks it; a flip inside the same scope
