@@ -140,10 +140,10 @@ jobs:
           Download-OneBundle '${{ steps.installer.outputs.path }}' 'installer-attestation.sigstore.jsonl'
           Download-OneBundle (Resolve-Path -LiteralPath installer-sbom.spdx.json).Path 'installer-sbom-attestation.sigstore.jsonl'
 
-      - name: Prepare CI transfer runtime (2)
+      - name: Configure artifact transport for Upload installer, attestation bundle, and SPDX
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-network-node-options.cjs
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Upload installer, attestation bundle, and SPDX
         uses: actions/upload-artifact@v7
         env:

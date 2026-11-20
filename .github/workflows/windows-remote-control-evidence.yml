@@ -145,10 +145,10 @@ jobs:
             -TrustedProviderRootCertificateSha256 $env:E2E_PROVIDER_ROOT_CERTIFICATE_SHA256 -TrustedProviderVerifierCertificateSha256 $env:E2E_PROVIDER_VERIFIER_CERTIFICATE_SHA256 `
             -EvidenceDirectory $env:EVIDENCE_DIRECTORY
 
-      - name: Prepare CI transfer runtime (2)
+      - name: Configure artifact transport for Upload immutable evidence bundle
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-network-node-options.cjs
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Upload immutable evidence bundle
         uses: actions/upload-artifact@v7
         env:

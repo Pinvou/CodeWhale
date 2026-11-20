@@ -905,10 +905,10 @@ jobs:
       - name: ELF 架构 + glibc 下限守卫 (Ubuntu 22.04)
         run: ./scripts/check-linux-glibc-floor.sh "pinvou3-app/src-tauri/target/release/bundle/deb/pinvou3_${VERSION}_x64.deb" amd64
 
-      - name: Prepare CI transfer runtime (2)
+      - name: Configure artifact transport for 上传 deb artifact
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-network-node-options.cjs
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: 上传 deb artifact
         uses: actions/upload-artifact@v7
         env:
@@ -1101,10 +1101,10 @@ jobs:
       - name: ELF 架构 + glibc 下限守卫 (Ubuntu 22.04)
         run: ./scripts/check-linux-glibc-floor.sh "pinvou3-app/src-tauri/target/release/bundle/deb/pinvou3_${VERSION}_arm64.deb" arm64
 
-      - name: Prepare CI transfer runtime (2)
+      - name: Configure artifact transport for 上传 deb artifact
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-network-node-options.cjs
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: 上传 deb artifact
         uses: actions/upload-artifact@v7
         env:
@@ -1322,10 +1322,10 @@ jobs:
       - name: glibc 下限守护 (deepin 23/25 + UOS V25 = glibc 2.38)
         run: ./scripts/check-linux-glibc-floor.sh "pinvou3-app/src-tauri/target/release/bundle/deb/pinvou3_${VERSION}_loong64.deb" loongarch64
 
-      - name: Prepare CI transfer runtime (3)
+      - name: Configure artifact transport for 上传 deb artifact
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-network-node-options.cjs
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: 上传 deb artifact
         uses: actions/upload-artifact@v7
         env:
@@ -1583,10 +1583,10 @@ jobs:
           echo "$SHA  $EXE" > "$EXE.sha256"
           ls -lh "$EXE"
 
-      - name: Prepare CI transfer runtime (3)
+      - name: Configure artifact transport for 上传 nsis artifact
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-network-node-options.cjs
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: 上传 nsis artifact
         uses: actions/upload-artifact@v7
         env:
@@ -1768,10 +1768,10 @@ jobs:
           echo "$SHA  pinvou3_${VERSION}_universal.dmg" > "pinvou3_${VERSION}_universal.dmg.sha256"
           ls -lh "pinvou3_${VERSION}_universal.dmg"
 
-      - name: Prepare CI transfer runtime (2)
+      - name: Configure artifact transport for 上传 dmg artifact
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-network-node-options.cjs
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: 上传 dmg artifact
         uses: actions/upload-artifact@v7
         env:

@@ -138,12 +138,11 @@ jobs:
           CI_REUSE_NEEDS: ${{ toJSON(needs) }}
         run: python3 scripts/ci-test-reuse.py record
 
-      - name: Prepare CI transfer runtime (1)
+      - name: Configure artifact transport for PR test success proof transport
         if: ${{ success() && steps.success_proof.outputs.directory != '' }}
-        continue-on-error: true
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-network-node-options.cjs
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: PR test success proof transport
         if: ${{ success() && steps.success_proof.outputs.directory != '' }}
         timeout-minutes: 3

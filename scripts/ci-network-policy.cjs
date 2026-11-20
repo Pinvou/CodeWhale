@@ -26,6 +26,11 @@ function checkWorkflow(source, filename = 'workflow') {
   const fail = message => { throw new Error(`${filename}: ${message}`); };
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
+    if (/^node scripts\/ci-artifact-node-options\.cjs(?: |$)/.test(field(step, 'run') || '')) {
+      if (!/^ {8}uses: actions\/upload-artifact@/m.test(steps[i + 1] || '')) {
+        fail('artifact preparation is duplicated or unpaired');
+      }
+    }
     if (/^ {6}(?:- uses:|  uses:) dtolnay\/rust-toolchain@/m.test(step)
         || /^          rustup toolchain install /m.test(step)) {
       if (field(steps[i - 1] || '', 'run') !== 'node scripts/ci-rust-network.cjs') fail('Rust setup lacks mirror retirement');
@@ -39,7 +44,10 @@ function checkWorkflow(source, filename = 'workflow') {
     if (!storageAction(step)) continue;
     count++;
     const prep = steps[i - 1] || '';
-    if (field(prep, 'run') !== 'node scripts/ci-network-node-options.cjs') fail('storage action lacks immediate transport preparation');
+    const artifact = /^ {8}uses: actions\/upload-artifact@/m.test(step);
+    const command = field(prep, 'run');
+    if (artifact ? !/^node scripts\/ci-artifact-node-options\.cjs --network(?: --diagnostics)?$/.test(command || '')
+        : command !== 'node scripts/ci-network-node-options.cjs') fail('storage action lacks immediate transport preparation');
     if (field(prep, 'timeout-minutes') !== '1') fail('transport preparation must remain bounded');
     const unknownPrep = prep.split('\n').filter(line => line.trim() && !line.trimStart().startsWith('#') &&
       !/^      - name: [^\r\n]+$/.test(line) &&
@@ -47,14 +55,15 @@ function checkWorkflow(source, filename = 'workflow') {
     if (unknownPrep.length || [...prep.matchAll(/^        run:/gm)].length !== 1) fail('transport preparation contains unreviewed work');
     if (field(prep, 'working-directory') !== '${{ github.workspace }}') fail('transport helper must use the repository root');
     if (field(prep, 'if') !== field(step, 'if')) fail('transport and action conditions differ');
-    if (field(prep, 'continue-on-error') !== field(step, 'continue-on-error')) fail('transport changes the action failure policy');
+    if (artifact ? field(prep, 'continue-on-error') !== undefined
+        : field(prep, 'continue-on-error') !== field(step, 'continue-on-error')) fail('transport changes the action failure policy');
     const assignments = [...step.matchAll(/^ {10}NODE_OPTIONS: (.*)$/gm)];
     if (assignments.length !== 1 || assignments[0][1] !== options) fail('storage action lacks inherited scoped TLS options');
     if (!/^ {10}PATH: \$\{\{ env\.PINVOU_CI_NETWORK_PATH \}\}$/m.test(step)) fail('storage action lacks the scoped archive tools path');
     if (!/^ {10}PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'$/m.test(step)) fail('storage action lacks passive stage diagnostics');
   }
   const remainder = text.replace(stepPattern, step => storageAction(step) ? '' : step);
-  if (/(?:NODE_OPTIONS:.*PINVOU_CI_NETWORK_NODE_OPTIONS|PATH:.*PINVOU_CI_NETWORK_PATH)/.test(remainder)) fail('transport options leaked into a business step or job environment');
+  if (/(?:NODE_OPTIONS:.*PINVOU_CI_NETWORK_NODE_OPTIONS|PATH:.*PINVOU_CI_NETWORK_PATH|--tls-max-v1\.2)/.test(remainder)) fail('transport options leaked into a business step or job environment');
   if (/NODE_TLS_REJECT_UNAUTHORIZED:|--tls-min-v1\.[01]\b/.test(text)) fail('TLS verification/minimum must not be weakened');
   // Valid workflow layout is checked by actionlint; a future alternate step
   // layout must not silently bypass this scanner.

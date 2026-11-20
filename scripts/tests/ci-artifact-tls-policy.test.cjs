@@ -13,6 +13,42 @@ const stepPattern = /^      - [\s\S]*?(?=^      - |^  [A-Za-z0-9_-]+:|$(?![\s\S]
 const { checkWorkflow } = require('../ci-network-policy.cjs');
 const { networkPath } = require('../ci-network-node-options.cjs');
 
+test('every PR artifact upload keeps main upload isolation and condition-matched preparation', () => {
+  checkWorkflow(workflow);
+  assert.ok(workflow.includes('uses: actions/upload-artifact@v7'));
+  for (const mutant of [
+    workflow.replace('NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}', 'NODE_OPTIONS: --tls-max-v1.2'),
+    workflow.replace('run: node scripts/ci-network-node-options.cjs', 'run: node scripts/unreviewed.cjs'),
+    workflow.replace("PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'", "PINVOU_CI_ARTIFACT_DIAGNOSTICS: '0'"),
+    workflow.replace(/(      - name: Configure artifact transport for Gate test resource lifecycle receipts\n)        if: \$\{\{ always\(\) && env.PINVOU_CI_RESOURCE_LEDGER != '' \}\}/,
+      '$1        if: success()'),
+    workflow.replace(/^env:$/m, 'env:\n  NODE_OPTIONS: --tls-max-v1.2'),
+    workflow.replace('        uses: actions/upload-artifact@v7', '        uses: actions/checkout@v7'),
+  ]) {
+    assert.notEqual(mutant, workflow, 'main upload negative control must change the workflow');
+    assert.throws(() => checkWorkflow(mutant));
+  }
+});
+
+test('artifact extension retains the legacy value and scopes common options to the consuming Action', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-common-'));
+  try {
+    const file = path.join(root, 'github-env');
+    const result = spawnSync(process.execPath, [helper, '--network'], {
+      env: { ...process.env, GITHUB_ENV: file, NODE_OPTIONS: '--max-old-space-size=192' },
+      encoding: 'utf8', timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const values = Object.fromEntries(fs.readFileSync(file, 'utf8').trimEnd().split('\n')
+      .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+    assert.equal(values.PINVOU_CI_ARTIFACT_NODE_OPTIONS, '--max-old-space-size=192 --tls-max-v1.2');
+    assert.match(values.PINVOU_CI_NETWORK_NODE_OPTIONS, /--max-old-space-size=192 .*--tls-max-v1\.2$/);
+    assert.ok(values.PINVOU_CI_NETWORK_PATH);
+    assert.equal(values.NODE_OPTIONS, undefined);
+    assert.equal(values.PATH, undefined);
+  } finally { fs.rmSync(root, { recursive: true }); }
+});
+
 test('Windows archive utilities stay scoped and an existing archiver wins', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cache-tools-'));
   try {

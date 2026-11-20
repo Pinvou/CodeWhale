@@ -61,10 +61,10 @@ jobs:
           path: ${{ steps.probe.outputs.cache }}
           key: ci-network-canary-${{ github.run_id }}-${{ github.run_attempt }}-${{ runner.os }}
           fail-on-cache-miss: true
-      - name: Prepare CI transfer runtime (3)
+      - name: Configure artifact transport for Upload authenticated transport probe
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
-        run: node scripts/ci-network-node-options.cjs
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Upload authenticated transport probe
         uses: actions/upload-artifact@v7
         env:
