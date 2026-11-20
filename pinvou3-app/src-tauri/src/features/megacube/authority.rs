@@ -101,8 +101,7 @@ pub(super) fn remember_local_device() -> Result<(), String> {
     let path = crate::platform::paths::pinvou3_home()
         .join("megacube")
         .join(LOCAL_RECEIPT);
-    write_receipt_if_changed(&path)
-        .map_err(|error| format!("device_record_failed: {error}"))
+    write_receipt_if_changed(&path).map_err(|error| format!("device_record_failed: {error}"))
 }
 
 /// r10 P2-C：回执内容恒为常量 `cmsd\n`；5s 库轮询每 tick 逐卡重写会造成
