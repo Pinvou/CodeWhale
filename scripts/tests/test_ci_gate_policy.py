@@ -3767,11 +3767,11 @@ python3() { fixture_mock python3 "$@"; }
         frontend_setup = _extract_job_block(body, 'frontend-setup')
         self.assertEqual(
             _step_named(frontend_setup, 'Upload frontend setup bundle').rstrip(),
-            "      - name: Upload frontend setup bundle\n        id: frontend_setup_upload\n        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n        continue-on-error: true\n        uses: actions/upload-artifact@v7\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1",
+            "      - name: Upload frontend setup bundle\n        id: frontend_setup_upload\n        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n        continue-on-error: true\n        uses: actions/upload-artifact@v7\n        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1",
         )
         self.assertEqual(
             _step_named(frontend_setup, 'Upload frontend setup bundle (retry)').rstrip(),
-            "      - name: Upload frontend setup bundle (retry)\n        id: frontend_setup_upload_retry\n        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}\n        uses: actions/upload-artifact@v7\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1\n          overwrite: true",
+            "      - name: Upload frontend setup bundle (retry)\n        id: frontend_setup_upload_retry\n        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}\n        uses: actions/upload-artifact@v7\n        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1\n          overwrite: true",
         )
         self.assertEqual(
             _step_named(frontend_setup, 'Require frontend setup bundle upload').rstrip(),

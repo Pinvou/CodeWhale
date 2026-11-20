@@ -33,6 +33,11 @@ const titleWorkflow = await readFile(
   "utf8",
 );
 
+const frontendUploadStep = "Upload frontend setup bundle";
+const frontendUploadRetryStep = "Upload frontend setup bundle (retry)";
+const frontendUploadRequiredStep = "Require frontend setup bundle upload";
+const uploadPolicyLF = String.fromCharCode(10);
+
 test("browser wrapper helper-only changes select both native runtime gates", () => {
   const helpers = [
     "pinvou3-app/tests/helpers/ndjson-child-driver.mjs",
@@ -2201,11 +2206,6 @@ test('all Linux frontend test entry points isolate their whole fixture tree afte
     assert.match(preflight, /python3 -m unittest discover -s \.\.\/scripts\/tests -p test_ci_browser_network\.py -v/);
   }
 });
-
-const frontendUploadStep = "Upload frontend setup bundle";
-const frontendUploadRetryStep = "Upload frontend setup bundle (retry)";
-const frontendUploadRequiredStep = "Require frontend setup bundle upload";
-const uploadPolicyLF = String.fromCharCode(10);
 
 function assertFrontendUploadRecovery(text) {
   const setup = jobBlock("frontend-setup", text);
