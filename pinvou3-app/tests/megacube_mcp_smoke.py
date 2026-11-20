@@ -23,6 +23,8 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
+from urllib.request import Request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = os.path.join(
@@ -608,7 +610,85 @@ def pure_render_checks(http_port):
         shutil.rmtree(cards_dir, ignore_errors=True)
 
 
+def redirect_policy_checks():
+    """r12 P2-1：_fetch 重定向策略负控/正控（file:// 拒绝、https 降级拒绝、
+    ftp 拒绝、http→http 正常跟随）。"""
+    import importlib.util as _ilu
+    server_py = os.path.join(
+        ROOT, "src-tauri", "resources", "common", "bundle", "mcp-servers",
+        "megacube_admin_server.py")
+    spec = _ilu.spec_from_file_location("_mas_redirect", server_py)
+    mas = _ilu.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mas)
+    except SystemExit:
+        pass
+
+    class RedirectOnce(BaseHTTPRequestHandler):
+        location = "file:///etc/passwd"
+
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", self.location)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    class HopThenFinal(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/hop":
+                self.send_response(302)
+                self.send_header("Location", "/final")
+                self.end_headers()
+            else:
+                body = b"hello"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    srv = TCPServer(("127.0.0.1", 0), RedirectOnce)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.handle_request).start()
+    try:
+        mas._fetch("http://127.0.0.1:%d/redirect" % port, timeout=5)
+        check("B3 _fetch file:// 重定向被拒绝", False, "未抛错")
+    except mas._NetError:
+        check("B3 _fetch file:// 重定向被拒绝", True)
+    except Exception as error:  # noqa: BLE001
+        check("B3 _fetch file:// 重定向被拒绝", False, type(error).__name__)
+    srv.server_close()
+
+    handler = mas._FetchRedirectHandler()
+    for label, origin, target in (
+        ("HTTPS 降级", "https://example.com/a", "http://down.example/"),
+        ("ftp 目标", "http://example.com/a", "ftp://evil/x"),
+    ):
+        try:
+            handler.redirect_request(Request(origin), None, 302, "Found", {}, target)
+            check("B3 _fetch 重定向%s被拒绝" % label, False, "未抛错")
+        except Exception:  # noqa: BLE001
+            check("B3 _fetch 重定向%s被拒绝" % label, True)
+
+    srv2 = TCPServer(("127.0.0.1", 0), HopThenFinal)
+    port2 = srv2.server_address[1]
+    for _ in range(2):
+        threading.Thread(target=srv2.handle_request).start()
+    try:
+        status, body = mas._fetch("http://127.0.0.1:%d/hop" % port2, timeout=5)
+        check("B3 _fetch http→http 重定向正常跟随", status == 200 and body == b"hello",
+              "%s %r" % (status, body[:16]))
+    except Exception as error:  # noqa: BLE001
+        check("B3 _fetch http→http 重定向正常跟随", False, type(error).__name__)
+    srv2.server_close()
+
+
 def main():
+    redirect_policy_checks()
     tmp = tempfile.mkdtemp(prefix="megacube-mcp-test-")
     state = FixtureState()
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)

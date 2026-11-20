@@ -68,7 +68,12 @@ export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserve
       try {
         const res = await fetchCmsTasks().catch(() => ({ available: false }));
         if (!alive) return;
-        if (!res?.available && !runtimePendingRef.current.size) return;
+        // r12 P2-8：cmsd 不可用且无待恢复运行时清空活动任务——否则任务弹窗
+        // 无限停留在「切换中」，cmsd 不恢复就永远无法关闭。
+        if (!res?.available && !runtimePendingRef.current.size) {
+          setActiveTask(null);
+          return;
+        }
         if (res?.available) setCmsAvailable(true);
         const tasks = Array.isArray(res.data?.tasks) ? res.data.tasks : [];
         const running = tasks.find(

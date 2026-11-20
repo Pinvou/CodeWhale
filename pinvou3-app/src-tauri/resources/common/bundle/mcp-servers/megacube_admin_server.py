@@ -359,52 +359,68 @@ _MAX_FETCH_BYTES = 16 * 1024 * 1024
 _FETCH_ALLOWED_SCHEMES = ("http", "https")
 
 
-def _fetch_redirect_target(current, location):
-    """r11 P1-2：重定向目标校验——只允许 http(s)，拒绝 file:/data: 等跨
-    scheme（裸 urlopen 的默认 opener 含 FileHandler，`Location: file:///`
-    可读本地文件并把片段反射进工具输出）。与 megacube_tools.state 的
-    RedirectHandler 同口径；不降级 https。
+class _FetchRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """r12 P2-1：每跳校验的重定向处理器。
+
+    r11 的 _fetch_redirect_target 只在裸 urlopen 抛 HTTPError 时生效，
+    但 urllib 默认 HTTPRedirectHandler 对 http↔http、https→http 降级与
+    http→ftp 全部静默跟随不抛错——校验从未运行（评审实测复现）。改为
+    build_opener 注入本处理器，每跳在 redirect_request 内校验，与
+    megacube_tools.state.RedirectHandler 同口径。
     """
-    target = urllib.parse.urljoin(current, location)
-    scheme = urllib.parse.urlsplit(target).scheme
-    if scheme not in _FETCH_ALLOWED_SCHEMES:
-        raise _NetError("重定向目标不是 http(s)（%s:），已拒绝。" % (scheme or "无"))
-    if urllib.parse.urlsplit(current).scheme == "https" and scheme != "https":
-        raise _NetError("拒绝 HTTPS 降级重定向。")
-    return target
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urllib.parse.urljoin(req.full_url, newurl)
+        scheme = urllib.parse.urlsplit(target).scheme
+        if scheme not in _FETCH_ALLOWED_SCHEMES:
+            raise urllib.error.URLError(
+                "redirect target rejected: non-http(s) scheme %r" % (scheme or "empty"))
+        if urllib.parse.urlsplit(req.full_url).scheme == "https" and scheme != "https":
+            raise urllib.error.URLError("redirect rejected: https downgrade")
+        # 不携带 Authorization（_fetch 本就不发送凭据；显式剥除以与 state 版一致）。
+        redirected = super().redirect_request(req, fp, code, msg, headers, target)
+        if redirected is not None:
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+def _fetch_opener():
+    return urllib.request.build_opener(_FetchRedirectHandler())
 
 
 def _fetch(url, timeout=HTTP_TIMEOUT_S):
     """极简 http(s) GET：返回 (status, body_bytes)。
 
-    3xx 手工跟 Location——hf-mirror 的 /api 会 308 跳 huggingface.co，而 urllib
-    对 308 的处理各版本不一致。网络层失败抛 _NetError。
+    重定向经 _FetchRedirectHandler 每跳校验（仅 http(s)、不降级 https）。
+    网络层失败抛 _NetError。
     """
-    current = url
-    for _ in range(6):
-        req = urllib.request.Request(
-            current, headers={"User-Agent": "megacube-admin/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "megacube-admin/1.0"})
+    opener = _fetch_opener()
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            # r7/r8 P2-3：与包内 16MiB 上限（state.py）同口径的有界读；超限
+            # 显式报错而非静默截断（截断会让下游把超大响应当损坏内容误报）。
+            raw = resp.read(_MAX_FETCH_BYTES + 1)
+            if len(raw) > _MAX_FETCH_BYTES:
+                raise _NetError("响应超过 16 MiB 上限，已拒绝读取；疑似异常或被劫持的源。")
+            return getattr(resp, "status", 200) or 200, raw
+    except urllib.error.HTTPError as e:
+        if e.code in (301, 302, 303, 307, 308):
+            # 合法重定向由 _FetchRedirectHandler 自动跟随；任何 3xx 走到
+            # 这里都是被拒的跳（如 file:///，urllib 在 handler 前就以
+            # "not allowed" 抛出）——显式报错而非返回 (302, b'')。
+            raise _NetError("重定向被拒绝（%d -> %s）。" % (
+                e.code, (e.headers.get("Location") or "未知目标")[:64]))
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                # r7/r8 P2-3：与包内 16MiB 上限（state.py）同口径的有界读；超限
-                # 显式报错而非静默截断（截断会让下游把超大响应当损坏内容误报）。
-                raw = resp.read(_MAX_FETCH_BYTES + 1)
-                if len(raw) > _MAX_FETCH_BYTES:
-                    raise _NetError("响应超过 16 MiB 上限，已拒绝读取；疑似异常或被劫持的源。")
-                return getattr(resp, "status", 200) or 200, raw
-        except urllib.error.HTTPError as e:
-            location = e.headers.get("Location") if e.headers else None
-            if e.code in (301, 302, 303, 307, 308) and location:
-                current = _fetch_redirect_target(current, location)
-                continue
-            try:
-                # r8 P2-3：错误分支同样有界（原 OOM 面保留在此）。
-                return e.code, e.read(_MAX_FETCH_BYTES + 1)
-            except Exception:
-                return e.code, b""
-        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as e:
-            raise _NetError("网络请求失败：%s" % (getattr(e, "reason", None) or e))
-    raise _NetError("重定向次数过多（超过 5 次）")
+            # r8 P2-3：错误分支同样有界。
+            return e.code, e.read(_MAX_FETCH_BYTES + 1)
+        except Exception:
+            return e.code, b""
+    except urllib.error.URLError as e:
+        # 含 _FetchRedirectHandler 的跳级拒绝（非 http(s) scheme / 降级）。
+        raise _NetError("网络请求失败（含重定向拒绝）：%s" % (getattr(e, "reason", None) or e))
+    except (socket.timeout, TimeoutError, OSError) as e:
+        raise _NetError("网络请求失败：%s" % (e,))
 
 
 def _fetch_json(url, timeout=HTTP_TIMEOUT_S):

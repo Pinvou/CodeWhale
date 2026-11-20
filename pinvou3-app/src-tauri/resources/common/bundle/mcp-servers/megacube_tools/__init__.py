@@ -26,7 +26,7 @@ TOOLS = [
     tool("cube_preview_install_retry", "只读预览原任务的当前安装包摘要、固定目录和 download/install_local 语义；不重装、不启用。",
          {"run_id": TEXT}, ["run_id"]),
     tool("cube_retry_install", "按已审阅摘要重试失败或取消的商店安装，复用界面后台及 Cube Manage Software 准入。保留原下载/部署类型和部分文件，不自动启用；连接或能力失败不可回退完整安装。按用户既有授权执行。",
-         {"run_id": TEXT, "expected_preview_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, ["run_id", "expected_preview_sha256"]),
+         {"run_id": TEXT, "expected_preview_sha256": {"type": "string", "description": "64 位十六进制预览摘要；格式在执行前 fullmatch 校验。"}}, ["run_id", "expected_preview_sha256"]),
     tool("cube_search_models", "搜索 HF 实时候选，不按架构/量化/体积过滤；其他来源可用已有搜索或浏览器工具。",
          {"query": TEXT, "limit": {"type": "integer", "minimum": 1, "maximum": 50},
           "sort": {"type": "string", "enum": ["downloads", "lastModified", "likes"]}, "credential_env": CREDENTIAL}, ["query"]),

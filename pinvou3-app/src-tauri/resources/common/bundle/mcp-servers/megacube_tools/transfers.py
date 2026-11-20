@@ -15,6 +15,8 @@ import time
 import urllib.error
 import uuid
 
+_MAX_UNKNOWN_FILE_BYTES = 32 * 1024 * 1024 * 1024
+
 from .state import (ToolError, absolute_dir, error_reply, http_url, open_url,
                     private_dir, public_url, read_json, relative_name, reply,
                     root, sha256_file, target_file, write_json)
@@ -330,6 +332,12 @@ class Transfer:
                         remaining = (total - offset) if total is not None else 0
                         if remaining > shutil.disk_usage(target.parent).free:
                             raise ToolError("INSUFFICIENT_DISK", "目标磁盘空间不足，部分文件保留。")
+                        # r12 P2-6：无 Content-Length 且调用方未传 size_bytes 时，
+                        # 上面的磁盘检查与循环内大小上限双双跳过——流式/恶意源可
+                        # 写盘至耗尽。设绝对单文件上限兜底（与商店单文件上限同口径）。
+                        if item["size_bytes"] is None and total is None \
+                                and shutil.disk_usage(target.parent).free - offset < _MAX_UNKNOWN_FILE_BYTES:
+                            raise ToolError("FILE_TOO_LARGE", "无长度信息的下载超过安全上限，已中止。")
                         write_json(meta_path, {"etag": response.headers.get("ETag"), "last_modified": response.headers.get("Last-Modified")})
                         flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
                         flags |= os.O_APPEND if offset else os.O_TRUNC
