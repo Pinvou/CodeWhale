@@ -1289,3 +1289,19 @@ test('remote proxy load status accepts only bounded categories', async () => {
       error.code === 'remote_proxy_projection_invalid');
   }
 });
+
+
+test('controlled status metadata cannot install a second workspace authority', () => {
+  let state = logic.createState();
+  assert.equal(Object.hasOwn(state.controlledDevice, 'workspaces'), false);
+  state = logic.applyControlledStatus(state, {
+    ...fixtures.controlledWaiting, workspaces: [{ id: 'untrusted-status-entry' }],
+  });
+  assert.equal(state.controlledDevice.workspaceCount, 1);
+  assert.equal(state.controlledDevice.codeModeAllowed, true);
+  assert.equal(Object.hasOwn(state.controlledDevice, 'workspaces'), false);
+  state = logic.applyControlledStatus(state, fixtures.controlledError);
+  assert.equal(state.controlledDevice.codeModeAllowed, false);
+  assert.equal(state.controlledDevice.workspaceCount, 0);
+  assert.equal(Object.hasOwn(state.controlledDevice, 'workspaces'), false);
+});

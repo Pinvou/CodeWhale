@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { renderReleasePathWorkflows } from "../../scripts/generate-remote-control-release-paths.mjs";
 import { test } from "node:test";
 import { minimatch } from "minimatch";
 import { parse } from "yaml";
@@ -418,7 +423,7 @@ test("PR and release workflows execute or route every policy-sensitive change", 
   assert.match(release, /node scripts\/remote-control-release-path-policy\.mjs/u);
   for (const marker of [
     "pinvou3-app/src/features/remote-control/**", "pinvou3-app/src-tauri/src/features/remote_control/**",
-    "pinvou3-app/src-tauri/src/app/commands/**", "remote-control-relay/docs/schemas/**",
+    "pinvou3-app/src-tauri/src/app/commands/**", "remote-control-relay/**",
     "pinvou3-app/src-tauri/capabilities/default.json", "pinvou3-app/src-tauri/packaging/windows/**",
     "scripts/remote-control-release-path-policy.mjs", ".github/workflows/windows-remote-control-evidence.yml",
   ]) {
@@ -441,7 +446,7 @@ test("PR and release workflows execute or route every policy-sensitive change", 
     "remote-control-relay/test/release-path-policy.test.js",
     "remote-control-relay/test/windows-e2e-*.test.js",
     "pinvou3-app/tests/nsis_resource_staging_contract.test.js",
-  ]) assert.ok(pr.includes(filter), `release-contract filter misses ${filter}`);
+  ]) assert.ok(prReleasePatterns.some((pattern) => globMatches(pattern, filter.replace("*", "orchestrator-contract"))), `release-contract filter misses ${filter}`);
   const samples = [
     ...REMOTE_CONTROL_RELEASE_EXACT_PATHS,
     ...REMOTE_CONTROL_RELEASE_PREFIXES.flatMap(samplesForPrefix),
@@ -454,4 +459,58 @@ test("PR and release workflows execute or route every policy-sensitive change", 
   }
   assert.ok(prReleasePatterns.some((pattern) => globMatches(pattern, "remote-control-relay/server.js")));
   assert.ok(prReleasePatterns.some((pattern) => globMatches(pattern, "pinvou3-app/src-tauri/src/features/sessions/remote_proxy/mod.rs")));
+});
+
+
+test("generated native paths are current and checked before actual CI routing", async () => {
+  const pr = await readFile(new URL("../../.github/workflows/pr-check.yml", import.meta.url), "utf8");
+  const release = await readFile(new URL("../../.github/workflows/release-packages.yml", import.meta.url), "utf8");
+  assert.deepEqual(renderReleasePathWorkflows(pr, release), { pr: pr.replaceAll("\r\n", "\n"), release: release.replaceAll("\r\n", "\n") });
+  const check = "node scripts/generate-remote-control-release-paths.mjs --check";
+  const changesSteps = parse(pr).jobs.changes.steps;
+  assert.ok(changesSteps.findIndex((step) => step.run === check) < changesSteps.findIndex((step) => step.id === "filter"));
+  assert.ok(changesSteps.some((step) => step.run === check && !step.if && !step["continue-on-error"]));
+  const releaseSteps = parse(release).jobs["check-version-bump"].steps;
+  assert.ok(releaseSteps.some((step) => step.run === check && !step.if && !step["continue-on-error"]));
+  const diff = releaseSteps.find((step) => step.id === "diff").run;
+  assert.match(diff, /node scripts\/remote-control-release-path-policy\.mjs \|\|/u);
+  const fallback = diff.split("\n").find((line) => line.includes("'^(VERSION|scripts/"));
+  assert.doesNotMatch(fallback, /remote-control|remote_control|remote-control-relay/u);
+});
+
+test("generator CLI rejects single-consumer drift and declaration additions removals and renames", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pinvou-path-generator-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "scripts"));
+  await mkdir(join(root, ".github", "workflows"), { recursive: true });
+  const files = ["scripts/generate-remote-control-release-paths.mjs", "scripts/remote-control-release-paths.mjs",
+    ".github/workflows/pr-check.yml", ".github/workflows/release-packages.yml"];
+  const originals = new Map();
+  for (const file of files) {
+    const source = await readFile(new URL(`../../${file}`, import.meta.url), "utf8");
+    originals.set(file, source);
+    await writeFile(join(root, file), source);
+  }
+  const execute = promisify(execFile);
+  const cli = join(root, files[0]);
+  await execute(process.execPath, [cli, "--check"], { timeout: 10_000 });
+  // Every generated consumer is changed independently, including both event lists.
+  for (const [file, occurrence] of [[files[2], 0], [files[3], 0], [files[3], 1]]) {
+    const source = originals.get(file);
+    let count = 0;
+    const changed = source.replace(/# BEGIN GENERATED release paths[\s\S]*?# END GENERATED release paths/gu, (block) =>
+      count++ === occurrence ? block.replace("- '.github/workflows/pr-check.yml'", "- 'removed-critical-path.yml'") : block);
+    assert.notEqual(changed, source);
+    await writeFile(join(root, file), changed);
+    await assert.rejects(execute(process.execPath, [cli, "--check"], { timeout: 10_000 }), /release_path_workflow_drift/u);
+    await writeFile(join(root, file), source);
+  }
+  const declaration = originals.get(files[1]);
+  const target = '  "pinvou3-app/src-tauri/src/lib.rs",';
+  assert.ok(declaration.includes(target));
+  for (const changed of [declaration.replace(target, `${target}\n  "pinvou3-app/src-tauri/src/new-release-input.rs",`),
+    declaration.replace(target, ""), declaration.replace(target, '  "pinvou3-app/src-tauri/src/renamed-release-input.rs",')]) {
+    await writeFile(join(root, files[1]), changed);
+    await assert.rejects(execute(process.execPath, [cli, "--check"], { timeout: 10_000 }), /release_path_workflow_drift/u);
+  }
 });
