@@ -51,7 +51,7 @@ owned_metadata() {
       echo 'Mutable Git metadata belongs to a different repository' >&2
       return 1
     fi
-    for entry in index config; do
+    for entry in HEAD index config; do
       owned_location "$("${git_command[@]}" rev-parse --path-format=absolute --git-path "$entry")" "$metadata"
     done
   done
@@ -116,6 +116,22 @@ if [[ ! "$entry" =~ ^160000\ ([0-9a-f]{40})\ 0$'\t'CodeWhale$ ]]; then
   exit 1
 fi
 gitlink="${BASH_REMATCH[1]}"
+# A reused workspace can retain an initialized module with no usable HEAD
+# after preparation stops before its first checkout. Even submodule sync can
+# fail before update gets a chance to fetch. Recover only the owned checkout,
+# from the already-validated public source and exact indexed commit; never
+# substitute a branch tip or change the parent's index.
+if [[ -e "$root/CodeWhale/.git" ]] &&
+   ! git -C "$root/CodeWhale" rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1; then
+  printf 'CODEWHALE_CI_RECOVERY reason=unresolved-local-head pinned_only=true\n'
+  if ! git -C "$root/CodeWhale" cat-file -e "${gitlink}^{commit}" 2>/dev/null; then
+    fetch_options=(--no-tags --no-recurse-submodules --no-write-fetch-head)
+    if [[ "$history" != true ]]; then fetch_options+=(--depth=1); fi
+    git -C "$root/CodeWhale" fetch "${fetch_options[@]}" https://github.com/Pinvou/CodeWhale.git "$gitlink"
+  fi
+  git -C "$root/CodeWhale" checkout --detach --force "$gitlink"
+fi
+
 git -C "$root" submodule sync -- CodeWhale
 git -C "$root" submodule update --init --recursive --checkout --force -- CodeWhale
 checkout="$(cd "$root/CodeWhale" && pwd -P)"

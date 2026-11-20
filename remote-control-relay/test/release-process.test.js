@@ -628,7 +628,18 @@ for (const shell of ["powershell.exe", "pwsh"]) {
       const code = "require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'inherit'}).unref();process.exit(0)";
       const script = `$ErrorActionPreference='Stop'; . ${quote(guard)};
         try { Invoke-PinvouWhitelistedProcess -FilePath ${quote(process.execPath)} -ExpectedSha256 '${nodeHash}' -Arguments @('-e',${quote(code)}) -TimeoutMilliseconds 1000 -RetainSuccessfulScope | Out-Null;throw 'incomplete-pipes-accepted' }
-        catch { $e=$_.Exception;while($e.InnerException){$e=$e.InnerException};if($e.Message -ne 'e2e_process_timeout' -or $e.ChildExitCode -ne 0 -or $e.CleanupFailed){throw} };
+        catch { $e=$_.Exception;while($e.InnerException){$e=$e.InnerException};
+          if($e.Message -ne 'e2e_process_timeout' -or $e.ChildExitCode -ne 0 -or $e.CleanupFailed){
+            try {
+              $rootExit=$null;$cleanup=$null;
+              if($e.PSObject.Properties['ChildExitCode'] -and $e.ChildExitCode -is [int]){$rootExit=$e.ChildExitCode};
+              if($e.PSObject.Properties['CleanupFailed'] -and $e.CleanupFailed -is [bool]){$cleanup=$e.CleanupFailed};
+              $kind=if($e.Message -eq 'e2e_process_timeout'){'timeout'}else{'other'};
+              [Console]::Error.WriteLine('[windows-pipe-retirement-witness] '+(@{phase='zero-root';failure=$kind;root_exit=$rootExit;cleanup_failed=$cleanup}|Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress))
+            } catch {};
+            throw
+          }
+        };
         $next=Invoke-PinvouWhitelistedProcess -FilePath ${quote(process.execPath)} -ExpectedSha256 '${nodeHash}' -Arguments @('-e','process.stdout.write("next")') -TimeoutMilliseconds 5000;
         if($next.ExitCode -ne 0 -or $next.StdOut -ne 'next'){throw 'next-command-failed'};[Console]::Out.Write('retired-and-recovered')`;
       const result = ps(shell, script);
