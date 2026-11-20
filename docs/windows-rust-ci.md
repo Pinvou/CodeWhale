@@ -1,53 +1,27 @@
 # Windows Rust CI
 
+> 相关 Windows 接手/验收史料（2026-11 回填留档）：[`Windows迁移与维护接手手册.md`](./Windows迁移与维护接手手册.md) · [`Windows端功能清单与测试用例.md`](./Windows端功能清单与测试用例.md)。
+
 ## Coverage contract
 
 `windows-rust-test` is the required native-Windows **Rust** job (the required
-gate also has related native-runtime, rustup-repair, static-updater and
-relay jobs — see the related-jobs section below). It is
-a two-leg matrix on the configured Windows heavy runner pool (default
-`windows-latest`; `fail-fast: false`, `max-parallel: 2`);
-the required gate aggregates the matrix result, so both legs must pass:
+gate also has `windows-codex-runtime-test`, `macos-codex-runtime-test`,
+`windows-rustup-repair-test`, and `relay-test`, see the related-jobs section).
+It is a two-leg matrix on `windows-latest` (`fail-fast: false`,
+`max-parallel: 2`); the required gate aggregates the matrix result, so both
+legs must pass:
 
 - `all-targets-check` runs the metadata-only checks (steps 8-10 below).
 - `regression` links the `pinvou3_lib` test executable and runs everything
-  that needs it (steps 11-17 below).
-
-`PINVOU_WINDOWS_ENABLED=false` disables Windows independently of
-`PINVOU_MACOS_ENABLED`. With Windows enabled and macOS disabled, Windows
-failures still fail the required gate; macOS results do not block PR merges.
-Self-hosted Windows runners require the native MSVC/Windows SDK toolchain and
-independent Cargo/Rustup directories. The dev-profile override is updated
-idempotently so repeated jobs cannot accumulate duplicate TOML tables.
-
-For self-hosted runners on networks with unreliable crates.io access, apply the
-network configuration to each runner's actual `CARGO_HOME/config.toml` rather
-than the administrator's home. A sparse registry mirror and
-`[http] multiplexing = false` avoid repeated index requests over unstable HTTP/2
-connections; keep `Cargo.lock` and its checksums unchanged. Windows Cargo uses
-Schannel, so the runner account must also be able to reach the certificate
-authority's CRL/OCSP endpoints through its configured network route. Keep TLS
-certificate and revocation checks enabled, and verify dependency download and
-native compilation as the runner account before enabling the pool.
+  that needs it (steps 11-16 below).
 
 Routing is job level and identical for both legs. The job runs on every push
 to `main` (cumulative Windows coverage plus cache warm-up) and on ready,
 non-draft pull requests matching the `rust_full` or `cli_rust` paths filters,
-or `rust_code` plus the explicit `ci:full-rust` label. On top of that,
-trusted community backflow pull requests are classified from the actual
-base→head diff (`backflow_mode` in the `changes` job): `full` and
-`windows_full` run this job regardless of the path filters, `ordinary`
-backflows fall back to the same `rust_full`/`cli_rust`/label routing, and
-malformed classifications (and policy/API/diff resolution failures) fail
-closed to `full`, while a trusted diff that is not a pure mechanical release
-resolves to `windows_full` (Windows-high-risk content), `portable_rust`
-(cross-platform Rust — cumulative Windows coverage defers to `main`), or
-`non_rust`; a pure mechanical release resolves to `release` and skips this
-job. Merge Queue does
-not repeat this native leg (Linux validates the combined tree) except when
-policy/API/diff resolution fails and the mode resolves to `full`; drafts,
-closed, and non-Rust pull requests are skipped. The matrix changes
-scheduling, not the set or failure semantics of the checks.
+or `rust_code` plus the explicit `ci:full-rust` label; Merge Queue does not
+repeat these legs (Linux validates the combined tree), and drafts, closed,
+and non-Rust pull requests are skipped. The matrix changes scheduling, not
+the set or failure semantics of the checks.
 
 `rust_full` fails closed: all of `pinvou3-app/src-tauri/**/*.rs` plus shared
 manifests (`**/Cargo.toml`, `**/Cargo.lock`, `**/deny.toml`, `**/build.rs`,
@@ -55,10 +29,9 @@ manifests (`**/Cargo.toml`, `**/Cargo.lock`, `**/deny.toml`, `**/build.rs`,
 the `CodeWhale` submodule, `.gitmodules`) and the loongarch64 cross-pipeline
 build scripts the rust legs execute (`scripts/ci-loongarch64-toolchain.sh`,
 `scripts/ci-loongarch64-sysroot.sh`, `scripts/ci-build-linux-loongarch64.sh`)
-trigger it, except the documented
-low-risk leaf features `feedback`, `personas`, and `pet` (their registration
-or app command surface still matches). `cli_rust` covers `pinvou-cli` Rust
-paths plus the compile inputs
+trigger it, except the documented low-risk leaf features `feedback`,
+`personas`, and `pet` (their registration or app command surface still
+matches). `cli_rust` covers `pinvou-cli` Rust paths plus the compile inputs
 the CLI embeds (`pinvou-cli/.cargo/**`, `pinvou-cli/**/*.manifest`,
 `pinvou3-app/src-tauri/tauri.conf.json`, the `CodeWhale` submodule, the
 connector lock tables `pinvou3-app/src-tauri/resources/platforms/**`, the
@@ -80,22 +53,15 @@ order:
    `git submodule update --init --recursive -- CodeWhale`.
 2. `dtolnay/rust-toolchain@stable`, then `rustup default` aligned to whatever
    the `rust-toolchain.toml` selects (same toolchain as local development).
-3. (`both legs`, `pwsh`) `dev profile 内存边界覆盖`: since the v0.9.12
-   upgrade, the dev profile's dependency-level `O2` makes rustc/LLVM exceed
-   the 16 GB hosted runner while compiling `codewhale-tui` (lib), and
-   tightening codegen-units instead pushed the compile past the job cap.
-   This job-only step installs a `[profile.dev.package.codewhale-tui]`
-   `opt-level = 0` override to `CARGO_HOME/config.toml` (package-level
-   profile overrides can only come from config, not an environment
-   variable) without touching the repository `Cargo.toml`; local builds keep
-   their dependency-level `O2` (the Linux `rust-test` job applies the same
-   override), and release artifacts are still governed by the release
-   profile.
+3. (`both legs`, `pwsh`) `dev profile 内存边界覆盖(codewhale-tui O0,仅本 job)`:
+   append `[profile.dev.package.codewhale-tui] opt-level = 0` to
+   `CARGO_HOME/config.toml` before anything compiles — a package-level
+   profile override can only come from config, and the repo `Cargo.toml`
+   stays untouched (see "Link memory on the hosted runner" for why both
+   legs need this crate back at O0).
 4. Compile `rustc-stack-wrapper.exe` (`rustc -O`) and export it as
    `RUSTC_WRAPPER`: compile-time-only `RUST_MIN_STACK=16MiB`; the `.exe` form
-   avoids the cmd.exe 8191-character command-line limit (the wrapper is
-   referenced by absolute `${{ github.workspace }}` path so it resolves
-   independently of the step's working directory).
+   avoids the cmd.exe 8191-character command-line limit.
    `AWS_LC_SYS_PREBUILT_NASM=1` substitutes for the NASM the runner lacks.
 5. (`both legs`) `Probe and export the Windows lld link flags`: compile a
    hello-world with `-C linker-features=+lld` (falling back to the explicit
@@ -105,35 +71,39 @@ order:
    into the cold build. See the "Link memory on the hosted runner" section
    for why lld is required.
 6. Cargo cache restore — see the "Cache" section.
-7. (`both legs`) `Windows Rust 缓存基线诊断`: print the
+7. (`both legs`, `pwsh`) `Windows Rust cache baseline diagnostics`: print the
    `WINDOWS_RUST_CACHE` marker (target presence plus fingerprint and
    direct dependency-artifact counts, no recursive scan) so cold-cache
    regressions are visible per leg without leaking cache contents.
 8. (`all-targets-check`) `cargo check --manifest-path
    pinvou3-app/src-tauri/Cargo.toml --all-targets --features dev-tools
    --locked`.
-9. (`all-targets-check`) `cargo check --manifest-path pinvou-cli/Cargo.toml --workspace
-   --all-targets --locked`: the CLI's Windows-only branches (exe/cmd
-   candidates, `cmd /D /S /C` shims, taskkill tree kill, `CREATE_NO_WINDOW`)
-   compile-check only on a Windows runner.
+9. (`all-targets-check`) `cargo check --manifest-path pinvou-cli/Cargo.toml
+   --workspace --all-targets --locked`: the CLI's Windows-only branches
+   (exe/cmd candidates, `cmd /D /S /C` shims, taskkill tree kill,
+   `CREATE_NO_WINDOW`) compile-check only on a Windows runner.
 10. (`all-targets-check`) `cargo check --manifest-path pinvou-cli/Cargo.toml
     -p adapter-gaia --features test-support --all-targets --locked`: the
-    adapter-gaia targets behind the `test-support` feature (and the
-    Windows-gated modules they carry) compile only on a Windows runner —
-    the Linux CLI leg never compiles them, so type-checking there proves
-    nothing about these targets.
-11. (`regression`) Link check: `cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml
-    --lib --no-run --locked --features benchmark-hooks --message-format=json`, capturing
-    the `pinvou3_lib` test executable as `PINVOU3_TEST_EXE`. The `benchmark-hooks`
-    feature compiles the headless-bridge contract module that step 16's
-    `windows_attachment_runtime_stays_security_gated` filter pins; without it that
-    filter would match zero tests. The yaml records the leg's wall clock rising
-    accordingly (~21m → ~56m) as the price of the filters matching a real test binary.
-12. (`regression`) Embed the Common-Controls v6 manifest (resource `#1`) with the Windows SDK
+    `dataset_contract` integration target is gated behind
+    `required-features = ["test-support"]` and is silently skipped by the
+    workspace-wide run of step 9, so this leg must at least compile it
+    (`--all-targets` is required: a bare `cargo check -p` builds lib+bins
+    only, and `required-features` can only filter targets out of the selected
+    set, never add the test target in).
+11. (`regression`, `pwsh`) Link check: `cargo test --manifest-path
+    pinvou3-app/src-tauri/Cargo.toml --lib --no-run --locked --features
+    benchmark-hooks --message-format=json`, capturing the `pinvou3_lib` test
+    executable as `PINVOU3_TEST_EXE`. The `benchmark-hooks` feature compiles
+    the headless-bridge contract module that step 15's
+    `windows_attachment_runtime_stays_security_gated` filter pins; without it
+    that filter would match zero tests. The yaml records the leg's wall clock
+    rising accordingly (~21m → ~56m) as the price of the filters matching a
+    real test binary.
+12. (`regression`, `pwsh`) Embed the Common-Controls v6 manifest (resource `#1`) with the Windows SDK
     `mt.exe`: `muda` statically imports `TaskDialogIndirect`, which exists only
     in the Common-Controls v6 side-by-side assembly, and Windows ignores a
     side-by-side `<exe>.manifest` once `link.exe` embedded a default one.
-13. (`regression`) Run `python scripts/ci-windows-imports-diagnose.py` on `PINVOU3_TEST_EXE`
+13. (`regression`, `pwsh`) Run `python scripts/ci-windows-imports-diagnose.py` on `PINVOU3_TEST_EXE`
     — a non-blocking PE import-table diagnostic (`continue-on-error`), after
     step 12 so the embedded manifest exempts SxS DLLs such as `comctl32`.
 14. (`regression`) Run the CodeWhale Windows PowerShell regression filters
@@ -148,19 +118,13 @@ order:
     same compiler as every other leg. The step unsets `SHELL` so the Windows
     fallback to `pwsh.exe` is deterministic, and each filter must match at
     least one test so a rename cannot silently pass.
-15. (`regression`) `Windows 静态更新契约`: `npm --prefix pinvou3-app run
-    test:windows-static-updater` against the runner's preinstalled Node
-    (dependency-free, so no `setup-node`/`npm ci`).
-    The same contract also has a dedicated fast job on the
-    `windows_static_updater` path filter — see the next section.
-16. (`regression`) `Windows 原子替换状态机回归`: run the patched application
+15. (`regression`) `Windows 原子替换状态机回归`: run the patched application
     binary directly — re-invoking `cargo test` could relink and drop the
     embedded manifest — once per filter with `--test-threads=1`; each filter
     must match at least one test (`running [1-9][0-9]* tests?`) so a renamed
     test fails loudly:
 
     - `platform::filesystem::tests::windows_`
-    - `platform::process::tests::`
     - `platform::paths::tests::managed_python_`
     - `cross_process_lock`
     - `artifact_read_recovers_an_occupied_1177_layout_after_release`
@@ -172,14 +136,12 @@ order:
     - `multiagent_depth_guard_enforces_two_level_inputs`
     - `features::marketplace::tests::reinstall_upload_with_unlocked_pip_dependencies_contract`
     - `features::marketplace::scope::tests::`
+    - `reconcile_`
+    - `release_env_defaults_guard`
     - `before_landing`
     - `before_anything_lands`
     - `preserves_consent_state`
     - `command_bodies_register_deny_first`
-    - `shared_apply_preserves_order`
-    - `production_skill_gate_refusal`
-    - `deny_decision_keeps_lazy_alias`
-    - `app::connector_consent_tests::`
     - `vacuous_uninstall_keeps_fresh_consent_entries`
     - `standalone_tencent_docs_preset_deny_entry_excludes_the_materialized_dir`
     - `restore_of_package_missing_entry_registers_no_deny_entry`
@@ -224,67 +186,42 @@ order:
     - `features::sessions::`
     - `run_with_timeout_reaps_and_stays_bounded`
     - `reap_killed_child_`
+    - `platform::process::tests::output_capture_`
+    - `platform::process::tests::completed_process_cannot_bypass_output_capture_limit`
+    - `platform::process::tests::completed_parent_does_not_wait_for_descendant_capture_handles`
+    - `platform::process::tests::plain_output_limit_also_terminates_the_process_tree`
+    - `platform::process::tests::read_capture_`
+    - `platform::process::tests::writing_descendant_`
     - `features::browser::platform::windows::tests::`
-    - `features::updater::platform::windows::tests::`
+    - `features::monitor::cpu_math::tests::`
     - `features::monitor::platform::windows_cpu::tests::`
     - `features::monitor::platform::windows_memory::tests::`
     - `features::monitor::platform::windows_gpu::tests::`
     - `features::remote_control::platform::windows::tests::`
-    - `app::commands::remote_control::reader_resume_tests::`
-    - `features::remote_control::controller::controlling_service::resume_projection_tests::`
-    - `features::remote_control::controller::controlling::tests::`
-    - `features::remote_control::controller::controlling_service::tests::resume_sequence_reopens_business_only_after_controller_resumed`
-    - `features::remote_control::controller::controlling_inbound::tests::`
-    - `features::remote_control::controller::controlling_service::inbound_tests::`
-    - `features::remote_control::controller::transfer::staging::tests::`
     - `features::computer_use::platform::windows::tests::`
+    - `features::computer_use::platform::virtual_display::windows_virtual::tests::`
     - `failed_probe_never_deletes_an_existing_store_windows`
     - `features::voice_shortcut::platform::tests::`
     - `app::commands::dependencies::platform::windows::tests::`
     - `features::codex_acp::platform::windows::tests::`
-    - `features::codex_acp::install::tests::`
+    - `features::codex_acp::platform::windows::shutdown_tests::`
+    - `features::codex_acp::shutdown::tests::`
+    - `features::system_tray::`
+    - `install_child_guard_drop_reclaims_tree_and_settled_guards_never_rekill`
     - `platform::os::windows::`
     - `windows_attachment_runtime_stays_security_gated`
 
-    The `features::sessions::` and `features::updater::platform::windows::tests::`
-    filters cover the atomic-replacement state machine that the static
-    updater exercises end to end; the `filesystem`/`artifact_*` filters cover
-    the same writer-side invariants at the unit level.
-    The isolated preconnection regression emits `READER_PRECONNECT` phase
-    markers for host creation, real socket reconnects, registration and each
-    deadline scenario. Markers contain only fixed phase names and monotonic
-    elapsed time. When its outer watchdog fires, the last marker distinguishes
-    a fixture/transport wait from a worker deadline failure; it does not prove
-    which one failed without that evidence. Production twenty-second deadlines,
-    inner assertions and the outer watchdog remain unchanged.
-    The A controller filters execute the authenticated resume status consumer,
-    its first/second-disconnection telemetry, exact state/owner publication
-    fences, raw DTO/shared fixture contract, and existing reader-authorized
-    service sequence. They run the linked product executable with the same
-    nonzero-match guard, independently of the B reader/worker filters. Controlled
-    Relay and telemetry ports do not establish a two-machine/WebView or upload
-    E2E; full Linux and Windows gates remain required for remote-control changes.
-    The two controller inbound prefixes execute the A-only item/byte budgets,
-    control/disconnect ordering, real port/reader failure handling and owner
-    replacement contracts. They run in this same linked and patched binary;
-    `all-targets-check` alone is not behavior coverage for these paths.
-17. (`regression`) `pinvou-cli Windows-gated unit tests`: the `pinvou-cli`
+16. (`regression`) `pinvou-cli Windows-gated unit tests`: the `pinvou-cli`
     workspace's own cfg(windows) unit tests run on no other leg — the Linux
     CLI leg cannot compile them and the all-targets-check leg only
     type-checks them — so this step runs each pinned filter directly with
     per-filter zero-match and `test result: ok` guards:
-    `windows_batch_tests`,
-    `rebind_nesting_rejection_folds_case_where_the_os_folds`,
-    `rebind_noop_fold_still_collapses_windows_alias_spellings` (`pinvou-cli`),
-    `dataset_windows` and `fetch_windows_acl` (`adapter-gaia`), and
-    `private_prediction::tests::windows_` plus `windows_private_acl::tests::`
-    (`benchmark-core`).
-
-    The private-ACL regressions include owned files and directories whose
-    access rules omit `WRITE_OWNER`, as on ordinary runner accounts. Hardening
-    must not request an ownership change when the current user already owns
-    the entry. The protected DACL and exact owner/SYSTEM/Administrators grants
-    remain mandatory, including on repeated calls.
+    `windows_batch_tests` (the BatBadBut std-batch hardening lock),
+    `rebind_nesting_rejection_folds_case_where_the_os_folds` and
+    `rebind_noop_fold_still_collapses_windows_alias_spellings`
+    (`pinvou-cli`), `dataset_windows` and `fetch_windows_acl`
+    (`adapter-gaia`), and `private_prediction::tests::windows_` plus
+    `windows_private_acl::tests::` (`benchmark-core`).
 
 ## Related jobs that share this gate
 
@@ -292,32 +229,20 @@ The `windows-rust-test` job is not the only native-Windows or routing entry
 in `pr-check.yml`; the doc covers the others so the routing stays
 understandable in one place:
 
-- `windows-static-updater-contract` (`windows_static_updater` filter): a
-  10-minute Windows job running the same `test:windows-static-updater`
-  contract when only the updater scripts/tests change, without paying for
-  the full Rust matrix.
+- `windows-codex-runtime-test` (`windows_codex`/`acp_runtime` filters): a
+  15-minute Windows job natively running the browser-wrapper
+  lifecycle/lazy regressions, the runtime manifest lifecycle contract, the
+  runtime packaging contract, the runtime cache contract, the NSIS
+  resource-staging check, and the ACP bridge runtime smoke.
+- `macos-codex-runtime-test` (`acp_runtime` filter): a 20-minute macOS job
+  that prepares the universal ACP Bridge and runs the native Codex/Claude
+  runtime packaging smoke.
 - `windows-rustup-repair-test` (`windows_rustup_repair` filter): installs
   the pinned toolchain in an isolated directory, breaks it, and verifies
   the download-source fallback and reinstall path
   (`test:windows-rustup-repair`).
-- `windows-codex-runtime-test` (`windows_codex`/`acp_runtime` filters):
-  native verification of the browser-wrapper lifecycle, Node + ACP Bridge
-  preparation, and installer resources. Out of scope for this document.
-- `windows-runtime-test` (`windows_runtime` filter): a 10-minute Windows job
-  running the private-runtime cache behavior regression
-  (`tests/windows_runtime_cache_behavior.ps1`).
-- `backflow-portability` (`backflow_infra` and the trusted-backflow
-  routing): runs the dependency-light backflow scheduling and cross-platform
-  contract tests on a Windows/macOS/Linux matrix, and reads back the
-  processing-platform provenance of the pull request. (The `backflow_mode`
-  classification that routes `windows-rust-test` is computed separately by
-  `scripts/ci-rust-policy.py` in the `changes` job; this job consumes the
-  trusted-backflow routing and verifies portability, it does not produce the
-  classification.)
-- `team-relay-hub-test` (`team_relay_hub` filter): full Hub suite plus a
-  high-severity dependency audit against a Postgres 16 service container.
-- `relay-test` (`relay` filter): remote-control relay suite and deploy
-  script syntax checks on Linux.
+- `relay-test` (`relay` filter): a 10-minute Linux job running the
+  remote-control relay suite (`npm --prefix remote-control-relay test`).
 
 ## Why the legs are independent
 
@@ -346,21 +271,21 @@ isolated runners, but
 `save-if` only allows the `regression` leg on `refs/heads/main` to write it
 (that leg owns the linked application and CodeWhale test artifacts; the step
 also sets `cache-on-failure: true`, so a failed `main` regression run still
-saves the compiled artifacts), so the
+saves the compiled artifacts — otherwise the namespace stays cold until a
+green run lands), so the
 split adds neither a second writer nor a new namespace, pull requests never
 rewrite the entry, and usage stays within the repository-wide 10GB budget.
 The saved entry holds the regression leg's build artifacts, so much of the
 dependency graph stays warm for the `all-targets-check` leg; the application
 crate's own `--all-targets --features dev-tools` metadata is the part compiled
 cold on every run. That residual cost is visible in the timing lines below.
-The `pinvou-cli` workspace joined the entry on 2026-10-15 (both legs compile
-it — the check leg's manifest check and the regression leg's filtered CLI
+The `pinvou-cli` workspace was audited 2026-10-15 and joined the entry on 2026-10-16 (#711, f4c267865f) (both legs compile
+it — the check leg's manifest checks and the regression leg's filtered CLI
 test runs — so its target directory needs caching here; before that every
 run cold-compiled the CLI tree on the slowest leg). Node/npm setup is absent —
 under the debug profile tauri's `generate_context!` uses `devUrl`, `dist/`
 is never packaged, and `build.rs` only depends on `tauri-build`/`cc` —
-saving 3-5 minutes per run; the regression leg's static-updater step uses
-the runner's preinstalled Node without installing anything.
+saving 3-5 minutes per run.
 
 ## Link memory on the hosted runner
 
@@ -378,9 +303,9 @@ post-LTO objects), `CARGO_PROFILE_DEV_DEBUG=0` (no DWARF; panic file:line
 comes from `Location` rodata), and `RUSTFLAGS` selecting the bundled lld
 with `/threads:1` so lld-link's internal threading and the final link stay
 serial (the linux leg uses the gcc-driver equivalents `-fuse-ld=lld`,
-`--threads=1` plus a `--thinlto-jobs=1` that is a no-op there — no bitcode
-reaches the linker — and stays only pending a separately evaluated removal;
-the Windows probe never sets it). Growing the hosted runner's pagefile is not an option: a
+`--thinlto-jobs=1`, `--threads=1`; `--thinlto-jobs` is a no-op on both legs
+because no bitcode reaches the linker — it stays only pending a separately
+evaluated removal). Growing the hosted runner's pagefile is not an option: a
 pagefile change requires a reboot a CI job cannot perform,
 so peak link memory is cut below RAM instead. The linker-selection flags are
 probed per toolchain by step 5, since the stable surface for picking lld has
@@ -435,7 +360,7 @@ toolchain rollover per channel bump; the cap
 applies per leg, since either leg can still compile cold on a cache miss.
 
 On failure, read the import-diagnostic output (step 13) and the failing filter
-name (steps 14, 16 and 17); cache restore misses stay visible rollback signals. Do not
+name (steps 14-16); cache restore misses stay visible rollback signals. Do not
 recover time by removing a regression filter, moving a step to the other leg
 without its prerequisites, skipping the manifest or import contract, changing
 failures to warnings, or adding another independent large target cache beyond

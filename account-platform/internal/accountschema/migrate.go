@@ -42,6 +42,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if err := validateOutboxAggregateLookup(input); err != nil {
 		return nil, err
 	}
+	if err := validateFinancialJSONObjects(input); err != nil {
+		return nil, err
+	}
 	if err := validatePaymentCreditAdmissions(input); err != nil {
 		return nil, err
 	}
