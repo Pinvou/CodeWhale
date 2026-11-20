@@ -111,6 +111,26 @@ try {
         await page.waitForFunction(label => [...document.querySelectorAll('#operations-probe .adm-operation-facts > div')].find(node => node.querySelector('dt')?.textContent === window.statusLabelsProbe.operationsCopy().attemptStatus)?.querySelector('dd')?.textContent === label, {}, expectedLabel);
       }
     });
+    await run(`${language}: batch candidates and selected summary use the safe status label`, async page => {
+      await navigateFixture(page, `${origin}/tests/fixtures/account-status-labels-ui.html?language=${language}&reconciliation=1&batch=1`, signal => page.waitForSelector('.adm-reconciliation-navigation button:nth-child(2)', { signal }));
+      await page.click('.adm-reconciliation-navigation button:nth-child(2)');
+      await page.waitForSelector('.adm-case-batch-picker');
+      await page.$eval('.adm-case-batch-picker input[type="date"]', input => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '2026-10-08');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      await page.click('.adm-case-batch-picker button[type="submit"]');
+      await page.waitForSelector('.adm-case-batch-candidates button');
+      const candidate = await page.$eval('.adm-case-batch-candidates button span', node => node.textContent);
+      const unknownStatus = `${expected[language].unknown} (FUTURE_REVIEW)`;
+      assert.equal(candidate, `WECHAT · 2026-10-08 · ${unknownStatus}`);
+      await page.click('.adm-case-batch-candidates button');
+      await page.waitForFunction(label => [...document.querySelectorAll('.adm-case-batch-summary dd')].some(node => node.textContent === label), {}, unknownStatus);
+      const id = await page.$eval('.adm-case-batch-summary code', node => node.textContent);
+      assert.equal(id, '11111111-1111-4111-8111-111111111111');
+      await page.waitForFunction(runID => window.statusLabelsProbe.reconciliationCalls.some(call => call.kind === 'cases' && call.run_id === runID), {}, id);
+    });
     await run(`${language}: real reconciliation list, detail and filter retain locale and raw query values`, async page => {
       const review = { zh: '复核中', en: 'Under review', ja: '確認中' };
       await navigateFixture(page, `${origin}/tests/fixtures/account-status-labels-ui.html?language=${language}&reconciliation=1`, signal => page.waitForFunction(() => window.statusLabelsProbe && document.querySelector('section nav button:nth-child(2)'), { signal }));

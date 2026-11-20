@@ -173,8 +173,8 @@ function Workspace({ client, me, language, copy, repairCopy, operationCopy, onVi
         <button type="button" disabled={writing} aria-pressed={caseScope === 'all'} onClick={() => clearRun('all')}>{copy.caseScopeAll}</button>
         {caseScope !== 'none' && <button type="button" disabled={writing} onClick={() => clearRun('none')}>{copy.caseScopeClear}</button>}
       </div>
-      {caseScope === 'batch' ? <ReconciliationBatchSummary id={runID} item={runContext} copy={copy} /> : caseScope === 'all' ? <p>{copy.caseScopeAllActive}</p> : null}
-      <AdminReconciliationBatchPicker {...{client,copy}} initialChannel={runContext?.reconciliation_run_id === runID ? runContext.channel : channel} initialDate={runContext?.reconciliation_run_id === runID ? runContext.business_date : date} selectedID={runID} onChoose={chooseRun} disabled={writing} />
+      {caseScope === 'batch' ? <ReconciliationBatchSummary id={runID} item={runContext} copy={copy} language={language} /> : caseScope === 'all' ? <p>{copy.caseScopeAllActive}</p> : null}
+      <AdminReconciliationBatchPicker {...{client,copy,language}} initialChannel={runContext?.reconciliation_run_id === runID ? runContext.channel : channel} initialDate={runContext?.reconciliation_run_id === runID ? runContext.business_date : date} selectedID={runID} onChoose={chooseRun} disabled={writing} />
     </>}
     <div className="adm-reconciliation-toolbar" role="group" aria-label={copy.reconciliationFilters}>
       {tab === 'runs' ? <><label>{copy.channel}<select disabled={busy} value={channel} onChange={event => setChannel(event.target.value)}>{['WECHAT', 'ALIPAY', 'UNIONPAY'].map(value => <option key={value}>{value}</option>)}</select></label><label>{copy.businessDate}<input type="date" disabled={busy} value={date} onChange={event => setDate(event.target.value)} /></label></> :

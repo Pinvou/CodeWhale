@@ -71,7 +71,9 @@ func TestCommerceClosureCallbacksRespectSubjectFence(t *testing.T) {
 			}
 			snapshot := func() string {
 				var b []byte
-				if e = c.QueryRow(ctx, `SELECT jsonb_build_object('mapping',(SELECT to_jsonb(m) FROM commerce_customer_mappings m WHERE id=$1),'job',(SELECT to_jsonb(j) FROM commerce_customer_sync_jobs j WHERE id=$2),'evidence',(SELECT jsonb_agg(e ORDER BY e.id) FROM commerce_customer_sync_evidence e WHERE job_id=$2),'user',(SELECT to_jsonb(u) FROM users u WHERE id=$3))`, job.MappingID, job.ID, me.UserID).Scan(&b); e != nil {
+				// Only the new administrative case link may be attached. Original
+				// closure, PII, job, mapping and synchronization facts stay exact.
+				if e = c.QueryRow(ctx, `SELECT jsonb_build_object('mapping',(SELECT to_jsonb(m) FROM commerce_customer_mappings m WHERE id=$1),'job',(SELECT to_jsonb(j)-'commerce_repair_case_id' FROM commerce_customer_sync_jobs j WHERE id=$2),'evidence',(SELECT jsonb_agg(e ORDER BY e.id) FROM commerce_customer_sync_evidence e WHERE job_id=$2),'user',(SELECT to_jsonb(u) FROM users u WHERE id=$3))`, job.MappingID, job.ID, me.UserID).Scan(&b); e != nil {
 					t.Fatal(e)
 				}
 				return string(b)
@@ -130,8 +132,8 @@ func TestCommerceClosureCallbacksRespectSubjectFence(t *testing.T) {
 				if e = <-closing; e != nil {
 					t.Fatal(e)
 				}
-				if e = <-done; e != nil {
-					t.Fatal(e)
+				if e = <-done; !errors.Is(e,account.ErrConflict) {
+					t.Fatal("closing callback acquired business completion authority",e)
 				}
 				var status, user string
 				if e = c.QueryRow(ctx, `SELECT m.status,u.status FROM commerce_customer_mappings m JOIN users u ON u.id=m.subject_id WHERE m.id=$1`, job.MappingID).Scan(&status, &user); e != nil || status != "IN_PROGRESS" || user != "CLOSING" {

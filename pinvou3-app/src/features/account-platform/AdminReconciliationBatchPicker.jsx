@@ -1,17 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { statusLabel } from './status-label.js';
 import { requireFinanceID } from './finance-contract.js';
 import { loadFinancePage } from './admin-finance-pagination.js';
 import { reconciliationDayRange, reconciliationReadError } from './reconciliation-contract.js';
 
 const CHANNELS = ['WECHAT', 'ALIPAY', 'UNIONPAY'];
 
-export function ReconciliationBatchSummary({ id, item, copy }) {
+export function ReconciliationBatchSummary({ id, item, copy, language }) {
   if (!id) return <p>{copy.caseBatchNotSelected}</p>;
   const known = item?.reconciliation_run_id === id ? item : null;
   const fields = known ? [
     [copy.channel, known.channel],
     [copy.businessDate, known.business_date],
-    [copy.status, copy.batchStatuses[known.status] || known.status],
+    [copy.status, statusLabel(known.status, language, copy.batchStatuses)],
     [copy.count, known.case_count],
     [copy.rows, known.provider_row_count],
   ] : [];
@@ -22,7 +23,7 @@ export function ReconciliationBatchSummary({ id, item, copy }) {
   </div>;
 }
 
-export function AdminReconciliationBatchPicker({ client, copy, initialChannel, initialDate, selectedID, onChoose, disabled }) {
+export function AdminReconciliationBatchPicker({ client, copy, language, initialChannel, initialDate, selectedID, onChoose, disabled }) {
   const [channel, setChannel] = useState(initialChannel);
   const [date, setDate] = useState(initialDate);
   const [knownID, setKnownID] = useState('');
@@ -79,7 +80,7 @@ export function AdminReconciliationBatchPicker({ client, copy, initialChannel, i
     {result?.kind === 'error' && <div role="alert"><p>{copy[result.code === 'permissions' ? 'permission' : result.code] || copy.unavailable}</p><button type="button" disabled={disabled} onClick={() => void load(result)}>{copy.refresh}</button></div>}
     {page?.items.length > 0 && <ul className="adm-case-batch-candidates">{page.items.map(item => <li key={item.reconciliation_run_id}>
       <button type="button" disabled={disabled} aria-pressed={selectedID === item.reconciliation_run_id} onClick={() => onChoose(item.reconciliation_run_id, item)}>
-        <span>{[item.channel, item.business_date, copy.batchStatuses[item.status] || item.status].filter(Boolean).join(' · ')}</span>
+        <span>{[item.channel, item.business_date, statusLabel(item.status, language, copy.batchStatuses)].filter(Boolean).join(' · ')}</span>
         <code dir="ltr">{item.reconciliation_run_id}</code>
         <small>{copy.count}: {item.case_count ?? copy.caseBatchNotProvided} · {copy.rows}: {item.provider_row_count ?? copy.caseBatchNotProvided}</small>
       </button>

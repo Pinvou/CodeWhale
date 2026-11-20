@@ -40,7 +40,14 @@ const operationsClient = {
   }))),
 };
 const reconciliationClient = {
-  reconciliationRuns: async query => { state.reconciliationCalls.push({ kind: 'runs', ...query }); return { items: [], next_cursor: null }; },
+  reconciliationRuns: async query => {
+    state.reconciliationCalls.push({ kind: 'runs', ...query });
+    const showBatch = new URLSearchParams(location.search).has('batch');
+    return collection(showBatch ? [{
+      reconciliation_run_id: usageID, channel: 'WECHAT', business_date: '2026-10-08',
+      status: 'FUTURE_REVIEW', case_count: 1, provider_row_count: 2,
+    }] : []);
+  },
   reconciliationCases: async query => {
     state.reconciliationCalls.push({ kind: 'cases', ...query });
     return { items: [{ case_id: '00000000-0000-4000-8000-000000000004', merchant_order_no: 'controlled-order', case_type: 'REFUND_DATE_UNVERIFIED', status: 'IN_REVIEW' }], next_cursor: null };
