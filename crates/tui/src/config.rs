@@ -3167,8 +3167,10 @@ pub struct Config {
     /// outcomes: it stays `required` on an in-scope route even when some
     /// tools fail closed, and falls back to `auto` only when the route
     /// itself is out of scope. (The child sub-agent surface requests with
-    /// `auto`, and thinking-mode chat requests may drop `tool_choice`
-    /// entirely — pre-existing surfaces this field does not change.)
+    /// `auto`, thinking-mode chat requests may drop `tool_choice`
+    /// entirely, and the `/preview-request` surface mirrors this same
+    /// route-gated selection — pre-existing surfaces this field does not
+    /// change.)
     pub strict_tool_mode: Option<bool>,
     /// Additional user-owned system-prompt sources concatenated in declared
     /// order (#454). Paths are expanded via `expand_path` so `~` and env vars

@@ -745,8 +745,9 @@ strict_tool_mode = true
 ```
 
 Off by default. When enabled, requests routed to an **official DeepSeek-family
-route** (provider-typed DeepSeek on `api.deepseek.com`, including the legacy
-`api.deepseeki.com` alias and the Anthropic-compatible Messages route) also set
+route** (provider-typed DeepSeek — the `deepseek` and legacy `deepseek-cn`
+typings — on `api.deepseek.com`, including the legacy `api.deepseeki.com`
+alias and the Anthropic-compatible Messages route) also set
 `tool_choice: "required"` and reshape every active tool schema to DeepSeek's
 strict contract: optional parameters are removed from the schema (each removal
 is reported in the tool description), non-numeric `const` values land on

@@ -36790,7 +36790,10 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
             "pandoc_convert",
             "remember",
             "bash",
-            "retrieve_tool_result"
+            "retrieve_tool_result",
+            "Run",
+            "task_shell_wait",
+            "read_media"
         ],
         "STRICT_REMOVAL_CONTEXT_NOTES drifted from the census manifest — \
          add the tool here AND a context-note entry in the constant, with \

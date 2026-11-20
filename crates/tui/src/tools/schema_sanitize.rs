@@ -164,6 +164,26 @@ pub(crate) const STRICT_REMOVAL_CONTEXT_NOTES: &[(&str, &str)] = &[
          `head`, `tail`, `lines`, `query`, and offset `bytes` modes are \
          unreachable.",
     ),
+    (
+        "Run",
+        "In strict mode verifier runs stay on defaults: `background`, \
+         `commands` (custom gates), and the cargo test selectors are no \
+         longer accepted, so tests and verifiers run in the foreground \
+         with the default profile and no custom gate commands.",
+    ),
+    (
+        "task_shell_wait",
+        "In strict mode gate-evidence recording is unavailable from this \
+         tool: `gate` is no longer accepted, so a completed task cannot \
+         be recorded as gate evidence here (the `gate_run` tool still \
+         records evidence).",
+    ),
+    (
+        "read_media",
+        "In strict mode region cropping and the detail preference are \
+         unavailable: `crop` and `detail` are no longer accepted, so the \
+         full image is returned at the default detail.",
+    ),
 ];
 
 /// Cap for the removal note. Names are schema-controlled (hostile MCP
@@ -205,6 +225,15 @@ const STRICT_UNREPRESENTABLE_KEYWORDS: &[&str] = &[
 /// copies drifted twice (a walker missing an arm its siblings had), so
 /// the set is now pinned against a literal list.
 const STRICT_NAME_MAP_KEYS: &[&str] = &["properties", "$defs", "definitions", "$def"];
+
+/// Hop cap shared by the `$ref` machinery: the gate's reference walk and
+/// the pair judge's branch resolution both stop after this many hops. A
+/// longer chain is indistinguishable from a loop for the documented
+/// subset — no validator expands it — and an uncapped walk re-walked
+/// every chain link per `$ref` occurrence: quadratic in document size on
+/// the per-request path (measured 27 s for a 6,000-link chain before the
+/// cap).
+const STRICT_REF_MAX_HOPS: usize = 16;
 
 /// The literal-keyword keys whose values are DATA (enum members, defaults,
 /// examples), not schemas. Shared by every walker alongside
@@ -563,7 +592,12 @@ fn strict_schema_supported(schema: &Value) -> Option<(Value, Vec<String>)> {
     // fails closed here rather than passing on the authored shape and
     // dangling on the wire; stripped subtrees are already gone, so no
     // ships-nowhere skip is needed.
-    if has_unresolvable_ref(&normalized, &normalized) {
+    // The per-reference verdict cache is scoped to this one walk: it is
+    // pure in (root, reference), and the walk reaches every definition as
+    // an occurrence, so the cache is what keeps a long chain from costing
+    // its length once per link.
+    let mut ref_chain_cache = std::collections::HashMap::new();
+    if has_unresolvable_ref(&normalized, &normalized, &mut ref_chain_cache) {
         return None;
     }
     // The strict documents describe `parameters` as an object schema, so
@@ -961,17 +995,20 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
         // node. The single-compatible-member leniency of the enum-vs-type
         // arm carries over: a partially satisfiable enum is the author's
         // sloppiness, not a wire the model cannot use.
+        // One compile per node, shared by the enum and const arms: the
+        // pattern is a node-level constraint, so both judgments read the
+        // same compiled form instead of each paying its own compile.
+        let node_pattern = compiled_documented_pattern(obj);
         if obj
             .get("enum")
             .and_then(Value::as_array)
             .is_some_and(|members| {
-                // One compile per node: every member is judged against the
-                // same pattern, so the enum arm hoists it out of the loop
-                // rather than paying a compile per member.
-                let pattern = compiled_documented_pattern(obj);
+                // Every member is judged against the same pattern, so the
+                // enum arm reads the hoisted form rather than paying a
+                // compile per member.
                 !members
                     .iter()
-                    .any(|member| value_clears_bounds_with(member, obj, pattern.as_ref()))
+                    .any(|member| value_clears_bounds_with(member, obj, node_pattern.as_ref()))
             })
         {
             return true;
@@ -987,11 +1024,10 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
         // string const that matches no judgeable `pattern` of its own
         // node accepts nothing either, so the same helper judges both
         // domains and the numeric-only gate on the const value drops.
-        if let Some(const_value) = obj.get("const") {
-            let pattern = compiled_documented_pattern(obj);
-            if !value_clears_bounds_with(const_value, obj, pattern.as_ref()) {
-                return true;
-            }
+        if let Some(const_value) = obj.get("const")
+            && !value_clears_bounds_with(const_value, obj, node_pattern.as_ref())
+        {
+            return true;
         }
         // A bound ships only in the numeric form the documents describe:
         // a string, boolean, object, or array value is a malformed keyword
@@ -1304,6 +1340,15 @@ fn value_satisfies_declared_type(value: &Value, schema_type: &str) -> bool {
 /// pays one compile per node, not one per member.
 fn compiled_documented_pattern(obj: &Map<String, Value>) -> Option<regex::Regex> {
     let pattern = obj.get("pattern").and_then(Value::as_str)?;
+    // The compile — not the linear-time match — is the hostile cost:
+    // compile work scales with the pattern source, and a judge site pays
+    // it per node (or per pair call) on the per-request path. Past this
+    // bound the judge abstains compatible-by-default; the pattern still
+    // ships and binds on the wire, the judge does not guess — the same
+    // line the ECMA-only spellings draw.
+    if pattern.len() > 4_096 {
+        return None;
+    }
     regex::Regex::new(pattern).ok()
 }
 
@@ -1369,7 +1414,17 @@ fn value_satisfies_documented_format(value: &str, format: &str) -> bool {
                         && octet.parse::<u16>().map(|n| n <= 255).unwrap_or(false)
                 })
         }
-        "ipv6" => value.contains(':') && value.chars().all(|c| c.is_ascii_hexdigit() || c == ':'),
+        // RFC 4291 §2.5.5.2 IPv4-mapped literals (`::ffff:192.168.0.1`)
+        // carry dotted quad groups, so the loose char judgment accepts
+        // `.` beside the hex/colon alphabet: a conforming member must not
+        // read as a false "violates" and fail a satisfiable schema closed
+        // for free.
+        "ipv6" => {
+            value.contains(':')
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        }
         "uuid" => {
             let groups: Vec<&str> = value.split('-').collect();
             groups.len() == 5
@@ -1498,7 +1553,7 @@ fn branch_property_closure<'a>(
 /// a hop is not an object a `$ref` could live on.
 fn resolved_branch_definition<'a>(branch: &'a Value, root: &'a Value) -> Option<&'a Value> {
     let mut target = branch;
-    for _ in 0..16 {
+    for _ in 0..STRICT_REF_MAX_HOPS {
         let obj = target.as_object()?;
         let Some(reference) = obj.get("$ref").and_then(Value::as_str) else {
             break;
@@ -1566,6 +1621,33 @@ fn schema_pair_satisfiable(a: &Value, b: &Value, root: &Value) -> bool {
     let (Some(a_obj), Some(b_obj)) = (a.as_object(), b.as_object()) else {
         return true;
     };
+    // A property-level `anyOf` is the instance's union, one encoding
+    // deeper than the node-level branch arm: an instance satisfies the
+    // wrapper only through SOME alternative, so the other side's pins
+    // and types must be judged against the alternatives, not against
+    // the wrapper (which carries no shape of its own). Without this
+    // chase a wrapper whose every alternative disjoins the covering
+    // branch's property — the `string|number` encoding beside a branch
+    // typing the same name `boolean` — counts as covering and ships
+    // the union strict unsatisfiable. An alternative this judge cannot
+    // read (a boolean or scalar form, already failed closed upstream)
+    // is simply not a satisfiability witness, and past the alternative
+    // cap the chase abstains compatible-by-default — the same
+    // hostile-input line the enum membership cap draws; alternative
+    // depth stays bounded by the document depth like every other
+    // recursion here.
+    const ANYOF_PAIR_ALTERNATIVE_CAP: usize = 256;
+    for (wrapper, other) in [(a, b), (b, a)] {
+        let Some(alternatives) = wrapper.get("anyOf").and_then(Value::as_array) else {
+            continue;
+        };
+        if alternatives.len() > ANYOF_PAIR_ALTERNATIVE_CAP {
+            return true;
+        }
+        return alternatives
+            .iter()
+            .any(|alternative| schema_pair_satisfiable(alternative, other, root));
+    }
     // Declared types: two disjoint string spellings admit no common value
     // (number/integer overlap; an unknown spelling is not judged).
     if let (Some(a_type), Some(b_type)) = (
@@ -1605,17 +1687,27 @@ fn schema_pair_satisfiable(a: &Value, b: &Value, root: &Value) -> bool {
     // the membership judgment is compatible-by-default, the same
     // abstention line the unjudgeable pattern spellings draw; real
     // discriminated unions pin a handful of members, and the per-value
-    // bounds judgment below stays live (it is linear).
+    // bounds judgment below stays live (it is linear). The same cap also
+    // bounds the per-member judgment against the other side's
+    // constraints: that scan is linear in the pinned side's member count,
+    // and a hostile enum past the cap abstains instead of paying it per
+    // branch pair.
     const ENUM_PAIR_MEMBER_CAP: usize = 256;
     let enum_pair_chaseable = [a_obj, b_obj].into_iter().all(|obj| {
         obj.get("enum")
             .and_then(Value::as_array)
             .is_none_or(|members| members.len() <= ENUM_PAIR_MEMBER_CAP)
     });
-    for (pinned, other) in [(a_obj, b_obj), (b_obj, a_obj)] {
-        // One compile per opposing side: every pinned value below is
-        // judged against the same constraints.
-        let other_pattern = compiled_documented_pattern(other);
+    // One compile per side (not per direction per judgment): every
+    // pinned value below is judged against the opposing side's shared
+    // compiled form, and a hostile pattern pays at most two compiles
+    // per pair call.
+    let a_pattern = compiled_documented_pattern(a_obj);
+    let b_pattern = compiled_documented_pattern(b_obj);
+    for (pinned, other, other_pattern) in [
+        (a_obj, b_obj, b_pattern.as_ref()),
+        (b_obj, a_obj, a_pattern.as_ref()),
+    ] {
         // A `const` must satisfy the other side wholesale and match the
         // other side's own pin exactly.
         if let Some(const_value) = pinned.get("const") {
@@ -1630,7 +1722,7 @@ fn schema_pair_satisfiable(a: &Value, b: &Value, root: &Value) -> bool {
             {
                 return false;
             }
-            if !value_clears_bounds_with(const_value, other, other_pattern.as_ref()) {
+            if !value_clears_bounds_with(const_value, other, other_pattern) {
                 return false;
             }
         }
@@ -1644,9 +1736,10 @@ fn schema_pair_satisfiable(a: &Value, b: &Value, root: &Value) -> bool {
             {
                 return false;
             }
-            if !members
-                .iter()
-                .any(|member| value_clears_bounds_with(member, other, other_pattern.as_ref()))
+            if members.len() <= ENUM_PAIR_MEMBER_CAP
+                && !members
+                    .iter()
+                    .any(|member| value_clears_bounds_with(member, other, other_pattern))
             {
                 return false;
             }
@@ -1755,11 +1848,17 @@ fn is_schema_shaped_branch(branch: &Value) -> bool {
 /// Literal-keyword values are skipped: an `enum`/`const`/`default` member
 /// that happens to be shaped like a `{"$ref": …}` object is data, not a
 /// reference to resolve.
-fn has_unresolvable_ref(schema: &Value, root: &Value) -> bool {
+fn has_unresolvable_ref(
+    schema: &Value,
+    root: &Value,
+    chain_cache: &mut std::collections::HashMap<String, bool>,
+) -> bool {
     let Some(obj) = schema.as_object() else {
-        return schema
-            .as_array()
-            .is_some_and(|values| values.iter().any(|value| has_unresolvable_ref(value, root)));
+        return schema.as_array().is_some_and(|values| {
+            values
+                .iter()
+                .any(|value| has_unresolvable_ref(value, root, chain_cache))
+        });
     };
     if let Some(reference) = obj.get("$ref") {
         // A `$ref` that is not a string is a malformed keyword value the
@@ -1778,8 +1877,23 @@ fn has_unresolvable_ref(schema: &Value, root: &Value) -> bool {
         // document — is strictly less resolvable than the dangling string
         // reference that already fails closed: no strict validator can
         // expand a definition that is not a schema object, so it fails
-        // closed here too.
-        if !ref_chain_target(root, pointer).is_some_and(Value::is_object) {
+        // closed here too. The verdict per reference string is memoized:
+        // the walk reaches every definition as an occurrence, so without
+        // the cache a chain of L links paid its full length once per link
+        // — quadratic in document size on the per-request path.
+        let target_is_object = match chain_cache.get(pointer) {
+            Some(verdict) => *verdict,
+            None => {
+                let verdict = ref_chain_target(root, pointer).is_some_and(Value::is_object);
+                chain_cache.insert(pointer.to_string(), verdict);
+                verdict
+            }
+        };
+        // A pointer that names a name-map container (`#/$defs`,
+        // `#/properties/a/properties`) resolves to a map of schemas, not
+        // to a schema: the same no-validator-can-expand class as the
+        // non-object terminals above.
+        if !target_is_object || ref_targets_name_map(pointer) {
             return true;
         }
     }
@@ -1794,18 +1908,40 @@ fn has_unresolvable_ref(schema: &Value, root: &Value) -> bool {
             if value.as_object().is_some_and(|named_schemas| {
                 named_schemas
                     .values()
-                    .any(|named_schema| has_unresolvable_ref(named_schema, root))
+                    .any(|named_schema| has_unresolvable_ref(named_schema, root, chain_cache))
             }) {
                 return true;
             }
         } else if STRICT_LITERAL_KEYS.contains(&key.as_str()) {
             // Literal-keyword values are data: an enum member shaped like a
             // `{"$ref": …}` object is a value to ship, not a reference.
-        } else if has_unresolvable_ref(value, root) {
+        } else if has_unresolvable_ref(value, root, chain_cache) {
             return true;
         }
     }
     false
+}
+
+/// Whether a `$ref` pointer lands on one of the schema name-map
+/// containers rather than on a schema. The role of each segment alternates:
+/// a container key segment (read relative to a schema node) addresses a
+/// name map, and the segment after it addresses a member NAME inside that
+/// map — any name the author chose, including one spelled like a container
+/// key (`#/$defs/properties` is a definition, `#/$defs/properties/x` is
+/// that definition's property map). Segments are compared raw: a `~1`-
+/// encoded spelling decodes to a name no container key equals, so an
+/// encoded form cannot false-positive here. The chain walk has already
+/// resolved the pointer, so no existence check is needed — only the
+/// segment roles decide.
+fn ref_targets_name_map(reference: &str) -> bool {
+    let Some(pointer) = reference.strip_prefix('#') else {
+        return false;
+    };
+    let mut inside_name_map = false;
+    for segment in pointer.split('/').skip(1) {
+        inside_name_map = !inside_name_map && STRICT_NAME_MAP_KEYS.contains(&segment);
+    }
+    inside_name_map
 }
 
 /// Resolve a JSON-pointer `$ref` against the schema root. Only `#…`
@@ -1846,6 +1982,15 @@ fn ref_chain_target<'a>(root: &'a Value, start: &str) -> Option<&'a Value> {
     let mut visited = std::collections::HashSet::new();
     let mut reference = start;
     loop {
+        // The same hop cap the pair judge's branch resolution draws:
+        // `visited` holds the references followed so far (the start
+        // included), so a len past the cap is the would-be hop after the
+        // last allowed one — past it the chain is indistinguishable from
+        // a loop for the documented subset and fails closed, instead of
+        // walking an unbounded chain per `$ref` occurrence.
+        if visited.len() > STRICT_REF_MAX_HOPS {
+            return None;
+        }
         if !visited.insert(reference.to_string()) {
             return None;
         }
@@ -7661,6 +7806,449 @@ mod tests {
             "an i64::MIN member beside a negative multipleOf must fail closed without panicking"
         );
         assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_fails_a_union_closed_when_the_shared_property_is_an_anyof() {
+        // The pair judge must chase a property-level `anyOf` wrapper: an
+        // instance of the shared name satisfies the wrapper only through
+        // SOME alternative, and here every alternative (string, number)
+        // disjoins the covering branch's `boolean` pin — no instance
+        // exists. Judging the wrapper as unjudgeable counted the branch
+        // as covering and shipped the union strict admitting nothing.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"a": {"anyOf": [{"type": "string"}, {"type": "number"}]}},
+                        "required": ["a"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"a": {"type": "boolean"}}, "required": ["a"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        let authored = tool.input_schema.clone();
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "an anyOf-wrapped shared property disjoining the covering branch must fail the union closed"
+        );
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_union_whose_anyof_shared_property_has_a_compatible_alternative() {
+        // Keep-side: one compatible alternative is all the wrapper needs —
+        // the instance can take the branch through the `string`
+        // alternative — so the union stays strict.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"a": {"anyOf": [{"type": "string"}, {"type": "number"}]}},
+                        "required": ["a"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_a_union_closed_when_both_pair_sides_are_anyof_wrappers() {
+        // Both sides wrapped with TWO alternatives each, so the wrappers
+        // survive the single-element collapse and the chase's nested path
+        // decides: every alternative of one side disjoins every
+        // alternative of the other (`const` 1/3 beside `const` 2/4), so
+        // no instance exists and the union fails closed. A chase that
+        // always (in)compatible flips this pin red.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"a": {"anyOf": [
+                            {"type": "integer", "const": 1},
+                            {"type": "integer", "const": 3}
+                        ]}},
+                        "required": ["a"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"a": {"anyOf": [
+                                {"type": "integer", "const": 2},
+                                {"type": "integer", "const": 4}
+                            ]}}, "required": ["a"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "disjoint anyOf alternatives on both pair sides must fail the union closed"
+        );
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_required_nullable_keyword_alone() {
+        // Isolated witness for the `nullable` keyword arm: the keyword is
+        // the ONLY null marker here (a declared string type, no union
+        // branch), so this pin binds that arm and nothing else — deleting
+        // the arm previously kept the whole suite green because the only
+        // required-position witness shared its tool with a second null
+        // defect another arm caught.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"p": {"type": "string", "nullable": true}},
+                "required": ["p"]
+            }),
+        );
+        let authored = tool.input_schema.clone();
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a required nullable keyword must fail the tool closed"
+        );
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_reference_chain_past_the_hop_cap() {
+        // The reference walk caps chain hops: a 17-hop chain is
+        // indistinguishable from a loop for the documented subset (no
+        // validator expands it) and an uncapped walk re-walked every link
+        // per occurrence — quadratic on the per-request path. The cap
+        // turns the over-long chain fail-closed.
+        let mut defs = serde_json::Map::new();
+        for i in 0..17usize {
+            defs.insert(
+                format!("a{i}"),
+                json!({ "$ref": format!("#/$defs/a{}", i + 1) }),
+            );
+        }
+        defs.insert(
+            "a17".to_string(),
+            json!({"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}),
+        );
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"v": {"$ref": "#/$defs/a0"}},
+                "required": ["v"],
+                "$defs": Value::Object(defs)
+            }),
+        );
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a reference chain past the hop cap must fail closed"
+        );
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_reference_chain_at_the_hop_cap() {
+        // Keep-side: 16 hops still terminate at a real schema and ship.
+        let mut defs = serde_json::Map::new();
+        for i in 0..16usize {
+            defs.insert(
+                format!("a{i}"),
+                json!({ "$ref": format!("#/$defs/a{}", i + 1) }),
+            );
+        }
+        defs.insert(
+            "a16".to_string(),
+            json!({"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}),
+        );
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"v": {"$ref": "#/$defs/a0"}},
+                "required": ["v"],
+                "$defs": Value::Object(defs)
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_reference_to_a_name_map_container() {
+        // A pointer that lands ON a name-map container (`#/$defs`,
+        // `#/properties/a/properties`) resolves to a map of schemas, not
+        // a schema — the same no-validator-can-expand class as the
+        // non-object terminals.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"$ref": "#/$defs"}},
+                "required": ["a"],
+                "$defs": {"x": {"type": "string"}}
+            }),
+        );
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a reference to a name-map container must fail closed"
+        );
+        assert_eq!(tool.strict, None);
+
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"$ref": "#/properties/a/properties"}},
+                "required": ["a"],
+                "properties": {"a": {"type": "object", "properties": {"b": {"type": "string"}}}}
+            }),
+        );
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a nested property-map pointer must fail closed"
+        );
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_definition_named_like_a_container_key() {
+        // Keep-side for the container check: `#/$defs/properties` names a
+        // DEFINITION (the segment after a map is a member name, any name
+        // allowed), so the reference must keep resolving and the tool
+        // keep shipping strict.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"$ref": "#/$defs/properties"}},
+                "required": ["a"],
+                "$defs": {"properties": {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}}
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_abstains_from_the_member_judgment_past_the_pair_cap() {
+        // The pair judge's per-member judgment is linear in the pinned
+        // side's member count: a hostile 300-member enum past the cap
+        // abstains compatible-by-default instead of paying the scan per
+        // branch pair (the enum still ships and binds; the judge does not
+        // guess). The members all fail the covering branch's pattern, so
+        // a mutation that removes the cap runs the scan and turns this
+        // pin red — the witness is provably unsatisfiable and only the
+        // cap keeps it shipping.
+        let members: Vec<Value> = (0..300u32)
+            .map(|i| Value::String(format!("m{i:04}")))
+            .collect();
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"a": {"type": "string", "enum": members}},
+                        "required": ["a"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"a": {"type": "string", "pattern": "^z"}}, "required": ["a"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_judges_enum_disjointness_at_the_exact_pair_cap() {
+        // Cap boundary: 256-member disjoint enums are still chased (the
+        // intersection scan runs at the boundary) and fail the union
+        // closed; 257 abstains. Pinning both edges keeps the constant's
+        // value from drifting silently in either direction.
+        for (count, should_ship) in [(256usize, false), (257, true)] {
+            let members: Vec<Value> = (0..count as u32).map(Value::from).collect();
+            let others: Vec<Value> = (1_000..1_000 + count as u32).map(Value::from).collect();
+            let mut tool = test_tool(
+                "probe",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "spec": {
+                            "type": "object",
+                            "properties": {"a": {"type": "integer", "enum": members}},
+                            "required": ["a"],
+                            "anyOf": [
+                                {"type": "object", "properties": {"a": {"type": "integer", "enum": others}}, "required": ["a"]}
+                            ]
+                        }
+                    },
+                    "required": ["spec"]
+                }),
+            );
+            assert_eq!(
+                prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+                should_ship,
+                "{count}-member disjoint enums: judged below the cap, abstained past it"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_mode_fails_a_union_closed_on_upper_edge_dual_form_bounds() {
+        // The upper-edge sibling of the dual-form pin: the node's
+        // `maximum: 10` beside `exclusiveMaximum: 5` pins the true edge at
+        // "below 5", and the covering branch's `minimum: 5` admits only
+        // numbers at or above it — no instance exists.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"a": {"type": "number", "maximum": 10, "exclusiveMaximum": 5}},
+                        "required": ["a"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"a": {"type": "number", "minimum": 5}}, "required": ["a"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "the stricter upper dual edge must fail the crossing branch closed"
+        );
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_fails_a_union_closed_at_the_pair_window_tie() {
+        // Tie boundary in the pair judge: `minimum: 5` against an
+        // EXCLUSIVE `maximum: 5` admits no number (the tie is only
+        // satisfiable when both edges are inclusive).
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"a": {"type": "number", "minimum": 5}},
+                        "required": ["a"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"a": {"type": "number", "exclusiveMaximum": 5}}, "required": ["a"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "an inclusive-vs-exclusive window tie admits nothing and must fail closed"
+        );
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_union_at_an_inclusive_window_tie() {
+        // Keep-side for the tie: both edges inclusive share the value 5.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"a": {"type": "number", "minimum": 5}},
+                        "required": ["a"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"a": {"type": "number", "maximum": 5}}, "required": ["a"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_abstains_from_an_oversized_pattern_source() {
+        // The pattern judge compiles per node (or per pair call), and
+        // compile cost scales with the pattern source: past the source
+        // bound the judge abstains compatible-by-default (the pattern
+        // still ships and binds), so a member the oversized pattern would
+        // have excluded no longer fails the tool closed. The small-
+        // pattern twin is pinned by the pattern judge pins.
+        let big_pattern = format!("{}$", "z".repeat(4_999));
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"type": "string", "pattern": big_pattern, "enum": ["abc"]}},
+                "required": ["a"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_keeps_an_ipv4_mapped_ipv6_member() {
+        // RFC 4291 IPv4-mapped literals carry dotted quads; the loose
+        // ipv6 judge must not read a conforming member as a false
+        // "violates" and fail a satisfiable schema closed for free.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"h": {"type": "string", "format": "ipv6", "enum": ["::ffff:192.168.0.1"]}},
+                "required": ["h"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
     }
 }
 /// Normalize a tool's function schema for Kimi / Moonshot API compatibility.

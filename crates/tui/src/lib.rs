@@ -7490,9 +7490,16 @@ fn doctor_api_target(config: &Config) -> DoctorApiTarget {
     // answer matches what a session started now would actually serve —
     // saved provider models, alias normalization, and roster preference
     // included — instead of re-deriving a config default that can diverge
-    // from the engine (DGF-01, dogfood 2026-08-02).
+    // from the engine (DGF-01, dogfood 2026-08-02). The selector is the
+    // session's own no-chip model (`config.default_model()`, the value
+    // the engine's turn resolver passes as `Some`): a `None` selector
+    // lets the resolver fall to its descriptor default, which diverges
+    // from the live endpoint key exactly when the configured model maps
+    // to a different dialect — a `responses`-dialect model answered
+    // `ready` because the default descriptor is a chat model.
+    let session_model = config.default_model();
     let (model, resolution, endpoint_key, base_url) =
-        match crate::route_runtime::resolve_runtime_route(config, provider, None) {
+        match crate::route_runtime::resolve_runtime_route(config, provider, Some(&session_model)) {
             Ok(route) => (
                 route.model.clone(),
                 DoctorModelResolution::Resolved,
@@ -7670,7 +7677,8 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
                 function_strict_sent: true,
                 message: "enabled; DeepSeek strict schemas use the beta endpoint; \
                           `tool_choice` stays `required` (omitted on thinking-enabled \
-                          requests, where the chat dialect suppresses it)"
+                          requests, where the chat dialect suppresses it); per-tool \
+                          schemas that cannot conform ship unchanged and non-strict"
                     .to_string(),
                 recommended_base_url: None,
             }
@@ -7690,7 +7698,8 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
                 message: "enabled, but function.strict is stripped for this non-beta DeepSeek \
                           endpoint; the strict schema reshaping still applies and \
                           `tool_choice` stays `required` (omitted on thinking-enabled \
-                          requests, where the chat dialect suppresses it)"
+                          requests, where the chat dialect suppresses it); per-tool \
+                          schemas that cannot conform ship unchanged and non-strict"
                     .to_string(),
                 recommended_base_url: Some(recommended.to_string()),
             }
@@ -7713,7 +7722,8 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
             message: "enabled; the strict tool pipeline acts on this \
                       DeepSeek-family route; `tool_choice` stays `required` \
                       (omitted on thinking-enabled requests, where the chat \
-                      dialect suppresses it)"
+                      dialect suppresses it); per-tool schemas that cannot \
+                      conform ship unchanged and non-strict"
                 .to_string(),
             recommended_base_url: None,
         },
@@ -14136,6 +14146,25 @@ mod doctor_endpoint_tests {
         assert_eq!(status.status, "disabled");
         assert!(!status.function_strict_sent);
         assert!(status.recommended_base_url.is_none());
+    }
+
+    #[test]
+    fn strict_tool_mode_doctor_answers_from_the_model_the_session_serves() {
+        // The doctor resolves with the session's own no-chip model, the
+        // same `Some(&effective_model)` selector the engine's turn
+        // resolver passes: a `responses`-dialect default model must
+        // answer `responses_dialect` (the wire hardcodes `strict: false`
+        // there), not `ready` off the resolver's descriptor default.
+        let config = Config {
+            strict_tool_mode: Some(true),
+            default_text_model: Some("deepseek-v4-flash".to_string()),
+            ..Default::default()
+        };
+
+        let status = doctor_strict_tool_mode_status(&config);
+
+        assert_eq!(status.status, "responses_dialect");
+        assert!(!status.function_strict_sent);
     }
 
     #[test]
