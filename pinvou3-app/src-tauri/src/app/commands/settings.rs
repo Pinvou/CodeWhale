@@ -3584,6 +3584,7 @@ mod tests {
         }
         let mut bridge = Pinvou3Bridge::test_fixture(None);
         bridge.prefs.advanced.saved_models = vec![SavedModel {
+            store_card_id: None,
             auth_mode: Some("none".to_string()),
             id: "wiring-model".to_string(),
             name: "wiring".to_string(),
@@ -3733,6 +3734,7 @@ mod tests {
             }
         }
         let record = |auth_mode: Option<&str>, ref_seeded: bool| SavedModel {
+            store_card_id: None,
             auth_mode: auth_mode.map(str::to_string),
             id: "ladder-fixtured".to_string(),
             name: "fixture".to_string(),
@@ -3865,6 +3867,7 @@ mod tests {
             }
         }
         let record = |auth_mode: Option<&str>, api_key: &str, ref_id: Option<&str>| SavedModel {
+            store_card_id: None,
             auth_mode: auth_mode.map(str::to_string),
             id: "save-fixtured".to_string(),
             name: "fixture".to_string(),

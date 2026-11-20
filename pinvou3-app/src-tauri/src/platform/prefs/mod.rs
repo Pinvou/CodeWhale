@@ -4096,6 +4096,7 @@ mod tests {
         let build = |auth_mode: Option<&str>| {
             let mut prefs = UserPrefs::default();
             let mut model = SavedModel {
+                store_card_id: None,
                 auth_mode: None,
                 id: "auth-mode-model".into(),
                 name: "auth mode".into(),
@@ -4172,6 +4173,7 @@ mod tests {
         let build = |base_url: &str, auth_mode: Option<&str>| {
             let mut prefs = UserPrefs::default();
             let mut model = SavedModel {
+                store_card_id: None,
                 auth_mode: None,
                 id: "auth-mode-plan".into(),
                 name: "auth mode plan".into(),
@@ -4235,6 +4237,7 @@ mod tests {
         let build = |preset: ModelPreset, auth_mode: Option<&str>| {
             let mut prefs = UserPrefs::default();
             let mut model = SavedModel {
+                store_card_id: None,
                 auth_mode: None,
                 id: "auth-mode-local".into(),
                 name: "auth mode local".into(),
@@ -4300,6 +4303,7 @@ mod tests {
             let mut prefs = UserPrefs::default();
             prefs.advanced.saved_models.clear();
             let mut model = SavedModel {
+                store_card_id: None,
                 auth_mode: None,
                 id: "keyless-load".into(),
                 name: "Keyless".into(),
@@ -4368,6 +4372,7 @@ mod tests {
             let mut prefs = UserPrefs::default();
             prefs.advanced.saved_models.clear();
             let model = SavedModel {
+                store_card_id: None,
                 auth_mode: None,
                 id: "keyless-wrong-type".into(),
                 name: "Keyless".into(),
