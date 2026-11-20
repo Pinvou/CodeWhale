@@ -1,0 +1,93 @@
+name: CI Network Transport
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/ci-network-*'
+      - 'scripts/ci-artifact-*'
+      - 'scripts/ci-download.py'
+      - 'scripts/ci-rust-*'
+      - 'scripts/ci-egress-proxy.py'
+      - 'scripts/lib/ci_https.py'
+
+permissions:
+  contents: read
+
+jobs:
+  storage-roundtrip:
+    name: Storage roundtrip (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && '{"os":["ubuntu-22.04","windows-latest"]}' || '{"os":["ubuntu-22.04"]}') }}
+    runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON((github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_LINUX_LIGHT_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON((github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_LIGHT_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') || matrix.os }}
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
+      - name: Create commit-bound transport probe
+        id: probe
+        run: node scripts/ci-network-probe.cjs create
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
+      - name: Save bounded transport canary cache
+        uses: actions/cache/save@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          path: ${{ steps.probe.outputs.cache }}
+          key: ci-network-canary-${{ github.run_id }}-${{ github.run_attempt }}-${{ runner.os }}
+      - name: Remove only the owned cache probe file
+        run: node scripts/ci-network-probe.cjs remove-cache-file
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
+      - name: Restore exact transport canary cache
+        uses: actions/cache/restore@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          path: ${{ steps.probe.outputs.cache }}
+          key: ci-network-canary-${{ github.run_id }}-${{ github.run_attempt }}-${{ runner.os }}
+          fail-on-cache-miss: true
+      - name: Configure artifact transport for Upload authenticated transport probe
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
+      - name: Upload authenticated transport probe
+        uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          name: ci-network-canary-${{ runner.os }}
+          path: ${{ steps.probe.outputs.artifact }}/probe.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Prepare CI transfer runtime (4)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
+      - name: Download authenticated transport probe
+        uses: actions/download-artifact@v8
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          name: ci-network-canary-${{ runner.os }}
+          path: ${{ steps.probe.outputs.downloaded }}
+      - name: Verify tested commit and exact bytes for both transports
+        run: node scripts/ci-network-probe.cjs verify

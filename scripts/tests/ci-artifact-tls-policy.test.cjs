@@ -10,47 +10,77 @@ const helper = path.resolve(__dirname, '../ci-artifact-node-options.cjs');
 const workflow = fs.readFileSync(path.resolve(__dirname, '../../.github/workflows/pr-check.yml'), 'utf8').replaceAll('\r\n', '\n');
 const stepPattern = /^      - [\s\S]*?(?=^      - |^  [A-Za-z0-9_-]+:|$(?![\s\S]))/gm;
 
-function checkPolicy(text) {
-  const steps = [...text.matchAll(stepPattern)].map(match => match[0]);
-  let uploads = 0;
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    if (!/^        uses: actions\/upload-artifact@v7$/m.test(step)) continue;
-    uploads++;
-    const assignments = [...step.matchAll(/^          NODE_OPTIONS: (.*)$/gm)];
-    assert.equal(assignments.length, 1, 'each upload must use the prepared runtime options');
-    assert.equal(assignments[0][1], '${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}');
-    const config = steps[i - 1] || '';
-    const diagnostics = step.includes("          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'");
-    assert.equal(config.match(/^        run: (.*)$/m)?.[1],
-      'node scripts/ci-artifact-node-options.cjs' + (diagnostics ? ' --diagnostics' : ''));
-    assert.match(config, /^        working-directory: \$\{\{ github.workspace \}\}$/m);
-    assert.equal(config.match(/^        if: (.*)$/m)?.[1], step.match(/^        if: (.*)$/m)?.[1],
-      'configuration must run under the same condition as its upload');
-    assert.doesNotMatch(config, /continue-on-error:|NODE_OPTIONS:/);
-  }
-  assert.ok(uploads > 0, 'the policy must inspect real upload steps');
-  const remainder = text.replace(stepPattern, step =>
-    /^        uses: actions\/upload-artifact@v7$/m.test(step) ? '' : step);
-  assert.doesNotMatch(remainder, /NODE_OPTIONS:|--tls-max-v1\.2/,
-    'business steps and job-wide Node settings must not receive the upload cap');
-  assert.doesNotMatch(text, /NODE_TLS_REJECT_UNAUTHORIZED|--tls-min-v1\.[01]/);
-}
+const { checkWorkflow } = require('../ci-network-policy.cjs');
+const { networkPath } = require('../ci-network-node-options.cjs');
 
-test('every PR artifact upload has a condition-matched preparation and an action-only TLS policy', () => {
-  checkPolicy(workflow);
+test('every PR artifact upload keeps main upload isolation and condition-matched preparation', () => {
+  checkWorkflow(workflow);
+  assert.ok(workflow.includes('uses: actions/upload-artifact@v7'));
   for (const mutant of [
-    workflow.replace('NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}', 'NODE_OPTIONS: --tls-max-v1.2'),
-    workflow.replace('run: node scripts/ci-artifact-node-options.cjs', 'run: node scripts/unreviewed.cjs'),
-    workflow.replace('run: node scripts/ci-artifact-node-options.cjs --diagnostics', 'run: node scripts/ci-artifact-node-options.cjs'),
-    workflow.replace('      - name: Configure artifact transport for Gate test resource lifecycle receipts\n        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != \'\' }}',
-      '      - name: Configure artifact transport for Gate test resource lifecycle receipts\n        if: success()'),
+    workflow.replace('NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}', 'NODE_OPTIONS: --tls-max-v1.2'),
+    workflow.replace('run: node scripts/ci-network-node-options.cjs', 'run: node scripts/unreviewed.cjs'),
+    workflow.replace("PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'", "PINVOU_CI_ARTIFACT_DIAGNOSTICS: '0'"),
+    workflow.replace(/(      - name: Configure artifact transport for Gate test resource lifecycle receipts\n)        if: \$\{\{ always\(\) && env.PINVOU_CI_RESOURCE_LEDGER != '' \}\}/,
+      '$1        if: success()'),
     workflow.replace(/^env:$/m, 'env:\n  NODE_OPTIONS: --tls-max-v1.2'),
     workflow.replace('        uses: actions/upload-artifact@v7', '        uses: actions/checkout@v7'),
   ]) {
-    assert.ok(mutant !== workflow, 'the negative control must change the workflow');
-    assert.throws(() => checkPolicy(mutant));
+    assert.notEqual(mutant, workflow, 'main upload negative control must change the workflow');
+    assert.throws(() => checkWorkflow(mutant));
   }
+});
+
+test('artifact extension retains the legacy value and scopes common options to the consuming Action', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-common-'));
+  try {
+    const file = path.join(root, 'github-env');
+    const result = spawnSync(process.execPath, [helper, '--network'], {
+      env: { ...process.env, GITHUB_ENV: file, NODE_OPTIONS: '--max-old-space-size=192' },
+      encoding: 'utf8', timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const values = Object.fromEntries(fs.readFileSync(file, 'utf8').trimEnd().split('\n')
+      .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+    assert.equal(values.PINVOU_CI_ARTIFACT_NODE_OPTIONS, '--max-old-space-size=192 --tls-max-v1.2');
+    assert.match(values.PINVOU_CI_NETWORK_NODE_OPTIONS, /--max-old-space-size=192 .*--tls-max-v1\.2$/);
+    assert.ok(values.PINVOU_CI_NETWORK_PATH);
+    assert.equal(values.NODE_OPTIONS, undefined);
+    assert.equal(values.PATH, undefined);
+  } finally { fs.rmSync(root, { recursive: true }); }
+});
+
+test('Windows archive utilities stay scoped and an existing archiver wins', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cache-tools-'));
+  try {
+    assert.equal(networkPath('original-path', 'linux', () => assert.fail('unexpected probe')), 'original-path');
+    fs.writeFileSync(path.join(root, 'tar.exe'), 'fixture');
+    assert.equal(networkPath(root, 'win32', () => assert.fail('existing archiver must win')), root);
+    assert.equal(networkPath('original-path', 'win32', () => root), `${root};original-path`);
+    assert.throws(() => networkPath('original-path', 'win32', () => null));
+    assert.throws(() => networkPath('path\nINJECTED=1'));
+  } finally { fs.rmSync(root, { recursive: true }); }
+});
+
+test('all workflows keep storage policies scoped, condition-matched and observable', () => {
+  const directory = path.resolve(__dirname, '../../.github/workflows');
+  let count = 0;
+  for (const name of fs.readdirSync(directory).filter(name => /\.ya?ml$/.test(name))) {
+    count += checkWorkflow(fs.readFileSync(path.join(directory, name), 'utf8'), name);
+  }
+  assert.ok(count > 80, 'the test must cover every actual storage action family');
+  for (const mutant of [
+    workflow.replace('NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}', 'NODE_OPTIONS: --tls-max-v1.2'),
+    workflow.replace('run: node scripts/ci-network-node-options.cjs', 'run: node scripts/unreviewed.cjs'),
+    workflow.replace('      - name: Configure verified Rust download source\n        run: node scripts/ci-rust-network.cjs\n      - name: 安装锁定的 Rust 工具链', '      - name: 安装锁定的 Rust 工具链'),
+    workflow.replace('run: node scripts/ci-rust-network.cjs --report', 'run: node scripts/unreviewed-rust-report.cjs'),
+    workflow.replace('working-directory: ${{ github.workspace }}', 'working-directory: wrong-directory'),
+    workflow.replace("PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'", "PINVOU_CI_ARTIFACT_DIAGNOSTICS: '0'"),
+    workflow.replace(/^env:$/m, 'env:\n  NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}'),
+  ]) {
+    assert.notEqual(mutant, workflow, 'negative control must change source');
+    assert.throws(() => checkWorkflow(mutant));
+  }
+  assert.throws(() => checkWorkflow('jobs:\n  test:\n    steps:\n      - uses: fork/unknown-cache@v1\n'));
 });
 
 test('the helper reads real inherited options, writes a separate value and preloads diagnostics', () => {
