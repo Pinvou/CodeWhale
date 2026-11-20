@@ -1,4 +1,5 @@
 //! Process-local action correlation and upload receipts.
+use super::super::desktop_remote_validation::lease_matches_remote_binding;
 use crate::features::remote_control::controller::protocol::LeaseContext;
 use crate::features::remote_control::controller::relay_runtime::log_remote_action_event;
 use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
@@ -360,7 +361,7 @@ impl DesktopRemoteActionState {
             return false;
         };
         if pending.live != *current_live
-            || !same_lease(lease, &pending.live)
+            || !lease_matches_remote_binding(lease, &pending.live)
             || payload.get("session_id").and_then(Value::as_str)
                 != Some(pending.remote_ref.as_str())
             || payload.get("operation").and_then(Value::as_str) != Some(pending.operation.as_str())
@@ -568,14 +569,6 @@ impl DesktopRemoteActionState {
         }
         Ok(())
     }
-}
-
-fn same_lease(lease: &LeaseContext, live: &LiveRemoteContext) -> bool {
-    lease.connection_id == live.connection_id
-        && lease.controller_lease_id == live.controller_lease_id
-        && lease.lease_epoch == live.lease_epoch
-        && lease.relay_epoch == live.relay_epoch
-        && lease.remote_control_generation == live.generation
 }
 
 #[cfg(test)]

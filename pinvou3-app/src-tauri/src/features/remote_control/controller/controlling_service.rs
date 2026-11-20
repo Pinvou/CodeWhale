@@ -1123,25 +1123,6 @@ fn handle_resume_frame(
     }
 }
 
-/// 生成下一条心跳帧：只在存在活租约（connected）时产出，序号单调递增；租约
-/// 变更后序号从 1 重新开始（epoch 同步换新，接收侧按新 epoch 接受）。
-fn next_liveness_frame(
-    manager: &ControllingDeviceManager,
-    liveness: &mut LivenessExpectations,
-) -> Option<Value> {
-    let (lease, _) = manager.live_runtime_context().ok()?;
-    let epoch = manager.live_liveness_epoch()?;
-    let next = liveness.next_sequence()?;
-    let frame = crate::features::remote_control::controller::liveness::build_controller_liveness(
-        &lease,
-        SenderRole::ControllerA,
-        &epoch,
-        next,
-    )
-    .ok()?;
-    Some(frame)
-}
-
 /// 把状态投影压成一行排障文本：与 UI 收到的 `status` / `errorCode` 同源，
 /// 不含连接码、租约、指纹或设备标识。
 fn controller_status_log_detail(status: &ControllingStatus) -> String {

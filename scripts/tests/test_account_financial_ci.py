@@ -145,6 +145,8 @@ class FinancialCIMatrixTests(unittest.TestCase):
                 'set -euo pipefail',
                 'python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py',
                 'python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py',
+                'python3 -m unittest discover -s scripts/tests -p test_account_financial_families_postgres.py',
+                'python3 -m unittest discover -s scripts/tests -p test_go_test_contract.py',
                 'python3 -m unittest discover -s scripts/tests -p test_financial_owners.py',
                 'policy_python="${{ steps.financial-policy-python.outputs.python-path }}"',
                 'policy_library="$(dirname "$(dirname "$policy_python")")/lib"',

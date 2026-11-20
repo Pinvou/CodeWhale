@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { parse } from 'yaml';
+import { minimatch } from 'minimatch';
 
 const workflow = parse(readFileSync(new URL('../../.github/workflows/pr-check.yml', import.meta.url), 'utf8'));
 const job = workflow.jobs['release-contract-test'];
@@ -35,7 +36,9 @@ test('Windows release step retains every mandatory command and required-gate dep
   assert.ok(job.steps.indexOf(regression) < job.steps.indexOf(step));
   assert.match(regression.run, /python scripts\/ci-fixture-process\.py --receipt .+ -- node --test remote-control-relay\/test\/windows-release-exit-code\.test\.js/u);
   const pathFilter = workflow.jobs.changes.steps.find((value) => value.id === 'filter');
-  assert.ok(parse(pathFilter.with.filters).release_contract.includes('remote-control-relay/test/windows-release-exit-code.test.js'));
+  assert.ok(parse(pathFilter.with.filters).release_contract.some((pattern) =>
+    minimatch('remote-control-relay/test/windows-release-exit-code.test.js', pattern,
+      { dot: true, nocase: false, nonegate: true })));
   assert.ok(parse(pathFilter.with.filters).release_contract.includes('.github/workflows/windows-remote-control-build-evidence.yml'));
   assert.equal(buildStep.shell, 'pwsh');
   assert.equal(buildStep['working-directory'], 'pinvou3-app');
