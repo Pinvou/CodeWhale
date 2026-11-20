@@ -1,11 +1,13 @@
 # Codex ACP 整体架构决策
 
-> 文档状态：架构已确认，MVP 已在 `feat/codex-acp` 实现，待体验复核
-> 评审范围：架构与产品边界，不代表已实现
-> 记录日期：2026-07-23
+> 文档状态：已归档的架构决策记录（2026-11 回填自内部仓库快照）；核心决策已落地并随后续版本继续演进（现状以 [`codex-acp.md`](./codex-acp.md) / [`multi-agent-acp.md`](./multi-agent-acp.md) 为准）
+> 评审范围：本文评审的是架构与产品边界，不逐项代表实现状态。除 §9（自含现状注记）外，正文组件名（`PermissionBroker`、`AcpRuntimeManager`、`AcpSessionAggregate` 等）与 §6/§11 的目标架构为设计构想，未按原样实现——现行实现为 `pinvou3-app/src-tauri/src/features/codex_acp/`（Rust）与 `pinvou3-app/src/features/codex/`（前端），本文与现状的逐项出入不另设对照表，以两份现状文档为准
+> 用语说明（2026-11-18 复核）：回填时将原文中的「CodeWhale」系组件名统一书写为「DeepSeek-TUI」，§6 mermaid 节点 `WorkConversationSurface` 亦改写为 `DeepSeekConversationSurface`——此系与备份分支原文间的系统性用语替换（记录时点实体已更名 CodeWhale，替换方向与时序相反），所指工件均实存；「应用隔离 Node runtime」等旧表述亦已按现行用语书写。
+> 记录日期：2026-07-23（2026-11 归档注记：分支 `feat/codex-acp` 不在本仓库、已删除（备份谱系见姊妹篇）；基线提交 `2b84908b` 本地与公开仓均不可解析——对象随删除未入任何可及谱系）
+> 归档说明：本文为回填的历史决策记录，未纳入 [`docs/adr/`](./adr/) 编号系列；该系列编号供新决策顺延使用，历史回填不占号
 > 对应分支：`feat/codex-acp`
-> 当前原型基线：`2b84908b`（实现已继续演进，最终提交号待收口）
-> AionUI 参考基线：`1b215f2f`，AionCore `v0.1.50` / `10cdd579`
+> 当前原型基线：`2b84908b`
+> AionUI 参考基线：`1b215f2f`，AionCore v0.1.50 时代（tag 指向 `4089fced`，参考提交取其后第 2 个（first-parent 序）commit 的 `10cdd579`（4089fced→7603d442→10cdd579）；AionUI/AionCore 为公开开源项目 github.com/iOfficeAI，不在本仓库）
 
 ## 1. 一句话决策
 
@@ -25,7 +27,7 @@ pinvou 采用“**Codex 作为 Agent 内核，pinvou 作为 ACP Host 和产品�
 
 ### 2.1 视觉和交互的分工
 
-前文截图是 **pinvou 当前调用 Codex ACP 的效果**，它反映的是当前实现问题，不是 Codex 原生 UI。
+原评审材料中的截图（回填时未随本文保留）反映的是 **pinvou 当时调用 Codex ACP 的实现问题**，不是 Codex 原生 UI。
 
 因此：
 
@@ -72,6 +74,8 @@ ACP 是 Host 与 Agent 之间的协议。Codex 提供 Agent 能力，pinvou 仍�
 - 如有真实并排使用需求，再提供“弹出为独立窗口”，不改变同窗口“代码”模式作为默认入口。
 
 ## 4. 当前 pinvou 原型的真实状态
+
+> （2026-11 注：本节为原型时点状态。表中 `EventBridge`/`AgentThoughtChunk` 等符号在现行 main 代码中同名但行为已不同——现行 `EventBridge` 是 `acp:event` 发射器、`AgentThoughtChunk` 忠实转发为 `agent_thought_chunk`（`features/codex_acp/mod.rs`/`events.rs`），现行事件链路见 `codex-acp.md`。）
 
 当前 `feat/codex-acp` 已经打通了最小可运行链路：
 
@@ -138,6 +142,8 @@ AionUI 并不会替换 Codex 自带的 Agent 内核。它的做法是：
 | 持久化 | session 映射 + 旧 messages | 独立会话/事件体系 | ACP state + timeline sidecar + 旧消息兼容投影 |
 | 复杂度 | 低 | 高 | 中等，只补齐 Codex 必需层 |
 
+（2026-11 注：本表「pinvou 当前原型」列为快照期行为——现行事件为忠实 `acp:event` 转发（§4 注同）、权限走 `permission_requested`/`permission_resolved` 交互与可恢复卡片、持久化为 `acp-state.json` + `acp-timeline.jsonl` journal（§12.2/§12.3）。）
+
 **哪个更优：**
 
 - 只看“最快打通”，当前 pinvou 原型更轻。
@@ -145,6 +151,8 @@ AionUI 并不会替换 Codex 自带的 Agent 内核。它的做法是：
 - 看 pinvou 的长期维护成本，**本文的混合方案最优**：学 AionUI 的 ACP 语义和会话管理，但不把 AionUI 的平台复杂度搬进 pinvou。
 
 ## 6. 目标总体架构
+
+（2026-11 注：本节为设计期目标架构；下图主导航中的「Codex」入口未按原样采纳——最终态为复用主页输入框「工作 / 代码」模式与现有会话列表，不设独立 Codex Tab，与 §6.1/§18 决策一致，见现行 `codex-acp.md`。）
 
 ```mermaid
 flowchart TB
@@ -185,7 +193,7 @@ flowchart TB
 ### 6.1 入口与页面决策
 
 - 主页输入区提供“工作 / 代码”模式，不在主导航增加独立 Codex Tab。
-- “工作”保持原有品悟输入框；“代码”当前只有 Codex，未来可扩展其他代码 Agent。
+- “工作”保持原有品悟输入框；“代码”当前只有 Codex，未来可扩展其他代码 Agent。（⚠️ 时代注：现行「代码」已支持 Codex / Claude Code / Kimi（ACP）与品悟原生会话，见 [`codex-acp.md`](./codex-acp.md) 与 [`multi-agent-acp.md`](./multi-agent-acp.md)。）
 - DeepSeek 与 Codex 会话在左侧统一列表中按最近更新时间混排，Codex 会话名前显示代码图标。
 - Codex 使用专属 timeline、输入框和运行状态，不复用 DeepSeek `ChatView` 的消息语义。
 - 代码草稿默认选择临时目录，首条发送时才物化会话；输入框下方也可选择项目目录或最近项目。
@@ -318,6 +326,14 @@ MVP 验收时需要用 pinvou 固定的 `codex-acp` / Codex CLI 版本验证 Cod
 - `error`
 - `unknown`
 
+> 注（2026-11 归档）：以上及下方合同规则为首期合同草案（其中「`unknown` 保留」规则现行未实现——未识别事件按 `_ => {}` 静默丢弃）。现行 `acp:event` 实际载荷为
+> `user_message_chunk` / `agent_message_chunk` / `agent_thought_chunk` / `tool_call` /
+> `tool_call_update` / `plan` / `available_commands` / `usage`，以及 turn / permission /
+> elicitation、`runtime_notice` / `runtime_ready` 等事件（`features/codex_acp/events.rs`），
+> 命名与本文草案不同（仅 `turn_started` / `turn_completed` / `permission_requested` /
+> `permission_resolved` 四名与草案逐字一致，其余事件名均与草案不同）。另：现行信封
+> `timestamp` 字段为字符串（`events.rs:65` `pub timestamp: String`），非本文 §9 示例中的数字毫秒值。
+
 合同规则：
 
 1. 每个会话的 `seq` 单调递增，前端按 `seq` 去重和排序。
@@ -360,8 +376,12 @@ MVP 不硬编码 `workspace-write + on-request` 这类未经当前 codex-acp cap
   `session/new`、`session/load` 和进程重连后先重新应用并等待确认，再开放发送。
 - Turn 运行期间禁止切换权限模式；配置请求使用
   `requested / applied / failed` 事件记录，避免无法判断某一轮实际使用了什么模式。
+  （📌 设计期口径：现行无独立 requested/applied/failed 事件通道——以 `set_model`/`set_mode`/
+  `set_config_option` 的 `Result` 与 `runtime_notice` 事件为准，见 [`codex-acp.md`](./codex-acp.md)。）
 
 ## 11. Codex ACP 对话 UI
+
+> ⚠️ 2026-11 注：本节对话 UI 为目标架构构想（未按原样实现，见文首 banner；现行前端落地面见 §15 阶段3 注与 `src/features/codex/`），组件边界与交互决策仅设计稿留档。
 
 ### 11.1 组件边界
 
@@ -440,6 +460,8 @@ running -> cancelling -> ready
 * -> disconnected / failed / shutting_down
 ```
 
+（2026-11 注：§12.1 上列状态机文本块（[姊妹篇](./Codex-ACP-运行环境与首次使用设计.md)所称 `CodexRuntime*` 组件族）未被采纳——现行状态契约是 `CodexAcpStatus` 布尔投影加 `acp:install-progress` / `runtime_notice` / `runtime_ready` 事件，见姊妹篇文首 banner；`CodexAcpStatus` 在 `features/codex_acp/mod.rs`（:1026），`acp:install-progress` 在 `install.rs`，`runtime_notice`/`runtime_ready` 投影在 `events.rs`。）
+
 ### 12.2 持久化分层
 
 ```text
@@ -448,8 +470,8 @@ running -> cancelling -> ready
 └─ acp-timeline.jsonl
 ```
 
-- `acp-state.json`：MVP 保存 ACP session ID、adapter/Agent 版本、model、mode、permission policy 和最后状态；后续再加入 pinvou skill/MCP/persona 快照。
-- `acp-timeline.jsonl`：脱敏后、可恢复 UI 的版本化 `acp:event`。
+- `acp-state.json`：MVP 保存 ACP session ID、adapter/Agent 版本、model、mode、permission policy 和最后状态；后续再加入 pinvou skill/MCP/persona 快照。（2026-11 注；2026-11-18 r16 订正：原注漏 `adapter`/`agent` 两顶层键且「adapter 版本不在其中」为假——spawn 全量重写 persist `adapter{agentId,package,version,path}` 与 `agent`，`persist_acp_state` 再插信封键 `version`/`pinvouSessionId`/`updatedAt`——现行实际键集为 adapter{agentId,package,version,path} / agent / capabilities / session（spawn 时写 {session_id,current_model_id,models,modes,config_options}；set_model/set_mode/set_config_option 经 apply_config_change 以 CodexAcpSessionInfo 序列化整体替换该键，steady state 另含 pending_permissions / pending_elicitations（无 skip 属性恒序列化）与 provider（Some 时）——operation_gate.rs:194、mod.rs:1159-1171） / workspace{kind,path,roots,explicit_ancestor_roots} / lastStatus / lastSeq，另加信封三键——permission policy 不在其中，mode 持久化于 `session-agents.json` 的 `acp_mode_id`。）
+- `acp-timeline.jsonl`：无损、可恢复 UI 的版本化 `acp:event`。（2026-11 注：桌面 journal 无损保存原始信封；脱敏仅作用于 Web/Relay 投影——`events.rs` 的 `project_acp_event_for_web`。）
 
 三个真相源的职责：
 
@@ -497,9 +519,9 @@ running -> cancelling -> ready
 
 阶段决策：
 
-- MVP 开发和内部体验阶段允许依赖机器已经安装的 Node 20+，优先完成 ACP 协议、会话和 UI。
+- MVP 开发和内部体验阶段允许依赖机器已经安装的 Node 20+，优先完成 ACP 协议、会话和 UI。（2026-11 注：现行 Bridge 运行时自带私有 Node 24.22.1、codex-acp 适配器 2.2.2，系统 Node 依赖已移除；[姊妹篇](./Codex-ACP-运行环境与首次使用设计.md)文首注记同。）
 - 如果 adapter/node_modules 已随包提供，运行时只需要 Node；npm 仅用于未内置或损坏后的安装回退。
-- 正式 Linux 发布按 x64 / arm64 分架构打包 Codex ACP adapter、Codex CLI、pinvou 私有 Node runtime 及所需 native dependencies。
+- 正式 Linux 发布按 x64 / arm64 分架构打包 Codex ACP adapter、Codex CLI、pinvou 私有 Node runtime 及所需 native dependencies。（2026-11 注：本条捆绑 Codex CLI 的打包决策未被采纳——落地为安装包只携带体积较小的 ACP Bridge Runtime（私有 Node + `codex-acp` / `claude-agent-acp` 两 ACP 适配器），不内置大体积 Codex 平台二进制，Codex 由用户自行安装/解析（现行 `install.rs`/`runtime.rs` 解析顺序），[姊妹篇](./Codex-ACP-运行环境与首次使用设计.md)§6.1 归档注及其文首 banner（含 §1 的最终态修正）记录了最终态（其 §6.4 主体为未被采纳的托管下载设计）。）
 - 正式用户不需要理解或手工安装 Node/npm。
 - 保留 `PINVOU3_CODEX_ACP_BIN` 作为开发/诊断覆盖，不作为普通用户安装步骤。
 
@@ -507,7 +529,7 @@ running -> cancelling -> ready
 
 - DeepSeek 现有远程协议不改。
 - MVP 不接入 Codex 富事件远程控制，也不要求老远程端展示 Codex 会话。
-- 后续会话 snapshot 增加 `backend: "codex-acp"` 标识，最终 assistant 文本可进入旧兼容摘要。
+- 后续会话 snapshot 增加 `backend: "codex-acp"` 标识（✅ 已落地：`session-agents.json` 的 `backend` 字段，序列化为 `"codex-acp"`），最终 assistant 文本可进入旧兼容摘要。
 - 后续 reasoning、tool、permission 和 plan 使用单独、版本化的 ACP timeline 数据，新远程端按 capability 渐进支持。
 - 后续远程 permission response 必须验证 session / turn / tool call / pending 状态，不允许仅用 tool call ID 跨会话回复。
 
@@ -537,7 +559,7 @@ running -> cancelling -> ready
 
 - 在主页增加“工作 / 代码”模式，移除独立 Codex Tab 和现有 DeepSeek 输入框中的 Codex backend chip。
 - 把 Codex 会话摘要并入左侧统一会话列表，底层 timeline 和运行时状态继续隔离。
-- 建立 `features/chat/acp/`。
+- 建立 `features/chat/acp/`。（2026-11 注：该计划路径从未启用——前端实际落于 `src/features/codex/`，见 §19 与文首 banner。）
 - 完成 timeline、reasoning、tool upsert、permission、plan、runtime status 和 composer。
 - 按 Codex/AionUI 的内容结构和交互语义验收，并保持 pinvou 视觉体系。
 - 强制回归 DeepSeek 原有对话。
@@ -564,7 +586,7 @@ running -> cancelling -> ready
 
 - pinvou 主页有“工作 / 代码”入口，左侧会话按时间混排，现有 DeepSeek 输入框不再承担 backend 切换。
 - 未安装、安装中、未登录、登录成功、启动失败均有明确 UI。
-- MVP 环境缺少 Node 20+ 时给出明确诊断，不进入伪启动状态。
+- MVP 环境缺少 Node 20+ 时给出明确诊断，不进入伪启动状态。（2026-11 注：验收口径为 system-Node 时代；现行随包私有 Node 24.22.1，见 §13 注。）
 - 新建会话、继续会话、切换会话、重启应用后恢复可用。
 - 新建会话可明确选择真实项目目录或临时目录；同项目可创建多个会话。
 - 项目会话的 adapter cwd、`session/new`、`session/load` 均为所选目录，恢复时不漂移。
@@ -621,7 +643,7 @@ running -> cancelling -> ready
 | skill 链接污染 workspace | 会话快照、白名单路径、原子替换、可回收管理 |
 | MCP 密钥泄露 | env 引用、日志脱敏、事件截断、持久化前清洗 |
 | 参考 Codex 后破坏 pinvou 视觉一致性 | 只参考内容结构和交互语义，颜色、字体、导航和整体布局服从 pinvou 设计体系 |
-| 正式包内置 Node 后体积增大 | x64/arm64 分架构打包并记录体积预算；MVP 先允许 system Node，不阻塞协议/UI 开发 |
+| 正式包内置 Node 后体积增大 | x64/arm64 分架构打包并记录体积预算；MVP 先允许 system Node，不阻塞协议/UI 开发（⚠️ 2026-11 注：系统 Node 依赖已移除，现行随包私有 Node 24.22.1，见 §13） |
 
 ## 18. 已确认的设计决策
 
@@ -635,7 +657,7 @@ running -> cancelling -> ready
 6. MVP 只保留 Codex 自身 system prompt、tools、tool loop、skills、MCP 配置和 context，不接入 pinvou skill、MCP、知识库和 persona。
 7. pinvou 扩展统一后置：skill 走 Codex 原生目录，工具和知识库走 MCP，persona 只允许可见、可选的首次 prompt 扩展。
 8. collaboration mode 与 security permission 分离；Host 不再按 Plan/YOLO 自动允许或拒绝。
-9. MVP 开发/内部体验允许依赖 system Node 20+；正式 Linux x64 / arm64 包内置 pinvou 私有 Node runtime，用户无需安装 Node/npm。
+9. MVP 开发/内部体验允许依赖 system Node 20+；正式 Linux x64 / arm64 包内置 pinvou 私有 Node runtime，用户无需安装 Node/npm。（2026-11 注：system Node 依赖已移除，现行自带私有 Node 24.22.1，见 §13 注。）
 10. DeepSeek 跨后端能力兼容后置，但现有 DeepSeek 功能必须零回归。
 11. 不引入 AionCore，不重构 DeepSeek-TUI 底座。
 12. Codex workspace 在创建会话时明确选择项目或临时目录，开始后不可更换；Pinvou 会话数据与项目目录分离。
@@ -658,6 +680,8 @@ running -> cancelling -> ready
 - `pinvou3-app/src/platform/tauri/client.js`：前端统一 Tauri 平台适配。
 
 ### AionUI / AionCore 参考
+
+（下列 `packages/desktop/…` 两条属 AionUi 仓库，`crates/aionui-…` 各条属 AionCore 仓库；两仓库均不在本仓库，基线见文首注。）
 
 - `packages/desktop/src/renderer/pages/conversation/platforms/acp/AcpChat.tsx`
 - `packages/desktop/src/renderer/pages/conversation/platforms/acp/useAcpMessage.ts`

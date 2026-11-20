@@ -1,16 +1,18 @@
-# 品悟银河麒麟 OS 原生适配评估
+# 品悟-银河麒麟OS原生适配评估
 
 > 评估日期：2026-07-15
 >
-> 评估对象：PINVOU 桌面应用（Tauri 2 + Rust + React + DeepSeek-TUI）
+> 评估对象：PINVOU 桌面应用（Tauri 2 + Rust + React + DeepSeek-TUI，底座现名 `CodeWhale/`）
 >
 > 目标系统：银河麒麟桌面操作系统 V10 SPx / V11
 >
 > 当前结论：技术可行，无需重写为 Qt/GTK；单版本、单架构适配复杂度中等，V11 开明包、严格沙箱、官方认证及全国产 CPU 矩阵会显著提高复杂度。
+>
+> **注（2026-11 回填）**：本文回填自内部仓库 2026-07-15 评估快照，未按当前主干逐条复核；总体「技术可行」结论仍有效，正文个别已过时的事实均已就地加注修正——§3/§5.1 的 glibc 归因出入以 [`麒麟OS-V11适配踩坑记录.md`](./麒麟OS-V11适配踩坑记录.md) 与 `scripts/check-linux-glibc-floor.sh` 为准、§5.4 SenseVoice 打包布局已改为按机器目录映射、§5.8 的「单包 OTA 清单互相覆盖」问题在现行 `latest.json` 数据模型下已不复存在（`platforms` 多平台映射，类型见 `pinvou3-app/src-tauri/src/features/updater/mod.rs`；应用内 OTA 通道本身尚未实施，§9/§10 的对应风险与决策行同步失效）、LoongArch64 构建与发布链路已于 2026-10 落地主线（仍需按 §5.4 注的原则做真机回归）。麒麟适配现行记录以踩坑记录为准。
 
 ## 1. 评估背景
 
-品悟当前已具备 Linux ARM64 DEB 发布和 OTA 能力，需要评估其面向银河麒麟桌面操作系统进行原生适配时的技术可行性、工作范围、风险和预计投入。
+品悟当前已具备 Linux ARM64 DEB 发布能力（2026-11 注：loongarch64 DEB 发布腿亦已上线，见 §5.4 注；应用内 OTA 为未实施的规划能力，见 §5.8 注），需要评估其面向银河麒麟桌面操作系统进行原生适配时的技术可行性、工作范围、风险和预计投入。
 
 本评估参考：
 
@@ -71,10 +73,10 @@
 - DEB 可以安装；
 - 应用可以启动；
 - WebKit 主界面可以正常显示；
-- Debian 12 Bookworm 构建产物最高要求 `GLIBC_2.34`，可在 glibc 2.38 的麒麟 V11 上运行；
+- Debian 12 Bookworm 构建产物最高要求 `GLIBC_2.34`，可在 glibc 2.38 的麒麟 V11 上运行；（注：[`麒麟OS-V11适配踩坑记录.md`](./麒麟OS-V11适配踩坑记录.md) 将 2.34 产物归因于 Ubuntu 22.04 容器构建，并把 Debian 12 列为「可能编出引用更高 glibc 符号」的警示项；两处记录有出入，兼容基线以踩坑记录的 Ubuntu 22.04 地板与 `scripts/check-linux-glibc-floor.sh` 为准。）
 - VirtIO 虚拟显卡可正常运行，QXL 图形栈会导致 WebKit EGL 初始化失败；
 - 麒麟 V11 安装 DEB 前需要进入维护模式，但应用运行不应长期依赖维护模式；
-- 当前仍未完成模型、文件、知识库、工具、工作流、升级等完整产品回归。
+- 当前仍未完成模型、文件、知识库、工具、升级等完整产品回归（⚠️ 快照口径：「工作流」未随现行主线发布，见 §8.3 注）。
 
 详细现场记录见：[麒麟OS-V11适配踩坑记录.md](./麒麟OS-V11适配踩坑记录.md)。
 
@@ -118,7 +120,7 @@ Tauri 虽未在手册中单独点名，但与 Electron 同属 Web 技术桌面�
 
 Tauri Linux 应用依赖宿主系统 glibc。当前开发机直接构建的 AMD64 二进制曾要求 `GLIBC_2.39`，无法在 glibc 2.38 的麒麟 V11 上启动，更无法覆盖 glibc 2.31 的部分 V10 环境。
 
-已有验证证明，在 Debian 12 Bookworm 构建后可把最高 glibc 要求降到 `GLIBC_2.34`。正式构建链需要：
+已有验证证明，在 Debian 12 Bookworm 构建后可把最高 glibc 要求降到 `GLIBC_2.34`。（注：归因与 [`麒麟OS-V11适配踩坑记录.md`](./麒麟OS-V11适配踩坑记录.md) 存在出入——彼处为 Ubuntu 22.04 容器构建并明确警示 Debian 12 镜像风险；正式构建镜像按踩坑记录执行，地板以 `scripts/check-linux-glibc-floor.sh`（amd64/arm64 2.35）为准。）正式构建链需要：
 
 - 固定兼容构建镜像；
 - 禁止复用宿主机 `target/`；
@@ -128,10 +130,10 @@ Tauri Linux 应用依赖宿主系统 glibc。当前开发机直接构建的 AMD6
 
 ### 5.2 WebKitGTK 准入
 
-品悟 Tauri 2 Linux 端依赖 `webkit2gtk = "2.0"`，生成的 DEB 会依赖：
+品悟 Tauri 2 Linux 端依赖 `webkit2gtk = "2.0"`，生成的 DEB 会依赖（2026-11 注：按现行 `pinvou3-app/src-tauri/config/platforms/linux/tauri.conf.json` 的 `depends` 实测；`libgtk-3-0` 为传递依赖，不直接声明）：
 
-- `libwebkit2gtk-4.1-0`；
-- `libgtk-3-0`。
+- `libwebkit2gtk-4.1-0 (>= 2.40)`；
+- `webkit2gtk-driver`、`libpipewire-0.3-0`、`libgbm1`、`libegl1`。
 
 每个目标麒麟版本都必须先确认软件源是否提供 WebKitGTK 4.1。若目标版本只提供 WebKitGTK 4.0，当前 Tauri 2 包不能直接安装。
 
@@ -179,27 +181,30 @@ XMODIFIERS=@im=fcitx
 品悟不仅包含主 Rust ELF，还包含或调用其他本地二进制。当前打包链路需要覆盖：
 
 - SenseVoice runtime 从固定上游 commit 在对应架构的 Ubuntu 22.04 runner 原生构建，
-  经 `x86_64` / `aarch64` overlay 分别装入；源码树不再保存单架构 ELF；
+  经 `x86_64` / `aarch64` / `loongarch64` overlay 分别装入（LoongArch64 为交叉构建，
+  见下文 2026-10 注）；源码树不再保存单架构 ELF；
 - 历史 x86_64 包中的 `web-template` 曾混入 ARM64 esbuild；
 - fastembed/ONNX Runtime 需要逐架构确认可用性；
 - ffmpeg、pandoc、poppler、tesseract、LibreOffice 等系统包需要确认目标架构的软件源支持。
 
 正式构建已通过 `scripts/check-linux-elf-policy.sh` 扫描包内全部 ELF 的目标架构
-和 Ubuntu 22.04 ABI 下限；麒麟适配仍应保留人工清单复核：
+和 ABI 下限（GLIBCXX_/CXXABI_ 按 Ubuntu 22.04 档；GLIBC_ 逐架构，loongarch64 为 2.38 档）；麒麟适配仍应保留人工清单复核：
 
 ```bash
 find <unpacked-package> -type f -exec file {} \; \
   | grep -E 'ELF|executable|shared object'
 ```
 
-生成资源按 target triple 管理，例如：
+生成资源按 target triple 管理（快照期示例命名，实际产物布局见下方注），例如：
 
 ```text
 sense-voice-main-x86_64-unknown-linux-gnu
 sense-voice-main-aarch64-unknown-linux-gnu
 ```
 
-第一阶段只建议承诺 AMD64 或 ARM64。LoongArch、MIPS64、SW64 等架构应分别立项验证，不能仅因为 Rust 主程序可编译就视为整包可用。
+（注：现行打包布局为按机器目录映射——`target/linux-asr-runtime/<machine>/sense-voice-main` → 包内 `runtime/asr/sense-voice-main`，见 `pinvou3-app/src-tauri/config/platforms/linux/{x86_64,aarch64,loongarch64}/tauri.conf.json` 与 `pinvou3-app/scripts/tauri/build.js`（注意与本文其余仓库根 `scripts/` 引用分属两个 root）。）
+
+第一阶段只建议承诺 AMD64 或 ARM64。LoongArch、MIPS64、SW64 等架构应分别立项验证，不能仅因为 Rust 主程序可编译就视为整包可用。（注：LoongArch64 交叉构建与发布链路已于 2026-10 落地主线——`scripts/ci-build-linux-loongarch64.sh` 与 release 专用 job；「整包可用」仍需按本节原则做真机回归。）
 
 ### 5.5 依赖安装与 V11 不可变系统
 
@@ -269,6 +274,8 @@ sense-voice-main-aarch64-unknown-linux-gnu
 
 当前 Linux OTA 使用单个 `latest.json`，清单只包含一个包 URL。发布第二个架构时，后上传的清单会覆盖前一个架构，导致另一架构客户端可能下载错误安装包。
 
+> 注（2026-11 归档）：现行主干 `latest.json` 的数据模型已支持按平台 `platforms` 映射（`macos-universal` / `linux-arm64` 等，含 per-platform `url/sha256/size/version` 与顶层字段回退，类型见 `pinvou3-app/src-tauri/src/features/updater/mod.rs`），本节描述的“单包 URL 互相覆盖”问题在采用该清单格式后即不复存在；注意应用内 OTA 通道本身尚未实施（`pinvou3-app/src-tauri/src/features/updater/` 各平台均为 unsupported 占位），本节其余建议按该数据模型评估即可。
+
 应改为以下任一协议：
 
 ```text
@@ -277,6 +284,8 @@ latest-amd64.json
 ```
 
 或：
+
+（下例沿用快照期「packages」键名，仅作方案示意；现行 updater 数据模型键名为「platforms」，见本节首注。）
 
 ```json
 {
@@ -305,13 +314,13 @@ latest-amd64.json
 
 ### 5.9 本地模型边界
 
-品悟已移除针对 MegaCube/GB10 出厂环境的本地 vLLM 一键启用逻辑，不再读取
-`/opt/.h3c/packages/vllm/`、调用预装启动脚本或通过 systemd 拉起推理服务。当前仅发现
+品悟已移除针对 GB10 出厂环境的本地 vLLM 一键启用逻辑，不再读取
+预装 vLLM 目录、调用预装启动脚本或通过 systemd 拉起推理服务。当前仅发现
 用户已经启动的 vLLM、Ollama、LM Studio 服务，或由用户手动配置本地模型端点。
 
 因此麒麟适配第一阶段建议定义为：
 
-> 银河麒麟终端运行品悟客户端，通过局域网连接现有 GB10/vLLM 或企业内网推理服务。
+> 银河麒麟终端运行品悟客户端，通过局域网连接现有 vLLM 或企业内网推理服务。
 
 如果要求在飞腾、鲲鹏、龙芯或国产 NPU 的麒麟终端上本机运行 Qwen3.6-35B，则需要单独评估：
 
@@ -344,7 +353,7 @@ latest-amd64.json
 
 - 固定兼容构建镜像；
 - 修复包内跨架构二进制；
-- 统一 `pinvou3` 命令和 Desktop Entry；
+- 统一 `pinvou3-tauri` 命令和 Desktop Entry；
 - 完成图形栈、输入法、多屏和麦克风适配；
 - 核实或重构系统依赖；
 - 改造多架构 OTA；
@@ -384,13 +393,13 @@ latest-amd64.json
 预计：
 
 - AMD64/ARM64 第二架构：额外 2～4 周；
-- LoongArch 等新架构：每架构单独评估，完整矩阵预计 3～6 个月以上。
+- LoongArch 等新架构：每架构单独评估，完整矩阵预计 3～6 个月以上。（注：LoongArch64 的交叉构建、CI 与 release 发布链路已于 2026-10 落地主线并出过首个发布件，本阶段余量为真机回归与生态项。）
 
 阶段出口：每个承诺架构都有独立产物、硬件回归和发布渠道。
 
 ## 7. 工作量评估
 
-以下估算假设模型继续使用现有 GB10/内网 vLLM，且能够获得目标麒麟环境：
+以下估算假设模型继续使用现有内网 vLLM，且能够获得目标麒麟环境：
 
 | 目标 | 预计投入 | 复杂度 |
 |---|---:|---|
@@ -444,10 +453,10 @@ latest-amd64.json
 - [ ] 本地文件和知识库；
 - [ ] 文件监听；
 - [ ] PDF、OCR、Office 和压缩包；
-- [ ] 网页类任务和 esbuild；
+- [ ] 网页类任务和 esbuild（⚠️ 快照口径：esbuild 未随主线发布（产品 bundle 与应用工具树无此依赖；底座 CodeWhale/web 的 package.json 顶层 overrides（作用于整树含生产依赖解析）仍含 esbuild））；
 - [ ] MCP server；
 - [ ] 连接器 CLI；
-- [ ] 定时任务和工作流；
+- [ ] 定时任务和工作流（⚠️ 快照口径：工作流子系统未随现行主线发布，现行仅定时任务在列）；
 - [ ] 远控和产物预览。
 
 ### 8.4 安全与权限
@@ -480,12 +489,12 @@ latest-amd64.json
 | 目标系统缺少 WebKitGTK 4.1 | 中 | 高 | 首周探针确认；使用 Kaiming runtime 或提高最低版本 |
 | Kaiming 沙箱无法承载宿主命令和文件访问 | 高 | 高 | 提前与麒麟确认权限；必要时拆分宿主服务 |
 | 包内混入错误架构 ELF | 已发生 | 高 | 构建后自动扫描全部 ELF 和 Node native binary |
-| 新系统构建导致 glibc 过高 | 已发生 | 高 | 固定 Debian 12/目标麒麟兼容构建基线 |
+| 新系统构建导致 glibc 过高 | 已发生 | 高 | 固定 Ubuntu 22.04（glibc 2.35）构建基线；勿用 Debian 12 等更高 glibc 环境构建（见踩坑记录与 `release-packages.yml` 发布基线） |
 | 国产 GPU 驱动与 WebKit EGL 冲突 | 中 | 高 | 物理机矩阵；按环境选择渲染后端，保留软件渲染降级 |
 | 全局 sudo 免密阻碍认证 | 高 | 高 | PolicyKit + 最小权限 helper |
 | 依赖包在私网或某架构不可用 | 高 | 中高 | 自包含、纯 Rust 替代或管理员预装 |
-| 单一 OTA 清单覆盖错误架构 | 高 | 高 | 分架构清单和包架构校验 |
-| 把客户端适配误解为本机模型适配 | 中 | 高 | 明确第一阶段模型仍由 GB10/内网服务提供 |
+| 单一 OTA 清单覆盖错误架构 | 高 | 高 | 分架构清单和包架构校验（注：现行 `latest.json` 数据模型已含 per-platform `platforms` 映射，见 §5.8 注；OTA 通道本身未实施） |
+| 把客户端适配误解为本机模型适配 | 中 | 高 | 明确第一阶段模型仍由内网推理服务提供 |
 
 ## 10. 推荐决策
 
@@ -496,7 +505,7 @@ latest-amd64.json
 3. 没有客户架构约束时，优先选择当前最有交付价值的 AMD64 或 ARM64，不同时承诺全部国产 CPU；
 4. 将构建基线、多架构资源、OTA 和超级权限整改先回馈 Linux 主线；
 5. 在进入 Kaiming 开发前，先向麒麟适配中心确认沙箱权限是否支持品悟的 Agent 能力；
-6. 第一阶段继续连接现有 GB10/内网 vLLM，不把国产硬件本机推理纳入桌面适配范围；
+6. 第一阶段继续连接现有内网 vLLM，不把国产硬件本机推理纳入桌面适配范围；
 7. 完成 L1 验收后，再决定走“认证 DEB”还是“Kaiming GUI + 宿主服务”。
 
 ### 不推荐路线
@@ -506,7 +515,7 @@ latest-amd64.json
 - 在没有真实硬件验证时承诺龙芯、申威、MIPS 全支持；
 - 为了进入沙箱而删除品悟的文件、工具和 Agent 核心能力；
 - 继续把 `NOPASSWD: ALL` 带入政企或认证版本；
-- 用一个 `latest.json` 同时发布多个 CPU 架构。
+- 用一个 `latest.json` 同时发布多个 CPU 架构。（注：现行数据模型的 per-platform `platforms` 映射已覆盖，见 §5.8 注）
 
 ## 11. 验收标准
 
@@ -519,7 +528,7 @@ latest-amd64.json
 - 安装、启动、升级、卸载通过；
 - 完成第 8 章测试矩阵中的适用项目；
 - 无全局 sudo 免密；
-- OTA 不会跨架构下载错误包；
+- OTA 不会跨架构下载错误包；（⚠️ 快照口径：OTA 通道未实施——现行数据模型已含 per-platform `platforms` 映射，见 §5.8 注与文首 banner）
 - 物理机至少完成一轮核心回归；
 - 输出构建记录、测试报告、已知限制和用户安装说明。
 
@@ -539,4 +548,4 @@ L2 原生生态交付还应满足：
 - [Tauri Linux 前置依赖](https://v2.tauri.app/zh-cn/start/prerequisites/)
 - [麒麟“麒心伙伴”及原生适配认证说明](https://www.kylinos.cn/eco/vipPartner/partnerGuide/index.html)
 - [仓库：麒麟 OS V11 适配踩坑记录](./麒麟OS-V11适配踩坑记录.md)
-- [仓库：应用内升级设计](./应用内升级-设计.md)
+- 内部文档《应用内升级设计》（未随本仓库发布）
