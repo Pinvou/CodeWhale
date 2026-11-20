@@ -43,11 +43,33 @@ def check_url(url):
     return parsed.hostname.lower()
 
 
+def curl_executable(*, platform=os.name, which=shutil.which, environment=os.environ):
+    existing = which('curl')
+    if existing:
+        return existing
+    # Windows service accounts need not have Git's bundled curl on PATH;
+    # 32-bit Python also redirects System32. Resolve a real installed binary
+    # without changing the caller's PATH or invoking a PowerShell alias.
+    if platform == 'nt':
+        candidates = []
+        git = which('git')
+        if git:
+            root = Path(git).parent.parent
+            candidates.extend(root / tail for tail in ('ucrt64/bin/curl.exe', 'mingw64/bin/curl.exe', 'usr/bin/curl.exe'))
+        windows = environment.get('SystemRoot')
+        if windows:
+            candidates.extend(Path(windows) / tail for tail in ('Sysnative/curl.exe', 'System32/curl.exe'))
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+    raise DownloadError('verified HTTPS downloader requires an installed curl executable')
+
+
 def curl_transfer(url, target, seconds, tls12, max_bytes):
     fields = ('http_code', 'time_namelookup', 'time_connect', 'time_appconnect',
               'time_starttransfer', 'size_download', 'num_redirects')
     template = '{' + ','.join('"' + field + '":"%{' + field + '}"' for field in fields) + '}'
-    args = ['curl', '--disable', '--proto', '=https', '--proto-redir', '=https',
+    args = [curl_executable(), '--disable', '--proto', '=https', '--proto-redir', '=https',
             '--location', '--max-redirs', '5', '--silent', '--show-error', '--fail',
             '--tlsv1.2', '--connect-timeout', str(min(15, seconds)),
             '--max-time', str(seconds), '--max-filesize', str(max_bytes),

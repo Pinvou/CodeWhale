@@ -19,6 +19,25 @@ URL = 'https://downloads.example.invalid/archive?sig=must-not-appear'
 
 
 class DownloadTests(unittest.TestCase):
+    def test_windows_service_path_resolves_git_bundled_curl_without_shell_alias_or_path_mutation(self):
+        with tempfile.TemporaryDirectory(prefix='installed Git ') as directory:
+            root = Path(directory)
+            git = root / 'cmd/git.exe'; git.parent.mkdir(); git.write_bytes(b'installed git')
+            curl = root / 'ucrt64/bin/curl.exe'; curl.parent.mkdir(parents=True)
+            curl.write_bytes(b'installed curl')
+            environment = {'PATH':'retained-business-path'}
+            resolved = DOWNLOAD.curl_executable(platform='nt',
+                which=lambda command: str(git) if command == 'git' else None, environment=environment)
+            self.assertEqual(Path(resolved), curl)
+            self.assertEqual(environment, {'PATH':'retained-business-path'})
+            self.assertEqual(DOWNLOAD.curl_executable(platform='nt',
+                which=lambda command: 'preferred-curl' if command == 'curl' else self.fail('unneeded Git probe'),
+                environment=environment), 'preferred-curl')
+            curl.unlink()
+            with self.assertRaises(DOWNLOAD.DownloadError):
+                DOWNLOAD.curl_executable(platform='nt',
+                    which=lambda command: str(git) if command == 'git' else None, environment={})
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
