@@ -1936,6 +1936,70 @@ impl ToolSpec for KeywordNamedPropertyTool {
     }
 }
 
+struct DependencyTriggerNamedPropertiesTool;
+
+#[async_trait::async_trait]
+impl ToolSpec for DependencyTriggerNamedPropertiesTool {
+    fn name(&self) -> &str {
+        "dep_trigger_probe"
+    }
+
+    fn description(&self) -> &str {
+        "dependency trigger named properties fixture"
+    }
+
+    fn input_schema(&self) -> Value {
+        // Review 5987169388: `dependentSchemas` is a name→schema map whose
+        // keys are trigger names; a trigger literally named `properties`
+        // dispatched as the keyword and walked the dependency schema's
+        // const literal as a schema, reordering its `required`.
+        json!({
+            "type": "object",
+            "properties": {"properties": {}, "required": {}},
+            "dependentSchemas": {
+                "properties": {
+                    "const": {"properties": true, "required": ["b", "a"]}
+                }
+            }
+        })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+
+    async fn execute(
+        &self,
+        _input: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("ok"))
+    }
+}
+
+#[test]
+fn dependency_trigger_named_properties_literal_survives_the_registry_pipeline() {
+    // The registry pipeline is sanitize then canonicalize; both name-map
+    // aware walks must keep the dependency schema's const literal
+    // byte-for-byte through build_api_tools (review 5987169388).
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let registry = ToolRegistryBuilder::new()
+        .with_tool(Arc::new(DependencyTriggerNamedPropertiesTool))
+        .build(ctx);
+    let tool = registry
+        .to_api_tools()
+        .into_iter()
+        .find(|tool| tool.name == "dep_trigger_probe")
+        .expect("dependency trigger probe registered");
+    assert_eq!(
+        tool.input_schema["dependentSchemas"]["properties"]["const"],
+        json!({"properties": true, "required": ["b", "a"]}),
+        "the dependency schema's const literal must ship verbatim: {}",
+        tool.input_schema
+    );
+}
+
 #[test]
 fn keyword_named_property_literal_survives_the_registry_pipeline() {
     // The registry pipeline is sanitize then canonicalize; the sanitizer's

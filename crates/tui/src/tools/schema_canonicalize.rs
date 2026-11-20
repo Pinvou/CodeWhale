@@ -55,7 +55,12 @@ pub fn canonicalize_schema(value: &mut Value) {
                 if INSTANCE_DATA_KEYS.contains(&k.as_str()) {
                     continue;
                 }
-                // A name→schema map: the keys are names, not keywords, so a
+                // A name→schema map (`dependentSchemas` included: its keys
+                // are dependency TRIGGER names, and a trigger literally
+                // named `properties` dispatched as the keyword walked the
+                // dependency schema's const literal as a schema, reordering
+                // its `required` — review 5987169388): the keys are names,
+                // not keywords, so a
                 // property literally named `enum` is NOT instance data — its
                 // schema must still canonicalize (two schemas differing only
                 // in `properties.enum.required` order otherwise keep
@@ -70,7 +75,11 @@ pub fn canonicalize_schema(value: &mut Value) {
                 // twice per level (work exponential in depth).
                 if matches!(
                     k.as_str(),
-                    "properties" | "patternProperties" | "$defs" | "definitions"
+                    "properties"
+                        | "patternProperties"
+                        | "$defs"
+                        | "definitions"
+                        | "dependentSchemas"
                 ) {
                     if let Some(name_map) = v.as_object_mut() {
                         let old = std::mem::take(name_map);
@@ -242,6 +251,51 @@ mod tests {
             keys,
             vec!["alpha", "zeta"],
             "name-map keys sort for stable bytes"
+        );
+    }
+
+    #[test]
+    fn dependency_trigger_named_properties_keeps_dep_schema_const_verbatim() {
+        // Review 5987169388: `dependentSchemas` is itself a name→schema
+        // map, and its keys are dependency TRIGGER names. A trigger
+        // literally named `properties` dispatched as the keyword, and the
+        // dependency schema's const literal was walked as a schema — its
+        // `required` reordered, rejecting the originally allowed value.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {"properties": {}, "required": {}},
+            "dependentSchemas": {
+                "properties": {
+                    "const": {"properties": true, "required": ["b", "a"]}
+                }
+            }
+        });
+        canonicalize_schema(&mut schema);
+        assert_eq!(
+            schema["dependentSchemas"]["properties"]["const"],
+            json!({"properties": true, "required": ["b", "a"]}),
+            "the dependency schema's const literal must stay verbatim: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the canonicalized schema must compile");
+        // The dependency applies when the instance carries the trigger key
+        // `properties`, and its const constrains the WHOLE instance — so
+        // the const-admitted instance is exactly the const value itself.
+        assert!(
+            validator.is_valid(&json!({
+                "properties": true,
+                "required": ["b", "a"]
+            })),
+            "the original const-admitted argument must stay valid: {schema}"
+        );
+        assert!(
+            !validator.is_valid(&json!({
+                "properties": true,
+                "required": ["a"]
+            })),
+            "the reordered-admission value must stay rejected: {schema}"
         );
     }
 
