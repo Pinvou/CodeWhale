@@ -227,7 +227,9 @@ function assertFinancialDiagnosticExemption(job) {
     "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
     "        with:",
     "          name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}",
-    "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+    "          path: |",
+    "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+    "            ${{ runner.temp }}/financial-parallel-*/",
     "          if-no-files-found: error",
     "          retention-days: 7",
   ].join("\n"));
@@ -652,6 +654,40 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   assertWorkflowFailurePolicy(original);
 });
 
+function assertFinancialFamilyPolicy(job) {
+  const policy = namedStep(job.replaceAll("\r\n", "\n"), "Financial runner policy regressions");
+  assert.equal(policy.trimEnd(), [
+    "      - name: Financial runner policy regressions",
+    "        shell: bash",
+    "        run: |",
+    "          set -euo pipefail",
+    "          python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py",
+    "          python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py",
+    "          python3 -m unittest discover -s scripts/tests -p test_account_financial_families_postgres.py",
+    "          python3 -m unittest discover -s scripts/tests -p test_go_test_contract.py",
+    "          python3 -m unittest discover -s scripts/tests -p test_financial_owners.py",
+    "          policy_python=\"${{ steps.financial-policy-python.outputs.python-path }}\"",
+    "          policy_library=\"$(dirname \"$(dirname \"$policy_python\")\")/lib\"",
+    "          python3 scripts/ci-fixture-process.py --receipt \"$PINVOU_CI_RESOURCE_LEDGER/financial-policy-process.json\" -- env \"LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\" \"$policy_python\" -m unittest discover -s scripts/tests -p test_account_financial_ci.py",
+  ].join("\n"));
+}
+
+test("family policy commands cannot be removed, skipped or made advisory", () => {
+  const job = jobBlock("account-platform-test");
+  assertFinancialFamilyPolicy(job);
+  for (const module of ["test_account_financial_families_postgres.py", "test_go_test_contract.py"]) {
+    const command = `          python3 -m unittest discover -s scripts/tests -p ${module}`;
+    for (const replacement of ["", command + " || true"]) {
+      assert.ok(job.includes(command));
+      assert.throws(() => assertFinancialFamilyPolicy(job.replace(command, () => replacement)));
+    }
+  }
+  for (const field of ["if: ${{ false }}", "continue-on-error: true"]) {
+    assert.throws(() => assertFinancialFamilyPolicy(job.replace("      - name: Financial runner policy regressions\n",
+      `      - name: Financial runner policy regressions\n        ${field}\n`)));
+  }
+});
+
 
 const portalRedisServiceLines = [
   "      portal-redis:",
@@ -690,6 +726,7 @@ function assertPortalRedisSteps(job) {
 }
 
 function assertFiniteAuditPGSetup(job) {
+  assertFinancialFamilyPolicy(job);
   const text = job.replaceAll("\r\n", "\n");
   // These are exactly two approved PostgreSQL services plus one bounded Portal Redis,
   // services, production credentials, public ports or persistent volumes.
@@ -881,7 +918,11 @@ function assertFiniteFinancialPGSetup(job) {
     "          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
     ...pgIdentityEnvironment("financial").map(value => `          ${value}`),
     "        run: |", "          set -euo pipefail",
-    '          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP" --verify-fixture-cache',
+    "          diagnostics=\"$(mktemp -d \"$RUNNER_TEMP/financial-parallel-${ACCOUNT_FINANCIAL_GROUP}-XXXXXX\")\"",
+    "          python3 scripts/ci-fixture-process.py --receipt \"$PINVOU_CI_RESOURCE_LEDGER/financial-process.json\" -- python3 scripts/test-token-financial-postgres.py --group \"$ACCOUNT_FINANCIAL_GROUP\" --verify-fixture-cache 2>&1 | tee \"$diagnostics/group.log\"",
+    "          if [[ \"$ACCOUNT_FINANCIAL_GROUP\" == owners ]]; then",
+    "            PINVOU_FINANCIAL_CHILD_ARTIFACTS=\"$diagnostics/owners-families\" python3 scripts/ci-fixture-process.py --receipt \"$PINVOU_CI_RESOURCE_LEDGER/financial-families-process.json\" -- python3 scripts/test-account-financial-families-postgres.py 2>&1 | tee \"$diagnostics/owners-families.log\"",
+    "          fi",
   ].join("\n"));
   const stop = namedStep(text, pgStopStepName);
   assert.equal(stop.trimEnd(), [
@@ -1474,7 +1515,10 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
   for (const path of ["scripts/test-token-financial-postgres.py", "scripts/test-financial-parallel.py",
     "scripts/test-financial-owners.py", "scripts/tests/test_financial_owners.py",
     "scripts/tests/test_financial_parallel.py", "scripts/tests/test_token_financial_postgres.py",
-    "scripts/check-account-financial-ci.py", "scripts/tests/test_account_financial_ci.py"]) {
+    "scripts/check-account-financial-ci.py", "scripts/tests/test_account_financial_ci.py",
+    "scripts/test-account-financial-families-postgres.py", "scripts/account-financial-families.json",
+    "scripts/tests/test_account_financial_families_postgres.py", "scripts/go-test-contract.py",
+    "scripts/tests/test_go_test_contract.py"]) {
     assert.ok(paths.includes(path));
   }
   const job = jobBlock("account-financial-test");
@@ -1487,7 +1531,7 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
       const mock = `python3() { case "$*" in *check-account-financial-ci.py*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *account-ci-postgres.py*) ${failedPhase === "postgres" ? "return 7" : "return 0"};; *ci-fixture-process.py*) ${failedPhase === "group" ? "return 7" : "return 0"};; *) return 99;; esac; }; export -f python3;\n`;
       const result = spawnSync(bash, ["-e", "-c", mock + run], {
         encoding: "utf8", timeout: 30_000, windowsHide: true,
-        env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: directory, ACCOUNT_FINANCIAL_GROUP: "token", PINVOU_ACCOUNT_PG_PROFILE: "financial" },
+        env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: directory.replaceAll("\\", "/"), RUNNER_TEMP: directory.replaceAll("\\", "/"), ACCOUNT_FINANCIAL_GROUP: "token", PINVOU_ACCOUNT_PG_PROFILE: "financial" },
       });
       assert.equal(result.status, failedPhase === "none" ? 0 : 7,
         `${failedPhase} must preserve the selected gate result: ${result.stderr}`);
@@ -1495,6 +1539,29 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("owners family execution follows restored owners and preserves either failure", () => {
+  const run = stepRun(jobBlock("account-financial-test"), "Run isolated financial group");
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-family-order-"));
+  try {
+    const trace = join(directory, "calls").replaceAll("\\", "/");
+    for (const [group, failure, expected, calls] of [
+      ["owners", "none", 0, ["owners", "families"]],
+      ["owners", "owners", 7, ["owners"]],
+      ["owners", "families", 9, ["owners", "families"]],
+      ["token", "none", 0, ["token"]],
+    ]) {
+      writeFileSync(trace, "");
+      const mock = `python3() { case "$*" in *test-account-financial-families-postgres.py*) printf 'families\\n' >> "$FAMILY_TRACE"; ${failure === "families" ? "return 9" : "return 0"};; *test-token-financial-postgres.py*) printf '%s\\n' "$ACCOUNT_FINANCIAL_GROUP" >> "$FAMILY_TRACE"; ${failure === "owners" ? "return 7" : "return 0"};; *) return 99;; esac; }; export -f python3;\n`;
+      const result = spawnSync(bash, ["-e", "-c", mock + run], {
+        encoding: "utf8", timeout: 30_000, windowsHide: true,
+        env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/"), PINVOU_CI_RESOURCE_LEDGER: directory.replaceAll("\\", "/"), ACCOUNT_FINANCIAL_GROUP: group, FAMILY_TRACE: trace },
+      });
+      assert.equal(result.status, expected, `${group}/${failure}: ${result.stderr}`);
+      assert.deepEqual(readFileSync(trace,"utf8").trim().split(/\r?\n/),calls);
+    }
+  } finally { rmSync(directory,{recursive:true,force:true}); }
 });
 
 test("named step fixtures exclude later steps and fail closed on missing names", () => {
