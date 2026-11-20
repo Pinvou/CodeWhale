@@ -227,6 +227,12 @@ pub async fn active_model_snapshot() -> Option<VllmSnapshot> {
     // chat page (chat:usage denominator) and the monitor page / progress-bar
     // denominator each tell their own story.
     let configured_context = model.as_ref().and_then(|m| m.context_window_tokens);
+    // 免鉴权声明随模型进探针:key 解析(model_api_key)与"缺 key"判定
+    // (remote_missing_api_key)都必须尊重声明,否则 env/钥匙串残留会顶着
+    // 声明外发、或正常工作的免鉴权端点被误报 missing_api_key。
+    let declares_no_auth = model
+        .as_ref()
+        .is_some_and(|m| codewhale_config::auth_mode_disables_api_key(m.auth_mode.as_deref()));
     snapshot_for_model_config(
         &upstream,
         configured_model,
@@ -235,11 +241,19 @@ pub async fn active_model_snapshot() -> Option<VllmSnapshot> {
         provider,
         api_key.as_deref(),
         configured_context,
+        declares_no_auth,
     )
     .await
 }
 
 fn model_api_key(model: &SavedModel) -> Option<String> {
+    // 免鉴权声明优先于一切凭据来源：与 bridge::api_key 同口径（判定直接复用
+    // 底座谓词，不本地抄同义词表），环境变量 / 钥匙串 / 明文残留都不得越过
+    // 声明外发 —— 监控探针携带 `Authorization: Bearer <key>` 打到用户声明为
+    // 免鉴权的端点，违反设置页契约（声明生效时不携带凭据）。
+    if codewhale_config::auth_mode_disables_api_key(model.auth_mode.as_deref()) {
+        return None;
+    }
     if let Ok(v) = std::env::var("DEEPSEEK_API_KEY") {
         let trimmed = v.trim();
         if !trimmed.is_empty() {
@@ -293,6 +307,22 @@ tokio::task_local! {
     static TEST_PROBE_CLIENT: reqwest::Client;
 }
 
+/// 远程端点是否应判 `MissingApiKey`。抽出为纯函数便于单测(同文件
+/// `local_native_display_window` 的先例):免鉴权声明必须豁免 —— 声明生效时
+/// 探针不携带凭据,端点"缺 key"的判定对它是误报(live dot 会长期红点)。
+fn remote_missing_api_key(
+    target_kind: &str,
+    api_key: Option<&str>,
+    declares_no_auth: bool,
+) -> bool {
+    target_kind == "remote"
+        && !declares_no_auth
+        && api_key
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .is_none()
+}
+
 async fn snapshot_for_model_config(
     upstream: &str,
     configured_model: Option<String>,
@@ -301,6 +331,7 @@ async fn snapshot_for_model_config(
     provider: String,
     api_key: Option<&str>,
     configured_context: Option<u32>,
+    declares_no_auth: bool,
 ) -> Option<VllmSnapshot> {
     let client = shared_probe_client()?;
     #[cfg(test)]
@@ -318,6 +349,7 @@ async fn snapshot_for_model_config(
         provider,
         api_key,
         configured_context,
+        declares_no_auth,
     )
     .await
 }
@@ -331,6 +363,7 @@ async fn snapshot_for_model_config_with_client(
     provider: String,
     api_key: Option<&str>,
     configured_context: Option<u32>,
+    declares_no_auth: bool,
 ) -> Option<VllmSnapshot> {
     // A local preset controls valid endpoint behavior, not URL validity.
     let target_kind = match vllm_target_kind(upstream) {
@@ -372,8 +405,12 @@ async fn snapshot_for_model_config_with_client(
     };
 
     // 1) /models 健康
+    // 免鉴权声明允许无凭据探测:声明即端点契约("无需鉴权"),远程端点同样
+    // 可以裸探 /models 拿到真实健康态,而不是跳过后误报缺 key。
     let should_probe_models = target_kind != "invalid"
-        && (target_kind == "local" || api_key.map(str::trim).is_some_and(|key| !key.is_empty()));
+        && (target_kind == "local"
+            || api_key.map(str::trim).is_some_and(|key| !key.is_empty())
+            || declares_no_auth);
     let models_resp = if should_probe_models {
         let models_url = models_probe_url(upstream);
         let mut request = client.get(models_url).timeout(Duration::from_secs(3));
@@ -644,14 +681,11 @@ async fn snapshot_for_model_config_with_client(
     let health_status = match status {
         VllmStatus::Mismatch => HealthStatus::Mismatch,
         _ if target_kind == "invalid" => HealthStatus::Unverified,
-        // Valid-target offline snapshots exit through the early returns
-        // above, which carry the transport/HTTP refinement themselves.
-        _ if target_kind == "remote"
-            && api_key
-                .map(str::trim)
-                .filter(|key| !key.is_empty())
-                .is_none() =>
-        {
+        // No `Offline` arm: `status` is only ever Ready/Busy here (built from
+        // the queue gauges, then possibly downgraded to Mismatch); every
+        // Offline snapshot exits through the early returns above, which carry
+        // the offline refinement diagnostic themselves.
+        _ if remote_missing_api_key(target_kind, api_key, declares_no_auth) => {
             HealthStatus::MissingApiKey
         }
         _ if target_kind == "remote" && served_model.is_none() => HealthStatus::Unverified,
@@ -1540,6 +1574,7 @@ mod tests {
                         "provider".to_string(),
                         key,
                         Some(262_144),
+                        false,
                     )
                     .await
                     .expect("invalid configuration remains an explicit snapshot");
@@ -1625,6 +1660,7 @@ mod tests {
                 "provider".to_string(),
                 key,
                 None,
+                false,
             )
             .await
             .expect("valid target snapshot");
@@ -1781,6 +1817,7 @@ mod tests {
             "vllm".to_string(),
             Some("secret"),
             None,
+            false,
         )
         .await
         .expect("snapshot with key");
@@ -1816,6 +1853,7 @@ mod tests {
             "vllm".to_string(),
             None,
             None,
+            false,
         )
         .await
         .expect("snapshot keyless");
@@ -1862,6 +1900,7 @@ mod tests {
             "vllm".to_string(),
             None,
             None,
+            false,
         )
         .await
         .expect("a local target yields a snapshot");
@@ -1911,6 +1950,7 @@ mod tests {
             "vllm".to_string(),
             None,
             None,
+            false,
         )
         .await
         .expect("snapshot");
@@ -1947,6 +1987,7 @@ mod tests {
             "vllm".to_string(),
             None,
             None,
+            false,
         )
         .await
         .expect("snapshot");
@@ -2014,6 +2055,7 @@ mod tests {
                         "vllm".to_string(),
                         None,
                         None,
+                        false,
                     ),
                 )
                 .await
@@ -2056,6 +2098,7 @@ mod tests {
             "vllm".to_string(),
             None,
             None,
+            false,
         )
         .await
         .expect("a local target yields a snapshot even when unreachable");
@@ -2093,6 +2136,7 @@ mod tests {
             "vllm".to_string(),
             None,
             None,
+            false,
         )
         .await
         .expect("snapshot");
@@ -2133,6 +2177,7 @@ mod tests {
             "vllm".to_string(),
             Some("secret"),
             None,
+            false,
         )
         .await
         .expect("snapshot");
@@ -2157,6 +2202,7 @@ mod tests {
             "vllm".to_string(),
             None,
             None,
+            false,
         )
         .await
         .expect("snapshot");
@@ -2183,6 +2229,7 @@ mod tests {
             "vllm".to_string(),
             None,
             None,
+            false,
         )
         .await
         .expect("snapshot");
@@ -2223,6 +2270,7 @@ mod tests {
             "vllm".to_string(),
             None,
             Some(262_144),
+            false,
         )
         .await
         .expect("a local target yields a snapshot even when unreachable");
@@ -2251,6 +2299,7 @@ mod tests {
             "vllm".to_string(),
             Some("secret"),
             Some(262_144),
+            false,
         )
         .await
         .expect("snapshot");
@@ -2276,6 +2325,7 @@ mod tests {
             "vllm".to_string(),
             Some("secret"),
             None,
+            false,
         )
         .await
         .expect("snapshot");
@@ -2307,6 +2357,7 @@ mod tests {
             "vllm".to_string(),
             None,
             Some(262_144),
+            false,
         )
         .await
         .expect("snapshot");
@@ -2337,6 +2388,7 @@ mod tests {
             "vllm".to_string(),
             None,
             None,
+            false,
         )
         .await
         .expect("a local target yields a snapshot even when unreachable");
@@ -2380,6 +2432,7 @@ mod tests {
             ModelPreset::Deepseek.as_str().to_string(),
             None,
             None,
+            false,
         )
         .await
         .expect("snapshot");
@@ -2800,6 +2853,7 @@ mod tests {
             "vllm".to_string(),
             None,
             None,
+            false,
         )
         .await
         .expect("a local target yields a snapshot");
@@ -2832,6 +2886,7 @@ mod tests {
             "vllm".to_string(),
             None,
             None,
+            false,
         )
         .await
         .expect("a local target yields a snapshot");
@@ -3650,5 +3705,88 @@ vllm:request_time_per_output_token_seconds_sum{engine=\"0\",model_name=\"qwen36_
                 "{preset:?} default model {model} must resolve an official context window via the shared resolution entry (the engine side has no prefs fallback)"
             );
         }
+    }
+
+    /// 免鉴权声明必须在监控探针侧生效:声明模型的 env / 明文残留凭据不得外发
+    /// (model_api_key 与 bridge::api_key 同口径,判定复用底座谓词),反方向
+    /// 无声明时 env key 照常生效(防过度短路)。
+    #[test]
+    fn keyless_declaration_suppresses_monitor_probe_key() {
+        let (_lock, _env) = crate::platform::test_support::locked_env(&["DEEPSEEK_API_KEY"]);
+        let mut model = SavedModel {
+            auth_mode: None,
+            id: "keyless-monitor-model".into(),
+            name: "keyless monitor model".into(),
+            alias: None,
+            preset: ModelPreset::OpenaiCompatible,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+            model: "gateway-model".into(),
+            base_url: "https://gateway.example.com:8443/v1".into(),
+            model_store_card_id: None,
+            model_store_link_detached: false,
+            model_store_link_requested: false,
+            model_store_link_only: false,
+            preserve_model_store_route: false,
+            preserve_context_window_tokens: false,
+            context_window_edit_requested: false,
+            reasoning_effort_only: false,
+            provider_kind: None,
+            vendor: None,
+            endpoint_mode: None,
+            image_capability_override: crate::platform::prefs::ImageCapabilityOverride::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: crate::platform::credential_store::CredentialState::Missing,
+            has_secret: false,
+            credential_action: None,
+        };
+        model.auth_mode = Some("none".to_string());
+        // SAFETY: ENV_LOCK 由 locked_env() 持有,env 写入已串行。
+        unsafe { std::env::set_var("DEEPSEEK_API_KEY", "env-injected-key") };
+        assert_eq!(
+            model_api_key(&model),
+            None,
+            "免鉴权声明不得外发 env 注入的 key(设置页契约:声明生效时不携带凭据)"
+        );
+        model.api_key = "residual-plaintext".into();
+        assert_eq!(
+            model_api_key(&model),
+            None,
+            "免鉴权声明不得外发明文残留 key"
+        );
+        // SAFETY: ENV_LOCK 由 locked_env() 持有;回到无 env 基线。
+        unsafe { std::env::remove_var("DEEPSEEK_API_KEY") };
+        // 反方向:无声明时残留明文 key 照常生效(防过度短路误伤存量条目)。
+        model.auth_mode = None;
+        assert_eq!(
+            model_api_key(&model).as_deref(),
+            Some("residual-plaintext"),
+            "无声明条目的凭据解析必须保持原行为"
+        );
+    }
+
+    /// 远程端点"缺 key"判定必须尊重免鉴权声明:声明生效时端点"缺 key"是
+    /// 误报(live dot 会长期红点 / 监控台 missing_api_key)。纯函数双向钉住。
+    #[test]
+    fn remote_missing_api_key_respects_keyless_declaration() {
+        assert!(
+            remote_missing_api_key("remote", None, false),
+            "无声明的远程端点缺 key 仍判 missing_api_key(存量语义不变)"
+        );
+        assert!(
+            !remote_missing_api_key("remote", Some(""), true),
+            "免鉴权声明豁免缺 key 判定"
+        );
+        assert!(
+            !remote_missing_api_key("remote", Some("k"), false),
+            "有 key 的远程端点不判缺 key"
+        );
+        assert!(
+            !remote_missing_api_key("local", None, false),
+            "local 目标不走该判定"
+        );
     }
 }

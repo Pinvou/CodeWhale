@@ -21,6 +21,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / 'lib'))
 from ci_transfer_deadline import DeadlineExceeded, command_deadline  # noqa: E402
+from ci_https import storage_opener  # noqa: E402
 
 MAX_BLOB = 128 * 1024**2
 
@@ -112,6 +113,10 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def storage_open(request, *, timeout):
+    return storage_opener(NoRedirect).open(request, timeout=timeout)
+
+
 def github_zip(destination, deadline):
     with command_deadline(deadline):
         return _github_zip(destination, deadline)
@@ -124,7 +129,7 @@ def _github_zip(destination, deadline):
     parsed = urllib.parse.urlsplit(api)
     if not token or not run.isdigit() or parsed.scheme != "https" or parsed.username or parsed.query or parsed.fragment:
         raise ValueError("invalid GitHub artifact context")
-    client = urllib.request.build_opener(NoRedirect)
+    client = storage_opener(NoRedirect)
     headers = {"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json"}
     root = api + "/repos/" + repository() + "/actions/"
     candidates = []
@@ -171,7 +176,7 @@ def _github_zip(destination, deadline):
                 raise ValueError("artifact redirect must use HTTPS")
             # Authorization is deliberately absent on the signed storage URL.
             request = urllib.request.Request(location, headers={"Range": "bytes=" + str(offset) + "-"} if offset else {})
-            with urllib.request.urlopen(request, timeout=15) as response:
+            with storage_open(request, timeout=15) as response:
                 if offset and response.status == 206:
                     expected = "bytes " + str(offset) + "-"
                     if not response.headers.get("Content-Range", "").startswith(expected):
