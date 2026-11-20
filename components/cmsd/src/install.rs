@@ -214,7 +214,9 @@ fn mirror_worker(app: &Arc<App>, task_id: &str, card: &str, run_id: &str) {
                     .saturating_sub(detail.line_offset)
                     .min(detail.lines.len())..]
                 {
-                    app.task_event(task_id, "store", line);
+                    // r8 P1-2 ③：商店侧 run 日志可能含注入凭据行；cmsd 是落盘前
+                    // 最后写入方，镜像边界统一过脱敏。
+                    app.task_event(task_id, "store", &redact_text(line));
                 }
                 seen = seen.max(detail.line_offset + detail.lines.len());
                 if let Some((done, total)) = detail.task.progress {
@@ -241,7 +243,7 @@ fn mirror_worker(app: &Arc<App>, task_id: &str, card: &str, run_id: &str) {
                         let msg = if detail.task.error.is_empty() {
                             "商店代办下载失败（原因见商店侧日志）".to_string()
                         } else {
-                            detail.task.error
+                            redact_text(&detail.task.error)
                         };
                         log_line(&format!("install {card} 失败（商店代办）：{msg}"));
                         app.task_finish(task_id, Err(msg));

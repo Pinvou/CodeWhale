@@ -370,16 +370,20 @@ def _fetch(url, timeout=HTTP_TIMEOUT_S):
             current, headers={"User-Agent": "megacube-admin/1.0"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                # r7 P2-3：与包内 16MiB 上限（state.py）同口径的有界读——超大或
-                # 被劫持的 store/HF 响应不允许 OOM 单线程 server 并阻塞 tools/list。
-                return getattr(resp, "status", 200) or 200, resp.read(_MAX_FETCH_BYTES + 1)
+                # r7/r8 P2-3：与包内 16MiB 上限（state.py）同口径的有界读；超限
+                # 显式报错而非静默截断（截断会让下游把超大响应当损坏内容误报）。
+                raw = resp.read(_MAX_FETCH_BYTES + 1)
+                if len(raw) > _MAX_FETCH_BYTES:
+                    raise _NetError("响应超过 16 MiB 上限，已拒绝读取；疑似异常或被劫持的源。")
+                return getattr(resp, "status", 200) or 200, raw
         except urllib.error.HTTPError as e:
             location = e.headers.get("Location") if e.headers else None
             if e.code in (301, 302, 303, 307, 308) and location:
                 current = urllib.parse.urljoin(current, location)
                 continue
             try:
-                return e.code, e.read()
+                # r8 P2-3：错误分支同样有界（原 OOM 面保留在此）。
+                return e.code, e.read(_MAX_FETCH_BYTES + 1)
             except Exception:
                 return e.code, b""
         except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as e:

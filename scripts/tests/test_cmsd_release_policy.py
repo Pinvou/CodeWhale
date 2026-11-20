@@ -222,6 +222,11 @@ class CmsdCiRoutingTests(unittest.TestCase):
         command = textwrap.dedent("\n".join(script_lines))
         environment = {**os.environ, "GITHUB_EVENT_NAME": "pull_request", "BACKFLOW_MODE": "ordinary"}
         for key in re.findall(r"^          ([A-Z0-9_]+):", required, re.M):
+            # r8 合并后 required-gate 段含 runner 专属 PATH 等进程关键键
+            # （来自 main 的 rust-network 包装步骤），覆盖本地进程 PATH 会让
+            # subprocess 找不到 bash。仅模拟门禁语义变量。
+            if key in ("PATH", "HOME", "TMPDIR"):
+                continue
             environment[key] = "success" if key.endswith("_RESULT") else "false"
         environment["CMSD_REQUIRED_BY_POLICY"] = "true"
         for status in ("success", "skipped", "failure", "cancelled", ""):

@@ -584,8 +584,11 @@ function enforceLazyChunks() {
 // the cmsd controller/views. Same-host locked-dependency desktop baseline:
 // 171,954 B; candidate desktop 175,132 B / web 177,358 B. Keep ~2 kB
 // headroom, the exact byte gates and all static/lazy graph checks.
-export const MAIN_ENTRY_BUDGET_BYTES = 177_500;
-export const WEB_MAIN_ENTRY_BUDGET_BYTES = 179_500;
+// 2026-11-20 r8 P2-14：main 已按合并树实测上调至 178_000/180_000（见上段），
+// 采纳 main 值——上限以 main 实测口径为准，本树实测 162,265/164,486 B
+// 仍在预算内。
+export const MAIN_ENTRY_BUDGET_BYTES = 178_000;
+export const WEB_MAIN_ENTRY_BUDGET_BYTES = 180_000;
 
 function mainEntryBudgetBytesFor(mode) {
   return mode === 'web' ? WEB_MAIN_ENTRY_BUDGET_BYTES : MAIN_ENTRY_BUDGET_BYTES;

@@ -581,6 +581,10 @@ pub struct SavedModel {
     pub vendor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_mode: Option<String>,
+    /// cmsd 卡片关联，也可指向明确托管的实验模型；不等价于模型商店来源。
+    /// 保留既有 wire 名称以兼容旧配置，单凭此标记不授予生命周期权限。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_card_id: Option<String>,
     /// 用户对端点鉴权的显式声明（设置页「此端点无需鉴权」开关）：`Some("none")`
     /// = 该端点不需要任何上游鉴权（自建网关/免鉴权服务）。落盘前经
     /// `normalize_provider_metadata` 归一：仅保留底座
@@ -594,10 +598,6 @@ pub struct SavedModel {
         deserialize_with = "deserialize_auth_mode_lenient"
     )]
     pub auth_mode: Option<String>,
-    /// cmsd 卡片关联，也可指向明确托管的实验模型；不等价于模型商店来源。
-    /// 保留既有 wire 名称以兼容旧配置，单凭此标记不授予生命周期权限。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub store_card_id: Option<String>,
     /// 图片输入能力覆盖(设计 §6.3):Pinvou 走能力解析链;Enabled/Disabled 强制。
     #[serde(default)]
     pub image_capability_override: ImageCapabilityOverride,

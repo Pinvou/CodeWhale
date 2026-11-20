@@ -1000,7 +1000,7 @@ fn wait_container_ready(
                 .ok()
                 .and_then(|t| t.lines().last().map(|l| l.trim().to_string()))
                 .filter(|l| !l.is_empty())
-                .map(|l| format!("（容器最近日志：{}）", clip(&l, 120)))
+                .map(|l| format!("（容器最近日志：{}）", clip(&redact_text(&l), 120)))
                 .unwrap_or_default();
             event(
                 "wait",
@@ -2884,6 +2884,9 @@ fn run_card_script_with_limits(
                 if tail.len() > SCRIPT_TAIL_LINES {
                     tail.remove(0);
                 }
+                // r8 P1-2：脚本 stdout/stderr 可含凭据行（env 注入 LMM_HF_TOKEN），
+                // 进事件流（持久 + SSE）前过脱敏，与等待路径同口径。
+                let line = redact_text(&line);
                 if is_err {
                     app.task_event(task_id, stage, &format!("stderr: {line}"));
                 } else {
@@ -2969,7 +2972,7 @@ fn run_card_script_with_limits(
             ScriptRun {
                 outcome: RunOutcome::Failed(format!(
                     "脚本失败{code_note}。最后输出：\n{}",
-                    tail.join("\n")
+                    redact_text(&tail.join("\n"))
                 )),
             }
         }

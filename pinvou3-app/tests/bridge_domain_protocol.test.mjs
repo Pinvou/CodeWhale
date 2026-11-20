@@ -336,8 +336,9 @@ const expectedProtocolHashes = {
   // inherits main's Windows progress event and installation lifecycle.
   // Guarded store deletion, endpoint-conditional deletion and models:changed are retained; list_models
   // uses the shared loader so cross-cluster reads share one ordering boundary.
-  // Combined parent conditional device deletion and PR CMS idle CAS.
-  settings: '476c7473aa5aa551dceab26e388e4d20fa9585323e4ed1f2e5e531b5dfac443d',
+  // Recomputed for the keyless-aware model and tier probes: the form's noAuth
+  // posture is forwarded so saved credentials cannot ride a keyless request.
+  settings: '90588b4c9655bea0beb331b0dcb4f2a21ff7ac855c7dc913f230e3ba80b2885c',
   updater: '30a3762ee45f378d476efec934dc4be50522a02a5b9a97111191496510d4d7d4',
   // Voice draft preparation now carries its typed source/model reference;
   // session bindings remain authoritative and the command set is unchanged.

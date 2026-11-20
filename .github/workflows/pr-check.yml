@@ -1361,7 +1361,7 @@ jobs:
         # negative result when the list may be truncated or its size is unknown.
         if: ${{ steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000)) }}
         run: |
-          python3 -m pip install --quiet python-pptx python-docx
+          python3 -m pip install --quiet python-pptx python-docx jsonschema
           fail=0
           for t in pinvou3-app/resources/mcp-servers/*/test_*.py; do
             [ -f "$t" ] || continue
@@ -3112,9 +3112,15 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       # r7 P2-6：cmsd 依赖图此前完全绕过 cargo-deny（rust_dependencies 过滤
       # 排除 components/cmsd/**）。钉同版安装器与四类检查，与知识库/主仓同口径。
       - name: cargo-deny
