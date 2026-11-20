@@ -30,7 +30,8 @@ VC Runtime 保持独立文件。运行时仓库历史中的二进制仍由 Git L
 
 `windows-runtime.manifest.json` 当前锁定 9 个仓库级资源，并额外记录四个组件 ZIP 内部
 112 个 7-Zip/Poppler/Tesseract/ASR 文件（2026-11 核验：7-Zip 5 + ASR 4 + Poppler 41 + Tesseract 62，按 gitlink `dcde8f01` manifest 计）的路径、大小和 SHA-256。staging 会先校验 ZIP，
-解压后再逐文件复核内部清单。Windows 安装包不映射 `sensevoice-small-q8.gguf`，应用在用户首次启用本地语音识别时
+解压后再逐文件复核内部清单，并按 manifest 的 `stagedFiles` 校验最终 staging 文件集合、大小和 SHA-256。
+Windows 安装包不映射 `sensevoice-small-q8.gguf`，应用在用户首次启用本地语音识别时
 下载并校验到用户目录；resolver 在复核归档后会从 staging 删除主模型和已解包的 payload，只保留 ASR 引擎与 VAD 模型。
 
 主仓库 `pinvou3-app/src-tauri/config/platforms/windows/runtime/x86_64.lock.json` 再锁定：
@@ -39,7 +40,9 @@ VC Runtime 保持独立文件。运行时仓库历史中的二进制仍由 Git L
 - runtime manifest 路径及 SHA-256；
 - 目标平台 `windows-x86_64`。
 
-因此版本完整性由三层保证：主仓库 gitlink、主仓库 lock、运行时文件级 manifest。
+因此版本完整性由三层保证：主仓库 gitlink、主仓库 lock、运行时文件级 manifest。缓存中的
+`.stage-manifest.json` 和 `.verified-lock` 只用于快速拒绝和诊断；最终文件的信任依据仍是主仓库 lock
+锁定的 manifest 中的 `stagedFiles` 清单，缓存元数据不能自行提供信任。
 
 ## 初始化和构建
 
@@ -80,9 +83,9 @@ commit；更新 checkout 时显式禁用 LFS smudge，一致时复用源码 chec
 超时即失败退出，稍后重试即可（元数据缓存与 staging 复用让重试代价很低）。
 
 Jenkins 的 `CheckoutSubmodule` 阶段只负责准备 submodule，不再单独执行 `runtime:windows:validate`。后续直接运行
-`npm --prefix pinvou3-app run build:nsis`：统一的 `build.js` 入口负责 runtime 校验和 staging，读取
+`npm --prefix pinvou3-app run build:nsis`：统一的 `build.js` 入口在 stage 阶段执行 runtime 校验和 staging，读取
 `runtime-descriptor.json`，再由 Windows installer adapter 为 NSIS 原子准备经过校验的 VC++ 引导程序。
-`build:nsis` 的 stage 与 bundle 两个 npm 阶段各自会进入一次 runtime 校验（第二次命中已验证缓存，代价很小）。
+后续 bundle 阶段通过 `usesValidatedNsisStaging` 消费已验证的 descriptor，不重复执行 runtime 校验和 staging。
 
 恢复缓存前可直接从主仓库 gitlink 取得缓存键，不会访问 runtime 远端：
 

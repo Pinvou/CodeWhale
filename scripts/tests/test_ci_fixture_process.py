@@ -64,8 +64,61 @@ def held_process(pid):
         kernel.CloseHandle(handle)
 
 
+def owned_pid_publication(ready, pid_expression):
+    """The JavaScript fixture's one-writer identity handoff to its observer."""
+    # Both names are inside the same fresh, private fixture directory. Publish
+    # only after the complete PID is written; existence is the reader's gate.
+    staging = json.dumps(str(ready) + '.tmp')
+    return (f"writeFileSync({staging}, String({pid_expression}), {{ flag: 'wx' }});\n"
+            f'renameSync({staging}, {json.dumps(str(ready))});')
+
+
 @unittest.skipUnless(sys.platform in ('win32', 'linux'), 'process scope supports CI operating systems')
 class ProcessScopeTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node publishes the fixture identity')
+    def test_owned_pid_handoff_never_exposes_an_incomplete_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ready = Path(directory) / 'child-ready'
+            entered, release = Path(directory) / 'write-entered', Path(directory) / 'write-release'
+            # Pause the actual fs write after creation but before its contents.
+            # A reader must see no ready file at this exact real IO boundary.
+            script = """
+import fs, { writeFileSync, renameSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const write = fs.writeFileSync;
+fs.writeFileSync = (path, data, options) => {
+  write(path, '', options);
+  write(ENTERED, 'entered');
+  const deadline = Date.now() + 5_000;
+  while (!fs.existsSync(RELEASE)) {
+    if (Date.now() >= deadline) throw new Error('publication barrier was not released');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+  }
+  write(path, data, { flag: 'w' });
+};
+syncBuiltinESMExports();
+""".replace('ENTERED', json.dumps(str(entered))).replace('RELEASE', json.dumps(str(release)))
+            script += owned_pid_publication(ready, 'process.pid')
+            p = subprocess.Popen([shutil.which('node'), '--input-type=module', '--eval', script],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                deadline = time.monotonic() + 10
+                while not entered.is_file() and p.poll() is None and time.monotonic() < deadline:
+                    time.sleep(.005)
+                self.assertTrue(entered.is_file(), 'writer did not reach the incomplete-write barrier')
+                self.assertFalse(ready.exists(), 'empty PID file was exposed as a ready identity')
+                release.touch()
+                stdout, stderr = p.communicate(timeout=10)
+                self.assertEqual(p.returncode, 0, stderr)
+                self.assertEqual(ready.read_text(), str(p.pid))
+                self.assertFalse(Path(str(ready) + '.tmp').exists())
+                self.assertEqual(stdout, '')
+            finally:
+                release.touch()
+                if p.poll() is None:
+                    p.kill()
+                p.communicate(timeout=10)
+
     def test_diagnostic_delivery_failure_cannot_replace_execution_or_cleanup(self):
         with patch.object(WORKSPACE, 'diagnostics', True), patch('builtins.print', side_effect=OSError('closed diagnostics')):
             WORKSPACE.diagnostic_phase('observe_process_tree')
@@ -168,13 +221,13 @@ print('original-cancel-verdict-preserved-with-root23')
         script = """
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync, renameSync } from 'node:fs';
 const { fixtureScope } = await import(FIXTURE);
 fixtureScope.register({kind:'probe',id:'signal-owned',close(){throw new Error('primary fixture close failure')},remove(){throw new Error('unconfirmed resource must not be removed')}});
 const child = spawn(process.execPath,['-e',"process.send({pid:process.pid});setInterval(()=>{},1000)"],{detached:true,stdio:['ignore','ignore','ignore','ipc']});
 const [ready] = await once(child,'message');
 console.log('OWNED_CHILD_PID='+ready.pid);
-writeFileSync(READY, String(ready.pid));
+PUBLISH_OWNED_PID
 child.disconnect(); child.unref();
 setInterval(()=>{},1000);
 while (!existsSync(RELEASE)) await new Promise(resolve => setTimeout(resolve, 5));
@@ -183,7 +236,7 @@ else process.kill(process.pid,'SIGTERM');
 """.replace('FIXTURE', json.dumps(fixture))
         with tempfile.TemporaryDirectory() as directory:
             ready, release = Path(directory) / 'child-ready', Path(directory) / 'child-release'
-            script = script.replace('READY', json.dumps(str(ready))).replace('RELEASE', json.dumps(str(release)))
+            script = script.replace('PUBLISH_OWNED_PID', owned_pid_publication(ready, 'ready.pid')).replace('RELEASE', json.dumps(str(release)))
             source = 'import subprocess,sys;sys.exit(subprocess.run(' + repr([node, '--input-type=module', '--eval', script]) + ').returncode)'
             receipt_path = Path(directory) / 'receipt.json'
             p = subprocess.Popen([sys.executable, str(SUPERVISOR), '--receipt', str(receipt_path),
