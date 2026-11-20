@@ -132,7 +132,7 @@ impl ToolSpec for GithubTool {
                 "Read GitHub issue context using gh. Read-only: bodies over ~32KB are condensed to a ~1200-char excerpt (the full text is written to a task artifact only when a durable task is active); comments, labels, and state pass through verbatim."
             }
             Some("pr_context") => {
-                "Read GitHub PR context using gh: body/comments/reviews/check status/files and optional diff artifact. The body is condensed like issue bodies when large (~32KB to a ~1200-char excerpt, full text to a task artifact only when a durable task is active). include_diff returns a ~900-char diff summary; the full diff is captured as an artifact only when it exceeds 64,000 bytes and a durable task is active. Read-only; no push/merge/close."
+                "Read GitHub PR context using gh: body/comments/reviews/check status/files and optional diff. The body is condensed like issue bodies when large (~32KB to a ~1200-char excerpt, full text to a task artifact only when a durable task is active). include_diff returns the complete diff inline when it fits 64,000 bytes; larger diffs return a ~900-char summary with the full diff captured as a task artifact only when a durable task is active. Read-only; no push/merge/close."
             }
             Some("comment") => {
                 "Post an evidence-backed GitHub issue/PR comment with gh. Requires approval. Use blocker comments for partial work; do not claim closure without evidence."
@@ -529,5 +529,145 @@ mod tests {
             std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
             "dry run must not invoke gh"
         );
+    }
+
+    /// A scripted gh that answers `pr diff` with the contents of a fixture
+    /// file and everything else with a minimal valid PR JSON, so the full
+    /// `pr_context` execute path runs without the real gh CLI.
+    #[cfg(unix)]
+    fn install_pr_fixture_gh(dir: &std::path::Path, patch_file: &std::path::Path) -> PathBuf {
+        let bin = dir.join("gh-fixture.sh");
+        let script = "#!/bin/sh\nfor a in \"$@\"; do\n  if [ \"$a\" = \"diff\" ]; then\n    cat "
+            .to_owned()
+            + patch_file.display().to_string().as_str()
+            + "\n    exit 0\n  fi\ndone\nprintf '%s' '{\"number\":7,\"title\":\"t\",\"state\":\"OPEN\",\"author\":{\"login\":\"a\"},\"body\":\"b\",\"url\":\"u\",\"files\":[]}'\n";
+        std::fs::write(&bin, script).expect("write fixture gh");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fixture gh");
+        }
+        bin
+    }
+
+    /// A realistic-enough patch text of an exact byte length.
+    #[cfg(unix)]
+    fn patch_of_bytes(total: usize) -> String {
+        let mut s = String::from(
+            "diff --git a/f.txt b/f.txt\nindex 111..222 100644\n--- a/f.txt\n+++ b/f.txt\n",
+        );
+        while s.len() + 8 <= total {
+            s.push_str("+change\n");
+        }
+        if s.len() < total {
+            s.push_str(&"x".repeat(total - s.len()));
+        }
+        s
+    }
+
+    /// (#847 review P2) The full `pr_context` path must keep the complete
+    /// diff INLINE when it fits the 64,000-byte artifact threshold — the
+    /// excerpt-only shape left the 8,001–64,000-byte band with no in-product
+    /// copy (a ~900-char summary plus `diff_artifact: null`). With a durable
+    /// task active, a patch above the threshold still spills complete to the
+    /// task artifact.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn pr_context_keeps_the_complete_diff_inline_below_the_threshold() {
+        use crate::tools::spec::RuntimeToolServices;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let patch = patch_of_bytes(10_000);
+        let patch_file = tmp.path().join("patch.txt");
+        std::fs::write(&patch_file, &patch).expect("write patch fixture");
+        let bin = install_pr_fixture_gh(tmp.path(), &patch_file);
+
+        // Hermetic repository for ensure_github_repo's rev-parse.
+        let repo = tempfile::tempdir().expect("repo dir");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init must succeed");
+
+        let ctx = ToolContext::new(repo.path()).with_runtime_services(RuntimeToolServices {
+            active_task_id: Some("task-1".to_string()),
+            task_data_dir: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        });
+
+        let _env = crate::test_support::lock_test_env();
+        // SAFETY: serialized behind the process-wide test env lock.
+        unsafe {
+            std::env::set_var("CODEWHALE_GH_BIN", &bin);
+        }
+        let tool = GithubTool::read_only("github");
+
+        // Below the threshold: the complete 10,000-byte patch rides inline,
+        // no artifact is written, and the summary stays for consumers.
+        let result = tool
+            .execute(
+                json!({ "action": "pr_context", "number": 7, "include_diff": true }),
+                &ctx,
+            )
+            .await
+            .expect("pr_context executes");
+        assert!(result.success, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).expect("response is JSON");
+        assert_eq!(
+            value["pr"]["diff"].as_str(),
+            Some(patch.as_str()),
+            "the complete 10,000-byte patch must ride inline, not a ~900-char summary"
+        );
+        assert!(
+            value["pr"]["diff_artifact"].is_null(),
+            "below the threshold no artifact is written"
+        );
+        assert!(
+            value["pr"]["diff_summary"]
+                .as_str()
+                .is_some_and(|s| s.len() < patch.len()),
+            "the summary stays alongside the inline diff"
+        );
+
+        // Just above the threshold: no inline diff, excerpt + the complete
+        // patch recoverable from the durable-task artifact.
+        let big = patch_of_bytes(64_001);
+        std::fs::write(&patch_file, &big).expect("rewrite patch fixture");
+        let result = tool
+            .execute(
+                json!({ "action": "pr_context", "number": 7, "include_diff": true }),
+                &ctx,
+            )
+            .await
+            .expect("pr_context executes (spill arm)");
+        // SAFETY: same lock; restores the process environment.
+        unsafe {
+            std::env::remove_var("CODEWHALE_GH_BIN");
+        }
+        assert!(result.success, "{}", result.content);
+        let value: Value = serde_json::from_str(&result.content).expect("response is JSON");
+        assert!(
+            value["pr"]["diff"].is_null(),
+            "above the threshold the patch does not ride inline"
+        );
+        let artifact = value["pr"]["diff_artifact"]
+            .as_str()
+            .expect("the spill arm carries an artifact path");
+        let stored = std::fs::read_to_string(tmp.path().join(artifact))
+            .expect("artifact file written under the task data dir");
+        assert_eq!(
+            stored.len(),
+            64_001,
+            "the complete 64,001-byte patch must remain recoverable from the artifact"
+        );
+        assert!(
+            value["pr"]["diff_summary"]
+                .as_str()
+                .is_some_and(|s| s.len() < big.len()),
+            "the spill arm keeps the excerpt"
+        );
+
+        let _ = std::fs::remove_dir_all(repo);
     }
 }

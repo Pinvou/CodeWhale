@@ -11,8 +11,8 @@ use crate::tools::spec::{
 
 use super::cli::{ensure_github_repo, git_status_porcelain, run_gh_json, run_gh_text};
 use super::shape::{
-    BODY_ARTIFACT_THRESHOLD, DIFF_ARTIFACT_THRESHOLD, artifact_refs_from_context,
-    github_event_metadata, shape_large_text, summarize, write_artifact_if_needed,
+    BODY_ARTIFACT_THRESHOLD, artifact_refs_from_context, github_event_metadata, shape_large_text,
+    shape_pr_diff_fields, summarize, write_artifact_if_needed,
 };
 use super::{GithubTool, validate_evidence};
 
@@ -67,10 +67,17 @@ impl GithubTool {
         let mut shaped = shape_large_text(context, raw, "pr_body", BODY_ARTIFACT_THRESHOLD)?;
         if optional_bool(input, "include_diff", false)? {
             let diff = run_gh_text(context, &["pr", "diff", &number_s, "--patch"]).await?;
-            let diff_ref =
-                write_artifact_if_needed(context, "pr_diff", &diff, DIFF_ARTIFACT_THRESHOLD)?;
-            shaped["diff_summary"] = json!(summarize(&diff, 900));
-            shaped["diff_artifact"] = json!(diff_ref);
+            // (#847 review P2) The excerpt-only shape left the
+            // 8,001–64,000-byte band with no in-product copy once the spill
+            // threshold moved up: neither inline nor artifact. Mirror the
+            // body path — the complete patch rides inline below the
+            // threshold, the excerpt + durable-task artifact spill above it.
+            let (diff_inline, diff_summary, diff_artifact) = shape_pr_diff_fields(context, &diff)?;
+            shaped["diff_summary"] = diff_summary;
+            shaped["diff_artifact"] = diff_artifact;
+            if !diff_inline.is_null() {
+                shaped["diff"] = diff_inline;
+            }
         }
         let mut result = ToolResult::json(&json!({
             "summary": format!("PR #{number}: {}", shaped["title"].as_str().unwrap_or("")),

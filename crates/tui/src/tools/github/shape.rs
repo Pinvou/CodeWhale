@@ -84,6 +84,29 @@ pub(super) fn write_artifact_if_needed(
     ))
 }
 
+/// The PR-diff response fields for a fetched patch (#847 review P2),
+/// mirroring the body path's verbatim-below-threshold semantics: the
+/// complete patch rides inline when it fits [`DIFF_ARTIFACT_THRESHOLD`] —
+/// the 900-char `diff_summary` stays in both arms for consumers that read
+/// it unconditionally — and above it the excerpt plus the durable-task
+/// artifact spill applies, where `write_artifact_if_needed` yields `None`
+/// without an active durable task (disclosed in the tool schema). Returns
+/// `(diff_inline, diff_summary, diff_artifact)`; a non-null `diff_inline`
+/// carries the complete patch, so recovery never depends on a task being
+/// active in that band.
+pub(super) fn shape_pr_diff_fields(
+    context: &ToolContext,
+    diff: &str,
+) -> Result<(Value, Value, Value), ToolError> {
+    let diff_summary = json!(summarize(diff, 900));
+    if diff.len() <= DIFF_ARTIFACT_THRESHOLD {
+        Ok((json!(diff), diff_summary, json!(None::<Value>)))
+    } else {
+        let artifact = write_artifact_if_needed(context, "pr_diff", diff, DIFF_ARTIFACT_THRESHOLD)?;
+        Ok((Value::Null, diff_summary, json!(artifact)))
+    }
+}
+
 pub(super) fn artifact_refs_from_context(content: &str, label: &str) -> Vec<TaskArtifactRef> {
     let Ok(value) = serde_json::from_str::<Value>(content) else {
         return Vec::new();
