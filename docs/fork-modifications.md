@@ -264,8 +264,6 @@
 | `4e75c6a07` | T3 | fetch_url 工具描述移除失实的 "sandboxed" 声明：改写为注明 Bash 工具的沙箱策略可能拒绝出站网络，fetch_url 本身是进程内 HTTP 客户端；citation 与 login-wall 句保持不变（#133） |
 | `8a4719fd4` | T3 本地化 | 清扫 locale 包过时模式文案：补完 rail→workbar 改名的非英文一半（11 个语言包 88 个 rail 词键），补齐多月未随英文发布的 must-translate 键并新增缺失门禁；全部 value-only 替换，`en.json` 与基线逐字节一致（#134） |
 | `11cba403d` | deps | undici 7.30.1 与 msal-node 7.1.2 的 npm lock 内刷新，关闭 `pinvou3-clean` 当时全部 4 条 open Dependabot 高危告警；仅 lockfile，无 manifest 或源码改动（#135） |
-| `6f7a3a748` | deps/fix | 公开维护头推进 5 提交（#136–#152 族）：`e972a9a05` route 输出预算暴露、`5f15cce57` todo 状态默认、`78804c83e` 终态错误真实来源、`37be2844f` 文案修复、`6f7a3a748` rusqlite 0.41/rio-vt 0.5.29/rmcp 3.9 安全通告升级（Cargo.toml+lock 57 行）；本轮仅父仓指针随进，无 fork 侧补丁 |
-
 
 2026-10-23 批次之前的历史 DCO 记录（当前例外见上文第 0 节）：除 #107 squash `f27672935`（其合并提交信息未保留 sign-off 尾部，已留言知会上游维护者，见 CodeWhale#107）外，所有提交都含 DCO `Signed-off-by`。`b4c02616b` 包含大部分跨主题收口，历史粒度确实不利于 bisect；分支公开进入评审后没有为历史美化 force-push，而是追加带 sign-off 的提交修复评审和发布门禁问题，并用本表、指纹和行为测试弥补审计粒度。不可变 tag 已创建，后续不得重写。
 
