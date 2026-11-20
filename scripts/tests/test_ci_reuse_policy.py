@@ -133,8 +133,28 @@ class ReusePlanTests(unittest.TestCase):
         self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
         verified_fetch = 'Fetch verified frontend setup bundle'
         job['steps'].append({'name': verified_fetch, 'conclusion': 'success'})
+        # Transport preparation is a new required command. Do not weaken the
+        # verifier or rewrite the historical payload to make it reusable.
+        frontend_transport = 'Configure artifact transport for Test resource lifecycle receipts'
+        browser_transport = 'Configure artifact transport for Browser shard resource lifecycle receipts'
+        self.assertFalse(PLAN.complete(policies['frontend-test'], {**job, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))
+        self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+        job['steps'].append({'name': frontend_transport, 'conclusion': 'success'})
         self.assertTrue(PLAN.complete(policies['frontend-test'], {**job, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))
+        self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+        job['steps'].append({'name': browser_transport, 'conclusion': 'success'})
         self.assertTrue(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+        for name, selected_policy, display in (
+                (frontend_transport, policies['frontend-test'], 'frontend-test'),
+                (browser_transport, policy, 'frontend-browser-test (1)')):
+            for bad in ('failure', 'skipped', 'missing'):
+                broken = copy.deepcopy(job)
+                broken['name'] = display
+                for step in broken['steps']:
+                    if step['name'] == name: step['conclusion'] = bad
+                if bad == 'missing': broken['steps'] = [step for step in broken['steps'] if step['name'] != name]
+                with self.subTest(transport=name, conclusion=bad):
+                    self.assertFalse(PLAN.complete(selected_policy, broken, {}, 'refs/heads/queue', {}))
         for bad in ('failure', 'skipped', 'missing'):
             broken = copy.deepcopy(job)
             for step in broken['steps']:
