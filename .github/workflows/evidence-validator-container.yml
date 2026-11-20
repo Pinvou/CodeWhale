@@ -70,12 +70,28 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-go@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           go-version-file: account-platform/go.mod
           cache-dependency-path: account-platform/go.sum
           cache: ${{ runner.environment == 'github-hosted' }}
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           python-version: '3.12.14'
       - name: Record runner and test real container
@@ -122,11 +138,20 @@ jobs:
           CI_REUSE_NEEDS: ${{ toJSON(needs) }}
         run: python3 scripts/ci-test-reuse.py record
 
+      - name: Configure artifact transport for PR test success proof transport
+        if: ${{ success() && steps.success_proof.outputs.directory != '' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: PR test success proof transport
         if: ${{ success() && steps.success_proof.outputs.directory != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: ci-success-proof-${{ github.run_attempt }}
           path: ${{ steps.success_proof.outputs.directory }}/proof.json

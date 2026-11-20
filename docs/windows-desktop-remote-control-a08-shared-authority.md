@@ -47,6 +47,39 @@ prepare 重排另覆盖已知未写出故障和 Legacy 中间 socket 后的完�
 真实缺失子协议协商和 Ping/Pong 顺序屏障，验证无 controller 帧泄漏。pending 夹具
 采用实际 B activation ACK 的 request ID，与 Relay 生产写方一致。
 
+## Controller 通道启动与 endpoint 生命周期
+
+共享 Web endpoint 启动在安装 pending sender 之前取得 Relay 生命周期锁，与 Web
+Stop/Refresh 串行化，不跨 await 持有锁。读端撤销在不持状态锁或权限锁的入口
+按相同顺序取得生命周期锁，覆盖精确 reader 退休及两个持久文件删除，在推送状态前
+释放生命周期锁。这样旧清理不能擦掉后继 Refresh/Start 已提交的配置或 RPC 账本。
+窄范围通道停止仍只取状态锁；启动在同一状态锁内核对精确 pending sender，并完成
+配置创建、落盘及 endpoint 安装。pending sender 已退休的启动返回 stale，不能在返回
+错误之前重新创建配置或 socket。
+启动失败只清理仍由本次 sender 持有的 pending 通道，不按同名代际清除替换者。
+
+真实 Controlled worker 还须在其原 operation 的状态锁内核验 intent、generation 与
+Registering 阶段，并连续完成同步 Relay 安装，之后释放该锁才启动异步注册。真实
+Controlled Stop/Refresh 先失效时，旧 operation 不得创建配置、账本、通道或 endpoint；
+准入先取得锁时，提交先于后续失效，窄停止仍保留已经提交的共享 endpoint。原公开
+async Relay 入口保留；raw 通道仍按 generation、binding 和 socket owner 独立围栏。
+
+Web 状态快照与 reader 派发在 Relay 状态锁外进行；启动中的 `web_access:status`
+通知仍位于 Relay 生命周期锁及 Controlled 准入锁内，同步监听回调不得重入 Controlled
+状态。注册等待、业务及清理回调不进入该准入锁。Legacy WebUI 的共享 endpoint、
+重复启用与已有持久配置的恢复语义继续保留。真实 Wry 无窗口宿主回归通过独立子进程
+和私有目录固定七个场景：pending 通道停止、Stop、Refresh、读端撤销串行化、旧清理与
+后继 Refresh、启动失败和迟到旧 Drop。撤销消息通过实际 manager reader 入口受控投递。
+CI 的实际二进制过滤器也通过共享进程监督器执行，保留非零退出与零命中检查。回归验证
+本地启动状态与副作用，不替代真实 Relay 部署演练。
+
+另一个独立真实宿主根装配生产 Controlled 状态、清理端口与 worker，覆盖停止先行、
+刷新先行、worker 持准入锁等待 Relay 生命周期锁时停止，以及同步准备失败后恢复。
+旧 operation 的拒绝核验配置/账本及 endpoint/pending/binding 均未产生；合法后继通过
+loopback 观察生产 endpoint 注册及配对注册请求。这证明可继续发起注册，不等于完成
+配对、真实 Relay 部署或发布验收。纯状态回归另钉住同代异 intent、异代、阶段拒绝、
+回调期间持锁和错误释放；所有旧七场景及单个子进程预算保持。
+
 ### A 端业务密钥的退出退休
 
 主动断开在等待最终帧回执前，按会话意图 → manager → business 顺序提交本地退休、清理托管业务

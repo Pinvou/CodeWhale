@@ -1,4 +1,5 @@
 import unittest
+import re
 from pathlib import Path
 
 
@@ -88,9 +89,9 @@ class ReleaseArm64PolicyTests(unittest.TestCase):
         )
         self.assertIn("\n    timeout-minutes: 120\n", live)
         self.assertEqual(
-            live.count("timeout-minutes:"),
+            len(re.findall(r"^    timeout-minutes:", live, re.M)),
             1,
-            "exactly one live timeout budget may exist in the job",
+            "exactly one job-level timeout budget may exist; bounded transport steps are separate",
         )
 
 

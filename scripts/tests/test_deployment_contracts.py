@@ -487,5 +487,195 @@ printf 'owned consumer marker\\n' > "$cache/profile-$3"
                     deployment.published_history(root, root / "legacy")
 
 
+    def failure_diagnostic(self, payload, *, environment=None, name="managed.jsonl"):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / name
+            errors = io.StringIO()
+            payload_file = Path(directory) / "payload.txt"
+            payload_file.write_bytes(payload.encode("utf-8"))
+            program = "from pathlib import Path; import sys; sys.stdout.write(Path(sys.argv[1]).read_text(encoding='utf-8')); sys.exit(9)"
+            with patch.dict(os.environ, environment or {}), contextlib.redirect_stderr(errors):
+                with self.assertRaisesRegex(RuntimeError, "deployment contract command failed") as raised:
+                    deployment.run_logged_command([sys.executable, "-X", "utf8", "-c", program, str(payload_file)], logfile)
+            self.assertEqual(logfile.read_text(), payload)
+            emitted = errors.getvalue()
+            self.assertIn("CONTRACT_COMMAND_FAILED exit=9 log=" + name, emitted)
+            # Approved independent summary + tail channels, not the old
+            # whole-stderr 24k contract. Limits are characters, not UTF-8 bytes.
+            self.assertLessEqual(len(emitted), 41000)
+            self.assertIn("CONTRACT_LOG_TAIL\n", emitted)
+            tail = emitted.split("CONTRACT_LOG_TAIL\n", 1)[1]
+            self.assertLessEqual(len(tail), 24001)  # print adds one newline
+            self.assertLessEqual(len(tail.splitlines()), 100)
+            return emitted, str(raised.exception)
+
+    def managed_event(self, name, action, output=None, **fields):
+        event = {"Package": "github.com/Pinvou/pinvou3/account-platform/cmd/token-release-prepare",
+                 "Test": name, "Action": action, **fields}
+        if output is not None:
+            event["Output"] = output
+        return json.dumps(event) + "\n"
+
+    def test_managed_failure_context_preserves_early_fail_over_later_pass(self):
+        target = "TestManagedRDSReleaseActualPostgres/early-failure"
+        payload = self.managed_event(target, "output", "controlled-early-assertion\n") + self.managed_event(target, "fail")
+        payload += "".join(self.managed_event("TestManagedRDSReleaseProductionHistoryPostgres/later", "output", "later PASS output\n") for _ in range(140))
+        emitted, _ = self.failure_diagnostic(payload)
+        self.assertIn("MANAGED_FAILURE_CONTEXT", emitted)
+        self.assertIn("controlled-early-assertion", emitted)
+
+    def test_managed_context_is_same_test_before_its_failure_only(self):
+        target = "TestManagedRDSReleaseActualPostgres/exact-child"
+        other = "TestManagedRDSReleaseActualPostgres/later-child"
+        payload = self.managed_event(target, "output", "exact child failure\n")
+        payload += self.managed_event(other, "output", "unrelated child output\n")
+        payload += self.managed_event(target, "fail")
+        payload += self.managed_event(target, "output", "after failure output\n")
+        emitted, _ = self.failure_diagnostic(payload)
+        context = emitted.split("MANAGED_FAILURE_CONTEXT", 1)[1]
+        self.assertIn("exact child failure", context)
+        self.assertNotIn("unrelated child output", context)
+        self.assertNotIn("after failure output", context)
+
+    def test_selected_context_redacts_urls_auth_keys_and_go_escaped_env(self):
+        target = "TestManagedRDSReleaseActualPostgres/private-context"
+        # Literal Go encoding/json form: UTF-8 text, mandatory line-separator
+        # escapes, HTML escapes, quote/backslash and a control character.
+        secret = 'fixture-中\u2028\u2029"<>&\\\nend'
+        go_line = ('{"Package":"github.com/Pinvou/pinvou3/account-platform/cmd/token-release-prepare",'
+                   '"Test":"' + target + '","Action":"output","Output":"env fixture-中'
+                   r'\u2028\u2029\"\u003c\u003e\u0026\\\nend\n"}' + "\n")
+        self.assertEqual(json.loads(go_line)["Output"], "env " + secret + "\n")
+        payload = self.managed_event(target, "output", "https://user:fixture-url-password@example.invalid/?token=fixture-query-secret\n")
+        payload += self.managed_event(target, "output", "Authorization: Bearer fixture-header-secret\n")
+        payload += self.managed_event(target, "output", "npm _authToken=fixture-config-secret\n") + go_line
+        payload += self.managed_event(target, "fail")
+        payload += "".join(self.managed_event("TestManagedRDSReleaseProductionHistoryPostgres/later", "output", "later PASS\n") for _ in range(130))
+        emitted, error = self.failure_diagnostic(payload, environment={"DATABASE_PASSWORD": secret})
+        context = emitted.split("MANAGED_FAILURE_CONTEXT", 1)[1]
+        self.assertIn("[redacted]", context)
+        for private in [secret, r'fixture-中\u2028\u2029\"\u003c\u003e\u0026\\\nend',
+                        "fixture-url-password", "fixture-query-secret", "fixture-header-secret", "fixture-config-secret"]:
+            self.assertNotIn(private, emitted)
+            self.assertNotIn(private, error)
+
+    def test_raw_tail_redacts_json_env_strings_with_control_and_non_ascii_values(self):
+        secret = 'fixture-中"\\\n\u2028\u2029<>&-private'
+        for ensure_ascii in [True, False]:
+            with self.subTest(ensure_ascii=ensure_ascii):
+                payload = json.dumps({"Output": "env " + secret}, ensure_ascii=ensure_ascii) + "\n"
+                emitted, _ = self.failure_diagnostic(payload, environment={"DATABASE_PASSWORD": secret})
+                self.assertNotIn(secret, emitted)
+                self.assertNotIn(json.dumps(secret, ensure_ascii=ensure_ascii)[1:-1], emitted)
+                self.assertIn("[redacted]", emitted)
+                self.assertNotIn("MANAGED_FAILURE_CONTEXT", emitted)
+
+    def test_malformed_non_map_wrong_package_and_lookalike_roots_keep_tail(self):
+        root = "TestManagedRDSReleaseActualPostgres"
+        payloads = ["not-json\n", "[]\n", "null\n", '"string"\n',
+                    self.managed_event(root + "-lookalike", "fail"),
+                    self.managed_event(root, "fail", Package="unrelated/package"),
+                    self.managed_event(root, "fail", Test={"invalid": True}),
+                    self.managed_event(root, "fail", Output=17)]
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                emitted, _ = self.failure_diagnostic(payload)
+                self.assertNotIn("MANAGED_FAILURE_CONTEXT", emitted)
+                self.assertIn(payload.strip(), emitted)
+
+    def test_failure_outside_the_original_window_is_not_claimed_recovered(self):
+        target = "TestManagedRDSReleaseActualPostgres/outside-window"
+        payload = self.managed_event(target, "output", "outside-window-assertion\n") + self.managed_event(target, "fail")
+        payload += "x" * 70000 + "\nordinary final tail\n"
+        emitted, _ = self.failure_diagnostic(payload)
+        self.assertNotIn("MANAGED_FAILURE_CONTEXT", emitted)
+        # The bounded-window selector does not recover this event. The
+        # independent main full-log summary intentionally can report it.
+        tail = emitted.split("CONTRACT_LOG_TAIL\n", 1)[1]
+        self.assertNotIn("outside-window-assertion", tail)
+        self.assertIn("outside-window-assertion", emitted.split("CONTRACT_LOG_TAIL\n", 1)[0])
+        self.assertIn("ordinary final tail", tail)
+
+    def test_partial_first_event_is_discarded_before_context_and_redaction(self):
+        target = "TestManagedRDSReleaseActualPostgres/partial"
+        payload = self.managed_event(target, "output", "https://example.invalid/" + "x" * 70000 + "?auth=fixture-private-query\n")
+        payload += self.managed_event(target, "fail")
+        emitted, _ = self.failure_diagnostic(payload)
+        self.assertIn("MANAGED_FAILURE_CONTEXT", emitted)
+        self.assertNotIn("fixture-private-query", emitted)
+
+    def test_many_managed_failures_and_nonmanaged_logs_stay_bounded(self):
+        payload = "".join(self.managed_event("TestManagedRDSReleaseActualPostgres/case-" + str(i), "output", "controlled error\n") +
+                          self.managed_event("TestManagedRDSReleaseActualPostgres/case-" + str(i), "fail") for i in range(100))
+        emitted, _ = self.failure_diagnostic(payload)
+        context = emitted.split("MANAGED_FAILURE_CONTEXT", 1)[1]
+        self.assertLessEqual(sum(json.loads(line).get("Action") == "fail" for line in context.splitlines() if line.startswith("{")), 8)
+        emitted, _ = self.failure_diagnostic(payload, name="history.jsonl")
+        self.assertNotIn("MANAGED_FAILURE_CONTEXT", emitted)
+
+
+    def test_overlapping_environment_credentials_are_redacted_longest_first(self):
+        short, long = "overlap-private", "overlap-private-confidential-suffix"
+        target = "TestManagedRDSReleaseActualPostgres/overlapping-env"
+        payload = self.managed_event(target, "output", "env " + long + "\n") + self.managed_event(target, "fail")
+        payload += "".join(self.managed_event("TestManagedRDSReleaseProductionHistoryPostgres/later", "output", "later PASS\n") for _ in range(130))
+        emitted, _ = self.failure_diagnostic(payload, environment={"FIRST_TOKEN": short, "SECOND_PASSWORD": long})
+        context = emitted.split("MANAGED_FAILURE_CONTEXT", 1)[1]
+        self.assertIn("[redacted]", context)
+        self.assertNotIn("confidential-suffix", emitted)
+        self.assertNotIn(short, emitted)
+
+
+    def test_split_overlapping_environment_credentials_are_masked_before_summary_truncation(self):
+        target = "TestManagedRDSReleaseActualPostgres/split-overlap"
+        payload = self.managed_event(target, "output", "abcd")
+        payload += self.managed_event(target, "output", "TAIL")
+        payload += self.managed_event(target, "fail")
+        emitted, _ = self.failure_diagnostic(payload, environment={"FIXTURE_TOKEN": "abcd", "FIXTURE_SECRET": "abcdTAIL"})
+        summaries = [json.loads(line.removeprefix("GO_TEST_FAILURE ")) for line in emitted.splitlines()
+                     if line.startswith("GO_TEST_FAILURE ")]
+        self.assertEqual(summaries[0]["Output"], "[redacted]")
+        self.assertNotIn("TAIL", emitted.replace("CONTRACT_LOG_TAIL", ""))
+        context = emitted.split("MANAGED_FAILURE_CONTEXT", 1)[1]
+        self.assertIn("[redacted]", context)
+
+    def test_summary_redacts_complete_url_before_limiting_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            logfile = Path(directory) / "managed.jsonl"
+            target = "TestManagedRDSReleaseActualPostgres/long-url"
+            payload = self.managed_event(target, "output", "https://example.invalid/" + "x" * 5000 + "?auth=private-query-suffix")
+            payload += self.managed_event(target, "output", "\nfixture.go:42: controlled assertion\n")
+            payload += self.managed_event(target, "fail")
+            logfile.write_bytes(payload.encode("utf-8"))
+            summary = deployment.first_go_failures(logfile)
+            self.assertNotIn("private-query-suffix", summary)
+            self.assertNotIn("https://", summary)
+            self.assertIn("controlled assertion", summary)
+            self.assertIn("[URL redacted]", summary)
+            self.assertEqual(logfile.read_bytes(), payload.encode("utf-8"))
+
+    def test_summary_and_selected_context_keep_last_four_outputs(self):
+        target = "TestManagedRDSReleaseActualPostgres/last-four"
+        payload = "".join(self.managed_event(target, "output", "controlled-part-" + str(i) + "\n") for i in range(5))
+        payload += self.managed_event(target, "fail")
+        emitted, _ = self.failure_diagnostic(payload)
+        summary = next(json.loads(line.removeprefix("GO_TEST_FAILURE ")) for line in emitted.splitlines()
+                       if line.startswith("GO_TEST_FAILURE "))
+        self.assertNotIn("controlled-part-0", summary["Output"])
+        context = emitted.split("MANAGED_FAILURE_CONTEXT", 1)[1]
+        self.assertNotIn("controlled-part-0", context)
+        for i in range(1, 5):
+            self.assertIn("controlled-part-" + str(i), summary["Output"])
+            self.assertIn("controlled-part-" + str(i), context)
+
+    def test_deep_json_does_not_replace_primary_command_failure(self):
+        payload = "[" * 2000 + "0" + "]" * 2000 + "\n"
+        emitted, error = self.failure_diagnostic(payload)
+        self.assertIn("CONTRACT_COMMAND_FAILED exit=9", emitted)
+        self.assertEqual(error, "deployment contract command failed; see redacted diagnostic")
+        self.assertNotIn("GO_TEST_FAILURE", emitted)
+
+
+
 if __name__ == "__main__":
     unittest.main()

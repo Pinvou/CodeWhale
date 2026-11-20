@@ -652,9 +652,9 @@ class ReleaseLoongArch64PolicyTests(unittest.TestCase):
         loong_budget = int(arm64_caps[0].rsplit(" ", 1)[1]) * 3 // 2
         self.assertIn(f"\n    timeout-minutes: {loong_budget}\n", self.job_code)
         self.assertEqual(
-            self.job_code.count("timeout-minutes:"),
+            len(re.findall(r"^    timeout-minutes:", self.job_code, re.M)),
             1,
-            "exactly one timeout budget may exist in the job",
+            "exactly one job timeout budget must exist (bounded setup steps are separate)",
         )
 
     def test_packager_header_names_the_bundled_cli_version(self):
