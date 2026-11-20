@@ -691,10 +691,12 @@ func TestChargebackPrincipalIndependentCashPostgres(t *testing.T) {
 			t.Fatal("concurrent evidence moved money")
 		}
 	})
-	t.Run("retained-038-forward-upgrade-and-down-refusal", chargebackPrincipalUpgrade)
 	t.Run("keyset-evidence-pagination-index-and-boundary", func(t *testing.T) {
 		chargebackPrincipalPageIndexProbe(t, ctx, r)
 	})
+	// This upgrade owns its database and deadline. Finish the checks that
+	// share r and ctx before running the independent migration.
+	t.Run("retained-038-forward-upgrade-and-down-refusal", chargebackPrincipalUpgrade)
 }
 
 func chargebackPrincipalUpgrade(t *testing.T) {
