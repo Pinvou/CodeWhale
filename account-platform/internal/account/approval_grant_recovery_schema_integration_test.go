@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Pinvou/pinvou3/account-platform/internal/accountschema"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -46,9 +45,8 @@ func TestManualGrantRecoverySchemaPostgres(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = accountschema.DownOne(ctx, operator, loaded)
-		if !errors.As(err, &pg) || pg.Code != "55000" {
-			t.Fatal("evidence/fence down not refused", err)
-		}
+		// Keep the complete current schema installed while testing this historical Down.
+		// DownOne selects the latest migration, which need not be this forward-only fence.
+		assertHistoricalRollbackRefusalContext(t, ctx, repo, loaded, 900023, "55000", "manual recovery evidence and execution fence are forward-only")
 	})
 }

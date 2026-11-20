@@ -12,6 +12,8 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 
 
+ARTIFACT_TLS_ENV = '        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n'
+
 ROOT = Path(__file__).resolve().parents[2]
 PR_WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release-packages.yml"
@@ -3695,6 +3697,9 @@ python3() { fixture_mock python3 "$@"; }
             '        timeout-minutes: 3',
             '        continue-on-error: true',
             '        uses: actions/upload-artifact@v7',
+            '        env:',
+            "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+            '          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}',
             '        with:',
             '          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}',
             '          path: |',
@@ -3711,6 +3716,13 @@ python3() { fixture_mock python3 "$@"; }
         atomic_receipt = _step_named(
             _extract_job_block(body, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
         )
+        self.assertEqual(_step_named(_extract_job_block(body, 'windows-rust-test'),
+            'Configure bounded Windows atomic upload diagnostics').rstrip(), '\n'.join([
+                '      - name: Configure bounded Windows atomic upload diagnostics',
+                "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+                '        working-directory: ${{ github.workspace }}',
+                '        run: node scripts/ci-artifact-node-options.cjs --diagnostics',
+            ]))
         for name in reviewed_diagnostics:
             diagnostic_step = body.split(
                 "- name: " + name + "\n", maxsplit=1
@@ -3728,6 +3740,8 @@ python3() { fixture_mock python3 "$@"; }
               timeout-minutes: 3
               continue-on-error: true
               uses: actions/upload-artifact@v7
+              env:
+                NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
               with:
                 name: gate-resource-lifecycle-${{ github.run_attempt }}
                 path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -3753,7 +3767,8 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn('timeout-minutes: 3', transport)
         self.assertIn('uses: actions/upload-artifact@v7', transport)
         self.assertIn('path: ${{ steps.success_proof.outputs.directory }}/proof.json', transport)
-        self.assertNotRegex(transport, r'(?m)^        (?:run|env):')
+        self.assertIn(ARTIFACT_TLS_ENV, transport)
+        self.assertNotRegex(transport.replace(ARTIFACT_TLS_ENV, '', 1), r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'windows-codex-runtime-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Preserve browser fixture exit receipts\n.*?(?=^      - |\Z)", diagnostic_job
@@ -3767,6 +3782,8 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}
                     retention-days: 7
@@ -3790,6 +3807,8 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: frontend-resource-lifecycle-${{ github.run_attempt }}
                     path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -3801,7 +3820,8 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn('timeout-minutes: 3', closure_receipt)
         self.assertIn('uses: actions/upload-artifact@v7', closure_receipt)
         self.assertIn('name: account-closure-resource-lifecycle-${{ github.run_attempt }}', closure_receipt)
-        self.assertNotRegex(closure_receipt, r'(?m)^        (?:run|env):')
+        self.assertIn(ARTIFACT_TLS_ENV, closure_receipt)
+        self.assertNotRegex(closure_receipt.replace(ARTIFACT_TLS_ENV, '', 1), r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'account-platform-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Account test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
@@ -3816,6 +3836,8 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: account-resource-lifecycle-${{ github.run_attempt }}
                     path: |
@@ -3839,6 +3861,8 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}
                     path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -3856,6 +3880,9 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
                     path: |
@@ -3907,6 +3934,10 @@ python3() { fixture_mock python3 "$@"; }
         atomic = _step_named(
             _extract_job_block(original, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
         )
+        atomic_config = _step_named(_extract_job_block(original, 'windows-rust-test'),
+            'Configure bounded Windows atomic upload diagnostics')
+        mutations['unreviewed atomic preload'] = original.replace(atomic_config,
+            atomic_config.replace('scripts/ci-artifact-node-options.cjs', 'scripts/unreviewed.cjs'), 1)
         for label, old, new in (
             ('atomic upload action', 'uses: actions/upload-artifact@v7', 'run: exit 37'),
             ('atomic upload id', 'id: windows_atomic_receipts_upload', 'id: unreviewed_upload'),
@@ -5148,6 +5179,7 @@ python3() { fixture_mock python3 "$@"; }
                 1,
             )
             self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('receipt="$(cygpath -w "$ledger/atomic-$index.json")"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5161,6 +5193,8 @@ python3() { fixture_mock python3 "$@"; }
             ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compile-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt', "echo bypass-supervisor --receipt"),
+            ('$ledger/atomic-$index.json', '$ledger/atomic-fixed.json'),
         ):
             with self.subTest(mutation=old):
                 mutant = regression.replace(old, new)
@@ -5185,6 +5219,7 @@ python3() { fixture_mock python3 "$@"; }
             for prefix in required:
                 self.assertEqual(filters.count(prefix), 1)
             self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('receipt="$(cygpath -w "$ledger/atomic-$index.json")"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5227,6 +5262,7 @@ python3() { fixture_mock python3 "$@"; }
             for required in required_filters:
                 self.assertEqual(filters.count(required), 1)
             self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('receipt="$(cygpath -w "$ledger/atomic-$index.json")"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
