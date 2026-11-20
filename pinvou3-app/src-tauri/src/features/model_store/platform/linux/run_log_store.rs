@@ -395,16 +395,33 @@ fn value_looks_secret(value: &str) -> bool {
 /// Authorization:basic dXNlcjpwYXNz… https://x`）——补设 redact_next，与
 /// Value 臂的 scheme 链同语义。scheme 判据带名字门：`X-Custom:basic` 后面跟
 /// 的多半是 URL 而不是凭据，无名字门会把下一个参数误吞。
-fn push_header_colon_value(name: &str, value: &str, out: &mut String, redact_next: &mut bool) {
+fn push_header_colon_value(
+    name: &str,
+    value: &str,
+    out: &mut String,
+    redact_next: &mut bool,
+    cookie_rest: &mut bool,
+) {
     // r30 P1-3 同理：set -x 回显带引号，名字先剥引号再比。
-    let bare_name = name.trim_matches(['"', '\'']);
+    // r43 P1-2：紧凑 JSON 的名字带 `{"` 前缀（`{"Authorization":"Bearer x"}` 无
+    // 空白可分词）——不剥花括号 is_auth 永远失配，scheme 链不启动、下一个词
+    // 的真凭据裸落。与 key_is_secret 同一 trim 集。
+    let bare_name = name
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | ','));
     let is_auth = bare_name.eq_ignore_ascii_case("authorization")
         || bare_name.eq_ignore_ascii_case("proxy-authorization");
+    let is_cookie = bare_name.eq_ignore_ascii_case("cookie");
     let scheme = value.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';'));
     out.push_str(name);
     out.push(':');
     out.push_str(REDACTED);
-    if is_auth && (scheme.eq_ignore_ascii_case("basic") || scheme.eq_ignore_ascii_case("bearer")) {
+    if is_cookie {
+        // r43 P1-2：Cookie 值是分号多对（theme=dark; SID=…）——只抹第一段
+        // 会把会话 ID 漏出去。整段抹到行末（折行不延续，两害取其轻）。
+        *cookie_rest = true;
+    } else if is_auth
+        && (scheme.eq_ignore_ascii_case("basic") || scheme.eq_ignore_ascii_case("bearer"))
+    {
         *redact_next = true;
     }
 }
@@ -421,7 +438,11 @@ fn push_header_equals_spec(spec: &str, out: &mut String) -> bool {
     };
     let bare_name = name.trim_matches(['"', '\'']);
     let bare_value = value.trim_matches(['"', '\'']);
-    if !bare_value.is_empty() && (query_key_is_secret(bare_name) || key_is_secret(bare_name)) {
+    if !bare_value.is_empty()
+        && (query_key_is_secret(bare_name)
+            || key_is_secret(bare_name)
+            || bare_name.eq_ignore_ascii_case("cookie"))
+    {
         out.push_str(name);
         out.push('=');
         out.push_str(REDACTED);
@@ -545,6 +566,12 @@ pub struct DiskCarry {
     pub redact_next: bool,
     /// r31 P1-1：`Authorization:`（非 -H 语境）已出现、等下一个词判 scheme/凭据。
     pub auth_pending: bool,
+    /// r43 P1-2：-H 两段式的「等名字」「等值」悬置态跨行延续——set -x 对跨行
+    /// 引号参数的回显会让 `-H 'X-Api-Key:` 停在行尾、值在下一行；行间丢状态
+    /// 就是值裸落。curl_user_next 同理（`--user` 与取值分行）。
+    pub header_expect_name: bool,
+    pub header_expect_value: bool,
+    pub curl_user_next: bool,
 }
 
 /// 定向脱敏：落盘走这一道（单行、无跨行状态的兼容入口；测试与既有调用方用）。
@@ -569,20 +596,42 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
     // 上一个词要求把下一个词抹掉（`--token abc` / `Bearer abc` 这种分开写的）。
     let mut redact_next = carry.redact_next;
     let mut auth_pending = carry.auth_pending;
+    // r43 P1-2：悬置态从 carry 恢复（跨行延续）。
+    // Cookie 整段抹是行内语义：行末即清。跨行永久置位会把 Cookie 之后整份
+    // 日志全部过抹——折行 Cookie 属罕见形态，两害取其轻。
+    let mut cookie_rest = false;
+    let mut curl_user_next = carry.curl_user_next;
+    let mut header_expect = if carry.header_expect_value {
+        Some(HeaderExpect::Value)
+    } else if carry.header_expect_name {
+        Some(HeaderExpect::Name)
+    } else {
+        None
+    };
     // r21 P2-8③：curl 的 `-u` / `--user`，取值形态是 `user:password`。**要求
     // 取值里带冒号**才整词抹（用户名+密码一起，与 URL userinfo 同口径）：
     // `sudo -u root` 的 -u 是「以该用户执行」，值是普通用户名、没有冒号——
     // 不设这道形状门，排障日志里最常见的 sudo 命令会被打得读不了。
-    let mut curl_user_next = false;
     // `--header` / `-H` 的两段式取值：先等 `名字:`、再等值。名字要留着（排查靠
     // 它认出是哪个头），值才是机密——整词抹掉会把"哪个头"一起丢掉。
-    let mut header_expect: Option<HeaderExpect> = None;
+    //（r43 P1-2：态本体已在上方从 carry 恢复，行尾由回写段延续。）
     let mut first = true;
     for word in masked.split_whitespace() {
         if !first {
             out.push(' ');
         }
         first = false;
+        // r43 P1-2：Cookie 值的剩余对（分号多对/折行）全部抹——逐词判键名永远
+        // 挡不住 `SID=…` 这类非名单 cookie 名，Cookie 头的值整段都是会话材料。
+        // 终止条件=词尾闭合引号（-H '…' 参数的收尾）：之后的 URL/其它参数
+        // 不受过抹牵连。
+        if cookie_rest {
+            out.push_str(REDACTED);
+            if word.ends_with('\'') || word.ends_with('"') {
+                cookie_rest = false;
+            }
+            continue;
+        }
         if redact_next {
             // r7 P1-4：`password => 'secret'` 的 `=>` 是操作符不是值——把它当值
             // 消耗后真正的凭据词反而存活。操作符词（纯符号+引号+冒号+等号）不
@@ -651,16 +700,36 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
             match trimmed.split_once(':') {
                 Some((name, value)) if !value.is_empty() => {
                     // r30 P2-1：冒号形态统一走 helper（补 scheme 链 + 引号 trim）。
-                    push_header_colon_value(name, value, &mut out, &mut redact_next);
+                    push_header_colon_value(name, value, &mut out, &mut redact_next, &mut cookie_rest);
                 }
                 Some((name, _)) => {
                     out.push_str(name);
                     out.push(':');
-                    header_expect = Some(HeaderExpect::Value);
+                    // r43 P1-2：Cookie 头（`-H 'Cookie: a=1; SID=…'）——值是分号
+                    // 多对且键名不在机密名单（SID/theme…），两段式 Value 臂抹一个
+                    // 词就收口会漏第二对。cookie_rest 把本行剩余词全抹（行末清）。
+                    if name
+                        .trim_matches(['"', '\''])
+                        .eq_ignore_ascii_case("cookie")
+                    {
+                        cookie_rest = true;
+                    } else {
+                        header_expect = Some(HeaderExpect::Value);
+                    }
                 }
                 None => {
                     // r30 P1-1/P1-3：`= `形态统一走 helper（三表并集 + 引号 trim）。
-                    if !push_header_equals_spec(trimmed, &mut out) {
+                    // r43 P1-2：Cookie 的 `= ` 形态（-H 'Cookie=theme=…'）——值是
+                    // 分号多对，整段进 cookie_rest（折行延续同抹）。
+                    let is_cookie_eq = trimmed
+                        .trim_matches(['"', '\''])
+                        .split_once('=')
+                        .is_some_and(|(n, _)| n.trim_matches(['"', '\'']).eq_ignore_ascii_case("cookie"));
+                    if is_cookie_eq {
+                        out.push_str(trimmed);
+                        out.push_str(REDACTED);
+                        cookie_rest = true;
+                    } else if !push_header_equals_spec(trimmed, &mut out) {
                         out.push_str(trimmed);
                         header_expect = Some(HeaderExpect::Value);
                     }
@@ -738,9 +807,9 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
             // 是 scheme，不在键名单里，不受影响。
             // r23 P1-2：值侧为空的命中（词尾冒号形态）改置 redact_next——值在
             // 下一个词，本词保留键名供排查。
-            out.push_str(name);
-            out.push(':');
             if value.is_empty() {
+                out.push_str(name);
+                out.push(':');
                 // r31 P1-1：authorization 族的空值命中不能直接 redact_next——
                 // 下一词若是 Basic/Bearer scheme，直接置位会把 scheme 词当凭据
                 // 吃掉、真凭据漏网（P2-09 陷阱）。转 auth_pending（scheme 感知）。
@@ -750,7 +819,12 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
                     redact_next = true;
                 }
             } else {
-                out.push_str(REDACTED);
+                // r43 P1-2：非空值统一走 helper（含 name+:+[REDACTED] 输出）——
+                // 值若是 scheme 声明（`{"Authorization":"Bearer` + 空格 + 真凭据），
+                // scheme 链必须启动把下一个词抹掉；此前本臂只把值自身抹成
+                // [REDACTED] 就收口，紧跟其后的真凭据词原样落盘（r43 实测形态）。
+                // 名字是 cookie 时置 cookie_rest 整段抹。
+                push_header_colon_value(name, value, &mut out, &mut redact_next, &mut cookie_rest);
             }
         } else if let Some((key, rest)) = word.split_once('=') {
             // `KEY=VALUE`：只看 KEY。命令行开关（`--token=abc`）和环境变量
@@ -772,7 +846,7 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
                     // 名单）。统一走与 Name 臂相同的两个 helper。
                     match rest.split_once(':') {
                         Some((name, value)) if !value.is_empty() => {
-                            push_header_colon_value(name, value, &mut out, &mut redact_next);
+                            push_header_colon_value(name, value, &mut out, &mut redact_next, &mut cookie_rest);
                         }
                         _ => {
                             if !push_header_equals_spec(rest, &mut out) {
@@ -865,6 +939,9 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
     }
     carry.redact_next = redact_next;
     carry.auth_pending = auth_pending;
+    carry.header_expect_name = matches!(header_expect, Some(HeaderExpect::Name));
+    carry.header_expect_value = matches!(header_expect, Some(HeaderExpect::Value));
+    carry.curl_user_next = curl_user_next;
     clamp_line(&out)
 }
 
@@ -1298,6 +1375,46 @@ pub fn export_run_log(run_id: &str) -> Result<(PathBuf, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// r43 P1-2：三种泄漏形态的对抗用例——断言**原值不落盘**（对齐本模块既有
+    /// 风格），外加跨行悬置态的接续与 Cookie 行末终止语义。
+    #[test]
+    fn disk_sanitizer_blocks_r43_leak_forms() {
+        // ① 紧凑 JSON：Bearer 后的真凭据不得存活（此前 `{"Authorization` 的
+        //    花括号让 is_auth 失配，scheme 链不启动）。
+        let json_compact =
+            r#"body={"Authorization":"Bearer shortsecret12345"}"#;
+        let cleaned = sanitize_for_disk(json_compact);
+        assert!(!cleaned.contains("shortsecret12345"), "紧凑 JSON 凭据泄漏: {cleaned}");
+
+        // ② Cookie 分号多对：非名单 cookie 名（SID）的值不得存活，且行内
+        //    后续普通词不受影响（行末终止语义）。
+        let cookie_line = "curl -H 'Cookie: theme=dark; SID=abc123def456ghi' https://x.example/api";
+        let cleaned = sanitize_for_disk(cookie_line);
+        assert!(!cleaned.contains("abc123def456ghi"), "Cookie 多对泄漏: {cleaned}");
+        assert!(cleaned.contains("https://x.example/api"), "Cookie 过抹越界: {cleaned}");
+
+        // ③ 跨行 -H：值停在下一行时（行尾悬置），下一行的值不得存活。
+        let mut carry = DiskCarry::default();
+        let l1 = sanitize_line_with("+ curl -H 'X-Api-Key:", &mut carry);
+        let l2 = sanitize_line_with("topsecret87654321'", &mut carry);
+        assert!(
+            !l1.contains("topsecret") && !l2.contains("topsecret87654321"),
+            "跨行 -H 值泄漏: {l1} / {l2}"
+        );
+
+        // ③' 跨行 curl --user：取值分行的 user:pass 不得存活。
+        let mut carry = DiskCarry::default();
+        sanitize_line_with("+ curl --user", &mut carry);
+        let l2 = sanitize_line_with("admin:s3cr3tpassw0rd", &mut carry);
+        assert!(!l2.contains("s3cr3tpassw0rd"), "跨行 --user 泄漏: {l2}");
+
+        // Cookie 之后的新行不受行内整段抹除影响（cookie_rest 行末即清）。
+        let mut carry = DiskCarry::default();
+        sanitize_line_with("+ curl -H 'Cookie: a=1; b=2'", &mut carry);
+        let next = sanitize_line_with("echo harmless_value_ok", &mut carry);
+        assert!(next.contains("harmless_value_ok"), "Cookie 态跨行误伤: {next}");
+    }
 
     /// 落盘路径上四种形状的机密都不许留下原值。
     ///
