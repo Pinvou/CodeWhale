@@ -36839,7 +36839,18 @@ fn strict_census_removed_any_property(
     after: &serde_json::Value,
 ) -> bool {
     let (Some(before_obj), Some(after_obj)) = (before.as_object(), after.as_object()) else {
+        // An object replaced wholesale by a non-object lost every property
+        // in it — a removal, not a skip (the reverse swap only ADDED
+        // constraints, and a scalar before a scalar carries no properties).
+        if before.is_object() && !after.is_object() {
+            return true;
+        }
         if let (Some(before_items), Some(after_items)) = (before.as_array(), after.as_array()) {
+            // A shorter `after` lost its tail: the positional zip below
+            // would truncate silently, so report the length loss first.
+            if after_items.len() < before_items.len() {
+                return true;
+            }
             return before_items
                 .iter()
                 .zip(after_items.iter())
@@ -36878,4 +36889,39 @@ fn strict_census_removed_any_property(
         }
     }
     false
+}
+
+#[test]
+fn strict_census_removed_helper_reports_wholesale_and_length_edges() {
+    // The two silent-miss edges the recursive walk used to have: an
+    // object replaced by a non-object lost every property in it, and a
+    // shorter `after` array lost its tail to the positional zip — both
+    // are removals the census note requirement must still catch.
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+        "required": ["a", "b"]
+    });
+    assert!(strict_census_removed_any_property(
+        &schema,
+        &serde_json::json!("scalar")
+    ));
+    assert!(strict_census_removed_any_property(
+        &serde_json::json!({"type": "array", "items": [{"type": "string"}, {"type": "number"}]}),
+        &serde_json::json!({"type": "array", "items": [{"type": "string"}]}),
+    ));
+    // The keep directions: a scalar gaining an object (constraints added,
+    // nothing removed), an equal-length array, and a scalar pair.
+    assert!(!strict_census_removed_any_property(
+        &serde_json::json!("scalar"),
+        &schema
+    ));
+    assert!(!strict_census_removed_any_property(
+        &serde_json::json!([1, 2]),
+        &serde_json::json!([1, 3])
+    ));
+    assert!(!strict_census_removed_any_property(
+        &serde_json::json!("x"),
+        &serde_json::json!("y")
+    ));
 }

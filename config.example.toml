@@ -31,11 +31,14 @@ base_url = "https://api.deepseek.com/beta"
 # http_headers = { "X-Model-Provider-Id" = "your-model-provider" }
 
 # DeepSeek beta strict tool schema mode (default: false). Only effective on
-# official DeepSeek-family routes (provider-typed DeepSeek on api.deepseek.com);
-# there it sets `tool_choice: "required"` and reshapes tool schemas to the strict
-# contract (optional parameters are removed and reported in the tool description).
-# Tools whose schemas cannot be represented faithfully keep their original
-# schema and ship non-strict. See `strict_tool_mode` in docs/CONFIGURATION.md.
+# official DeepSeek-family routes (provider-typed deepseek / deepseek-cn /
+# deepseek-anthropic on api.deepseek.com, including the legacy api.deepseeki.com
+# alias); there it sets `tool_choice: "required"` (omitted on thinking-enabled
+# DeepSeek-dialect chat requests, where the wire rejects the combination) and
+# reshapes tool schemas to the strict contract (optional parameters are removed
+# and reported in the tool description). Tools whose schemas cannot be
+# represented faithfully keep their original schema and ship non-strict.
+# See `strict_tool_mode` in docs/CONFIGURATION.md.
 # strict_tool_mode = true
 
 # ─────────────────────────────────────────────────────────────────────────────────

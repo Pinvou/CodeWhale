@@ -751,6 +751,9 @@ route** (provider-typed DeepSeek on `api.deepseek.com`, including the legacy
 strict contract: optional parameters are removed from the schema (each removal
 is reported in the tool description), non-numeric `const` values land on
 `enum`, and conditional-requirement tables (`dependentRequired`) are stripped.
+One carve-out: on thinking-enabled chat requests to the DeepSeek dialect the
+`tool_choice` key is omitted entirely (the wire rejects the combination), so
+`required` applies to every other request on the route.
 
 Tools whose schema cannot be represented faithfully under the strict subset —
 root alternatives, required nullables, or tools whose runtime demands

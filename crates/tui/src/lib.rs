@@ -7465,9 +7465,12 @@ struct DoctorApiTarget {
     model: String,
     resolution: DoctorModelResolution,
     /// The resolver's endpoint key for the resolved route (`Some` only when
-    /// `resolution` is `Resolved`). The dialect answers — Anthropic
-    /// forwarding, Responses `strict: false` — are wire facts keyed on this,
-    /// not on the URL.
+    /// `resolution` is `Resolved`). The Responses-dialect answer —
+    /// `strict: false` beside `tool_choice: "auto"` — is a wire fact keyed
+    /// on this, not on the URL. The Anthropic-forwarding answer keys on
+    /// provider typing instead (a `DeepseekAnthropic` route can never
+    /// resolve the Responses endpoint, so the two mechanisms never
+    /// disagree on a verdict).
     endpoint_key: Option<String>,
 }
 
@@ -14491,6 +14494,70 @@ mod doctor_endpoint_tests {
         assert!(status.function_strict_sent);
         assert!(status.message.contains("Anthropic wire forwards"));
         assert!(status.recommended_base_url.is_none());
+    }
+
+    #[test]
+    fn strict_tool_mode_doctor_answers_the_anthropic_provider_from_the_wire_on_the_default_path() {
+        // The Anthropic family's DEFAULT endpoint is the non-canonical
+        // `/anthropic` path (`provider_defaults`), not the beta URL the
+        // other pins use: the Anthropic arm answers from provider typing,
+        // not from the URL's canonicality, so the default path gets the
+        // same `official_route` wire answer. A URL-keyed condition would
+        // mislabel this route `custom_endpoint`.
+        let config = Config {
+            provider: Some("deepseek-anthropic".to_string()),
+            strict_tool_mode: Some(true),
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek_anthropic: crate::config::ProviderConfig {
+                    base_url: Some("https://api.deepseek.com/anthropic".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let status = doctor_strict_tool_mode_status(&config);
+
+        assert_eq!(status.status, "official_route");
+        assert!(status.function_strict_sent);
+        assert!(status.message.contains("Anthropic wire forwards"));
+        assert!(status.recommended_base_url.is_none());
+    }
+
+    #[test]
+    fn strict_tool_mode_doctor_discloses_thinking_suppression_for_deepseek_cn_custom_urls() {
+        // The DeepseekCN chat shape suppresses `tool_choice` on
+        // thinking-enabled requests exactly like the Deepseek shape, so a
+        // CN-typed provider on a custom URL needs the same suppression
+        // parenthetical the Deepseek custom-URL arm carries — the wire
+        // honesty is per provider shape, and `DeepseekCN` is the second
+        // occupant of the family gate.
+        let config = Config {
+            provider: Some("deepseek-cn".to_string()),
+            strict_tool_mode: Some(true),
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek_cn: crate::config::ProviderConfig {
+                    base_url: Some("https://llm.example.com/v1".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let status = doctor_strict_tool_mode_status(&config);
+
+        assert_eq!(status.status, "custom_endpoint");
+        assert!(!status.function_strict_sent);
+        assert!(status.message.contains("official DeepSeek-family"));
+        assert!(
+            status
+                .message
+                .contains("omitted on thinking-enabled requests"),
+            "the DeepseekCN chat shape suppresses `tool_choice`: {}",
+            status.message
+        );
     }
 
     #[test]

@@ -1537,7 +1537,7 @@ fn branch_properties_value_compatible(
     node_properties.iter().all(|(name, node_schema)| {
         branch_properties
             .get(name)
-            .is_none_or(|branch_schema| schema_pair_satisfiable(node_schema, branch_schema))
+            .is_none_or(|branch_schema| schema_pair_satisfiable(node_schema, branch_schema, root))
     })
 }
 
@@ -1552,8 +1552,17 @@ fn branch_properties_value_compatible(
 /// values (`const`/`enum`) against the other side's type, bounds, and
 /// string constraints, and the numeric windows — applied recursively
 /// through `properties` and array `items`, where the same conjunction
-/// recurs.
-fn schema_pair_satisfiable(a: &Value, b: &Value) -> bool {
+/// recurs. A side that stands for a definition — a `$ref` chain — is
+/// judged as the schema it names: the property-level sibling of the
+/// branch-level resolution the coverage judge applies one level up.
+fn schema_pair_satisfiable(a: &Value, b: &Value, root: &Value) -> bool {
+    // By the time the gate runs, the reference walk has already failed
+    // dangling, malformed, and cyclic chains closed, so an unresolvable hop
+    // here is unreachable in the production path; keeping the authored side
+    // in that case is the same compatible-by-default line the unjudgeable
+    // combinations draw.
+    let a = resolved_branch_definition(a, root).unwrap_or(a);
+    let b = resolved_branch_definition(b, root).unwrap_or(b);
     let (Some(a_obj), Some(b_obj)) = (a.as_object(), b.as_object()) else {
         return true;
     };
@@ -1574,7 +1583,7 @@ fn schema_pair_satisfiable(a: &Value, b: &Value) -> bool {
     ) {
         for (name, a_schema) in a_properties {
             if let Some(b_schema) = b_properties.get(name)
-                && !schema_pair_satisfiable(a_schema, b_schema)
+                && !schema_pair_satisfiable(a_schema, b_schema, root)
             {
                 return false;
             }
@@ -1585,10 +1594,24 @@ fn schema_pair_satisfiable(a: &Value, b: &Value) -> bool {
     if let (Some(a_items), Some(b_items)) = (a_obj.get("items"), b_obj.get("items"))
         && a_items.is_object()
         && b_items.is_object()
-        && !schema_pair_satisfiable(a_items, b_items)
+        && !schema_pair_satisfiable(a_items, b_items, root)
     {
         return false;
     }
+    // The enum-vs-enum membership scan is quadratic in the member counts,
+    // and the documented subset puts no cap on `enum` — a hostile schema
+    // can park two 50,000-member disjoint enums on a nested union's shared
+    // property and pay the scan per branch pair per request. Past the cap
+    // the membership judgment is compatible-by-default, the same
+    // abstention line the unjudgeable pattern spellings draw; real
+    // discriminated unions pin a handful of members, and the per-value
+    // bounds judgment below stays live (it is linear).
+    const ENUM_PAIR_MEMBER_CAP: usize = 256;
+    let enum_pair_chaseable = [a_obj, b_obj].into_iter().all(|obj| {
+        obj.get("enum")
+            .and_then(Value::as_array)
+            .is_none_or(|members| members.len() <= ENUM_PAIR_MEMBER_CAP)
+    });
     for (pinned, other) in [(a_obj, b_obj), (b_obj, a_obj)] {
         // One compile per opposing side: every pinned value below is
         // judged against the same constraints.
@@ -1602,6 +1625,7 @@ fn schema_pair_satisfiable(a: &Value, b: &Value) -> bool {
                 return false;
             }
             if let Some(other_members) = other.get("enum").and_then(Value::as_array)
+                && enum_pair_chaseable
                 && !other_members.contains(const_value)
             {
                 return false;
@@ -1615,6 +1639,7 @@ fn schema_pair_satisfiable(a: &Value, b: &Value) -> bool {
         // one value with it.
         if let Some(members) = pinned.get("enum").and_then(Value::as_array) {
             if let Some(other_members) = other.get("enum").and_then(Value::as_array)
+                && enum_pair_chaseable
                 && !members.iter().any(|member| other_members.contains(member))
             {
                 return false;
@@ -1651,25 +1676,41 @@ fn declared_types_disjoint(a: &str, b: &str) -> bool {
 }
 
 /// Whether the documented numeric bounds of the two sides admit no common
-/// number: the lower edges and upper edges combine per side, and the
-/// windows cross when the combined lower edge sits past the combined
-/// upper edge (inclusive/exclusive forms compare exactly at the
-/// boundary). Fractional/integer intersections are not chased here — the
-/// same disclosed line the per-node crossing arm draws.
+/// number: the lower edges and upper edges combine per side — the stricter
+/// of the two spellings when a node carries both forms — and the windows
+/// cross when the combined lower edge sits past the combined upper edge
+/// (inclusive/exclusive forms compare exactly at the boundary).
+/// Fractional/integer intersections are not chased here — the same
+/// disclosed line the per-node crossing arm draws.
 fn numeric_windows_cross(a: &Map<String, Value>, b: &Map<String, Value>) -> bool {
-    let edge = |obj: &Map<String, Value>, inclusive: &str, exclusive: &str| {
-        obj.get(inclusive)
-            .and_then(Value::as_f64)
-            .map(|value| (value, true))
-            .or_else(|| {
-                obj.get(exclusive)
-                    .and_then(Value::as_f64)
-                    .map(|value| (value, false))
-            })
+    // One edge per side, combined from both documented spellings: the
+    // window's true boundary is the stricter of `minimum`/`exclusiveMinimum`
+    // (and of `maximum`/`exclusiveMaximum`) when a node carries both, and
+    // reading only one form let a node whose dual spellings pin an empty
+    // window (`minimum: 0` beside `exclusiveMinimum: 10`) slip a crossing
+    // union through on the weaker edge. At a tie the exclusive spelling is
+    // the stricter one: the value must clear it, not merely reach it.
+    let edge = |obj: &Map<String, Value>,
+                inclusive_key: &str,
+                exclusive_key: &str,
+                stricter: fn(f64, f64) -> f64|
+     -> Option<(f64, bool)> {
+        let inclusive = obj.get(inclusive_key).and_then(Value::as_f64);
+        let exclusive = obj.get(exclusive_key).and_then(Value::as_f64);
+        match (inclusive, exclusive) {
+            (Some(inclusive_value), Some(exclusive_value)) => {
+                let value = stricter(inclusive_value, exclusive_value);
+                let from_inclusive = value == inclusive_value && inclusive_value != exclusive_value;
+                Some((value, from_inclusive))
+            }
+            (Some(inclusive_value), None) => Some((inclusive_value, true)),
+            (None, Some(exclusive_value)) => Some((exclusive_value, false)),
+            (None, None) => None,
+        }
     };
     let (Some((a_lower, a_lower_inclusive)), Some((b_upper, b_upper_inclusive))) = (
-        edge(a, "minimum", "exclusiveMinimum"),
-        edge(b, "maximum", "exclusiveMaximum"),
+        edge(a, "minimum", "exclusiveMinimum", f64::max),
+        edge(b, "maximum", "exclusiveMaximum", f64::min),
     ) else {
         return false;
     };
@@ -1929,6 +1970,12 @@ fn enforce_strict_subset(schema: &mut Value, removed_optionals: &mut Vec<String>
             // those closed.
             if !obj.contains_key("type") {
                 obj.insert("type".into(), Value::String("object".to_string()));
+                // The injection just named this node `object`: a well-formed
+                // numeric or string-domain constraint it carried is now a
+                // dead letter beside that type, and the same widening strip
+                // the typed nodes got in the pass above applies here too
+                // (idempotent — typed nodes were already stripped).
+                strip_domain_mismatched_constraints(obj);
             }
             // A set, not a Vec: the membership test runs once per property,
             // and a Vec scan would make each property cost the whole list.
@@ -2079,6 +2126,52 @@ fn strip_unsupported_strict_keywords(obj: &mut Map<String, Value>) {
     obj.remove("maxLength");
     obj.remove("minItems");
     obj.remove("maxItems");
+    strip_domain_mismatched_constraints(obj);
+}
+
+/// A documented constraint binds only its own domain: on a node whose
+/// declared single-string type names the other domain, a well-formed
+/// keyword of the wrong domain is a dead letter the strict documents never
+/// describe for that type (`minimum` beside `type: "string"`, the
+/// whitelisted `format` beside `type: "number"`), and dropping it only
+/// widens what the endpoint accepts — the same placement-free line the
+/// length/count strips draw. A typeless node keeps its constraints: the
+/// enum/const judges key on each value's own domain, so a numeric member
+/// is still bound by a numeric bound on an untyped node. A malformed value
+/// keeps its position too and still fails closed in the gate's junk arm,
+/// exactly as on matching-type nodes — this strip moves well-formed dead
+/// letters, not malformed keywords. Runs from the enforce pass on every
+/// object node, after the type injection has named a typeless
+/// properties-bearing map `object`.
+fn strip_domain_mismatched_constraints(obj: &mut Map<String, Value>) {
+    // Owned: the strips below mutate the same map the type was read from.
+    let Some(schema_type) = obj.get("type").and_then(Value::as_str).map(str::to_string) else {
+        return;
+    };
+    if !matches!(schema_type.as_str(), "number" | "integer") {
+        for key in [
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "multipleOf",
+        ] {
+            if obj.get(key).is_some_and(Value::is_number) {
+                obj.remove(key);
+            }
+        }
+    }
+    if schema_type.as_str() != "string" {
+        if obj.get("pattern").is_some_and(Value::is_string) {
+            obj.remove("pattern");
+        }
+        if matches!(
+            obj.get("format").and_then(Value::as_str),
+            Some(format) if matches!(format, "email" | "hostname" | "ipv4" | "ipv6" | "uuid")
+        ) {
+            obj.remove("format");
+        }
+    }
 }
 
 fn is_object_schema(obj: &Map<String, Value>) -> bool {
@@ -7020,6 +7113,288 @@ mod tests {
         assert!(
             prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
             "a value-agreeing branch must keep the union strict"
+        );
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    // ── Round-17 wave: dual-form window edges, property-level references,
+    //    the hostile-enum cap, and type-mismatched constraint strips ──
+
+    #[test]
+    fn strict_mode_fails_a_union_closed_on_dual_form_bound_edges() {
+        // Both documented spellings on one side pin the stricter edge
+        // together: the node's `a` carries `minimum: 0` beside
+        // `exclusiveMinimum: 10`, so its true window starts above 10,
+        // while the covering branch's `a` admits only numbers <= 5 — no
+        // instance satisfies both. Reading the pair through the weaker
+        // `minimum` edge would count the branch as covering and ship the
+        // union strict admitting nothing.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"a": {"type": "number", "minimum": 0, "exclusiveMinimum": 10}},
+                        "required": ["a"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"a": {"type": "number", "maximum": 5}}, "required": ["a"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        let authored = tool.input_schema.clone();
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "dual-form edges pin the stricter window: the crossing branch must not cover"
+        );
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_union_whose_dual_form_edges_leave_a_window() {
+        // Over-fail guard for the stricter-edge combination: a node whose
+        // `minimum: 0` beside `exclusiveMinimum: 1` pairs with a branch
+        // `maximum: 5` leaves the numbers in (1, 5], so the branch covers
+        // and the union keeps strict mode.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"a": {"type": "number", "minimum": 0, "exclusiveMinimum": 1}},
+                        "required": ["a"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"a": {"type": "number", "maximum": 5}}, "required": ["a"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        assert!(
+            prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "dual-form edges leaving a usable window must keep the union strict"
+        );
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_a_union_closed_when_a_branch_property_ref_disjoins_the_node() {
+        // The property-level sibling of the ref-branch coverage judge: the
+        // covering branch's `a` is a `$ref` to a definition whose `const`
+        // disjoins the node's own `a` pin, and an instance satisfying the
+        // union through the branch would pin `a` to 1 and 2 at once. The
+        // pair judge must resolve the reference and judge the definition
+        // instead of treating the unjudgeable side as compatible-by-default.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"a": {"type": "number", "const": 1}},
+                        "required": ["a"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"a": {"$ref": "#/$defs/pin"}}, "required": ["a"]}
+                        ]
+                    }
+                },
+                "required": ["spec"],
+                "$defs": {"pin": {"type": "number", "const": 2}}
+            }),
+        );
+        let authored = tool.input_schema.clone();
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a branch property `$ref` standing for a contradictory definition must not cover"
+        );
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_union_whose_branch_property_ref_agrees_with_the_node() {
+        // Keep-side for the property-level resolution: the reference
+        // resolves to a definition that agrees with the node's pin
+        // (`const: 1`), so the branch covers. This also stays green when
+        // the resolution is deleted and the bare `{"$ref": …}` side is
+        // judged compatible-by-default — the fail-side pin above is the
+        // binding one; this one guards the over-fail direction.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"a": {"type": "number", "const": 1}},
+                        "required": ["a"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"a": {"$ref": "#/$defs/pin"}}, "required": ["a"]}
+                        ]
+                    }
+                },
+                "required": ["spec"],
+                "$defs": {"pin": {"type": "number", "const": 1}}
+            }),
+        );
+        assert!(
+            prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a branch property `$ref` standing for an agreeing definition must cover"
+        );
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_abstains_from_enum_pair_disjointness_past_the_member_cap() {
+        // The enum-vs-enum membership scan is quadratic in the member
+        // counts, and a hostile schema can park two huge disjoint enums on
+        // a nested union's shared property to pay it per branch pair per
+        // request. Past the cap the membership judgment abstains
+        // (compatible-by-default, the same line the unjudgeable pattern
+        // spellings draw), so the branch covers and the union keeps strict
+        // mode — an explicit trade of a pathological contradiction
+        // judgment for bounded request cost; the small-enum disjointness
+        // pins above stay binding.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "spec": {
+                        "type": "object",
+                        "properties": {"a": {"type": "integer", "enum": (0..300).collect::<Vec<i32>>()}},
+                        "required": ["a"],
+                        "anyOf": [
+                            {"type": "object", "properties": {"a": {"type": "integer", "enum": (1_000..1_300).collect::<Vec<i32>>()}}, "required": ["a"]}
+                        ]
+                    }
+                },
+                "required": ["spec"]
+            }),
+        );
+        assert!(
+            prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "past the member cap the membership judgment abstains and the branch covers"
+        );
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_strips_a_well_formed_constraint_of_the_wrong_domain() {
+        // A constraint binds only its own domain: `minimum` beside
+        // `type: "string"` and the whitelisted `format` beside
+        // `type: "number"` are dead letters the strict documents never
+        // describe for those types, and the strip drops them (widening
+        // only) instead of shipping the never-described combination under
+        // a strict flag — the domain-conditional sibling of the
+        // unconditional length/count strips.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "s": {"type": "string", "minimum": 5, "maximum": 1, "multipleOf": 2},
+                    "n": {"type": "number", "format": "uuid", "pattern": "^x$"}
+                },
+                "required": ["s", "n"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(tool.strict, Some(true));
+        let properties = tool.input_schema.get("properties").unwrap();
+        for name in ["minimum", "maximum", "multipleOf"] {
+            assert!(
+                properties.get("s").unwrap().get(name).is_none(),
+                "{name} is a dead letter beside a string type and must not ship"
+            );
+        }
+        assert!(
+            properties.get("n").unwrap().get("format").is_none(),
+            "a whitelisted format is a dead letter beside a number type"
+        );
+        assert!(
+            properties.get("n").unwrap().get("pattern").is_none(),
+            "a pattern is a dead letter beside a number type"
+        );
+        assert_eq!(tool.description, "probe", "widening strips do not note");
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_typeless_nodes_numeric_bounds_judging() {
+        // The strip is domain-conditional: a typeless node keeps its
+        // bounds, and the enum-vs-bounds arm still fails it closed when no
+        // member clears them (`{"enum":[1,2],"minimum":5}` admits nothing).
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"u": {"enum": [1, 2], "minimum": 5}},
+                "required": ["u"]
+            }),
+        );
+        let authored = tool.input_schema.clone();
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a typeless node's bounds still bind its numeric members"
+        );
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_still_fails_a_malformed_bound_on_a_mismatched_type() {
+        // The strip moves well-formed dead letters, not malformed keywords:
+        // a junk bound value beside a mismatched type keeps its position
+        // and the gate's junk arm still fails the tool closed, exactly as
+        // on matching-type nodes.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"s": {"type": "string", "minimum": "abc"}},
+                "required": ["s"]
+            }),
+        );
+        let authored = tool.input_schema.clone();
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a malformed bound value fails closed regardless of the node's type"
+        );
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_keeps_strict_when_literal_values_hold_ref_shaped_members() {
+        // An enum member shaped like a reference is data to ship, not a
+        // reference to resolve: the walk's literal skip must keep the tool
+        // strict. Deleting the skip makes the walk judge the member a
+        // dangling reference and fail the tool closed on its own data —
+        // this pin is the keep-side that catches exactly that.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "x": {"type": "string", "enum": [{"$ref": "#/nowhere"}, "plain"]}
+                },
+                "required": ["x"]
+            }),
+        );
+        assert!(
+            prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a `$ref`-shaped enum member is a literal value, not a reference"
         );
         assert_eq!(tool.strict, Some(true));
     }
