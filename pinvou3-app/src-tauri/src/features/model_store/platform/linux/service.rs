@@ -760,7 +760,10 @@ pub async fn local_resources() -> Result<Value, String> {
 
 /// 启用前内存准入快照。前端据此决定是否需要给用户二次确认，真正开始启用时还会在
 /// `start_lifecycle` 里复算一次，避免用户打开确认框后内存状态已变化。
-pub async fn memory_admission(card_id: String, version_id: Option<String>) -> Result<Value, String> {
+pub async fn memory_admission(
+    card_id: String,
+    version_id: Option<String>,
+) -> Result<Value, String> {
     // r43 P1-4：带 version_id 时按切换目标版本的记录评估（版本切换预检用），
     // 否则按 active 记录（启用/部署预检用）。
     tokio::task::spawn_blocking(move || {

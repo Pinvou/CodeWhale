@@ -406,8 +406,8 @@ fn push_header_colon_value(
     // r43 P1-2：紧凑 JSON 的名字带 `{"` 前缀（`{"Authorization":"Bearer x"}` 无
     // 空白可分词）——不剥花括号 is_auth 永远失配，scheme 链不启动、下一个词
     // 的真凭据裸落。与 key_is_secret 同一 trim 集。
-    let bare_name = name
-        .trim_matches(|c: char| matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | ','));
+    let bare_name =
+        name.trim_matches(|c: char| matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | ','));
     let is_auth = bare_name.eq_ignore_ascii_case("authorization")
         || bare_name.eq_ignore_ascii_case("proxy-authorization");
     let is_cookie = bare_name.eq_ignore_ascii_case("cookie");
@@ -700,7 +700,13 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
             match trimmed.split_once(':') {
                 Some((name, value)) if !value.is_empty() => {
                     // r30 P2-1：冒号形态统一走 helper（补 scheme 链 + 引号 trim）。
-                    push_header_colon_value(name, value, &mut out, &mut redact_next, &mut cookie_rest);
+                    push_header_colon_value(
+                        name,
+                        value,
+                        &mut out,
+                        &mut redact_next,
+                        &mut cookie_rest,
+                    );
                 }
                 Some((name, _)) => {
                     out.push_str(name);
@@ -724,7 +730,9 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
                     let is_cookie_eq = trimmed
                         .trim_matches(['"', '\''])
                         .split_once('=')
-                        .is_some_and(|(n, _)| n.trim_matches(['"', '\'']).eq_ignore_ascii_case("cookie"));
+                        .is_some_and(|(n, _)| {
+                            n.trim_matches(['"', '\'']).eq_ignore_ascii_case("cookie")
+                        });
                     if is_cookie_eq {
                         out.push_str(trimmed);
                         out.push_str(REDACTED);
@@ -846,7 +854,13 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
                     // 名单）。统一走与 Name 臂相同的两个 helper。
                     match rest.split_once(':') {
                         Some((name, value)) if !value.is_empty() => {
-                            push_header_colon_value(name, value, &mut out, &mut redact_next, &mut cookie_rest);
+                            push_header_colon_value(
+                                name,
+                                value,
+                                &mut out,
+                                &mut redact_next,
+                                &mut cookie_rest,
+                            );
                         }
                         _ => {
                             if !push_header_equals_spec(rest, &mut out) {
@@ -1382,17 +1396,25 @@ mod tests {
     fn disk_sanitizer_blocks_r43_leak_forms() {
         // ① 紧凑 JSON：Bearer 后的真凭据不得存活（此前 `{"Authorization` 的
         //    花括号让 is_auth 失配，scheme 链不启动）。
-        let json_compact =
-            r#"body={"Authorization":"Bearer shortsecret12345"}"#;
+        let json_compact = r#"body={"Authorization":"Bearer shortsecret12345"}"#;
         let cleaned = sanitize_for_disk(json_compact);
-        assert!(!cleaned.contains("shortsecret12345"), "紧凑 JSON 凭据泄漏: {cleaned}");
+        assert!(
+            !cleaned.contains("shortsecret12345"),
+            "紧凑 JSON 凭据泄漏: {cleaned}"
+        );
 
         // ② Cookie 分号多对：非名单 cookie 名（SID）的值不得存活，且行内
         //    后续普通词不受影响（行末终止语义）。
         let cookie_line = "curl -H 'Cookie: theme=dark; SID=abc123def456ghi' https://x.example/api";
         let cleaned = sanitize_for_disk(cookie_line);
-        assert!(!cleaned.contains("abc123def456ghi"), "Cookie 多对泄漏: {cleaned}");
-        assert!(cleaned.contains("https://x.example/api"), "Cookie 过抹越界: {cleaned}");
+        assert!(
+            !cleaned.contains("abc123def456ghi"),
+            "Cookie 多对泄漏: {cleaned}"
+        );
+        assert!(
+            cleaned.contains("https://x.example/api"),
+            "Cookie 过抹越界: {cleaned}"
+        );
 
         // ③ 跨行 -H：值停在下一行时（行尾悬置），下一行的值不得存活。
         let mut carry = DiskCarry::default();
@@ -1413,7 +1435,10 @@ mod tests {
         let mut carry = DiskCarry::default();
         sanitize_line_with("+ curl -H 'Cookie: a=1; b=2'", &mut carry);
         let next = sanitize_line_with("echo harmless_value_ok", &mut carry);
-        assert!(next.contains("harmless_value_ok"), "Cookie 态跨行误伤: {next}");
+        assert!(
+            next.contains("harmless_value_ok"),
+            "Cookie 态跨行误伤: {next}"
+        );
     }
 
     /// 落盘路径上四种形状的机密都不许留下原值。

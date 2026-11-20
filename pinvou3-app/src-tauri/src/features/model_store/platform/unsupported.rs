@@ -71,7 +71,10 @@ pub async fn local_resources() -> Result<Value, String> {
     nope()
 }
 
-pub async fn memory_admission(_card_id: String, _version_id: Option<String>) -> Result<Value, String> {
+pub async fn memory_admission(
+    _card_id: String,
+    _version_id: Option<String>,
+) -> Result<Value, String> {
     nope()
 }
 

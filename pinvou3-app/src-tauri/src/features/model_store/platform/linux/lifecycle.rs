@@ -2495,8 +2495,8 @@ impl ModelManager {
             return Err(ModelManagerError::new("已取消，原脚本未修改。"));
         }
         self.require_stopped_for_script_update(&rec)?;
-        let changed =
-            db::replace_card_package(&rec, &pkg.scripts, &pkg.assets).map_err(ModelManagerError::new)?;
+        let changed = db::replace_card_package(&rec, &pkg.scripts, &pkg.assets)
+            .map_err(ModelManagerError::new)?;
         if let Some((name, version)) = new_engine_identity {
             db::update_engine_identity(&rec.card_id, &name, version.as_deref())
                 .map_err(ModelManagerError::new)?;
