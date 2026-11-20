@@ -329,6 +329,18 @@ jobs:
                 job['steps'][-1]['conclusion'] = status
                 self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
 
+    def test_transport_preparation_is_not_a_product_witness_or_a_name_based_waiver(self):
+        extra = '''      - name: Prepare transfer
+        run: node scripts/ci-network-node-options.cjs
+'''
+        workflow = self.workflow() + extra
+        steps = PLAN.catalog(workflow, jobs={'suite'})['suite']['steps']
+        self.assertTrue(steps[-1]['optional'])
+        mutant = workflow.replace('run: node scripts/ci-network-node-options.cjs',
+                                  'run: node scripts/ci-network-node-options.cjs && product-test')
+        steps = PLAN.catalog(mutant, jobs={'suite'})['suite']['steps']
+        self.assertFalse(steps[-1]['optional'])
+
     def test_unknown_conditions_require_execution_and_wrong_labels_reject(self):
         policy = PLAN.catalog(self.workflow().replace("env.RUN_HEAVY_RUST_CHECKS == 'true'", 'unknown.output'), jobs={'suite'})['suite']
         job = self.job()

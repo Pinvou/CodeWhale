@@ -80,6 +80,10 @@ func TestExpiredHoldHTTPProofPreservesTransportTimeoutAndCancellation(t *testing
 				if scenario == "canceled" {
 					cancel()
 				}
+				// Keep the deliberately incomplete response open until the
+				// client has observed its own timeout/cancellation. Returning
+				// on r.Context().Done() races the deadline with a clean empty
+				// response, so JSON EOF can mask the transport sentinel.
 				<-release
 			}))
 			defer server.Close()
