@@ -3888,7 +3888,9 @@ python3() { fixture_mock python3 "$@"; }
                     NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}
-                    path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                    path: |
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                      ${{ runner.temp }}/financial-parallel-*/
                     if-no-files-found: error
                     retention-days: 7
             """).rstrip(), "      "),

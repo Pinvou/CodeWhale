@@ -21,7 +21,7 @@ pub(crate) mod controlling_handshake;
 pub(crate) mod controlled_handshake;
 
 #[path = "../../../src/features/remote_control/controller/controlling_session.rs"]
-mod controlling_session;
+pub(crate) mod controlling_session;
 
 #[path = "../../../src/features/remote_control/controller/permission.rs"]
 pub(crate) mod permission;

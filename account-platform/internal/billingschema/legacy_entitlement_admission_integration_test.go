@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -529,32 +530,128 @@ func TestLegacyEntitlementUpgradeAdmissionPostgres(t *testing.T) {
 			t.Fatal(e)
 		}
 		before := snapshot(t, c)
+		var pid, databaseOID uint32
+		var database, session, current string
+		var started time.Time
+		if e := c.QueryRow(ctx, `SELECT pg_backend_pid(),(SELECT oid FROM pg_database WHERE datname=current_database()),current_database(),session_user,current_user`).Scan(&pid, &databaseOID, &database, &session, &current); e != nil {
+			t.Fatal("record owned waiter backend", e)
+		}
+		if pid != c.PgConn().PID() || database != c.Config().Database || session != "billing_migrator" || current != "billing_service" {
+			t.Fatal("owned waiter identity changed before admission")
+		}
+		// Activity details are restricted by current_user, even for this PID:
+		// billing_service cannot inspect the billing_migrator login's details.
+		// Read only our own backend under its existing session role, then roll
+		// back SET LOCAL before any admission work uses the runtime identity.
+		if e := func() (err error) {
+			tx, err := c.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+			if err != nil {
+				return err
+			}
+			defer func() { err = errors.Join(err, tx.Rollback(ctx)) }()
+			if _, err = tx.Exec(ctx, `SET LOCAL ROLE billing_migrator`); err != nil {
+				return err
+			}
+			return tx.QueryRow(ctx, `SELECT backend_start FROM pg_stat_activity WHERE pid=$1 AND pid=pg_backend_pid() AND usename=session_user`, pid).Scan(&started)
+		}(); e != nil {
+			t.Fatal("record owned waiter start under its session role", e)
+		}
+		var restoredPID, restoredOID uint32
+		var restoredDatabase, restoredSession, restoredCurrent string
+		if e := c.QueryRow(ctx, `SELECT pg_backend_pid(),(SELECT oid FROM pg_database WHERE datname=current_database()),current_database(),session_user,current_user`).Scan(&restoredPID, &restoredOID, &restoredDatabase, &restoredSession, &restoredCurrent); e != nil {
+			t.Fatal("verify waiter identity after session-role observation", e)
+		}
+		if restoredPID != pid || restoredOID != databaseOID || restoredDatabase != database || restoredSession != session || restoredCurrent != current {
+			t.Fatal("waiter runtime identity was not restored after observation")
+		}
+		observeWaiter := func(observe context.Context) (present, blocked bool, err error) {
+			var actualOID uint32
+			var actualDatabase, actualSession string
+			var actualStarted time.Time
+			err = f.admin.QueryRow(observe, `SELECT datid,datname,usename,backend_start,COALESCE(wait_event_type='Lock' AND wait_event='advisory' AND query LIKE '%pg_advisory_lock%',false) FROM pg_stat_activity WHERE pid=$1`, pid).Scan(&actualOID, &actualDatabase, &actualSession, &actualStarted, &blocked)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return false, false, nil
+			}
+			if err != nil {
+				return false, false, err
+			}
+			if actualOID != databaseOID || actualDatabase != database || actualSession != session || !actualStarted.Equal(started) {
+				return false, false, errors.New("owned waiter backend identity changed")
+			}
+			return true, blocked, nil
+		}
 		work, stop := context.WithCancel(ctx)
 		done := make(chan error, 1)
-		pid := c.PgConn().PID()
 		go func() { done <- Up(work, c, loaded) }()
+		retirementStarted := false
+		retireWaiter := func() error {
+			retirementStarted = true
+			// One original five-second cancellation budget covers the result,
+			// pgx asynchronous cleanup and PostgreSQL's backend acknowledgement.
+			retirement, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			stop()
+			var result error
+			select {
+			case e := <-done:
+				if e == nil {
+					result = errors.New("cancelled lock acquisition succeeded")
+				}
+			case <-retirement.Done():
+				return fmt.Errorf("cancel did not release waiter: %w", retirement.Err())
+			}
+			// A server-side cancellation can leave a usable connection. Retire
+			// only this joined waiter; Close alone does not await asyncClose.
+			if e := c.Close(retirement); e != nil {
+				result = errors.Join(result, e)
+			}
+			select {
+			case <-c.PgConn().CleanupDone():
+			case <-retirement.Done():
+				return errors.Join(result, fmt.Errorf("waiter client cleanup unconfirmed: %w", retirement.Err()))
+			}
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				present, _, e := observeWaiter(retirement)
+				if e != nil {
+					return errors.Join(result, e)
+				}
+				if !present {
+					return result
+				}
+				select {
+				case <-ticker.C:
+				case <-retirement.Done():
+					return errors.Join(result, fmt.Errorf("waiter backend retirement unconfirmed: %w", retirement.Err()))
+				}
+			}
+		}
+		defer func() {
+			// Also cancel/join/retire if an observation or assertion fails before
+			// the normal cancellation point. Never retry a failed retirement.
+			if !retirementStarted {
+				if e := retireWaiter(); e != nil {
+					t.Error("owned waiter cleanup unconfirmed", e)
+				}
+			}
+		}()
 		blocked := false
 		for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
-			if e := f.admin.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock' AND wait_event='advisory' AND query LIKE '%pg_advisory_lock%')`, pid).Scan(&blocked); e != nil {
-				t.Fatal(e)
+			present, waiting, e := observeWaiter(ctx)
+			if e != nil || !present {
+				t.Fatal("observe actual owned admission waiter", e)
 			}
+			blocked = waiting
 			if blocked {
 				break
 			}
 		}
 		if !blocked {
-			stop()
-			<-done
 			t.Fatal("did not observe actual blocked admission lock")
 		}
-		stop()
-		select {
-		case e := <-done:
-			if e == nil {
-				t.Fatal("cancelled lock acquisition succeeded")
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("cancel did not release waiter")
+		if e := retireWaiter(); e != nil {
+			t.Fatal("cancelled waiter retirement", e)
 		}
 		if before != snapshot(t, owner) {
 			t.Fatal("cancelled preflight changed schema/ledger/facts")

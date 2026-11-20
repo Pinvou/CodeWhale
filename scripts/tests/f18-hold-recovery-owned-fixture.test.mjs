@@ -57,12 +57,17 @@ test("F18 runbook distinguishes implemented local lifecycle from external accept
   assert.match(runbook, /stop before DDL/u);
   assert.match(goTest, /raw := os\.Getenv\("PINVOU_TEST_BILLING_DATABASE_URL"\)/u);
   assert.match(goTest, /if raw == ""\s*\{\s*t\.Skip\(/u);
-  assert.match(goTest, /localOwned := os\.Getenv\("F18_TEST_DATABASE_PROFILE"\) != ""/u);
-  assert.match(goTest, /if localOwned\s*\{\s*config, directory, port := f18OwnedConnectionConfig\(t, raw\)[\s\S]*?admin,\s*e\s*=\s*pgx\.ConnectConfig\(ctx,\s*config\)\s*\} else \{\s*admin,\s*e\s*=\s*pgx\.Connect\(ctx,\s*raw\)/u,
+  assert.match(goTest, /ownedProfile := os\.Getenv\("F18_TEST_DATABASE_PROFILE"\) != ""/u);
+  assert.match(goTest, /localOwned := os\.Getenv\("F18_TEST_DATABASE_PROFILE"\) == "local-owned"/u);
+  assert.match(goTest, /if ownedProfile\s*\{\s*config, directory, port := f18OwnedConnectionConfig\(t, raw\)[\s\S]*?admin,\s*e\s*=\s*f18ConnectOwned\(ctx,\s*config\)\s*\} else \{\s*admin,\s*e\s*=\s*pgx\.Connect\(ctx,\s*raw\)/u,
     "revisit current-status documentation when the named test changes its connection paths");
   assert.match(goConfig, /os\.Getenv\("F18_TEST_DATABASE_PROFILE"\) != f17fixture\.OwnedProfile/u);
   assert.match(goConfig, /instance := f17fixture\.OwnedInstance\{/u);
   assert.match(goConfig, /!instance\.ConfigurationAllowed\(config\)/u);
+  assert.match(goConfig, /os\.Getenv\("F18_TEST_DATABASE_PROFILE"\) == "ci-owned"/u);
+  assert.match(goConfig, /cifixture\.ConnectConfig\(ctx, config\)/u);
+  assert.match(goConfig, /cifixture\.ConfigurationAllowed\(config, port, system, directory\)/u);
+  assert.match(runbook, /ci-owned.*verified.*owners.*service/u);
   for (const name of names.slice(2)) {
     assert.match(goConfig, new RegExp(String.raw`os\.(?:Getenv|LookupEnv)\(\s*"${name}"\s*\)`),
       `${name} consumption requires revisiting the documented current status`);
