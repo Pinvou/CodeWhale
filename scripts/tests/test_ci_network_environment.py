@@ -14,6 +14,42 @@ SPEC.loader.exec_module(ENV)
 
 
 class NetworkEnvironmentTests(unittest.TestCase):
+    def test_domestic_registry_preserves_profiles_and_can_return_to_official(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); cargo = root / 'cargo'; cargo.mkdir()
+            config = cargo / 'config.toml'
+            original = '[build]\njobs = 12\n'
+            config.write_text(original)
+            ENV.cargo_source(cargo, 'rsproxy')
+            self.assertIn(original, config.read_text())
+            self.assertIn('sparse+https://rsproxy.cn/index/', config.read_text())
+            ENV.cargo_source(cargo, 'rsproxy')
+            self.assertEqual(config.read_text().count('[source.crates-io]'), 1)
+            ENV.cargo_source(cargo, 'official')
+            self.assertNotIn('rsproxy', config.read_text())
+            self.assertIn(original, config.read_text())
+
+    def test_domestic_registry_refuses_custom_source_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / 'config.toml'
+            text = '[source.crates-io]\nreplace-with = "private"\n'
+            config.write_text(text)
+            with self.assertRaises(ValueError): ENV.cargo_source(root, 'rsproxy')
+            self.assertEqual(config.read_text(), text)
+
+    def test_ambiguous_or_mixed_source_policies_are_rejected_without_partial_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config = root / 'config.toml'
+            text = ENV.MIRROR_CONFIG + '\n[source.private]\nregistry="https://example.invalid/index"\n'
+            config.write_text(text)
+            with self.assertRaises(ValueError): ENV.cargo_source(root, 'rsproxy')
+            self.assertEqual(config.read_text(), text)
+            config.write_text(ENV.MIRROR_CONFIG)
+            (root / 'config').write_text('[build]\njobs=12\n')
+            with self.assertRaises(ValueError): ENV.cargo_source(root, 'rsproxy')
+            self.assertEqual(config.read_text(), ENV.MIRROR_CONFIG)
+
     @unittest.skipUnless(shutil.which('node'), 'Node reports the actual safe download receipt')
     def test_report_retains_stage_evidence_without_raw_errors_urls_or_environment(self):
         with tempfile.TemporaryDirectory() as directory:

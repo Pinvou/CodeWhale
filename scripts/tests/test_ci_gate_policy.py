@@ -3396,7 +3396,7 @@ python3() { fixture_mock python3 "$@"; }
         self.assertEqual([line.strip() for line in cache.splitlines() if line.strip()], [
             "- name: Cargo cache",
             "id: cli_lint_cache",
-            "uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0",
+            "uses: ./.github/actions/linux-rust-cache",
             "env:", "NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}", "PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}",
             "PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
             "with:", "workspaces: pinvou-cli", "shared-key: cli-lint",
@@ -6192,8 +6192,11 @@ python3() { fixture_mock python3 "$@"; }
                 if job_name == "rust-test"
                 else job
             )
+            cache_action = ("uses: ./.github/actions/linux-rust-cache"
+                            if job_name in ("rust-test", "knowledge-rust", "rust-lint", "cli-test")
+                            else "uses: Swatinem/rust-cache@v2")
             cache_step = _without_yaml_comments(
-                job_scope.split("uses: Swatinem/rust-cache@v2", maxsplit=1)[1].split(
+                job_scope.split(cache_action, maxsplit=1)[1].split(
                     "\n      - name:", maxsplit=1
                 )[0]
             )
@@ -6204,7 +6207,7 @@ python3() { fixture_mock python3 "$@"; }
         )[1].split("\n  cli-test:", maxsplit=1)[0]
         rust_test_cache = _without_yaml_comments(
             rust_test_job.split("- name: Cargo test cache", maxsplit=1)[1].split(
-                "uses: Swatinem/rust-cache@v2", maxsplit=1
+                "uses: ./.github/actions/linux-rust-cache", maxsplit=1
             )[1].split("\n      - name:", maxsplit=1)[0]
         )
         self.assertIn("shared-key: rust-test-v2", rust_test_cache)
@@ -6340,7 +6343,7 @@ python3() { fixture_mock python3 "$@"; }
         knowledge_job = _extract_job_block(self.pr_workflow, "knowledge-rust")
         knowledge_cache = _without_yaml_comments(
             knowledge_job.split(
-                "uses: Swatinem/rust-cache@v2", maxsplit=1
+                "uses: ./.github/actions/linux-rust-cache", maxsplit=1
             )[1].split("\n      - name:", maxsplit=1)[0]
         )
         self.assertIn("cache-targets: false", knowledge_cache)

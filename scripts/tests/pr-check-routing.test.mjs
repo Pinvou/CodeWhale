@@ -33,6 +33,16 @@ const titleWorkflow = await readFile(
   "utf8",
 );
 
+test('Rust cache and download helper-only changes reach their real consumers', () => {
+  for (const name of ['rust_code', 'cli_rust', 'knowledge_rust']) {
+    const paths = filterPaths(workflow.replace(/^ {14}#.*\r?\n/gm, ''), name);
+    for (const changed of ['.github/actions/linux-rust-cache/action.yml',
+      'scripts/ci-rust-cache-paths.cjs', 'scripts/ci-network-environment.py', 'scripts/ci-rust-dist.py']) {
+      assert.ok(paths.some(pattern => !pattern.startsWith('!') && matchesGlob(changed, pattern)), `${name}: ${changed}`);
+    }
+  }
+});
+
 test("browser wrapper helper-only changes select both native runtime gates", () => {
   const helpers = [
     "pinvou3-app/tests/helpers/ndjson-child-driver.mjs",
@@ -1680,8 +1690,9 @@ test("an exact Rust test cache hit skips only the redundant lint restore", () =>
   assert.equal(stepCondition(job, "恢复 Rust lint 暖缓存"), "steps.rust-test-cache-probe.outputs.cache-hit != 'true'");
   assert.equal(stepCondition(job, "恢复被淘汰缓存的 Rust lint 回退"), "steps.rust-test-cache-probe.outputs.cache-hit == 'true' && steps.rust-test-cache.outputs.cache-hit != 'true'");
   const recovery = job.split("- name: 恢复被淘汰缓存的 Rust lint 回退")[1].split("\n      - name:")[0];
-  assert.match(recovery, /uses: Swatinem\/rust-cache@v2/);
-  assert.match(recovery, /workspaces: pinvou3-app\/src-tauri/);
+  assert.match(recovery, /uses: \.\/\.github\/actions\/linux-rust-cache/);
+  assert.match(recovery, /pinvou3-app\/src-tauri/);
+  assert.match(recovery, /pinvou-knowledge/);
   assert.match(recovery, /shared-key: rust-lint-v2/);
   assert.match(recovery, /cache-on-failure: true/);
   assert.match(recovery, /save-if: false/);
