@@ -1174,6 +1174,16 @@
         "sha256": "2ae6887caa0f1641e54b1b953f9e949fd35482e0242ba26fadd3bf4c35f99694"
       },
       {
+        "file": "900025_commerce_manual_completion.down.sql",
+        "version": 900025,
+        "sha256": "2749336f31232b322f7986c451da63173146d57d3b659831940c1140c62024d5"
+      },
+      {
+        "file": "900025_commerce_manual_completion.up.sql",
+        "version": 900025,
+        "sha256": "9fe562a84685342a5c71047acdba6d8587f1148199354417b1d647d6b27a01f5"
+      },
+      {
         "file": "900026_approval_delivery_terminal_recovery.down.sql",
         "version": 900026,
         "sha256": "6c27277197eea78b54e959bbf48793cf0dad004f6b1f19336076481b8475660c"
