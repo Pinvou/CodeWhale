@@ -212,7 +212,7 @@ test('authorization release gate classifies every HTTP task event callback and C
   // The existing complete graph includes the reconciliation repair-context GET.
   // It also includes the two profile-revocation receipt claim/confirm routes.
   // Also retain main's approval delivery terminal recovery worker.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 425, tasks: 35, events: 18, cli: 28 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 430, tasks: 35, events: 18, cli: 28 });
 });
 
 test('existing grant inventory CLI retains its bounded read-only Account identity', async () => {
@@ -810,6 +810,33 @@ test('grant recovery keeps five literal tuples and the original action and polic
   for (const broken of [code.replace('APPROVAL_GRANT_RECOVERY_REVIEW', 'APPROVAL_GRANT_RECOVERY_OBSERVE'),
     code.replace('s.adminGrantRecoveryMutation(w, r, "REVIEW")', 's.adminGrantRecoveryMutation(w, r, "OBSERVE")'),
     code.replace('"/approval-grant-recovery-cases/:case_id/reviews"', '"/approval-grant-recovery-cases/:case_id/" + "reviews"')]) {
+    assert.notEqual(broken, code);
+    assert.throws(() => check(broken));
+  }
+});
+
+test('commerce recovery preserves its five authorized HTTP tuples', async () => {
+  const source = 'account-platform/internal/account/commerce_repair_http.go';
+  const code = await readFile(new URL('../../internal/account/commerce_repair_http.go', import.meta.url), 'utf8');
+  const expected = [
+    ['GET', '/commerce-repairs', 'PermissionCommerceRepairsRead', null],
+    ['GET', '/commerce-repairs/:case_id', 'PermissionCommerceRepairsRead', null],
+    ['POST', '/commerce-repairs', 'PermissionCommerceRepairsRequest', 'ACCOUNT_COMMERCE_REPAIR_QUARANTINE'],
+    ['POST', '/commerce-repairs/:case_id/observations', 'PermissionCommerceRepairsRequest', 'ACCOUNT_COMMERCE_REPAIR_OBSERVE'],
+    ['POST', '/commerce-repairs/:case_id/actions/confirm', 'PermissionCommerceRepairsApprove', 'ACCOUNT_COMMERCE_REPAIR_CONFIRM'],
+  ];
+  const check = text => {
+    const routes = authorizationRoutes(source, text);
+    assert.deepEqual(routes.map(x => [x.receiver, x.method, x.path]), expected.map(([method, path]) => ['admin', method, path]));
+    for (const [index, [, , permission, policy]] of expected.entries()) {
+      const registration = routes[index].registration.replace(/\s+/g, '');
+      assert.ok(registration.includes(`requirePermission(${permission})`));
+      if (policy) assert.ok(registration.includes(`approvalpolicy.Require("${policy}",approvalpolicy.AuditOnly)`));
+    }
+  };
+  check(code);
+  for (const broken of [code.replace('PermissionCommerceRepairsApprove', 'PermissionCommerceRepairsRead'),
+    code.replace('ACCOUNT_COMMERCE_REPAIR_CONFIRM', 'ACCOUNT_COMMERCE_REPAIR_OBSERVE')]) {
     assert.notEqual(broken, code);
     assert.throws(() => check(broken));
   }

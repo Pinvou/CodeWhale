@@ -106,6 +106,8 @@ ACCOUNT_REQUIRED = {
     "TestProfileRevocationClosureRuntimePostgres",
     "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
+    "TestCommerceManualCompletionMigrationPostgres",
+    "TestCommerceManualCompletionPostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
     "TestRegistrationCompensationDatabaseErrorIdentityPostgres",
     "TestRegistrationOutboxAggregateLookupPostgres",
@@ -185,7 +187,23 @@ F12_UPGRADE_CHILD = "TestF12PaymentCreditUpgradeChildPostgres"
 F12_UPGRADE_MARKER = "PINVOU_F12_UPGRADE_PHASE_RESULT "
 # This parent verifies two exact child processes, not t.Run subcases. Its
 # phase evidence is required separately below; every old subcase stays required.
-SCHEMA_CHILD_REQUIRED = SCHEMA_REQUIRED - {F12_UPGRADE_PARENT}
+SCHEMA_REQUIRED |= {
+    "TestCommerceClaimMappingLockKeepsLeaseLive",
+    "TestCommerceClaimSubjectLockKeepsLeaseLive",
+    "TestCommerceClosureCallbacksRespectSubjectFence",
+    "TestF02CommerceClaimWaitStartsFreshLease",
+    "TestF02CommerceConfirmedProducersPreserveStatuses",
+    "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock",
+    "TestF02CommerceOriginal15LateUpgradePreservesFacts",
+    "TestF02CommerceSupersededGenerationCannotDispatch",
+    "TestF02PublicCommerceCustomerLifecycle",
+}
+SCHEMA_LEAF_REQUIRED = {
+    "TestCommerceClaimMappingLockKeepsLeaseLive",
+    "TestCommerceClaimSubjectLockKeepsLeaseLive",
+    "TestF02CommerceOriginal15LateUpgradePreservesFacts",
+}
+SCHEMA_CHILD_REQUIRED = SCHEMA_REQUIRED - SCHEMA_LEAF_REQUIRED - {F12_UPGRADE_PARENT}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -351,6 +369,69 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestAccountFinancialJSONObjectsPostgres": {"fresh-current-producer", "upgrade-current-producer", "dirty-critical-history", "dirty-financial-history"},
     "TestBillingFinancialJSONObjectsPostgres": {"fresh-current-producer", "upgrade-current-producer", "dirty-details", "dirty-provider_capability_snapshot", "dirty-policy_snapshot", "dirty-evidence_summary", "dirty-payload_snapshot"},
+    "TestCommerceClosureCallbacksRespectSubjectFence": {
+        "complete-after-anonymize",
+        "complete-user-wait",
+        "retry-after-anonymize",
+        "retry-user-wait",
+    },
+    "TestCommerceManualCompletionMigrationPostgres": {
+        "late-catalog-collision-rolls-back",
+        "nonempty-upgrade-and-forward-only",
+    },
+    "TestCommerceManualCompletionPostgres": {
+        "audit-cancellation-rolls-back-completion",
+        "callback-evidence-invalidates-old-proposal",
+        "closed-identity-keeps-retired-facts",
+        "closed-job-can-open-evidence-only-case",
+        "concurrent-reviewers-write-one-receipt",
+        "current-success-http-and-receipt-replay",
+                "startup-wait-rechecks-committed-quarantine",
+                "busy-discovery-preserves-sla-and-next-candidate",
+        "expired-lease-quarantines-without-redispatch",
+        "no-effect-is-not-sync-success",
+        "observation-id-replay-and-payload-conflict",
+        "operator-wire-boundaries-preserve-original-facts",
+        "proposer-expiry-during-mapping-wait", "proposer-expiry-during-sla-wait",
+        "retired-active-lifecycle-keeps-business-facts",
+        "reviewer-expiry-during-mapping-wait", "reviewer-expiry-during-sla-wait",
+        "reviewer-revocation-during-role-wait",
+        "self-and-unprivileged-confirmations-block",
+        "stale-mapping-keeps-new-generation",
+        "unknown-and-superseded-observation-block",
+    },
+    "TestF02CommerceClaimWaitStartsFreshLease": {
+        "mapping",
+        "user",
+    },
+    "TestF02CommerceConfirmedProducersPreserveStatuses": {
+        "confirmed-mobile-ACTIVE",
+        "confirmed-mobile-DISABLED",
+        "confirmed-mobile-PROVISIONING",
+        "confirmed-mobile-REPAIR_REQUIRED",
+        "real-registration-provisioning",
+    },
+    "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock": {
+        "complete",
+        "retry",
+    },
+    "TestF02CommerceSupersededGenerationCannotDispatch": {
+        "confirmed-mobile-wins-lock",
+        "expired-lease",
+        "inflight-complete",
+        "inflight-retry",
+    },
+    "TestF02PublicCommerceCustomerLifecycle": {
+        "bootstrap-wallet-ack-and-get-me",
+        "current-schema-with-subject-lifecycle",
+        "detached-current-mapping-cannot-resume",
+        "disabled-user-cannot-claim-or-complete",
+        "mapping-generation-and-adapter-fence",
+        "quarantined-lease-rejects-previous-worker",
+        "quarantined-lease-rejects-previous-worker/complete",
+        "quarantined-lease-rejects-previous-worker/retry",
+        "startup-ensure-claim-retry-complete",
+    },
     "TestStreamStatePollingPublicPostgres": {"complete", "cancel", "disconnect",
         "complete/concurrent-last-event-id-public-replay", "disconnect/concurrent-last-event-id-public-replay",
         "external-committed", "external-released"},
@@ -1073,9 +1154,16 @@ def main(*, group="all", verify_fixture_cache=False, owner_lane=None):
         phase_timing(label, time.monotonic() - started, events, result.returncode, started_epoch=started_epoch)
         if result.returncode:
             raise RuntimeError("Go financial phase failed: " + label)
+        phase_children = {
+            "owner-account": ACCOUNT_CHILD_REQUIRED,
+            "retained-token": TOKEN_CHILD_REQUIRED,
+            "retained-billing": BILLING_CHILD_REQUIRED & required,
+            "owner-schema": SCHEMA_CHILD_REQUIRED & required,
+            "owner-schema-legacy-expiry": SCHEMA_CHILD_REQUIRED & required,
+        }.get(label)
         count = verify_results(events,
                                required, package=package, require_children=scoped or label == "retained-token", exact_roots=scoped,
-                               children_required=SCHEMA_CHILD_REQUIRED & required if label == "owner-schema" else ACCOUNT_CHILD_REQUIRED if label == "owner-account" else TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED & required if label == "retained-billing" else None)
+                               children_required=phase_children)
         print(f"Financial phase {label}: {count} named passes; all {len(required)} required roots completed", flush=True)
 
     if verify_fixture_cache:

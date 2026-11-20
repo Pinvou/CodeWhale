@@ -26,6 +26,8 @@
 
 ## 本地验证
 
+Commerce 客户同步耗尽重试、过期租约及未知结果的授权、证据、双人收尾与回执恢复见 [人工收尾运行说明](docs/commerce-manual-completion.md)。
+
 在本目录执行 `go test -count=1 ./...`、`go vet ./...`。工具使用独立模块，在 `tools/kms-recovery/` 执行同样命令。真实 PostgreSQL、Keycloak 和 OpenBao 用例为显式 opt-in；条件跳过不代表实际集成或部署验收通过。Windows 的文件 mode 测试不证明 POSIX 权限或 Windows ACL，实际使用须按各工具文档限制宿主权限。
 
 普通 relay 的真实 TLS/NATS/PG 用例需要显式 `PINVOU_TEST_NATS_SERVER_BINARY` 与 `PINVOU_TEST_EVENTS_DATABASE_URL`；测试仅启动独有 loopback NATS、生成临时测试密钥并创建独有数据库 schema，结束后核对自身进程、监听器和 schema 已清理。它验证实际 broker ACK、SQL 标记和同代次去重，不等同生产部署或完整 E2E 验收。

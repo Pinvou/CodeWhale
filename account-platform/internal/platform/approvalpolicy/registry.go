@@ -167,6 +167,9 @@ func buildPolicies() map[string]Policy {
 		"ACCOUNT_REGISTRATION_COMPENSATE":               "platform.registrations.repair",
 		"ACCOUNT_PROFILE_CHANGE_RETRY":                  "platform.profile-changes.repair",
 		"ACCOUNT_SMS_CONFIGURATION_UPDATE":              "platform.sms-config.manage",
+		"ACCOUNT_COMMERCE_REPAIR_QUARANTINE":            "platform.commerce.repairs.request",
+		"ACCOUNT_COMMERCE_REPAIR_OBSERVE":               "platform.commerce.repairs.request",
+		"ACCOUNT_COMMERCE_REPAIR_CONFIRM":               "platform.commerce.repairs.approve",
 	} {
 		result[commandType] = Policy{CommandType: commandType, PolicyVersion: Version, Mode: AuditOnly,
 			RequesterPermission: permission, RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE",

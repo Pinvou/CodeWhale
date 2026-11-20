@@ -48,6 +48,10 @@ func (s *manualWorkerFaultStore) step(ctx context.Context, name string, limit in
 func (s *manualWorkerFaultStore) SyncManualReviewCases(ctx context.Context, limit int) (int, error) {
 	return s.step(ctx, "sync", limit)
 }
+func (s *manualWorkerFaultStore) SyncCommerceRepairCases(ctx context.Context, limit int) (int, error) {
+	return s.step(ctx, "commerce", limit)
+}
+
 func (s *manualWorkerFaultStore) EscalateOverdueManualReviews(ctx context.Context, schedule manualreview.OnCallSchedule, limit int) (int, error) {
 	s.gotSchedule = schedule
 	return s.step(ctx, "escalate", limit)
@@ -61,8 +65,8 @@ func (w *manualWorkerFailingLogWriter) Write([]byte) (int, error) {
 }
 
 func TestManualReviewWorkerFailuresRemainVisibleAndIndependent(t *testing.T) {
-	expectedSteps := []string{"sync", "escalate"}
-	expectedEvents := map[string]string{"sync": "manual_review_sync_failed", "escalate": "manual_review_escalation_failed"}
+	expectedSteps := []string{"sync", "escalate", "commerce"}
+	expectedEvents := map[string]string{"sync": "manual_review_sync_failed", "commerce": "commerce_manual_review_sync_failed", "escalate": "manual_review_escalation_failed"}
 	for _, fault := range expectedSteps {
 		t.Run(fault, func(t *testing.T) {
 			schedule, err := manualreview.ParseOnCallSchedule(uuid.NewString(), true)
@@ -105,7 +109,7 @@ func TestManualReviewWorkerFailuresRemainVisibleAndIndependent(t *testing.T) {
 }
 
 func TestManualReviewWorkerRunsStartupAndLaterPassAfterFailure(t *testing.T) {
-	expectedSteps := []string{"sync", "escalate"}
+	expectedSteps := []string{"sync", "escalate", "commerce"}
 	schedule, err := manualreview.ParseOnCallSchedule(uuid.NewString(), true)
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +150,7 @@ func TestManualReviewWorkerRunsStartupAndLaterPassAfterFailure(t *testing.T) {
 }
 
 func TestManualReviewWorkerBrokenLogSinkPreservesRemainingSteps(t *testing.T) {
-	expectedSteps := []string{"sync", "escalate"}
+	expectedSteps := []string{"sync", "escalate", "commerce"}
 	store := &manualWorkerFaultStore{fault: expectedSteps[0]}
 	writer := &manualWorkerFailingLogWriter{}
 	previous := slog.Default()
@@ -162,7 +166,7 @@ func TestManualReviewWorkerBrokenLogSinkPreservesRemainingSteps(t *testing.T) {
 }
 
 func TestManualReviewWorkerArgumentsRemainPrivateWithoutFiltering(t *testing.T) {
-	expectedSteps := []string{"sync", "escalate"}
+	expectedSteps := []string{"sync", "escalate", "commerce"}
 	for _, fault := range expectedSteps {
 		store := &manualWorkerFaultStore{fault: fault}
 		worker := &ManualReviewSLAWorker{repository: store, interval: time.Minute}
@@ -178,8 +182,8 @@ func TestManualReviewWorkerArgumentsRemainPrivateWithoutFiltering(t *testing.T) 
 }
 
 func TestManualReviewWorkerShutdownKeepsIndependentStorageFailure(t *testing.T) {
-	expectedSteps := []string{"sync", "escalate"}
-	expectedEvents := map[string]string{"sync": "manual_review_sync_failed", "escalate": "manual_review_escalation_failed"}
+	expectedSteps := []string{"sync", "escalate", "commerce"}
+	expectedEvents := map[string]string{"sync": "manual_review_sync_failed", "commerce": "commerce_manual_review_sync_failed", "escalate": "manual_review_escalation_failed"}
 	for _, tc := range []struct {
 		name             string
 		err              error

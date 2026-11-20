@@ -140,6 +140,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	}
 	admin := protected.Group("/admin/v1")
 	s.registerPlatformRoleRoutes(admin)
+	s.registerCommerceRepairRoutes(admin)
 	admin.GET("/audit-logs", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLogs))
 	admin.GET("/audit-logs/:audit_id", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLog))
 	if s.auditExports != nil {
@@ -234,6 +235,8 @@ func (s *Service) getAuthorizationContext(w http.ResponseWriter, r *http.Request
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the request could not be completed"
 	switch {
+	case errors.Is(err, ErrInvalidCommerceRepair):
+		status, code, message = http.StatusBadRequest, "INVALID_COMMERCE_REPAIR", "the commerce repair request is invalid"
 	case accountClosureSerializationConflict(r, err):
 		status, code, message = http.StatusConflict, "ACCOUNT_CLOSURE_SERIALIZATION_CONFLICT", "the account closure request conflicted with another request; retry with the same idempotency key"
 	case errors.Is(err, ErrInvalidAccountClosureRequest):

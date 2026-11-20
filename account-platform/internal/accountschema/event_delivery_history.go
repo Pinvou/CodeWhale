@@ -98,6 +98,9 @@ func VerifyApplied(ctx context.Context, c *pgx.Conn, input []migrations.Migratio
 	if err := validateFinancialJSONObjects(input); err != nil {
 		return migrations.Verification{}, err
 	}
+	if err := validateCommerceManualCompletion(input); err != nil {
+		return migrations.Verification{}, err
+	}
 	if err := validateOrganizationEvidenceGuard(input); err != nil {
 		return migrations.Verification{}, err
 	}
