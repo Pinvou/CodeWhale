@@ -299,7 +299,7 @@ func TestOrganizationMemberUnitProducerPublicPostgres(t *testing.T) {
 		}
 	})
 	t.Run("public-down-retains-scope-history", func(t *testing.T) {
-		assertCurrentAccount900013Down(t, ctx, c, m)
+		assertHistoricalAccount900013Down(t, ctx, f, c, m)
 	})
 	t.Run("historical-900006-down-900005-guard-and-restore", func(t *testing.T) {
 		assertHistoricalAccount900006Down(t, ctx, f, m)
