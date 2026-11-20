@@ -1896,3 +1896,66 @@ fn registered_enum_literal_data_survives_the_canonicalize_pass() {
         tool.input_schema
     );
 }
+
+struct KeywordNamedPropertyTool;
+
+#[async_trait::async_trait]
+impl ToolSpec for KeywordNamedPropertyTool {
+    fn name(&self) -> &str {
+        "keyword_named_probe"
+    }
+
+    fn description(&self) -> &str {
+        "keyword-shaped property name fixture"
+    }
+
+    fn input_schema(&self) -> Value {
+        // A property literally named `properties` whose schema carries an
+        // enum literal with order-sensitive data (reviews 5986731697 /
+        // 5986738054): the canonicalizer's value walk must be exclusive of
+        // the generic recursion, or the name re-dispatches as the keyword
+        // and the literal's `required` reorders.
+        json!({
+            "type": "object",
+            "properties": {
+                "properties": {"enum": [{"required": ["b", "a"]}]}
+            }
+        })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+
+    async fn execute(
+        &self,
+        _input: Value,
+        _context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::success("ok"))
+    }
+}
+
+#[test]
+fn keyword_named_property_literal_survives_the_registry_pipeline() {
+    // The registry pipeline is sanitize then canonicalize; the sanitizer's
+    // name-map branch and the canonicalizer's exclusive value walk must
+    // both keep the literal byte-for-byte through build_api_tools (reviews
+    // 5986731697 / 5986738054).
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let registry = ToolRegistryBuilder::new()
+        .with_tool(Arc::new(KeywordNamedPropertyTool))
+        .build(ctx);
+    let tool = registry
+        .to_api_tools()
+        .into_iter()
+        .find(|tool| tool.name == "keyword_named_probe")
+        .expect("keyword-named probe registered");
+    assert_eq!(
+        tool.input_schema["properties"]["properties"]["enum"],
+        json!([{"required": ["b", "a"]}]),
+        "the keyword-named property's enum literal must ship verbatim: {}",
+        tool.input_schema
+    );
+}

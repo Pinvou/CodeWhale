@@ -60,16 +60,29 @@ pub fn canonicalize_schema(value: &mut Value) {
                 // schema must still canonicalize (two schemas differing only
                 // in `properties.enum.required` order otherwise keep
                 // different bytes, regressing the cache-stability contract,
-                // review 5986025535). Walk each VALUE as a schema node; the
-                // map's own keys are sorted by the rebuild below.
+                // review 5986025535). The traversal is EXCLUSIVE: walk each
+                // value as a schema node once, sort the map's own keys
+                // explicitly, and continue — falling through to the generic
+                // recursion re-entered the map and redispatched its names as
+                // keywords (a property named `properties` descending into
+                // its enum literal and reordering `required`, reviews
+                // 5986731697/5986738054), and nested name maps were visited
+                // twice per level (work exponential in depth).
                 if matches!(
                     k.as_str(),
                     "properties" | "patternProperties" | "$defs" | "definitions"
                 ) {
                     if let Some(name_map) = v.as_object_mut() {
-                        for (_name, prop_schema) in name_map.iter_mut() {
+                        let old = std::mem::take(name_map);
+                        let mut entries: Vec<(String, Value)> = old.into_iter().collect();
+                        entries.sort_by(|a, b| a.0.cmp(&b.0));
+                        for (_name, prop_schema) in entries.iter_mut() {
                             canonicalize_schema(prop_schema);
                         }
+                        for (name, prop_schema) in entries {
+                            name_map.insert(name, prop_schema);
+                        }
+                        continue;
                     }
                 }
                 canonicalize_schema(v);
@@ -171,6 +184,64 @@ mod tests {
             a["properties"]["enum"]["required"],
             json!(["a", "b"]),
             "the property schema's required order is canonicalized"
+        );
+    }
+
+    #[test]
+    fn keyword_named_property_keeps_its_enum_literal_verbatim() {
+        // Reviews 5986731697/5986738054: a property literally named
+        // `properties` is a NAME — falling through to the generic recursion
+        // after the value walk re-entered the map, redispatched the name as
+        // the keyword, and reordered the enum literal's `required`. The
+        // traversal is exclusive: the literal stays byte-for-byte and the
+        // name keys still sort.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "properties": {"enum": [{"required": ["b", "a"]}]}
+            }
+        });
+        canonicalize_schema(&mut schema);
+        assert_eq!(
+            schema["properties"]["properties"]["enum"],
+            json!([{"required": ["b", "a"]}]),
+            "the enum literal under a property named `properties` must stay verbatim: {schema}"
+        );
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .build(&schema)
+            .expect("the canonicalized schema must compile");
+        assert!(
+            validator.is_valid(&json!({"properties": {"required": ["b", "a"]}})),
+            "the original enum-admitted argument must stay valid: {schema}"
+        );
+        assert!(
+            !validator.is_valid(&json!({"properties": {"required": ["a"]}})),
+            "the reordered-admission value must stay rejected: {schema}"
+        );
+    }
+
+    #[test]
+    fn sorts_name_map_keys_without_keyword_dispatch() {
+        // The name map's own keys (property names) sort deterministically;
+        // sorting must not interpret them as keywords.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "zeta": {"type": "string"},
+                "alpha": {"type": "string"}
+            }
+        });
+        canonicalize_schema(&mut schema);
+        let keys: Vec<&String> = schema["properties"]
+            .as_object()
+            .expect("map")
+            .keys()
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["alpha", "zeta"],
+            "name-map keys sort for stable bytes"
         );
     }
 
