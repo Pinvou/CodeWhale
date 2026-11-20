@@ -406,6 +406,11 @@ jobs:
               - 'scripts/check-account-financial-ci.py'
               - 'scripts/tests/test_account_financial_ci.py'
               - 'scripts/tests/test_financial_parallel.py'
+              - 'scripts/test-account-financial-families-postgres.py'
+              - 'scripts/account-financial-families.json'
+              - 'scripts/tests/test_account_financial_families_postgres.py'
+              - 'scripts/go-test-contract.py'
+              - 'scripts/tests/test_go_test_contract.py'
               - 'scripts/tests/test_financial_owners.py'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
@@ -2101,7 +2106,11 @@ jobs:
           PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
         run: |
           set -euo pipefail
-          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP" --verify-fixture-cache
+          diagnostics="$(mktemp -d "$RUNNER_TEMP/financial-parallel-${ACCOUNT_FINANCIAL_GROUP}-XXXXXX")"
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP" --verify-fixture-cache 2>&1 | tee "$diagnostics/group.log"
+          if [[ "$ACCOUNT_FINANCIAL_GROUP" == owners ]]; then
+            PINVOU_FINANCIAL_CHILD_ARTIFACTS="$diagnostics/owners-families" python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-families-process.json" -- python3 scripts/test-account-financial-families-postgres.py 2>&1 | tee "$diagnostics/owners-families.log"
+          fi
 
       - name: Stop owned temporary PostgreSQL services
         if: ${{ always() }}
@@ -2134,7 +2143,9 @@ jobs:
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}
-          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          path: |
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+            ${{ runner.temp }}/financial-parallel-*/
           if-no-files-found: error
           retention-days: 7
 
@@ -2591,6 +2602,8 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
           python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
+          python3 -m unittest discover -s scripts/tests -p test_account_financial_families_postgres.py
+          python3 -m unittest discover -s scripts/tests -p test_go_test_contract.py
           python3 -m unittest discover -s scripts/tests -p test_financial_owners.py
           policy_python="${{ steps.financial-policy-python.outputs.python-path }}"
           policy_library="$(dirname "$(dirname "$policy_python")")/lib"

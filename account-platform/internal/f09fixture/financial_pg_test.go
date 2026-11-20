@@ -20,7 +20,7 @@ func TestF09CorrectedFinancialPublicCoordinator(t *testing.T) {
 	dir := filepath.Join("..", "billing")
 	args := []string{"test", "-race", "-json", "-count=1", "-mod=readonly", "-run", "^TestF09Corrected"}
 	args = append(args, stageProductionSources(t, ctx, dir)...)
-	for _, file := range []string{"payment_credit_legacy_fixture_test.go", "payment_credit_fixture_test.go", "retained_financial_integration_test.go", "retained_organization_financial_dismiss_integration_test.go", "finance_refund_reconcile_integration_test.go", "entitlement_correction_execute_integration_test.go", "entitlement_correction_refund_integration_test.go"} {
+	for _, file := range []string{"payment_credit_legacy_fixture_test.go", "payment_credit_fixture_test.go", "fixture_template_helpers_test.go", "package_expiry_phase_test.go", "retained_financial_integration_test.go", "retained_organization_financial_dismiss_integration_test.go", "finance_refund_reconcile_integration_test.go", "entitlement_correction_execute_integration_test.go", "entitlement_correction_refund_integration_test.go"} {
 		args = append(args, filepath.Join(dir, file))
 	}
 	child := exec.CommandContext(ctx, os.Getenv("PINVOU_PRIVATE_GO"), args...)
