@@ -2644,7 +2644,11 @@ async function expand(page) {
     const menuActionReady = await window.__uiWait__(() => !!findButton('收纳'));
     findButton('收纳')?.click();
     const confirmButton = () => {
-      const dialog = document.querySelector('[role="alertdialog"][aria-labelledby="archive-confirm-title"]');
+      // 社区 #902 回流后确认层走共享 ConfirmDialog(useId 生成的 title id
+      // 不再是稳定字面量),按「包含确认收纳按钮的 alertdialog」定位。
+      const dialog = [...document.querySelectorAll('[role="alertdialog"]')]
+        .find(node => [...node.querySelectorAll('button')]
+          .some(btn => (btn.textContent || '').trim() === '确认收纳'));
       return dialog ? findButton('确认收纳', dialog) : null;
     };
     const confirmActionReady = await window.__uiWait__(() => !!confirmButton());
