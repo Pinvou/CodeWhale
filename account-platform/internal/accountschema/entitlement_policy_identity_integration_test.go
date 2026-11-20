@@ -40,10 +40,11 @@ func TestF09EntitlementPolicyMigrationIdentityPostgres(t *testing.T) {
 			original = m
 			continue
 		}
-		// The baseline omits the original dependent 070 and F10 Ledger 071,
-		// which requires that complete route. The qualified upgrade below still
-		// uses loaded unchanged, so it exercises their real public sequence.
-		if m.Version == 70 || m.Version == 71 {
+		// Omit the complete dependency closure: 070-077 extend the 069 route;
+		// 900009 requires 077 and 900013 requires both. Keep independent
+		// supplemental prerequisites such as the mandatory 028/900005 pair.
+		// This is a compatible partial public set, not a chronological prefix.
+		if (m.Version >= 70 && m.Version <= 77) || m.Version == 900009 || m.Version == 900013 {
 			continue
 		}
 		baseline = append(baseline, m)
@@ -51,8 +52,7 @@ func TestF09EntitlementPolicyMigrationIdentityPostgres(t *testing.T) {
 	if original.Name != "entitlement_component_adjustment_policy_v2" || original.Checksum != "5dfcd5e1f9e3f41206e594653cc6b55c0e1c3c015033e8d59a294f966710dd6e" {
 		t.Fatal("original policy migration source missing")
 	}
-	// Original 070 alone declares the 069 dependency; later retained originals
-	// stay in their genuine order and have not been fabricated in the ledger.
+	// Validate the public prerequisite set without fabricating ledger rows.
 	if _, err := Ordered(baseline); err != nil {
 		t.Fatal(err)
 	}
