@@ -888,9 +888,10 @@ Section Uninstall
     DeleteRegKey /ifempty HKCU "${MANUPRODUCTKEY}"
     DeleteRegKey /ifempty HKCU "${MANUKEY}"
 
-    SetShellVarContext current
-    RmDir /r "$APPDATA\${BUNDLEID}"
-    RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
+    ; 社区 #873 回流:$APPDATA/$LOCALAPPDATA/$PROFILE 跟随提权 token
+    ; (over-the-shoulder 提权会误删管理员数据),改经 hooks 宏按交互会话
+    ; 属主解析路径删除;解析失败保留数据并提示手动清理。
+    !insertmacro PinvouDeleteInteractiveUserData
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL
