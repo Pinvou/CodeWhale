@@ -1282,11 +1282,18 @@ jobs:
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         run: python3 scripts/ci-resource-ledger.py --recover
 
+      - name: Configure artifact transport for Gate test resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: Gate test resource lifecycle receipts
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: gate-resource-lifecycle-${{ github.run_attempt }}
           path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -1379,9 +1386,16 @@ jobs:
           PINVOU_FRONTEND_CACHE_URL: ${{ vars.PINVOU_FRONTEND_CACHE_URL }}
         run: python3 ../scripts/ci-frontend-bundle.py publish --bundle "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
 
+      - name: Configure artifact transport for Upload frontend setup bundle
+        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: Upload frontend setup bundle
         if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: frontend-setup-bundle
           path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
@@ -1391,9 +1405,16 @@ jobs:
 
       # 自建机上行到 GitHub 工件存储实测偶发 stall(见上方 Pack 注释的 run 证据),
       # 上传动作无内建重试;主上传失败时以 overwrite 重建同名工件,自动补试一次。
+      - name: Configure artifact transport for Upload frontend setup bundle (retry)
+        if: ${{ failure() && steps.frontend_bundle.outputs.transport == 'github' }}
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: Upload frontend setup bundle (retry)
         if: ${{ failure() && steps.frontend_bundle.outputs.transport == 'github' }}
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: frontend-setup-bundle
           path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
@@ -1542,6 +1563,11 @@ jobs:
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         run: python3 ../scripts/ci-resource-ledger.py --recover
 
+      - name: Configure artifact transport for Test resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: Test resource lifecycle receipts
         id: frontend_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -1549,6 +1575,8 @@ jobs:
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: frontend-resource-lifecycle-${{ github.run_attempt }}
           path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -1703,6 +1731,11 @@ jobs:
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         run: python3 ../scripts/ci-resource-ledger.py --recover
 
+      - name: Configure artifact transport for Browser shard resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: Browser shard resource lifecycle receipts
         id: browser_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -1710,6 +1743,8 @@ jobs:
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: frontend-browser-${{ matrix.shard }}-resource-lifecycle-${{ github.run_attempt }}
           path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -1773,11 +1808,18 @@ jobs:
           bash -n scripts/deploy-remote-relay-test.sh
           python3 scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}.json" -- npm --prefix remote-control-relay test
 
+      - name: Configure artifact transport for 保留 Relay 进程作用域原始回执
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: 保留 Relay 进程作用域原始回执
         if: always()
         continue-on-error: true
         timeout-minutes: 3
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: relay-process-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -1936,12 +1978,19 @@ jobs:
           set -euo pipefail
           python3 scripts/ci-resource-ledger.py --recover --directory "$PINVOU_CI_RESOURCE_LEDGER"
 
+      - name: Configure artifact transport for Financial group lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: Financial group lifecycle receipts
         id: financial_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}
           path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -2388,12 +2437,19 @@ jobs:
           done
           python3 scripts/ci-resource-ledger.py --recover "${args[@]}"
 
+      - name: Configure artifact transport for Account test resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: Account test resource lifecycle receipts
         id: account_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: account-resource-lifecycle-${{ github.run_attempt }}
           path: |
@@ -2487,12 +2543,19 @@ jobs:
           set -euo pipefail
           python3 scripts/ci-resource-ledger.py --recover --directory "$PINVOU_CI_RESOURCE_LEDGER"
 
+      - name: Configure artifact transport for Account closure resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: Account closure resource lifecycle receipts
         id: account_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: account-closure-resource-lifecycle-${{ github.run_attempt }}
           path: |
@@ -2541,11 +2604,18 @@ jobs:
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
       - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）
         run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs
+      - name: Configure artifact transport for Preserve Windows relay tools process receipt
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: Preserve Windows relay tools process receipt
         if: always()
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/windows-relay-tools-process.json
@@ -2655,7 +2725,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
     runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_MEDIUM_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') || matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 20 || 15 }}
     steps:
       - uses: actions/checkout@v7
 
@@ -2722,7 +2792,16 @@ jobs:
 
       - name: Windows 共享进程监督器兼容回归
         if: ${{ runner.os == 'Windows' }}
-        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json" -- python -m unittest discover -s scripts/tests -p test_ci_fixture_process.py
+        run: |
+          python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json" -- python -m unittest discover -s scripts/tests -p test_ci_fixture_process.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test scripts/tests/ci-artifact-upload-diagnostics.test.cjs scripts/tests/ci-artifact-tls-policy.test.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Configure bounded Windows upload diagnostics
+        if: ${{ always() && runner.os == 'Windows' }}
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --diagnostics
 
       - name: Preserve Windows release contract process receipts
         id: windows_release_contract_receipts
@@ -2730,6 +2809,9 @@ jobs:
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -4603,12 +4685,20 @@ jobs:
           PY
           "$python_exe" scripts/ci-resource-ledger.py --directory "$PINVOU_CI_RESOURCE_LEDGER"
 
+      - name: Configure bounded Windows atomic upload diagnostics
+        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --diagnostics
+
       - name: Windows atomic lifecycle receipts
         id: windows_atomic_receipts_upload
         if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
           path: |
@@ -5315,11 +5405,18 @@ jobs:
           PINVOU3_TEST_BROWSER_NO_HOST: "1"
         run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lazy-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node pinvou3-app/tests/browser_wrapper_lazy.test.mjs
 
+      - name: Configure artifact transport for Preserve browser fixture exit receipts
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: Preserve browser fixture exit receipts
         if: always()
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
@@ -5343,11 +5440,18 @@ jobs:
       - name: Windows ACP bridge runtime smoke
         run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-acp-${{ github.run_id }}-${{ github.run_attempt }}.json" -- python scripts/test-windows-acp-runtime.py
 
+      - name: Configure artifact transport for Preserve ACP fixture exit receipt
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: Preserve ACP fixture exit receipt
         if: always()
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: windows-acp-exit-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
@@ -5984,11 +6088,18 @@ jobs:
           CI_REUSE_NEEDS: ${{ toJSON(needs) }}
         run: python3 scripts/ci-test-reuse.py record
 
+      - name: Configure artifact transport for PR test success proof transport
+        if: ${{ success() && steps.success_proof.outputs.directory != '' }}
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs
+
       - name: PR test success proof transport
         if: ${{ success() && steps.success_proof.outputs.directory != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
         with:
           name: ci-success-proof-${{ github.run_attempt }}
           path: ${{ steps.success_proof.outputs.directory }}/proof.json

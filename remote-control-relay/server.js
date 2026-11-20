@@ -1,13 +1,13 @@
 import http from "node:http";
 import { CREDENTIAL_TRANSPORT_MAX_UTF16_UNITS } from "./credential-transport-contract.js";
 import crypto from "node:crypto";
-import { isExampleHmacKey } from "./hmac-key-config.js";
 import { isIP } from "node:net";
-import { chmod, mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { encodeFrame } from "./frame.js";
+import { isExampleHmacKey } from "./hmac-key-config.js";
 import { createTelemetryService } from "./telemetry-service.js";
 import { ControllerTelemetry } from "./controller-telemetry.js";
 import { ControllerLeaseManager } from "./controller-lease.js";
@@ -27,34 +27,6 @@ import { isLegacyWebEndpointIdentifier, isRelaySigningKeyIdentifier } from "./id
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIB = 1024 * 1024;
 const RELAY_STATE_VERSION = 1;
-// Caps header- and config-derived IP text before parsing: the cap keeps
-// garbage from reaching the parser at all. OS-reported peer addresses (short
-// interface names included) stay far below it. Declared before the top-level
-// parseIpSet calls, which run normalizeIp at module init.
-const MAX_IP_TEXT_CHARS = 128;
-// Config parsing runs at module init: an escaping throw would die with a
-// stack that prints repo paths. Every configuration failure reports one
-// fixed [relay-error] line and exits 1, like every other startup failure.
-function configOrExit(parse) {
-  try {
-    return parse();
-  } catch (error) {
-    console.error(`[relay-error] ${error.message}`);
-    process.exit(1);
-  }
-}
-
-// listen() validates the port synchronously, so an invalid value would die
-// with a RangeError whose stack prints the module path instead of the fixed
-// startup report.
-function parsePort(value) {
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error("invalid PORT: use an integer from 1 to 65535");
-  }
-  return port;
-}
-
 const PORT = configOrExit(() => parsePort(process.env.PORT || 8787));
 const HOST = process.env.PINVOU_REMOTE_HOST || "0.0.0.0";
 const PUBLIC_BASE_PATH = normalizeBasePath(
@@ -64,9 +36,8 @@ const WEB_ROOT = resolve(process.env.PINVOU_REMOTE_WEB_DIR || resolve(__dirname,
 // safeWebPath maps the site root to exactly this path.
 const WEB_INDEX_PATH = resolve(WEB_ROOT, "index.html");
 // A non-numeric value used to reach setInterval as NaN, which Node clamps to
-// a 1 ms tick; bound the input like every other numeric env instead. The
-// heartbeat also drives reservation/lease/router expiry, so only the parsing
-// is bounded here — the scheduling semantics are unchanged.
+// a 1 ms tick while printing a warning; bound the input like every other
+// numeric env instead.
 const HEARTBEAT_INTERVAL_MS = boundedInteger(
   process.env.HEARTBEAT_INTERVAL_MS,
   15_000,
@@ -163,8 +134,8 @@ const MAX_RELAY_STATE_BYTES = boundedInteger(
 // A tombstone serializes to well under 256 bytes even with the longest legal
 // endpoint id, so clamping the configured capacity to what the state limit
 // can hold keeps revocation persistence possible however the two env values
-// combine; relayStateContents stays the exact backstop. The state limit's own
-// floor (1024) makes the derivation's floor 4, so no extra guard below.
+// combine; relayStateContents stays the exact backstop. The state limit's
+// own floor (1024) makes the derivation's floor 4, so no extra guard below.
 const MAX_REVOKED_ENDPOINTS = Math.min(
   boundedInteger(process.env.MAX_REVOKED_ENDPOINTS, 100_000, 1, 1_000_000),
   Math.floor(MAX_RELAY_STATE_BYTES / 256),
@@ -173,6 +144,39 @@ let legacyCapacityWarning = false;
 const RELAY_STATE_PATH = resolve(
   process.env.PINVOU_REMOTE_STATE_PATH || resolve(__dirname, "data", "relay-state.json"),
 );
+// Caps header- and config-derived IP text before parsing: isIP accepts zone
+// ids of unbounded length, so the cap keeps garbage from reaching isIP at
+// all. OS-reported peer addresses (interface names are short) stay far
+// below it.
+const MAX_IP_TEXT_CHARS = 128;
+// A forwarded header longer than this is treated as unusable and the
+// connection is attributed to the direct peer; real proxy chains stay far
+// below it.
+const MAX_FORWARDED_HEADER_CHARS = 4096;
+// Config parsing runs at module init: an escaping throw would die with a
+// stack that prints repo paths. Every configuration failure reports one
+// fixed [relay-error] line and exits 1, like every other startup failure.
+function configOrExit(parse) {
+  try {
+    return parse();
+  } catch (error) {
+    console.error(`[relay-error] ${error.message}`);
+    process.exit(1);
+  }
+}
+
+// listen() validates the port synchronously, so an invalid value would die
+// with a RangeError whose stack prints the module path instead of the fixed
+// startup report. Port 0 is also rejected: the banner no longer prints the
+// bound address, so an ephemeral port could never be discovered.
+function parsePort(value) {
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("invalid PORT: use an integer from 1 to 65535");
+  }
+  return port;
+}
+
 const ALLOWED_WEB_ORIGINS = configOrExit(
   () => parseOriginSet(process.env.PINVOU_REMOTE_ALLOWED_WEB_ORIGINS),
 );
@@ -183,7 +187,7 @@ const ALLOWED_PROXY_IPS = configOrExit(() => parseIpSet(
 const TRUSTED_PROXY_IPS = configOrExit(() => parseIpSet(
   "PINVOU_REMOTE_TRUSTED_PROXY_IPS",
   process.env.PINVOU_REMOTE_TRUSTED_PROXY_IPS
-    || process.env.PINVOU_REMOTE_ALLOWED_PROXY_IPS,
+    ?? process.env.PINVOU_REMOTE_ALLOWED_PROXY_IPS,
 ));
 const DESKTOP_CONTROLLER_ENABLED = process.env.PINVOU_DESKTOP_CONTROLLER_ENABLED === "1";
 const CONTROLLER_TYPES = new Set(CONTROLLER_MESSAGE_TYPES);
@@ -227,6 +231,16 @@ const pendingEndpointCreations = new Map();
 const revokedEndpoints = new Map();
 const endpointCreationBuckets = new Map();
 const wsConnectionBuckets = new Map();
+// Round-11 review: receiver-error terminations are surfaced in /healthz so an
+// operator can tell "client hung up" from "endpoint keeps sending poisoned
+// frames" (the connection-level close reason is invisible to probes).
+// Round-14 honesty note: ws emits 'error' from the sender path too (a write
+// failure on an already-dropping client, e.g. an RST mid-flush, funnels
+// through senderOnError into the same event), so this counter bounds
+// "protocol violations" from above, not exactly — a client that dies during
+// an in-flight write is counted here as well. Treat spikes as a signal to
+// check the logs, not as a violations-only metric.
+const relayStats = { receiverErrorTerminations: 0 };
 const controllerTelemetry = new ControllerTelemetry({
   auditSink(record) {
     // `record` has already crossed the fixed controller telemetry allowlist.
@@ -245,9 +259,23 @@ const telemetry = createTelemetryService({
 let relayStateMutation = Promise.resolve();
 let controllerStateStore = null;
 
-await loadRelayState();
+try {
+  await loadRelayState();
+} catch (error) {
+  // Report only the fixed message and the errno name. Letting the rejection
+  // reach Node's default handler would print the error cause, whose message
+  // and `path` property embed the state file location. The cause code is
+  // shape-checked to an errno-style name so a future cause can never carry
+  // arbitrary text into stderr either.
+  const code = error?.cause?.code;
+  const codeSuffix = typeof code === "string" && /^[A-Z][A-Z0-9_]*$/u.test(code)
+    ? ` code=${code}`
+    : "";
+  console.error(`[relay-error] ${error.message}${codeSuffix}`);
+  process.exit(1);
+}
 
-// A signal during a revocation write can strand a relay-state.json.<pid>.<hex>.tmp
+// A signal during a revocation write can strand a relay-state.json.*.tmp
 // sibling; the rename design means none of them is ever the live state, so
 // last boot's leftovers are swept before this process writes anything. The
 // sweep matches only names the writer itself produces (basename, pid, hex
@@ -266,7 +294,31 @@ try {
   }
 } catch {}
 
-const controllerRuntime = DESKTOP_CONTROLLER_ENABLED ? await createControllerRuntime() : null;
+let controllerRuntime = null;
+if (DESKTOP_CONTROLLER_ENABLED) {
+  try {
+    controllerRuntime = await createControllerRuntime();
+  } catch (error) {
+    // Same fixed-line discipline as the state load above: enrollment,
+    // store and validation rejections all carry a fixed snake_case code,
+    // with any raw detail (errno names, fs text) tucked into `cause`.
+    // Library-level failures without such a code (e.g. a DER decode
+    // error) collapse to a generic code, and the appended cause code is
+    // shape-checked to an errno-style name, so no filesystem path,
+    // offending value or library text ever reaches stderr.
+    const code = typeof error?.code === "string" && /^[a-z][a-z0-9_]*$/u.test(error.code)
+      ? error.code
+      : (typeof error?.message === "string" && /^[a-z][a-z0-9_]*$/u.test(error.message)
+        ? error.message
+        : "controller_startup_failed");
+    const rawCauseCode = error?.cause?.code;
+    const causeCode = typeof rawCauseCode === "string" && /^[A-Z][A-Z0-9_]*$/u.test(rawCauseCode)
+      ? rawCauseCode
+      : null;
+    console.error(`[relay-error] ${code}${causeCode ? ` code=${causeCode}` : ""}`);
+    process.exit(1);
+  }
+}
 
 async function createControllerRuntime() {
   const config = loadEnrollmentRegistryConfig(process.env);
@@ -484,20 +536,36 @@ function expandIpv6(address) {
 }
 
 // Configuration entries and attributed addresses funnel through this one
-// canonical form — lowercase, IPv6 expanded to eight zero-padded groups,
-// IPv4-mapped spellings reduced to the embedded dotted quad — so any valid
-// spelling of the same address matches. Zone-id suffixes are not supported:
-// any "%" is rejected outright instead of being matched verbatim.
+// canonical form - lowercase, IPv6 expanded to eight zero-padded groups,
+// IPv4-mapped spellings reduced to the embedded dotted quad - so any valid
+// spelling of the same address matches. Before canonicalization a valid-but-
+// non-canonical entry (uppercase or expanded) started cleanly yet never
+// matched a peer, silently collapsing clients behind that proxy into one
+// bucket. The zone-id suffix is validated here too, which keeps acceptance
+// independent of the runtime's own zone-id support.
 function normalizeIp(value) {
   if (typeof value !== "string" || value.length > MAX_IP_TEXT_CHARS) return "";
   const text = value.trim();
-  if (text === "" || text.includes("%")) return "";
-  const address = text.toLowerCase();
+  if (text === "") return "";
+  const zoneAt = text.indexOf("%");
+  const address = (zoneAt === -1 ? text : text.slice(0, zoneAt)).toLowerCase();
+  const zone = zoneAt === -1 ? "" : text.slice(zoneAt + 1);
   if (address.includes(":")) {
+    // A zone id is an interface name: never empty, no further %, and matched
+    // verbatim against what the peer reports.
+    if (zoneAt !== -1 && !/^[0-9A-Za-z._-]+$/.test(zone)) return "";
     const expanded = expandIpv6(address);
-    return expanded === null ? "" : expanded;
+    if (expanded === null) return "";
+    // A mapped spelling already reduced to plain IPv4, and an IPv4 peer never
+    // reports a zone: keeping the suffix would silently rename the entry to
+    // the bare dotted quad, so an inapplicable zone is rejected outright.
+    if (!expanded.includes(":")) return zoneAt === -1 ? expanded : "";
+    return expanded + (zone === "" ? "" : `%${zone}`);
   }
-  return isIP(address) === 4 ? address : "";
+  // A dotted quad never carries a zone id: reject any % suffix, including a
+  // bare trailing one whose empty zone would slip past a zone-only check.
+  if (zoneAt !== -1 || isIP(address) !== 4) return "";
+  return address;
 }
 
 function parseIpSet(name, value) {
@@ -575,12 +643,14 @@ function clientIp(req) {
   const peer = peerIp(req);
   if (!TRUSTED_PROXY_IPS.has(peer)) return peer || "unknown";
   const header = req.headers["x-forwarded-for"];
+  // X-Real-IP is consulted only when X-Forwarded-For is entirely absent: a
+  // present-but-unusable forwarded header must never let a second, equally
+  // client-controlled header choose the attribution.
+  if (header === undefined) return normalizeIp(req.headers["x-real-ip"]) || peer || "unknown";
+  if (typeof header !== "string" || header.length > MAX_FORWARDED_HEADER_CHARS) return peer;
   // Only the rightmost proxy-appended address is authoritative. Never skip a
   // malformed final item and fall back to an attacker-controlled earlier item.
-  if (typeof header === "string" && header.length <= 4096) {
-    return normalizeIp(header.split(",").at(-1)) || peer || "unknown";
-  }
-  return (header === undefined ? normalizeIp(req.headers["x-real-ip"]) : "") || peer || "unknown";
+  return normalizeIp(header.split(",").at(-1)) || peer;
 }
 
 function consumeRateLimit(buckets, ip, limit, windowMs, now = Date.now()) {
@@ -737,25 +807,40 @@ function reportLegacyRevocationCapacity(entries, bytes) {
 }
 
 async function loadRelayState() {
+  let metadata;
+  try {
+    metadata = await stat(RELAY_STATE_PATH);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    // Do not interpolate the failure reason: it can embed filesystem paths.
+    throw new Error("relay_state_load_failed", { cause: error });
+  }
+  // Deliberate validation failures keep their own messages so the startup
+  // report distinguishes them from filesystem errors, which stay wrapped.
+  // Checked before reading: a FIFO at the state path would block the read
+  // forever.
+  if (!metadata.isFile()) throw new Error("relay state path is not a regular file");
+  // Checked before reading, like the regular-file check: the limit's purpose
+  // is to bound what this process will hold in memory, so an oversize file
+  // (a misconfigured path, a stray deployment leftover) must be rejected at
+  // stat time instead of being read fully into a Buffer plus a utf8 string.
+  if (metadata.size > MAX_RELAY_STATE_BYTES) {
+    throw new Error("relay state exceeds MAX_RELAY_STATE_BYTES");
+  }
   let contents;
   try {
-    const metadata = await stat(RELAY_STATE_PATH);
-    if (!metadata.isFile()) throw new Error("relay state path is not a regular file");
-    if (metadata.size > MAX_RELAY_STATE_BYTES) {
-      throw new Error("relay state exceeds MAX_RELAY_STATE_BYTES");
-    }
     contents = await readFile(RELAY_STATE_PATH, "utf8");
-    if (Buffer.byteLength(contents) > MAX_RELAY_STATE_BYTES) {
-      throw new Error("relay state exceeds MAX_RELAY_STATE_BYTES");
-    }
   } catch (error) {
     if (error?.code === "ENOENT") return;
     throw new Error("relay_state_load_failed", { cause: error });
   }
+  if (Buffer.byteLength(contents) > MAX_RELAY_STATE_BYTES) {
+    throw new Error("relay state exceeds MAX_RELAY_STATE_BYTES");
+  }
 
   let state;
   try { state = JSON.parse(contents); } catch (error) {
-    throw new Error("failed to load relay state: invalid JSON", { cause: error });
+    throw new Error("relay_state_load_failed: invalid JSON", { cause: error });
   }
   // The size limit above is the real bound on a persisted file. The
   // MAX_REVOKED_ENDPOINTS clamp only governs new revocations: an older relay
@@ -764,7 +849,7 @@ async function loadRelayState() {
   if (!state || typeof state !== "object" || Array.isArray(state)
     || state.version !== RELAY_STATE_VERSION
     || !Array.isArray(state.revoked_endpoints)) {
-    throw new Error("failed to load relay state: unsupported or malformed state");
+    throw new Error("relay_state_load_failed: unsupported or malformed state");
   }
 
   for (const entry of state.revoked_endpoints) {
@@ -773,7 +858,7 @@ async function loadRelayState() {
       || !validEndpointId(entry.endpoint_id)
       || !Number.isFinite(Date.parse(revokedAt))
       || revokedEndpoints.has(entry.endpoint_id)) {
-      throw new Error("failed to load relay state: malformed revoked endpoint");
+      throw new Error("relay_state_load_failed: malformed revoked endpoint");
     }
     revokedEndpoints.set(entry.endpoint_id, revokedAt);
   }
@@ -944,19 +1029,21 @@ function pruneExpiredEndpoints(now = Date.now()) {
 function healthSummary() {
   pruneExpiredEndpoints();
   const values = [...endpoints.values()];
+  const desktopOpenCount = values.filter((endpoint) => socketOpen(endpoint.desktop)).length;
   return {
     ok: true,
     desktop_controller_enabled: Boolean(controllerRuntime),
     endpoint_count: values.length,
     // Keep the aggregate-only key consumed by the current deployment probe.
     room_count: values.length,
-    connected_endpoint_count: values.filter((endpoint) => socketOpen(endpoint.desktop)).length,
-    desktop_open_count: values.filter((endpoint) => socketOpen(endpoint.desktop)).length,
-    desktop_offline_count: values.filter((endpoint) => !socketOpen(endpoint.desktop)).length,
+    connected_endpoint_count: desktopOpenCount,
+    desktop_open_count: desktopOpenCount,
+    desktop_offline_count: values.length - desktopOpenCount,
     web_client_open_count: values.filter((endpoint) => socketOpen(endpoint.web)).length,
     ws_connection_count: wss.clients.size,
     unauthenticated_connection_count: [...wss.clients]
       .filter((ws) => ws.role === "unknown").length,
+    receiver_error_terminations: relayStats.receiverErrorTerminations,
   };
 }
 
@@ -1050,9 +1137,8 @@ const server = http.createServer(async (req, res) => {
     url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
   } catch {
     // A hostile Host header (out-of-range port) or an absolute-form request
-    // target makes the URL constructor throw; the fixed reply never echoes
-    // the offending value. Like any other poisoned input this must terminate
-    // only this exchange, never the process.
+    // target makes the URL constructor throw. Like any other poisoned input
+    // this must terminate only this exchange, never the process.
     res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
     res.end("bad request");
     return;
@@ -1399,16 +1485,17 @@ async function revokeFromSocket(ws, msg) {
       return;
     }
     controllerTelemetry.audit("revocation_persist_failed");
-    console.error("[relay-error] revocation_persist_failed");
+    // Fixed event code plus the errno name (never a path); the endpoint id is
+    // a persistent device identifier and raw error text embeds fs paths.
+    console.error(`[relay-error] revocation_persist_failed${error?.code ? ` code=${error.code}` : ""}`);
     rejectSocket(ws, "revoke_persistence_failed", "failed to persist endpoint revocation");
     return;
   }
   revokeEndpoint(endpoint, msg.reason || "revoked", ws);
-  // Only a socket of the revoked endpoint goes down with it. A requester
-  // revoking a different endpoint with that endpoint's secret — an
-  // authenticated desktop/web socket of another endpoint, or an
-  // authenticated controller — keeps its own session; teardownEndpoint
-  // already told it desktop_endpoint_revoked.
+  // Only a socket of the revoked endpoint goes down with it. Any other
+  // authenticated socket — a desktop or a web client revoking a different
+  // endpoint with that endpoint's secret — keeps its own session;
+  // teardownEndpoint already told it desktop_endpoint_revoked.
   if (ws.endpointId !== endpointId) {
     ws.revokePending = false;
     // The revoke cleared the authentication timer. A cross-endpoint revoker
@@ -1497,15 +1584,15 @@ wss.on("connection", (ws, req) => {
   ws.revokePending = false;
   ws.controllerAuthenticated = false;
   ws.controllerSocketIdentity = `socket-${crypto.randomBytes(18).toString("base64url")}`;
+  ws.ingressBucket = { started_at: Date.now(), messages: 0, bytes: 0 };
+  armAuthTimer(ws);
+  ws.on("pong", () => { ws.isAlive = true; });
   // ws emits "error" on the socket for protocol violations (e.g. a frame over
   // maxPayload). Without a listener, one unauthenticated frame would crash the
-  // whole relay process. Attached before any lane-specific setup so the
-  // controller and legacy lanes — and the early-reject path below — are all
-  // covered.
+  // whole relay process.
   ws.on("error", (error) => {
     // ws closes the offending socket itself; the fixed code keeps contained
-    // protocol violations visible without echoing frame content or any
-    // session or path detail.
+    // protocol violations visible without echoing frame content.
     console.error(`[relay-error] websocket_protocol_violation code=${error?.code ?? "unknown"}`);
     try { ws.terminate(); } catch {}
   });
@@ -1522,9 +1609,26 @@ wss.on("connection", (ws, req) => {
       return;
     }
   }
-  ws.ingressBucket = { started_at: Date.now(), messages: 0, bytes: 0 };
-  armAuthTimer(ws);
-  ws.on("pong", () => { ws.isAlive = true; });
+
+  // The ws Receiver emits 'error' directly on frame-header-level violations
+  // (declared length over maxPayload, reserved opcodes, invalid UTF-8 close
+  // reasons) — those never reach the JSON-level guards below, and ws turns an
+  // unlistened 'error' event into ERR_UNHANDLED_ERROR, killing the process.
+  // Same contract as the send() guard: one poisoned frame terminates only
+  // this socket; the close handler then runs the endpoint bookkeeping. The
+  // termination is loud (log + healthz counter): an operator must be able to
+  // tell "client hung up" from "endpoint keeps sending poisoned frames"
+  // (round-11 review). This listener sits after the controller addSocket()
+  // block, so a socket rejected there with connection_initialization_failed
+  // never reaches the counter below — the fixed-line error handler attached
+  // earlier still covers that socket's drain-window errors.
+  ws.on("error", (error) => {
+    relayStats.receiverErrorTerminations += 1;
+    console.error(
+      `[relay] receiver error on ${ws.role || "unknown"} socket: ${error && error.message ? error.message : error}`,
+    );
+    terminateDestination(ws);
+  });
 
   ws.on("message", (raw, isBinary) => {
     if (ws.policyClosing || ws.revokePending) return;
@@ -1624,8 +1728,8 @@ wss.on("connection", (ws, req) => {
         // throw can never leave the socket ignoring messages or the endpoint
         // unable to expire.
         ws.revokePending = false;
-        const failedEndpoint = endpoints.get(msg.endpoint_id || ws.endpointId);
-        if (failedEndpoint) failedEndpoint.revoking = false;
+        const endpoint = endpoints.get(msg.endpoint_id || ws.endpointId);
+        if (endpoint) endpoint.revoking = false;
         console.error("[relay-error] revocation_unexpected_failure");
         rejectSocket(ws, "revoke_failed", "endpoint revocation failed");
       });
@@ -1713,7 +1817,16 @@ server.listen(PORT, HOST, () => {
     + `, ws_buffer_high_water=${WS_MAX_BUFFERED_BYTES}B`
     + `, endpoint_create_limit=${ENDPOINT_CREATE_LIMIT}/${ENDPOINT_CREATE_WINDOW_MS}ms`
     + `, endpoint_offline_ttl=${ENDPOINT_OFFLINE_TTL_MS}ms`
+    // Bounded knobs an operator typo can silently alter (an empty heartbeat
+    // value clamps to the floor, a large MAX_REVOKED_ENDPOINTS clamps to the
+    // state cap); like revoked_capacity below, show the effective values.
+    + `, heartbeat=${HEARTBEAT_INTERVAL_MS}ms`
     + `, revoked_endpoints=${revokedEndpoints.size}`
+    // The effective capacity, after the state-size clamp: an operator setting
+    // MAX_REVOKED_ENDPOINTS above it is silently capped and needs to see the
+    // real value (MAX_RELAY_STATE_BYTES is what raises it).
+    + `, revoked_capacity=${MAX_REVOKED_ENDPOINTS}`
+    + `, max_relay_state=${MAX_RELAY_STATE_BYTES}B`
     + `, max_payload=${MAX_PAYLOAD_BYTES})`,
   );
 });
@@ -1727,9 +1840,16 @@ async function shutdown() {
     try { ws.terminate(); } catch {}
   }
   try { server.close(); } catch {}
+  // The controller state store keeps its own write-ahead log: close it before
+  // exit so a signal during pairing/persistence cannot strand a transaction.
   await controllerStateStore?.close().catch(() => {});
   process.exit(0);
 }
 
-process.once("SIGINT", shutdown);
-process.once("SIGTERM", shutdown);
+// A repeated signal during the (short) async close can only queue behind the
+// first handler run, and the shuttingDown guard makes that run a no-op. on,
+// not once, keeps the handler registered, so re-delivery can never fall back
+// to the default (signal) disposition and turn a graceful exit-0 shutdown
+// into a signal kill mid-close.
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
