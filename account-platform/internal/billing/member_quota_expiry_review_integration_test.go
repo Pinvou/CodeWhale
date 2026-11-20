@@ -98,6 +98,23 @@ func reviewExpirySnapshot(t *testing.T, r *PostgresRepository, ctx context.Conte
 	return snapshot
 }
 
+func reviewExpiryDiagnostics(t *testing.T) [2]string {
+	t.Helper()
+	doc, err := os.ReadFile("../../docs/member-quota-expiry-recovery.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(strings.ReplaceAll(string(doc), "\r\n", "\n"), "```sql\n")
+	if len(parts) != 2 {
+		t.Fatal("diagnostic SQL block missing")
+	}
+	statements := strings.Split(strings.TrimSpace(strings.Split(parts[1], "```")[0]), ";")
+	if len(statements) != 5 || strings.TrimSpace(statements[0]) != "BEGIN READ ONLY" || strings.TrimSpace(statements[3]) != "ROLLBACK" || strings.TrimSpace(statements[4]) != "" {
+		t.Fatal("expected the original two SELECTs inside the read-only runbook transaction")
+	}
+	return [2]string{strings.TrimSpace(statements[1]), strings.TrimSpace(statements[2])}
+}
+
 func TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry(t *testing.T) {
 	for _, scenario := range []string{"restore-first", "worker-first", "concurrent", "zero-restore", "zero-worker", "active-hold", "review-all", "review-mixed", "package-not-due", "package-frozen", "base-bonus", "review-queue"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -349,15 +366,7 @@ func TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry(t *testing.T) {
 				t.Fatal("historical residual was automatically rewritten", count, err)
 			}
 			// Execute the actual runbook's first diagnostic through a read-only tx.
-			doc, err := os.ReadFile("../../docs/member-quota-expiry-recovery.md")
-			if err != nil {
-				t.Fatal(err)
-			}
-			parts := strings.Split(string(doc), "```sql\n")
-			if len(parts) != 2 {
-				t.Fatal("diagnostic SQL block missing")
-			}
-			diagnostic := strings.Split(strings.TrimPrefix(parts[1], "BEGIN READ ONLY;\n"), ";\n\nSELECT")[0]
+			diagnostic := reviewExpiryDiagnostics(t)[0]
 			read, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 			if err != nil {
 				t.Fatal(err)
@@ -383,6 +392,63 @@ func TestF06MemberQuotaRestoreUsesOrdinaryPackageExpiry(t *testing.T) {
 			}
 			if before != reviewExpirySnapshot(t, r, ctx) {
 				t.Fatal("read-only diagnostic changed historical data")
+			}
+		})
+	}
+	for _, status := range []string{"EXPIRED", "CONSUMED", "ACTIVE"} {
+		t.Run("terminal-suspended-diagnostic-"+status, func(t *testing.T) {
+			r, ctx := retainedFinanceRepository(t)
+			_, order, _, packageID := retainedOrganizationFinanceOrder(t, r, ctx, 1000000, true)
+			member := uuid.New()
+			grant := reviewExpiryGrant(t, r, ctx, order, packageID, member, 500000)
+			if _, err := r.ApplyOrganizationMemberLifecycle(ctx, *order.BeneficiaryOrganizationID, member, "SUSPENDED", 2); err != nil {
+				t.Fatal(err)
+			}
+			if status != "ACTIVE" {
+				// Represent the historical terminal-package/suspended-grant
+				// mismatch only in this UUID fixture, without changing postings.
+				if _, err := r.pool.Exec(ctx, `UPDATE entitlement_packages SET status=$2 WHERE id=$1`, packageID, status); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := reviewExpirySnapshot(t, r, ctx)
+			read, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer read.Rollback(ctx)
+			var readOnly string
+			if err := read.QueryRow(ctx, `SHOW transaction_read_only`).Scan(&readOnly); err != nil || readOnly != "on" {
+				t.Fatal("diagnostic transaction is not read-only", err)
+			}
+			rows, err := read.Query(ctx, reviewExpiryDiagnostics(t)[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			count := 0
+			for rows.Next() {
+				var pack, grantID uuid.UUID
+				var actualStatus string
+				var available, reserved int64
+				if err := rows.Scan(&pack, &actualStatus, &grantID, &available, &reserved); err != nil || pack != packageID || actualStatus != status || grantID != grant.ID || available != 500000 || reserved != 0 {
+					rows.Close()
+					t.Fatal("diagnostic returned another grant or incorrect financial facts", err)
+				}
+				count++
+			}
+			rows.Close()
+			want := 1
+			if status == "ACTIVE" {
+				want = 0
+			}
+			if rows.Err() != nil || count != want {
+				t.Fatal("terminal suspended diagnostic hit/miss differs", count, want, rows.Err())
+			}
+			if err := read.Rollback(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if before != reviewExpirySnapshot(t, r, ctx) {
+				t.Fatal("second read-only diagnostic changed financial facts")
 			}
 		})
 	}
