@@ -3,9 +3,10 @@ import { createPortal } from 'react-dom';
 import { AlertTriangle, AppWindow, Archive, BookOpen, Check, ChevronDown, Database, Download, Edit2, ExternalLink, FileText, FolderOpen, GridIcon, IconList, ImageIcon, Package, Plus, PresentationIcon, RefreshCw, TableIcon, Trash2, X } from '../../components/icons.jsx';
 import { IosSearchField, IosSegmentedControl } from '../../components/IosControls.jsx';
 import { bridge, useBridgeState } from '../../hooks/useBridge.js';
-import { OFFICE_HTML_STYLE } from '../artifacts/ArtifactsPanel.jsx';
-import { RemoteKnowledgeView } from '../remote-knowledge/RemoteKnowledgeView.jsx';
+import { useIntervalWhen } from '../../hooks/useIntervalWhen.js';
+import { OFFICE_HTML_STYLE } from '../../shared/artifact-utils.js';
 import { FilePreviewModal } from '../artifacts/FilePreviewModal.jsx';
+import { RemoteKnowledgeView } from '../remote-knowledge/RemoteKnowledgeView.jsx';
 import { invokeTauri } from '../../platform/tauri/client.js';
 import { resolveAppAssetUrl } from '../../shared/asset-url.mjs';
 import { can, isWeb } from '../../shared/platform.js';
@@ -943,16 +944,14 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
       }, [outputsOnly, kbm.startupReady, loadColls]);
 
       const indexing = !!(idx && idx.running);
-      useEffect(() => {
-        if (!indexing) return;
-        const id = setInterval(async () => {
-          try {
-            const s = await invokeTauri('kb_index_status'); replaceIndexState(s);
-            if (!s.running) { loadColls(); if (activeColl) loadDocs(activeColl.id); }
-          } catch (e) {}
-        }, 1000);
-        return () => clearInterval(id);
-      }, [indexing, replaceIndexState]);
+      // 索引进度 1s 轮询(#817 B3 起走共享的 useIntervalWhen;回调 latest-ref
+      // 取最新 replaceIndexState/loadColls/loadDocs/activeColl)。
+      useIntervalWhen(async () => {
+        try {
+          const s = await invokeTauri('kb_index_status'); replaceIndexState(s);
+          if (!s.running) { loadColls(); if (activeColl) loadDocs(activeColl.id); }
+        } catch { /* silently degrade */ }
+      }, 1000, indexing);
 
       const resumeImport = async () => {
         if (!idx || !idx.jobId || failedFilesLoading) return;
