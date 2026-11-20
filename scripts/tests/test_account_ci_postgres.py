@@ -312,9 +312,14 @@ class AccountCIAdmissionTests(unittest.TestCase):
         for root in roots:self.assertIsNotNone(re.fullmatch(pattern,root))
         self.assertIsNone(re.fullmatch(pattern,"TestUnrelatedOptionalFixture"))
         invitation="TestMembershipInvitationLegacyRollbackPublicPostgres"
+        history="TestAuditExportPublicDownRetainsOriginalHistory"
         children={
             "TestAccount039RollbackInventoryPostgres": {"empty-ledger", "before-approval-schema", "installed-039", "higher-version", "retained-v2-reference", "wrong-database", "missing-approval-column-grant"},
             invitation: {"retained-link-refuses-down-without-fact-or-schema-loss", "forward-upgrade-replays-original-and-accepts-next-command"},
+            history: {"three_scope_public_down", "three_scope_public_down/LF", "three_scope_public_down/CRLF",
+                      "unbound_public_down_forbids_incomplete_inverse", "expired_binding_public_down_retains_evidence",
+                      "public_governance_down_preserves_audit_history",
+                      "public_governance_down_preserves_audit_history/pinned_ledger_ignores_temp_shadow"},
         }
         events=[]
         for root in roots:
@@ -347,11 +352,12 @@ class AccountCIAdmissionTests(unittest.TestCase):
                 with patch.object(sys,'argv',['audit-validator',str(schema_path),str(account_path)]):
                     exec(compile(code,'<actual-audit-workflow-validator>','exec'),{})
             verify(events)
-            for child in children[invitation]:
-                for invalid in ([e for e in events if e['Test']!=invitation+'/'+child],
-                                [dict(e,Action='skip') if e['Test']==invitation+'/'+child else e for e in events]):
-                    with self.subTest(child=child),self.assertRaises(AssertionError):verify(invalid)
-            with self.assertRaises(AssertionError):verify([e for e in events if not e['Test'].startswith(invitation)])
+            for root in (invitation,history):
+                for child in children[root]:
+                    for invalid in ([e for e in events if e['Test']!=root+'/'+child],
+                                    [dict(e,Action='skip') if e['Test']==root+'/'+child else e for e in events]):
+                        with self.subTest(root=root,child=child),self.assertRaises(AssertionError):verify(invalid)
+                with self.assertRaises(AssertionError):verify([e for e in events if not e['Test'].startswith(root)])
             for case in lease_cases | retry_cases | commerce_cases:
                 for invalid in ([e for e in account if e['Test']!=case],
                                 [dict(e,Action='skip') if e['Test']==case else e for e in account]):

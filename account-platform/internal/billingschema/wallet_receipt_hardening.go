@@ -84,7 +84,11 @@ func schemaOwnedOriginalWalletReceipt(ctx context.Context, tx pgx.Tx) (bool, err
 }
 
 func originalWalletReceiptHardeningOwner(ctx context.Context, tx pgx.Tx) (string, error) {
-	original, err := knownOriginalWalletReceiptHistory(ctx, tx)
+	ledger, err := migrations.LedgerTable(ctx, tx.Conn())
+	if err != nil {
+		return "", err
+	}
+	original, err := knownOriginalWalletReceiptHistory(ctx, tx, ledger)
 	if err != nil || !original {
 		return "", err
 	}

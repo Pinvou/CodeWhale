@@ -92,10 +92,17 @@ func VerifyApplied(ctx context.Context, c *pgx.Conn, input []migrations.Migratio
 	if err := validateOutboxAggregateLookup(input); err != nil {
 		return migrations.Verification{}, err
 	}
+	if err := validateFinancialJSONObjects(input); err != nil {
+		return migrations.Verification{}, err
+	}
 	if err := validateCommerceManualCompletion(input); err != nil {
 		return migrations.Verification{}, err
 	}
 	if err := validateOrganizationEvidenceGuard(input); err != nil {
+		return migrations.Verification{}, err
+	}
+	ctx, err := migrations.PinLedger(ctx, c)
+	if err != nil {
 		return migrations.Verification{}, err
 	}
 	expected, err := expectedEventDeliveryHistory(ctx, c, input)

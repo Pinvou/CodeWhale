@@ -920,8 +920,7 @@ apt_method() {
   # outside what this check defends against. Deepin publishes InRelease;
   # wiring a pinned-key verification is a deliberate follow-up, not done
   # here.
-  curl --proto '=https' --tlsv1.2 --location --silent --show-error --fail \
-    --retry 3 --retry-delay 2 -o "$release_file" "$release_url" \
+  python3 "$SCRIPT_DIR/ci-download.py" "$release_url" --output "$release_file" \
     || fail "Release download failed: $release_url"
   local components
   components="$(sed -n 's/^Components:[[:space:]]*//p' "$release_file" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//')"
@@ -932,13 +931,12 @@ apt_method() {
   for comp in $components; do
     index_url="$mirror/dists/$suite/$comp/binary-$DPKG_ARCH/Packages.gz"
     log "apt method: fetching $index_url"
-    curl --proto '=https' --tlsv1.2 --location --silent --show-error --fail \
-      --retry 3 --retry-delay 2 -o "$work_dir/Packages.$comp.gz" "$index_url" \
-      || fail "index download failed: $index_url"
-    gzip -t "$work_dir/Packages.$comp.gz" || fail "index is not valid gzip: $work_dir/Packages.$comp.gz"
     expected_index_sha="$(release_index_sha256 "$comp/binary-$DPKG_ARCH/Packages.gz" "$release_file")"
     [ -n "$expected_index_sha" ] \
       || fail "Release file lists no SHA256 for $comp/binary-$DPKG_ARCH/Packages.gz (refusing an unauthenticated index)"
+    python3 "$SCRIPT_DIR/ci-download.py" "$index_url" --output "$work_dir/Packages.$comp.gz" --sha256 "$expected_index_sha" \
+      || fail "index download failed: $index_url"
+    gzip -t "$work_dir/Packages.$comp.gz" || fail "index is not valid gzip: $work_dir/Packages.$comp.gz"
     echo "$expected_index_sha  $work_dir/Packages.$comp.gz" | sha256sum --check --status \
       || fail "Packages.gz sha256 does not match the Release file for component $comp (mirror inconsistency?)"
     zcat "$work_dir/Packages.$comp.gz" >> "$work_dir/Packages.raw"
@@ -1172,9 +1170,9 @@ PYEOF
   while IFS=$'\t' read -r name filename sha; do
     url="$mirror/$filename"
     deb_path="$debs_dir/$(basename "$filename")"
+    [ -n "$sha" ] || fail "index has no SHA256 for $name; refusing an unverified download"
     if [ ! -s "$deb_path" ]; then
-      curl --proto '=https' --tlsv1.2 --location --silent --show-error --fail \
-        --retry 3 --retry-delay 2 -o "$deb_path" "$url" \
+      python3 "$SCRIPT_DIR/ci-download.py" "$url" --output "$deb_path" --sha256 "$sha" \
         || fail "download failed: $url"
     fi
     if [ -n "$sha" ]; then

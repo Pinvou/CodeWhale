@@ -1,5 +1,6 @@
 """Real OS process-tree regressions; every child is created by this test."""
 import ctypes
+from contextlib import contextmanager
 import importlib.util
 import json
 import os
@@ -34,6 +35,31 @@ def alive(pid):
         return False
     try:
         return kernel.WaitForSingleObject(handle, 0) == 0x102
+    finally:
+        kernel.CloseHandle(handle)
+
+
+@contextmanager
+def held_process(pid):
+    """Keep the observed identity alive; never re-open a possibly reused PID."""
+    if sys.platform == 'linux':
+        import select
+        descriptor = os.pidfd_open(pid)
+        try:
+            yield lambda: not bool(select.select([descriptor], [], [], 0)[0])
+        finally:
+            os.close(descriptor)
+        return
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.argtypes, kernel.OpenProcess.restype = [w.DWORD, w.BOOL, w.DWORD], w.HANDLE
+    kernel.WaitForSingleObject.argtypes, kernel.WaitForSingleObject.restype = [w.HANDLE, w.DWORD], w.DWORD
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    handle = kernel.OpenProcess(0x100000, False, pid)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        yield lambda: kernel.WaitForSingleObject(handle, 0) == 0x102
     finally:
         kernel.CloseHandle(handle)
 
@@ -142,27 +168,51 @@ print('original-cancel-verdict-preserved-with-root23')
         script = """
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { existsSync, writeFileSync } from 'node:fs';
 const { fixtureScope } = await import(FIXTURE);
 fixtureScope.register({kind:'probe',id:'signal-owned',close(){throw new Error('primary fixture close failure')},remove(){throw new Error('unconfirmed resource must not be removed')}});
 const child = spawn(process.execPath,['-e',"process.send({pid:process.pid});setInterval(()=>{},1000)"],{detached:true,stdio:['ignore','ignore','ignore','ipc']});
 const [ready] = await once(child,'message');
 console.log('OWNED_CHILD_PID='+ready.pid);
+writeFileSync(READY, String(ready.pid));
 child.disconnect(); child.unref();
 setInterval(()=>{},1000);
+while (!existsSync(RELEASE)) await new Promise(resolve => setTimeout(resolve, 5));
 if (process.platform === 'win32') process.emit('SIGTERM');
 else process.kill(process.pid,'SIGTERM');
 """.replace('FIXTURE', json.dumps(fixture))
-        source = 'import subprocess,sys;sys.exit(subprocess.run(' + repr([node, '--input-type=module', '--eval', script]) + ').returncode)'
         with tempfile.TemporaryDirectory() as directory:
-            p, receipt, receipt_path = self.invoke(source, directory)
-            self.assertEqual(p.returncode, 1, p.stderr)
-            self.assertIn('primary fixture close failure', p.stderr)
+            ready, release = Path(directory) / 'child-ready', Path(directory) / 'child-release'
+            script = script.replace('READY', json.dumps(str(ready))).replace('RELEASE', json.dumps(str(release)))
+            source = 'import subprocess,sys;sys.exit(subprocess.run(' + repr([node, '--input-type=module', '--eval', script]) + ').returncode)'
+            receipt_path = Path(directory) / 'receipt.json'
+            p = subprocess.Popen([sys.executable, str(SUPERVISOR), '--receipt', str(receipt_path),
+                '--cleanup-seconds', '0.2', '--', sys.executable, '-c', source],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                deadline = time.monotonic() + 15
+                while not ready.is_file() and p.poll() is None and time.monotonic() < deadline:
+                    time.sleep(.005)
+                self.assertTrue(ready.is_file(), 'the owned descendant never reached the identity barrier')
+                pid = int(ready.read_text())
+                with held_process(pid) as child_alive:
+                    self.assertTrue(child_alive())
+                    release.touch()
+                    stdout, stderr = p.communicate(timeout=max(.01, deadline - time.monotonic()))
+                    self.assertEqual(p.returncode, 1, stderr)
+                    self.assertFalse(child_alive(), 'the exact held descendant survived cleanup')
+            finally:
+                release.touch()
+                if p.poll() is None:
+                    p.terminate()
+                p.communicate(timeout=10)
+            self.assertIn('OWNED_CHILD_PID='+str(pid), stdout)
+            self.assertIn('primary fixture close failure', stderr)
+            receipt = json.loads(receipt_path.read_text())
             self.assertTrue(receipt['cleanup_failed'], 'the surviving descendant must require supervisor intervention')
             self.assertEqual(receipt['state'], 'released')
             ledger = receipt_path.parent / (receipt_path.stem + '-resources') / 'signal-owned.json'
             self.assertEqual(json.loads(ledger.read_text())['state'], 'unconfirmed')
-            pid = int(p.stdout.split('OWNED_CHILD_PID=')[1].splitlines()[0])
-            self.assertFalse(alive(pid))
 
     def invoke(self, source, directory, name='receipt'):
         receipt = Path(directory) / (name + '.json')

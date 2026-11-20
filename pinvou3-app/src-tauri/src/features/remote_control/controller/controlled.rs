@@ -560,6 +560,31 @@ impl ControlledDeviceManager {
         Ok(operation)
     }
 
+    /// Linearize a real worker's first relay installation with Stop/Refresh.
+    /// The callback must finish synchronously without reentering this manager,
+    /// running business/cleanup callbacks, or waiting for network registration.
+    /// Synchronous status listeners invoked by startup must not reenter it.
+    pub(crate) fn with_registration_start<T>(
+        &self,
+        operation: &ControlledOperation,
+        start: impl FnOnce() -> std::result::Result<T, String>,
+    ) -> std::result::Result<T, String> {
+        let inner = self.inner.lock();
+        ensure_operation(&inner, operation).map_err(|error| error.code.to_owned())?;
+        if inner.phase != ControlledStatusKind::Registering {
+            return Err("desktop_remote_phase_invalid".to_owned());
+        }
+        // Keep the operation guard through configuration and endpoint commit.
+        let result = start();
+        drop(inner);
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn registration_start_guard_available_for_test(&self) -> bool {
+        self.inner.try_lock().is_some()
+    }
+
     pub(crate) fn registration_request_id(&self, operation: ControlledOperation) -> Result<String> {
         let inner = self.inner.lock();
         ensure_operation(&inner, &operation)?;
@@ -4363,3 +4388,7 @@ pub(super) mod tests {
 #[cfg(test)]
 #[path = "controlled/preconnect_tests.rs"]
 mod preconnect_tests;
+
+#[cfg(test)]
+#[path = "controlled/registration_start_tests.rs"]
+mod registration_start_tests;

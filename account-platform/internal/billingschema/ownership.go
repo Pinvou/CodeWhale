@@ -92,10 +92,14 @@ func applyBillingMigration(ctx context.Context, tx pgx.Tx, migration migrations.
 }
 
 func prepareBillingMigration(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
-	if _, err := knownLegacyWaiverHistory(ctx, tx); err != nil {
+	ledger, err := migrations.LedgerTable(ctx, tx.Conn())
+	if err != nil {
 		return err
 	}
-	if _, err := knownOriginalWalletReceiptHistory(ctx, tx); err != nil {
+	if _, err := knownLegacyWaiverHistory(ctx, tx, ledger); err != nil {
+		return err
+	}
+	if _, err := knownOriginalWalletReceiptHistory(ctx, tx, ledger); err != nil {
 		return err
 	}
 	var actor bool

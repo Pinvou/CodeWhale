@@ -88,6 +88,7 @@ ACCOUNT_REQUIRED = {
     "TestOrganizationStartupDiagnosticsPostgres",
     "TestApprovalDeliveryTerminalRecoveryPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
+    "TestAccountFinancialJSONObjectsPostgres",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
     "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
@@ -176,6 +177,8 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
+MIGRATIONS_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+MIGRATIONS_REQUIRED = {"TestPinnedMigrationLedgerPostgresIntegration", "TestRestrictedMigrationLedgerPostgresIntegration"}
 SCHEMA_REQUIRED = {"TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestF09EntitlementPackageIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestManualRetentionHistoricalHardeningPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestReconciliationFairRetryRegisteredIdentity", "TestTokenWalletReceiptSchemaPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestUsageWaiverHistoricalSchemaPostgres"}
 F12_UPGRADE_PARENT = "TestPaymentCreditF12DeployedCarriersUpgradePostgres"
 F12_UPGRADE_CHILD = "TestF12PaymentCreditUpgradeChildPostgres"
@@ -240,6 +243,7 @@ RETAINED_REQUIRED = {
     "TestF12PaymentRepairOrderLookupPostgres",
     "TestF12PaymentRepairDeployedBaselineUpgradePostgres",
     "TestRetainedOrganizationOrderHistoryPagination",
+    "TestBillingFinancialJSONObjectsPostgres",
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
     "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease",
     "TestExpiredHoldProofRetryDiagnosticsPostgres",
@@ -359,6 +363,8 @@ EXACT_REQUIRED_CHILDREN = {
         "pre-admission-fixture-rejects-current-schema",
         "runtime-immutable-command-and-exact-prefix-down",
     },
+    "TestAccountFinancialJSONObjectsPostgres": {"fresh-current-producer", "upgrade-current-producer", "dirty-critical-history", "dirty-financial-history"},
+    "TestBillingFinancialJSONObjectsPostgres": {"fresh-current-producer", "upgrade-current-producer", "dirty-details", "dirty-provider_capability_snapshot", "dirty-policy_snapshot", "dirty-evidence_summary", "dirty-payload_snapshot"},
     "TestCommerceClosureCallbacksRespectSubjectFence": {
         "complete-after-anonymize",
         "complete-user-wait",
@@ -485,6 +491,28 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestOrganizationStartupDiagnosticsPostgres": {
         "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestPinnedMigrationLedgerPostgresIntegration": {
+        "up-path-change-keeps-original-ledger",
+        "verify-rejects-original-drift-despite-shadow",
+        "down-path-change-removes-only-original-row",
+        "actual-cli-retains-bound-namespace",
+        "binding-cannot-cross-connections",
+        "missing-search-path-schema-rejects-before-preparation",
+        "another-workflow-selects-its-own-visible-ledger",
+        "temporary-shadow-does-not-hide-later-permanent-ledger",
+        "temporary-shadow-does-not-capture-creation-schema",
+        "temporary-only-path-rejects-before-preparation",
+    },
+    "TestRestrictedMigrationLedgerPostgresIntegration": {
+        "existing_ledger_upgrade_and_down",
+        "checksum_remains_closed",
+        "existing_ledger_without_permission",
+        "trusted_owner_switch_keeps_ledger_identity",
+        "after_hook_starts_as_migration_role_and_rolls_back",
+        "down_hooks_pin_roles_and_rollback_atomically",
+        "empty_schema_without_create",
+        "advisory_lock_still_serializes",
     },
     "TestPaymentCreditRetentionPublicPostgres": {"late-acknowledgement-survives-billing-retention", "waiting-old-ack-batch-does-not-starve-later-clearance"},
     "TestPaymentCreditClosureBoundaryPostgres": {
@@ -936,11 +964,11 @@ def require_exclusive_instance(query, databases, roles, *, timeout_seconds=15, n
 BILLING_GROUPS = tuple(f"billing-{index}" for index in range(4))
 GROUPS = ("owners", "token", *BILLING_GROUPS)
 OWNER_LANES = {
-    "account": ("owner-account", "lifecycle-reconciliation"),
+    "account": ("owner-ledger", "owner-account", "lifecycle-reconciliation"),
     "wallet": ("owner-wallet", "owner-token-schema", "owner-provisioning"),
     "schema": ("owner-schema-legacy-expiry", "owner-schema"),
 }
-OWNER_ORDER = ("owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema",
+OWNER_ORDER = ("owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema",
                "owner-provisioning", "lifecycle-reconciliation")
 EXACT_REQUIRED_CHILDREN["TestOwnerWalletTemplateScopePostgres"] = {
     "first", "first/case-a", "first/case-b", "second", "second/case-a", "second/case-b",
@@ -1088,7 +1116,7 @@ def main(*, group="all", verify_fixture_cache=False, owner_lane=None):
             env["PINVOU_TEST_ACCOUNT_DATABASE_URL"] = raw
         elif target == "./internal/billingschema":
             env["PINVOU_TEST_SCHEMA_DATABASE_URL"] = raw
-        elif target == "./internal/tokenschema":
+        elif target in ("./internal/tokenschema", "./internal/platform/migrations"):
             env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
         else:
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
@@ -1144,6 +1172,7 @@ def main(*, group="all", verify_fixture_cache=False, owner_lane=None):
         # Each existing owner fixture requires its own absent actors. Restoration
         # is checked between every phase, before any next fixture can write.
         phases = {
+            "owner-ledger": ("./internal/platform/migrations", MIGRATIONS_PACKAGE, MIGRATIONS_REQUIRED),
             "owner-account": ("./internal/account", ACCOUNT_PACKAGE, ACCOUNT_REQUIRED),
             "owner-wallet": ("./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED),
             "owner-token-schema": ("./internal/tokenschema", TOKEN_SCHEMA_PACKAGE, TOKEN_SCHEMA_REQUIRED),

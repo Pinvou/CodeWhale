@@ -970,6 +970,7 @@ mod tests {
 
     fn ordinary_model() -> SavedModel {
         SavedModel {
+            auth_mode: None,
             id: "ordinary".to_string(),
             name: "Ordinary".to_string(),
             alias: None,

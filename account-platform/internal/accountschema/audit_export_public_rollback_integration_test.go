@@ -136,7 +136,7 @@ func TestAuditExportPublicDownRetainsOriginalHistory(t *testing.T) {
 			t.Helper()
 			var result string
 			if err := governance.QueryRow(ctx, `SELECT jsonb_build_object(
-'ledger_except_39',(SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m WHERE version<>39),
+'ledger_except_39',(SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM public.schema_migrations m WHERE version<>39),
 'roles',(SELECT jsonb_agg(to_jsonb(r) ORDER BY code) FROM roles r),
 'audit_permissions',(SELECT jsonb_agg(to_jsonb(p) ORDER BY code) FROM permissions p WHERE code LIKE 'platform.audit.%'),
 'audit_role_permissions',(SELECT jsonb_agg(to_jsonb(r) ORDER BY role_code,permission_code) FROM role_permissions r WHERE permission_code LIKE 'platform.audit.%'),
@@ -155,10 +155,48 @@ func TestAuditExportPublicDownRetainsOriginalHistory(t *testing.T) {
 		// Original 039 Down contains DISTINCT over a void-returning function.
 		// Only the existing identity-checked ApplySQL hook makes it executable;
 		// calling a helper directly would miss a dropped public hook on merge.
-		if err := DownOne(ctx, governance, loaded); err != nil {
-			t.Fatal("COMPOSED_PUBLIC_GOVERNANCE_DOWN", err)
-		}
-		migrations.Unlock(ctx, governance)
+		t.Run("pinned_ledger_ignores_temp_shadow", func(t *testing.T) {
+			pinned, err := migrations.PinLedger(ctx, governance)
+			if err != nil {
+				t.Fatal("PIN_PUBLIC_GOVERNANCE_LEDGER", err)
+			}
+			publicLedger := pgx.Identifier{"public", "schema_migrations"}.Sanitize()
+			if table, err := migrations.LedgerTable(pinned, governance); err != nil || table != publicLedger {
+				t.Fatal("GOVERNANCE_LEDGER_NOT_PUBLIC", err)
+			}
+			if _, err := governance.Exec(ctx, `CREATE TEMP TABLE schema_migrations(version bigint PRIMARY KEY,name text,checksum text);
+INSERT INTO pg_temp.schema_migrations VALUES(39,'shadow-governance','must-not-authorize')`); err != nil {
+				t.Fatal("CREATE_OWNED_TEMP_LEDGER", err)
+			}
+			t.Cleanup(func() {
+				cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
+				defer done()
+				if _, err := governance.Exec(cleanup, `DROP TABLE pg_temp.schema_migrations`); err != nil {
+					t.Error("RETIRE_OWNED_TEMP_LEDGER", err)
+				}
+			})
+			temporaryFacts := func() string {
+				t.Helper()
+				var facts string
+				if err := governance.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM pg_temp.schema_migrations m`).Scan(&facts); err != nil {
+					t.Fatal("TEMP_LEDGER_FACTS", err)
+				}
+				return facts
+			}
+			temporaryBefore := temporaryFacts()
+			if err := DownOne(pinned, governance, loaded); err != nil {
+				t.Fatal("COMPOSED_PUBLIC_GOVERNANCE_DOWN", err)
+			}
+			if err := migrations.Unlock(pinned, governance); err != nil {
+				t.Fatal("GOVERNANCE_DOWN_UNLOCK", err)
+			}
+			if temporaryFacts() != temporaryBefore || auditHistory() != before {
+				t.Fatal("PINNED_GOVERNANCE_DOWN_CHANGED_SHADOW_OR_AUDIT_HISTORY")
+			}
+			if err := governance.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=38),EXISTS(SELECT 1 FROM public.schema_migrations WHERE version=39)`).Scan(&has38, &has39); err != nil || !has38 || has39 {
+				t.Fatal("PINNED_GOVERNANCE_DOWN_LEDGER", err)
+			}
+		})
 		if _, err := migrations.VerifyApplied(ctx, governance, after39); err != nil {
 			t.Fatal("COMPOSED_PUBLIC_GOVERNANCE_DOWN_VERIFY", err)
 		}
