@@ -1327,21 +1327,21 @@ assert.match(desktopRemoteControlBridge,
 assert.equal(
   (desktopRemoteControlBridge.match(/\{ last_error: String\(error\), last_error_code: null \}/g) || []).length, 2,
   'the status-refresh failure merge and the revoke failure merge must both clear the stale code');
-assert.match(remoteControlCommands, /web_access_revoke_host_workspace\([\s\S]{0,240}require_main_webview\(&window\)\?/,
+assert.match(remoteControlCommands, /web_access_revoke_host_workspace\([\s\S]{0,240}require_main_webview\(&webview\)\?/,
   'only the main desktop WebView may revoke folder consent');
-assert.match(remoteControlCommands, /web_access_enable\([\s\S]{0,240}require_main_webview\(&window\)\?/,
+assert.match(remoteControlCommands, /web_access_enable\([\s\S]{0,240}require_main_webview\(&webview\)\?/,
   'only the main desktop WebView may enable a persistent remote endpoint');
 assert.match(
   remoteControlCommands,
-  /web_access_status\([\s\S]{0,260}require_main_webview\(&window\)\?/,
+  /web_access_status\([\s\S]{0,260}require_main_webview\(&webview\)\?/,
   'web_access_status carries the token-bearing pairing URL and must stay main-WebView only',
 );
 assert.match(
   remoteControlCommands,
-  /web_access_rotate\([\s\S]{0,240}require_main_webview\(&window\)\?/,
+  /web_access_rotate\([\s\S]{0,240}require_main_webview\(&webview\)\?/,
   'rotation rewrites link credentials and must stay main-WebView only',
 );
-assert.match(remoteControlCommands, /web_access_disable\([\s\S]{0,240}require_main_webview\(&window\)\?/,
+assert.match(remoteControlCommands, /web_access_disable\([\s\S]{0,240}require_main_webview\(&webview\)\?/,
   'only the main desktop WebView may stop a persistent remote endpoint');
 assert.match(remoteControlManager, /require_host_workspace_authorization\(endpoint\.config\.allow_host_workspace\)\?/,
   'workspace capabilities must fail closed until desktop authorization is persisted');
