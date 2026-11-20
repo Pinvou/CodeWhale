@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestRegistrationBonusLifetimeEligibilityPostgresIntegration(t *testing.T) {
@@ -208,4 +210,105 @@ WHERE package.wallet_id=$1 AND package.product_id='REGISTRATION_BONUS' AND packa
 			t.Fatalf("immutable registration bonus table %s allowed TRUNCATE", table)
 		}
 	}
+	for _, target := range []struct{ table, column string }{
+		{"registration_bonus_policy_versions", "revision"},
+		{"registration_bonus_policy_commands", "actor_user_id"},
+		{"registration_bonus_policy_audit", "id"},
+		{"registration_bonus_claims", "id"},
+		{"registration_bonus_receipts", "registration_operation_id"},
+	} {
+		for _, operation := range []string{"UPDATE", "DELETE"} {
+			t.Run(target.table+"/"+operation, func(t *testing.T) {
+				table, column := pgx.Identifier{target.table}.Sanitize(), pgx.Identifier{target.column}.Sanitize()
+				var tuple string
+				if err := repository.pool.QueryRow(ctx, "SELECT ctid::text FROM "+table+" LIMIT 1").Scan(&tuple); err != nil {
+					t.Fatal("immutable probe needs a real writer-produced row", err)
+				}
+				statement := "DELETE FROM " + table + " WHERE ctid=$1::tid"
+				if operation == "UPDATE" {
+					statement = "UPDATE " + table + " SET " + column + "=" + column + " WHERE ctid=$1::tid"
+				}
+				immutable := func(err error) bool {
+					var failure *pgconn.PgError
+					return errors.As(err, &failure) && failure.Code == "P0001" && failure.Message == "posted ledger records are immutable"
+				}
+				protected := func() {
+					tx, err := repository.pool.Begin(ctx)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer tx.Rollback(ctx)
+					if _, err := tx.Exec(ctx, statement, tuple); !immutable(err) {
+						t.Fatal("UPDATE/DELETE was not rejected by the original immutable trigger", err)
+					}
+				}
+				before := registrationBonusFixtureFacts(t, repository, ctx)
+				protected()
+				// This transaction removes only the corresponding trigger inside
+				// the owned UUID database using its migration owner. Business
+				// writes above/below still exercise the original runtime role.
+				config := repository.pool.Config().ConnConfig.Copy()
+				if !strings.HasPrefix(config.Database, "retained_finance_") {
+					t.Fatal("trigger mutation requires the owned UUID database")
+				}
+				config.User, config.Password = "billing_migrator", ""
+				owner, err := pgx.ConnectConfig(ctx, config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer owner.Close(context.Background())
+				if _, err := owner.Exec(ctx, `SET ROLE billing_schema_owner`); err != nil {
+					t.Fatal(err)
+				}
+				tx, err := owner.Begin(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer tx.Rollback(ctx)
+				if _, err := tx.Exec(ctx, "DROP TRIGGER "+pgx.Identifier{target.table + "_immutable"}.Sanitize()+" ON "+table); err != nil {
+					t.Fatal("controlled trigger removal failed", err)
+				}
+				changed, err := tx.Exec(ctx, statement, tuple)
+				if immutable(err) {
+					t.Fatal("probe could not distinguish removal of its immutable trigger")
+				}
+				if err == nil {
+					if changed.RowsAffected() != 1 {
+						t.Fatal("negative probe did not reach its writer-produced row")
+					}
+				} else {
+					var dependency *pgconn.PgError
+					if !errors.As(err, &dependency) || dependency.Code != "23503" {
+						t.Fatal("negative probe failed for an unrelated reason", err)
+					}
+					// A foreign key is distinct from the required trigger error;
+					// it must never be counted as trigger immutability coverage.
+					t.Log("removed trigger reached a downstream foreign-key refusal")
+				}
+				if err := tx.Rollback(ctx); err != nil {
+					t.Fatal(err)
+				}
+				protected()
+				if before != registrationBonusFixtureFacts(t, repository, ctx) {
+					t.Fatal("trigger negative/restoration changed financial facts")
+				}
+			})
+		}
+	}
+}
+
+func registrationBonusFixtureFacts(t *testing.T, repository *PostgresRepository, ctx context.Context) string {
+	t.Helper()
+	var result strings.Builder
+	for _, table := range []string{
+		"registration_bonus_policy_versions", "registration_bonus_policy_state", "registration_bonus_policy_commands", "registration_bonus_policy_audit", "registration_bonus_claims", "registration_bonus_receipts",
+		"wallets", "credit_lots", "entitlement_packages", "entitlement_components", "journal_entries", "ledger_postings",
+	} {
+		var facts string
+		if err := repository.pool.QueryRow(ctx, "SELECT COALESCE(jsonb_agg(to_jsonb(row) ORDER BY to_jsonb(row)::text),'[]'::jsonb)::text FROM "+pgx.Identifier{table}.Sanitize()+" row").Scan(&facts); err != nil {
+			t.Fatal(err)
+		}
+		result.WriteString(table + ":" + facts + "\n")
+	}
+	return result.String()
 }
