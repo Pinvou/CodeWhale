@@ -16,7 +16,7 @@ SPEC.loader.exec_module(RUNNER)
 
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
-EXPECTED_RETAINED_ROOT_COUNT = 90
+EXPECTED_RETAINED_ROOT_COUNT = 91
 EXPECTED_SCHEMA_ROOT_COUNT = 19
 
 # Fixed identities independently checked against each actual -run selector.
@@ -1022,6 +1022,30 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             ):
                 with self.subTest(root=root), self.assertRaises(RuntimeError):
                     RUNNER.verify_results(bad, RUNNER.ACCOUNT_REQUIRED, **options)
+
+    def test_financial_json_contract_roots_and_each_dirty_column_are_required(self):
+        account = "TestAccountFinancialJSONObjectsPostgres"
+        billing = "TestBillingFinancialJSONObjectsPostgres"
+        for root, roots, package, children, expected in (
+            (account, RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, RUNNER.ACCOUNT_CHILD_REQUIRED,
+             {"fresh-current-producer", "upgrade-current-producer", "dirty-critical-history", "dirty-financial-history"}),
+            (billing, RUNNER.RETAINED_REQUIRED, RUNNER.BILLING_PACKAGE, RUNNER.BILLING_CHILD_REQUIRED,
+             {"fresh-current-producer", "upgrade-current-producer", "dirty-details", "dirty-provider_capability_snapshot", "dirty-policy_snapshot", "dirty-evidence_summary", "dirty-payload_snapshot"}),
+        ):
+            self.assertIn(root, roots)
+            self.assertIn(root, children)
+            self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], expected)
+            events = self.events({root}, package, children=True)
+            options = dict(package=package, require_children=True, exact_roots=True)
+            RUNNER.verify_results(events, {root}, **options)
+            for name in [root] + [root + "/" + child for child in expected]:
+                for broken in (
+                    [event for event in events if event.get("Test") != name],
+                    events + [{"Action": "skip", "Package": package, "Test": name}],
+                    events + [{"Action": "fail", "Package": package, "Test": name}],
+                ):
+                    with self.subTest(root=root, name=name), self.assertRaises(RuntimeError):
+                        RUNNER.verify_results(broken, {root}, **options)
 
     def test_unstarted_grant_actual_leaf_is_required_without_synthetic_children(self):
         root = "TestUnstartedApprovalGrantInventoryPostgres"
@@ -2299,6 +2323,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             "TestManualGrantRecoveryWorkflowPostgres",
             "TestApprovalDeliveryTerminalRecoveryPostgres",
             "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
+            "TestAccountFinancialJSONObjectsPostgres",
             "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
             "TestF06OrganizationStatusProjectionVersionPublicPostgres",
             "TestF06OrganizationDeletionVersionAndTerminalScope",

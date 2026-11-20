@@ -1174,6 +1174,16 @@
         "sha256": "aee7a5cd278fdf8b0f5d6e2b96ae16a331c6203ac9c05f30d4a65b1b86f91ba9"
       },
       {
+        "file": "900024_financial_json_object_contracts.down.sql",
+        "version": 900024,
+        "sha256": "d3a0e4b0e826c1ae512e9011c387dd33992c30b10c52500aff50fe5ac7e41108"
+      },
+      {
+        "file": "900024_financial_json_object_contracts.up.sql",
+        "version": 900024,
+        "sha256": "2ae6887caa0f1641e54b1b953f9e949fd35482e0242ba26fadd3bf4c35f99694"
+      },
+      {
         "file": "900026_approval_delivery_terminal_recovery.down.sql",
         "version": 900026,
         "sha256": "6c27277197eea78b54e959bbf48793cf0dad004f6b1f19336076481b8475660c"
@@ -2334,6 +2344,16 @@
         "file": "900039_payment_credit_attempts.up.sql",
         "version": 900039,
         "sha256": "722e0334e4072c841704015f1f0a5b40e412f6b4a82a7c8477c4b1f6600df7e9"
+      },
+      {
+        "file": "900042_financial_json_object_contracts.down.sql",
+        "version": 900042,
+        "sha256": "a95c55e4e8a7bb566f15df7fc3b4d0ee9a268587221329c5d5757dc6c26e0fdc"
+      },
+      {
+        "file": "900042_financial_json_object_contracts.up.sql",
+        "version": 900042,
+        "sha256": "a25714955d96b06f5cfec08a412618bc4e9dc16ed7b91dabdfc51a3ee0cb7d10"
       },
       {
         "file": "900043_package_expiry_scan.down.sql",
