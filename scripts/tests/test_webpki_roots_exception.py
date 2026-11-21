@@ -330,12 +330,12 @@ class WebpkiCiContractTests(unittest.TestCase):
         # Explicitly review each diagnostic-only entry. More uploads do not add
         # a Rust policy consumer, but neither an unknown entry nor a new action
         # version may silently inherit this review.
-        # 例外:frontend-setup 的工件上传(2026-11-16 setup 工件化)是功能性
-        # 传输——4 个消费分片依赖它,上传失败必须让 job 显式红,因此它不属于
-        # diagnostic 通道(retention 1 天同 run 内消费;无 continue-on-error)。
+        # Frontend setup is functional transport: only its first upload may
+        # fail provisionally, so the existing retry and strict reducer can run.
+        # The retry and every other setup step remain blocking. The separate
+        # CI policy suite checks the complete transport/outcome truth table.
         functional = [('frontend-setup', 'Upload frontend setup bundle'),
-                      # 同名工件 overwrite 重试通道:主上传 stall 后自动补试一次,
-                      # 与主上传同为功能性传输(retention 1 天,无 continue-on-error)。
+                      # One overwrite retry remains functional, not diagnostic.
                       ('frontend-setup', 'Upload frontend setup bundle (retry)')]
         reviewed = [('required-gate', 'PR test success proof transport'),
                     ('fast-gate', 'Gate test resource lifecycle receipts'),
@@ -357,7 +357,20 @@ class WebpkiCiContractTests(unittest.TestCase):
             self.assertEqual(len(entries), 1)
             self.assertIn('uses: actions/upload-artifact@v7\n', entries[0])
             self.assertIn('retention-days: 1\n', entries[0])
-            self.assertNotIn('continue-on-error', entries[0])
+            if name == 'Upload frontend setup bundle':
+                self.assertIn('        id: frontend_setup_upload\n', entries[0])
+                self.assertEqual(re.findall(r'^        continue-on-error: (.*)$', entries[0], re.M), ['true'])
+            else:
+                self.assertNotIn('continue-on-error', entries[0])
+        setup = job_block(workflow, 'frontend-setup')
+        self.assertNotRegex(setup, r'(?m)^    continue-on-error:')
+        for step in setup.split('\n      - ')[1:]:
+            if not step.startswith('name: Upload frontend setup bundle\n'):
+                self.assertNotIn('continue-on-error', step)
+        reducers = [step for step in setup.split('\n      - ')
+                    if step.startswith('name: Require frontend setup bundle upload\n')]
+        self.assertEqual(len(reducers), 1)
+        self.assertIn('        if: ${{ always() && !cancelled() }}\n', reducers[0])
         for job, name in reviewed:
             steps = job_block(workflow, job).split('\n      - ')
             entries = [step for step in steps if step.startswith(f'name: {name}\n')]
@@ -432,7 +445,8 @@ class WebpkiCiContractTests(unittest.TestCase):
 
     def test_diagnostic_transport_never_relaxes_tests_or_resource_retirement(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
-        for name in ['Confirm test resource retirement', 'Confirm Account test resource retirement',
+        for name in ['Require frontend setup bundle upload', 'Upload frontend setup bundle (retry)',
+                     'Confirm test resource retirement', 'Confirm Account test resource retirement',
                      'Gate policy test suite (scripts/tests)', 'Confirm gate test resource retirement',
                      'Test and vet all Account Platform Go modules',
                      'Install financial contract dependencies', 'Verify financial contract Node consumers',
@@ -446,6 +460,9 @@ class WebpkiCiContractTests(unittest.TestCase):
             with self.subTest(step=name), self.assertRaises(AssertionError):
                 self.verify_diagnostic_uploads(workflow.replace(
                     f'      - name: {name}\n', f'      - name: {name}\n        continue-on-error: true\n'))
+        with self.assertRaises(AssertionError):
+            self.verify_diagnostic_uploads(workflow.replace(
+                '  frontend-setup:\n', '  frontend-setup:\n    continue-on-error: true\n'))
         with self.assertRaises(AssertionError):
             self.verify_diagnostic_uploads(workflow.replace(
                 '        timeout-minutes: 3\n        continue-on-error: true\n',

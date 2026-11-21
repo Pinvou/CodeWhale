@@ -109,9 +109,8 @@ func TestMemberFinancialReviewReasonPublicUpgrade(t *testing.T) {
 	if _, e = Ordered(full); e != nil {
 		t.Fatal(e)
 	}
-	if e = migrations.DownOne(ctx, upgrade, full); e == nil {
-		t.Fatal("financial reason rollback was permitted")
-	}
+	assertHistoricalBillingRollback(t, ctx, memberMigrationDatabase(t, ctx, raw), full, 900012, "55000", "financial review reason migration is forward-only")
+	assertBillingCurrentReplay(t, ctx, upgrade, full)
 	if ledger != stageValue(t, ctx, upgrade, `SELECT jsonb_agg(jsonb_build_array(version,checksum) ORDER BY version)::text FROM schema_migrations`) {
 		t.Fatal("rejected rollback changed ledger")
 	}

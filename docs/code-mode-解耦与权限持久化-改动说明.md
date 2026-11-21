@@ -5,11 +5,14 @@
 > 合入主线，内容原样保留，仅标题层级统一下移。
 > **注意**：mode 持久化的现行语义以第二篇「六、语义修订（2026-08-12，lane
 > 语义 + 会话独立持久化；2026-09 起 design 并入 work 改两分）」为准；其前文
-> （三/四/五节）描述的两层持久化语义已被该节取代，仅作历史记录。
+> （三/四/五节）描述的两层持久化语义已被该节取代，仅作历史记录。文中的
+> `test:codex-acp` 前端套件已于社区仓 `pinvou-agent#296` 全仓测试清理中移除
+> （对应本仓 PR #714；职责并入 `npm test` 与平台运行时冒烟脚本），各
+> 「验证结果」小节保留的是当时状态。
 
 ---
 
-## 第一篇：code 与 plain 模式解耦及能力回补（PR #182）
+## 第一篇：code 与 plain 模式解耦及能力回补（社区仓 PR `pinjou-agent#182`）
 
 > 关联：`.luzeyang/code-plain-decoupling/code-plain-decoupling-improvements.md`（设计方案，下称「设计文档」，已归档）、`.luzeyang/code-plain-decoupling/code-mode-review-improvements.md`（问题来源，已归档）、`.luzeyang/code-plain-decoupling/code-native-agent-会话能力档案设计.md`（策略对象方向，已归档）。
 > 分支：`feat/code-plain-decoupling`（自 `fix/code-native-agent-review-issues` HEAD 拉出，未同步主线）。
@@ -98,10 +101,10 @@ code 模式（真实项目目录绑定）与 plain 模式（沙箱会话目录�
 
 ---
 
-## 第二篇：code 会话权限默认值与 mode 持久化（PR #190）
+## 第二篇：code 会话权限默认值与 mode 持久化（社区仓 PR `pinjou-agent#190`）
 
 > 关联：`docs/code-native-agent.md` §8.7（历史语义；现行两分 lane 语义以本篇第六节为准）、第一篇（前序解耦）、`.luzeyang/code-plain-decoupling/code-plain-decoupling-剩余待改动项评估.md`（S-1 背景，已归档）。
-> 分支：`feat/code-mode-permission`（基于最新 main，含 #182 解耦成果）。
+> 分支：`feat/code-mode-permission`（基于最新 main，含社区仓 `pinjou-agent#182` 解耦成果）。
 > 本篇登记 S-1 权限决策的实施结果，作为 PR 的验收依据。
 
 ### 一、为什么需要这个改动

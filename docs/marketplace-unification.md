@@ -2,7 +2,7 @@
 
 > 状态：实施中（Phase 2 app 侧已完成；`docs/marketplace-unification-todo.md` 为已过期的历史交接快照，不再是进度真相源——现行状态以 `docs/plugin-package-spec.md`、`docs/plugin-protocol.md` 与本文为准）。
 > 关联文档：`docs/工具市场.md`（现状设计）、`docs/fork-policy.md`（底座改动边界）；
-> #287 已合入：`docs/capability-governance.md` 为能力治理单一真相源（scope 已按模式泛化、
+> [pinjou-agent#287](https://github.com/Pinvou/pinvou-agent/pull/287) 已合入：`docs/capability-governance.md` 为能力治理单一真相源（scope 已按模式泛化、
 > PackDefaultPolicy / declare_all_modes! 编译期哨兵已就位），本文聚焦市场侧的统一改造。
 
 ## 0. 背景与决策
@@ -10,7 +10,7 @@
 工具市场现状是多份权威状态各自演化：`mcp.json`、`marketplace/installed.json`、
 `disabled_connectors.json` / `disabled_skills.json`、`bundle/skills/` 扁平目录
 （靠 `.installed-from` 标记考古归属）、`connectors/<platform>/bin/` 无版本 CLI 二进制。
-#279 完成的能力包统一模型（`features/marketplace/bundle.rs`）目前是**只读视图**，
+[pinjou-agent#279](https://github.com/Pinvou/pinvou-agent/pull/279) 完成的能力包统一模型（`features/marketplace/bundle.rs`）目前是**只读视图**，
 从上述散落文件反推包信息；写路径仍分散在四条安装管线
 （MCP / 预置技能 / 上传 zip / CLI 连接授权）。
 
@@ -62,7 +62,8 @@
 ### 3.1 分层
 
 - **存储层 `BundleRecord`**（bundles.json，唯一可写）：id / source
-  （`preset` | `upload:<zip名>` | 内置快照 + 内容指纹）/ installed / 内容指纹 /
+  （`preset` | `upload:<zip名>` | 内置快照 + 内容指纹）/ installed（资源缺失时置
+  `degraded` 并记原因）/ 内容指纹 /
   assets 引用（kind + name + version + sha256；读不懂的条目原样保留，不致整文件加载失败）/
   credentials 引用 / 安装时间。
 - **查询层 `BundleInfo`**（现算投影，不落盘）：在现有 `bundle.rs:145` 基础上演进：
@@ -79,7 +80,7 @@
 |---|---|---|
 | installed | 存储态（二态） | BundleStore 登记 ∧ 资源完整 |
 | ready | 派生态（现算） | CLI 按授权存在；凭据型按必填凭据齐；本地免凭据恒 ready；带脚本技能可声明运行时依赖进提示 |
-| enabled | 治理态（按模式） | scope map（#287 泛化格式，键=SessionMode） |
+| enabled | 治理态（按模式） | scope map（[pinjou-agent#287](https://github.com/Pinvou/pinvou-agent/pull/287) 泛化格式，键=SessionMode） |
 
 异常态收敛为一种：`Degraded`（登记在、资源缺），修复动作统一为按来源重新获取
 （预置重释放 / 上传重导入 / CLI 重下载），对所有包类型同构。
@@ -131,7 +132,7 @@ disconnect / uninstall…），每个动作带可用性与原因；
    双份物理副本，后续技能卸载的候选目录清理会连唯一副本一起删；恢复供给
    （install_upload）失败则整体回滚到回收站（目录搬回 + 清单条目复原 + 登记
    移除），可修复后重试，不残留「记录已安装、无供给面、无从重试」的半恢复态；
-   恢复过**恢复同意门**（review #455 R5-m5 / R9-M2，round-23 MAJOR 2 文档对齐）：
+   恢复过**恢复同意门**（review [pinjou-agent#455](https://github.com/Pinvou/pinvou-agent/pull/455) R5-m5 / R9-M2，round-23 MAJOR 2 文档对齐）：
    恢复的包在已初始化的 DenyAll scope 重新落回默认禁用（带安装默认标记，欢迎卡/
    场景 opt-in 可抬起），任何声明凭据的包（含组合包与 bin 侧清单不可读的 MCP
    条目）在未初始化 scope 走强制变体物化同一门（防供给面零同意上线）；门的
@@ -261,13 +262,13 @@ install_bundle(id):
 
 | 期 | 内容 | 验收 |
 |---|---|---|
-| **Phase 0** 地基 ✅ | #287 已合入（scope 按模式泛化、capability-governance.md、编译期穷尽哨兵） | 已上游合并 |
+| **Phase 0** 地基 ✅ | [pinjou-agent#287](https://github.com/Pinvou/pinvou-agent/pull/287) 已合入（scope 按模式泛化、capability-governance.md、编译期穷尽哨兵） | 已上游合并 |
 | **Phase 1** 底座缝 | tooling_changed → ToolingSource 双轨 → CredentialResolver；上游 PR 同步推（探查已完成，落点见 todo 文档 B 节） | FileSource 行为不变；RegistrySource 可注册；dump_session_tooling 交付 |
 | **Phase 2** app 反转 ✅ | BundleStore 可写化 + 首启迁移（刀1-3）；存储布局迁移（刀4/10/11）；execpolicy 路径 deny（刀6）；scope 收敛包 id（刀12 / a02d58b7，见 todo A 节，已完成） | 安装/卸载/更新镜像全走 BundleStore；bundles.json 为安装态唯一真相源 |
 | **Phase 3** 切换删除（前端部分已提前） | 前端切 bundle_readiness + 动作下发 ✅（刀5/7/8/9，CLI 元数据下沉已同批完成）；待做：app 切 RegistrySource、删除物化模块、mcp.json 写入、占位符、CONNECTOR_CLAIMED_SKILLS、逐连接器 status 命令（前端调用已删，后端命令待删）、tsSkillsData、CLI 常量表 | 删除清单逐项核销；FileSource 回退期（一个版本周期）后删除 |
 | **Phase 4** 收尾 | V5 条件认领退出条件执行；占位卡改注册表 upcoming 条目；capability-governance.md 登记全部已知限制 | 文档与代码一致 |
 
-每期内"新路径 + 旧路径删除"原子完成，不留双写双读中间态（#279"前端已切、
+每期内"新路径 + 旧路径删除"原子完成，不留双写双读中间态（[pinjou-agent#279](https://github.com/Pinvou/pinvou-agent/pull/279)"前端已切、
 元数据没搬"硬约束扩展为全程通则）。
 
 ## 9. 迁移（首启一次性导入）
@@ -278,7 +279,7 @@ install_bundle(id):
 2. `mcp.json` + `installed.json` 反推已装 MCP 包，登记并补齐资源完整性校验；
 3. 存量 CLI 二进制对照 lock 表验 SHA-256：匹配则移入 `assets/cli/<name>/<version>/`
    并登记版本，不匹配则登记 `Degraded`（待修复，提供重新下载动作）；
-4. 全程在 FILE_LOCK 内完成（"读到即迁移"必须持锁，#287 竞态教训前置）；
+4. 全程在 FILE_LOCK 内完成（"读到即迁移"必须持锁，[pinjou-agent#287](https://github.com/Pinvou/pinvou-agent/pull/287) 竞态教训前置）；
    迁移幂等；失败回滚到 FileSource，保留"重新安装即可自愈"逃生门；
 5. 迁移校验通过后旧布局直接删除（激进红利：用户基数少，不保留双轨）。
 
@@ -288,7 +289,7 @@ install_bundle(id):
 2. **决策点强制**：治理硬保证在 execpolicy / disallowed_tools 执行层；
    prompt/供给层只是体验。
 3. **编译期强制优先**：新增模式、组件类型、CLI 清单，能宏哨兵/E0004 的不靠
-   测试遍历（#287 自我指涉测试教训：`ALL` 遍历 `ALL` 漏挂照样绿）。
+   测试遍历（[pinjou-agent#287](https://github.com/Pinvou/pinvou-agent/pull/287) 自我指涉测试教训：`ALL` 遍历 `ALL` 漏挂照样绿）。
 4. **可观测性与组合同时交付**：`dump_session_tooling` 随 RegistrySource 上线。
 5. **审计成对**：授权/拦截/迁移决策落事件日志。
 6. **fork 边界**：底座只进三条通用缝；每次 gitlink 更新跑 `fork-guard.sh --fast`
