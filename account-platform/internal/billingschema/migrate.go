@@ -65,6 +65,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if err := validateChargebackPrincipal(input); err != nil {
 		return nil, err
 	}
+	if err := validateOutboxStatisticsIndex(input); err != nil {
+		return nil, err
+	}
 	if err := validatePaymentCreditAttempts(input); err != nil {
 		return nil, err
 	}

@@ -1154,6 +1154,16 @@
         "sha256": "c4ad07bf49d5faa3f7493df352ca7885a3be3c23c49a618a804fcc4825e2e615"
       },
       {
+        "file": "900021_outbox_dead_statistics_index.down.sql",
+        "version": 900021,
+        "sha256": "b45139e38cbddba9f8890a9363007eb37113f7a4a1bcb7a36b53d0694087c4d9"
+      },
+      {
+        "file": "900021_outbox_dead_statistics_index.up.sql",
+        "version": 900021,
+        "sha256": "045599c0f220e53a2c369fb255a7518e8b33bd2e0019ee2e79526635050b9ec1"
+      },
+      {
         "file": "900022_approval_unstarted_grants.down.sql",
         "version": 900022,
         "sha256": "fa5e9919933b7ac6b29b44775dea9cd31584fd74b766c0a60458aa39d79fefdc"
@@ -2404,6 +2414,16 @@
         "file": "900045_provider_health_recent.up.sql",
         "version": 900045,
         "sha256": "0d1b5cc17cce2342540c4c75d15c783f53f37177412247ca5eefcd24d942d961"
+      },
+      {
+        "file": "900046_outbox_dead_statistics_index.down.sql",
+        "version": 900046,
+        "sha256": "bc2912f5c3ebef282384628699361874ba5dda08c0334815c54fbaabd8d41241"
+      },
+      {
+        "file": "900046_outbox_dead_statistics_index.up.sql",
+        "version": 900046,
+        "sha256": "fdb45f949ce1fe97935022f6ffe057003243ba5b5cd1c6e863ffcb32cf1fed40"
       }
     ],
     "payment-simulator": [
@@ -2908,6 +2928,16 @@
         "file": "900011_outbox_publication_generation.up.sql",
         "version": 900011,
         "sha256": "b100fa80e195e33883bcd75053691bc7c405babf67c595566559e04350c51348"
+      },
+      {
+        "file": "900012_outbox_dead_statistics_index.down.sql",
+        "version": 900012,
+        "sha256": "005d99a7e18db3b28c5a3d4f55a06cc082acf3b7b49884d00f90738a32475b9a"
+      },
+      {
+        "file": "900012_outbox_dead_statistics_index.up.sql",
+        "version": 900012,
+        "sha256": "1d46d336edc90b8e94b45a41034d68e957e798c3c10e2efaf823433ee11112ff"
       }
     ]
   }

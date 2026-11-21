@@ -149,10 +149,7 @@ func main() {
 		} else if domain == "billing" {
 			err = billingschema.DownOne(ctx, connection, loaded)
 		} else if domain == "token" {
-			loaded, err = tokenschema.Ordered(loaded)
-			if err == nil {
-				err = migrations.DownOne(ctx, connection, loaded)
-			}
+			err = tokenschema.DownOne(ctx, connection, loaded)
 		} else if domain == "payment-simulator" {
 			loaded, err = simulatorschema.Ordered(loaded)
 			if err == nil {

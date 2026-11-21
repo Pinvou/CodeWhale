@@ -167,11 +167,11 @@ SELECT min(usage_request_id::text),count(*) FROM evidence`, controlledUsage).Sca
 	// Ledger installation timestamps legitimately change on re-install. Check
 	// original rows separately and verify every current published SQL identity.
 	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version=ANY($1)`, retainedVersions).Scan(&current); err != nil || current != retained {
-		t.Fatal("reinstallation changed predecessor ledger", err)
+		t.Fatal("reinstallation changed historical predecessor ledger", err)
 	}
 	verified, err := VerifyApplied(ctx, connection, loaded)
-	if err != nil || verified.AppliedCount != len(loaded) {
-		t.Fatal("reinstalled full public package failed identity verification", verified, err)
+	if err != nil || verified.AppliedCount != len(ordered) {
+		t.Fatalf("reinstalled complete public package: %+v err=%v", verified, err)
 	}
 	if originalHead == 900009 {
 		var count int

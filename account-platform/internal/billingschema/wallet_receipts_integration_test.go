@@ -62,6 +62,9 @@ func TestTokenWalletReceiptSchemaPostgres(t *testing.T) {
 		if err := Up(ctx, c, loaded); err != nil {
 			t.Fatal(err)
 		}
+		if err := migrations.Unlock(ctx, c); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := VerifyApplied(ctx, c, loaded); err != nil {
 			t.Fatal("fresh exact history rejected", err)
 		}
@@ -84,14 +87,7 @@ func TestTokenWalletReceiptSchemaPostgres(t *testing.T) {
 				t.Fatal("runtime obtained forbidden authority", q)
 			}
 		}
-		before := stageShape(t, ctx, c)
-		ledger := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`)
-		assertHistoricalBillingRollback(t, ctx, f.database(t, ctx, "billing", "billing_schema_owner"), loaded, 900023, "P0001", "wallet receipt history is forward-only")
-		assertBillingCurrentReplay(t, ctx, c, loaded)
-		migrations.Unlock(ctx, c)
-		if before != stageShape(t, ctx, c) || ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(s) ORDER BY version)::text FROM schema_migrations s`) {
-			t.Fatal("failed rollback changed shape or ledger")
-		}
+		testStatisticsHeadRoundTrip(t, ctx, c, loaded, walletReceiptEvidenceFacts)
 		// The generic verifier remains strict even for an otherwise legitimate extra
 		// migration. This case never changes application data or the receipt table.
 		if _, err := c.Exec(ctx, `SET ROLE billing_schema_owner; INSERT INTO schema_migrations(version,name,checksum) VALUES(1900023,'owned-negative-control',repeat('a',64)); SET ROLE billing_service`); err != nil {
@@ -100,6 +96,12 @@ func TestTokenWalletReceiptSchemaPostgres(t *testing.T) {
 		if _, err := VerifyApplied(ctx, c, loaded); err == nil {
 			t.Fatal("unknown extra history accepted")
 		}
+	})
+	t.Run("historical-900023-forward-only", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 180*time.Second)
+		defer cancel()
+		c := f.database(t, ctx, "billing", "billing_schema_owner")
+		testHistoricalEvidenceRefusal(t, ctx, c, loaded, walletReceiptVersion, "wallet receipt history is forward-only", walletReceiptEvidenceFacts)
 	})
 	t.Run("original-053-LF-CRLF-and-existing-receipts-preserved", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 180*time.Second)
