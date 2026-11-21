@@ -26,6 +26,16 @@ impl PermissionJournal {
         self.registered.get(callback).map(String::as_str)
     }
 
+    /// Completion is a retained fact, not only an event in the current poll.
+    /// An empty journal cannot authorize resuming a waiting task.
+    pub(super) fn all_registered_projected(&self) -> bool {
+        !self.registered.is_empty()
+            && self
+                .registered
+                .values()
+                .all(|approval| self.projected.contains(approval))
+    }
+
     pub(super) fn register(
         &mut self,
         callback: &str,

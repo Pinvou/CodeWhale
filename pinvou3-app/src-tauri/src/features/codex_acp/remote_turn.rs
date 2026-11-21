@@ -545,8 +545,14 @@ pub(super) fn permission_mint_projection(
 {
     match result {
         Ok(view) => Ok(Some(view)),
-        Err(error) if error.to_string() == "task_cleanup_busy" => Ok(None),
-        Err(error) if error.to_string() == "remote_permission_callback_gone" => Ok(None),
+        Err(error)
+            if matches!(
+                error.to_string().as_str(),
+                "task_cleanup_busy" | "permission_task_busy" | "remote_permission_callback_gone"
+            ) =>
+        {
+            Ok(None)
+        }
         Err(_) => Err("permission_binding_stale".to_owned()),
     }
 }
@@ -592,121 +598,19 @@ impl AcpPoolCodeTurnPort {
         journal: &mut PermissionJournal,
         events: &Arc<dyn ControllerTaskEventSink>,
     ) -> std::result::Result<(), String> {
-        let pending = self.pool.pending_remote_permissions(owner).await;
-        let now =
-            crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis(
-            );
-        self.permission_authority
-            .sweep_expired(self.permission_authority.now_ms());
-        for request in pending {
-            if let Some(approval_id) = journal.approval(&request.callback_id) {
-                if request.approval_id.as_deref() != Some(approval_id) {
-                    return Err("permission_binding_stale".to_owned());
-                }
-                let view = self
-                    .permission_authority
-                    .view_for_binding(&owner.lease, &owner.task_id, approval_id)
-                    .map_err(|error| error.code.to_owned())?;
-                let decision = match view.state.as_str() {
-                    "allowed" => Some(true),
-                    "denied" | "expired" => Some(false),
-                    _ => None,
-                };
-                if let Some(allow) = decision {
-                    let resolution = self
-                        .pool
-                        .respond_remote_permission(owner, approval_id, allow)
-                        .await;
-                    if let Err(error) = resolution {
-                        let code = error.to_string();
-                        if code == PERMISSION_DISPATCH_DEFERRED {
-                            continue;
-                        }
-                        if matches!(code.as_str(), TURN_TIMEOUT_CODE | TASK_CANCELLED_CODE) {
-                            return Err(code);
-                        }
-                        let still_pending = self
-                            .pool
-                            .pending_remote_permissions(owner)
-                            .await
-                            .iter()
-                            .any(|pending| pending.approval_id.as_deref() == Some(approval_id));
-                        if permission_dispatch_unresolved(
-                            &self.permission_authority,
-                            owner,
-                            approval_id,
-                            allow,
-                            still_pending,
-                        ) {
-                            return Err("permission_dispatch_failed".to_owned());
-                        }
-                    }
-                }
-                continue;
-            }
-            let minted = self
-                .pool
-                .mint_remote_permission(
-                    owner,
-                    &request.callback_id,
-                    &self.permission_authority,
-                    &self.tasks.ledger(),
-                    REMOTE_PERMISSION_TTL_MS,
-                )
-                .await;
-            // No approval is minted during the brief journal resource gate.
-            // Retry at the next bounded poll without retiring this runtime.
-            let Some(view) = permission_mint_projection(minted)? else {
-                continue;
-            };
-            let record = self
-                .tasks
-                .status(&owner.task_id)
-                .map_err(|error| error.code.to_owned())?;
-            if record.sequence != owner.task_sequence || record.session_id != owner.session_id
-                || record.lease != crate::features::remote_control::controller::task::TaskLeaseBinding::from_context(&owner.lease)
-            {
-                return Err("permission_binding_stale".to_owned());
-            }
-            if record.state == RemoteTaskState::Running {
-                self.tasks
-                    .enter_waiting_permission(&owner.task_id, owner.task_sequence, now)
-                    .map_err(|error| error.code.to_owned())?;
-            } else if record.state != RemoteTaskState::WaitingPermission {
-                return Err("task_state_conflict".to_owned());
-            }
-            journal.register(&request.callback_id, &view, events.as_ref())?;
-        }
-
-        // Responses in this very poll can remove entries. Observe the actual
-        // pending set again rather than requiring another 200ms iteration.
-        let current = self
-            .pool
-            .pending_remote_permissions(owner)
-            .await
-            .into_iter()
-            .map(|request| request.callback_id)
-            .collect::<HashSet<_>>();
-        if journal.project_missing(
+        permission_waiting::sync(
+            &*self.pool,
             &self.permission_authority,
             &self.tasks,
-            events.as_ref(),
-            &current,
-        )? > 0
-        {
-            let record = self
-                .tasks
-                .status(&owner.task_id)
-                .map_err(|error| error.code.to_owned())?;
-            if record.state == RemoteTaskState::WaitingPermission {
-                self.tasks.resume_running(&owner.task_id, owner.task_sequence,
-                    crate::features::remote_control::controller::relay_runtime::controlled_monotonic_millis())
-                    .map_err(|error| error.code.to_owned())?;
-            }
-        }
-        Ok(())
+            owner,
+            journal,
+            events,
+        )
+        .await
     }
 }
+
+mod permission_waiting;
 
 #[async_trait]
 impl RemoteCodeTurnPort for AcpPoolCodeTurnPort {
