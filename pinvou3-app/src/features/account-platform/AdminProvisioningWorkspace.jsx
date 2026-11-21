@@ -1,3 +1,4 @@
+import { tokenStatusLabel } from './status-label.js';
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import './admin-provisioning-table.css';
 import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-navigation.js';
@@ -95,7 +96,7 @@ function ProvisioningRows({ items, copy }) {
       return <tr key={item.provisioning_id}>
         <td data-label={words.object}><ProvisioningObjects item={item} copy={copy} /></td>
         <td data-label={copy.status}><Status value={item.status} copy={copy} /></td>
-        <td data-label={copy.stage}>{copy.enumLabels?.[item.stage] || item.stage}</td>
+        <td data-label={copy.stage}>{tokenStatusLabel(item.stage, copy.statusLanguage)}</td>
         <td data-label={copy.provisioningPresentation.versions}><dl className="adm-provisioning-versions"><div><dt>{copy.provisioningPresentation.effective}</dt><dd><ConfigGeneration value={item.actual_generation} copy={copy} /></dd></div><div><dt>{copy.provisioningPresentation.target}</dt><dd><ConfigGeneration value={item.desired_generation} copy={copy} /></dd></div></dl></td>
         <td data-label={copy.updatedAt}><DateValue value={item.updated_at} /></td>
         <td data-label={copy.actions}><button type="button" aria-expanded={expanded} aria-controls={details}

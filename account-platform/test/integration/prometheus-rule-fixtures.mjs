@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import YAML from 'yaml';
 import { composeApprovalRules } from '../../deploy/compose/render-approval-relay-alerts.mjs';
+import { retentionRuleCases } from './retention-rule-fixtures.mjs';
 
 const [renderedFile, outputDirectory] = process.argv.slice(2);
 assert.ok(renderedFile && outputDirectory, 'provide Helm-rendered YAML and a new test output directory');
@@ -100,6 +101,7 @@ const scenarios = [
     alert(deadName, baseLabels, 'Account authorization relay has unclassified dead letters')]],
 ];
 cases.tests.push(...scenarios.map(([name, input_series, alert_rule_test]) => ({ name, interval: '1m', input_series, alert_rule_test })));
+cases.tests.push(...retentionRuleCases(groups));
 
 const helmGroup = groups.find(group => group.name === 'account-platform.approval-authorization');
 const multiScopeGroups = [helmGroup, { ...composeRules.groups[0], name: `${helmGroup.name}.compose` }];

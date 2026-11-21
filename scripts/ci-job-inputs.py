@@ -28,8 +28,12 @@ CONTRACTS = {
         'windows-rustup-repair-test', 'windows-codex-runtime-test', 'windows-runtime-test',
         'macos-codex-runtime-test')},
 }
-POLICY_KEYS = ('trusted_backflow', 'backflow_mode', 'pure_release_backflow')
+POLICY_KEYS = ('trusted_backflow', 'pure_release_backflow')
 OBSERVATIONS = ('reused_jobs', 'reuse_verified', 'reuse_source')
+NEEDS_SCALAR = re.compile(
+    r"\bneeds(?:\.[\w-]+\.outputs\.[\w-]+|(?:\.[\w-]+|\[\s*(['\"])[\w-]+\1\s*\])\.result)"
+    r"(?=\s*(?:$|[}),=!&|<>]))"
+)
 
 
 def digest(value):
@@ -92,6 +96,11 @@ def fingerprint(name, workflow, entries, changed, configuration, routing):
         if key not in known or key in used or key.startswith('PINVOU_CI_REUSE_')}
     keys = set(re.findall(r'needs\.changes\.outputs\.([\w-]+)', context)) - set(OBSERVATIONS)
     keys.update(POLICY_KEYS)
+    # An explicit scalar output is already tracked above. Whole-object or
+    # indirect reads can observe the mode, so keep it unless all needs reads
+    # in this job and its producers are statically accounted for.
+    if re.search(r'\bneeds\b(?![ \t]*:)', NEEDS_SCALAR.sub('', context), re.I):
+        keys.add('backflow_mode')
     route = {key: routing.get(key, 'full' if key == 'backflow_mode' else 'false') for key in keys}
     return digest({'contract': 1, 'domains': sorted(domains),
                    'entries': [row for row in entries if selected(row[-1], domains)],

@@ -1,3 +1,4 @@
+import { statusLabel, tokenStatusLabel } from './status-label.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-navigation.js';
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
@@ -80,7 +81,7 @@ function ProvisioningList({ load, copy, routeVersion, onQueryChange, onOpen, his
       { key: 'sla_overdue', label: copy.slaOverdue, options: ['true', 'false'] },
     ]} />
     <SourceFeedback state={state} copy={copy} onRetry={retry} />
-    {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.provisioning}</th><th>{copy.modelID}</th><th>{copy.status}</th><th>{copy.stage}</th><th>{copy.generation}</th><th>{copy.updatedAt}</th>{canOpen && <th>{copy.actions}</th>}</tr></thead><tbody>{state.items.map((item) => <tr key={item.provisioning_id}><td data-label={copy.provisioning}><span className="adm-mono">{item.provisioning_id}</span></td><td data-label={copy.modelID}><span className="adm-mono">{item.model_id}</span></td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.stage}>{copy.enumLabels?.[item.stage] || item.stage}</td><td data-label={copy.generation}>{item.actual_generation || 0} / {item.desired_generation}</td><td data-label={copy.updatedAt}><DateValue value={item.updated_at} /></td>{canOpen && <td data-label={copy.actions}><button type="button" onClick={() => onOpen(item.provisioning_id)}>{copy.viewDetail}</button></td>}</tr>)}</tbody></table></div>}
+    {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.provisioning}</th><th>{copy.modelID}</th><th>{copy.status}</th><th>{copy.stage}</th><th>{copy.generation}</th><th>{copy.updatedAt}</th>{canOpen && <th>{copy.actions}</th>}</tr></thead><tbody>{state.items.map((item) => <tr key={item.provisioning_id}><td data-label={copy.provisioning}><span className="adm-mono">{item.provisioning_id}</span></td><td data-label={copy.modelID}><span className="adm-mono">{item.model_id}</span></td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.stage}>{tokenStatusLabel(item.stage, copy.statusLanguage)}</td><td data-label={copy.generation}>{item.actual_generation || 0} / {item.desired_generation}</td><td data-label={copy.updatedAt}><DateValue value={item.updated_at} /></td>{canOpen && <td data-label={copy.actions}><button type="button" onClick={() => onOpen(item.provisioning_id)}>{copy.viewDetail}</button></td>}</tr>)}</tbody></table></div>}
     <Pagination source="provisionings" query={query} state={state} copy={copy} cursorHistory={histories} onQueryChange={onQueryChange} />
   </section>;
 }
@@ -124,7 +125,7 @@ function ReconciliationList({ load, copy, routeVersion, onQueryChange, onOpen, h
       { key: 'sla_overdue', label: copy.slaOverdue, options: ['true', 'false'] },
     ]} />
     <SourceFeedback state={state} copy={copy} onRetry={retry} />
-    {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.caseID}</th><th>{copy.caseType}</th><th>{copy.severity}</th><th>{copy.status}</th><th>{copy.resolutionDue}</th>{canOpen && <th>{copy.actions}</th>}</tr></thead><tbody>{state.items.map((item) => <tr key={item.case_id}><td data-label={copy.caseID}><span className="adm-mono">{item.case_id}</span></td><td data-label={copy.caseType}>{copy.enumLabels?.[item.case_type] || item.case_type}</td><td data-label={copy.severity}><Status value={item.severity} copy={copy} /></td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.resolutionDue}><DateValue value={item.resolution_due_at} /></td>{canOpen && <td data-label={copy.actions}><button type="button" onClick={() => onOpen(item.resource_id)}>{copy.reviewEvidence}</button></td>}</tr>)}</tbody></table></div>}
+    {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.caseID}</th><th>{copy.caseType}</th><th>{copy.severity}</th><th>{copy.status}</th><th>{copy.resolutionDue}</th>{canOpen && <th>{copy.actions}</th>}</tr></thead><tbody>{state.items.map((item) => <tr key={item.case_id}><td data-label={copy.caseID}><span className="adm-mono">{item.case_id}</span></td><td data-label={copy.caseType}>{copy.enumLabels?.[item.case_type] || item.case_type}</td><td data-label={copy.severity}><span className="adm-status">{statusLabel(item.severity, copy.statusLanguage, copy.enumLabels, true)}</span></td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.resolutionDue}><DateValue value={item.resolution_due_at} /></td>{canOpen && <td data-label={copy.actions}><button type="button" onClick={() => onOpen(item.resource_id)}>{copy.reviewEvidence}</button></td>}</tr>)}</tbody></table></div>}
     <Pagination source="reconciliation" query={query} state={state} copy={copy} cursorHistory={histories} onQueryChange={onQueryChange} />
   </section>;
 }
@@ -139,7 +140,7 @@ function Evidence({ client, usageID, copy, routeVersion, onQueryChange, historie
     <SourceHeader title={copy.evidenceHistory} titleID="evidence-title" state={state} copy={copy} onRetry={retry} />
     <FilterForm source="usageEvidence" query={query} copy={copy} onQueryChange={onQueryChange} fields={[{ key: 'evidence_type', label: copy.evidenceType }]} />
     <SourceFeedback state={state} copy={copy} onRetry={retry} />
-    {state.items.length > 0 && <div className="adm-evidence-list">{state.items.map((item) => <article key={`${item.source_kind}:${item.source_id}`}><div><strong>{item.evidence_type}</strong><Status value={item.source_kind} copy={copy} /></div><time>{new Date(item.observed_at).toLocaleString()}</time><pre>{JSON.stringify(item.evidence || {}, null, 2)}</pre></article>)}</div>}
+    {state.items.length > 0 && <div className="adm-evidence-list">{state.items.map((item) => <article key={`${item.source_kind}:${item.source_id}`}><div><strong>{item.evidence_type}</strong><span className="adm-status">{statusLabel(item.source_kind, copy.statusLanguage, copy.enumLabels, true)}</span></div><time>{new Date(item.observed_at).toLocaleString()}</time><pre>{JSON.stringify(item.evidence || {}, null, 2)}</pre></article>)}</div>}
     <Pagination source="usageEvidence" query={query} state={state} copy={copy} cursorHistory={histories} onQueryChange={onQueryChange} />
   </section>;
 }
@@ -177,7 +178,7 @@ function UsageDetail({ id, client, copy, routeVersion, onBack, onQueryChange, hi
         [copy.tokenAccountID, valueOrDash(item.token_account_id)],
         [copy.protocol, valueOrDash(item.protocol_definition_id)],
         [copy.adapterVersion, valueOrDash(item.adapter_version)],
-        [copy.attemptStatus, valueOrDash(item.attempt_status)],
+        [copy.attemptStatus, item.attempt_status === null || item.attempt_status === undefined || item.attempt_status === '' ? '—' : tokenStatusLabel(item.attempt_status, copy.statusLanguage)],
         [copy.usageAmount, `${item.actual_microcredits ?? '—'} / ${item.maximum_microcredits}`],
         [copy.tokenUsage, `${valueOrDash(item.input_tokens)} + ${valueOrDash(item.cached_input_tokens)} / ${valueOrDash(item.output_tokens)}`],
         [copy.reconciliationAttempts, item.reconciliation_attempts],
