@@ -410,13 +410,11 @@ fn push_header_colon_value(
         name.trim_matches(|c: char| matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | ','));
     let is_auth = bare_name.eq_ignore_ascii_case("authorization")
         || bare_name.eq_ignore_ascii_case("proxy-authorization");
-    let is_cookie = bare_name.eq_ignore_ascii_case("cookie")
-        || bare_name.eq_ignore_ascii_case("set-cookie");
+    let is_cookie =
+        bare_name.eq_ignore_ascii_case("cookie") || bare_name.eq_ignore_ascii_case("set-cookie");
     // r44 P2-3：trim 集补反斜杠——转义引号形态（`\"Bearer`）不剥则 scheme
     // 判定失配、redact_next 不置位，凭据词裸落（磁盘+导出同漏）。
-    let scheme = value.trim_matches(|c: char| {
-        matches!(c, '"' | '\'' | ',' | ';' | '\\')
-    });
+    let scheme = value.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | '\\'));
     out.push_str(name);
     out.push(':');
     out.push_str(REDACTED);
