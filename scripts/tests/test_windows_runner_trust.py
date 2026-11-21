@@ -18,13 +18,13 @@ EXPECTED = {
     "pr-check": {
         "backflow-portability": "LIGHT",
         "windows-relay-dacl": "LIGHT",
-        "windows-relay-tools-test": "LIGHT",
+        "windows-relay-tools-test": "MEDIUM",
         "release-contract-test": "MEDIUM",
         "windows-static-updater-contract": "LIGHT",
         "windows-rust-test": "HEAVY",
         "windows-rustup-repair-test": "HEAVY",
-        "windows-codex-runtime-test": "LIGHT",
-        "windows-runtime-test": "LIGHT",
+        "windows-codex-runtime-test": "MEDIUM",
+        "windows-runtime-test": "MEDIUM",
     },
     "release-packages": {
         "remote-control-release-gate": "REMOTE",
