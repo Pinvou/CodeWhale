@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import { createPricingUnknownRecoveryGate, archivePricingUnknown, readPricingUnknownConfiguration, readPricingUnknownHistory } from './pricing-unknown-recovery.js';
 import { integerMoney } from './finance-contract.js';
 import { pricingUnknownStorageKey, replayPricingMutation } from './pricing-mutation.js';
@@ -18,10 +19,11 @@ const mutationKey = (prefix) => `${prefix}:${secureRequestID()}`;
 const outcomeUnknown = (error) => !Number.isFinite(error?.status) || error.status >= 500;
 const stableUUID = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
 
-function PricingStatus({ value }) {
-  const normalized = String(value || '—');
+function PricingStatus({ value, copy }) {
+  const normalized = typeof value === 'string' ? value : '';
+  const label = statusLabel(value, copy.statusLanguage);
   const tone = ['ACTIVE', 'PUBLISHED'].includes(normalized) ? 'ok' : normalized === 'DRAFT' ? 'warn' : 'neutral';
-  return <span className={`adm-status ${tone}`} aria-label={normalized}>{normalized}</span>;
+  return <span className={`adm-status ${tone}`} data-status={normalized} aria-label={label}>{label}</span>;
 }
 
 function fieldError(labels, value) {
@@ -804,7 +806,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
                 {formula?.version != null ? <small>{listWords.formulaVersion(formula.version)}</small> : <small className="adm-price-id">{item.formula_version_id || listWords.unavailable}</small>}
               </div></td>
               <td>v{item.version}</td>
-              <td><PricingStatus value={item.derived_status} /></td>
+              <td><PricingStatus value={item.derived_status} copy={copy} /></td>
               <td><div className="adm-price-window">
                 <PricingDate value={item.effective_from} language={language} missing={listWords.unavailable} />
                 {item.effective_to ? <PricingDate value={item.effective_to} language={language} missing={listWords.unavailable} /> : <small>{labels.openEnded}</small>}
@@ -829,7 +831,7 @@ export function PricingLifecycleWorkspace({ copy, client, permissions, owner, co
         {unitForm && <form className="adm-pricing-unit-form" onSubmit={submitUnit}><fieldset className="adm-pricing-fieldset" disabled={Boolean(loading.mutation || unknownMutation || !canManage)}><label>{labels.unitCode}<input maxLength="80" value={unitForm.unit_code} onChange={(event) => setUnitForm((current) => ({ ...current, unit_code: event.target.value }))} /></label><label>{labels.minimumPrecision}<input type="number" min="1" step="1" value={unitForm.minimum_precision} onChange={(event) => setUnitForm((current) => ({ ...current, minimum_precision: event.target.value }))} /></label><label>{labels.priceDenominator}<input type="number" min="1" step="1" value={unitForm.price_denominator} onChange={(event) => setUnitForm((current) => ({ ...current, price_denominator: event.target.value }))} /></label><label>{labels.roundingRule}<select value={unitForm.rounding_rule} onChange={(event) => setUnitForm((current) => ({ ...current, rounding_rule: event.target.value }))}><option>CEILING</option><option>FLOOR</option><option>HALF_UP</option></select></label><button disabled={loading.mutation || unknownMutation || !canManage}>{labels.createUnitVersion}</button><button type="button" disabled={Boolean(unknownMutation)} onClick={() => setUnitForm(null)}>{labels.cancel}</button></fieldset></form>}
         {/* biome-ignore lint/a11y/noNoninteractiveTabindex: This named overflow region needs keyboard focus for native table scrolling. */}
         <div className="adm-table-wrap" tabIndex="0" role="region" aria-label={labels.meteringUnits}><table className="adm-table adm-pricing-unit-table"><thead><tr><th scope="col">{labels.unitCode}</th><th scope="col">{labels.version}</th><th scope="col">{technicalWords.pricingBasis}</th><th scope="col">{copy.accounts.status}</th><th scope="col">{copy.accounts.actions}</th></tr></thead><tbody>
-          {units.map((item) => <tr key={item.unit_definition_id}><td><strong>{item.unit_code}</strong><PricingIdentifiers label={technicalWords.advanced} target={item.unit_code + " · v" + item.version} scope={identifierScope} client={client} owner={owner} language={language} identifiers={[[technicalWords.unitID, item.unit_definition_id]]} /></td><td>v{item.version}</td><td><MeteringBasis unit={item} labels={labels} /></td><td><PricingStatus value={item.status} /></td><td>{canManage && item.status === 'ACTIVE' ? <button type="button" className="danger adm-pricing-risk-trigger" onClick={() => openDeactivate(item)} disabled={loading.mutation || unknownMutation}>{labels.deactivate}</button> : '—'}</td></tr>)}
+          {units.map((item) => <tr key={item.unit_definition_id}><td><strong>{item.unit_code}</strong><PricingIdentifiers label={technicalWords.advanced} target={item.unit_code + " · v" + item.version} scope={identifierScope} client={client} owner={owner} language={language} identifiers={[[technicalWords.unitID, item.unit_definition_id]]} /></td><td>v{item.version}</td><td><MeteringBasis unit={item} labels={labels} /></td><td><PricingStatus value={item.status} copy={copy} /></td><td>{canManage && item.status === 'ACTIVE' ? <button type="button" className="danger adm-pricing-risk-trigger" onClick={() => openDeactivate(item)} disabled={loading.mutation || unknownMutation}>{labels.deactivate}</button> : '—'}</td></tr>)}
           {!units.length && !loading.units && !errors.units && updatedAt.units && <tr><td colSpan="5" className="adm-empty">{labels.noUnits}</td></tr>}
         </tbody></table></div>
       </section>

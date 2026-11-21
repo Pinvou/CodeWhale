@@ -1,8 +1,9 @@
+import { statusLabel } from './status-label.js';
 import React from 'react';
 import { accountLayoutCopy, adminLayoutCopy } from '../../shared/i18n.js';
 
 const known = (dictionary, value) => typeof value === 'string' && Object.prototype.hasOwnProperty.call(dictionary, value);
-const stateValue = (dictionary, value, missing) => known(dictionary, value) ? dictionary[value] : typeof value === 'string' && value.trim() ? <>{missing} (<code>{value}</code>)</> : missing;
+const stateValue = (dictionary, value, missing, language) => known(dictionary, value) ? dictionary[value] : typeof value === 'string' && value.trim() ? statusLabel(value, language, dictionary, true) : missing;
 const hasPaymentTime = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && !value.startsWith('0001-') && Number.isFinite(Date.parse(value.replace(/\.\d+/, '')));
 const lifecycle = ['CREATED', 'PENDING', 'PAID', 'PAID_LATE', 'FAILED', 'CLOSED', 'EXPIRED', 'MANUAL_REVIEW'];
 
@@ -22,10 +23,10 @@ export function AdminOrderStatusSummary({ detail, language }) {
   const expiredPending = detail.status === 'EXPIRED' && detail.fulfillment_status === 'PENDING';
   return <>
     <dl className="adm-user-details adm-order-status-summary">
-      <dt>{words.order}</dt><dd>{stateValue(orderStates, detail.status, words.unknown)}</dd>
+      <dt>{words.order}</dt><dd>{stateValue(orderStates, detail.status, words.unknown, language)}</dd>
       <dt>{words.payment}</dt><dd>{payment}{hasReceipt && receiptUnderReview && <> · {words.paymentUnderReview}</>}</dd>
-      <dt>{words.fulfillment}</dt><dd>{stateValue(words.fulfillmentStates, detail.fulfillment_status, words.unknown)}</dd>
-      <dt>{words.attention}</dt><dd>{stateValue(words.attentionStates, detail.attention_summary, words.unknown)}</dd>
+      <dt>{words.fulfillment}</dt><dd>{stateValue(words.fulfillmentStates, detail.fulfillment_status, words.unknown, language)}</dd>
+      <dt>{words.attention}</dt><dd>{stateValue(words.attentionStates, detail.attention_summary, words.unknown, language)}</dd>
     </dl>
     {expiredPending && <p><small>{words.expiredPending}</small></p>}
   </>;

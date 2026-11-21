@@ -1,6 +1,7 @@
+import { statusLabel } from './status-label.js';
 import React from 'react';
 import { adminLayoutCopy } from '../../shared/i18n.js';
-import { anomalyStatusText } from './anomaly-queue-status.js';
+import { anomalyStatusText, normalizeAnomalyStatus } from './anomaly-queue-status.js';
 import './admin-payment-anomaly-queue.css';
 
 const association = ['payment_order_id','payment_transaction_id','payment_evidence_id','refund_id','forced_refund_case_id','chargeback_case_id'];
@@ -26,7 +27,7 @@ export function AdminPaymentAnomalyTable({ items, emptyState, language, detailsL
         return <tr key={value.case_id}>
           <td data-label={copy.case}><code dir="ltr">{value.case_id}</code></td>
           <td data-label={copy.type}>{type && <strong>{type}</strong>}{valid(value.anomaly_type) ? <code dir="ltr">{value.anomaly_type}</code> : copy.missing}</td>
-          <td data-label={copy.status}>{anomalyStatusText(status, value.status)}</td>
+          <td data-label={copy.status}>{['OPEN', 'RESOLVED'].includes(normalizeAnomalyStatus(value.status)) ? anomalyStatusText(status, value.status) : statusLabel(value.status, language, status, true)}</td>
           <td data-label={copy.severity}>{valid(value.severity) ? value.severity : copy.missing}</td>
           <td data-label={copy.owner}>{valid(value.owner_id) ? <><code dir="ltr">{value.owner_id}</code>{timestamp(value.claimed_at) && <small>{copy.claimed} {valueAt(value.claimed_at, language, copy)}</small>}</> : copy.unassigned}</td>
           <td data-label={copy.range}>{links.length ? <dl>{links.map(key => <div key={key}><dt>{copy[key]}</dt><dd><code dir="ltr">{value[key]}</code></dd></div>)}</dl> : copy.missing}</td>

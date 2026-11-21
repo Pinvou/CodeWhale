@@ -60,6 +60,7 @@ try {
     assert.ok(text.includes('9,007,199,254,740,993'));
     assert.ok(text.includes('9,223,372,036,854,775,807'));
     for (const key of ['services', 'relays', 'recentErrors']) assert.ok(text.includes(await page.evaluate(key => window.statusFixture.copy.system[key], key)));
+    assert.ok(await page.$$eval('.adm-system-workspace .adm-status.ok', (badges, label) => badges.some(badge => badge.textContent.includes(label)), await page.evaluate(() => window.statusFixture.copy.system.statusLabels.HEALTHY)));
     assert.ok(text.includes('HEALTHY'));
     const recent = await page.evaluate(() => {
       const title = window.statusFixture.copy.system.recentErrors;
@@ -85,11 +86,18 @@ try {
     assert.ok(await page.evaluate(label => [...document.querySelectorAll('.adm-system-workspace th')].some(cell => cell.textContent === label), expectedUpdated));
     assert.deepEqual(await page.evaluate(() => window.statusFixture.calls.filter(call => call.url === '/api/admin/system/status').map(call => call.method)), ['GET', 'GET']);
   });
+  for (const language of ['zh', 'en', 'ja']) await run(`unknown service key retains text without inherited dictionary labels ${language}`, async page => {
+    await open(page, `language=${language}&mode=prototype-key`);
+    await page.waitForSelector('.adm-system-workspace .adm-metrics');
+    assert.ok(await page.$eval('.adm-system-workspace', node => node.textContent.includes('constructor')));
+    assert.deepEqual(await page.evaluate(() => window.statusFixture.calls.filter(call => call.url === '/api/admin/system/status').map(call => call.method)), ['GET']);
+  });
   await run('unhealthy, degraded relay and recent errors remain visible', async page => {
     await open(page, 'mode=unhealthy'); await page.waitForSelector('.adm-system-workspace .adm-metrics');
     const text = await page.evaluate(() => document.querySelector('.adm-system-workspace').textContent);
     for (const value of ['UNHEALTHY', 'DEGRADED', 'connection failed', 'controlled-resource', 'controlled pending error']) assert.ok(text.includes(value));
     assert.equal(await page.evaluate(() => document.querySelector('.adm-metrics article strong').textContent), '0 / 1');
+    for (const key of ['UNHEALTHY', 'DEGRADED']) assert.ok(text.includes(await page.evaluate(key => window.statusFixture.copy.system.statusLabels[key], key)));
   });
   for (const language of ['zh', 'en', 'ja']) await run(`unavailable reconciliation is not zero and diagnostics are translated ${language}`, async page => {
     await open(page, `language=${language}&mode=reconciliation-unavailable`);
