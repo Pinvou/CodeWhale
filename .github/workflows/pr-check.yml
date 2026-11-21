@@ -1078,6 +1078,8 @@ jobs:
               - '.github/workflows/release-packages.yml'
               - '.github/workflows/pr-check.yml'
             windows_runtime:
+              - 'scripts/ci-fixture-process.py'
+              - 'scripts/tests/test_ci_fixture_process.py'
               - 'pinvou3-app/resources/mcp-servers/**/manifest.json'
               - 'pinvou3-app/src-tauri/packaging/windows/runtime/**'
               - 'pinvou3-app/src-tauri/config/platforms/windows/runtime/**'
@@ -6014,8 +6016,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Windows 私有 runtime 缓存行为回归
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File pinvou3-app/tests/windows_runtime_cache_behavior.ps1
+      - name: Windows runtime 缓存与 Release 行为回归（PowerShell 5.1 和 7）
+        shell: pwsh
+        run: |
+          # Let each host build its own module search path. Inheriting pwsh's
+          # PSModulePath can hide built-in 5.1 modules such as Get-FileHash.
+          Remove-Item Env:PSModulePath -ErrorAction SilentlyContinue
+          $receipts = Join-Path $env:RUNNER_TEMP 'windows-runtime-${{ github.run_id }}-${{ github.run_attempt }}'
+          New-Item -ItemType Directory -Path $receipts -ErrorAction Stop | Out-Null
+          & python scripts/ci-fixture-process.py --receipt (Join-Path $receipts 'process-scope-tests.json') -- python -m unittest discover -s scripts/tests -p test_ci_fixture_process.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($runtimeShell in @('powershell', 'pwsh')) {
+            foreach ($runtimeTest in @('windows_runtime_cache_behavior.ps1', 'windows_runtime_release_behavior.ps1')) {
+              $receipt = Join-Path $receipts "$runtimeShell-$runtimeTest.json"
+              & python scripts/ci-fixture-process.py --receipt $receipt -- $runtimeShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "pinvou3-app/tests/$runtimeTest"
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
+
+      - name: Configure artifact transport for Windows runtime resource receipts
+        if: always()
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
+      - name: 上传 Windows runtime 资源收据
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          name: windows-runtime-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-runtime-${{ github.run_id }}-${{ github.run_attempt }}/
+          retention-days: 7
+          if-no-files-found: warn
 
   macos-codex-runtime-test:
     name: macos-codex-runtime-test

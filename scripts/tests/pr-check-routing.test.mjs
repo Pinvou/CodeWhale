@@ -120,6 +120,14 @@ function filterPaths(text, name) {
     .map((line) => line.slice(2).trim().replace(/^['"]|['"]$/g, ""));
 }
 
+test("Windows runtime regressions follow changes to their process supervisor", () => {
+  const paths = filterPaths(workflow, "windows_runtime");
+  for (const file of ["scripts/ci-fixture-process.py", "scripts/tests/test_ci_fixture_process.py"]) {
+    assert.ok(paths.some(pattern => matchesGlob(file, pattern)), file);
+  }
+  assert.ok(!paths.some(pattern => matchesGlob("scripts/check-version.mjs", pattern)));
+});
+
 // Extract the `if:` condition of a named workflow step.
 function stepCondition(text, stepName) {
   const escaped = stepName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -477,6 +485,24 @@ function assertWorkflowFailurePolicy(workflowText) {
   assertFrontendUploadRecovery(text);
   remainder = remainder.replace(namedStep(jobBlock("frontend-setup", text), frontendUploadStep), "");
   {
+    const receipt = namedStep(jobBlock("windows-runtime-test", text), "上传 Windows runtime 资源收据");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: 上传 Windows runtime 资源收据",
+      "        if: always()",
+      "        timeout-minutes: 3",
+      "        uses: actions/upload-artifact@v7",
+      "        continue-on-error: true",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
+      "        with:",
+      "          name: windows-runtime-receipts-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: ${{ runner.temp }}/windows-runtime-${{ github.run_id }}-${{ github.run_attempt }}/",
+      "          retention-days: 7",
+      "          if-no-files-found: warn",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
     const receipt = namedStep(jobBlock("windows-rust-test", text), "Windows atomic lifecycle receipts");
     assert.equal(namedStep(jobBlock("windows-rust-test", text), "Configure bounded Windows atomic upload diagnostics").trimEnd(), [
       "      - name: Configure bounded Windows atomic upload diagnostics",
@@ -623,6 +649,7 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     ["account-closure-test", "Account closure resource lifecycle receipts"],
     ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
     ["windows-codex-runtime-test", "Preserve ACP fixture exit receipt"],
+    ["windows-runtime-test", "上传 Windows runtime 资源收据"],
     ["windows-rust-test", "Windows atomic lifecycle receipts"],
     ["windows-relay-tools-test", "Preserve Windows relay tools process receipt"],
     ["release-contract-test", "Preserve Windows release contract process receipts"],

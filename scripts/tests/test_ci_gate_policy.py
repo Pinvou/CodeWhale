@@ -3849,6 +3849,7 @@ python3() { fixture_mock python3 "$@"; }
             "Account closure resource lifecycle receipts",
             "Preserve browser fixture exit receipts",
             "Preserve ACP fixture exit receipt",
+            "上传 Windows runtime 资源收据",
             "Windows atomic lifecycle receipts",
             "Preserve Windows relay tools process receipt",
             "Preserve Windows release contract process receipts",
@@ -3955,6 +3956,14 @@ python3() { fixture_mock python3 "$@"; }
                   run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
             """).rstrip(), "      "),
         )
+        runtime_receipt = _step_named(_extract_job_block(body, 'windows-runtime-test'), '上传 Windows runtime 资源收据')
+        for setting in ('if: always()', 'timeout-minutes: 3', 'uses: actions/upload-artifact@v7',
+                        'retention-days: 7', 'if-no-files-found: warn',
+                        'name: windows-runtime-receipts-${{ github.run_id }}-${{ github.run_attempt }}',
+                        'path: ${{ runner.temp }}/windows-runtime-${{ github.run_id }}-${{ github.run_attempt }}/'):
+            self.assertIn(setting, runtime_receipt)
+        self.assertIn(ARTIFACT_TLS_ENV, runtime_receipt)
+        self.assertNotRegex(runtime_receipt.replace(ARTIFACT_TLS_ENV, '', 1), r'(?m)^        (?:run|env):')
         transport = _step_named(_extract_job_block(body, 'required-gate'), 'PR test success proof transport')
         self.assertIn('timeout-minutes: 3', transport)
         self.assertIn('uses: actions/upload-artifact@v7', transport)
