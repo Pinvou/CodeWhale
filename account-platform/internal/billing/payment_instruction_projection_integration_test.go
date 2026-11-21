@@ -836,7 +836,7 @@ func instructionCommandFactsSnapshot(t *testing.T, r *PostgresRepository, ctx co
 func instructionImmutableOrderFacts(t *testing.T, r *PostgresRepository, ctx context.Context, id uuid.UUID) string {
 	t.Helper()
 	var facts string
-	if err := r.pool.QueryRow(ctx, `SELECT (to_jsonb(o)-ARRAY['status','close_status','payment_url','qr_data','expires_at','provider_payable_until','final_archive_eligible_at','last_successful_query_at','last_authoritative_unpaid_at','provider_status','provider_trace_id','updated_at','close_requested_at','locally_closed_at','attention_summary','summary_version'])::text FROM payment_orders o WHERE id=$1`, id).Scan(&facts); err != nil {
+	if err := r.pool.QueryRow(ctx, `SELECT (to_jsonb(o)-ARRAY['status','close_status','payment_url','qr_data','expires_at','provider_payable_until','final_archive_eligible_at','last_successful_query_at','last_authoritative_unpaid_at','archive_query_generation','archive_query_authoritative_unpaid','provider_status','provider_trace_id','updated_at','close_requested_at','locally_closed_at','attention_summary','summary_version'])::text FROM payment_orders o WHERE id=$1`, id).Scan(&facts); err != nil {
 		t.Fatal(err)
 	}
 	return facts

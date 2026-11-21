@@ -114,13 +114,14 @@ func TestUsageWaiverHistoricalSchemaPostgres(t *testing.T) {
 	}
 	t.Run("fresh-exact-history-append-only-runtime-and-forward-only", func(t *testing.T) {
 		c := f.database(t, ctx, "billing", "billing_schema_owner")
-		if err := Up(ctx, c, loaded); err != nil {
+		prefix := statisticsRollbackPrefix(loaded)
+		if err := Up(ctx, c, prefix); err != nil {
 			t.Fatal(err)
 		}
 		if err := migrations.Unlock(ctx, c); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := VerifyApplied(ctx, c, loaded); err != nil {
+		if _, err := VerifyApplied(ctx, c, prefix); err != nil {
 			t.Fatal(err)
 		}
 		var original string

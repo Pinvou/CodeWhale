@@ -98,6 +98,12 @@ func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []migration
 	if err := validateUsageWaiverHistoryDelivery(loaded); err != nil {
 		return migrations.Verification{}, err
 	}
+	if err := validateLatePaymentQueryAdmission(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
+	if err := validateLatePaymentQueryGenerations(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
 	ctx, err := migrations.PinLedger(ctx, connection)
 	if err != nil {
 		return migrations.Verification{}, err

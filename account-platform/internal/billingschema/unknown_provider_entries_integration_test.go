@@ -29,7 +29,7 @@ func TestUnknownProviderEntryPublicMigrationPostgres(t *testing.T) {
 	for _, kind := range []string{"fresh-public-up", "existing-known-row-upgrade", "historical-forward-only"} {
 		t.Run(kind, func(t *testing.T) {
 			c := f.database(t, ctx, "billing", "billing_schema_owner")
-			target := loaded
+			target := statisticsRollbackPrefix(loaded)
 			if kind == "historical-forward-only" {
 				target = nil
 				for _, m := range loaded {

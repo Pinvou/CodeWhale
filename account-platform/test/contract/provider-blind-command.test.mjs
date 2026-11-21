@@ -36,7 +36,7 @@ test('the real review dispatcher and client retain the original provider-blind c
   };
   try {
     const oldPending = Object.freeze({ action: facts.action, id: facts.id, reason: facts.reason });
-    assert.throws(() => execute(oldPending, key), /FINANCE_COMMAND_PROTOCOL_REQUIRED/);
+    await assert.rejects(execute(oldPending, key), /FINANCE_COMMAND_PROTOCOL_REQUIRED/);
     assert.equal(calls.length, 0, 'an unversioned old intent must not be upgraded and dispatched');
     await assert.rejects(execute(facts, key), TypeError);
     assert.equal(calls.length, 1, 'the client must not silently dispatch another command');

@@ -74,6 +74,12 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if err := validatePackageExpiryScan(input); err != nil {
 		return nil, err
 	}
+	if err := validateLatePaymentQueryAdmission(input); err != nil {
+		return nil, err
+	}
+	if err := validateLatePaymentQueryGenerations(input); err != nil {
+		return nil, err
+	}
 	if err := validateProviderHealthRecent(input); err != nil {
 		return nil, err
 	}

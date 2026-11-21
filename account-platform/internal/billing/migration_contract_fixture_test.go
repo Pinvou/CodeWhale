@@ -129,7 +129,8 @@ func installBillingFixturePrefix(t *testing.T, ctx context.Context, r *PostgresR
 // After the exact historical/Down contract, exercise the complete current
 // carrier on the same real facts, including lower versions delivered after45.
 // New migration objects are legitimate; every pre-existing ledger row and
-// financial/observation row must nevertheless remain byte-for-byte identical.
+// original financial/observation field must remain identical. The exact two
+// nullable 900047 additions have their own no-backfill/schema/ACL oracle.
 func completeBillingMigrationContract(t *testing.T, ctx context.Context, r *PostgresRepository, source, staged, product string) {
 	t.Helper()
 	loaded, err := migrations.Load(source)
@@ -161,10 +162,11 @@ func completeBillingMigrationContract(t *testing.T, ctx context.Context, r *Post
 	}
 	facts := func(phase string) string {
 		logPackageExpiryPhase(t, ctx, phase+".begin")
-		value := providerHealthTableFacts(t, ctx, r, "wallets", "payment_orders", "payment_transactions", "credit_lots", "entitlement_packages", "entitlement_components", "journal_entries", "ledger_postings", "payment_provider_attempts", "payment_provider_health_observations", "payment_stop_loss_evaluations", "payment_stop_loss_evaluation_members", "payment_provider_controls", "outbox_events")
+		value := providerHealthTableFacts(t, ctx, r, "wallets", "payment_transactions", "credit_lots", "entitlement_packages", "entitlement_components", "journal_entries", "ledger_postings", "payment_provider_attempts", "payment_provider_health_observations", "payment_stop_loss_evaluations", "payment_stop_loss_evaluation_members", "payment_provider_controls", "outbox_events")
 		logPackageExpiryPhase(t, ctx, phase+".end")
 		return value
 	}
+	queryUpgrade := freezeHistoricalQueryUpgrade(t, ctx, r)
 	beforeLedger, beforeFacts := ledger(), facts("carrier.facts.pre")
 	// Frozen900003 intentionally DROP/CREATEs billing_no_truncate for each
 	// pending migration. Bind original triggers by original tableOID and name,
@@ -205,6 +207,7 @@ func completeBillingMigrationContract(t *testing.T, ctx context.Context, r *Post
 			t.Fatal(err)
 		}
 	}
+	var completeLedgerBeforeReplay string
 	if product != "" {
 		logPackageExpiryPhase(t, ctx, "carrier.cli.up.begin")
 		output, err := providerHealthCLI(ctx, product, r, "billing_migrator", "up")
@@ -219,6 +222,9 @@ func completeBillingMigrationContract(t *testing.T, ctx context.Context, r *Post
 		latest := loaded[len(loaded)-1]
 		if err != nil || json.Unmarshal(output, &evidence) != nil || evidence.Event != "migration.post_verification" || evidence.Domain != "billing" || evidence.AppliedCount != len(loaded) || evidence.LatestVersion != latest.Version || evidence.LatestChecksum != latest.Checksum {
 			t.Fatalf("complete carrier actual CLI verification: %v\n%s", err, output)
+		}
+		if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&completeLedgerBeforeReplay); err != nil {
+			t.Fatal(err)
 		}
 	}
 	config := r.pool.Config().ConnConfig.Copy()
@@ -239,6 +245,13 @@ func completeBillingMigrationContract(t *testing.T, ctx context.Context, r *Post
 	if _, err = billingschema.VerifyApplied(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
+	if completeLedgerBeforeReplay != "" {
+		var current string
+		if err := r.pool.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`).Scan(&current); err != nil || current != completeLedgerBeforeReplay {
+			t.Fatal("complete replay changed an original or newly installed ledger row", err)
+		}
+	}
+	queryUpgrade.assertAfter(t, ctx, r)
 	afterLedger, afterFacts, afterAuthority := ledger(), facts("carrier.facts.post"), authority()
 	if afterAuthority != beforeAuthority {
 		var beforeParts, afterParts []json.RawMessage
