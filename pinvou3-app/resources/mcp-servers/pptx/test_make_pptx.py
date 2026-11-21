@@ -164,6 +164,66 @@ def test_partial_scoped_output_is_not_published():
         assert len(Presentation(recovered["path"]).slides) == 1
 
 
+def _directory_redirect(path, target):
+    if os.name == "nt":
+        # A directory junction exercises the reparse-point check without
+        # requiring the Windows symbolic-link privilege on the test runner.
+        import _winapi
+
+        _winapi.CreateJunction(target, path)
+    else:
+        os.symlink(target, path, target_is_directory=True)
+
+
+@case("3d. 拒绝重定向的会话目录")
+def test_redirected_session_directory_is_rejected():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        target = os.path.join(root, "other-session")
+        session = os.path.join(root, "sessions", "controlled-session")
+        os.mkdir(target)
+        os.makedirs(os.path.dirname(session))
+        _directory_redirect(session, target)
+        destination = os.path.join(session, "artifacts")
+        with patch.object(server, "_session_artifacts_dir", destination):
+            result = server.make_pptx(slides=[{"layout": "cover", "title": "会话目录"}])
+        assert result.get("ok") is False and "产物目录" in result.get("error", ""), result
+        assert os.listdir(target) == [], "不得在重定向目标下创建产物目录"
+
+
+@case("3e. 拒绝重定向的产物目录")
+def test_redirected_artifact_directory_is_rejected():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        target = os.path.join(root, "other-artifacts")
+        session = os.path.join(root, "sessions", "controlled-session")
+        os.mkdir(target)
+        os.makedirs(session)
+        destination = os.path.join(session, "artifacts")
+        _directory_redirect(destination, target)
+        with patch.object(server, "_session_artifacts_dir", destination):
+            result = server.make_pptx(slides=[{"layout": "cover", "title": "产物目录"}])
+        assert result.get("ok") is False and "产物目录" in result.get("error", ""), result
+        assert os.listdir(target) == [], "不得写入重定向的产物目录"
+
+
+@case("3f. 允许重定位整个会话根目录")
+def test_relocated_sessions_root_is_supported():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        target = os.path.join(root, "relocated-sessions")
+        sessions = os.path.join(root, "sessions")
+        os.mkdir(target)
+        _directory_redirect(sessions, target)
+        destination = os.path.join(sessions, "controlled-session", "artifacts")
+        with patch.object(server, "_session_artifacts_dir", destination):
+            result = server.make_pptx(
+                slides=[{"layout": "cover", "title": "会话根目录"}],
+                filename="relocated",
+            )
+        assert result.get("ok") is True, result
+        assert result["path"] == os.path.join(destination, "relocated.pptx"), result
+        stored = os.path.join(target, "controlled-session", "artifacts", "relocated.pptx")
+        assert len(Presentation(stored).slides) == 1
+
+
 # ── 4. 9 套主题全渲染 ────────────────────────────────────────────────────
 @case("4. 9 套主题全部能渲染")
 def test_all_themes():
