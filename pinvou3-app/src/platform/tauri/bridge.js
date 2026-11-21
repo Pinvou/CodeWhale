@@ -2908,6 +2908,8 @@ function composePlanMarkdown(snapshots) { return pinvouSharedtauriMain().compose
       cancelRemoteTask: desktopRemoteControlFeature.cancelRemoteTask,
       abandonRemoteTask: desktopRemoteControlFeature.abandonRemoteTask,
       permissionList: desktopRemoteControlFeature.permissionList,
+      userInputList: desktopRemoteControlFeature.userInputList,
+      userInputRespond: desktopRemoteControlFeature.userInputRespond,
       controlledPermissionList: desktopRemoteControlFeature.controlledPermissionList,
       permissionDecide: desktopRemoteControlFeature.permissionDecide,
       permissionDenyTask: desktopRemoteControlFeature.permissionDenyTask,

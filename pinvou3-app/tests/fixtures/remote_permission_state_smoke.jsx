@@ -39,6 +39,14 @@ function makeSession(id, leaseEpoch = 1, revision = 1, generation = 'generation-
   };
   if (!previous) history.unattemptedPending = [];
   history.entries = [{ journalEpoch: 'epoch-wait', sequence: 1, eventId: 'event-wait', taskId: 'task-wait', kind: 'status', body: 'waiting_permission' }];
+  if (fixture.scenario === 'question') {
+    history.entries = [
+      { journalEpoch: 'epoch-wait', sequence: 1, eventId: 'question-running', taskId: 'task-wait', kind: 'status', body: 'running' },
+      { journalEpoch: 'epoch-wait', sequence: 2, eventId: 'question-tool', taskId: 'task-wait', kind: 'tool', body: JSON.stringify({
+        schema: 'remote_tool_display/v1', toolId: 'call-question', toolName: 'request_user_input', toolState: 'running',
+      }) },
+    ];
+  }
   const bs = {
     activeSessionId: id, remoteProxyHistory: history, remoteCapabilities: capabilities,
     chatItems: [], messages: [], artifacts: [], attachments: [], sessions: [], queuedMessages: [],
@@ -53,11 +61,13 @@ function session(id, lease = 1, revision = 1, generation = 'generation-1') {
 }
 window.TauriBridge = {
   available: true,
+  lifecycle: { init: async () => {} },
   state: {
     getMany: () => ({ platformCapabilities }),
     get: domain => domain === 'desktopRemoteControl'
       ? { controllerConnection: fixture.current.connection, remoteCapabilities: fixture.current.capabilities } : {},
     subscribe: () => () => {},
+    subscribeMany: () => () => {},
   },
   chat: {
     getComposerDraft: () => composerDraft, setComposerDraft: text => { composerDraft = text; },
@@ -78,6 +88,8 @@ window.TauriBridge = {
       displayName: `${id}.txt`, mimeType: 'text/plain', totalBytes: 4, previewKind: 'text' }],
     permissionList: (...args) => fixture.permissionBridge.permissionList(...args),
     permissionDecide: (...args) => fixture.permissionBridge.permissionDecide(...args),
+    userInputList: (...args) => fixture.permissionBridge.userInputList(...args),
+    userInputRespond: (...args) => fixture.permissionBridge.userInputRespond(...args),
     artifactPreview(id) {
       return new Promise((resolve, reject) => fixture.previews.push({ id, resolve, reject }));
     },
@@ -142,6 +154,14 @@ function App() {
   fixture.current = selected;
   permissionState.desktopRemoteControl = { ...permissionState.desktopRemoteControl, controllerConnection: selected.connection };
   fixture.select = (...args) => setSelected(session(...args));
+  fixture.questionTerminal = status => {
+    const sequence = selected.history.entries.at(-1).sequence + 1;
+    const history = { ...selected.history, entries: [...selected.history.entries, {
+      journalEpoch: 'epoch-wait', sequence, eventId: `question-terminal-${sequence}`,
+      taskId: 'task-wait', kind: 'status', body: status,
+    }] };
+    setSelected({ ...selected, history, bs: { ...selected.bs, remoteProxyHistory: history } });
+  };
   fixture.projectPendingApproval = entry => {
     const sequence = selected.history.entries.at(-1).sequence + 1;
     const history = { ...selected.history, entries: [...selected.history.entries, {

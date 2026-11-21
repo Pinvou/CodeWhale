@@ -512,6 +512,8 @@ test("runtime validation requires negotiated outer and inner capabilities", () =
 
 test("remote actions require their operation capability in both encrypted directions", () => {
   const cases = [
+    ["user_input_list", { task_id: "task-1" }, { requests: [] }, "permission_v1"],
+    ["user_input_respond", { task_id: "task-1", input_id: "input-1", cancel: true, answers: [] }, { state: "accepted" }, "permission_v1"],
     ["permission_list", { task_id: "task-1" }, { permissions: [] }, "permission_v1"],
     ["attachment_abort", { task_id: "task-1", transfer_id: "ctr-up-1" }, { aborted: true }, "attachment_v1"],
     ["attachment_abort_confirmed", { task_id: "task-1", transfer_id: "ctr-up-1" }, { transfer_id: "ctr-up-1", cleanup_confirmed: true }, "attachment_v1"],

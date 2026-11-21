@@ -55,6 +55,8 @@ use tauri::{AppHandle, Manager as _};
 
 #[path = "desktop_remote_controller_business/permission_decision.rs"]
 mod permission_decision;
+#[path = "desktop_remote_controller_business/user_input_action.rs"]
+mod user_input_action;
 
 /// E2E-06：B 端清理端口。`ControlledDeviceManager` 在 stop / refresh / 远端断开 /
 /// 恢复失败等任何终态都会触发它；这里用同一代的任务登记表中断本代远端任务，
@@ -1094,7 +1096,9 @@ impl ControlledBusinessPort for DesktopControlledBusiness {
         operation: &str,
         body: &Value,
     ) -> Result<Value, String> {
-        if operation == "permission_decide" {
+        if matches!(operation, "user_input_list" | "user_input_respond") {
+            user_input_action::handle(&self.app, lease, session_ref, operation, body).await
+        } else if operation == "permission_decide" {
             self.handle_remote_permission_decision(lease, session_ref, body)
                 .await
         } else {

@@ -1,0 +1,39 @@
+{
+  "requests": [{
+    "input_id": "input-fixture-1",
+    "questions": [{
+      "id": "0", "header": "Pick", "question": "Choose a report", "multi_select": true,
+      "options": [
+        { "value": "0", "label": "A", "description": "First" },
+        { "value": "1", "label": "B", "description": "Second" }
+      ]
+    }]
+  }],
+  "valid_answers": [
+    [],
+    [{ "question_id": "0", "option_ids": ["0", "1"] }],
+    [{ "question_id": "0", "option_ids": [], "custom_text": "Other preference" }],
+    [{ "question_id": "0", "option_ids": [], "custom_text": null }]
+  ],
+  "invalid_answers": [
+    [{ "question_id": "constructor", "option_ids": ["0"] }],
+    [{ "question_id": "0", "option_ids": ["4"] }],
+    [{ "question_id": "0", "option_ids": ["0", "0"] }],
+    [{ "question_id": "0", "option_ids": [0] }],
+    [{ "question_id": "0", "option_ids": [], "custom_text": "  " }],
+    [{ "question_id": "0", "option_ids": [], "decision": "allow" }],
+    [{ "question_id": "0", "option_ids": [] }, { "question_id": "0", "option_ids": [] }],
+    [{ "question_id": "0", "option_ids": "0" }]
+  ],
+  "invalid_request_mutations": [
+    { "path": "/0/input_id", "value": "bad/id" },
+    { "path": "/0/questions/0/id", "value": "constructor" },
+    { "path": "/0/questions/0/multi_select", "value": "true" },
+    { "path": "/0/questions/0/header", "value": "" },
+    { "path": "/0/questions/0/question", "value": null },
+    { "path": "/0/questions/0/options", "value": [] },
+    { "path": "/0/questions/0/options/0/value", "value": "2" },
+    { "path": "/0/questions/0/options/0/label", "value": "" },
+    { "path": "/0/questions/0/options/0/description", "value": 12 }
+  ]
+}

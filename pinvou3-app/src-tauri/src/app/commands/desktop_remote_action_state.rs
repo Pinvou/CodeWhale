@@ -124,7 +124,7 @@ impl DesktopRemoteActionState {
     ) -> Result<ActionIdentityReservation, ActionIdentityError> {
         // Hash the exact canonical typed intent; never retain attachment bytes
         // or credentials in a second cache. Include task/chunk fields via body.
-        let permission_read = operation == "permission_list";
+        let permission_read = matches!(operation, "permission_list" | "user_input_list");
         let identity = json!([
             local_session_id,
             remote_ref,

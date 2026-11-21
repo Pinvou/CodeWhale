@@ -1322,7 +1322,7 @@
       }
       var key = remoteActionKey(localSessionId, remoteRef, intent);
       // A refresh after a decision must not inherit an earlier read's snapshot.
-      if (intent.operation === "permission_list" && independentRead) key += "|read:" + independentRead;
+      if ((intent.operation === "permission_list" || intent.operation === "user_input_list") && independentRead) key += "|read:" + independentRead;
       var actionLease = attachmentLeaseKey();
       if (actionLease && actionLedger.lease && actionLease !== actionLedger.lease) {
         actionLedger.entries = Object.create(null);
@@ -1366,7 +1366,8 @@
           }
           // A read has no mutation receipt to retain, including an uncertain
           // first attempt followed by a different, non-authoritative failure.
-          if (intent.operation === "permission_list" && independentRead) forgetAction(key, entry);
+          if ((intent.operation === "permission_list" || intent.operation === "user_input_list") && independentRead) forgetAction(key, entry);
+          if (intent.operation === "user_input_respond" && entry.unknown && !error.authoritative) error.resultUnknown = true;
           throw error;
         });
       }
@@ -1376,6 +1377,35 @@
       entry.promise = flight.finally(function () { entry.promise = null; });
       attempt(retryUncertain !== false).then(resolveFlight, rejectFlight);
       return entry.promise;
+    }
+
+    var userInputReadSequence = 0;
+    function sameQuestionView(before, after) {
+      var left = before.controllerConnection || {};
+      var right = after.controllerConnection || {};
+      return before.intents.controller === after.intents.controller
+        && ["status", "localSessionId", "sessionRef", "connectionId", "controllerLeaseId", "leaseEpoch", "relayEpoch", "generation"]
+          .every(function (field) { return left[field] === right[field]; });
+    }
+    function userInputList(localSessionId, remoteRef, taskId) {
+      if (!requiredOpaqueId(taskId) || userInputReadSequence >= Number.MAX_SAFE_INTEGER) return Promise.reject(invalidTaskIntent());
+      var before = current();
+      var terminal = controllerTerminalSequence;
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "user_input_list", taskId: taskId,
+      }, null, false, ++userInputReadSequence).then(function (body) {
+        if (terminal !== controllerTerminalSequence || !sameQuestionView(before, current())) return [];
+        return body && Array.isArray(body.requests) ? body.requests : [];
+      });
+    }
+
+    function userInputRespond(localSessionId, remoteRef, taskId, inputId, cancel, answers) {
+      if (!requiredOpaqueId(taskId) || !requiredOpaqueId(inputId) || typeof cancel !== "boolean" || !Array.isArray(answers)) {
+        return Promise.reject(invalidTaskIntent());
+      }
+      return invokeRemoteAction(localSessionId, remoteRef, {
+        operation: "user_input_respond", taskId: taskId, inputId: inputId, cancel: cancel, answers: answers,
+      });
     }
 
     function permissionList(localSessionId, remoteRef, taskId) {
@@ -1607,6 +1637,8 @@
       cancelRemoteTask: cancelRemoteTask,
       abandonRemoteTask: abandonRemoteTask,
       permissionList: permissionList,
+      userInputList: userInputList,
+      userInputRespond: userInputRespond,
       controlledPermissionList: controlledPermissionList,
       permissionDecide: permissionDecide,
       permissionDenyTask: permissionDenyTask,
