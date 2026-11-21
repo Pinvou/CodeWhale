@@ -90,5 +90,6 @@ export function ReconciliationCaseEvidence({ item, copy }) {
       </dl>}
       <pre>{JSON.stringify(item[key] ?? {}, null, 2)}</pre>
     </section>)}
+    {item.latest_observation && <section><h4>{copy.latestObservation}</h4><pre>{JSON.stringify(item.latest_observation, null, 2)}</pre></section>}
   </details>;
 }
