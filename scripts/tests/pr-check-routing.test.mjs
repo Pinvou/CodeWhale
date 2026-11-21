@@ -102,6 +102,38 @@ test("Windows runtime regressions follow changes to their process supervisor", (
   assert.ok(!paths.some(pattern => matchesGlob("scripts/check-version.mjs", pattern)));
 });
 
+test("Windows native fixture jobs use medium capacity without trusting fork labels", () => {
+  const names = ["windows-relay-tools-test", "windows-codex-runtime-test", "windows-runtime-test"];
+  const vars = {
+    PINVOU_WINDOWS_LIGHT_RUNNER: '["self-hosted","light"]',
+    PINVOU_WINDOWS_MEDIUM_RUNNER: '["self-hosted","medium"]',
+    PINVOU_WINDOWS_RUNNER: '["self-hosted","legacy"]',
+  };
+  for (const name of names) {
+    const expression = jobBlock(name).match(/^    runs-on: \$\{\{ (.*) \}\}$/m)[1];
+    const select = (event, headRepo = "Pinvou/pinvou3", headId = "123", variables = vars) => Array.from(runInNewContext(expression, {
+      fromJSON: JSON.parse,
+      vars: variables,
+      github: { event_name: event, repository: "Pinvou/pinvou3", repository_id: "123", event: {
+        pull_request: { head: { repo: { full_name: headRepo, id: headId } },
+          base: { repo: { full_name: "Pinvou/pinvou3", id: "123" } } },
+      } },
+    }));
+    for (const event of ["pull_request", "merge_group", "push"]) {
+      assert.deepEqual(select(event), ["self-hosted", "medium"], `${name}/${event}`);
+    }
+    assert.deepEqual(select("pull_request", "fork/pinvou3"), ["windows-latest"]);
+    assert.deepEqual(select("pull_request", "Pinvou/pinvou3", "999"), ["windows-latest"]);
+    assert.deepEqual(select("pull_request", "Pinvou/pinvou3", ""), ["windows-latest"]);
+    assert.deepEqual(select("pull_request", "Pinvou/pinvou3", "123", {
+      ...vars, PINVOU_WINDOWS_MEDIUM_RUNNER: "",
+    }), ["self-hosted", "legacy"]);
+    assert.deepEqual(select("pull_request", "Pinvou/pinvou3", "123", {
+      ...vars, PINVOU_WINDOWS_MEDIUM_RUNNER: "", PINVOU_WINDOWS_RUNNER: "",
+    }), ["windows-latest"]);
+  }
+});
+
 // Extract the `if:` condition of a named workflow step.
 function stepCondition(text, stepName) {
   const escaped = stepName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
