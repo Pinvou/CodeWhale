@@ -55,8 +55,8 @@ test('real public bridge forwards bounded user-question intents and retains unkn
     calls.push(structuredClone(args));
     if (args.intent.operation === 'user_input_list') return { requests: [] };
     attempts += 1;
-    if (attempts === 1) throw { code: 'result_unknown', requestId: args.requestId };
-    if (attempts === 2) throw { code: 'remote_action_failed', requestId: args.requestId };
+    if (attempts === 1) throw Object.assign(new Error('result_unknown'), { code: 'result_unknown', requestId: args.requestId });
+    if (attempts === 2) throw Object.assign(new Error('remote_action_failed'), { code: 'remote_action_failed', requestId: args.requestId });
     return { state: 'accepted' };
   });
   await h.api.platform.loadPlatformCapabilities();
@@ -84,7 +84,7 @@ test('unknown question reads release correlation capacity and cannot exhaust ans
     assert.equal(command, 'desktop_remote_action_a');
     if (args.intent.operation === 'user_input_list') {
       reads.add(args.requestId);
-      throw { code: 'result_unknown', requestId: args.requestId };
+      throw Object.assign(new Error('result_unknown'), { code: 'result_unknown', requestId: args.requestId });
     }
     mutation += 1; return { state: 'accepted' };
   });

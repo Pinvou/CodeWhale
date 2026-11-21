@@ -9,6 +9,22 @@
       ]
     }]
   }],
+  "mixed_requests": [{
+    "input_id": "input-fixture-mixed",
+    "questions": [{
+      "id": "0", "header": "Pick", "question": "Choose a report", "multi_select": true,
+      "options": [
+        { "value": "0", "label": "A", "description": "First" },
+        { "value": "1", "label": "B", "description": "Second" }
+      ]
+    }, {
+      "id": "1", "header": "Output", "question": "Choose output", "multi_select": false,
+      "options": [
+        { "value": "0", "label": "HTML", "description": "Web report" },
+        { "value": "1", "label": "TXT", "description": "Text report" }
+      ]
+    }]
+  }],
   "valid_answers": [
     [],
     [{ "question_id": "0", "option_ids": ["0", "1"] }],

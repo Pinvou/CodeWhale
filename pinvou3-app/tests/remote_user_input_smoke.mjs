@@ -10,6 +10,9 @@ import { createServer } from './helpers/vite-fixture.mjs';
 // Rust. Formal local runs may supply its exact fresh nonce/output instead.
 const producer = JSON.parse(fs.readFileSync(process.env.PINVOU_REMOTE_USER_INPUT_PROJECTION_FILE
   || new URL('../../remote-control-relay/test/fixtures/controller-user-input.json', import.meta.url), 'utf8'));
+const mixedProducer = process.env.PINVOU_REMOTE_USER_INPUT_MIXED_FILE
+  ? JSON.parse(fs.readFileSync(process.env.PINVOU_REMOTE_USER_INPUT_MIXED_FILE, 'utf8')).requests
+  : JSON.parse(fs.readFileSync(new URL('../../remote-control-relay/test/fixtures/controller-user-input.json', import.meta.url), 'utf8')).mixed_requests;
 const chrome = process.env.CHROME || [
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', '/usr/bin/chromium',
@@ -66,6 +69,32 @@ try {
     assert.equal(sent.intent.taskId, 'task-wait');
     assert.equal(sent.localSessionId, 'remote-a');
     assert.deepEqual(sent.intent.answers, [{ question_id: '0', option_ids: ['0', '1'] }]);
+    await settle(0, { state: 'accepted' });
+    await page.waitForFunction(() => !document.querySelector('[data-testid="remote-user-input"] input'));
+    assert.deepEqual(errors, []); count += 1;
+  }
+
+  for (const custom of [false, true]) {
+    await load(); await supply(0, mixedProducer);
+    const boxes = await page.$$('[data-testid="remote-user-input"] input[type="checkbox"]');
+    await boxes[0].click();
+    if (!custom) await boxes[1].click();
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('[data-testid="remote-user-input"] button')]
+      .find(button => button.textContent === window.dispatchFixture.copy.uiSubmit).disabled), true,
+    'the unanswered single-choice question blocks submission of a multi-question card');
+    if (custom) await page.type('[data-testid="remote-user-input"] fieldset:nth-of-type(2) input[type="text"]', 'My output');
+    else {
+      const radios = await page.$$('[data-testid="remote-user-input"] input[type="radio"]');
+      await radios[1].click();
+    }
+    await clickCopy('submit');
+    const sent = await decision(0);
+    assert.equal(sent.intent.inputId, mixedProducer[0].input_id);
+    assert.deepEqual(sent.intent.answers, [
+      { question_id: '0', option_ids: custom ? ['0'] : ['0', '1'] },
+      custom ? { question_id: '1', option_ids: [], custom_text: 'My output' }
+        : { question_id: '1', option_ids: ['1'] },
+    ]);
     await settle(0, { state: 'accepted' });
     await page.waitForFunction(() => !document.querySelector('[data-testid="remote-user-input"] input'));
     assert.deepEqual(errors, []); count += 1;

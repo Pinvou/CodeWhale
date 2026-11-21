@@ -103,6 +103,79 @@ fn producer_questions_keep_opaque_ids_and_exact_native_multi_answers_once() {
 }
 
 #[test]
+fn mixed_questions_require_the_single_choice_and_preserve_custom_answers() {
+    let guard = scope();
+    let turn = &guard.0;
+    let mut mixed = questions();
+    mixed.as_array_mut().unwrap().push(json!({
+        "id":"output-format", "header":"Output", "question":"Choose output",
+        "options":[{"label":"HTML","description":"Web report"},
+                   {"label":"TXT","description":"Text report"}]
+    }));
+    record_for_turn(
+        &turn.session_id,
+        turn.generation,
+        "turn-native",
+        "mixed",
+        mixed.clone(),
+    )
+    .unwrap();
+    let view = turn.pending().unwrap();
+    let id = &view[0].input_id;
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../../remote-control-relay/test/fixtures/controller-user-input.json"
+    ))
+    .unwrap();
+    let mut normalized = serde_json::to_value(&view).unwrap();
+    normalized[0]["input_id"] = fixture["mixed_requests"][0]["input_id"].clone();
+    assert_eq!(normalized, fixture["mixed_requests"]);
+    if let Ok(path) = std::env::var("PINVOU_REMOTE_USER_INPUT_MIXED_FILE") {
+        std::fs::write(path, serde_json::to_vec(&json!({"requests":view})).unwrap()).unwrap();
+    }
+    // The multi-select alone cannot submit the unanswered required output question.
+    assert!(turn.respond(id, false, &answer(), |_, _| panic!()).is_err());
+    let mut answers = answer();
+    answers.push(InputAnswer {
+        question_id: "1".into(),
+        option_ids: vec!["0".into(), "1".into()],
+        custom_text: None,
+    });
+    assert!(turn.respond(id, false, &answers, |_, _| panic!()).is_err());
+    answers[1].option_ids = vec!["1".into()];
+    turn.respond(id, false, &answers, |_, response| {
+        let response = response.unwrap();
+        assert_eq!(response.answers.len(), 3);
+        assert_eq!(response.answers[0].id, "__proto__");
+        assert_eq!(response.answers[2].id, "output-format");
+        assert_eq!(response.answers[2].value, "TXT");
+        Ok(())
+    })
+    .unwrap();
+    turn.record("custom-after-mixed", mixed).unwrap();
+    let next = turn.pending().unwrap()[0].input_id.clone();
+    let custom = vec![
+        InputAnswer {
+            question_id: "0".into(),
+            option_ids: vec![],
+            custom_text: None,
+        },
+        InputAnswer {
+            question_id: "1".into(),
+            option_ids: vec![],
+            custom_text: Some("My output".into()),
+        },
+    ];
+    turn.respond(&next, false, &custom, |_, response| {
+        let response = response.unwrap();
+        assert_eq!(response.answers.len(), 1);
+        assert_eq!(response.answers[0].id, "output-format");
+        assert_eq!(response.answers[0].value, "My output");
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn cancellation_closing_and_successor_reject_old_nonce() {
     let guard = scope();
     let old = guard.0.clone();

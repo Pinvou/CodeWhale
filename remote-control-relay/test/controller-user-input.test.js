@@ -18,6 +18,7 @@ const validate = (body, result) => validateControllerRuntimePayload(packet(body,
 
 test('shared native/relay user-question vectors reject malformed and excess authority fields', () => {
   assert.doesNotThrow(() => validate({ requests: fixture.requests }, true));
+  assert.doesNotThrow(() => validate({ requests: fixture.mixed_requests }, true));
   for (const mutation of fixture.invalid_request_mutations) {
     const requests = structuredClone(fixture.requests);
     const path = mutation.path.slice(1).split('/');

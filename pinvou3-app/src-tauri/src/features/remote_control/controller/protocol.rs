@@ -5872,6 +5872,7 @@ mod tests {
             )
         };
         packet(json!({"requests":fixture["requests"]}), true).unwrap();
+        packet(json!({"requests":fixture["mixed_requests"]}), true).unwrap();
         for mutation in fixture["invalid_request_mutations"].as_array().unwrap() {
             let mut requests = fixture["requests"].clone();
             *requests
