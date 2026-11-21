@@ -18,10 +18,17 @@
 
 use crate::http;
 use crate::json::Value;
+use crate::redact::redact_text;
 use std::io::{BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// r18 #5：协议错误的原文摘录先脱敏再截断——商店应答体可能回显脚本 env
+/// 注入的凭据（LMM_HF_TOKEN 形态），错误消息会经 task.error/事件出站。
+fn excerpt(text: &str) -> String {
+    redact_text(text).chars().take(512).collect()
+}
 
 struct DeadlineStream {
     stream: UnixStream,
@@ -181,10 +188,9 @@ impl StoreClient {
     pub fn tasks(&self) -> Result<Vec<StoreTask>, StoreErr> {
         let (status, text) = self.request("GET", "/v1/tasks", None)?;
         let v = self.parse_json(status, &text)?;
-        let arr = v
-            .get("tasks")
-            .and_then(|x| x.as_arr())
-            .ok_or_else(|| StoreErr::Protocol(format!("/v1/tasks 应答缺 tasks 数组：{text}")))?;
+        let arr = v.get("tasks").and_then(|x| x.as_arr()).ok_or_else(|| {
+            StoreErr::Protocol(format!("/v1/tasks 应答缺 tasks 数组：{}", excerpt(&text)))
+        })?;
         arr.iter()
             .map(|value| {
                 parse_store_task(value)
@@ -206,7 +212,7 @@ impl StoreClient {
         let (status, text) = self.request("GET", &path, None)?;
         let v = self.parse_json(status, &text)?;
         let task = parse_store_task(&v)
-            .ok_or_else(|| StoreErr::Protocol(format!("单任务应答缺字段：{text}")))?;
+            .ok_or_else(|| StoreErr::Protocol(format!("单任务应答缺字段：{}", excerpt(&text))))?;
         let lines = v
             .get("lines")
             .and_then(|x| x.as_arr())
@@ -278,12 +284,13 @@ impl StoreClient {
             .and_then(|x| x.as_str())
             .unwrap_or("store_error")
             .to_string();
+        // r18 #5：message 缺失时不得回退原始应答体全文（可能回显凭据）。
         let message = v
             .get("error")
             .and_then(|e| e.get("message"))
             .and_then(|x| x.as_str())
-            .unwrap_or(text)
-            .to_string();
+            .map(|x| x.to_string())
+            .unwrap_or_else(|| excerpt(text));
         Err(StoreErr::Http(status, code, message))
     }
 

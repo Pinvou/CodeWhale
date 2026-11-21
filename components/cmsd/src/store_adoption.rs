@@ -227,11 +227,16 @@ pub fn reconcile(app: &Arc<App>) {
                     return;
                 }
             }
-            if let Err(error) = crate::private_storage::secure_state(&app.config.state_dir)
-                .and_then(|_| crate::private_storage::publish(&file, &raw, true))
-            {
-                status["phase"] = "unavailable".into();
-                status["error"] = error.into();
+            // r18 #9：与 selection.rs 的孪生写方同款字节比较守卫——30s
+            // reconcile 对未变化的内容不重写（原为无条件 temp+双 fsync+
+            // rename，2,880 writes/日怠速）。
+            if trusted_file(&file, 1024 * 1024).ok().as_deref() != Some(raw.as_slice()) {
+                if let Err(error) = crate::private_storage::secure_state(&app.config.state_dir)
+                    .and_then(|_| crate::private_storage::publish(&file, &raw, true))
+                {
+                    status["phase"] = "unavailable".into();
+                    status["error"] = error.into();
+                }
             }
             if let Err(error) = selection::fence_archived(app, &snapshot) {
                 status["phase"] = "unavailable".into();

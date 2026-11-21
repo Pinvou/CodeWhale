@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import ssl
 import tempfile
 import urllib.error
 import urllib.parse
@@ -249,7 +250,7 @@ def error_reply(error):
         code, message = error.code, str(error)
     elif isinstance(error, urllib.error.HTTPError):
         code, message = "HTTP_%s" % error.code, "远端服务返回 HTTP %s。" % error.code
-    elif isinstance(error, (urllib.error.URLError, TimeoutError, http.client.HTTPException)):
+    elif isinstance(error, (urllib.error.URLError, TimeoutError, ssl.SSLError, http.client.HTTPException)):
         code, message = "NETWORK_ERROR", "网络连接失败或超时。"
     elif isinstance(error, OSError):
         code, message = "FILESYSTEM_ERROR", "文件操作失败（errno=%s）；检查空间、权限与目录。" % error.errno

@@ -1036,7 +1036,8 @@ fn tasks_view(app: &Arc<App>) -> Value {
             let (_, code, message) = install::map_store_err(error, false);
             let mut detail = Value::obj();
             detail.set("code", code.into());
-            detail.set("message", message.into());
+            // r18 #5：store_query.error.message 与直通/镜像边界同口径脱敏。
+            detail.set("message", redact::redact_text(&message).into());
             store_query.set("error", detail);
         }
     }

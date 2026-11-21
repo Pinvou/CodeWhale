@@ -67,6 +67,28 @@ def _socket_path():
     return os.path.join(runtime or state, "megacube/cmsd.sock")
 
 
+_CMSD_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
+def _bounded_recv(sock, limit=_CMSD_MAX_RESPONSE_BYTES):
+    """r18 #3：cmsd 管理通道有界读（与仓内其余通道 16MiB 口径对齐）。
+    socket 超时只拦停顿的发送方，拦不住快速流——无界 recv 可被异常 cmsd
+    或被指向的任意本地 socket 推爆整个 MCP 工具面的内存。"""
+    chunks = []
+    total = 0
+    while True:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise megacube_tools.ToolError(
+                "CMSD_RESPONSE_TOO_LARGE",
+                "管理通道应答超过 %d MiB 上限，已中止读取。" % (limit // (1024 * 1024)),
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
 def _http_get(path):
     """unix socket 上的极简 GET。返回 (status, body_text)。"""
     sock_path = _socket_path()
@@ -80,13 +102,7 @@ def _http_get(path):
             "GET %s HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n" % path
         ).encode("utf-8")
         sock.sendall(request)
-        chunks = []
-        while True:
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        raw = b"".join(chunks).decode("utf-8", "replace")
+        raw = _bounded_recv(sock).decode("utf-8", "replace")
         head, _, body = raw.partition("\r\n\r\n")
         parts = head.split(" ", 2)
         status = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
@@ -125,13 +141,7 @@ def _http_post(path, payload):
             "content-length: %d\r\nconnection: close\r\n\r\n" % (path, len(body))
         ).encode("utf-8")
         sock.sendall(head + body)
-        chunks = []
-        while True:
-            chunk = sock.recv(65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        raw = b"".join(chunks).decode("utf-8", "replace")
+        raw = _bounded_recv(sock).decode("utf-8", "replace")
         head_text, _, resp_body = raw.partition("\r\n\r\n")
         parts = head_text.split(" ", 2)
         status = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0

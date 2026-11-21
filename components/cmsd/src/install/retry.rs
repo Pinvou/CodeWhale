@@ -105,7 +105,7 @@ pub fn install(app: &Arc<App>, card: &str, body: &[u8]) -> Result<String, ApiErr
             }
             Err(error) => {
                 let error = map_store_err(error, false);
-                app.task_finish(&task, Err(error.2));
+                app.task_finish(&task, Err(crate::redact::redact_text(&error.2)));
                 return;
             }
         }

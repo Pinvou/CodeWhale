@@ -4,11 +4,13 @@ try:
 except ImportError:
     fcntl = None
 import hashlib
+import errno
 import http.client
 import os
 from pathlib import Path
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import time
@@ -386,8 +388,12 @@ class Transfer:
                 digest = sha256_file(part, self.cancel)
                 if item["sha256"] and digest != item["sha256"]:
                     # Retain evidence, but the next attempt must not resume corrupt bytes.
+                    # r18 #8：仅删 meta 不够——续传守卫对带 sha256 清单的项不生效，
+                    # 下一尝试会把 Range 接在已证损坏的前缀上（毒前缀循环）。
+                    # 全流 sha256 已证字节坏，receipt 仅成功时写、无误记风险。
                     meta_path.unlink(missing_ok=True)
-                    raise ToolError("HASH_MISMATCH", "文件摘要不匹配；不发布为完整产物。请检查来源或用新目录重新下载。")
+                    part.unlink(missing_ok=True)
+                    raise ToolError("HASH_MISMATCH", "文件摘要不匹配；已丢弃损坏分片，不发布为完整产物。请检查来源或用新目录重新下载。")
                 self.cancel()
                 artifact = {"path": str(target), "size_bytes": size, "sha256": digest,
                             "verification": "expected_sha256" if item["sha256"] else "computed_only",
@@ -401,8 +407,17 @@ class Transfer:
                 meta_path.unlink(missing_ok=True)
                 return artifact
             except (OSError, ToolError, http.client.HTTPException) as exc:
+                # r18 #7：磁盘满（ENOSPC/EDQUOT）不论源头（分片写、进度
+                # state.json 写、fsync）一律按 INSUFFICIENT_DISK 终止——
+                # 既不误记 FILESYSTEM_ERROR，也不进入网络重试空转。
+                if isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT):
+                    raise ToolError(
+                        "INSUFFICIENT_DISK",
+                        "磁盘空间不足（写分片或状态失败），部分文件保留。") from exc
                 code = getattr(exc, "code", None)
-                retryable = (isinstance(exc, (TimeoutError, ConnectionError, http.client.HTTPException))
+                # r18 #6：ssl.SSLError（OSError 子类但非 Connection/Timeout 族）
+                # 是多 GiB 传输的日常 TLS 记录层错误，必须按可重试处理。
+                retryable = (isinstance(exc, (TimeoutError, ConnectionError, ssl.SSLError, http.client.HTTPException))
                              or isinstance(exc, urllib.error.URLError) and not isinstance(exc, urllib.error.HTTPError)
                              or isinstance(exc, urllib.error.HTTPError) and exc.code in (408, 429, 500, 502, 503, 504)
                              or code in ("INCOMPLETE_DOWNLOAD", "RANGE_RESTART"))
@@ -413,6 +428,33 @@ class Transfer:
                     self.cancel()
                     time.sleep(0.1)
         raise ToolError("DOWNLOAD_FAILED", "下载失败。")
+
+
+def _terminal_event(transfer, state, message):
+    """r18 #7：终态事件写失败（满盘）不得吞掉已计算的终态——至少留在内存，
+    由 _terminal_save 的最小记录尽力落盘。"""
+    try:
+        transfer.event(message)
+    except OSError:
+        state.setdefault("events", []).append({"at": time.time(), "message": message})
+
+
+def _terminal_save(transfer, state):
+    """r18 #7：终态落账尽力而为。全量 save 失败时降级写最小终态记录
+    （status/error 等关键字段）；两者都失败也不再让异常逃逸——否则 worker
+    在满盘上静默崩溃，state.json 永远停在 running，用户无从得知磁盘满。"""
+    try:
+        transfer.save(True)
+        return
+    except OSError:
+        pass
+    minimal = {key: state[key] for key in (
+        "id", "status", "phase", "error", "error_code", "pid", "process_identity")
+        if key in state}
+    try:
+        write_json(transfer.directory / "state.json", minimal)
+    except OSError:
+        pass
 
 
 def run_worker(directory):
@@ -454,10 +496,10 @@ def run_worker(directory):
             transfer.event("文件获取完成；尚未安装引擎或验证推理。")
         except Cancelled:
             state.update(status="cancelled", phase="cancelled", error=None)
-            transfer.event("任务已取消，完整文件与部分下载均保留。")
+            _terminal_event(transfer, state, "任务已取消，完整文件与部分下载均保留。")
         except Exception as exc:
             result = error_reply(exc)
             state.update(status="failed", phase="failed", error=result["summary"], error_code=result["data"]["error_code"])
-            transfer.event(result["summary"])
+            _terminal_event(transfer, state, result["summary"])
         finally:
-            transfer.save(True)
+            _terminal_save(transfer, state)

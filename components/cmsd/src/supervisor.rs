@@ -715,13 +715,24 @@ fn reconcile_container_model(
             drop(guard);
             let mut guard = app.store.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(model) = guard.state.models.get_mut(card_name) {
-                model.status = if c.is_some_and(|c| c.running) {
+                // r18 #2：与下方原生孪生分支同款 diff 守卫——未归属容器卡的
+                // 30s 观察在稳态（status/main_pid 未变）不得置脏（原为每轮
+                // 全量落盘 2,880 saves/日）；重取锁后复检 ownership，避免并发
+                // enable 完成时被旧观察覆盖落盘错误快照。
+                if model.lifecycle_owned {
+                    return;
+                }
+                let next_status = if c.is_some_and(|c| c.running) {
                     ModelStatus::Running
                 } else {
                     ModelStatus::Stopped
                 };
-                model.main_pid = c.filter(|c| c.running && c.pid > 0).map(|c| c.pid);
-                guard.mark_dirty();
+                let next_pid = c.filter(|c| c.running && c.pid > 0).map(|c| c.pid);
+                if model.status != next_status || model.main_pid != next_pid {
+                    model.status = next_status;
+                    model.main_pid = next_pid;
+                    guard.mark_dirty();
+                }
             }
             return;
         }
@@ -1133,6 +1144,45 @@ mod tests {
 
     /// 残留收敛：对账之前状态就已是 Stopped（旧版品悟 stop.sh / docker stop
     /// 的历史现场），活跃指针还滞留且容器不会自拉（策略 no）⇒ 清掉指针。
+    /// r18 #2：非归属容器卡的观察在稳态（status/main_pid 未变）不得置脏
+    /// store——原为每轮无条件赋值+mark（2,880 saves/日）。
+    #[test]
+    fn steady_unowned_container_observation_does_not_remark_the_store_dirty() {
+        let (root, app, _port) = enabled_fixture("unowned-steady");
+        {
+            let mut guard = app.store.lock().unwrap_or_else(|e| e.into_inner());
+            let model = guard.state.models.get_mut("fixture-c").unwrap();
+            model.lifecycle_owned = false;
+            model.status = ModelStatus::Stopped;
+            model.main_pid = None;
+        }
+        // 第一次观察对齐运行态（容器已停）并落盘清脏。
+        reconcile_containers(&app);
+        assert!(app
+            .store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_dirty());
+        app.store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .save_if_dirty()
+            .unwrap();
+        // 稳态复测：同一观察不再置脏。
+        for _ in 0..3 {
+            reconcile_containers(&app);
+        }
+        assert!(
+            !app.store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_dirty(),
+            "稳态非归属容器观察不得再次置脏 store（r18 #2）"
+        );
+        drop(app);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn reconcile_clears_stale_active_pointer_when_not_autostart() {
         let (root, app, port) = enabled_fixture("staleactive");

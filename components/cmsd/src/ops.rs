@@ -1787,6 +1787,11 @@ pub fn register_external_managed(app: &Arc<App>, card_name: &str, us: &crate::sy
 
 /// 野生进程登记（D2）：只读收编，不拥有生命周期。
 /// 同 pid 但 /proc start_time 变了 = pid 复用（孤儿检测思想），按新进程轮转登记。
+/// r18 #1：sighting 存活判定由 supervisor 的 live_pids 承担（retain 对活进程
+/// 不依赖 last_seen），持久化时间戳只需在接近保留窗口时刷新——逐 tick 落盘
+/// 是纯写放大（每 sighting 43,200 saves/日）。
+const EXTERNAL_LAST_SEEN_REFRESH_SECS: u64 = 600;
+
 pub fn register_external(app: &Arc<App>, proc: &engine::ProcInfo) {
     let key = ExternalSighting::key(&proc.sha8, proc.pid);
     let mut guard = app.store.lock().unwrap_or_else(|e| e.into_inner());
@@ -1800,6 +1805,7 @@ pub fn register_external(app: &Arc<App>, proc: &engine::ProcInfo) {
     if reused {
         guard.state.externals.remove(&key);
     }
+    let existed = guard.state.externals.contains_key(&key);
     let entry = guard
         .state
         .externals
@@ -1813,14 +1819,24 @@ pub fn register_external(app: &Arc<App>, proc: &engine::ProcInfo) {
             first_seen_at: now,
             last_seen_at: now,
         });
-    entry.last_seen_at = now;
-    if entry.port.is_none() {
+    // r18 #1：仅当持久化字段真实变化（新 sighting/start_time 轮换/port 或
+    // model_id 补全）或时间戳接近保留窗口时才置脏。
+    let mut changed = !existed;
+    if now.saturating_sub(entry.last_seen_at) >= EXTERNAL_LAST_SEEN_REFRESH_SECS {
+        entry.last_seen_at = now;
+        changed = true;
+    }
+    if entry.port.is_none() && proc.port.is_some() {
         entry.port = proc.port;
+        changed = true;
     }
-    if entry.model_id.is_none() {
+    if entry.model_id.is_none() && proc.model_id.is_some() {
         entry.model_id = proc.model_id.clone();
+        changed = true;
     }
-    guard.mark_dirty();
+    if changed {
+        guard.mark_dirty();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2141,6 +2157,50 @@ fn switch_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn steady_external_sighting_does_not_remark_the_store_dirty() {
+        // r18 #1：supervisor 每 2s 对每个野生引擎调用 register_external；
+        // 稳态重复 sighting（start_time/port/model_id 不变且时间戳未到刷新
+        // 窗口）不得置脏——原为每 tick 全量落盘（43,200 saves/日）。
+        let root = crate::docker::fixtures::tmpdir("external-sighting-steady");
+        let app = crate::docker::fixtures::make_app(&root, 128, 100);
+        let proc = crate::engine::ProcInfo {
+            pid: 4242,
+            sha8: "ab12cd34".into(),
+            port: Some(18000),
+            model_id: Some("Model-X".into()),
+            start_time: 100,
+        };
+        register_external(&app, &proc);
+        {
+            let mut store = app.store.lock().unwrap();
+            assert!(store.is_dirty());
+            assert_eq!(store.state.externals.len(), 1);
+            store.save_if_dirty().unwrap();
+        }
+        // 稳态复测：同一 sighting 连续到达不再置脏。
+        register_external(&app, &proc);
+        assert!(
+            !app.store.lock().unwrap().is_dirty(),
+            "稳态 sighting 不得再次置脏 store（r18 #1）"
+        );
+        // 时间戳到达刷新窗口（600s）后允许一次刷新落盘。
+        {
+            let mut store = app.store.lock().unwrap();
+            let sighting = store.state.externals.values_mut().next().unwrap();
+            sighting.last_seen_at = sighting
+                .last_seen_at
+                .saturating_sub(EXTERNAL_LAST_SEEN_REFRESH_SECS);
+            store.save_if_dirty().unwrap();
+        }
+        register_external(&app, &proc);
+        assert!(
+            app.store.lock().unwrap().is_dirty(),
+            "陈旧 last_seen 刷新应落盘"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn changed_deployment_never_reuses_old_container() {
         let deploy = crate::cards::DockerDeploy {

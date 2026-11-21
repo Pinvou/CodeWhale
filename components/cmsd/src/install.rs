@@ -86,7 +86,7 @@ pub fn install(app: &Arc<App>, card_name: &str) -> Result<String, ApiErr> {
                     ),
                 ));
             }
-            app.task_finish(&task_id, Err(err.2.clone()));
+            app.task_finish(&task_id, Err(redact_text(&err.2)));
             return Err(err);
         }
     };
@@ -303,7 +303,14 @@ fn mirror_worker(app: &Arc<App>, task_id: &str, card: &str, run_id: &str) {
                                     // The first POST may still be queued or its
                                     // accepted record may be unavailable. A
                                     // later rejection cannot certify absence.
-                                    app.task_event(task_id,"reconnect",&format!("原关联仍未确认，商店核实请求被拒绝；继续保留互斥：{message}"));
+                                    app.task_event(
+                                        task_id,
+                                        "reconnect",
+                                        &format!(
+                                            "原关联仍未确认，商店核实请求被拒绝；继续保留互斥：{}",
+                                            redact_text(&message)
+                                        ),
+                                    );
                                 }
                                 _ => {} // Unknown is still unknown; never release exclusion.
                             }
@@ -320,7 +327,7 @@ fn mirror_worker(app: &Arc<App>, task_id: &str, card: &str, run_id: &str) {
                     app.task_event(
                         task_id,
                         "reconnect",
-                        &format!("商店查询异常，原任务仍待核实：{m}"),
+                        &format!("商店查询异常，原任务仍待核实：{}", redact_text(&m)),
                     );
                 }
             }
@@ -329,7 +336,7 @@ fn mirror_worker(app: &Arc<App>, task_id: &str, card: &str, run_id: &str) {
                     app.task_event(
                         task_id,
                         "reconnect",
-                        &format!("商店任务协议异常，保留原关联及互斥：{m}"),
+                        &format!("商店任务协议异常，保留原关联及互斥：{}", redact_text(&m)),
                     );
                 }
                 offline_streak = offline_streak.saturating_add(1);

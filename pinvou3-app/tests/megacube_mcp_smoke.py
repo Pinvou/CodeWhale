@@ -755,6 +755,10 @@ def network_error_preserves_retry_checks(tmp):
         status = 200
         headers = {}
         _sent = False
+        error_class = ConnectionResetError
+
+        def __init__(self, error_class=ConnectionResetError):
+            self.error_class = error_class
 
         def __enter__(self):
             return self
@@ -766,27 +770,114 @@ def network_error_preserves_retry_checks(tmp):
             if not self._sent:
                 self._sent = True
                 return b"x" * 1024
-            raise ConnectionResetError("peer reset mid-stream")
+            raise self.error_class("peer reset mid-stream")
+
+    import ssl as _ssl
 
     real_open = transfers.open_url
-    transfers.open_url = lambda *_a, **_k: ResetMidStream()
-    job = os.path.join(tmp, "net-job")
+    for label, error_class, expect_connection in (
+        ("连接中断", ConnectionResetError, True),
+        # r18 #6：ssl.SSLError 是 OSError 子类但非 Connection/Timeout 族，
+        # 必须同样直达 retryable（重试耗尽后原样抛出，不落终态 INSUFFICIENT_DISK）。
+        ("TLS 记录层错误", _ssl.SSLError, False),
+    ):
+        transfers.open_url = lambda *_a, **_k: ResetMidStream(error_class)
+        job = os.path.join(tmp, "net-job-%s" % label)
+        os.makedirs(job, exist_ok=True)
+        dest = os.path.join(tmp, "net-dest-%s" % label)
+        os.makedirs(dest, exist_ok=True)
+        try:
+            transfers.Transfer(_Path(job), {"artifacts": [], "events": []}).file(
+                {"url": "http://127.0.0.1:1/stream", "path": "net.bin",
+                 "size_bytes": None, "sha256": ""}, _Path(dest), None)
+            check("B3 网络中断保留重试分类（%s）" % label, False, "未抛错")
+        except transfers.ToolError as error:
+            check("B3 网络中断保留重试分类（%s）" % label,
+                  error.code != "INSUFFICIENT_DISK", error.code)
+        except (ConnectionError, _ssl.SSLError) as error:
+            # 重试耗尽后原样抛出网络异常：外层分类可判 retryable，part 可续传。
+            check("B3 网络中断保留重试分类（%s）" % label,
+                  expect_connection or isinstance(error, _ssl.SSLError))
+        except Exception as error:  # noqa: BLE001
+            check("B3 网络中断保留重试分类（%s）" % label, False, type(error).__name__)
+        finally:
+            transfers.open_url = real_open
+    if prev_home is None:
+        os.environ.pop("PINVOU3_HOME", None)
+    else:
+        os.environ["PINVOU3_HOME"] = prev_home
+
+
+def cmsd_channel_and_poison_part_checks(tmp):
+    """r18 #3：管理通道有界读（越限即 CMSD_RESPONSE_TOO_LARGE）；
+    r18 #8：HASH_MISMATCH 丢弃损坏 .part（毒前缀不得续传）。"""
+    import importlib as _il
+    from pathlib import Path as _Path
+    prev_home = os.environ.get("PINVOU3_HOME")
+    os.environ["PINVOU3_HOME"] = tmp
+    servers_dir = os.path.join(
+        ROOT, "src-tauri", "resources", "common", "bundle", "mcp-servers")
+    if servers_dir not in sys.path:
+        sys.path.insert(0, servers_dir)
+    admin = _il.import_module("megacube_admin_server")
+    transfers = _il.import_module("megacube_tools.transfers")
+
+    # r18 #3：伪造超限推送流（不走磁盘，仅内存累计判定）。
+    class FloodSocket:
+        def recv(self, _size):
+            return b"x" * 65536
+
+        def close(self):
+            pass
+
+    default_limit = admin._CMSD_MAX_RESPONSE_BYTES
+    admin._CMSD_MAX_RESPONSE_BYTES = 1024 * 1024
+    try:
+        admin._bounded_recv(FloodSocket())
+        check("B3 管理通道超限即中止（有界读）", False, "未抛错")
+    except transfers.ToolError as error:
+        check("B3 管理通道超限即中止（有界读）",
+              error.code == "CMSD_RESPONSE_TOO_LARGE", error.code)
+    except Exception as error:  # noqa: BLE001
+        check("B3 管理通道超限即中止（有界读）", False, type(error).__name__)
+    finally:
+        admin._CMSD_MAX_RESPONSE_BYTES = default_limit
+
+    # r18 #8：全流完成但 sha256 不匹配 → .part 必须删除。
+    class WrongDigestStream:
+        status = 200
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read1(self, _size):
+            if not getattr(self, "_sent", False):
+                self._sent = True
+                return b"corrupt-bytes"
+            return b""
+
+    real_open = transfers.open_url
+    transfers.open_url = lambda *_a, **_k: WrongDigestStream()
+    job = os.path.join(tmp, "poison-job")
     os.makedirs(job, exist_ok=True)
-    dest = os.path.join(tmp, "net-dest")
+    dest = os.path.join(tmp, "poison-dest")
     os.makedirs(dest, exist_ok=True)
     try:
         transfers.Transfer(_Path(job), {"artifacts": [], "events": []}).file(
-            {"url": "http://127.0.0.1:1/stream", "path": "net.bin",
-             "size_bytes": None, "sha256": ""}, _Path(dest), None)
-        check("B3 网络中断保留重试分类", False, "未抛错")
+            {"url": "http://127.0.0.1:1/stream", "path": "poison.bin",
+             "size_bytes": None, "sha256": "0" * 64}, _Path(dest), None)
+        check("B3 HASH_MISMATCH 丢弃损坏分片", False, "未抛错")
     except transfers.ToolError as error:
-        check("B3 网络中断保留重试分类",
-              error.code != "INSUFFICIENT_DISK", error.code)
-    except ConnectionError:
-        # 重试耗尽后原样抛出连接异常：外层分类可判 retryable，part 可续传。
-        check("B3 网络中断保留重试分类", True)
+        parts = list(_Path(dest).glob(".poison.bin.*.part"))
+        check("B3 HASH_MISMATCH 丢弃损坏分片",
+              error.code == "HASH_MISMATCH" and not parts,
+              "%s parts=%d" % (error.code, len(parts)))
     except Exception as error:  # noqa: BLE001
-        check("B3 网络中断保留重试分类", False, type(error).__name__)
+        check("B3 HASH_MISMATCH 丢弃损坏分片", False, type(error).__name__)
     finally:
         transfers.open_url = real_open
         if prev_home is None:
@@ -800,6 +891,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix="megacube-mcp-test-")
     unknown_length_cap_checks(tmp)
     network_error_preserves_retry_checks(tmp)
+    cmsd_channel_and_poison_part_checks(tmp)
     state = FixtureState()
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
     httpd.state = state

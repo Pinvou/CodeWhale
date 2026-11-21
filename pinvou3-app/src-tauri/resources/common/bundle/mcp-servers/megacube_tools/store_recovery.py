@@ -9,6 +9,7 @@ import struct
 import sys
 
 from .state import ToolError, error_reply, page, reply
+from .redact import redact_line, redact_text
 
 _LIMIT = 16 * 1024 * 1024
 _RUN = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,159}\Z")
@@ -79,9 +80,15 @@ def list_incomplete(args):
     value = _rpc("library", {})
     result = page(value.get("incompleteInstallations", []), {"installations_limit": 8, **args}, "installations")
     for item in result["installations"]:
-        if isinstance(item.get("error"), str) and len(item["error"]) > 1000:
-            item["error"] = item["error"][:1000]
-            item["error_truncated"] = True
+        # r18 #4：先脱敏再截断——与 cmsd 侧镜像/直通边界同口径，防止截断
+        # 把凭据劈成两半漏出前缀。
+        if isinstance(item.get("error"), str):
+            redacted = redact_text(item["error"])
+            if len(redacted) > 1000:
+                item["error"] = redacted[:1000]
+                item["error_truncated"] = True
+            else:
+                item["error"] = redacted
     result["observation_error"] = value.get("incompleteError")
     return reply("未完成安装索引；不代表已安装或已取得管理权。", result,
                  "先查原任务和错误；可恢复项调用 cube_preview_install_retry。取消保留部分文件，不自动清理。")
@@ -135,12 +142,14 @@ def task(args):
     status = "unknown" if value.get("unconfirmed") else "running"
     if value.get("done"):
         status = "cancelled" if value.get("cancelled") else "succeeded" if value.get("ok") else "failed"
+    raw_error = value.get("error")
     data = {"id": args["task_id"], "store_run_id": run_id, "status": status,
-            "backend_pending": value.get("backend_pending", False), "error": value.get("error"),
+            "backend_pending": value.get("backend_pending", False),
+            "error": redact_text(raw_error) if isinstance(raw_error, str) else raw_error,
             "result_available": value.get("result") is not None or value.get("result_truncated", False),
             "result_truncated": value.get("result_truncated", False),
             "error_truncated": value.get("error_truncated", False),
-            "events": [{"message": line[:1000], "truncated": len(line) > 1000 or absolute_start + index in truncated}
+            "events": [{"message": redact_line(line)[:1000], "truncated": len(line) > 1000 or absolute_start + index in truncated}
                        for index, line in enumerate(selected)],
             "events_total": total, "events_offset": absolute_start,
             "events_next_offset": absolute_start + len(selected) if total is not None and absolute_start + len(selected) < total else None}
