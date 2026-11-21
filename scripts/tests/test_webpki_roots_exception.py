@@ -208,7 +208,8 @@ def cargo_deny_commands(workflow):
     reviewed_pinned_actions = {'actions/setup-go@v6', 'actions/upload-artifact@v7'}
     reviewed_actions = {'actions/checkout', 'actions/setup-node', 'actions/setup-python',
                         'actions/cache/restore', 'actions/cache/save', 'dorny/paths-filter',
-                        'dtolnay/rust-toolchain', 'Swatinem/rust-cache', 'taiki-e/install-action'}
+                         'dtolnay/rust-toolchain', 'Swatinem/rust-cache', 'taiki-e/install-action',
+                         './.github/actions/linux-rust-cache'}
     for index, line in enumerate(lines):
         if index in scalar_lines or line.lstrip().startswith('#'):
             continue

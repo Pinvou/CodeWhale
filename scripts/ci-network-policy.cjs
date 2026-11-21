@@ -5,7 +5,7 @@ const path = require('node:path');
 
 const stepPattern = /^      - [\s\S]*?(?=^      - |^  [A-Za-z0-9_-]+:|$(?![\s\S]))/gm;
 const options = '${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}';
-const families = /^(actions\/(upload-artifact|download-artifact|attest-build-provenance|cache(?:\/(restore|save))?|setup-node|setup-go|setup-python)|swatinem\/rust-cache)$/;
+const families = /^(actions\/(upload-artifact|download-artifact|attest-build-provenance|cache(?:\/(restore|save))?|setup-node|setup-go|setup-python)|swatinem\/rust-cache|\.\/\.github\/actions\/linux-rust-cache)$/;
 
 function storageAction(step) {
   const action = step.match(/^ {6}(?:- uses:|  uses:) ([^\s]+)\s*$/m)?.[1]?.toLowerCase().split('@')[0];
