@@ -146,6 +146,7 @@ import {
 } from '../remote-control/remote-control-logic.mjs';
 import { createCapabilityRequestLoop } from '../remote-control/capability-request-loop.mjs';
 import { prepareRemoteTaskCapabilities } from '../remote-control/remote-task-preflight.mjs';
+import { permissionStateCopyKey } from '../remote-control/permission-state.mjs';
 import { permissionOperationCopyKey, permissionRedactionCopyKey } from '../remote-control/controlled-device-panel-state.mjs';
 import {
   canUseControllerTemporaryModel,
@@ -1162,6 +1163,7 @@ const openChatExternalUrl = (url) => {
       const [remoteTransfer, setRemoteTransfer] = useState(null);
       const [remoteTransferGuard] = useState(createRemoteTransferGuard);
       const [remotePermissions, setRemotePermissions] = useState([]);
+      const [remotePermissionRefreshRevision, setRemotePermissionRefreshRevision] = useState(0);
       const [remoteArtifacts, setRemoteArtifacts] = useState([]);
       const [remoteArtifactPreview, setRemoteArtifactPreview] = useState(null);
       const [remoteActionError, setRemoteActionError] = useState(null);
@@ -1331,6 +1333,17 @@ const openChatExternalUrl = (url) => {
           : null,
         [activeSessionId, remoteChatActive, remoteProxyHistory, scopedRemoteConnection],
       );
+      const remotePermissionOwner = remoteModelBindingKey && currentRemoteTaskId
+        ? JSON.stringify([remoteModelBindingKey, currentRemoteTaskId]) : '';
+      const remotePermissionOwnerRef = useRef(remotePermissionOwner);
+      // eslint-disable-next-line react-hooks/refs -- async reads refresh only the current lease/task owner
+      remotePermissionOwnerRef.current = remotePermissionOwner;
+      useEffect(() => {
+        remotePermissionOwnerRef.current = remotePermissionOwner;
+        return () => {
+          if (remotePermissionOwnerRef.current === remotePermissionOwner) remotePermissionOwnerRef.current = '';
+        };
+      }, [remotePermissionOwner]);
       const remoteModelListingRequestIdentity = remoteBinding ? remoteSendIdentity : '';
       const [remoteModelsForBinding, setRemoteModelsForBinding] = useState({ key: '', models: [] });
       const [remoteModelSelection, setRemoteModelSelection] = useState({ key: '', modelId: '' });
@@ -1437,7 +1450,8 @@ const openChatExternalUrl = (url) => {
           if (!cancelled) setRemoteActionError(remoteActionFailureCode(failure));
         });
         return () => { cancelled = true; };
-      }, [remoteModelBindingKey, currentRemoteTaskId, remotePermissionPollRevision]);
+      }, [remoteModelBindingKey, currentRemoteTaskId, remotePermissionPollRevision,
+        scopedRemoteConnection?.capabilityRevision, remotePermissionRefreshRevision]);
       const controlledLinkReady = !!(
         controlledChatActive
         && controlledSession.sessionId
@@ -3706,6 +3720,11 @@ const openChatExternalUrl = (url) => {
             remoteBinding.localSessionId, remoteBinding.remoteRef, permission.taskId,
             permission.permissionRequestId, decision,
           );
+          // A renewed capability snapshot retires action UI ownership, but a
+          // successful decision still needs a fresh read for this exact task.
+          if (remotePermissionOwner && remotePermissionOwnerRef.current === remotePermissionOwner) {
+            setRemotePermissionRefreshRevision(current => current + 1);
+          }
           if (isCurrentRemoteAction(operation)) {
             setRemotePermissions(current => current.filter(item => item.permissionRequestId !== permission.permissionRequestId));
           }
@@ -5263,7 +5282,7 @@ const openChatExternalUrl = (url) => {
                         <button type="button" data-testid="chat-remote-permission-deny" data-coordination-id={permission.permissionRequestId} onClick={() => decideRemotePermission(permission, 'deny')} disabled={!!remoteDispatchAction}
                           className="rounded-full border px-2 py-1 disabled:opacity-50">{t.remoteConversation.permissionDeny}</button>
                       </div>
-                    ) : <div className="mt-1 text-amber-700 dark:text-amber-300">{t.remoteConversation.permissionTimedOut}</div>}
+                    ) : <div className="mt-1 text-amber-700 dark:text-amber-300">{t.remoteConversation[permissionStateCopyKey(permission.state)]}</div>}
                   </div>
                 ))}
               </section>
