@@ -276,7 +276,7 @@
         var language = state && state.settings && state.settings.language;
         var dictionary = window.PinvouPptxProfileUnavailableCopy;
         var copy = dictionary && dictionary[language === "en" ? "en" : language === "ja" ? "ja" : "zh"];
-        if (copy) return copy;
+        if (copy && copy.message) return copy.message;
       }
       var recovery = migrationRecoveryText(text, state);
       if (recovery != null) return recovery;

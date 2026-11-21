@@ -208,8 +208,10 @@ const migrationCases = {
 for (const [language, copy] of Object.entries(CHAT_RECOVERY_COPY)) {
   await withLanguage(language === 'zh' ? 'zh-Hans' : language, () => {
     const pptError = 'send_user_message failed: pptx_session_profile_unavailable';
-    assert.equal(displayTurnError(new Error(pptError)), PPTX_PROFILE_UNAVAILABLE_COPY[language]);
-    assert.equal(displayTurnError(pptError), PPTX_PROFILE_UNAVAILABLE_COPY[language]);
+    const pptCopy = PPTX_PROFILE_UNAVAILABLE_COPY[language].message;
+    assert.equal(displayTurnError(new Error(pptError)), pptCopy);
+    assert.equal(displayTurnError(pptError), pptCopy);
+    assert.equal(displayTurnError('pptx_session_profile_unavailable'), pptCopy);
     for (const message of ['account_platform_runtime_protocol_unavailable: internal detail', 'account platform model runtime protocol is missing or unsupported; publish its capability before invoking']) {
       for (const prefix of ['', 'send_user_message failed: ']) {
         assert.equal(displayTurnError(new Error(prefix + message)), copy.modelRuntimeProtocolUnavailable);
