@@ -245,11 +245,16 @@ function pumpRun(id, runId, { replayLimit = null } = {}) {
     // 取消中…」，而 `.catch(() => {})` 恰好让那句话成真——补发失败时用户看到的就是
     // 一张永远「正在取消」的卡。评审没点到这处，但它跟下面那两处是同一个病。
     cancelRun(runId).catch((e) => {
-      patch(id, (task) => ({
-        status: task.status === 'cancelling' ? 'running' : task.status,
-        errorKey: 'taskCancelFailed',
-        errorDetail: String(e?.message || e),
-      }));
+      patch(id, (task) => {
+        // r43 P2：轮询可能已经把任务落成终态（error/cancelled）——这时回灌
+        // 「取消失败」会把真正的结局盖掉。终态一概不动。
+        if (task.status === 'error' || task.status === 'cancelled') return {};
+        return {
+          status: task.status === 'cancelling' ? 'running' : task.status,
+          errorKey: 'taskCancelFailed',
+          errorDetail: String(e?.message || e),
+        };
+      });
     });
   }
   return drainRun(runId, {
@@ -443,11 +448,16 @@ function cancelTask(id) {
       // 不能走 `failTask`——那会把整张卡判死并广播 settled，而运行大概率还在继续，
       // 轮询循环仍然会送回它真正的结果，两边会打架。这里只做两件事：把状态退回
       // `running` 让按钮重新可点，并把原因显示出来。
-      patch(id, (task) => ({
-        status: task.status === 'cancelling' ? 'running' : task.status,
-        errorKey: 'taskCancelFailed',
-        errorDetail: String(e?.message || e),
-      }));
+      patch(id, (task) => {
+        // r43 P2：轮询可能已经把任务落成终态（error/cancelled）——这时回灌
+        // 「取消失败」会把真正的结局盖掉。终态一概不动。
+        if (task.status === 'error' || task.status === 'cancelled') return {};
+        return {
+          status: task.status === 'cancelling' ? 'running' : task.status,
+          errorKey: 'taskCancelFailed',
+          errorDetail: String(e?.message || e),
+        };
+      });
     });
   } else {
     // run_id 还没回来。记下意图,等它落地时补发(见 pumpRun)。
@@ -478,7 +488,10 @@ function answerTask(id, value) {
         // **只在 key 仍然是它本人时才清**:这中间用户完全可能点过取消、而那次
         // 取消又失败了(errorKey 已经变成 taskCancelFailed),无条件清会把那条
         // 更晚、更要紧的错误一起抹掉。
-        patch(id, (task) => (task.errorKey === 'taskAnswerFailed' ? { errorKey: null, errorDetail: null } : {}));
+        patch(id, (task) => {
+          if (task.status === 'error' || task.status === 'cancelled') return {};
+          return task.errorKey === 'taskAnswerFailed' ? { errorKey: null, errorDetail: null } : {};
+        });
       },
       (e) => {
         // 答案没送到，而脚本还阻塞在它那次 `read` 上——600 秒后会被
@@ -487,12 +500,16 @@ function answerTask(id, value) {
         //
         // 把提示原样放回去（让用户能再答一次）并显示原因。同样不走 `failTask`：
         // 判死这张卡的权力属于轮询循环。
-        patch(id, (task) => ({
-          prompt: task.prompt ?? pendingPrompt,
-          status: task.status === 'cancelling' ? 'running' : task.status,
-          errorKey: 'taskAnswerFailed',
-          errorDetail: String(e?.message || e),
-        }));
+        patch(id, (task) => {
+          // r43 P2：同 cancelTask——终态后不再回灌输入框/错误，结局优先。
+          if (task.status === 'error' || task.status === 'cancelled') return {};
+          return {
+            prompt: task.prompt ?? pendingPrompt,
+            status: task.status === 'cancelling' ? 'running' : task.status,
+            errorKey: 'taskAnswerFailed',
+            errorDetail: String(e?.message || e),
+          };
+        });
       }
     );
   }

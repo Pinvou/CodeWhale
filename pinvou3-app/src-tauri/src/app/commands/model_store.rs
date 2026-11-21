@@ -106,14 +106,22 @@ pub async fn model_store_versions(card_id: String, measure: Option<bool>) -> Res
     model_store::versions(card_id, measure).await
 }
 #[tauri::command]
-pub fn model_store_start_version_action(
+pub async fn model_store_start_version_action(
     service: State<'_, Arc<ModelStoreService>>,
     card_id: String,
     action: String,
     version_id: String,
     memory_confirmed: bool,
 ) -> Result<Value, String> {
-    model_store::start_version_action(&service, card_id, action, version_id, memory_confirmed)
+    // r43 P2：switch 的内存准入带 Docker/进程探测（prepare_model_start 内联
+    // reconcile+采样），同步命令会把 UI 线程卡住数秒——改走与 start_deploy
+    // 相同的 spawn_blocking 形态。
+    let service = Arc::clone(&service);
+    tokio::task::spawn_blocking(move || {
+        model_store::start_version_action(&service, card_id, action, version_id, memory_confirmed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

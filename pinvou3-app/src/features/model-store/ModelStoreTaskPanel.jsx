@@ -301,7 +301,11 @@ function ModelStoreTaskCard({ task, copy, onCancel, onDismiss, onToggle, onAnswe
           : task.errorKey,
         task.errorDetail,
       ].filter(Boolean).join(String.fromCharCode(10));
-      const ok = fields.length > 0 && await copyClipboardText(fields);
+      // r43 P2：同步失败只落 task.error（无 errorKey/errorDetail）时上面的拼装
+      // 是空的——用户点「复制详情」得到 copyFailed。这里没有运行记录，
+      // task.error 不可能是脚本输出尾，回落到展示用的 errorText 同源文本。
+      const payload = fields || (task.error ? errorText : '');
+      const ok = payload.length > 0 && await copyClipboardText(payload);
       setCopied(ok ? 'ok' : 'fail');
       setLogNotice(ok
         ? { tone: 'ok', text: copy.copied }
