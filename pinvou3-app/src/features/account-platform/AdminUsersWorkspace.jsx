@@ -1,3 +1,4 @@
+import { accountUserStatusLabel, statusLabel } from './status-label.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { adminLayoutCopy, accountLayoutCopy, organizationCopy } from '../../shared/i18n.js';
 import { localizedAccountPlatformError } from './error-localization.js';
@@ -32,7 +33,7 @@ function UserDetails({ client, userID, copy, language, route, currentUserID, acc
   const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString({ zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' }[language]) : '—';
   return <section className="adm-panel"><header className="adm-user-detail-head">
     <button type="button" onClick={() => route.navigate('users', { user_id: null })}>{words.backToUserList}</button>
-    {profile && <div className="adm-user-profile-identity"><h3>{userDisplayName(profile)}</h3><span className="adm-user-profile-status">{accountLayoutCopy[language].statuses[profile.status] || profile.status}</span></div>}
+    {profile && <div className="adm-user-profile-identity"><h3>{userDisplayName(profile)}</h3><span className="adm-user-profile-status">{accountUserStatusLabel(profile.status, language)}</span></div>}
   </header>
     {error && <p role="alert">{localizedAccountPlatformError(copy, error)}<button onClick={() => setRevision(value => value + 1)}>{copy.retry}</button></p>}
     {!profile && !error && <p role="status">{copy.loading}</p>}
@@ -151,7 +152,7 @@ export function AdminUsersWorkspace({ client, copy, language, canManage, current
       return <tr key={user.user_id}>
         <td data-label={copy.userManagement.account}>{user.status === 'DELETED' ? <span>{label}</span> : <button className="adm-name-link" onClick={() => route.navigate('users', { user_id: user.user_id })}>{label}</button>}</td>
         <td data-label={copy.userManagement.exactCode}>{resultCurrent ? <AdminIdentifier client={resultScope.client} owner={JSON.stringify([resultScope.actor, resultScope.epoch, resultScope.version])} sessionEpoch={resultScope.epoch} platformAuthorizationVersion={resultScope.version} routeScope={resultScope.location} value={user.user_code} label={copy.userManagement.exactCode} targetLabel={label} language={language} alwaysExpanded /> : <code className="adm-user-retained-code">{user.user_code || '—'}</code>}</td>
-        <td data-label={copy.accounts.status}>{accountLayoutCopy[language].statuses[user.status] || user.status}</td>
+        <td data-label={copy.accounts.status}>{accountUserStatusLabel(user.status, language)}</td>
         <td data-label={copy.accounts.actions}>{canManage && ['ACTIVE', 'DISABLED'].includes(user.status) && <>
           <button type="button" className={user.status === 'ACTIVE' ? 'adm-user-disable-action' : undefined} data-user-status-target={user.user_id}
             aria-label={`${words.userStatusTitle(action)}: ${label} (${user.user_code || user.user_id})`}

@@ -284,9 +284,9 @@ client.session().then(control.render);
     assert.equal(await page.$$eval('tbody', (n) => n[0].rows.length), 100);
     await click('priceRetry');
     await page.waitForFunction(() => document.querySelectorAll('tbody')[0]?.rows.length === 1);
-    assert.equal(
-      await page.$eval('tbody tr [aria-label="ACTIVE"]', (n) => n.textContent),
-      'ACTIVE',
+    assert.deepEqual(
+      await page.$eval('tbody tr [data-status="ACTIVE"]', (n) => ({ text: n.textContent, aria: n.getAttribute('aria-label') })),
+      { text: 'Active', aria: 'Active' },
     );
     await click('endActive');
     await page.waitForSelector('[role="dialog"]');

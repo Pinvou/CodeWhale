@@ -1,5 +1,6 @@
+import { statusLabel } from './status-label.js';
 import React, { useId, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { adminLayoutCopy, accountLayoutCopy } from '../../shared/i18n.js';
+import { adminLayoutCopy, accountLayoutCopy, accountStatusCopy } from '../../shared/i18n.js';
 import { financeReadDefinition, financeListRouteUpdates, readFinanceListRoute } from './admin-finance-read-route.js';
 import { normalizeAnomalyStatus, anomalyStatusText } from './anomaly-queue-status.js';
 
@@ -54,6 +55,8 @@ export function AdminFinanceFilters({ kind, language, value, onChange, onSubmit,
   const orderListContext = orderFilterOptions ? adminLayoutCopy[language].orderListContext : null;
   const orderOptionsID = useId();
   const config = financeReadDefinition(kind);
+  const statusLabels = kind === 'late' ? accountStatusCopy[language].latePayments : { ...accountLayoutCopy[language].statuses, ...words };
+  const closedStatuses = kind === 'late';
   const anomalyStatus = kind === 'anomalies' ? adminLayoutCopy[language].anomalyQueueStatus : null;
   const normalizedStatus = anomalyStatus ? normalizeAnomalyStatus(value.status) : '';
   const anomalyHelp = anomalyStatus ? adminLayoutCopy[language].anomalyQueueResults : null;
@@ -77,8 +80,8 @@ export function AdminFinanceFilters({ kind, language, value, onChange, onSubmit,
       <small>{orderListContext.optionHelp}</small>
     </> : options(key) ? <select disabled={disabled} value={anomalyStatus && key === 'status' ? normalizedStatus : value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })}>
       <option value="">{anomalyStatus && key === 'status' ? anomalyStatus.all : words.allValues}</option>
-      {anomalyStatus && key === 'status' && normalizedStatus && !options(key).includes(normalizedStatus) && <option value={normalizedStatus}>{anomalyStatusText(anomalyStatus, value.status)}</option>}
-      {options(key).map(option => <option key={option} value={option}>{anomalyStatus && key === 'status' ? anomalyStatusText(anomalyStatus, option) : words[option] || accountLayoutCopy[language].statuses[option] || option}</option>)}
+      {anomalyStatus && key === 'status' && normalizedStatus && !options(key).includes(normalizedStatus) && <option value={normalizedStatus}>{statusLabel(value.status, language, anomalyStatus, true)}</option>}
+      {options(key).map(option => <option key={option} value={option}>{anomalyStatus && key === 'status' ? anomalyStatusText(anomalyStatus, option) : ['status', 'lifecycle_status'].includes(key) ? statusLabel(option, language, statusLabels, closedStatuses) : words[option] || option}</option>)}
     </select> : <input disabled={disabled} maxLength={key === 'q' || key === 'business_reference' ? 160 : 120} step={/_(from|to|before)$/.test(key) ? '0.001' : undefined} type={/_(from|to|before)$/.test(key) ? 'datetime-local' : 'text'} value={value[key] || ''} onChange={event => onChange({ ...value, [key]: event.target.value })} />}</label>)}
     <label>{words.limit}<select disabled={disabled} value={value.limit} onChange={event => onChange({ ...value, limit: event.target.value })}>{['25', '50', '100', '200'].map(limit => <option key={limit}>{limit}</option>)}</select></label><button disabled={disabled}>{words.search}</button>
   </form>;

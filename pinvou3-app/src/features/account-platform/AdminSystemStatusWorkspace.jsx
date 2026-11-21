@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { localizedAccountPlatformError } from "./error-localization.js";
@@ -86,7 +87,7 @@ export function AdminSystemStatusWorkspace({
   const count = (value) => formatSystemCount(value, language);
   const name = (value) => Object.prototype.hasOwnProperty.call(labels.names, value) ? labels.names[value] : value;
   const statusCell = (value) => (
-    <span className={`adm-status ${value === "HEALTHY" ? "ok" : "warn"}`}>{Object.prototype.hasOwnProperty.call(labels.statusLabels, value) ? <>{labels.statusLabels[value]} <code>{value}</code></> : value}</span>
+    <span className={`adm-status ${value === "HEALTHY" ? "ok" : "warn"}`}>{Object.prototype.hasOwnProperty.call(labels.statusLabels, value) ? <>{labels.statusLabels[value]} <code>{value}</code></> : statusLabel(value, language, labels.statusLabels, true)}</span>
   );
   const age = (value) =>
     typeof value === "number" && Number.isFinite(value) && value >= 0
