@@ -1,0 +1,52 @@
+{
+  "permissions": [
+    {
+      "permission_request_id": "permission-6d0c6f74df9d4abc8e37cf4d2fd248bd-00000000000000000001",
+      "task_id": "task-wait",
+      "operation_type": "shell_command",
+      "risk_level": "high",
+      "target_scope": "[PATH]",
+      "preview": "[REDACTED]",
+      "expires_at_ms": "300010",
+      "state": "pending",
+      "decision": null,
+      "dispatch_state": "not_dispatched"
+    },
+    {
+      "permission_request_id": "permission-6d0c6f74df9d4abc8e37cf4d2fd248bd-00000000000000000002",
+      "task_id": "task-wait",
+      "operation_type": "shell_command",
+      "risk_level": "high",
+      "target_scope": "[PATH]",
+      "preview": "[REDACTED]",
+      "expires_at_ms": "300010",
+      "state": "allowed",
+      "decision": "allow",
+      "dispatch_state": "dispatched"
+    },
+    {
+      "permission_request_id": "permission-6d0c6f74df9d4abc8e37cf4d2fd248bd-00000000000000000003",
+      "task_id": "task-wait",
+      "operation_type": "shell_command",
+      "risk_level": "high",
+      "target_scope": "[PATH]",
+      "preview": "[REDACTED]",
+      "expires_at_ms": "300010",
+      "state": "denied",
+      "decision": "deny",
+      "dispatch_state": "not_dispatched"
+    },
+    {
+      "permission_request_id": "permission-6d0c6f74df9d4abc8e37cf4d2fd248bd-00000000000000000004",
+      "task_id": "task-wait",
+      "operation_type": "shell_command",
+      "risk_level": "high",
+      "target_scope": "[PATH]",
+      "preview": "[REDACTED]",
+      "expires_at_ms": "300010",
+      "state": "expired",
+      "decision": "deny",
+      "dispatch_state": "not_dispatched"
+    }
+  ]
+}
