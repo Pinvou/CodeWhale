@@ -233,6 +233,13 @@ func migrationDomain(ctx context.Context, connection *pgx.Conn, loaded []migrati
 }
 
 func protectedMigrationDomain(version int64, name, checksum string) string {
+	// Reserved query facts select the Billing identity validator even if an
+	// artifact forges its version/directory. This never grants SQL authority:
+	// Ordered still requires exact version, name, both SQL bodies and checksum.
+	if name == "late_payment_query_admission" || checksum == "5de84e5e0aa20f152aa63bd598fed1e5e7810031215ba43bfcccab241f6c9c1d" ||
+		name == "late_payment_query_generations" || checksum == "f233f8a00a12014ce65542e71d10903d16ae58ae2df881fd934c7e47440f8558" {
+		return "billing"
+	}
 	// These F02 names and canonical SQL digests remain reserved across version
 	// changes; the Billing wrapper must validate the complete identity.
 	if name == "refund_dispatch_fencing" || name == "payment_notification_provenance" ||
@@ -277,6 +284,8 @@ func protectedMigrationDomain(version int64, name, checksum string) string {
 		{"billing", 900016, "payment_activation_execution_lock", "e91164261390798fd3b98be27d91ff4442b30ed3aebb72002b180104d465a6a1"},
 		{"billing", 900043, "package_expiry_scan", "010fb10ad9c02c80f86fece213a603b602dca7b3e19a263d5a498a51270dd205"},
 		{"billing", 900045, "provider_health_recent", "0d1b5cc17cce2342540c4c75d15c783f53f37177412247ca5eefcd24d942d961"},
+		{"billing", 900047, "late_payment_query_admission", "5de84e5e0aa20f152aa63bd598fed1e5e7810031215ba43bfcccab241f6c9c1d"},
+		{"billing", 900048, "late_payment_query_generations", "f233f8a00a12014ce65542e71d10903d16ae58ae2df881fd934c7e47440f8558"},
 		{"billing", 900017, "payment_repair_order_lookup", "18d285451a58950e40ef90cf77ebe7455e86f2331db2187ba437f8c67f84a865"},
 		{"billing", 900018, "refund_activation_execution_lock", "96b284f182a33fce5c7636291be06e50c050e69ee26cf923033c2332b8a8d673"},
 		{"billing", 900019, "chargeback_activation_execution_lock", "98a4640847b80cc79bb865a5cc462f42b5b75012fc66d988e120497381e051d1"},

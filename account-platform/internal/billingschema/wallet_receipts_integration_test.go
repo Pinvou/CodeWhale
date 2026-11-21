@@ -59,13 +59,14 @@ func TestTokenWalletReceiptSchemaPostgres(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 180*time.Second)
 		defer cancel()
 		c := f.database(t, ctx, "billing", "billing_schema_owner")
-		if err := Up(ctx, c, loaded); err != nil {
+		prefix := statisticsRollbackPrefix(loaded)
+		if err := Up(ctx, c, prefix); err != nil {
 			t.Fatal(err)
 		}
 		if err := migrations.Unlock(ctx, c); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := VerifyApplied(ctx, c, loaded); err != nil {
+		if _, err := VerifyApplied(ctx, c, prefix); err != nil {
 			t.Fatal("fresh exact history rejected", err)
 		}
 		var original bool

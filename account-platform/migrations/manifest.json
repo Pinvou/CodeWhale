@@ -2424,6 +2424,26 @@
         "file": "900046_outbox_dead_statistics_index.up.sql",
         "version": 900046,
         "sha256": "fdb45f949ce1fe97935022f6ffe057003243ba5b5cd1c6e863ffcb32cf1fed40"
+      },
+      {
+        "file": "900047_late_payment_query_admission.down.sql",
+        "version": 900047,
+        "sha256": "0525e581974cdd9b85cf7c2cbf46aa89a85b04b300c8405d814c31d9c778959a"
+      },
+      {
+        "file": "900047_late_payment_query_admission.up.sql",
+        "version": 900047,
+        "sha256": "5de84e5e0aa20f152aa63bd598fed1e5e7810031215ba43bfcccab241f6c9c1d"
+      },
+      {
+        "file": "900048_late_payment_query_generations.down.sql",
+        "version": 900048,
+        "sha256": "03d2e6a42a8113a6c8d5b4bacdd549aa07226df4b2dd10563b4ad7cf7df480ae"
+      },
+      {
+        "file": "900048_late_payment_query_generations.up.sql",
+        "version": 900048,
+        "sha256": "f233f8a00a12014ce65542e71d10903d16ae58ae2df881fd934c7e47440f8558"
       }
     ],
     "payment-simulator": [

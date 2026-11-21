@@ -86,10 +86,22 @@ func assertStatisticsHeadIndex(t *testing.T, ctx context.Context, c *pgx.Conn) {
 	}
 }
 
-// Callers retain their full installation and runtime checks. They release their
+func statisticsRollbackPrefix(full []migrations.Migration) []migrations.Migration {
+	var prefix []migrations.Migration
+	for _, m := range full {
+		if m.Version <= statisticsHeadVersion {
+			prefix = append(prefix, m)
+		}
+	}
+	return prefix
+}
+
+// Callers install the actual 900046 head before checking its index rollback.
+// They release their
 // own Up locks before entering; each operation here releases only its own lock.
-func testStatisticsHeadRoundTrip(t *testing.T, ctx context.Context, c *pgx.Conn, loaded []migrations.Migration, factsSQL string) {
+func testStatisticsHeadRoundTrip(t *testing.T, ctx context.Context, c *pgx.Conn, full []migrations.Migration, factsSQL string) {
 	t.Helper()
+	loaded := statisticsRollbackPrefix(full)
 	if head := stageValue(t, ctx, c, `SELECT max(version)::text FROM schema_migrations`); head != "900046" {
 		t.Fatal("statistics roundtrip requires the explicit current head", head)
 	}
@@ -134,6 +146,21 @@ func testStatisticsHeadRoundTrip(t *testing.T, ctx context.Context, c *pgx.Conn,
 		} else if restoredLedger != currentLedger {
 			t.Fatal("idempotent replay changed the restored ledger")
 		}
+	}
+	const prefixLedgerSQL = "SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version <= 900046"
+	prefixLedger := stageValue(t, ctx, c, prefixLedgerSQL)
+	err = Up(ctx, c, full)
+	unlockErr = migrations.Unlock(ctx, c)
+	if err != nil || unlockErr != nil {
+		t.Fatal("full public upgrade after statistics restore", err, unlockErr)
+	}
+	if _, err := VerifyApplied(ctx, c, full); err != nil {
+		t.Fatal("full public upgrade identity", err)
+	}
+	assertStatisticsHeadIndex(t, ctx, c)
+	assertBillingCurrentReplay(t, ctx, c, full)
+	if prefixLedger != stageValue(t, ctx, c, prefixLedgerSQL) || facts != stageValue(t, ctx, c, factsSQL) || outbox != stageValue(t, ctx, c, statisticsOutboxFacts) {
+		t.Fatal("full upgrade or replay changed statistics-era ledger or business facts")
 	}
 }
 

@@ -147,3 +147,26 @@ test('current lawful authority only reads original key/facts without replacing o
   assert.equal(calls.length, 1); assert.ok(calls[0].url.endsWith('/query-command-results'));
   assert.equal(calls[0].options.headers['Idempotency-Key'], key);
 });
+
+test('old UNKNOWN recovery remains read-only after a distinct explicit current query completes', async t => {
+  const original = globalThis.fetch; t.after(() => { globalThis.fetch = original; });
+  const client = new AdminPlatformClient(''); client.csrfToken = 'PUBLIC_SYNTHETIC_CSRF';
+  const nextKey = 'finance-controlled-explicit-next-query';
+  const calls = []; const originalFacts = JSON.stringify(facts);
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    const requested = options.headers['Idempotency-Key'];
+    return new Response(JSON.stringify(requested === nextKey ? { ...completed(), query_reference: nextKey } :
+      { command_protocol: 1, query_reference: key, actor_id: id, case_id: id, payment_order_id: other, state: 'UNKNOWN' }), { status: 200 });
+  };
+  await assert.rejects(client.queryLatePaymentReview(id, facts, key), error => error.code === 'COMMAND_RESULT_UNKNOWN');
+  await assert.rejects(client.queryLatePaymentReviewResult(id, facts, key), error => error.code === 'COMMAND_RESULT_UNKNOWN');
+  assert.deepEqual(await client.queryLatePaymentReview(id, freshLatePaymentQuery(item, id, authority(1)), nextKey), completed().result);
+  await assert.rejects(client.queryLatePaymentReviewResult(id, facts, key), error => error.code === 'COMMAND_RESULT_UNKNOWN');
+  assert.equal(JSON.stringify(facts), originalFacts);
+  assert.deepEqual(calls.map(call => [call.url.split('/').at(-1), call.options.headers['Idempotency-Key']]), [
+    ['query-commands', key], ['query-command-results', key], ['query-commands', nextKey], ['query-command-results', key],
+  ]);
+  for (const call of calls) assert.deepEqual(JSON.parse(call.options.body), { command_protocol: 1, payment_order_id: other,
+    provider_id: 'controlled', provider_version: 'v1', merchant_order_no: 'controlled-order' });
+});

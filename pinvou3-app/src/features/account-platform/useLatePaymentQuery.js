@@ -53,6 +53,8 @@ export function useLatePaymentQuery(owner, copy, client, enabled = true, authori
         : await client.queryLatePaymentReviewResult(entry.facts.id, entry.facts, entry.key, undefined, authority);
       if (!current()) return;
       entry.state = 'COMPLETED';
+      entry.confirmedAuthorityKey = authorityKey;
+      entry.confirmedAuthorization = authorization();
       setMessage({ identity, authorityKey, authorization: authorization() });
       return result;
     } catch {
@@ -72,8 +74,17 @@ export function useLatePaymentQuery(owner, copy, client, enabled = true, authori
     const entry = entries.find(value => value.key === key && value.state === 'UNKNOWN');
     return entry ? run(entry) : undefined;
   };
+  // Intent order comes from begin(), never completion time or receipt arrival.
+  // This enables only an archive attempt; the server still verifies current
+  // generation, authoritative evidence, ownership and every financial guard.
+  const canAttemptArchive = caseID => {
+    const latest = [...entries].reverse().find(entry => entry.facts.id === caseID);
+    return !running.current && currentAuthority() && activeIdentity.current === identity &&
+      activeAuthority.current === authorityKey && latest?.state === 'COMPLETED' &&
+      latest.confirmedAuthorityKey === authorityKey && latest.confirmedAuthorization === authorization();
+  };
   return { busy, retired: !currentAuthority(), unknown: entries.some(value => value.state === 'UNKNOWN'),
     unknownQueries: entries.filter(value => value.state === 'UNKNOWN').map(value => ({ key: value.key, facts: value.facts })),
     message: message?.identity === identity && message.authorityKey === authorityKey && message.authorization === authorization()
-      ? copy.queryRecorded : '', begin, retry };
+      ? copy.queryRecorded : '', begin, retry, canAttemptArchive };
 }

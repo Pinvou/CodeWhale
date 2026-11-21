@@ -305,6 +305,7 @@ func TestProviderBlindCommandReceiptPostgres(t *testing.T) {
 		if _, err := billingschema.VerifyApplied(ctx, connection, prefix); err != nil {
 			t.Fatal("rejected down changed prefix identity", err)
 		}
+		queryUpgrade := freezeHistoricalQueryUpgrade(t, ctx, r)
 		if err := billingschema.Up(ctx, connection, loaded); err != nil {
 			t.Fatal("full current Up after provider prefix", err)
 		}
@@ -315,6 +316,9 @@ func TestProviderBlindCommandReceiptPostgres(t *testing.T) {
 		if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=900029) AND to_regclass('public.late_payment_review_archive_commands') IS NOT NULL`).Scan(&archiveMarker); err != nil || !archiveMarker {
 			t.Fatal("full Up did not install Archive 900029", archiveMarker, err)
 		}
+		queryUpgrade.assertAfter(t, ctx, r)
+		assertHistoricalQueryFinancialSnapshot(t, before, providerBlindFacts(t, r, ctx), "payment_orders")
+		fullFacts := providerBlindFacts(t, r, ctx)
 		fullLedger := ledger()
 		if err := billingschema.Up(ctx, connection, loaded); err != nil {
 			t.Fatal("full current Up replay", err)
@@ -322,13 +326,13 @@ func TestProviderBlindCommandReceiptPostgres(t *testing.T) {
 		if _, err := billingschema.VerifyApplied(ctx, connection, loaded); err != nil {
 			t.Fatal("full replay migration identity", err)
 		}
-		if fullLedger != ledger() || marker() != beforeMarker || before != providerBlindFacts(t, r, ctx) {
+		if fullLedger != ledger() || marker() != beforeMarker || fullFacts != providerBlindFacts(t, r, ctx) {
 			t.Fatal("full Up/replay changed provider ledger, ACL, marker or domain facts")
 		}
 		replay, err := r.EscalateProviderBlind(ctx, late.ID, actor, reason, key)
 		left, _ := json.Marshal(original)
 		right, _ := json.Marshal(replay)
-		if err != nil || !bytes.Equal(left, right) || before != providerBlindFacts(t, r, ctx) {
+		if err != nil || !bytes.Equal(left, right) || fullFacts != providerBlindFacts(t, r, ctx) {
 			t.Fatal("full Up/replay changed original provider command receipt", err)
 		}
 	})
