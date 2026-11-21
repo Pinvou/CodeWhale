@@ -752,6 +752,43 @@ async function recoveryCli(statePath, argv) {
   }
 }
 
+function recoveryCliFailureDiagnostic(stderr) {
+  // Only closed public codes may reach an assertion; stderr itself stays private.
+  const publicCodes = [
+    "relay_state_recovery_failed", "relay_state_acl_unverified",
+    "relay_state_permissions_unsafe", "relay_state_windows_runtime_unavailable",
+    "relay_state_path_component_unsafe", "relay_state_file_identity_unavailable",
+    "relay_state_unavailable", "relay_state_recovery_changed",
+    "relay_state_recovery_evidence_invalid", "relay_state_recovery_evidence_mismatch",
+    "relay_state_recovery_archive_root_invalid", "relay_state_recovery_archive_root_unwritable",
+    "relay_state_recovery_close_failed", "relay_state_recovery_outcome_unknown",
+  ];
+  const systemCodes = [
+    "ERR_PARSE_ARGS_UNKNOWN_OPTION", "ERR_PARSE_ARGS_INVALID_OPTION_VALUE",
+    "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL", "ERR_INVALID_ARG_TYPE", "ERR_INVALID_ARG_VALUE",
+    "ERR_UNKNOWN_BUILTIN_MODULE", "ERR_ENCODING_INVALID_ENCODED_DATA",
+    "EACCES", "EPERM", "ENOENT", "ENOTDIR", "EISDIR", "EIO", "ENOSPC", "EROFS", "EBUSY",
+  ];
+  const closedCode = (value) => [...publicCodes, ...systemCodes].includes(value) ? value : "unknown";
+  const result = { code: "unknown", stage: "unknown", name: "unknown", cause_code: "unknown" };
+  for (const line of String(stderr ?? "").slice(0, 64 * 1024).split(/\r?\n/u).slice(0, 16)) {
+    if (publicCodes.includes(line)) result.code = line;
+    try {
+      const value = JSON.parse(line);
+      if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+      const code = closedCode(value.code);
+      if (code !== "unknown") result.code = code;
+      if (["arguments", "recovery"].includes(value.stage)) result.stage = value.stage;
+      if (["Error", "TypeError", "RangeError", "SyntaxError", "AggregateError"].includes(value.name)) {
+        result.name = value.name;
+      }
+      const causeCode = closedCode(value.cause_code);
+      if (causeCode !== "unknown") result.cause_code = causeCode;
+    } catch { /* Unknown/raw stderr, including paths and archive details, is never echoed. */ }
+  }
+  return result;
+}
+
 test("offline recovery CLI help and invalid arguments are safe and do not open a store", async (t) => {
   const statePath = await temporaryState(t);
   const parent = path.dirname(path.dirname(statePath));
@@ -806,7 +843,8 @@ test("offline recovery CLI archives originals and restores only a verified stage
   if (process.platform === "win32") await protectWindowsPath(archiveRoot, "directory");
   const identity = await fs.stat(value.statePath, { bigint: true });
   const recovered = await recoveryCli(value.statePath, [...args, "--archive-root", archiveRoot]);
-  assert.equal(recovered.exit, 0, "valid CLI recovery must succeed through default OS protection");
+  assert.equal(recovered.exit, 0,
+    `valid CLI recovery must succeed through default OS protection: ${JSON.stringify(recoveryCliFailureDiagnostic(recovered.stderr))}`);
   const result = JSON.parse(recovered.stdout);
   assert.equal(result.revision, value.evidence.primaryRevision);
   assert.equal(path.dirname(result.archive), archiveRoot);
