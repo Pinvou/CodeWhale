@@ -15,6 +15,8 @@ import (
 )
 
 var (
+	ErrChargebackPrincipalMigrationRequired = errors.New("billing requires migration 900044_chargeback_cash_principal and runtime access to its objects")
+
 	paymentClearingAccount = uuid.MustParse("00000000-0000-7000-8000-000000000001")
 	usageRevenueAccount    = uuid.MustParse("00000000-0000-7000-8000-000000000002")
 	refundClearingAccount  = uuid.MustParse("00000000-0000-7000-8000-000000000003")
@@ -65,6 +67,35 @@ func NewPostgresRepositoryWithPool(pool *pgxpool.Pool) *PostgresRepository {
 }
 
 func (r *PostgresRepository) Ping(ctx context.Context) error { return r.pool.Ping(ctx) }
+
+// VerifyChargebackPrincipalSchema checks the minimum supported Billing schema
+// with runtime privileges. Later migrations can remain installed.
+func (r *PostgresRepository) VerifyChargebackPrincipalSchema(ctx context.Context) error {
+	const query = `
+WITH required_objects AS (
+ SELECT pg_catalog.to_regclass('public.chargeback_cash_principals') AS principal_view,
+        pg_catalog.to_regclass('public.chargeback_principal_evidence') AS evidence_table
+)
+SELECT EXISTS (
+ SELECT 1 FROM public.schema_migrations
+ WHERE version = 900044 AND name = 'chargeback_cash_principal'
+) AND COALESCE(pg_catalog.has_table_privilege(principal_view, 'SELECT'), false)
+  AND COALESCE(pg_catalog.has_table_privilege(evidence_table, 'SELECT'), false)
+  AND COALESCE(pg_catalog.has_table_privilege(evidence_table, 'INSERT'), false)
+FROM required_objects`
+	var installed bool
+	if err := r.pool.QueryRow(ctx, query).Scan(&installed); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			return ErrChargebackPrincipalMigrationRequired
+		}
+		return err
+	}
+	if !installed {
+		return ErrChargebackPrincipalMigrationRequired
+	}
+	return nil
+}
 
 func (r *PostgresRepository) Close() { r.pool.Close() }
 

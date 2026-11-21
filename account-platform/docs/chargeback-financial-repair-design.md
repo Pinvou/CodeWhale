@@ -197,3 +197,5 @@
 证据页保留原 `chargeback_case_id` 作用域、UUID `after` 严格前进和 `limit+1` 游标合同，新增 `(chargeback_case_id,id)` 索引支撑有界键集读取；原交易索引和全部证据继续保留。回归直接读取生产 SQL，比对受控交错历史的自然 EXPLAIN/BUFFERS、真实逐页结果及不变的金融快照，不强制 planner，也不把合成的规模行宣称为真实供应商收据或生产 SLA。Go 的实际 wire 回归使用 Node 和已锁定的 `account-platform` npm 依赖，应先完成该依赖准备；纯 Go 镜像不是这组 wire 验收的完整环境。
 
 安装完整前向 Billing `900044_chargeback_cash_principal` 后再启用新服务版本；旧 SQL 和旧执行回执不重写、不回填本金。迁移将旧缓存的原付款总额标记为现金未核实，并为活动的历史缺证据案件保留人工关注标记，保留所有账本与余额；Down 明确拒绝。统一切换 Billing 版本，避免旧服务重写旧口径摘要；本地验证不等于生产滚动升级或真实供应商验收。完整接口见 [本金证据合同](../contracts/openapi/chargeback-principal.json)。
+
+Billing 在注册消费者、启动后台任务和提供 HTTP 服务前，以运行账号检查 900044 的迁移记录、视图读取权限以及证据表的读取和插入权限。缺少所需迁移记录、对象或对象权限时，启动日志记录 `BILLING_MIGRATION_900044_REQUIRED`。检查查询失败时（例如无权读取迁移记录表），日志记录 `BILLING_CHARGEBACK_PRINCIPAL_SCHEMA_CHECK_FAILED`。就绪探针持续核对相同条件。首次生产升级和历史备份恢复按 [Billing 维护窗口](../deploy/runbooks/high-availability-failover.md#billing-900044-的维护窗口) 执行。

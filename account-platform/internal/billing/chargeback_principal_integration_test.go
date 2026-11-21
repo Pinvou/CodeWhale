@@ -594,6 +594,9 @@ func TestChargebackPrincipalIndependentCashPostgres(t *testing.T) {
 		if _, err := retainedFinanceOwnerExec(t, r, ctx, `REVOKE SELECT ON chargeback_cash_principals FROM billing_service`); err != nil {
 			t.Fatal(err)
 		}
+		if err := r.VerifyChargebackPrincipalSchema(ctx); !errors.Is(err, ErrChargebackPrincipalMigrationRequired) {
+			t.Fatal("runtime schema check must reject revoked view access", err)
+		}
 		record(t, transaction, "cash-storage", "50", ref, "CNY", 500)
 		if _, err := r.ApplyConfirmedChargeback(ctx, item.PaymentEvidenceID, item.ProviderChargebackID); err == nil || errors.Is(err, ErrConflict) {
 			t.Fatal("storage failure was accepted or mislabeled a business conflict", err)
@@ -603,6 +606,9 @@ func TestChargebackPrincipalIndependentCashPostgres(t *testing.T) {
 		}
 		if _, err := retainedFinanceOwnerExec(t, r, ctx, `GRANT SELECT ON chargeback_cash_principals TO billing_service`); err != nil {
 			t.Fatal(err)
+		}
+		if err := r.VerifyChargebackPrincipalSchema(ctx); err != nil {
+			t.Fatal("restored view access must admit the runtime schema", err)
 		}
 		current := record(t, transaction, "cash-storage", "100", ref, "CNY", 200)
 		if current.Version != item.Version || current.CashPrincipal.ObservationCount != 1 {
@@ -703,6 +709,9 @@ func chargebackPrincipalUpgrade(t *testing.T) {
 	product := principalMigrationTool(t)
 	source, staged := stageBillingMigrationContract(t, 900044)
 	r, ctx := retainedFinanceRepository(t, 900038)
+	if err := r.VerifyChargebackPrincipalSchema(ctx); !errors.Is(err, ErrChargebackPrincipalMigrationRequired) {
+		t.Fatal("pre-principal database must fail the runtime schema check", err)
+	}
 	// This retained fixture represents historical owner facts, not a new supplier
 	// assertion. No original cash proof can be recovered from its points.
 	fixture := seedChargebackShortfall(t, ctx, r, false)
@@ -719,6 +728,9 @@ func chargebackPrincipalUpgrade(t *testing.T) {
 		t.Fatal("runtime CLI refusal changed history, authority or money")
 	}
 	principalMigrationCLI(t, ctx, product, r, "billing_migrator", "up", true)
+	if err := r.VerifyChargebackPrincipalSchema(ctx); err != nil {
+		t.Fatal("full upgrade must admit the runtime schema", err)
+	}
 	authorityInstalled := principalMigrationAuthoritySnapshot(t, ctx, r)
 	principalMigrationCLI(t, ctx, product, r, "billing_migrator", "up", true)
 	if principalMigrationAuthoritySnapshot(t, ctx, r) != authorityInstalled {
