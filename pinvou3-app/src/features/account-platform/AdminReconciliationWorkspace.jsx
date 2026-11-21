@@ -26,7 +26,7 @@ function CaseActions({ client, item, owner, copy, canWrite, onChanged, canReques
   const submit = async () => {
     setInvalid(false);
     try {
-      const facts = op.pendingFacts || reconciliationCommand(action, fields);
+      const facts = op.pendingFacts || reconciliationCommand(action, fields, item.latest_observation);
       const result = await op.mutate(facts, async (frozen, key) => {
         try { return await client.reconciliationCaseCommand(item.case_id, frozen, key); }
         catch (error) {
@@ -118,6 +118,11 @@ function Workspace({ client, me, language, copy, repairCopy, operationCopy, onVi
         value.items.forEach(item => requireFinanceID(tab === 'runs' ? item.reconciliation_run_id : item.case_id));
         setPage({ ...value, tab, readScope }); setCursor(result.query.cursor);
         setReading({ readScope, stage: 'ready' });
+        if (tab === 'cases') setSelected(current => {
+          if (!current || current.readScope !== readScope) return current;
+          const item = value.items.find(item => item.case_id === current.item.case_id);
+          return item ? { ...current, item } : null;
+        });
       }
     } catch (error) {
       if (!isCurrent()) return;
