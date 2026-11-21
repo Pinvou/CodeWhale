@@ -20,6 +20,7 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 from functools import lru_cache
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -211,7 +212,23 @@ def read_proof(raw):
             content = stream.read(MAX_BYTES + 1)
         if len(content) > MAX_BYTES:
             raise ValueError('oversized proof content')
-        return json.loads(content)
+        proof = json.loads(content)
+        if not isinstance(proof, dict):
+            raise ValueError('unexpected proof format')
+        return proof
+
+
+def log_rejection(reason):
+    print(f'Queue reuse: miss ({reason})')
+
+
+def read_evidence(reason, read, *args, **kwargs):
+    try:
+        return read(*args, **kwargs)
+    except Exception:
+        # Log only the caller's fixed phase, never an exception or response.
+        log_rejection(reason)
+        raise
 
 
 def verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, configuration, routing, head_ref):
@@ -222,17 +239,24 @@ def verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, 
             or proof.get('attempt') != run['run_attempt'] or proof.get('head') != head
             or (not modern and proof.get('fingerprint') != expected)
             or (modern and proof.get('fingerprint', {}).get('policy') != expected['policy'])):
+        log_rejection('proof_identity_or_fingerprint_mismatch')
         return []
     age = (now - datetime.fromisoformat(proof['created'])).total_seconds()
-    if not 0 <= age <= MAX_AGE or not isinstance(proof.get('jobs'), list) or len(set(proof['jobs'])) != len(proof['jobs']):
+    if not 0 <= age <= MAX_AGE:
+        log_rejection('proof_age_outside_window')
+        return []
+    if not isinstance(proof.get('jobs'), list) or len(set(proof['jobs'])) != len(proof['jobs']):
+        log_rejection('invalid_proof_jobs')
         return []
     gates = [job for job in jobs if job.get('name') == GATE_NAME]
     if len(gates) != 1 or gates[0].get('conclusion') != 'success':
+        log_rejection('source_gate_not_successful')
         return []
     result = []
     inputs = job_inputs(os.environ['TESTED_SHA'], expected['base'], configuration, routing) if modern else {}
     for name in proof['jobs']:
         if name not in JOBS:
+            log_rejection('invalid_proof_jobs')
             return []
         if modern and (inputs.get(name) is None or proof.get('job_inputs', {}).get(name) != inputs[name]):
             print(f'Queue reuse: {name}: execute (inputs_changed_or_unclassified)')
@@ -241,6 +265,8 @@ def verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, 
         if (candidates and all(job.get('run_id') == run['id'] for job in candidates)
                 and PLAN['complete_group'](JOBS[name], candidates, routing, head_ref, configuration)):
             result.append(name)
+        else:
+            print(f'Queue reuse: {name}: execute (incomplete_execution_evidence)')
     return sorted(result)
 
 
@@ -248,10 +274,12 @@ def lookup(event, configuration, api, *, now=None):
     now = now or datetime.now(timezone.utc)
     repository = os.environ['GITHUB_REPOSITORY']
     if configuration.get('PINVOU_CI_REUSE_FORCE_RUN') == 'true':
+        log_rejection('force_run_enabled')
         return [], None
     group = event['merge_group']
     tested, base = sha(group['head_sha']), sha(group['base_sha'])
     if tested != sha(os.environ['TESTED_SHA']):
+        log_rejection('tested_commit_mismatch')
         return [], None
     routing = json.loads(os.environ.get('CI_REUSE_ROUTING_FILTERS', os.environ.get('CI_REUSE_ROUTING', '{}')))
     policy_outputs = json.loads(os.environ.get('CI_REUSE_ROUTING_POLICY', '{}'))
@@ -259,23 +287,30 @@ def lookup(event, configuration, api, *, now=None):
         routing = {key: value for key, value in routing.items() if key in ROUTING_KEYS}
         routing.update({key: policy_outputs.get(key) or fallback for key, fallback in
                         (('trusted_backflow', 'false'), ('backflow_mode', 'full'), ('pure_release_backflow', 'false'))})
-    expected = fingerprint(tested, base, configuration, routing)
+    expected = read_evidence('queue_git_objects_unavailable', fingerprint, tested, base, configuration, routing)
     # A PR which edits the verifier or workflow cannot authorize its own reuse.
-    if any(expected['policy'][path] != git('rev-parse', f'{base}:{path}') for path in POLICY):
+    if any(expected['policy'][path] != read_evidence('queue_git_objects_unavailable', git, 'rev-parse', f'{base}:{path}') for path in POLICY):
+        log_rejection('queue_policy_changed')
         return [], None
     branch = group['base_ref'].removeprefix('refs/heads/')
     match = re.fullmatch(r'refs/heads/gh-readonly-queue/' + re.escape(branch) + r'/pr-([1-9][0-9]*)-([0-9a-f]{40})', group['head_ref'])
     if not match or match[2] != base:
+        log_rejection('unsupported_queue_ref')
         return [], None
     pr_number = number(match[1])
-    pr = api.request(f'pulls/{pr_number}')
+    pr = read_evidence('pr_metadata_unavailable', api.request, f'pulls/{pr_number}')
     if (pr['head']['repo']['full_name'] != repository or pr.get('draft') is not False
             or pr['base']['ref'] != branch):
+        log_rejection('ineligible_pr')
         return [], None
     head = sha(pr['head']['sha'])
-    if parents(tested) != [base, head]:
+    if read_evidence('queue_git_objects_unavailable', parents, tested) != [base, head]:
+        log_rejection('unsupported_queue_parents')
         return [], None  # Combined/multi-member queues retain full validation.
-    runs = api.request('actions/workflows/' + WORKFLOW.rsplit('/', 1)[1] + '/runs?event=pull_request&status=success&head_sha=' + head + '&per_page=30')['workflow_runs']
+    runs_path = f'actions/workflows/{WORKFLOW.rsplit("/", 1)[1]}/runs?event=pull_request&status=success&head_sha={head}&per_page=30'
+    runs = read_evidence('source_runs_unavailable', api.request, runs_path)['workflow_runs']
+    if not runs:
+        log_rejection('no_successful_pr_run')
     for run in runs[:30]:
         if (run.get('event') != 'pull_request' or run.get('conclusion') != 'success'
                 or run.get('head_sha') != head or run.get('path') != WORKFLOW
@@ -283,35 +318,59 @@ def lookup(event, configuration, api, *, now=None):
                 or not any(row.get('number') == pr_number and row.get('head', {}).get('sha') == head
                            and row.get('base', {}).get('ref') == branch
                            for row in run.get('pull_requests', []))):
+            log_rejection('source_run_identity_mismatch')
             continue
         run_id, attempt = number(run['id']), number(run['run_attempt'])
         if (now - datetime.fromisoformat(run['updated_at'].replace('Z', '+00:00'))).total_seconds() > MAX_AGE:
+            log_rejection('source_run_outside_window')
             continue
-        artifacts = api.pages(f'actions/runs/{run_id}/artifacts', 'artifacts')
-        artifacts = [item for item in artifacts if item.get('name') == f'ci-success-proof-{attempt}' and item.get('expired') is False]
-        if len(artifacts) != 1:
+        artifacts = read_evidence('artifact_listing_unavailable', api.pages, f'actions/runs/{run_id}/artifacts', 'artifacts')
+        matching = [item for item in artifacts if item.get('name') == f'ci-success-proof-{attempt}']
+        current = [item for item in matching if item.get('expired') is False]
+        if not matching:
+            log_rejection('artifact_missing')
             continue
-        artifact = artifacts[0]
+        if not current:
+            log_rejection('artifact_expired_or_unavailable')
+            continue
+        if len(current) != 1:
+            log_rejection('artifact_ambiguous')
+            continue
+        artifact = current[0]
         if (artifact.get('size_in_bytes', MAX_BYTES + 1) > MAX_BYTES
                 or artifact.get('workflow_run', {}).get('id') != run_id
                 or artifact['workflow_run'].get('head_sha') != head):
+            log_rejection('artifact_identity_or_size_mismatch')
             continue
-        proof = read_proof(api.request(f'actions/artifacts/{number(artifact["id"])}/zip', binary=True))
+        try:
+            raw = read_evidence('artifact_download_failed', api.request,
+                                f'actions/artifacts/{number(artifact["id"])}/zip', binary=True)
+            proof = read_evidence('artifact_decode_failed', read_proof, raw)
+        except (OSError, ValueError, EOFError, zipfile.BadZipFile, RuntimeError, zlib.error):
+            # A broken artifact does not invalidate independently verified
+            # evidence from another run for the same head.
+            continue
         if proof.get('base_ref') != branch:
+            log_rejection('proof_base_ref_mismatch')
             continue
         # PR associations above establish ownership, not an immutable base.
         # The producer's tested Git object identifies its own immutable base/tree;
         # schema 2 compares the queue's inputs separately for each job below.
         # Fetching it through the API is read-only; no PR-controlled URL is used.
-        commit = api.request(f'git/commits/{sha(proof["tested"])}')
         source = proof.get('fingerprint', {})
+        if not isinstance(source, dict) or source.get('policy') != expected['policy']:
+            log_rejection('source_policy_mismatch')
+            continue
+        commit = read_evidence('source_commit_unavailable', api.request, f'git/commits/{sha(proof["tested"])}')
         source_base = source.get('base') if proof.get('schema') == 2 else base
         source_tree = source.get('tree') if proof.get('schema') == 2 else expected['tree']
         if (commit.get('tree', {}).get('sha') != source_tree
                 or [item.get('sha') for item in commit.get('parents', [])] != [source_base, head]):
+            log_rejection('source_commit_mismatch')
             continue
         if proof.get('schema') == 2:
             if not JOB_SCOPED:
+                log_rejection('unsupported_proof_schema')
                 continue
             # Read immutable source objects, never an artifact-controlled URL.
             # A shallow queue checkout need not have the earlier PR merge.
@@ -319,19 +378,26 @@ def lookup(event, configuration, api, *, now=None):
                 git('cat-file', '-e', sha(proof['tested']) + '^{commit}')
                 git('cat-file', '-e', sha(source_base) + '^{commit}')
             except subprocess.CalledProcessError:
-                git('fetch', '--no-tags', '--depth=2', 'origin', sha(proof['tested']))
-            if (parents(proof['tested']) != [source_base, head]
-                    or fingerprint(proof['tested'], source_base, configuration, routing)['policy'] != expected['policy']
-                    or any(git('rev-parse', f'{source_base}:{path}') != expected['policy'][path] for path in POLICY)):
+                read_evidence('source_git_objects_unavailable', git, 'fetch', '--no-tags', '--depth=2', 'origin', sha(proof['tested']))
+            if read_evidence('source_git_objects_unavailable', parents, proof['tested']) != [source_base, head]:
+                log_rejection('source_commit_mismatch')
+                continue
+            source_policy = read_evidence('source_git_objects_unavailable', fingerprint,
+                                          proof['tested'], source_base, configuration, routing)['policy']
+            if (source_policy != expected['policy']
+                    or any(read_evidence('source_git_objects_unavailable', git, 'rev-parse', f'{source_base}:{path}')
+                           != expected['policy'][path] for path in POLICY)):
+                log_rejection('source_policy_mismatch')
                 continue
             # The artifact cannot lie about a source tree or dependency digest.
             # Recompute source file/diff inputs using current configuration and
             # routing. Equality with the recorded digest additionally establishes
             # that those effective settings did not change for this job.
-            source_inputs = job_inputs(proof['tested'], source_base, configuration, routing)
+            source_inputs = read_evidence('source_job_inputs_unavailable', job_inputs,
+                                          proof['tested'], source_base, configuration, routing)
             proof = dict(proof, job_inputs={name: value for name, value in proof.get('job_inputs', {}).items()
                                          if value is not None and source_inputs.get(name) == value})
-        jobs = api.pages(f'actions/runs/{run_id}/attempts/{attempt}/jobs', 'jobs')
+        jobs = read_evidence('source_jobs_unavailable', api.pages, f'actions/runs/{run_id}/attempts/{attempt}/jobs', 'jobs')
         reusable = verified_jobs(proof, run, jobs, expected, repository, pr_number, head, now, configuration, routing, group['head_ref'])
         if reusable:
             return reusable, run_id

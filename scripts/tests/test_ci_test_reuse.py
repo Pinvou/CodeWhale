@@ -122,6 +122,47 @@ class ReuseTests(unittest.TestCase):
         self.assertNotEqual(self.tested, self.queued)
         self.assertEqual(self.lookup(), (sorted(TARGETS), 12))
 
+    def test_frontend_reuses_a_real_tree_proof_across_non_consumed_backflow_mode(self):
+        self.proof['schema'] = 2
+        self.proof['jobs'] = ['frontend-test']
+        routing = {'frontend': 'true'}
+        pr_routing = {**routing, 'backflow_mode': 'windows_full'}
+        self.proof['job_inputs'] = REUSE.job_inputs(self.tested, self.base, self.config, pr_routing)
+        with patch.dict(os.environ, {'CI_REUSE_ROUTING_FILTERS': json.dumps(routing),
+                                     'CI_REUSE_ROUTING_POLICY': '{"backflow_mode":"non_rust"}'}):
+            self.assertEqual(self.lookup(), (['frontend-test'], 12))
+
+    def test_unreadable_artifact_allows_another_verified_candidate(self):
+        later_run = {**self.run, 'id': 13}
+        later_artifact = {**self.artifact, 'id': 100, 'workflow_run': {'id': 13, 'head_sha': self.head}}
+        api_request, api_pages = self.api.request, self.api.pages
+
+        def pages(path, field):
+            if path == 'actions/runs/13/artifacts':
+                return [later_artifact]
+            return api_pages(path, field)
+
+        for error, reason in ((OSError('private download detail'), 'artifact_download_failed'),
+                              (None, 'artifact_decode_failed')):
+            for keep_valid in (True, False):
+                with self.subTest(reason=reason, keep_valid=keep_valid):
+                    def request(path, *, binary=False):
+                        if path.startswith('actions/workflows/'):
+                            return {'workflow_runs': [later_run, self.run] if keep_valid else [later_run]}
+                        if path == 'actions/artifacts/100/zip':
+                            if error:
+                                raise error
+                            return b'private invalid archive contents'
+                        return api_request(path, binary=binary)
+
+                    with (patch.object(self.api, 'request', side_effect=request),
+                          patch.object(self.api, 'pages', side_effect=pages),
+                          patch('sys.stdout', new_callable=io.StringIO) as stdout):
+                        expected = (sorted(TARGETS), 12) if keep_valid else ([], None)
+                        self.assertEqual(self.lookup(), expected)
+                    self.assertIn(f'miss ({reason})', stdout.getvalue())
+                    self.assertNotIn('private', stdout.getvalue())
+
     def scoped_queue(self, path):
         """Real main advance and real two-parent merge, same original PR head."""
         self.git('checkout', '--detach', self.base)
@@ -641,6 +682,7 @@ class ReuseTests(unittest.TestCase):
         with patch.dict(os.environ,{'GITHUB_EVENT_PATH':str(event_path),'GITHUB_EVENT_NAME':'merge_group','GITHUB_TOKEN':'private-token','CI_REUSE_CONFIGURATION':json.dumps(self.config)}),patch('sys.argv',['ci-test-reuse.py','lookup']),patch.object(REUSE.GitHub,'request',side_effect=OSError('private-token')),patch('sys.stdout',new_callable=io.StringIO) as stdout:
             REUSE.main()
         self.assertIn('execute normally',stdout.getvalue())
+        self.assertIn('miss (pr_metadata_unavailable)', stdout.getvalue())
         self.assertNotIn('private-token',stdout.getvalue())
         self.assertFalse((Path(self.temp.name)/'output').exists())
 
