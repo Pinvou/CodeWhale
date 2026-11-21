@@ -1164,7 +1164,9 @@ pub struct RunLogFile {
 }
 
 struct FileState {
-    /// 写到上限之后置成 `None`，此后这条运行不再落盘。
+    /// 写到上限之后置 `true`：普通行不再落盘，但文件**保持打开**——
+    /// `finish` 的结局行是例外（r43 P2：终态必须可见，允许最后越预算几行）。
+    capped: bool,
     file: Option<std::fs::File>,
     written: u64,
     /// 进度行的"日志省略"说明只留一次。
@@ -1207,6 +1209,7 @@ impl RunLogFile {
         Some(Self {
             path,
             state: Mutex::new(FileState {
+                capped: false,
                 file: Some(file),
                 written: written + header.len() as u64,
                 progress_notice_emitted: false,
@@ -1257,9 +1260,15 @@ impl RunLogFile {
             text
         );
         let mut state = self.state.lock();
+        if state.capped {
+            // r43 P2：封顶后普通行直接丢弃（说明行只在封顶那一刻写一次）。
+            return;
+        }
         if state.written >= MAX_RUN_LOG_BYTES {
-            // 上限到了：留一句话说明为什么突然没了，然后彻底闭嘴。
-            if let Some(mut file) = state.file.take() {
+            // 上限到了：留一句话说明为什么突然没了。**不再关闭文件**——
+            // `finish` 的结局行要越过预算落盘（终态是用户排障的第一行线索，
+            // 比 4MiB 的硬预算多几行是值得的）。
+            if let Some(file) = state.file.as_mut() {
                 let _ = file.write_all(
                     format!(
                         "…… 本次运行的日志已达 {} MiB 上限，后续行不再记录 ……\n",
@@ -1269,6 +1278,7 @@ impl RunLogFile {
                 );
                 let _ = file.flush();
             }
+            state.capped = true;
             return;
         }
         let Some(file) = state.file.as_mut() else {
@@ -1284,8 +1294,22 @@ impl RunLogFile {
     }
 
     /// 写结局那一行并收尾。
+    ///
+    /// r43 P2：结局行**无视封顶**——封顶只限制普通行；「失败原因/最终结果」
+    /// 是整份日志里最有价值的一行，绝不能因为前面的进度刷屏把它挤没了。
+    /// 代价是预算越界一个 clamp_line 的行宽，有界且值得。
     pub fn finish(&self, outcome: &str) {
-        self.append(&format!("==== 结束：{outcome} ===="));
+        let line = format!(
+            "{} ==== 结束：{outcome} ====\n",
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        );
+        {
+            let mut state = self.state.lock();
+            if let Some(file) = state.file.as_mut() {
+                let _ = file.write_all(line.as_bytes());
+                let _ = file.flush();
+            }
+        }
         let mut state = self.state.lock();
         if let Some(mut file) = state.file.take() {
             let _ = file.flush();
@@ -1332,11 +1356,22 @@ fn prune_old_logs(dir: &Path, active_run_ids: &[String]) {
     }
     if runs.len() >= MAX_RUN_FILES {
         runs.sort_by(|a, b| b.0.cmp(&a.0));
-        for (_, path) in runs.into_iter().skip(MAX_RUN_FILES - 1) {
+        for (modified, path) in runs.into_iter().skip(MAX_RUN_FILES - 1) {
             // 活跃运行的日志宁可让预算临时超一份，也不能删。
             if path
                 .file_stem()
                 .is_some_and(|stem| active.contains(stem.to_string_lossy().as_ref()))
+            {
+                continue;
+            }
+            // r43 P2：**跨进程租约**——`active` 只登记本进程的 run；另一应用
+            // 窗口/进程正在写的日志不在名单里，但它的 mtime 是新鲜的（心跳/
+            // 进度行持续刷）。mtime 在租约窗内的不删，宁可预算临时超份。窗
+            // 口取 1800s：覆盖提示等待 600s×心跳粒度的最坏静默，仍远小于
+            // 日志的自然老化周期。
+            if modified
+                .elapsed()
+                .is_ok_and(|age| age < std::time::Duration::from_secs(1800))
             {
                 continue;
             }
@@ -2170,12 +2205,42 @@ mod tests {
             file.append("一行");
             file.finish("成功");
         }
+        // r43 P2：轮转带跨进程 mtime 租约（新鲜文件不删）——「老到该删」的
+        // 判据从「排位靠后」变成「排位靠后且 mtime 超租约窗」。把全部文件
+        // backdate 到两小时前，再触发一次轮转验证裁剪。
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        for entry in std::fs::read_dir(logs_dir()).unwrap().flatten() {
+            set_mtime(&entry.path(), old);
+        }
+        RunLogFile::open("run-trigger", "轮转触发", &[]).unwrap();
         let count = std::fs::read_dir(logs_dir())
             .unwrap()
             .flatten()
             .filter(|entry| entry.path().extension().is_some_and(|e| e == "log"))
             .count();
         assert!(count <= MAX_RUN_FILES, "轮转没生效，目录里有 {count} 份");
+    }
+
+    /// r43 P2：跨进程租约的另一面——mtime 新鲜（另一进程正在写）的日志
+    /// 即使排位落在删除线上也不删，预算宁可临时超份。
+    #[test]
+    fn fresh_mtime_logs_survive_rotation_via_cross_process_lease() {
+        let _home = config::TempHome::new();
+        for index in 0..(MAX_RUN_FILES + 3) {
+            let file = RunLogFile::open(&format!("fresh-{index:03}"), "租约测试", &[]).unwrap();
+            file.append("一行");
+            file.finish("成功");
+        }
+        RunLogFile::open("fresh-trigger", "租约触发", &[]).unwrap();
+        let count = std::fs::read_dir(logs_dir())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "log"))
+            .count();
+        assert!(
+            count > MAX_RUN_FILES,
+            "新鲜 mtime 的日志不该被删（租约失效？）目录里有 {count} 份"
+        );
     }
 
     fn set_mtime(path: &std::path::Path, when: std::time::SystemTime) {
