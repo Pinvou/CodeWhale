@@ -71,10 +71,10 @@ class SelfHostedRoutingTests(unittest.TestCase):
         for job, pool in (('windows-rust-test', 'HEAVY'),
                           ('windows-rustup-repair-test', 'HEAVY'),
                           ('windows-relay-dacl', 'LIGHT'),
-                          ('windows-relay-tools-test', 'LIGHT'),
+                          ('windows-relay-tools-test', 'MEDIUM'),
                           ('windows-static-updater-contract', 'LIGHT'),
-                          ('windows-codex-runtime-test', 'LIGHT'),
-                          ('windows-runtime-test', 'LIGHT')):
+                          ('windows-codex-runtime-test', 'MEDIUM'),
+                          ('windows-runtime-test', 'MEDIUM')):
             block = re.split(r'\n  [a-zA-Z]', source.split('\n  ' + job + ':', 1)[1], maxsplit=1)[0]
             with self.subTest(job=job):
                 self.assertIn("vars.PINVOU_WINDOWS_ENABLED != 'false'", block)
