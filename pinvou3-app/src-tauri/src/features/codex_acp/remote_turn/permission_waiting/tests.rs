@@ -1,0 +1,738 @@
+use super::*;
+use crate::features::codex_acp::{
+    CodexAcpPendingPermission, PendingPermission, RemotePermissionProjection,
+    mint_remote_permission_in_maps, remote_permission_response_key,
+};
+use crate::features::remote_control::controller::{
+    journal::JournalKind,
+    permission::{DecisionAuthority, PermissionDecision, PermissionDecisionOwner},
+    protocol::LeaseContext,
+    task::{RemoteTaskLedger, RemoteTaskRequest, RemoteTaskTerminal, task_input_digest_for_value},
+};
+use serde_json::{Value, json};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tokio::sync::{Mutex, oneshot};
+
+// Only provider/runtime activation and response delivery are controlled. The
+// production polling loop, B authority, pool mint, owner matching and task
+// ledger/state service below are real; the one-active-per-task cap is retained.
+struct ResponseFault {
+    code: &'static str,
+    remove_callback: bool,
+}
+
+struct Pool {
+    pending: Mutex<HashMap<String, PendingPermission>>,
+    response_fault: parking_lot::Mutex<Option<ResponseFault>>,
+    cancel_before_mint: AtomicBool,
+    queued_during_response: parking_lot::Mutex<Option<&'static str>>,
+    owners: parking_lot::Mutex<HashMap<String, RemotePermissionOwner>>,
+}
+impl Pool {
+    async fn insert(&self, owner: &RemotePermissionOwner, callback: &str) {
+        let (response_tx, _) = oneshot::channel();
+        self.pending.lock().await.insert(
+            callback.into(),
+            PendingPermission {
+                callback_instance: Arc::new(()),
+                view: CodexAcpPendingPermission {
+                    session_id: owner.session_id.clone(),
+                    tool_call_id: callback.into(),
+                    request: Value::Null,
+                },
+                option_ids: vec![],
+                option_kinds: HashMap::new(),
+                generation: 1,
+                remote_owner: Some(owner.clone()),
+                remote_request_id: Some(callback.into()),
+                remote_approval_id: None,
+                remote_projection: Some(RemotePermissionProjection {
+                    operation_type: "shell_command".into(),
+                    risk_level: "high".into(),
+                    target_scope: "[PATH]".into(),
+                    preview: "[REDACTED]".into(),
+                }),
+                turn_id: None,
+                activity: crate::features::codex_acp::stall::new_activity_clock(),
+                response_tx,
+                // This fixture controls delivery; actual SDK acceptance has its own root.
+                sdk_responder: None,
+                bridge: None,
+            },
+        );
+    }
+}
+#[async_trait::async_trait]
+impl PermissionPool for Pool {
+    async fn pending_remote_permissions(
+        &self,
+        owner: &RemotePermissionOwner,
+    ) -> Vec<RemoteOwnedPermission> {
+        self.pending
+            .lock()
+            .await
+            .values()
+            .filter_map(|p| {
+                if p.remote_owner.as_ref() != Some(owner) {
+                    return None;
+                }
+                Some(RemoteOwnedPermission {
+                    callback_id: p.remote_request_id.clone()?,
+                    approval_id: p.remote_approval_id.clone(),
+                    owner: owner.clone(),
+                    projection: p.remote_projection.clone()?,
+                })
+            })
+            .collect()
+    }
+    async fn mint_remote_permission(
+        &self,
+        owner: &RemotePermissionOwner,
+        callback: &str,
+        authority: &PermissionAuthority,
+        ledger: &RemoteTaskLedger,
+        ttl: u64,
+    ) -> anyhow::Result<PermissionView> {
+        if self.cancel_before_mint.swap(false, Ordering::SeqCst) {
+            self.pending.lock().await.remove(callback);
+        }
+        mint_remote_permission_in_maps(
+            &self.pending,
+            &self.owners,
+            owner,
+            callback,
+            authority,
+            ledger,
+            ttl,
+        )
+        .await
+    }
+    async fn respond_remote_permission(
+        &self,
+        owner: &RemotePermissionOwner,
+        approval: &str,
+        _: bool,
+    ) -> anyhow::Result<()> {
+        // Entering this responder proves sync has already captured its initial
+        // snapshot. Inject the later callback before the final pending read.
+        let queued = self.queued_during_response.lock().take();
+        if let Some(callback) = queued {
+            self.insert(owner, callback).await;
+        }
+        let fault = self.response_fault.lock().take();
+        let mut pending = self.pending.lock().await;
+        let key = remote_permission_response_key(&pending, owner, approval)
+            .ok_or_else(|| anyhow::anyhow!("stale"))?;
+        if let Some(fault) = fault {
+            if fault.remove_callback {
+                pending.remove(&key).unwrap();
+            }
+            return Err(anyhow::anyhow!(fault.code));
+        }
+        pending.remove(&key).unwrap();
+        Ok(())
+    }
+}
+#[derive(Default)]
+struct Events(parking_lot::Mutex<Vec<Value>>);
+impl ControllerTaskEventSink for Events {
+    fn emit(&self, _: Value) {}
+    fn emit_journal(&self, kind: JournalKind, session: &str, task: Option<&str>, payload: Value) {
+        assert!(matches!(kind, JournalKind::Permission));
+        assert_eq!(session, "session-wait");
+        assert_eq!(task, Some("task-wait"));
+        self.0.lock().push(payload);
+    }
+}
+struct Fixture {
+    tasks: RemoteTaskService,
+    owner: RemotePermissionOwner,
+    authority: PermissionAuthority,
+    clock: Arc<AtomicU64>,
+    pool: Pool,
+    registered: HashMap<String, String>,
+    journal: super::super::PermissionJournal,
+    request: RemoteTaskRequest,
+    events: Arc<Events>,
+}
+impl Fixture {
+    fn new() -> Self {
+        let lease = LeaseContext {
+            connection_id: "connection-wait".into(),
+            controller_lease_id: "lease-wait".into(),
+            lease_epoch: "1".into(),
+            relay_epoch: "relay-wait".into(),
+            remote_control_generation: "generation-wait".into(),
+        };
+        let input = json!({"text":"approval", "attachment_ids":[], "skill_ids":[], "workspace_id":"workspace-wait"});
+        let request = RemoteTaskRequest::from_payload(&json!({
+            "connection_id":lease.connection_id, "controller_lease_id":lease.controller_lease_id,
+            "lease_epoch":lease.lease_epoch, "relay_epoch":lease.relay_epoch, "remote_control_generation":lease.remote_control_generation,
+            "task_id":"task-wait", "client_request_id":"client-wait", "session_id":"session-wait",
+            "capability_revision":"1", "mode":"code", "model_source":"controlled_device",
+            "input_digest":task_input_digest_for_value(&input).unwrap(), "input":input,
+        })).unwrap();
+        let tasks = RemoteTaskService::new(Arc::new(RemoteTaskLedger::in_memory()));
+        tasks.ledger().admit(&lease, &request, 1).unwrap();
+        let record = tasks.ledger().begin_dispatch(&request.task_id, 2).unwrap();
+        let owner = RemotePermissionOwner {
+            task_sequence: record.sequence,
+            session_id: record.session_id,
+            task_id: record.task_id,
+            lease,
+        };
+        let clock = Arc::new(AtomicU64::new(10));
+        let read_clock = clock.clone();
+        Self {
+            tasks,
+            authority: PermissionAuthority::with_clock(Arc::new(move || {
+                read_clock.load(Ordering::SeqCst)
+            })),
+            pool: Pool {
+                pending: Mutex::new(HashMap::new()),
+                response_fault: parking_lot::Mutex::new(None),
+                cancel_before_mint: AtomicBool::new(false),
+                queued_during_response: parking_lot::Mutex::new(None),
+                owners: parking_lot::Mutex::new(HashMap::from([(
+                    owner.session_id.clone(),
+                    owner.clone(),
+                )])),
+            },
+            journal: super::super::PermissionJournal::new(owner.clone()),
+            owner,
+            clock,
+            registered: HashMap::new(),
+            request,
+            events: Arc::new(Events::default()),
+        }
+    }
+    async fn tick(&mut self) -> Result<(), String> {
+        let events: Arc<dyn ControllerTaskEventSink> = self.events.clone();
+        let result = sync(
+            &self.pool,
+            &self.authority,
+            &self.tasks,
+            &self.owner,
+            &mut self.journal,
+            &events,
+        )
+        .await;
+        for request in self.pool.pending_remote_permissions(&self.owner).await {
+            if let Some(approval) = request.approval_id {
+                self.registered.insert(request.callback_id, approval);
+            }
+        }
+        result
+    }
+    fn state(&self) -> RemoteTaskState {
+        self.tasks.status(&self.owner.task_id).unwrap().state
+    }
+    fn terminal_states(&self) -> Vec<String> {
+        self.events
+            .0
+            .lock()
+            .iter()
+            .filter_map(|event| event["status"].as_str())
+            .filter(|state| *state != "pending")
+            .map(str::to_owned)
+            .collect()
+    }
+    fn decide(&self, callback: &str, decision: PermissionDecision) {
+        let id = &self.registered[callback];
+        self.authority
+            .decide_for_owner(
+                DecisionAuthority::ControllerA,
+                &self.owner.lease,
+                &self.owner.task_id,
+                id,
+                decision,
+                &PermissionDecisionOwner {
+                    session_id: self.owner.session_id.clone(),
+                    task_sequence: self.owner.task_sequence,
+                },
+            )
+            .unwrap();
+        if decision == PermissionDecision::Allow {
+            self.authority
+                .commit_dispatch(id, self.authority.now_ms())
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn resolved_callback_cannot_resume_while_the_next_real_approval_waits() {
+    for decision in [PermissionDecision::Allow, PermissionDecision::Deny] {
+        let mut f = Fixture::new();
+        f.pool.insert(&f.owner, "first").await;
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        assert_eq!(f.authority.active_count(), 1);
+        f.decide("first", decision);
+        // The first responder finished between polls. Only now can the next
+        // callback mint under the real authority's per-task capacity rule.
+        f.pool
+            .respond_remote_permission(&f.owner, &f.registered["first"], true)
+            .await
+            .unwrap();
+        f.pool.insert(&f.owner, "second").await;
+        f.tick().await.unwrap();
+        assert_eq!(
+            f.state(),
+            RemoteTaskState::WaitingPermission,
+            "second is still pending"
+        );
+        assert_eq!(f.authority.active_count(), 1);
+        assert_eq!(
+            f.authority.view(&f.registered["second"]).unwrap().state,
+            "pending"
+        );
+        f.tick().await.unwrap();
+        assert_eq!(
+            f.state(),
+            RemoteTaskState::WaitingPermission,
+            "next tick cannot lose waiting state"
+        );
+        f.decide("second", PermissionDecision::Deny);
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::Running);
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::Running);
+    }
+}
+
+#[tokio::test]
+async fn expiry_resumes_only_after_the_last_callback_and_never_revives_cancelled_task() {
+    let mut f = Fixture::new();
+    f.pool.insert(&f.owner, "expiry").await;
+    f.tick().await.unwrap();
+    let deadline = f
+        .authority
+        .view(&f.registered["expiry"])
+        .unwrap()
+        .expires_at_ms;
+    f.clock.store(deadline, Ordering::SeqCst);
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::Running);
+    f.tasks
+        .enter_waiting_permission(&f.owner.task_id, f.owner.task_sequence, 5)
+        .unwrap();
+    f.tasks
+        .ledger()
+        .complete(&f.owner.task_id, RemoteTaskTerminal::Cancelled, None, 6)
+        .unwrap();
+    resume_when_clear(&f.tasks, &f.owner, &[]).unwrap();
+    assert_eq!(f.state(), RemoteTaskState::Cancelled);
+}
+
+#[tokio::test]
+async fn late_resolution_rejects_changed_lease_session_or_admission_identity() {
+    let mut f = Fixture::new();
+    f.tasks
+        .enter_waiting_permission(&f.owner.task_id, f.owner.task_sequence, 3)
+        .unwrap();
+    for kind in 0..7 {
+        let mut old = f.owner.clone();
+        match kind {
+            0 => old.task_sequence += 1,
+            1 => old.session_id.push_str("-old"),
+            2 => old.lease.connection_id.push_str("-old"),
+            3 => old.lease.controller_lease_id.push_str("-old"),
+            4 => old.lease.lease_epoch.push_str("-old"),
+            5 => old.lease.relay_epoch.push_str("-old"),
+            _ => old.lease.remote_control_generation.push_str("-old"),
+        }
+        assert_eq!(
+            resume_when_clear(&f.tasks, &old, &[]).unwrap_err(),
+            "permission_binding_stale"
+        );
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+    }
+    // No registered approval means there is no completion evidence, even
+    // when the same task is already waiting for another reason.
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+}
+
+#[tokio::test]
+async fn cancelled_unminted_tail_resumes_after_the_previous_decision_was_projected() {
+    for decision in [PermissionDecision::Allow, PermissionDecision::Deny] {
+        let mut f = Fixture::new();
+        f.pool.insert(&f.owner, "first").await;
+        f.tick().await.unwrap();
+        f.decide("first", decision);
+        *f.pool.queued_during_response.lock() = Some("queued-tail");
+        f.tick().await.unwrap();
+        let tail = f.pool.pending_remote_permissions(&f.owner).await;
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].callback_id, "queued-tail");
+        assert!(
+            tail[0].approval_id.is_none(),
+            "tail arrived after the initial snapshot"
+        );
+        assert_eq!(f.registered.len(), 1);
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        assert_eq!(f.authority.active_count(), 0);
+        let projected = f.terminal_states();
+        assert_eq!(
+            projected,
+            vec![if decision == PermissionDecision::Allow {
+                "allowed"
+            } else {
+                "denied"
+            }]
+        );
+
+        // Controlled request-cancellation seam: the actual SDK watcher is
+        // covered separately by remote_permission_receipt_requires_the_actual_sdk_response_queue.
+        let removed = f.pool.pending.lock().await.remove("queued-tail").unwrap();
+        assert_eq!(removed.remote_owner.as_ref(), Some(&f.owner));
+        assert!(removed.remote_approval_id.is_none());
+        f.tick().await.unwrap();
+        assert_eq!(
+            f.state(),
+            RemoteTaskState::Running,
+            "completed approvals must resume after the unminted tail is cancelled"
+        );
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::Running);
+        assert_eq!(
+            f.terminal_states(),
+            projected,
+            "empty ticks cannot reproject a decision"
+        );
+        assert_eq!(f.authority.active_count(), 0);
+
+        f.pool.insert(&f.owner, "successor").await;
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        assert_eq!(f.authority.active_count(), 1);
+        f.decide("successor", PermissionDecision::Deny);
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::Running);
+        assert_eq!(f.terminal_states().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn completed_old_journal_cannot_resume_a_reused_task_admission() {
+    let mut f = Fixture::new();
+    f.pool.insert(&f.owner, "old").await;
+    f.tick().await.unwrap();
+    f.decide("old", PermissionDecision::Deny);
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::Running);
+    let projected = f.terminal_states();
+    f.tasks
+        .ledger()
+        .complete(&f.owner.task_id, RemoteTaskTerminal::Interrupted, None, 20)
+        .unwrap();
+    // Exercise real retained-ledger eviction before reusing the same wire ID.
+    for index in 0..256 {
+        let mut request = f.request.clone();
+        request.task_id = format!("wait-filler-{index}");
+        request.client_request_id = format!("wait-client-{index}");
+        f.tasks
+            .ledger()
+            .admit(&f.owner.lease, &request, 21)
+            .unwrap();
+        f.tasks
+            .ledger()
+            .complete(&request.task_id, RemoteTaskTerminal::Succeeded, None, 22)
+            .unwrap();
+    }
+    f.tasks
+        .ledger()
+        .admit(&f.owner.lease, &f.request, 23)
+        .unwrap();
+    let record = f
+        .tasks
+        .ledger()
+        .begin_dispatch(&f.owner.task_id, 24)
+        .unwrap();
+    assert_ne!(record.sequence, f.owner.task_sequence);
+    let mut next = f.owner.clone();
+    next.task_sequence = record.sequence;
+    f.pool
+        .owners
+        .lock()
+        .insert(next.session_id.clone(), next.clone());
+    f.tasks
+        .enter_waiting_permission(&next.task_id, next.task_sequence, 25)
+        .unwrap();
+    f.pool.insert(&next, "next-admission").await;
+    assert_eq!(f.tick().await.unwrap_err(), "permission_binding_stale");
+    assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+    assert_eq!(f.terminal_states(), projected);
+    let pending = f.pool.pending_remote_permissions(&next).await;
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].approval_id.is_none());
+
+    f.owner = next;
+    f.journal = super::super::PermissionJournal::new(f.owner.clone());
+    f.registered.clear();
+    f.tick().await.unwrap();
+    assert_eq!(f.authority.active_count(), 1);
+    f.decide("next-admission", PermissionDecision::Deny);
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::Running);
+}
+
+#[tokio::test]
+async fn actual_authority_and_controller_wire_projection_preserve_each_state() {
+    let mut f = Fixture::new();
+    let mut views = Vec::new();
+    for (callback, ending) in [
+        ("p", "pending"),
+        ("a", "allowed"),
+        ("d", "denied"),
+        ("e", "expired"),
+    ] {
+        // Only one active entry at a time, as in the production authority.
+        f.pool.insert(&f.owner, callback).await;
+        f.tick().await.unwrap();
+        let id = f.registered[callback].clone();
+        if ending == "allowed" {
+            f.decide(callback, PermissionDecision::Allow);
+        }
+        if ending == "denied" {
+            f.decide(callback, PermissionDecision::Deny);
+        }
+        if ending == "expired" {
+            let deadline = f.authority.view(&id).unwrap().expires_at_ms;
+            f.clock.store(deadline, Ordering::SeqCst);
+            f.authority.sweep_expired(deadline);
+        }
+        let view = f.authority.view(&id).unwrap();
+        assert_eq!(view.state, ending);
+        views.push(view.into_remote_action_payload());
+        if ending == "pending" {
+            f.decide(callback, PermissionDecision::Deny);
+        }
+        f.tick().await.unwrap();
+        assert!(
+            f.authority.pending_for_task(&f.owner.task_id).is_empty(),
+            "closed entries cannot appear in the normal list"
+        );
+    }
+    // Browser fixture consumes these actual authority/production encoder
+    // outputs. Closed-state inputs exercise defensive consumer semantics;
+    // they are not evidence that the current normal list returns history.
+    let fixture: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/remote_permission_states.json"
+    )))
+    .unwrap();
+    let mut actual = json!({"permissions":views});
+    let mut ids = HashSet::new();
+    for (actual, expected) in actual["permissions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(fixture["permissions"].as_array().unwrap())
+    {
+        let id = actual["permission_request_id"].as_str().unwrap().to_owned();
+        assert!(!id.is_empty() && id.len() <= 128 && ids.insert(id));
+        // Only the intentionally fresh process nonce/sequence is normalized.
+        // State, owner task, expiry, decision, dispatch and redaction must match.
+        actual["permission_request_id"] = expected["permission_request_id"].clone();
+    }
+    assert_eq!(
+        actual, fixture,
+        "committed UI fixture must match the real producer"
+    );
+    println!(
+        "PERMISSION_PROJECTION_JSON {}",
+        json!({"permissions":views})
+    );
+}
+
+#[tokio::test]
+async fn simultaneous_callbacks_queue_under_the_real_single_active_capacity() {
+    for decision in [PermissionDecision::Allow, PermissionDecision::Deny] {
+        let mut f = Fixture::new();
+        f.pool.insert(&f.owner, "parallel-a").await;
+        f.pool.insert(&f.owner, "parallel-b").await;
+        f.tick().await.unwrap();
+        assert_eq!(f.registered.len(), 1);
+        assert_eq!(f.authority.active_count(), 1);
+        assert_eq!(f.pool.pending_remote_permissions(&f.owner).await.len(), 2);
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        f.tick().await.unwrap();
+        assert_eq!(
+            f.registered.len(),
+            1,
+            "queued callback has not minted a second active approval"
+        );
+        let first = f.registered.keys().next().unwrap().clone();
+        let second = if first == "parallel-a" {
+            "parallel-b"
+        } else {
+            "parallel-a"
+        };
+        f.decide(&first, decision);
+        f.tick().await.unwrap();
+        assert_eq!(f.registered.len(), 2);
+        assert_eq!(f.authority.active_count(), 1);
+        assert_eq!(f.pool.pending_remote_permissions(&f.owner).await.len(), 1);
+        assert_eq!(
+            f.authority.view(&f.registered[second]).unwrap().state,
+            "pending"
+        );
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        f.decide(second, PermissionDecision::Deny);
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::Running);
+        assert_eq!(f.authority.active_count(), 0);
+        assert!(f.pool.pending_remote_permissions(&f.owner).await.is_empty());
+        f.tick().await.unwrap();
+        assert_eq!(f.state(), RemoteTaskState::Running);
+    }
+}
+
+#[tokio::test]
+async fn simultaneous_callbacks_continue_after_first_expiry_without_retiring_the_turn() {
+    let mut f = Fixture::new();
+    f.pool.insert(&f.owner, "expire-a").await;
+    f.pool.insert(&f.owner, "expire-b").await;
+    f.tick().await.unwrap();
+    let first = f.registered.keys().next().unwrap().clone();
+    let deadline = f
+        .authority
+        .view(&f.registered[&first])
+        .unwrap()
+        .expires_at_ms;
+    f.clock.store(deadline, Ordering::SeqCst);
+    f.tick().await.unwrap();
+    let second = if first == "expire-a" {
+        "expire-b"
+    } else {
+        "expire-a"
+    };
+    assert_eq!(
+        f.authority.view(&f.registered[&first]).unwrap().state,
+        "expired"
+    );
+    assert_eq!(
+        f.authority.view(&f.registered[second]).unwrap().state,
+        "pending"
+    );
+    assert_eq!(f.authority.active_count(), 1);
+    assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+    f.decide(second, PermissionDecision::Deny);
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::Running);
+}
+
+#[tokio::test]
+async fn dispatch_deferred_keeps_waiting_and_terminal_codes_are_preserved() {
+    for code in [
+        PERMISSION_DISPATCH_DEFERRED,
+        TURN_TIMEOUT_CODE,
+        TASK_CANCELLED_CODE,
+    ] {
+        let mut f = Fixture::new();
+        f.pool.insert(&f.owner, "dispatch").await;
+        f.tick().await.unwrap();
+        f.decide("dispatch", PermissionDecision::Deny);
+        *f.pool.response_fault.lock() = Some(ResponseFault {
+            code,
+            remove_callback: false,
+        });
+        let result = f.tick().await;
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        assert_eq!(f.pool.pending_remote_permissions(&f.owner).await.len(), 1);
+        if code == PERMISSION_DISPATCH_DEFERRED {
+            result.unwrap();
+            f.tick().await.unwrap();
+            assert_eq!(f.state(), RemoteTaskState::Running);
+        } else {
+            assert_eq!(result.unwrap_err(), code);
+        }
+    }
+}
+
+#[tokio::test]
+async fn lost_allow_delivery_cannot_resume_when_the_callback_disappears() {
+    for projected_prefix in [false, true] {
+        let mut f = Fixture::new();
+        if projected_prefix {
+            f.pool.insert(&f.owner, "projected-prefix").await;
+            f.tick().await.unwrap();
+            f.decide("projected-prefix", PermissionDecision::Deny);
+            f.tick().await.unwrap();
+            assert_eq!(f.terminal_states(), vec!["denied"]);
+        }
+        f.pool.insert(&f.owner, "lost-allow").await;
+        f.tick().await.unwrap();
+        let id = f.registered["lost-allow"].clone();
+        // A decision alone is not an accepted provider response. Unlike decide(),
+        // deliberately leave this real authority entry awaiting delivery.
+        f.authority
+            .decide_for_owner(
+                DecisionAuthority::ControllerA,
+                &f.owner.lease,
+                &f.owner.task_id,
+                &id,
+                PermissionDecision::Allow,
+                &PermissionDecisionOwner {
+                    session_id: f.owner.session_id.clone(),
+                    task_sequence: f.owner.task_sequence,
+                },
+            )
+            .unwrap();
+        assert_eq!(f.authority.view(&id).unwrap().state, "allowed");
+        assert!(
+            !f.authority
+                .allow_delivery_observed(&f.owner.lease, &f.owner.task_id, &id)
+        );
+        assert!(
+            !f.authority
+                .callback_was_cancelled(&f.owner.lease, &f.owner.task_id, &id)
+        );
+        let projected = f.terminal_states();
+        let dispatch_state = f.authority.view(&id).unwrap().dispatch_state;
+        *f.pool.response_fault.lock() = Some(ResponseFault {
+            code: "controlled_delivery_failed",
+            remove_callback: true,
+        });
+        assert_eq!(f.tick().await.unwrap_err(), "permission_dispatch_failed");
+        assert!(f.pool.pending_remote_permissions(&f.owner).await.is_empty());
+        assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+        // The first tick returned before checking recovery. Later empty ticks
+        // must still refuse both a sole uncommitted Allow and a mixed journal.
+        for _ in 0..2 {
+            f.tick().await.unwrap();
+            assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+            assert_eq!(f.terminal_states(), projected);
+            assert_eq!(
+                f.authority.view(&id).unwrap().dispatch_state,
+                dispatch_state
+            );
+            assert!(
+                !f.authority
+                    .allow_delivery_observed(&f.owner.lease, &f.owner.task_id, &id)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn callback_cancelled_between_snapshot_and_mint_keeps_the_next_approval_usable() {
+    let mut f = Fixture::new();
+    f.pool.insert(&f.owner, "cancel-before-mint").await;
+    f.pool.cancel_before_mint.store(true, Ordering::SeqCst);
+    f.tick().await.unwrap();
+    assert!(f.pool.pending_remote_permissions(&f.owner).await.is_empty());
+    assert_eq!(f.authority.active_count(), 0);
+    assert_eq!(f.state(), RemoteTaskState::Running);
+    f.pool.insert(&f.owner, "next").await;
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::WaitingPermission);
+    assert_eq!(f.authority.active_count(), 1);
+    f.decide("next", PermissionDecision::Deny);
+    f.tick().await.unwrap();
+    assert_eq!(f.state(), RemoteTaskState::Running);
+}

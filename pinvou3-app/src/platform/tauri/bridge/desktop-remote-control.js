@@ -42,6 +42,8 @@
     var capabilityFlights = Object.create(null);
     var capabilityRenewalTimer = null;
     var modelListIntent = 0;
+    var permissionMirrorIntent = 0;
+    var permissionMirrorOwner = "";
     var capabilityReadIntent = 0;
     var capabilityReadFlight = null;
     var controlledTerminalSequence = 0;
@@ -238,6 +240,8 @@
     }
 
     function stop() {
+      ++permissionMirrorIntent;
+      permissionMirrorOwner = "";
       controlledRegistrationFailureIntent = null;
       subscriptionOwner = null;
       channelRegistrations = Object.create(null);
@@ -1308,7 +1312,7 @@
         ? JSON.stringify(parts) : "";
     }
 
-    function invokeRemoteAction(localSessionId, remoteRef, intent, suppliedRequestId, retryUncertain) {
+    function invokeRemoteAction(localSessionId, remoteRef, intent, suppliedRequestId, retryUncertain, independentRead) {
       ensureAvailable();
       if (!requiredOpaqueId(localSessionId) || !requiredOpaqueId(remoteRef)) {
         return Promise.reject(invalidTaskIntent());
@@ -1317,6 +1321,8 @@
         return Promise.reject(invalidTaskIntent());
       }
       var key = remoteActionKey(localSessionId, remoteRef, intent);
+      // A refresh after a decision must not inherit an earlier read's snapshot.
+      if (intent.operation === "permission_list" && independentRead) key += "|read:" + independentRead;
       var actionLease = attachmentLeaseKey();
       if (actionLease && actionLedger.lease && actionLease !== actionLedger.lease) {
         actionLedger.entries = Object.create(null);
@@ -1358,6 +1364,9 @@
           } else if (error.authoritative || !entry.unknown) {
             forgetAction(key, entry);
           }
+          // A read has no mutation receipt to retain, including an uncertain
+          // first attempt followed by a different, non-authoritative failure.
+          if (intent.operation === "permission_list" && independentRead) forgetAction(key, entry);
           throw error;
         });
       }
@@ -1371,9 +1380,15 @@
 
     function permissionList(localSessionId, remoteRef, taskId) {
       if (!requiredOpaqueId(taskId)) return Promise.reject(invalidTaskIntent());
+      var before = current();
+      var terminal = controllerTerminalSequence;
+      var intent = ++permissionMirrorIntent;
+      permissionMirrorOwner = JSON.stringify([localSessionId, remoteRef, taskId]);
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "permission_list", taskId: taskId,
-      }).then(function (body) {
+      }, null, undefined, intent).then(function (body) {
+        if (intent !== permissionMirrorIntent || terminal !== controllerTerminalSequence
+          || !sameControllerView(before, current())) return [];
         var permissions = body && body.permissions;
         var next = shallow(current());
         next.remotePermissions = Array.isArray(permissions)
@@ -1397,13 +1412,21 @@
     function permissionDecide(localSessionId, remoteRef, taskId, permissionRequestId, decision) {
       if (!requiredOpaqueId(taskId) || !requiredOpaqueId(permissionRequestId)
         || ["allow", "deny"].indexOf(decision) < 0) return Promise.reject(invalidTaskIntent());
+      var before = current();
+      var terminal = controllerTerminalSequence;
+      var owner = JSON.stringify([localSessionId, remoteRef, taskId]);
       return invokeRemoteAction(localSessionId, remoteRef, {
         operation: "permission_decide", taskId: taskId,
         permissionRequestId: permissionRequestId, decision: decision,
       }).then(function (result) {
+        if (owner !== permissionMirrorOwner || terminal !== controllerTerminalSequence
+          || !sameControllerView(before, current())) return result;
+        // A read started before this acknowledgement must not restore the old
+        // pending card after its successful decision removed it.
+        ++permissionMirrorIntent;
         var next = shallow(current());
         next.remotePermissions = (next.remotePermissions || []).filter(function (entry) {
-          return entry.permissionRequestId !== permissionRequestId;
+          return entry.taskId !== taskId || entry.permissionRequestId !== permissionRequestId;
         });
         publish(next);
         return result;

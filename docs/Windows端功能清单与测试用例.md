@@ -1,6 +1,6 @@
 # PINVOU Windows 端功能清单与测试用例
 
-> **注（2026-11 回填）**：本文回填自内部仓库 2026-07-23 快照（版本 `0.6.3`、基线 `025-architecture-migration`），未按当前主干逐条复核。同期姊妹篇：[`Windows迁移与维护接手手册.md`](./Windows迁移与维护接手手册.md)（2026-06-15 迁移接手快照）；现行 Windows 构建/CI 与私有运行时权威入口见 [`windows-rust-ci.md`](./windows-rust-ci.md) 与 [`windows-private-runtime-submodule.md`](./windows-private-runtime-submodule.md)。以下快照内容**不可**当作当前主干能力：§3.8 的 WF-01..09 工作流子系统（已在主干整体移除，见 `features/retirement.rs`；§5.7 的 WIN-WF-001..008 用例与 §8 清单中的「工作流启动、人工门禁…重启恢复通过」条目同属该子系统，一并作废）、§3.12 的 OTA-01..04 Windows 双层 OTA 链路（主干 `features/updater/platform/` 无 Windows 实现；§5.10 的 WIN-OTA-001..008 用例与 §8 清单中的「OTA 检查、下载、取消…升级结果上报通过」条目同属该链路，一并作废）、§3.9 的 CONN-04/05 员工门户/企业知识库连接器（主干连接器仅 feishu/wecom/dingtalk/ima/tmeet；§5.9 的 WIN-CONN-004/005 用例同属该能力，一并作废）、§3.5 的 MODEL-01「内置模型账号绑定」与 MODEL-02「后台失败缓存容错」（主干无对应实现——现行账号体系为 ACP 代理账号，见 [`codex-acp.md`](./codex-acp.md)；§5.5 的 WIN-MODEL-001..004A 用例与 §6.1 的「内置模型账号暂时失败保留缓存」项同属该能力，一并作废）；§3.12 的 SET-06「用户反馈」提交链路（现行主干 `submit_feedback` 为社区版桩：无条件返回校验失败、不可重试，仅本地回执并引导社区 Issue——`pinvou3-app/src-tauri/src/features/feedback/mod.rs`；§5.10 的 WIN-SET-004..006 提交/重试用例同属该链路，一并作废）；§9 追溯矩阵为 0.6.x 代码布局（子模块目录现为 `CodeWhale/`，前端/Rust 均已按 `features/`/`platform/` 重构）。编号空缺两处为快照期原貌、非漏排：§3.5 功能条目表的 `MODEL-08`（MODEL-07 直跳 MODEL-09）与 §5.7 用例表的 `WIN-TOOL-008`（§5.5 的 `WIN-MODEL-008` 用例存在）；文中版本号 `0.6.3` 为内部仓库编号，与公开 tag 序列非一一对应。其余条目经抽查与现行代码一致（附件上限 4 处经 2026-11-19 #894 单附件上限 20→50 MiB 后带行内注；§2.3/§4.1/§5.11/§6.3 四处 OTA 相关行注不在上列逐节枚举内），正式验收前以当前代码为准。
+> **注（2026-11 回填）**：本文回填自内部仓库 2026-07-23 快照（版本 `0.6.3`、基线 `025-architecture-migration`），未按当前主干逐条复核。同期姊妹篇：[`Windows迁移与维护接手手册.md`](./Windows迁移与维护接手手册.md)（2026-06-15 迁移接手快照）；现行 Windows 构建/CI 与私有运行时权威入口见 [`windows-rust-ci.md`](./windows-rust-ci.md) 与 [`windows-private-runtime-submodule.md`](./windows-private-runtime-submodule.md)。以下快照内容**不可**当作当前主干能力：§3.8 的 WF-01..09 工作流子系统（已在主干整体移除，见 `features/retirement.rs`；§5.7 的 WIN-WF-001..008 用例与 §8 清单中的「工作流启动、人工门禁…重启恢复通过」条目同属该子系统，一并作废）、§3.12 的 OTA-01..04 Windows 更新链路（⚠️ 订正 2026-11-21：本注原称「主干 `features/updater/platform/` 无 Windows 实现」系失实——Windows 应用内更新已在主干实现：`features/updater/platform/windows.rs` 按 `latest.json` 平台清单下载已签名 NSIS/MSI 并强校验 SHA-256、UAC 启动安装器，`mod.rs` 以 cfg(windows) 接线、8 个 updater 命令已注册于 `lib.rs`；§5.10 的 WIN-OTA-001..008 用例与 §8 清单中的「OTA 检查、下载、取消…升级结果上报通过」条目**不作废**，唯快照期步骤需按现行单包实现逐条核对后执行）、§3.9 的 CONN-04/05 员工门户/企业知识库连接器（主干连接器仅 feishu/wecom/dingtalk/ima/tmeet；§5.9 的 WIN-CONN-004/005 用例同属该能力，一并作废）、§3.5 的 MODEL-01「内置模型账号绑定」与 MODEL-02「后台失败缓存容错」（主干无对应实现——现行账号体系为 ACP 代理账号，见 [`codex-acp.md`](./codex-acp.md)；§5.5 的 WIN-MODEL-001..004A 用例与 §6.1 的「内置模型账号暂时失败保留缓存」项同属该能力，一并作废）；§3.12 的 SET-06「用户反馈」提交链路（现行主干 `submit_feedback` 为社区版桩：无条件返回校验失败、不可重试，仅本地回执并引导社区 Issue——`pinvou3-app/src-tauri/src/features/feedback/mod.rs`；§5.10 的 WIN-SET-004..006 提交/重试用例同属该链路，一并作废）；§9 追溯矩阵为 0.6.x 代码布局（子模块目录现为 `CodeWhale/`，前端/Rust 均已按 `features/`/`platform/` 重构）。编号空缺两处为快照期原貌、非漏排：§3.5 功能条目表的 `MODEL-08`（MODEL-07 直跳 MODEL-09）与 §5.7 用例表的 `WIN-TOOL-008`（§5.5 的 `WIN-MODEL-008` 用例存在）；文中版本号 `0.6.3` 为内部仓库编号，与公开 tag 序列非一一对应。其余条目经抽查与现行代码一致（附件上限 4 处经 2026-11-19 #894 单附件上限 20→50 MiB 后带行内注；§2.3/§4.1/§5.11/§6.3 四处 OTA 相关行注不在上列逐节枚举内），正式验收前以当前代码为准。
 
 ## 1. 文档信息
 
@@ -28,7 +28,7 @@
 
 | 项目 | 当前实现 |
 |---|---|
-| 安装包 | NSIS + MSI（现行未显式指定 `--bundles` 时，经由 Windows 平台配置 `src-tauri/config/platforms/windows/tauri.conf.json` 的 `"targets": ["msi","nsis"]` 字面量生效；`pinvou3-app/scripts/tauri/build.js` 的 `windowsBundleTargets` 在未显式指定时亦缺省返回同组目标、用于安装器暂存），`perMachine` 安装模式，简体中文/英文/日文安装界面，LZMA 压缩 |
+| 安装包 | MSI（⚠️ 订正 2026-11-21：未显式指定 `--bundles` 时的实际 bundle 目标来自 Windows 平台配置 `src-tauri/config/platforms/windows/tauri.conf.json` 的 `"targets": ["msi"]`，默认产物为 MSI 单包；NSIS 安装器仅经 `build:nsis` 专用流水线（staging + `bundle:nsis`，显式 `--bundles nsis`）产出；`pinvou3-app/scripts/tauri/build.js` 的 `windowsBundleTargets` 未显式指定时返回 `["msi", "nsis"]` 仅用于安装器暂存判定，不改变实际 bundle 目标），`perMachine` 安装模式，简体中文/英文/日文安装界面，LZMA 压缩 |
 | 应用窗口 | Tauri 2 桌面窗口，默认最大化、无系统装饰栏、支持调整大小 |
 | 安装权限 | 机器级安装和运行时环境变量配置需要管理员权限 |
 | VC++ 运行库 | 安装前检查 Microsoft Visual C++ 2015-2022 x64；缺失或版本不足时先补齐 Windows Installer 必需的临时目录和权限，再静默安装 |
@@ -51,7 +51,7 @@
 
 > 注（2026-11 回填）：表中精确版本号（Python 3.13.14 / Node 24.18.0 / Pandoc 3.10 / ONNX Runtime 1.20）写档时取自私有 runtime lock；运行时仓库现已公开（`private-runtimes/windows` → `Pinvou/pinvou3-windows-runtime`），版本钉在公开树的 `pinvou3-app/src-tauri/config/platforms/windows/runtime/x86_64.lock.json` 与其 manifest，可核对 `runtime/python|node|pandoc|onnxruntime` 目录布局与打包合同（`pinvou3-app/tests/windows_runtime_packaging_contract.test.js`）。
 
-以下能力仍可能依赖外部环境：旧版 Office/WPS 文档、演示文稿和表格的完整转换依赖 LibreOffice；本地模型能力依赖本地 vLLM 服务；远程模型、工具市场、连接器、反馈和 OTA 依赖网络及对应服务可用（快照口径：Windows OTA 未随主线发布；反馈提交链路现行主干为社区版桩、提交不可成功——均见文首失效声明）。
+以下能力仍可能依赖外部环境：旧版 Office/WPS 文档、演示文稿和表格的完整转换依赖 LibreOffice；本地模型能力依赖本地 vLLM 服务；远程模型、工具市场、连接器、反馈和 OTA 依赖网络及对应服务可用（快照口径订正：Windows OTA 现行主干已有单包静态 OTA 实现，见文首订正；反馈提交链路现行主干为社区版桩、提交不可成功——见文首失效声明）。
 
 ### 2.3 用户数据目录
 
@@ -66,7 +66,7 @@ Windows 下 `~/.pinvou3` 等价于 `%USERPROFILE%\.pinvou3`。主要数据包括
 | `bundle/` | 内置说明、技能、MCP 配置和随应用释放的扩展资源（快照口径：原文所列「工作流」内容未随主线发布；现行 bundle 为说明、内置技能、MCP 配置、personas 等，见文首失效声明） |
 | `knowledge/` | 本地知识库数据库、索引和模型 |
 | `asr/` | 按需下载的语音识别模型 |
-| `updates/` | OTA 下载、解包和安装反馈状态（快照：Windows OTA 链路已随底座归档失效，见文首失效声明） |
+| `updates/` | 静态更新安装器下载暂存目录；完整校验（SHA-256）后才会成为可安装文件（现行 Windows 静态 OTA 使用，见文首订正） |
 | `marketplace/` | 工具、技能安装状态和动态配置 |
 | `settings.json` | 用户设置；敏感凭据按代码策略进入系统凭据存储，不应明文展示在 UI、日志或测试报告中 |
 | `pet_window.json` / `selected_pet.json` | 桌伴公仔位置、缩放和当前选择；启用开关保存在 `settings.json` |
@@ -282,10 +282,10 @@ Windows 下 `~/.pinvou3` 等价于 `%USERPROFILE%\.pinvou3`。主要数据包括
 | SET-04 | 归档会话管理 | 可用 | 在设置中恢复或永久删除收纳会话 |
 | SET-05 | 运行依赖自检 | 可用 | 检查 PDF、Pandoc、OCR、压缩、邮件、语音等依赖并给出修复入口 |
 | SET-06 | 用户反馈 | 0.6.x 快照 | 提交问题或建议，可附最多 5 个图片/视频附件，校验类型并支持失败重试（⚠️ 快照口径：现行主干 `submit_feedback` 为社区版桩——无条件返回校验失败、不可重试（`pinvou3-app/src-tauri/src/features/feedback/mod.rs`），仅本地回执并引导社区 Issue——完整失效声明见文首 banner；5 附件帽与失败重试 UI 控件实存但提交不可成功。2026-11-18 订正） |
-| OTA-01 | 启动静默检查更新 | 0.6.x 快照 | 不阻塞启动；发现新版本后设置页和设置图标显示红点（⚠️ Windows 更新链路未在当前主干落地） |
-| OTA-02 | Windows OTA 下载 | 0.6.x 快照 | 下载时展示进度，支持取消，校验包和文件哈希（⚠️ 主干未落地） |
-| OTA-03 | Windows OTA 安装 | 0.6.x 快照 | 准备双层 OTA 包并启动安装程序；升级结果在下次启动上报（⚠️ 主干未落地） |
-| OTA-04 | 版本保护 | 0.6.x 快照 | 只提示更高版本，拒绝不完整、损坏或越界的更新包（⚠️ 随 Windows OTA 一并在主干缺失） |
+| OTA-01 | 启动静默检查更新 | 条件可用 | 不阻塞启动；发现新版本后设置页和设置图标显示红点 |
+| OTA-02 | Windows OTA 下载 | 条件可用 | 从 `latest.json` 的 Windows 平台节点下载，展示进度并支持取消，强校验大小和 SHA-256 |
+| OTA-03 | Windows OTA 安装 | 条件可用 | 启动已签名 NSIS/MSI 安装器并触发 UAC；安装成功后拉起新版本 |
+| OTA-04 | 版本保护 | 可用 | 只提示更高版本，拒绝不完整、损坏或越界的更新包 |
 
 ## 4. 测试范围与方法
 
@@ -300,7 +300,7 @@ Windows 下 `~/.pinvou3` 等价于 `%USERPROFILE%\.pinvou3`。主要数据包括
 | 模型 | 内置模型（预设模型目录，非已作废的内置账号）、本地 vLLM、一个 OpenAI 兼容远程模型、无可用模型 |
 | 硬件 | NVIDIA 独显、集显/无 NVIDIA；有麦克风、无麦克风和录音约束不兼容环境；单屏及不同 DPI/排列的双屏环境 |
 | 文件 | 文本、PDF、扫描 PDF、Office/WPS、图片、压缩包、邮件、超限和损坏样本 |
-| 升级 | 全新安装、覆盖升级、取消升级、升级后首次启动（快照：「损坏 OTA」项随 OTA 链路归档失效） |
+| 升级 | 全新安装、覆盖升级、取消升级、损坏 OTA、升级后首次启动 |
 | 辅助功能 | Windows“动画效果”开/关各一轮，验证桌伴的动态与减少动态效果降级 |
 
 ### 4.2 优先级
@@ -519,7 +519,7 @@ Windows 下 `~/.pinvou3` 等价于 `%USERPROFILE%\.pinvou3`。主要数据包括
 | WIN-SET-005 | P1 | 准备 6 个附件或不支持格式 | 提交反馈 | 超过 5 个或格式非法时本地拒绝；正文为空时不提交（⚠️ 同 WIN-SET-004 注：提交链路已作废，本地拒绝路径实存但提交不可成功） |
 | WIN-SET-006 | P1 | 反馈服务暂时失败 | 提交后重试 | 显示可重试状态；重试不重复添加附件或提交多份（⚠️ 同 WIN-SET-004 注：重试验收不可通过） |
 
-> ⚠️ 快照条目：以下 WIN-OTA-001..008 验收的是 OTA-01..04 所述已在主干缺失的 Windows 双层 OTA 链路（主干 `features/updater/platform/` 无 Windows 实现），仅作历史留档，请勿据此验收。
+> ⚠️ 快照条目订正 2026-11-21：以下 WIN-OTA-001..008 按 0.6.x 快照口径编写；现行主干 Windows 应用内更新已实现为单包静态 OTA（`features/updater/platform/windows.rs`：`latest.json` → 签名 NSIS/MSI 下载 + SHA-256 强校验 → UAC 安装），用例方向继续有效，不再「仅作历史留档」；唯 WIN-OTA-004/005 的双层 ZIP/`FullPack.zip` 步骤与现行单包校验不同，正式验收前需按现行实现逐条核对。
 
 | 用例 ID | P | 前置条件 | 操作步骤 | 预期结果 |
 |---|---:|---|---|---|
@@ -544,7 +544,7 @@ Windows 下 `~/.pinvou3` 等价于 `%USERPROFILE%\.pinvou3`。主要数据包括
 | WIN-STAB-001 | P0 | 运行长 Shell、模型生成 | 高频查询连接器状态、切换页面 | 正在运行的 turn 不被无关状态刷新回收（快照：原前置含已移除的工作流负载） |
 | WIN-STAB-002 | P0 | Engine 被主动回收 | 观察前端状态 | 仍发送权威终态，busy、取消中和工具卡均收敛 |
 | WIN-STAB-003 | P1 | 快速连续点击取消/关闭/切会话 | 重复操作 | 命令幂等或返回明确已结束状态，不崩溃、不重复删除数据 |
-| WIN-STAB-004 | P1 | 中文 Windows 用户名和非 ASCII 文件名 | 完整执行聊天、附件、知识库、制品 | 无乱码和路径找不到；子进程参数不被错误拆分（快照：原步骤含已归档的 OTA 环节） |
+| WIN-STAB-004 | P1 | 中文 Windows 用户名和非 ASCII 文件名 | 完整执行聊天、附件、知识库、制品、OTA | 无乱码和路径找不到；子进程参数不被错误拆分 |
 | WIN-STAB-005 | P1 | 磁盘空间不足或目录只读 | 保存会话、制品、模型或更新 | 明确报错且不留下被视为有效的半成品；原数据可继续读取 |
 | WIN-STAB-006 | P1 | 应用运行数小时 | 多会话、多次进出监控/知识库/工具市场 | 无明显句柄、子进程、定时器或内存持续泄漏 |
 
@@ -609,7 +609,7 @@ npm run build:nsis
 |---|---|
 | P0 | Windows CI 真进程测试：PowerShell/CMD 前台实时输出、后台输出、任务取消、父子进程树清理 |
 | P0 | Engine 缺失/主动回收时的取消和 `chat:done` 权威终态端到端测试 |
-| P0 | 路径越界和损坏包拒绝测试（快照：原建议中的 OTA 双层 ZIP/两级哈希项随 OTA 链路归档失效） |
+| P0 | 静态清单 JSON 无 BOM、平台隔离、HTTPS、大小/SHA-256、临时文件及路径越界拒绝测试 |
 | P1 | 中文用户名、空格路径、UNC 和联接点的附件/制品/运行时路径测试 |
 | P1 | NSIS 安装与卸载虚拟机流水线，检查注册表、PATH、VC++ 和用户数据选项 |
 | P1 | 连接器状态高频轮询期间长 turn 不被 Engine 回收的并发回归 |
@@ -648,7 +648,7 @@ npm run build:nsis
 - [ ] 桌伴三款公仔、开关持久化、状态卡回复、定时提醒、多屏拖拽、缩放、资源降级和退出联动通过。
 - [ ] 工作流启动、人工门禁、重跑、停止并修改、鉴权熔断和重启恢复通过。（⚠️ 对应子系统已在主干整体移除，此条仅作 0.6.x 快照留档，现行发布验收跳过。）
 - [ ] 麦克风拒绝、首次模型下载、录音识别和会话切换保护通过。
-- [ ] OTA 检查、下载、取消、哈希失败、合法安装和升级结果上报通过。（⚠️ 对应 Windows OTA 链路未在主干落地，此条仅作 0.6.x 快照留档，现行发布验收跳过。）
+- [ ] OTA 检查、下载、取消、哈希失败、UAC 取消和合法安装通过；静态更新不产生旧服务端结果上报。
 - [ ] 中文用户名、含空格路径、非系统盘和低磁盘空间专项通过。
 - [ ] UI、日志、设置、会话和反馈材料均未泄露敏感凭据。
 - [ ] `npm test`、UI/知识库/输入框工具/工具市场/定时任务/桌伴/Markdown smoke、Rust 检查和 fork guard 全部记录实际结果。
