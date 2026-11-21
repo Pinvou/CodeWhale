@@ -189,7 +189,7 @@ func statisticsMigrationCLIs(t *testing.T, ctx context.Context) (string, string,
 
 // Keep real SQL bytes and filenames; never manufacture an older installed head
 // by deleting later ledger entries.
-func statisticsAccountPackage(t *testing.T, directory string, through, omit int64) string {
+func statisticsMigrationPackage(t *testing.T, directory string, through, omit int64) string {
 	t.Helper()
 	entries, err := os.ReadDir(directory)
 	if err != nil {
@@ -400,7 +400,10 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 			fullDirectory := newDirectory
 			downDirectory := fullDirectory
 			if domain == "account" {
-				newDirectory = statisticsAccountPackage(t, fullDirectory, 900021, 0)
+				newDirectory = statisticsMigrationPackage(t, fullDirectory, 900021, 0)
+				downDirectory = newDirectory
+			} else if domain == "billing" {
+				newDirectory = statisticsMigrationPackage(t, fullDirectory, statisticsHeadVersion, 0)
 				downDirectory = newDirectory
 			}
 			run(databaseURL, baselineCLI, oldDirectory, "up", true)
@@ -564,12 +567,12 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 			check()
 			if domain != "account" {
 				beforeRoleLedger := statisticsLedgerFacts(t, ctx, operator)
-				verifyStatisticsRollbackRole(t, ctx, domain, databaseURL, actor, fullDirectory)
+				verifyStatisticsRollbackRole(t, ctx, domain, databaseURL, actor, downDirectory)
 				requireStatisticsLedgerPreserved(t, ctx, operator, beforeRoleLedger, indexVersion)
 			} else {
 				// The actual historical 900022 head retains its exact refusal.
 				// Later current migrations are installed and verified separately.
-				forwardDirectory := statisticsAccountPackage(t, fullDirectory, 900022, 0)
+				forwardDirectory := statisticsMigrationPackage(t, fullDirectory, 900022, 0)
 				run(databaseURL, candidateCLI, forwardDirectory, "up", true)
 				var head int64
 				if e = operator.QueryRow(ctx, `SELECT max(version) FROM public.schema_migrations`).Scan(&head); e != nil || head != 900022 {
@@ -639,7 +642,7 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 				}
 				defer gapOperator.Close(context.Background())
 				gapURL := f.serviceURL(t, gapSetup, domain+"_migrator")
-				gapPackage := statisticsAccountPackage(t, fullDirectory, 0, 900021)
+				gapPackage := statisticsMigrationPackage(t, fullDirectory, 0, 900021)
 				run(gapURL, candidateCLI, gapPackage, "up", true)
 				var has22, has21 bool
 				if err = gapOperator.QueryRow(ctx, `SELECT EXISTS(SELECT FROM schema_migrations WHERE version=900022),EXISTS(SELECT FROM schema_migrations WHERE version=900021) OR to_regclass('public.outbox_events_dead_statistics_idx') IS NOT NULL`).Scan(&has22, &has21); err != nil || !has22 || has21 {
@@ -656,6 +659,20 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 				run(gapURL, candidateCLI, fullDirectory, "up", true)
 				if statisticsAccountUpgradeFacts(t, ctx, gapOperator, true) != gapFacts {
 					t.Fatal("full current replay changed retained history")
+				}
+			}
+			if domain == "billing" {
+				beforeCurrentLedger := statisticsLedgerFacts(t, ctx, operator)
+				beforeCurrentIndexes := statisticsOriginalIndexFacts(t, ctx, operator)
+				for replay := 0; replay < 2; replay++ {
+					run(databaseURL, candidateCLI, fullDirectory, "up", true)
+					requireStatisticsLedgerPreserved(t, ctx, operator, beforeCurrentLedger, 0)
+					requireStatisticsOriginalIndexesPreserved(t, ctx, operator, beforeCurrentIndexes)
+					if statisticsFacts(t, ctx, operator) != facts || statisticsAccessFacts(t, ctx, operator) != policy {
+						t.Fatal("full billing upgrade changed retained facts or authority")
+					}
+					beforeCurrentLedger = statisticsLedgerFacts(t, ctx, operator)
+					check()
 				}
 			}
 			freshSetup := f.database(t, ctx, domain, owner)

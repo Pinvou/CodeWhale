@@ -45,7 +45,7 @@ func TestLatePaymentArchiveCommandReplayPostgres(t *testing.T) {
 		}
 		// Controlled historical authority facts, exactly the original archive
 		// predicate. Supplier-query producer contracts are covered by old roots.
-		if _, err = r.pool.Exec(ctx, `UPDATE payment_orders SET created_at=$2::timestamptz-interval '10 days',expires_at=$2::timestamptz-interval '9 days',provider_payable_until=$2::timestamptz-interval '9 days',late_review_boundary_at=$2::timestamptz-interval '8 days',final_archive_eligible_at=$2::timestamptz-interval '1 hour',last_successful_query_at=$2,last_authoritative_unpaid_at=$2 WHERE id=$1`, order.ID, now); err != nil {
+		if _, err = r.pool.Exec(ctx, `UPDATE payment_orders SET created_at=$2::timestamptz-interval '10 days',expires_at=$2::timestamptz-interval '9 days',provider_payable_until=$2::timestamptz-interval '9 days',late_review_boundary_at=$2::timestamptz-interval '8 days',final_archive_eligible_at=$2::timestamptz-interval '1 hour',last_successful_query_at=$2,last_authoritative_unpaid_at=$2,archive_query_generation=gen_random_uuid(),archive_query_authoritative_unpaid=true WHERE id=$1`, order.ID, now); err != nil {
 			t.Fatal(err)
 		}
 		return item
@@ -190,7 +190,7 @@ func TestLatePaymentArchiveCommandReplayPostgres(t *testing.T) {
 		}
 	})
 	t.Run("new-command-retains-original-authority-and-claim-admission", func(t *testing.T) {
-		for _, guard := range []string{"before-boundary", "stale-query", "absent-authority", "unreviewed-claim"} {
+		for _, guard := range []string{"before-boundary", "stale-query", "absent-authority", "unreviewed-claim", "order-frozen-false", "case-frozen-false", "unknown-current-query"} {
 			item := fixture(t)
 			switch guard {
 			case "before-boundary":
@@ -199,6 +199,12 @@ func TestLatePaymentArchiveCommandReplayPostgres(t *testing.T) {
 				_, err = r.pool.Exec(ctx, `UPDATE payment_orders SET last_successful_query_at=final_archive_eligible_at-interval '1 microsecond' WHERE id=$1`, item.PaymentOrderID)
 			case "absent-authority":
 				_, err = r.pool.Exec(ctx, `UPDATE payment_orders SET last_authoritative_unpaid_at=NULL WHERE id=$1`, item.PaymentOrderID)
+			case "unknown-current-query":
+				_, err = r.pool.Exec(ctx, `UPDATE payment_orders SET archive_query_generation=NULL,archive_query_authoritative_unpaid=NULL WHERE id=$1`, item.PaymentOrderID)
+			case "order-frozen-false":
+				_, err = r.pool.Exec(ctx, `UPDATE payment_orders SET provider_capability_snapshot=jsonb_set(provider_capability_snapshot,'{authoritative_unpaid_terminal}','false'::jsonb) WHERE id=$1`, item.PaymentOrderID)
+			case "case-frozen-false":
+				_, err = r.pool.Exec(ctx, `UPDATE late_payment_review_cases SET provider_capability_snapshot=jsonb_set(provider_capability_snapshot,'{authoritative_unpaid_terminal}','false'::jsonb) WHERE id=$1`, item.ID)
 			case "unreviewed-claim":
 				_, err = r.pool.Exec(ctx, `INSERT INTO late_payment_review_evidence(id,case_id,evidence_type,payload_digest,payload_snapshot,created_at) VALUES($1,$2,'USER_PAYMENT_CLAIM',repeat('b',64),'{}',$3)`, uuid.New(), item.ID, now)
 			}
@@ -210,6 +216,125 @@ func TestLatePaymentArchiveCommandReplayPostgres(t *testing.T) {
 			if before != facts(t, item.ID) {
 				t.Fatal("failed original archive admission wrote facts", guard)
 			}
+		}
+	})
+	t.Run("accepted-unfinished-query-blocks-new-archive-without-changing-facts", func(t *testing.T) {
+		item := fixture(t)
+		input := LatePaymentQueryInput{1, item.PaymentOrderID, item.ProviderID, item.ProviderVersion, item.MerchantOrderNo}
+		queryKey := "query-" + uuid.NewString()
+		receipt, err := r.PrepareLatePaymentQuery(ctx, item.ID, actor, queryKey, input)
+		if err != nil || !receipt.dispatch || receipt.State != "UNKNOWN" {
+			t.Fatal("query admission did not retain its real unfinished marker", err)
+		}
+		before := facts(t, item.ID)
+		financial := instructionCommandFactsSnapshot(t, r, ctx)
+		call(t, item, actor.String(), "archive-"+uuid.NewString(), 409)
+		if before != facts(t, item.ID) || !reflect.DeepEqual(financial, instructionCommandFactsSnapshot(t, r, ctx)) {
+			t.Fatal("pending-query rejection changed protected facts")
+		}
+		original, err := r.ReadLatePaymentQuery(ctx, item.ID, actor, queryKey, input)
+		if err != nil || original.State != "UNKNOWN" || original.dispatch || original.Reference != queryKey {
+			t.Fatal("archive rejection changed the original unknown query", err)
+		}
+		order, err := getPaymentOrderByID(ctx, r.pool, item.PaymentOrderID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		provider := &instructionCreateProvider{retainedFinancialProvider: &retainedFinancialProvider{result: ProviderOrder{
+			MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen,
+			Currency: order.Currency, ExternalCustomerKey: order.RequesterID.String(), ExternalSKU: order.ProviderSKU,
+			Status: "CLOSED", ProviderStatus: "PAY_CLOSED",
+		}}, authoritative: true}
+		coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		coordinator.now = r.now
+		order, err = coordinator.syncReviewedQueryCommand(ctx, order.ID, receipt.generation)
+		if err != nil {
+			t.Fatal("real accepted query failed", err)
+		}
+		var generation uuid.UUID
+		var unpaid bool
+		if err := r.pool.QueryRow(ctx, `SELECT archive_query_generation,archive_query_authoritative_unpaid FROM payment_orders WHERE id=$1`, order.ID).Scan(&generation, &unpaid); err != nil || generation != receipt.generation || !unpaid {
+			t.Fatal("query republished a different generation or failed to prove unpaid", err)
+		}
+		// Even after real authority exists, this exact current receipt is pending.
+		beforeCompletion := facts(t, item.ID)
+		call(t, item, actor.String(), "archive-"+uuid.NewString(), 409)
+		if beforeCompletion != facts(t, item.ID) {
+			t.Fatal("current pending rejection changed complete archive facts")
+		}
+		completed, err := r.CompleteLatePaymentQuery(ctx, item.ID, actor, queryKey, input, order, nil)
+		if err != nil || completed.State != "COMPLETED" {
+			t.Fatal("rejected archive prevented original query completion", err)
+		}
+		// The exact accepted receipt now accompanies the real producer's proof.
+		call(t, item, actor.String(), "archive-"+uuid.NewString(), 200)
+	})
+	t.Run("archive-sql-cancellation-retains-database-error-not-business-conflict", func(t *testing.T) {
+		item := fixture(t)
+		before := facts(t, item.ID)
+		financial := instructionCommandFactsSnapshot(t, r, ctx)
+		blocker, err := r.pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer blocker.Rollback(ctx)
+		if _, err = blocker.Exec(ctx, `SELECT id FROM payment_orders WHERE id=$1 FOR UPDATE`, item.PaymentOrderID); err != nil {
+			t.Fatal(err)
+		}
+		attemptCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		finished := make(chan error, 1)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, err := r.ArchiveLatePaymentReview(attemptCtx, item.ID, actor, "archive-"+uuid.NewString())
+			finished <- err
+		}()
+		defer func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("owned canceled archive goroutine did not acknowledge exit")
+			}
+		}()
+		waitCtx, stopWait := context.WithTimeout(ctx, 10*time.Second)
+		defer stopWait()
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			var waiting bool
+			if err = r.pool.QueryRow(waitCtx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND usename=current_user AND wait_event_type='Lock' AND query LIKE 'SELECT final_archive_eligible_at,%')`).Scan(&waiting); err != nil {
+				t.Fatal(err)
+			}
+			if waiting {
+				break
+			}
+			select {
+			case <-finished:
+				t.Fatal("archive did not reach the controlled order-lock barrier")
+			case <-waitCtx.Done():
+				t.Fatal("archive did not wait on its real admission SQL", waitCtx.Err())
+			case <-tick.C:
+			}
+		}
+		cancel()
+		select {
+		case err = <-finished:
+			if !errors.Is(err, context.Canceled) || errors.Is(err, ErrConflict) {
+				t.Fatal("admission SQL error was relabeled as business conflict", err)
+			}
+		case <-waitCtx.Done():
+			t.Fatal("canceled archive did not release its attempt", waitCtx.Err())
+		}
+		if err = blocker.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if before != facts(t, item.ID) || !reflect.DeepEqual(financial, instructionCommandFactsSnapshot(t, r, ctx)) {
+			t.Fatal("SQL cancellation left archive/financial effects")
 		}
 	})
 	t.Run("receipt-insert-failure-rolls-back-original-archive", func(t *testing.T) {
@@ -339,5 +464,47 @@ func TestLatePaymentArchiveCommandReplayPostgres(t *testing.T) {
 		if before != facts(t, item.ID) {
 			t.Fatal("archive receipt/history changed")
 		}
+	})
+	t.Run("prepare-commit-invalidates-old-archive-snapshot", func(t *testing.T) {
+		archivePendingSnapshotBarrier(t, r, ctx, fixture(t), actor, facts)
+	})
+	t.Run("new-Prepare-fences-a-previously-completed-current-command", func(t *testing.T) {
+		item := fixture(t)
+		input := LatePaymentQueryInput{1, item.PaymentOrderID, item.ProviderID, item.ProviderVersion, item.MerchantOrderNo}
+		key := "query-" + uuid.NewString()
+		accepted, err := r.PrepareLatePaymentQuery(ctx, item.ID, actor, key, input)
+		if err != nil || !accepted.dispatch || accepted.generation == uuid.Nil {
+			t.Fatal("initial explicit command", err)
+		}
+		order, err := getPaymentOrderByID(ctx, r.pool, item.PaymentOrderID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		provider := &instructionCreateProvider{retainedFinancialProvider: &retainedFinancialProvider{result: ProviderOrder{
+			MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency,
+			ExternalCustomerKey: order.RequesterID.String(), ExternalSKU: order.ProviderSKU, Status: "CLOSED", ProviderStatus: "PAY_CLOSED",
+		}}, authoritative: true}
+		coordinator, err := newBillingFixturePaymentCoordinator(r, provider, "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		coordinator.now = r.now
+		order, err = coordinator.syncReviewedQueryCommand(ctx, order.ID, accepted.generation)
+		if err != nil {
+			t.Fatal("initial complete authoritative query", err)
+		}
+		if receipt, err := r.CompleteLatePaymentQuery(ctx, item.ID, actor, key, input, order, nil); err != nil || receipt.State != "COMPLETED" {
+			t.Fatal("initial current receipt", err)
+		}
+		// The old Serializable snapshot starts with a real completed binding,
+		// then must retry and reject the next atomically accepted pending one.
+		archivePendingSnapshotBarrier(t, r, ctx, item, actor, facts)
+	})
+	t.Run("current-query-real-producer", func(t *testing.T) {
+		archiveCurrentQueryAdmission(t, r, ctx, actor, func(c *PaymentCoordinator) http.Handler {
+			return NewService(r).WithPayments(c).WithAuthorizer(authorizer).Handler("controlled-service", func(_ context.Context, token string) (identity.Principal, error) {
+				return identity.Principal{Issuer: "controlled", Subject: token, AuthenticatedAt: r.now()}, nil
+			})
+		})
 	})
 }

@@ -86,7 +86,15 @@ func (r *PostgresRepository) archiveLatePaymentReviewOnce(ctx context.Context, c
 	var eligibleAt time.Time
 	var valid bool
 	err = tx.QueryRow(ctx, `SELECT final_archive_eligible_at,
-		$2>=final_archive_eligible_at AND last_successful_query_at>=final_archive_eligible_at AND last_authoritative_unpaid_at>=final_archive_eligible_at
+		COALESCE(payment.archive_query_authoritative_unpaid IS TRUE AND $2>=final_archive_eligible_at AND last_successful_query_at>=final_archive_eligible_at AND last_authoritative_unpaid_at>=final_archive_eligible_at
+		AND NOT (payment.provider_capability_snapshot @> '{"authoritative_unpaid_terminal":false}'::jsonb)
+		AND NOT EXISTS(SELECT 1 FROM late_payment_review_cases frozen WHERE frozen.id=$1 AND frozen.provider_capability_snapshot @> '{"authoritative_unpaid_terminal":false}'::jsonb)
+		AND NOT EXISTS(SELECT 1 FROM late_payment_query_commands pending JOIN late_payment_query_generations binding ON binding.idempotency_key=pending.idempotency_key
+		 WHERE pending.case_id=$1 AND pending.completed_at IS NULL AND binding.generation=payment.archive_query_generation)
+		AND (NOT EXISTS(SELECT 1 FROM late_payment_query_commands pending WHERE pending.case_id=$1 AND pending.completed_at IS NULL)
+		 OR EXISTS(SELECT 1 FROM late_payment_query_commands completed JOIN late_payment_query_generations binding ON binding.idempotency_key=completed.idempotency_key
+		 WHERE completed.case_id=$1 AND completed.payment_order_id=payment.id AND binding.generation=payment.archive_query_generation
+		 AND completed.completed_at IS NOT NULL AND completed.result_snapshot IS NOT NULL))
 		AND NOT EXISTS(SELECT 1 FROM payment_transactions WHERE payment_order_id=payment.id AND status IN ('PAID','LATE_PAID','REVIEW_REQUIRED'))
 		AND NOT EXISTS(SELECT 1 FROM payment_evidence evidence WHERE evidence.payment_order_id=payment.id AND
             (evidence.merge_result='REVIEW_REQUIRED' OR
@@ -100,9 +108,12 @@ func (r *PostgresRepository) archiveLatePaymentReviewOnce(ctx context.Context, c
               AND evidence.payload_snapshot->>'channel'=payment.channel
               AND evidence.payload_snapshot->'amount_fen'=to_jsonb(payment.amount_fen)
               AND evidence.payload_snapshot->>'currency'=payment.currency)))
-		AND NOT EXISTS(SELECT 1 FROM late_payment_review_evidence claim WHERE claim.case_id=$1 AND claim.evidence_type='USER_PAYMENT_CLAIM' AND NOT EXISTS(SELECT 1 FROM late_payment_review_evidence query WHERE query.case_id=claim.case_id AND query.evidence_type IN ('MANUAL_QUERY','ARCHIVE_QUERY') AND query.created_at>claim.created_at AND query.payload_snapshot->>'query_succeeded'='true' AND payment.last_authoritative_unpaid_at>claim.created_at))
+		AND NOT EXISTS(SELECT 1 FROM late_payment_review_evidence claim WHERE claim.case_id=$1 AND claim.evidence_type='USER_PAYMENT_CLAIM' AND NOT EXISTS(SELECT 1 FROM late_payment_review_evidence query WHERE query.case_id=claim.case_id AND query.evidence_type IN ('MANUAL_QUERY','ARCHIVE_QUERY') AND query.created_at>claim.created_at AND query.payload_snapshot->>'query_succeeded'='true' AND payment.last_authoritative_unpaid_at>claim.created_at)),false)
 		FROM payment_orders payment WHERE id=$3 FOR UPDATE`, caseID, now, item.PaymentOrderID).Scan(&eligibleAt, &valid)
-	if err != nil || !valid {
+	if err != nil {
+		return LatePaymentReviewCase{}, err
+	}
+	if !valid {
 		return LatePaymentReviewCase{}, ErrConflict
 	}
 	_, err = tx.Exec(ctx, `UPDATE payment_orders SET archive_status='ARCHIVED_CONFIRMED_UNPAID',archived_at=$2,payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,updated_at=$2 WHERE id=$1`, item.PaymentOrderID, now)

@@ -16,11 +16,11 @@ SPEC.loader.exec_module(RUNNER)
 
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
-EXPECTED_RETAINED_ROOT_COUNT = 94
-EXPECTED_SCHEMA_ROOT_COUNT = 29
+EXPECTED_RETAINED_ROOT_COUNT = 95
+EXPECTED_SCHEMA_ROOT_COUNT = 31
 
 # Fixed identities independently checked against each actual -run selector.
-EXPECTED_SCHEMA_ROOTS = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres"}
+EXPECTED_SCHEMA_ROOTS = {"TestLatePaymentQueryGenerationsMigrationIdentity", "TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres", "TestLatePaymentArchiveQueryAdmissionPublicMigration"}
 EXPECTED_SCHEMA_ROOTS |= {'TestF02CommerceClaimWaitStartsFreshLease', 'TestCommerceClosureCallbacksRespectSubjectFence', 'TestF02CommerceOriginal15LateUpgradePreservesFacts', 'TestCommerceClaimSubjectLockKeepsLeaseLive', 'TestCommerceClaimMappingLockKeepsLeaseLive', 'TestF02PublicCommerceCustomerLifecycle', 'TestF02CommerceSupersededGenerationCannotDispatch', 'TestF02CommerceLeaseExpiresWhileWaitingForMappingLock', 'TestF02CommerceConfirmedProducersPreserveStatuses'}
 EXPECTED_SCHEMA_ROOTS |= {"TestChargebackPrincipalRegisteredIdentity"}
 EXPECTED_SCHEMA_EXPIRY_ROOT = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
@@ -142,8 +142,9 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_f12_upgrade_roots_are_selected_in_their_real_actor_phases(self):
         parent = "TestPaymentCreditF12DeployedCarriersUpgradePostgres"
         billing = {"TestF12PaymentRepairOrderLookupPostgres", "TestF12PaymentRepairDeployedBaselineUpgradePostgres"}
-        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 29)
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), EXPECTED_SCHEMA_ROOT_COUNT)
         self.assertIn(parent, RUNNER.SCHEMA_REQUIRED)
+        self.assertIn("TestLatePaymentArchiveQueryAdmissionPublicMigration", RUNNER.SCHEMA_REQUIRED)
         self.assertEqual(RUNNER.SCHEMA_CHILD_REQUIRED, RUNNER.SCHEMA_REQUIRED - RUNNER.SCHEMA_LEAF_REQUIRED - {parent})
         self.assertTrue(billing <= RUNNER.RETAINED_REQUIRED)
         self.assertTrue(billing <= RUNNER.BILLING_LEAF_REQUIRED)
@@ -1539,6 +1540,61 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         self.assertIn(root, command[command.index("-run") + 1])
 
+    def test_query_command_requires_complete_identity_and_generation_children(self):
+        root = "TestLatePaymentQueryCommandPostgres"
+        children = {
+            "lost_ACK_original_receipt_new_review_and_terminal_projection",
+            "missing_marker_readonly_and_crash_after_marker_never_dispatch",
+            "concurrent_same_identity_has_one_actual_Provider_dispatch",
+            "actor_case_facts_and_current_owner_cannot_disclose_original_receipt",
+            "record_and_receipt_failure_roll_back_together_and_retry_stays_unknown",
+            "uncertain_marker_commit_grants_zero_external_dispatch",
+            "marker_commit_failure_and_missing_result_do_not_dispatch",
+            "Provider_IO_holds_no_query_or_case_transaction_lock",
+            "exact_900030_direct_Down_refuses_and_retains_marker",
+            "PAY12_committed_before_receipt_fault_is_not_reexecuted_or_forged",
+            "concurrent_legal_terminal_case_is_not_overwritten_by_completion",
+            "cancellation_after_Get_preserves_original_unknown",
+            "reachable_Close_interruption_never_recloses_on_recovery",
+            "runtime_identity_and_completed_receipts_are_immutable",
+        }
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True, "require_children": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            name = root + "/" + child
+            for invalid in ([event for event in events if event.get("Test") != name],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": name}],
+                            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": name}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_query_generation_identity_requires_every_frozen_child(self):
+        root = "TestLatePaymentQueryGenerationsMigrationIdentity"
+        children = {
+            "up", "down", "checksum", "version", "reserved-admission-version", "name", "metadata-forged",
+            "up-reserved-version-before-db", "down-reserved-version-before-db", "verify-reserved-version-before-db",
+            "up-before-db", "down-before-db", "verify-before-db",
+        }
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "exact_roots": True, "require_children": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            name = root + "/" + child
+            for invalid in (
+                [event for event in events if event.get("Test") != name],
+                events + [{"Action": "skip", "Package": RUNNER.SCHEMA_PACKAGE, "Test": name}],
+                events + [{"Action": "fail", "Package": RUNNER.SCHEMA_PACKAGE, "Test": name}],
+            ):
+                with self.subTest(child=child, events=len(invalid)), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
 
     def test_late_schedule_receipt_root_is_selected_and_requires_completed_children(self):
         root = "TestLatePaymentScheduleCommandReplayPostgres"
@@ -2363,7 +2419,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestCommerceClaimMappingLockKeepsLeaseLive", "TestCommerceClaimSubjectLockKeepsLeaseLive", "TestCommerceClosureCallbacksRespectSubjectFence", "TestF02CommerceClaimWaitStartsFreshLease", "TestF02CommerceConfirmedProducersPreserveStatuses", "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock", "TestF02CommerceOriginal15LateUpgradePreservesFacts", "TestF02CommerceSupersededGenerationCannotDispatch", "TestF02PublicCommerceCustomerLifecycle", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestF09EntitlementPackageIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestManualRetentionHistoricalHardeningPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestReconciliationFairRetryRegisteredIdentity", "TestTokenWalletReceiptSchemaPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestChargebackPrincipalRegisteredIdentity"})
+        self.assertEqual(roots, EXPECTED_SCHEMA_ROOTS)
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)
@@ -2723,7 +2779,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             self.assertEqual(self.fixture_writes, [] if phase in {"owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation"} else ["create", "drop"])
 
     def test_schema_phase_partition_preserves_all_fixed_identities_and_boundaries(self):
-        self.assertEqual(len(EXPECTED_SCHEMA_ROOTS), 29)
+        self.assertEqual(len(EXPECTED_SCHEMA_ROOTS), EXPECTED_SCHEMA_ROOT_COUNT)
         self.assertEqual(RUNNER.SCHEMA_REQUIRED, EXPECTED_SCHEMA_ROOTS)
         for group in ("owners", "all"):
             with self.subTest(group=group):
@@ -2741,7 +2797,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     self.assertEqual(command[-1], "./internal/billingschema")
                     self.assertEqual([arg for arg in command if arg.startswith("-timeout=")], ["-timeout=20m"])
                     selected.append(actual)
-                self.assertEqual([len(roots) for roots in selected], [1, 28])
+                self.assertEqual([len(roots) for roots in selected], [1, EXPECTED_SCHEMA_ROOT_COUNT - 1])
                 self.assertFalse(selected[0] & selected[1])
                 self.assertEqual(selected[0] | selected[1], EXPECTED_SCHEMA_ROOTS)
                 self.assertEqual(sum(map(len, selected)), len(EXPECTED_SCHEMA_ROOTS))
@@ -3170,6 +3226,86 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             with self.subTest(child=child), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(incomplete, {root}, **options)
 
+
+    def test_archive_current_query_public_migration_is_required_with_exact_children(self):
+        root = "TestLatePaymentArchiveQueryAdmissionPublicMigration"
+        children = {"fresh-public-cli", "previous-full-upgrade-and-forward-only", "production-900038-version-set-upgrade-and-forward-only"}
+        self.assertIn(root, RUNNER.SCHEMA_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
+        self.assertIn(root, command[command.index("-run") + 1])
+        options = {"package": RUNNER.SCHEMA_PACKAGE, "exact_roots": True, "require_children": True}
+        events = self.events({root}, RUNNER.SCHEMA_PACKAGE, children=True)
+        self.assertGreater(RUNNER.verify_results(events, {root}, **options), 0)
+        for name in children:
+            missing = [event for event in events if event.get("Test") != root + "/" + name]
+            with self.subTest(missing=name), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(missing, {root}, **options)
+        for action in ("skip", "fail"):
+            invalid = events + [{"Action": action, "Package": RUNNER.SCHEMA_PACKAGE, "Test": root + "/fresh-public-cli"}]
+            with self.subTest(action=action), self.assertRaises(RuntimeError):
+                RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_archive_current_query_runtime_children_are_registered_and_cannot_be_omitted(self):
+        root = "TestLatePaymentArchiveCommandReplayPostgres"
+        children = {
+            "lost-ack-recovers-exact-original-terminal-receipt",
+            "current-auth-owner-and-changed-case-identity",
+            "no-receipt-terminal-and-provider-blind-are-not-success",
+            "new-command-retains-original-authority-and-claim-admission",
+            "receipt-insert-failure-rolls-back-original-archive",
+            "concurrent-same-key-archives-once",
+            "key-admission-and-permanent-immutable-receipt",
+            "accepted-unfinished-query-blocks-new-archive-without-changing-facts",
+            "archive-sql-cancellation-retains-database-error-not-business-conflict",
+            "prepare-commit-invalidates-old-archive-snapshot",
+            "new-Prepare-fences-a-previously-completed-current-command",
+            "current-query-real-producer",
+            "current-query-real-producer/real-CLOSED-then-failure-PENDING-and-identical-CLOSED",
+            "current-query-real-producer/latest-canceled-query-stays-UNKNOWN-and-never-redispatches",
+            "current-query-real-producer/completion-fault-keeps-current-pending-until-new-explicit-success",
+            "current-query-real-producer/committed-authority-ACK-loss-failed-completion-current",
+            "current-query-real-producer/committed-authority-ACK-loss-failed-completion-stale",
+            "current-query-real-producer/older-failure-cannot-cover-newer-CLOSED",
+            "current-query-real-producer/older-PENDING-cannot-cover-newer-CLOSED",
+            "current-query-real-producer/older-CLOSED-cannot-cover-newer-CLOSED",
+            "current-query-real-producer/older-SUCCESS-cannot-cover-newer-CLOSED",
+            "current-query-real-producer/older-SUCCESS-newer-provider-CLOSED-Account-CLOSED",
+            "current-query-real-producer/older-SUCCESS-newer-provider-CLOSED-Account-SUBJECT_UNAVAILABLE",
+            "current-query-real-producer/older-CLOSED-cannot-clear-newer-failure",
+            "current-query-real-producer/older-CLOSED-cannot-clear-newer-PENDING",
+        }
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        options = {"package": RUNNER.BILLING_PACKAGE, "exact_roots": True, "require_children": True}
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        self.assertGreater(RUNNER.verify_results(events, {root}, **options), 0)
+        missing = [event for event in events if event.get("Test") != root + "/current-query-real-producer/older-SUCCESS-cannot-cover-newer-CLOSED"]
+        with self.assertRaises(RuntimeError):
+            RUNNER.verify_results(missing, {root}, **options)
+
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
+    def test_query_generation_upgrade_is_required_with_its_complete_recovery_child(self):
+        root = "TestLatePaymentQueryGenerationUpgradePostgres"
+        children = {"published-pre48-UNKNOWN-and-new-explicit-recovery"}
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        self.assertGreater(RUNNER.verify_results(events, {root}, **options), 0)
+        for child in children:
+            for invalid in ([event for event in events if event.get("Test") != root + "/" + child],
+                            events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+                            events + [{"Action": "fail", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}]):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
 
     def test_profile_revocation_requires_every_closure_child(self):
         root = "TestProfileRevocationClosureRuntimePostgres"

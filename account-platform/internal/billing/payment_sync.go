@@ -204,19 +204,11 @@ func truncatePaymentReconciliationError(value string) string {
 }
 
 func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (PaymentOrder, error) {
-	order, err := p.syncOrder(ctx, orderID, false)
-	if err != nil {
-		return order, err
-	}
-	return p.currentPaymentOrderProjection(ctx, order)
+	return p.syncOrder(ctx, orderID, false)
 }
 
 func (p *PaymentCoordinator) SyncReviewedOrder(ctx context.Context, orderID uuid.UUID) (PaymentOrder, error) {
-	order, err := p.syncOrder(ctx, orderID, true)
-	if err != nil {
-		return order, err
-	}
-	return p.currentPaymentOrderProjection(ctx, order)
+	return p.syncOrder(ctx, orderID, true)
 }
 
 func providerFailureMatchesOrder(provider ProviderOrder, order PaymentOrder) bool {
@@ -264,6 +256,19 @@ func (p *PaymentCoordinator) ConfirmProviderFailed(ctx context.Context, caseID, 
 }
 
 func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, reviewed bool) (PaymentOrder, error) {
+	return p.syncOrderWithArchiveGeneration(ctx, orderID, reviewed, uuid.Nil)
+}
+
+// Only the fresh command's private execution receipt supplies this generation.
+// Replays never reach here; old in-flight results still merge all paid evidence.
+func (p *PaymentCoordinator) syncReviewedQueryCommand(ctx context.Context, orderID, generation uuid.UUID) (PaymentOrder, error) {
+	if generation == uuid.Nil {
+		return PaymentOrder{}, ErrConflict
+	}
+	return p.syncOrderWithArchiveGeneration(ctx, orderID, true, generation)
+}
+
+func (p *PaymentCoordinator) syncOrderWithArchiveGeneration(ctx context.Context, orderID uuid.UUID, reviewed bool, generation uuid.UUID) (PaymentOrder, error) {
 	if !p.Capabilities().OrderQuerySupported {
 		return PaymentOrder{}, payment.ErrUnsupported
 	}
@@ -277,12 +282,41 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 	if p.Capabilities().ProviderID != order.ProviderID || p.Capabilities().Version != order.ProviderVersion {
 		return PaymentOrder{}, ErrConflict
 	}
+	if generation == uuid.Nil {
+		generation, err = p.beginArchiveQueryObservation(ctx, order)
+		if err != nil {
+			return PaymentOrder{}, err
+		}
+	}
+	// Capture the accepted provider declaration, not a later mutable adapter
+	// value. Failed/canceled attempts retain the committed unknown fact.
+	authoritative := p.Capabilities().AuthoritativeUnpaidTerminal
+	originalOrder := order
+	var observation ProviderOrder
+	result, err := p.syncOrderObservation(ctx, order, reviewed, &observation)
+	if err != nil {
+		return result, err
+	}
+	result, err = p.currentPaymentOrderProjection(ctx, result)
+	if err != nil {
+		return result, err
+	}
+	if err := p.completeArchiveQueryObservation(ctx, originalOrder, generation, observation, authoritative); err != nil {
+		return PaymentOrder{}, err
+	}
+	return result, nil
+}
+
+// Preserve the original supplier/close/financial flow independently of the
+// current archive projection. A stale generation never skips strong evidence.
+func (p *PaymentCoordinator) syncOrderObservation(ctx context.Context, order PaymentOrder, reviewed bool, observation *ProviderOrder) (PaymentOrder, error) {
 	providerOrder, err := providerCall(ctx, p, "ORDER_QUERY", order.Channel, false, providerCallScope(order), func() (ProviderOrder, error) {
 		return p.provider.Get(ctx, order.MerchantOrderNo)
 	})
 	if err != nil {
 		return PaymentOrder{}, errors.Join(ErrPaymentProvider, err)
 	}
+	*observation = providerOrder
 	order, err = p.persistQueriedPaymentProjection(ctx, order.ID, providerOrder)
 	if err != nil {
 		return PaymentOrder{}, err
@@ -313,6 +347,7 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 		if closeErr != nil {
 			return PaymentOrder{}, errors.Join(ErrPaymentProvider, closeErr)
 		}
+		*observation = closed
 		if closed.MerchantOrderNo != order.MerchantOrderNo || closed.Channel != order.Channel || closed.AmountFen != order.AmountFen || closed.Currency != order.Currency {
 			_ = p.recordProviderObservation(ctx, order.ID, "QUERY", closed)
 			return PaymentOrder{}, ErrConflict
