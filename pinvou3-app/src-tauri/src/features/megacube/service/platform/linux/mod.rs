@@ -25,8 +25,9 @@ use serde_json::{Value, json};
 // Match the daemon Store persistence contract; valid task history may exceed
 // 16 MiB. Smaller component/configuration receipts keep their own limits.
 const MAX_CMS_STATE_BYTES: u64 = 64 * 1024 * 1024;
-/// r14 R6：`backups/{job-id}` 每次卸载/成功更新新增一份（单份至多约 96MiB），
-/// 无界累积在单板机上不可接受；保留最近 N 份，归档后滚动清理。
+/// r14 R6：`backups/{job-id}` 在卸载与每次成功 update 都新增一份（单份至多
+/// 约 96MiB），rollback/restore 亦经 activation 归档。清理只在 update 路径
+/// 执行（保留最近 N 份滚动）；卸载的最终归档按正文披露不参与清理。
 const BACKUP_RETENTION: usize = 5;
 
 #[derive(Clone, Deserialize, Serialize)]

@@ -332,12 +332,15 @@ class Transfer:
                         remaining = (total - offset) if total is not None else 0
                         if remaining > shutil.disk_usage(target.parent).free:
                             raise ToolError("INSUFFICIENT_DISK", "目标磁盘空间不足，部分文件保留。")
-                        # r12 P2-6（r14 R1 更正）：无 Content-Length 且调用方未传
-                        # size_bytes 时，上面的磁盘预检与循环内 expected 上限双双
-                        # 跳过。r12 曾以"余量不足 32GiB 即拒绝"兜底，但那不是绝对
-                        # 上限（盘大时仍可写满），又把小余量设备上的未知长度下载
-                        # 一律拒之门外。现改为循环内绝对单文件上限（与商店单文件
-                        # 上限同口径）：越限立即中止；磁盘中途写满按写失败报
+                        # r12 P2-6（r14 R1 更正，r15 P3-1 注释改写实据）：
+                        # 无 Content-Length 且调用方未传 size_bytes 时，上面的
+                        # 磁盘预检与循环内 expected 上限双双跳过。r12 曾以
+                        # "余量不足 32GiB 即拒绝"兜底，但那不是绝对上限（盘大
+                        # 时仍可写满），又把小余量设备上的未知长度下载一律拒之
+                        # 门外。现改为循环内绝对单文件上限：仓库并无"商店单文
+                        # 件上限"可对齐（最近似的是 _fetch 侧 100GiB 总量 LFS
+                        # 预算，且其明确不约束单次下载），32GiB 为独立选取的
+                        # 有界兜底。越限立即中止；磁盘中途写满按写失败报
                         # INSUFFICIENT_DISK，不再前置要求整段余量。可用性边界：
                         # 缺长度元数据的来源最多写入 _MAX_UNKNOWN_FILE_BYTES。
                         write_json(meta_path, {"etag": response.headers.get("ETag"), "last_modified": response.headers.get("Last-Modified")})
@@ -345,20 +348,28 @@ class Transfer:
                         flags |= os.O_APPEND if offset else os.O_TRUNC
                         with os.fdopen(os.open(part, flags, 0o600), "ab" if offset else "wb") as output:
                             size = offset
-                            try:
-                                while True:
-                                    self.cancel()
-                                    block = response.read1(1024 * 1024)
-                                    if not block:
-                                        break
-                                    size += len(block)
-                                    expected = item["size_bytes"] if item["size_bytes"] is not None else total
-                                    if expected is not None and size > expected:
-                                        raise ToolError("SIZE_MISMATCH", "下载超过预期大小。")
-                                    if expected is None and size > _MAX_UNKNOWN_FILE_BYTES:
-                                        raise ToolError("FILE_TOO_LARGE", "无长度信息的下载超过安全上限，已中止。")
+                            while True:
+                                self.cancel()
+                                # r15 #2：网络读取异常（ConnectionReset/Timeout 等
+                                # OSError 子类）必须直达外层 retryable 分类，保住
+                                # 退避重试 + part 偏移续传；except OSError 只圈写盘。
+                                block = response.read1(1024 * 1024)
+                                if not block:
+                                    break
+                                size += len(block)
+                                expected = item["size_bytes"] if item["size_bytes"] is not None else total
+                                if expected is not None and size > expected:
+                                    raise ToolError("SIZE_MISMATCH", "下载超过预期大小。")
+                                if expected is None and size > _MAX_UNKNOWN_FILE_BYTES:
+                                    raise ToolError("FILE_TOO_LARGE", "无长度信息的下载超过安全上限，已中止。")
+                                try:
                                     output.write(block)
-                                    self.progress(size)
+                                except OSError as exc:
+                                    raise ToolError(
+                                        "INSUFFICIENT_DISK",
+                                        "写入分片失败（磁盘可能已满），部分文件保留。") from exc
+                                self.progress(size)
+                            try:
                                 output.flush()
                                 os.fsync(output.fileno())
                             except OSError as exc:

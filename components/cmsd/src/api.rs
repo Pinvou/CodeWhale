@@ -1069,7 +1069,9 @@ fn store_task_json(t: &crate::shop::StoreTask) -> Value {
     if t.error.is_empty() {
         v.set("error", Value::Null);
     } else {
-        v.set("error", t.error.clone().into());
+        // r15 #3：与镜像落盘边界（install.rs 对 detail.task.error）同口径，
+        // 失败任务的错误串出站前必须过脱敏。
+        v.set("error", redact::redact_text(&t.error).into());
     }
     v.set("result", Value::Null);
     match t.progress {
@@ -2062,6 +2064,66 @@ mod store_merge_tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// r15 #3 / P3-4：商店直通回退（task_view 未命中本地任务时走商店
+    /// socket）的 detail.lines 与 error 出站前脱敏。
+    #[test]
+    fn store_task_detail_lines_are_redacted_before_leaving_cmsd() {
+        let root = sfx::tmpdir("store-detail-redact");
+        let app = make_app(&root);
+        let listener = std::os::unix::net::UnixListener::bind(root.join("store.sock")).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let request = http::read_request(&mut reader).unwrap().unwrap();
+            assert_eq!(request.path, "/v1/tasks/run-secret");
+            let mut response = Value::parse(
+                r#"{
+                "card_id": "card", "created_at": "2026-10-21T08:00:00+00:00",
+                "created_at_epoch": 1792569600, "kind": "download",
+                "error": "auth failed for api_key=sk-ANTHROPUS-abc123",
+                "last_line": "pull failed: token sk-ANTHROPUS-abc123 rejected",
+                "progress": null, "run_id": "run-secret", "status": "failed",
+                "lines": ["hf download with token sk-ANTHROPUS-abc123", "retrying"]
+            }"#,
+            )
+            .unwrap();
+            response.set(
+                "lines",
+                Value::Arr(vec![
+                    "hf download with token sk-ANTHROPUS-abc123".into(),
+                    "retrying".into(),
+                ]),
+            );
+            http::write_response(
+                &mut stream,
+                "200 OK",
+                "application/json",
+                response.to_string().as_bytes(),
+                &[],
+            )
+            .unwrap();
+        });
+        let view = task_view(&app, "run-secret").unwrap();
+        server.join().unwrap();
+        let lines = view.get("lines").and_then(Value::as_arr).unwrap();
+        let joined = lines
+            .iter()
+            .map(|line| line.as_str().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!joined.contains("sk-ANTHROPUS-abc123"), "{joined}");
+        assert!(joined.contains("***"), "{joined}");
+        let error = view.get("error").and_then(Value::as_str).unwrap_or("");
+        assert!(!error.contains("sk-ANTHROPUS-abc123"), "{error}");
+        let last_event = view
+            .get("last_event")
+            .and_then(|event| event.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(!last_event.contains("sk-ANTHROPUS-abc123"), "{last_event}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn unknown_store_time_is_not_reported_as_the_epoch_or_completion_time() {
         let task = crate::shop::StoreTask {
@@ -2088,7 +2150,8 @@ mod store_merge_tests {
         );
     }
 
-    /// r14 R5：商店直通路径的 last_event 与镜像落盘边界同口径脱敏。
+    /// r14 R5 / r15 #3：商店直通路径的 last_event 与 error 均与镜像落盘
+    /// 边界同口径脱敏。
     #[test]
     fn store_task_last_event_is_redacted_before_leaving_cmsd() {
         let task = crate::shop::StoreTask {
@@ -2099,7 +2162,7 @@ mod store_merge_tests {
             created_at: 0,
             progress: None,
             last_line: "download failed: token sk-ANTHROPUS-abc123 leaking".into(),
-            error: String::new(),
+            error: "auth rejected for api_key=sk-ANTHROPUS-abc123".into(),
         };
         let value = store_task_json(&task);
         let message = value
@@ -2109,6 +2172,9 @@ mod store_merge_tests {
             .unwrap();
         assert!(!message.contains("sk-ANTHROPUS-abc123"), "{message}");
         assert!(message.contains("***"), "{message}");
+        let error = value.get("error").and_then(Value::as_str).unwrap();
+        assert!(!error.contains("sk-ANTHROPUS-abc123"), "{error}");
+        assert!(error.contains("***"), "{error}");
     }
 
     /// /v1/tasks 合并透出：cmsd 任务 source="cmsd"，商店任务 source="store"

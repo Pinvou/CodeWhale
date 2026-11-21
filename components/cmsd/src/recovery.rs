@@ -702,8 +702,20 @@ fn observe(app: &Arc<App>, model: &ModelState) -> Result<(), ApiErr> {
         // 模型走到这里，无条件覆写会让 supervisor 的 2s save_store 每次都
         // 全量序列化+双 fsync（单板机 eMMC 写放大与持锁抖动）。与
         // supervisor.rs 的 diff-before-mark 纪律对齐。
+        // r15 #1：熔断开启且引擎已退出的模型，Degraded 是设计终态（D4）。
+        // 若此处降级为 Stopped，同一 tick 内 enable_automatic 的熔断守卫
+        // 错误路径（apply_observe_error）会再翻回 Degraded——两条 diff 守卫
+        // 交错互视为变化，崩溃循环终态将每 10s 双翻转置脏。保持 Degraded，
+        // 持久化单一表示。
         let next_status = if running {
             ModelStatus::Running
+        } else if current.status == ModelStatus::Degraded
+            && current
+                .degraded_reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("recovery_circuit_open:"))
+        {
+            ModelStatus::Degraded
         } else {
             ModelStatus::Stopped
         };
@@ -896,6 +908,60 @@ mod tests {
             store.state.models["qa-recover"].status,
             ModelStatus::Degraded
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// r15 #1：崩溃循环终态（熔断开启 + 容器已退出）上，observe() 与熔断
+    /// 错误路径交错不得让 Degraded↔Stopped 每 10s 双翻转置脏。
+    #[test]
+    fn crash_loop_terminal_state_does_not_oscillate_between_degraded_and_stopped() {
+        let (root, app, _) = fixture("circuit-terminal-steady", 100);
+        arm(&app, "qa-recover", false).unwrap();
+        disarm(&app, "qa-recover").unwrap();
+        {
+            let mut store = app.store.lock().unwrap();
+            let model = store.state.models.get_mut("qa-recover").unwrap();
+            model.status = ModelStatus::Degraded;
+            model.degraded_reason = Some("recovery_circuit_open: repeated crashes".into());
+        }
+        // 先对齐一轮（observe + 熔断错误交错）并落盘清脏。
+        let model = app.store.lock().unwrap().state.models["qa-recover"].clone();
+        observe(&app, &model).unwrap();
+        {
+            let mut store = app.store.lock().unwrap();
+            apply_observe_error(
+                &mut store,
+                "qa-recover",
+                "recovery_circuit_open",
+                "repeated crashes",
+            );
+            store.save_if_dirty().unwrap();
+            assert_eq!(
+                store.state.models["qa-recover"].status,
+                ModelStatus::Degraded,
+                "熔断终态必须保持 Degraded（D4 设计终态）"
+            );
+        }
+        // r15 #1 稳态复测：交错两边都不得再置脏。
+        let model = app.store.lock().unwrap().state.models["qa-recover"].clone();
+        observe(&app, &model).unwrap();
+        {
+            let mut store = app.store.lock().unwrap();
+            apply_observe_error(
+                &mut store,
+                "qa-recover",
+                "recovery_circuit_open",
+                "repeated crashes",
+            );
+            assert!(
+                !store.is_dirty(),
+                "崩溃循环终态不得每 tick 双翻转置脏（r15 #1 写放大）"
+            );
+            assert_eq!(
+                store.state.models["qa-recover"].status,
+                ModelStatus::Degraded
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

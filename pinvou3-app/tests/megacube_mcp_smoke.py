@@ -738,10 +738,68 @@ def unknown_length_cap_checks(tmp):
             os.environ["PINVOU3_HOME"] = prev_home
 
 
+def network_error_preserves_retry_checks(tmp):
+    """r15 #2：mid-stream 网络异常（OSError 子类）不得被写盘分支转成终态
+    INSUFFICIENT_DISK——必须保留外层 retryable 分类与续传。"""
+    import importlib as _il
+    from pathlib import Path as _Path
+    prev_home = os.environ.get("PINVOU3_HOME")
+    os.environ["PINVOU3_HOME"] = tmp
+    servers_dir = os.path.join(
+        ROOT, "src-tauri", "resources", "common", "bundle", "mcp-servers")
+    if servers_dir not in sys.path:
+        sys.path.insert(0, servers_dir)
+    transfers = _il.import_module("megacube_tools.transfers")
+
+    class ResetMidStream:
+        status = 200
+        headers = {}
+        _sent = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read1(self, _size):
+            if not self._sent:
+                self._sent = True
+                return b"x" * 1024
+            raise ConnectionResetError("peer reset mid-stream")
+
+    real_open = transfers.open_url
+    transfers.open_url = lambda *_a, **_k: ResetMidStream()
+    job = os.path.join(tmp, "net-job")
+    os.makedirs(job, exist_ok=True)
+    dest = os.path.join(tmp, "net-dest")
+    os.makedirs(dest, exist_ok=True)
+    try:
+        transfers.Transfer(_Path(job), {"artifacts": [], "events": []}).file(
+            {"url": "http://127.0.0.1:1/stream", "path": "net.bin",
+             "size_bytes": None, "sha256": ""}, _Path(dest), None)
+        check("B3 网络中断保留重试分类", False, "未抛错")
+    except transfers.ToolError as error:
+        check("B3 网络中断保留重试分类",
+              error.code != "INSUFFICIENT_DISK", error.code)
+    except ConnectionError:
+        # 重试耗尽后原样抛出连接异常：外层分类可判 retryable，part 可续传。
+        check("B3 网络中断保留重试分类", True)
+    except Exception as error:  # noqa: BLE001
+        check("B3 网络中断保留重试分类", False, type(error).__name__)
+    finally:
+        transfers.open_url = real_open
+        if prev_home is None:
+            os.environ.pop("PINVOU3_HOME", None)
+        else:
+            os.environ["PINVOU3_HOME"] = prev_home
+
+
 def main():
     redirect_policy_checks()
     tmp = tempfile.mkdtemp(prefix="megacube-mcp-test-")
     unknown_length_cap_checks(tmp)
+    network_error_preserves_retry_checks(tmp)
     state = FixtureState()
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
     httpd.state = state
