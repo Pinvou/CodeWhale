@@ -126,7 +126,14 @@ static MARKETPLACE_TRANSACTION_LOCK: Mutex<()> = Mutex::new(());
 /// `engine_owned_mcp_server_keys_are_exactly_the_engine_footprint`. (ensure_builtin
 /// also runs `refresh_mcp_python_commands`, which may rewrite the python command of
 /// any entry; that self-heal is complementary and outside this key-set footprint.)
-pub(crate) const ENGINE_OWNED_MCP_SERVER_KEYS: &[&str] = &["pinvou3", "pinvou", "browser"];
+pub(crate) const ENGINE_OWNED_MCP_SERVER_KEYS: &[&str] = &[
+    "pinvou3",
+    "pinvou",
+    "browser",
+    // 连字符旧 key：迁移期保留，ensure_builtin_mcp_servers 负责删我们的残留
+    "megacube-admin",
+    "megacube_admin",
+];
 
 /// Back up a corrupt JSON config file next to itself as `<stem>.<epoch>`,
 /// skipping the write when an existing backup already holds identical bytes —
@@ -1131,6 +1138,9 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         // HashMap 迭代顺序不确定 → 按 id 排序返回，保证前端列表/开关菜单每次刷新顺序稳定
         // （否则每次 toggle 触发刷新时工具行会随机换位）。
         let mut tools: Vec<ToolManifest> = by_id.into_values().collect();
+        // 与 MCP/Skill 共用识别门控：曾识别设备的独立安装能力不依赖 cmsd 在线。
+        let megacube_present = crate::features::megacube::tooling_available();
+        tools.retain(|m| m.id != "megacube-admin" || megacube_present);
         tools.sort_by(|a, b| a.id.cmp(&b.id));
         tools
     }
@@ -5387,7 +5397,71 @@ pub(crate) mod tests {
     fn engine_owned_mcp_server_keys_are_exactly_the_engine_footprint() {
         assert_eq!(
             ENGINE_OWNED_MCP_SERVER_KEYS,
-            ["pinvou3", "pinvou", "browser"]
+            [
+                "pinvou3",
+                "pinvou",
+                "browser",
+                "megacube-admin",
+                "megacube_admin"
+            ]
+        );
+    }
+
+    /// 显式配置过的设备在离线时仍保留排障工具，不能把 socket 缺席误判为
+    /// 独立安装环境或隐藏恢复入口。工具可见不授予模型生命周期权限；无配置、
+    /// 无设备记录时的缺席规则由 megacube::authority 的纯状态用例覆盖。
+    #[test]
+    fn megacube_admin_listing_preserves_explicit_offline_connection_and_records() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = EnvVarGuard::capture(&["CMSD_SOCKET", "PINVOU3_CMSD_UNIT", "PINVOU3_HOME"]);
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: 本测试全程持 ENV_LOCK，env 写在进程内串行。
+        unsafe { std::env::set_var("PINVOU3_HOME", home.path()) };
+        // SAFETY: 本测试全程持 ENV_LOCK，env 写在进程内串行。
+        unsafe {
+            std::env::remove_var("PINVOU3_CMSD_UNIT");
+            std::env::set_var("CMSD_SOCKET", "/tmp/pinvou3-test-no-such-cmsd.sock");
+        };
+        let tools = MarketplaceManager::new().available_tools();
+        assert!(
+            tools.iter().any(|t| t.id == "megacube-admin"),
+            "显式连接离线时应保留 megacube-admin 排障入口"
+        );
+        assert!(
+            builtin::is_builtin_tool("megacube-admin"),
+            "展示过滤不影响内嵌目录的成员身份判定"
+        );
+        let sock = std::env::temp_dir().join(format!("cmsd-present-{}.sock", std::process::id()));
+        std::fs::write(&sock, b"").unwrap();
+        // SAFETY: 同上。
+        unsafe { std::env::set_var("CMSD_SOCKET", &sock) };
+        let tools = MarketplaceManager::new().available_tools();
+        let entry = tools
+            .iter()
+            .find(|t| t.id == "megacube-admin")
+            .expect("socket 在场时 megacube-admin 应列出");
+        assert!(entry.builtin && entry.visibility == "system");
+        assert!(
+            entry
+                .mcp_tools
+                .iter()
+                .any(|name| name.ends_with("cube_fetch_files"))
+        );
+        assert!(
+            entry
+                .mcp_tools
+                .iter()
+                .any(|name| name.ends_with("cube_register_artifact"))
+        );
+        let _ = std::fs::remove_file(&sock);
+        std::fs::create_dir_all(crate::features::megacube::installation_records_dir()).unwrap();
+        // SAFETY: 本测试仍持 ENV_LOCK，撤掉显式连接后核实本地记录保留入口。
+        unsafe { std::env::remove_var("CMSD_SOCKET") };
+        assert!(
+            MarketplaceManager::new()
+                .available_tools()
+                .iter()
+                .any(|tool| tool.id == "megacube-admin")
         );
     }
 

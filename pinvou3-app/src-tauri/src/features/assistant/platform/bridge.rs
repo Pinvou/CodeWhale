@@ -2476,15 +2476,28 @@ impl Pinvou3Bridge {
         // foundation**.
         const S: usize = 4_000;
         const FIXED: usize = 22_000;
+        // pinned / framing 与 forkguard 测试、设计文档 §3 常量表同源的实测值。
+        const R: usize = 4_500;
+        const FRAMING: usize = 2_500;
         // ÷1.5 == ×2/3: convert the conservative full ruler back to
         // should_compact's raw subset ruler.
         let raw_equiv = emergency.saturating_sub(S).saturating_mul(2) / 3;
         let threshold = raw_equiv.saturating_sub(FIXED);
-        // ⚠️ Upper bound `.max(4_096)`: with a pathologically small window
+        // 小窗口下限（2026-10-15 真机实证：64K 窗口 T=7,418，而系统提示+工具
+        // schema 基线就有 ~7.2k——随便发什么都越线，每发必压）：固定 22,000
+        // 守护余量是为 256K 窗口校准的，在 ≤64K 窗口吃掉近半 E，T 直接贴到
+        // 基线上。下限提到 W/4，但不超过同尺不变量允许的位置
+        // （(T+R)×1.5+S+framing ≤ E ⟺ T ≤ (E−S−framing)×2/3−R，与
+        // forkguard_compaction_threshold_below_emergency_all_windows 同一条
+        // 式子）；256K/128K 的既有 T 本就在 W/4 之上，行为不变。
+        let invariant_max_raw = emergency.saturating_sub(S + FRAMING).saturating_mul(2) / 3;
+        let invariant_max = invariant_max_raw.saturating_sub(R);
+        let floor = (window / 4).clamp(4_096, invariant_max.max(4_096));
+        // ⚠️ Upper bound `.max(floor)`: with a pathologically small window
         // (W<5461 → W*3/4<4096), a bare clamp's min>max would trip
         // `Ord::clamp`'s `assert!(min<=max)` panic → build_engine_config
         // crashes. Raising the upper bound keeps it legal.
-        threshold.clamp(4_096, (window * 3 / 4).max(4_096))
+        threshold.clamp(floor, (window * 3 / 4).max(floor))
     }
 
     /// Legacy single-engine path (used by the headless harness): goes through
@@ -6234,6 +6247,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: Default::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: api_key.to_string(),
             credential_ref: None,
@@ -6270,6 +6284,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: Default::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: api_key.to_string(),
             credential_ref: None,
@@ -9372,6 +9387,35 @@ mod tests {
             let t = b.build_engine_config().compaction.token_threshold; // must not panic
             assert_eq!(t, 4_096, "极端小窗口 W={w} 应 clamp 到 floor 4096,实得 {t}");
         }
+    }
+
+    /// 64K 窗口防「每发必压」回归（2026-10-15 真机实证）：系统提示+工具 schema
+    /// 基线 ~7.2k，而旧公式（固定 22,000 余量为 256K 校准）给 64K 窗口的
+    /// T=7,418——贴线，随便发什么都触发自动压缩。小窗口下限提到 W/4 后
+    /// T=16,384，既明显高于基线，又不破同尺不变量（由上面全窗口测试锁定）。
+    #[test]
+    fn forkguard_compaction_threshold_64k_window_clears_the_baseline() {
+        let (_lock, _env) =
+            locked_env(&["DEEPSEEK_MAX_OUTPUT_TOKENS", "PINVOU3_MAX_OUTPUT_TOKENS"]);
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("DEEPSEEK_MAX_OUTPUT_TOKENS", "24576") };
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::remove_var("PINVOU3_MAX_OUTPUT_TOKENS") };
+        let mut bridge = fixture_bridge();
+        bridge.probed_context_tokens = Some(65_536);
+        let t = bridge.build_engine_config().compaction.token_threshold;
+        assert_eq!(
+            t, 16_384,
+            "64K 窗口 T 应被小窗口下限抬到 W/4=16384（明显高于 ~7.2k 基线），实得 {t}"
+        );
+        // 大窗口行为不变：既有 T 本就在 W/4 之上，下限不得把它压低。
+        let mut big = fixture_bridge();
+        big.probed_context_tokens = Some(262_144);
+        let t_big = big.build_engine_config().compaction.token_threshold;
+        assert!(
+            t_big > 65_536,
+            "256K 窗口 T={t_big} 不应被 W/4 下限改变（须大于 W/4）"
+        );
     }
 
     /// probed_context_tokens=Some → must be filled into

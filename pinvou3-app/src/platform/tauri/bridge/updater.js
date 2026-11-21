@@ -18,28 +18,39 @@ function pinvouSharedtauriUpdater() {
   const notify = context.notify;
   const invoke = context.invoke;
   const listen = context.listen;
-  let progressTimer = null;
-  let windowsDownload = false;
-  function clearProgressTimer() {
-    if (progressTimer !== null) root.clearTimeout(progressTimer);
-    progressTimer = null;
-  }
-  listen("update:progress", function (event) {
-    if (!windowsDownload || !state.updateDownloading || state.updateCancelling || state.updateProgress >= 100) return;
-    const payload = event && event.payload || {};
-    const total = Number(payload.total), downloaded = Number(payload.downloaded);
-    if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(downloaded) || downloaded < 0) return;
-    const progress = Math.min(99, Math.floor(downloaded / total * 100));
-    if (progress <= state.updateProgress) return;
-    state.updateProgress = progress;
-    if (progressTimer === null) progressTimer = root.setTimeout(function () {
-      progressTimer = null;
-      notify();
-    }, 200);
-  });
   // ── 应用内升级 ───────────────────────────────────────────────────
-  // Chain: check_for_update (compares the server's latest.json) → download_update (streamed download + sha256)
-  // → update:progress → install_update → restart_app.
+  // Chain: check_for_update (compares the server's latest.json) → download_update (streamed download + sha256,
+  // progress arrives over the update:progress event) → install_update (pkexec apt) → restart_app.
+  const UPDATE_PROGRESS_NOTIFY_INTERVAL_MS = 200;
+  /** @type {number | null} */
+  var updateProgressNotifyTimer = null;
+
+  function cancelScheduledUpdateProgressNotification() {
+    if (updateProgressNotifyTimer === null) return;
+    root.clearTimeout(updateProgressNotifyTimer);
+    updateProgressNotifyTimer = null;
+  }
+
+  /** @param {{ total?: unknown, downloaded?: unknown } | null | undefined} payload - Raw update progress event payload. */
+  function publishUpdateProgress(payload) {
+    var total = Number(payload && payload.total);
+    var downloaded = Number(payload && payload.downloaded);
+    if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(downloaded) || downloaded < 0) return;
+    // Keep the progress feature on all emitters. Only a successful download
+    // receipt may publish 100%, and late/backwards events cannot regress it.
+    var nextProgress = Math.min(99, Math.floor(downloaded / total * 100));
+    if (nextProgress <= state.updateProgress) return;
+    state.updateProgress = nextProgress;
+    if (updateProgressNotifyTimer !== null) return;
+    updateProgressNotifyTimer = root.setTimeout(function () {
+      updateProgressNotifyTimer = null;
+      notify();
+    }, UPDATE_PROGRESS_NOTIFY_INTERVAL_MS);
+  }
+  listen("update:progress", function (e) {
+    if (!state.updateDownloading || state.updateCancelling || state.updateProgress >= 100) return;
+    publishUpdateProgress(e.payload || {});
+  });
   async function loadAppVersion() {
     try {
       state.appVersion = await invoke("get_app_version");
@@ -65,12 +76,12 @@ async function checkForUpdate() { return pinvouSharedtauriUpdater().checkForUpda
     const shouldRestartAfterInstall = info.platform !== "windows";
     let installed = false;
     state.updateDownloading = true; state.updateCancelling = false;
-    windowsDownload = info.platform === "windows";
-    clearProgressTimer();
+    cancelScheduledUpdateProgressNotification();
     state.updateProgress = 0; state.updateError = null; notify();
     try {
+      cancelScheduledUpdateProgressNotification();
       const downloadResult = await invoke("download_update", { info: state.updateInfo });
-      clearProgressTimer();
+      cancelScheduledUpdateProgressNotification();
       state.updateProgress = 100; notify();
       state.updateInfo = info; // 复原：install 用发起时的版本元数据，不随静默检查漂移
       if (downloadResult && typeof downloadResult === "object" && downloadResult.installer_path) {
@@ -85,8 +96,7 @@ async function checkForUpdate() { return pinvouSharedtauriUpdater().checkForUpda
       if (state.updateCancelling) state.updateProgress = 0;
       else state.updateError = String(e);
     }
-    clearProgressTimer();
-    windowsDownload = false;
+    cancelScheduledUpdateProgressNotification();
     state.updateDownloading = false; state.updateCancelling = false; notify();
     if (installed && shouldRestartAfterInstall) restartApp();
     return installed;
@@ -95,7 +105,7 @@ async function checkForUpdate() { return pinvouSharedtauriUpdater().checkForUpda
   // 已进入 install(pkexec/apt)则无效(系统接管,装一半不能停)。
   function cancelUpdate() {
     if (!state.updateDownloading || state.updateCancelling) return;
-    clearProgressTimer();
+    cancelScheduledUpdateProgressNotification();
     state.updateCancelling = true; notify();
     invoke("cancel_download").catch(function () { /* 忽略,下载循环超时也会退 */ });
   }

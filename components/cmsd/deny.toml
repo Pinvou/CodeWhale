@@ -1,0 +1,47 @@
+# cargo-deny 配置 —— components/cmsd（r7 P2-6）
+# cmsd 是随包发布、以常驻用户/系统服务运行的独立 crate，此前完全绕过
+# cargo-deny 硬门禁（rust_dependencies 过滤排除本目录）。本配置把
+# advisories / licenses / bans / sources 四类检查接入 cmsd-check。
+# 白名单与豁免口径沿用 src-tauri/deny.toml 的既定评估（宽松许可集合、
+# 多版本放行、crates.io+本地来源限制），未新增任何 ignore。
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+ignore = []
+unmaintained = "workspace"
+unsound = "workspace"
+
+[licenses]
+version = 2
+# cmsd 自身是私有 crate（license = "Proprietary"），非 SPDX 可解析表达式；
+# 依赖图的许可证审计照常运行，仅豁免本 crate 自身。
+private = { ignore = true }
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "0BSD",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "allow"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -68,6 +68,21 @@ test('接入时记录稳定卡片关联，升级后仍沿用保存模型 id', ()
   assert.equal(buildSavedModel(OK).model_store_link_only, false);
 });
 
+test('首次登记的预定稳定 id 不触发 link_only 窄事务（组合场景：自动接入从未接入的卡片）', () => {
+  // switch-follow 对从未接入的商店卡会预定 m_cmsd_* 稳定 id 并首次登记：
+  // 这必须是"新行 + link_requested"，绝不能带 link_only 让后端窄事务去找
+  // 一个不存在的既有行（round-58 审核实证过的确定性拒绝路径）。
+  const row = buildSavedModel({ ...OK, cardId: 'fresh-card', registrationId: 'm_cmsd_stable-1' });
+  assert.equal(row.id, 'm_cmsd_stable-1');
+  assert.equal(row.model_store_card_id, 'fresh-card');
+  assert.equal(row.model_store_link_requested, true);
+  assert.equal(row.model_store_link_only, false);
+  // 同一稳定 id 的重复自动接入仍然不带 link_only：新行语义不因重试而改变。
+  const retry = buildSavedModel({ ...OK, cardId: 'fresh-card', registrationId: 'm_cmsd_stable-1' });
+  assert.equal(retry.id, 'm_cmsd_stable-1');
+  assert.equal(retry.model_store_link_only, false);
+});
+
 test('缺任何一个必要取值都要当场报错，不能拼出半截配置', () => {
   for (const missing of ['modelName', 'baseUrl']) {
     assert.throws(() => buildSavedModel({ ...OK, [missing]: undefined }), undefined, missing);

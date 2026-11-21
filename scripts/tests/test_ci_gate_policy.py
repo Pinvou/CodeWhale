@@ -6274,9 +6274,9 @@ python3() { fixture_mock python3 "$@"; }
                     deny_lines.append((path.name, match.group(1).strip()))
         self.assertEqual(
             deny_lines,
-            [("pr-check.yml", "cargo-deny@0.20.2")] * 2,
-            "exactly the knowledge-rust and rust-lint call sites must "
-            "install cargo-deny, both at exactly the pinned version, "
+            [("pr-check.yml", "cargo-deny@0.20.2")] * 3,
+            "exactly the knowledge-rust, rust-lint and cmsd-check call sites "
+            "must install cargo-deny, all at exactly the pinned version, "
             "and no other workflow may install it at all",
         )
 

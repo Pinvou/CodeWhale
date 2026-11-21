@@ -1,0 +1,707 @@
+//! 商店生命周期委托：cmsd 在场且认识这张原生卡时，启用/停用的权威让位给
+//! systemd 守护层（崩溃自愈、开机自启、内存预算、degraded 熔断）。
+//!
+//! 判定纪律：明确配置、本机发现/组件回执、历史歧义或每卡所有权存在时，
+//! 失联或查询失败不允许回退。远端只读连接与有来源的独立下载记录不代表
+//! 本机管理权。只有确认本机未配置，或有效本机查询确认该卡不存在且没有
+//! 历史所有权时，才返回 NotManaged 供商店继续卡片脚本。
+//!
+//! 进度模型：复用商店 spawn_op 的 run 日志（长轮询），cmsd 任务事件逐条写进
+//! 日志行（形如 `[cmsd] wait: 等待服务就绪…`），前端零改动。取消语义以谓词
+//! 闭包传入（解开对 model_store 私有 platform 模块的编译期依赖）。
+
+use super::client::{Client, GATEWAY_MODEL_ALIAS};
+
+/// 委托结果。调用方（model_store lifecycle）据此落库。
+pub enum DelegateOutcome {
+    /// 无本机管理预期，或已确认该卡不受管理且无历史冲突。
+    NotManaged,
+    /// cmsd 侧 enable 完成：钉固定端点 + 别名（设计 §9.1 端点稳定性）。
+    Enabled {
+        endpoint_url: String,
+        endpoint_model: String,
+    },
+    /// cmsd 侧 disable 完成。
+    Stopped,
+    /// cmsd 侧 purge 完成（注销登记；容器卡不动权重/容器实体，原生卡含权重清除）。
+    Purged,
+}
+
+fn ownership_path(card: &str) -> Result<std::path::PathBuf, String> {
+    if card.is_empty()
+        || card.len() > 128
+        || matches!(card, "." | "..")
+        || !card
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+    {
+        return Err("invalid_card: 模型标识不合法".into());
+    }
+    Ok(super::installation_records_dir()
+        .join("ownership")
+        .join(card))
+}
+
+fn ownership_known(card_id: &str) -> Result<bool, String> {
+    Ok(super::authority::present_or_unknown(&ownership_path(
+        card_id,
+    )?))
+}
+
+/// Shared by lifecycle and maintenance; global tool availability is not a
+/// statement about local authority. Metadata errors never prove absence.
+fn local_client(card_id: &str) -> Result<Option<Client>, String> {
+    let owned = ownership_known(card_id)?;
+    match Client::connect() {
+        Ok(client) => Ok(Some(client)),
+        Err(error) if owned || super::authority::local_authority_expected() => Err(format!(
+            "cmsd_unavailable: 本机管理配置或历史记录尚未核实，请恢复设备服务或核对原记录，不能改用旧脚本。{error}"
+        )),
+        Err(_) => Ok(None),
+    }
+}
+
+/// A same-name observed resource is not permission to execute local scripts.
+fn managed_by_cmsd(client: &Client, card_id: &str) -> Result<bool, String> {
+    match client.model_fact(card_id)? {
+        Some(model) if model.get("managed").and_then(serde_json::Value::as_bool) == Some(true) => {
+            remember_ownership(card_id)?;
+            Ok(true)
+        }
+        Some(_) => Err("ownership_required: 同名资源只有观察权限，不能改用旧脚本操作".into()),
+        None if ownership_known(card_id)? => Err("ownership_conflict: 已托管模型未出现在设备服务中，请恢复设备记录后重试，不能改用旧脚本".into()),
+        None => Ok(false),
+    }
+}
+
+fn remember_ownership(card: &str) -> Result<(), String> {
+    let binding = ownership_path(card)?;
+    super::authority::remember_local_device()?;
+    super::authority::write_receipt_if_changed(&binding)
+        .map_err(|e| format!("ownership_persist_failed: {e}"))
+}
+
+/// Prepare the asynchronous reader before an exclusive store resource lock.
+/// Facts read here grant no permission; the transaction rechecks them under its
+/// own locks. Waiting while holding that resource lock would block cmsd's reader.
+pub(crate) fn prepare_reader(card_id: &str) -> Result<(), String> {
+    if let Some(client) = local_client(card_id)? {
+        client.model_fact(card_id)?;
+    }
+    Ok(())
+}
+
+/// Resolve ownership once before opening a cross-process store transaction.
+pub(crate) fn maintenance_client(
+    card_id: &str,
+    expected_runtime: Option<&str>,
+) -> Result<Option<Client>, String> {
+    let Some(client) = local_client(card_id)? else {
+        return Ok(None);
+    };
+    let Some(model) = maintenance_fact(
+        client.model_fact_cached(expected_runtime.unwrap_or(card_id))?,
+        card_id,
+        expected_runtime,
+        ownership_known(card_id)?,
+    )?
+    else {
+        return Ok(None);
+    };
+    let owned = model.get("managed").and_then(serde_json::Value::as_bool) == Some(true);
+    if !client.supports("model.maintenance.reservation")? {
+        return Err("maintenance_unsupported: 请先更新设备服务以支持安全卸载预留和仅撤登记的 scoped purge；未执行卸载脚本".into());
+    }
+    if owned {
+        remember_ownership(card_id)?;
+    }
+    Ok(Some(client))
+}
+
+// Known current store identities must be represented by a positive cleanup
+// fact. Absence or a stale physical alias never authorizes the old script path.
+fn maintenance_fact(
+    model: Option<serde_json::Value>,
+    logical_card: &str,
+    expected_runtime: Option<&str>,
+    owned_before: bool,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(model) = model else {
+        if expected_runtime.is_some() || owned_before {
+            return Err(
+                "ownership_conflict: 当前商店清理对象未获设备服务确认，不能回退旧脚本".into(),
+            );
+        }
+        return Ok(None);
+    };
+    if expected_runtime.is_some_and(|expected| {
+        model["card"].as_str() != Some(expected)
+            || model["logical_card"].as_str() != Some(logical_card)
+    }) {
+        return Err("maintenance_target_changed: 设备服务清理对象与当前商店部署不一致".into());
+    }
+    if model["can_reserve_uninstall"].as_bool() != Some(true) {
+        return Err("ownership_required: 此资源未获标准卸载预留权，不能回退旧脚本".into());
+    }
+    Ok(Some(model))
+}
+
+pub(crate) fn forget_ownership(card_id: &str) -> Result<(), String> {
+    let path = ownership_path(card_id)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// 轮询 cmsd 任务直到终结，事件行写进商店 run 日志。
+/// 取消语义：enable 是幂等长操作（权重加载分钟级），前端点了取消就停止轮询
+/// 并明确报错——cmsd 侧任务继续推进，状态融合（library 融合 cmsd 实况）会在
+/// 下次打开商店时纠正行内状态，不留漂移。
+fn wait_task(
+    client: &Client,
+    task_id: &str,
+    log: &mut dyn FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    let mut seen_events = 0usize;
+    loop {
+        if cancelled() {
+            return Err("已取消等待；设备任务状态仍待核实，未撤销设备侧操作".into());
+        }
+        let task = client.task(task_id)?;
+        let status = observed_task_status(&task)?;
+        let events = task
+            .get("events")
+            .and_then(|e| e.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for event in events.iter().skip(seen_events) {
+            let stage = event.get("stage").and_then(|s| s.as_str()).unwrap_or("");
+            let message = event.get("message").and_then(|m| m.as_str()).unwrap_or("");
+            log(&format!("[cmsd] {stage}: {message}"));
+        }
+        seen_events = events.len();
+        match status {
+            "succeeded" => return Ok(()),
+            "cancelled" => return Err("设备任务已取消".to_string()),
+            "failed" => {
+                let error = task
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("管理面任务失败（无详情）");
+                return Err(error.to_string());
+            }
+            _ => {
+                if cancelled() {
+                    return Err(
+                        "已取消等待（Cube Manage Software 侧任务仍在继续推进，可稍后在侧栏设备管理（普通设备为运行状态）→MegaCube→Cube Manage Software 查看结果）"
+                            .to_string(),
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+    }
+}
+
+/// A missing or malformed receipt is an unconfirmed outcome, never a
+/// running task. Keep ownership and the store record for later reconciliation.
+fn observed_task_status(task: &serde_json::Value) -> Result<&str, String> {
+    if task
+        .get("http_status")
+        .is_some_and(|code| code.as_u64() != Some(200))
+        || task
+            .get("error")
+            .is_some_and(|error| !error.is_null() && task["status"] != "failed")
+    {
+        return Err(
+            "cmsd_task_unconfirmed: 设备任务无法核实，请恢复设备服务后查看原任务；未重发操作"
+                .into(),
+        );
+    }
+    match task["status"].as_str() {
+        Some(
+            status @ ("queued" | "running" | "pending" | "succeeded" | "failed" | "cancelled"),
+        ) => Ok(status),
+        _ => Err(
+            "cmsd_task_unconfirmed: 设备任务回执缺失或状态未知；请核实原任务，未重发操作".into(),
+        ),
+    }
+}
+
+/// Return only a confirmed gateway observation. Callers performing optional
+/// reconciliation retain their existing endpoint when the daemon is unavailable.
+pub fn gateway_endpoint() -> Option<(String, String)> {
+    let client = Client::connect().ok()?;
+    gateway_endpoint_for(&client).ok()
+}
+
+fn gateway_endpoint_for(client: &Client) -> Result<(String, String), String> {
+    let status = client
+        .status()
+        .map_err(|error| format!("cmsd_gateway_unavailable: {error}"))?;
+    gateway_endpoint_from_status(&status)
+}
+
+fn gateway_endpoint_from_status(status: &serde_json::Value) -> Result<(String, String), String> {
+    let unavailable =
+        || "cmsd_gateway_unavailable: 无法核实设备网关端点，请恢复设备服务后重试".to_owned();
+    if status["service"] != "cmsd"
+        || status.get("error").is_some_and(|error| !error.is_null())
+        || status
+            .get("http_status")
+            .is_some_and(|code| code.as_u64() != Some(200))
+    {
+        return Err(unavailable());
+    }
+    let gateway = status
+        .get("gateway")
+        .and_then(serde_json::Value::as_str)
+        .filter(|gateway| !gateway.trim().is_empty())
+        .ok_or_else(unavailable)?;
+    Ok((
+        format!("http://{gateway}/v1/chat/completions"),
+        GATEWAY_MODEL_ALIAS.to_string(),
+    ))
+}
+
+/// Resolve a specific managed card through the authoritative logical/current
+/// mapping. Missing observations cannot become the device-wide default alias.
+pub(crate) fn endpoint_model_for(client: &Client, card_id: &str) -> Result<String, String> {
+    let model = client
+        .model_fact(card_id)
+        .map_err(|error| format!("cmsd_model_identity_unavailable: {error}"))?;
+    endpoint_model_from_fact(model)
+}
+
+fn endpoint_model_from_fact(model: Option<serde_json::Value>) -> Result<String, String> {
+    model
+        .filter(|model| model["managed"] == true)
+        .and_then(|model| {
+            model["model_id"]
+                .as_str()
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| {
+            "cmsd_model_identity_unavailable: 无法核实该模型的真实连接标识，请恢复设备观测后重试"
+                .to_owned()
+        })
+}
+
+/// 委托启用。返回 Ok(NotManaged) 表示不接管（调用方走老路径）。
+pub fn enable(
+    card_id: &str,
+    log: &mut dyn FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<DelegateOutcome, String> {
+    let Some(client) = local_client(card_id)? else {
+        return Ok(DelegateOutcome::NotManaged);
+    };
+    let fact = client.model_fact(card_id)?;
+    match fact {
+        Some(model) if model.get("managed").and_then(serde_json::Value::as_bool) == Some(true) => {
+            remember_ownership(card_id)?;
+        }
+        Some(model)
+            if model.get("can_adopt").and_then(serde_json::Value::as_bool) == Some(true)
+                && client.supports("model.explicit_adoption")? =>
+        {
+            log("[cmsd] 按本次显式启用请求接管已部署的标准卡；发现本身不授予管理权");
+        }
+        Some(_) => {
+            return Err(
+                "ownership_required: 此资源只有观察权限，请先在模型商店完成或修复部署".into(),
+            );
+        }
+        None => {
+            if ownership_known(card_id)? {
+                return Err("ownership_conflict: 原托管模型记录缺失，请先恢复设备记录".into());
+            }
+            return Ok(DelegateOutcome::NotManaged);
+        }
+    }
+    log("[cmsd] 检测到 MegaCube 管理面，启用改由 systemd 托管（崩溃自愈、开机自启）");
+    let task = client.model_action(card_id, "enable")?;
+    if let Some(error) = task.get("error") {
+        // 预算不足等前置拒绝：cmsd 的中文 verdict 直接透传
+        let message = error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("管理面拒绝启用");
+        return Err(message.to_string());
+    }
+    let task_id = task
+        .get("task_id")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| "管理面应答缺 task_id".to_string())?;
+    log(&format!("[cmsd] 任务 {task_id} 已创建，等待就绪…"));
+    wait_task(&client, task_id, log, cancelled)?;
+    let connection_unconfirmed = |error: String| {
+        format!(
+            "{error}；设备启用任务 {task_id} 已成功，但连接信息尚未核实；未更新连接信息，请在设备页核实状态"
+        )
+    };
+    if !managed_by_cmsd(&client, card_id).map_err(&connection_unconfirmed)? {
+        return Err(connection_unconfirmed(
+            "ownership_unconfirmed: 启用结束但未确认设备已接管，请核实状态".into(),
+        ));
+    }
+    let (endpoint_url, _) = gateway_endpoint_for(&client).map_err(&connection_unconfirmed)?;
+    // A named store row must stay on its own current physical deployment.
+    // The global default alias can name another card and is not an identity fallback.
+    let real_model_id = endpoint_model_for(&client, card_id).map_err(connection_unconfirmed)?;
+    log(&format!(
+        "[cmsd] 服务就绪，固定端点 {endpoint_url}（模型 {real_model_id}）"
+    ));
+    Ok(DelegateOutcome::Enabled {
+        endpoint_url,
+        endpoint_model: real_model_id,
+    })
+}
+
+/// 委托停用：明确不存在且无历史冲突时才返回 NotManaged。
+pub fn stop(
+    card_id: &str,
+    log: &mut dyn FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<DelegateOutcome, String> {
+    let Some(client) = local_client(card_id)? else {
+        return Ok(DelegateOutcome::NotManaged);
+    };
+    if !managed_by_cmsd(&client, card_id)? {
+        return Ok(DelegateOutcome::NotManaged);
+    }
+    log("[cmsd] 经 MegaCube 管理面停用（systemd 停止并撤销自启登记）");
+    let task = client.model_action(card_id, "disable")?;
+    let task_id = task
+        .get("task_id")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| "管理面应答缺 task_id".to_string())?;
+    wait_task(&client, task_id, log, cancelled)?;
+    Ok(DelegateOutcome::Stopped)
+}
+
+/// 委托注销（2026-10-15 用户实测驱动）：商店删除模型记录时，把管理面的登记
+/// 一并撤掉——否则商店记录没了、cmsd 还说「已下载」，LLM 会把已删模型报给用户。
+/// purge 对容器卡是停服务+撤登记（权重/容器实体不动，归商店卸载流程）；
+/// 对原生卡是完整清除（含权重目录，cmsd 侧护栏）。仅观察或未知时不回退。
+pub fn purge(
+    card_id: &str,
+    log: &mut dyn FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<DelegateOutcome, String> {
+    let Some(client) = local_client(card_id)? else {
+        return Ok(DelegateOutcome::NotManaged);
+    };
+    if !managed_by_cmsd(&client, card_id)? {
+        return Ok(DelegateOutcome::NotManaged);
+    }
+    log("[cmsd] 商店记录已删，同步注销管理面登记（停服务+撤登记）");
+    let task = client.model_action(card_id, "purge")?;
+    if let Some(error) = task.get("error") {
+        let message = error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("管理面拒绝注销");
+        return Err(message.to_string());
+    }
+    let task_id = task
+        .get("task_id")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| "管理面应答缺 task_id".to_string())?;
+    wait_task(&client, task_id, log, cancelled)?;
+    // r5 台账 #2：归属记录 unlink 失败不能吞——管理面已注销而本地记录残留，
+    // 同卡 id 的后续操作会永久 ownership_conflict，而提示的补救（恢复设备
+    // 记录）在注销后已不可能。失败上抛并给出确切路径与处置方法；调用方
+    // 保留商店记录，用户清理该文件后可重试。文件本就不在视为幂等成功。
+    let ownership = ownership_path(card_id)?;
+    if let Err(error) = std::fs::remove_file(&ownership) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "管理面已注销，但本机归属记录清理失败（{error}）。请删除 {} 后重试删除。",
+                ownership.display()
+            ));
+        }
+    }
+    Ok(DelegateOutcome::Purged)
+}
+
+/// 状态融合数据（library() 用）：cmsd 对这张卡的实况。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CmsdModelState {
+    pub managed: bool,
+    pub can_adopt: bool,
+    pub can_reserve_uninstall: bool,
+    /// 引擎自报的真实模型 id（接入条目写真名——用户拍板，别名只作兜底）。
+    pub model_id: Option<String>,
+    pub status: String,
+    pub healthy: Option<bool>,
+    pub restart_count: u64,
+    pub degraded: bool,
+    pub degraded_reason: Option<String>,
+    pub port: Option<u16>,
+    pub measured_footprint_gib: Option<f64>,
+    /// 引擎自报的上下文窗口（/v1/models 的 max_model_len）：接入行
+    /// context_window 的事实来源（没有它路由预算落保守兜底，每条消息都
+    /// 误触发紧急压缩——真机实测）。
+    pub max_model_len: Option<u64>,
+    /// Confirmed current deployment identity, forwarded to the desktop cache.
+    pub deployment_revision: Option<String>,
+    pub version_id: Option<String>,
+}
+
+/// 取 cmsd 的模型实况表（card → 状态）。cmsd 不在场返回 None（调用方原样直行）。
+pub fn cmsd_states() -> Option<std::collections::BTreeMap<String, CmsdModelState>> {
+    let client = Client::connect().ok()?;
+    let value = client.models().ok()?;
+    cmsd_states_from_value(&value, &mut remember_ownership)
+}
+
+fn cmsd_states_from_value(
+    value: &serde_json::Value,
+    remember: &mut dyn FnMut(&str) -> Result<(), String>,
+) -> Option<std::collections::BTreeMap<String, CmsdModelState>> {
+    if value
+        .get("http_status")
+        .is_some_and(|code| code.as_u64() != Some(200))
+        || value.get("error").is_some_and(|error| !error.is_null())
+    {
+        return None;
+    }
+    let models = value.get("models")?.as_array()?;
+    let bindings = super::client::store_bindings(value).ok()?;
+    let mut out = std::collections::BTreeMap::new();
+    for m in models {
+        let Some(card) = m.get("card").and_then(|c| c.as_str()) else {
+            continue;
+        };
+        if m.get("managed").and_then(|v| v.as_bool()) == Some(true) {
+            if remember(card).is_err() {
+                return None;
+            }
+        }
+        let status = m
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("stopped")
+            .to_string();
+        let degraded_reason = m
+            .get("degraded_reason")
+            .and_then(|r| r.as_str())
+            .map(|s| s.to_string());
+        out.insert(
+            card.to_string(),
+            CmsdModelState {
+                managed: m.get("managed").and_then(serde_json::Value::as_bool) == Some(true),
+                can_adopt: m.get("can_adopt").and_then(serde_json::Value::as_bool) == Some(true),
+                can_reserve_uninstall: m
+                    .get("can_reserve_uninstall")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true),
+                model_id: m
+                    .get("model_id")
+                    .and_then(|x| x.as_str())
+                    .filter(|id| !id.trim().is_empty())
+                    .map(|s| s.to_string()),
+                degraded: status == "degraded" || degraded_reason.is_some(),
+                status,
+                degraded_reason,
+                healthy: m.get("healthy").and_then(|h| h.as_bool()),
+                restart_count: m.get("restart_count").and_then(|r| r.as_u64()).unwrap_or(0),
+                port: m.get("port").and_then(|p| p.as_u64()).map(|p| p as u16),
+                measured_footprint_gib: m.get("measured_footprint_gib").and_then(|f| f.as_f64()),
+                max_model_len: m.get("max_model_len").and_then(|l| l.as_u64()),
+                deployment_revision: m
+                    .get("deployment_revision")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                version_id: m
+                    .get("version_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+            },
+        );
+    }
+    let physical = out.clone();
+    for (logical, runtime) in bindings {
+        let state = physical.get(&runtime)?.clone();
+        if state.managed && remember(&logical).is_err() {
+            return None;
+        }
+        out.insert(logical, state);
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_and_error_task_receipts_do_not_keep_waiting() {
+        for task in [
+            serde_json::json!({"http_status":404,"error":{"code":"unknown_task"}}),
+            serde_json::json!({"status":"running","http_status":503}),
+            serde_json::json!({}),
+            serde_json::json!({"status":"unknown"}),
+        ] {
+            assert!(
+                observed_task_status(&task)
+                    .unwrap_err()
+                    .starts_with("cmsd_task_unconfirmed:")
+            );
+        }
+        assert_eq!(
+            observed_task_status(&serde_json::json!({"status":"failed","error":"reason"})).unwrap(),
+            "failed"
+        );
+        assert_eq!(
+            observed_task_status(&serde_json::json!({"status":"running"})).unwrap(),
+            "running"
+        );
+    }
+
+    #[test]
+    fn state_mapping_uses_ownership_and_rejects_unconfirmed_observations() {
+        let value = serde_json::json!({"models":[{"card":"physical","managed":true,"status":"running"}],"store_bindings":{"logical":"physical"}});
+        let mut remembered = Vec::new();
+        assert!(
+            cmsd_states_from_value(&value, &mut |id| {
+                remembered.push(id.to_owned());
+                Ok(())
+            })
+            .is_some()
+        );
+        assert_eq!(remembered, ["physical", "logical"]);
+        assert!(cmsd_states_from_value(&value, &mut |_| Err("disk full".into())).is_none());
+        for error in [
+            serde_json::json!({"models":[],"http_status":503}),
+            serde_json::json!({"models":[],"error":"invalid"}),
+        ] {
+            assert!(
+                cmsd_states_from_value(&error, &mut |_| panic!("must not grant ownership"))
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn specific_card_connections_require_a_confirmed_nonempty_model_identity() {
+        let known = serde_json::json!({"card":"physical-b","managed":true,"model_id":"Model-B"});
+        assert_eq!(endpoint_model_from_fact(Some(known)).unwrap(), "Model-B");
+        for model in [
+            None,
+            Some(serde_json::json!({"managed":false,"model_id":"Model-B"})),
+            Some(serde_json::json!({"managed":true})),
+            Some(serde_json::json!({"managed":true,"model_id":null})),
+            Some(serde_json::json!({"managed":true,"model_id":""})),
+            Some(serde_json::json!({"managed":true,"model_id":"  "})),
+        ] {
+            assert!(
+                endpoint_model_from_fact(model)
+                    .unwrap_err()
+                    .starts_with("cmsd_model_identity_unavailable:")
+            );
+        }
+    }
+
+    #[test]
+    fn gateway_endpoints_require_confirmed_status_and_preserve_configured_addresses() {
+        for gateway in ["127.0.0.1:18081", "127.0.0.2:18082", "[::1]:18083"] {
+            let status = serde_json::json!({"service":"cmsd","gateway":gateway});
+            assert_eq!(
+                gateway_endpoint_from_status(&status).unwrap(),
+                (
+                    format!("http://{gateway}/v1/chat/completions"),
+                    GATEWAY_MODEL_ALIAS.to_owned()
+                )
+            );
+        }
+        for status in [
+            serde_json::json!({"http_status":503,"error":{"code":"store_selection_unavailable"}}),
+            serde_json::json!({"service":"cmsd","gateway":"127.0.0.1:18081","http_status":503}),
+            serde_json::json!({"service":"cmsd","gateway":"127.0.0.1:18081","error":"unavailable"}),
+            serde_json::json!({"service":"other","gateway":"127.0.0.1:18081"}),
+            serde_json::json!({"service":"cmsd"}),
+            serde_json::json!({"service":"cmsd","gateway":null}),
+            serde_json::json!({"service":"cmsd","gateway":"  "}),
+        ] {
+            assert!(
+                gateway_endpoint_from_status(&status)
+                    .unwrap_err()
+                    .starts_with("cmsd_gateway_unavailable:")
+            );
+        }
+    }
+
+    #[test]
+    fn cmsd_states_parses_real_shape() {
+        // 2026-10-13 真机 /v1/models 应答形状
+        let value = serde_json::json!({
+            "active_model": "ornith15-35b-a3b-nvfp4",
+            "models": [{
+                "card": "ornith15-35b-a3b-nvfp4",
+                "status": "running",
+                "healthy": true,
+                "restart_count": 1,
+                "degraded_reason": null,
+                "port": 18080,
+                "measured_footprint_gib": 33.0,
+                "max_model_len": 128000
+            }, {
+                "card": "qwen38-27b-nvfp4-tachyon",
+                "status": "stopped"
+            }]
+        });
+        let out = cmsd_states_from_value(&value, &mut |_| Ok(())).unwrap();
+        let ornith = &out["ornith15-35b-a3b-nvfp4"];
+        assert_eq!(ornith.status, "running");
+        assert_eq!(ornith.healthy, Some(true));
+        assert_eq!(ornith.restart_count, 1);
+        assert!(!ornith.degraded);
+        assert_eq!(ornith.port, Some(18080));
+        let qwen = &out["qwen38-27b-nvfp4-tachyon"];
+        assert_eq!(qwen.status, "stopped");
+        assert_eq!(qwen.healthy, None);
+        // 序列化形状（前端消费 camelCase）
+        let json = serde_json::to_value(ornith).unwrap();
+        assert_eq!(json["restartCount"], 1);
+        assert_eq!(json["maxModelLen"], 128000);
+    }
+
+    #[test]
+    fn cleanup_current_fact_never_falls_back_or_crosses_physical_identity() {
+        assert!(maintenance_fact(None, "logical", Some("physical"), false).is_err());
+        assert!(maintenance_fact(None, "logical", None, true).is_err());
+        assert!(
+            maintenance_fact(None, "standalone", None, false)
+                .unwrap()
+                .is_none()
+        );
+        let fact = serde_json::json!({"card":"physical","logical_card":"logical","managed":false,"can_reserve_uninstall":true});
+        assert_eq!(
+            maintenance_fact(Some(fact.clone()), "logical", Some("physical"), false).unwrap(),
+            Some(fact.clone())
+        );
+        for (field, replacement) in [
+            ("card", serde_json::json!("old-physical")),
+            ("logical_card", serde_json::json!("another-logical")),
+            ("can_reserve_uninstall", serde_json::json!(false)),
+        ] {
+            let mut changed = fact.clone();
+            changed[field] = replacement;
+            assert!(
+                maintenance_fact(Some(changed), "logical", Some("physical"), false).is_err(),
+                "{field}"
+            );
+        }
+        let mut owned_unknown = fact;
+        owned_unknown["managed"] = serde_json::json!(true);
+        owned_unknown["can_reserve_uninstall"] = serde_json::Value::Null;
+        assert!(maintenance_fact(Some(owned_unknown), "logical", Some("physical"), true).is_err());
+    }
+}

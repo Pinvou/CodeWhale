@@ -110,3 +110,6 @@ pinvou3-app/src-tauri/resources/platforms/macos/.codex-bridge-build.*/
 
 # 可选的本地 Windows 私有规则目录
 /.agents/rules/windows-private/
+
+# megacube 冒烟默认证据目录（PNG/report.json），Agent 密集 add -A 时防误提交
+/.qa/

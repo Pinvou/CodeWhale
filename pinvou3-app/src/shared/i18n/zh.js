@@ -1,3 +1,7 @@
+import { CMS_MODEL_GUIDANCE_COPY } from './cms-model-guidance.js';
+import { CMS_LAYOUT_COPY } from './cms-layout.js';
+import { MEGACUBE_OWNERSHIP_COPY } from './megacube-ownership.js';
+import { CMSD_SERVICE_COPY } from './cmsd-service.js';
 import { trayLabels } from './tray/zh.js';
 // 中文 UI 词典。自启动预算拆分(round-41)起 zh 与 en/ja 一致走惰性装载
 // (ensureLanguage('zh'));各入口经 ensureLanguageWithZhFallback 在首选语言
@@ -195,7 +199,7 @@ export const dictZh = {
         langTag: 'zh',
         acpAgent: 'ACP Agent',
         deviceMgr: '设备管理',
-        newChat: '新对话', currentChat: '当前对话', searchChats: '搜索对话', scheduledPlans: '定时任务', monitor: '运行状态', workflow: '工作流', multiAgent: '蜂群模式', multiAgentDesktopOnly: '此蜂群对话当前仅在桌面端可用。', toolStore: '插件中心', modelStore: '模型商店', cardPool: '专家池', recent: '历史对话', pinnedTasks: '置顶任务', regularTasks: '任务', sidebarTaskList: '任务列表', sidebarTaskFilter: '筛选', sidebarTaskFilterAll: '全部', sidebarTaskFilterPinned: '置顶', sidebarTaskFilterCode: '项目', sidebarTaskFilterCodeSessions: '代码会话', sidebarTaskFilterScheduled: '定时任务', sidebarTaskSort: '排序', sidebarTaskSortPinnedFirst: '置顶优先', sidebarTaskSortRecent: '最近更新', sidebarTaskEmpty: '暂无任务', sidebarViewAll: '查看全部', sidebarSection: '任务列表', sidebarDateGrouping: '按日期折叠', sidebarDateGroupingDesc: '任务列表按日期分组，今天默认展开', chatSection: '对话', chatStreamingAnimation: '流式回复淡入', chatStreamingAnimationDesc: 'AI 回复流式输出时，新内容淡入显示',  sidebarNavExpand: '展开导航', sidebarNavCollapse: '收起导航', sidebarCollapseAll: '折叠', sidebarExpandAll: '展开', sidebarTaskStyle: '样式', sidebarResize: '拖拽调整边栏宽度，双击复位', settings: '设置', localEnv: '本地环境', megacubeSite: '打开 MegaCube 官网', tearoffTitle: '撕离窗口', tearoffHint: '弹出为独立窗口', mobileMore: '更多',        previewTaskDailyBrief: '每日早报', previewTaskFollowUp: '事项督办', previewTaskSalesWeekly: '销售线索周报',
+        newChat: '新对话', currentChat: '当前对话', searchChats: '搜索对话', scheduledPlans: '定时任务', deviceManagement:'设备管理', monitor: '运行状态', workflow: '工作流', multiAgent: '蜂群模式', multiAgentDesktopOnly: '此蜂群对话当前仅在桌面端可用。', toolStore: '插件中心', modelStore: '模型商店', cardPool: '专家池', recent: '历史对话', pinnedTasks: '置顶任务', regularTasks: '任务', sidebarTaskList: '任务列表', sidebarTaskFilter: '筛选', sidebarTaskFilterAll: '全部', sidebarTaskFilterPinned: '置顶', sidebarTaskFilterCode: '项目', sidebarTaskFilterCodeSessions: '代码会话', sidebarTaskFilterScheduled: '定时任务', sidebarTaskSort: '排序', sidebarTaskSortPinnedFirst: '置顶优先', sidebarTaskSortRecent: '最近更新', sidebarTaskEmpty: '暂无任务', sidebarViewAll: '查看全部', sidebarSection: '任务列表', sidebarDateGrouping: '按日期折叠', sidebarDateGroupingDesc: '任务列表按日期分组，今天默认展开', chatSection: '对话', chatStreamingAnimation: '流式回复淡入', chatStreamingAnimationDesc: 'AI 回复流式输出时，新内容淡入显示',  sidebarNavExpand: '展开导航', sidebarNavCollapse: '收起导航', sidebarCollapseAll: '折叠', sidebarExpandAll: '展开', sidebarTaskStyle: '样式', sidebarResize: '拖拽调整边栏宽度，双击复位', settings: '设置', localEnv: '本地环境', megacubeSite: '打开 MegaCube 官网', tearoffTitle: '撕离窗口', tearoffHint: '弹出为独立窗口', mobileMore: '更多',        previewTaskDailyBrief: '每日早报', previewTaskFollowUp: '事项督办', previewTaskSalesWeekly: '销售线索周报',
         archiveSession: '收纳', archiveConfirmTitle: '确认收纳任务', archiveConfirmMessage: '将该任务移出任务列表，存入【对话管理-已收纳】，需要时可找回。', archiveConfirmDetail: '', archiveConfirmAction: '确认收纳',
         archiveSuccess: '已收纳到【对话管理-已收纳】', archiveSuccessView: '前往查看',
         exportSessionArchive: '导出会话日志', exportSessionDone: path => `会话日志已导出：${path}`, exportSessionFailed: '会话日志导出失败', unknownError: '未知错误',
@@ -394,7 +398,7 @@ export const dictZh = {
           doctorCustomPlaceholder:'描述你遇到的问题，例如：风扇一直响怎么办？', doctorCharCounter:n=>`${n} / 2000`, doctorSend:'发送',
         },
 
-        uiSettings: { common:'常用', system:'系统', general:'通用', model:'模型', search:'搜索', memory:'记忆', community:'用户交流', permissions:'权限与环境', data:'数据管理', update:'更新', help:'帮助反馈', appearance:'外观', language:'界面语言', languageDesc:'切换应用显示语言', theme:'主题模式', themeDesc:'跟随系统,或选择浅色/深色外观', notifications:'通知', taskNotice:'任务完成提醒', taskNoticeDesc:'任务完成后展示系统通知', inputNotice:'需要输入提醒', inputNoticeDesc:'任务等待你的回复时展示系统通知；「任务完成提醒」关闭时不生效', sessionsSection:'会话', importSessionsArchive:'导入会话备份', importSessionsDesc:'选择会话归档（.tar.xz）或会话记录（.json），恢复到会话列表；同 id 会话自动跳过', importingSessions:'导入中…', importSessionsDone:(imported, skipped, failed, artifactsFailed) => `已导入 ${imported} 个会话，跳过 ${skipped} 个（已存在），失败 ${failed} 个${artifactsFailed ? `，${artifactsFailed} 个已导入但缺少产物（删除该会话后重新导入可重试）` : ''}`, importSessionsFailed:'会话导入失败', voiceShortcuts:'语音快捷键', voiceShortcutEnable:'启用 Alt 唤醒语音', voiceShortcutEnableDesc:'Alt 可语音输入；输入框已有文本时，Alt 可语音编辑当前文本。默认关闭，需主动开启。', voiceShortcutHelp:'查看 Alt 语音快捷键说明', voiceShortcutUnsupportedDesc:'全局 Alt 快捷键仅 Windows 支持；当前平台可在应用窗口内使用 Alt 语音输入。', voicePostprocess:'智能整理', voicePostprocessDesc:'把识别文本（连同输入框现有草稿）交给所选模型服务纠错并整理为结构化输入；关闭后仅做本地规则纠错。', voiceShortcutWebDesc:'浏览器端可在窗口内使用 Alt 语音输入；不支持全局快捷键，且仅做转写、不含智能整理与语音编辑。',globalShortcuts:'全局唤醒快捷键', globalShortcutEnable:'启用全局唤醒快捷键', globalShortcutEnableDesc:'窗口在后台时，也可随时按快捷键把品悟窗口带到前台。默认关闭。', globalShortcutAccelerator:'快捷键组合', globalShortcutPlaceholder:'例如 Ctrl/Cmd+Alt+P', globalShortcutInvalid:'快捷键格式无效，需至少包含一个修饰键和一个按键。', globalShortcutConflict:'无法应用该快捷键；该组合可能已被其他应用占用。', globalShortcutUnsupportedDesc:'当前桌面环境不支持全局快捷键（例如 Wayland 会话）。', globalShortcutSaveFailed:'快捷键设置保存失败，请重试。', desktopAssistant:'桌面助手', pet:'桌伴公仔', petDesc:'在桌面显示常驻小公仔', version:'版本', currentVersion:'当前版本', beta:'内测版', releaseNotes:'更新内容', noReleaseNotes:'暂无更新说明', downloading:p=>`正在下载更新 ${p}%`, installingUpdate:'正在安装更新…', installerStarted:'安装器已启动', cancelDownload:'取消下载', providers:'ACP 管理' },
+        uiSettings: { common:'常用', system:'系统', general:'通用', model:'模型', search:'搜索', memory:'记忆', community:'用户交流', permissions:'权限与环境', data:'数据管理', update:'更新', help:'帮助反馈', appearance:'外观', language:'界面语言', languageDesc:'切换应用显示语言', theme:'主题模式', themeDesc:'跟随系统,或选择浅色/深色外观', notifications:'通知', taskNotice:'任务完成提醒', taskNoticeDesc:'任务完成后展示系统通知', inputNotice:'需要输入提醒', inputNoticeDesc:'任务等待你的回复时展示系统通知；「任务完成提醒」关闭时不生效', sessionsSection:'会话', importSessionsArchive:'导入会话备份', importSessionsDesc:'选择会话归档（.tar.xz）或会话记录（.json），恢复到会话列表；同 id 会话自动跳过', importingSessions:'导入中…', importSessionsDone:(imported, skipped, failed, artifactsFailed) => `已导入 ${imported} 个会话，跳过 ${skipped} 个（已存在），失败 ${failed} 个${artifactsFailed ? `，${artifactsFailed} 个已导入但缺少产物（删除该会话后重新导入可重试）` : ''}`, importSessionsFailed:'会话导入失败', voiceShortcuts:'语音快捷键', voiceShortcutEnable:'启用 Alt 唤醒语音', voiceShortcutEnableDesc:'Alt 可语音输入；输入框已有文本时，Alt 可语音编辑当前文本。默认关闭，需主动开启。', voiceShortcutHelp:'查看 Alt 语音快捷键说明', voiceShortcutUnsupportedDesc:'全局 Alt 快捷键仅 Windows 支持；当前平台可在应用窗口内使用 Alt 语音输入。', voicePostprocess:'智能整理', voicePostprocessDesc:'把识别文本（连同输入框现有草稿）交给所选模型服务纠错并整理为结构化输入；关闭后仅做本地规则纠错。', voiceShortcutWebDesc:'浏览器端可在窗口内使用 Alt 语音输入；不支持全局快捷键，且仅做转写、不含智能整理与语音编辑。',globalShortcuts:'全局唤醒快捷键', globalShortcutEnable:'启用全局唤醒快捷键', globalShortcutEnableDesc:'窗口在后台时，也可随时按快捷键把品悟窗口带到前台。默认关闭。', globalShortcutAccelerator:'快捷键组合', globalShortcutPlaceholder:'例如 Ctrl/Cmd+Alt+P', globalShortcutInvalid:'快捷键格式无效，需至少包含一个修饰键和一个按键。', globalShortcutConflict:'无法应用该快捷键；该组合可能已被其他应用占用。', globalShortcutUnsupportedDesc:'当前桌面环境不支持全局快捷键（例如 Wayland 会话）。', globalShortcutSaveFailed:'快捷键设置保存失败，请重试。', desktopAssistant:'桌面助手', pet:'桌伴公仔', petDesc:'在桌面显示常驻小公仔', version:'版本', currentVersion:'当前版本', beta:'内测版', releaseNotes:'更新内容', noReleaseNotes:'暂无更新说明', downloading:p=>`正在下载更新 ${p}%`, installingUpdate:'正在安装更新…', installerStarted:'安装器已启动', cancelDownload:'取消下载', providers:'ACP 管理', megacube:'MegaCube' },
         uiSettingsDetail: { modelSection:'模型', settingsLoadFailed:'设置页加载失败', addModel:'添加模型', envManaged:'如果模型配置被环境变量管理，设置页会保留当前值，但修改可能需要到环境变量中完成。', localModel:'本地模型', defaultTag:'默认', edit:'编辑', delete:'删除', noModels:'暂无模型', localDefaultName:'本地 Qwen3.6', searchList:'搜索源列表', setDefault:'设为默认', addSearch:'添加搜索源', searchDescriptions:{ bing:'内置搜索', metaso:'中文搜索服务', bocha:'搜索服务', baidu:'千帆 AI 搜索', tavily:'海外搜索服务' }, searchSourceHint:'内置搜索免密钥、开箱即用；所选服务失败时自动回退内置搜索。中文长查询建议添加中文搜索服务获得更准结果。', memoryTypes:{ preference:'长期偏好', work_context:'工作背景', current_focus:'当前关注', recent_activity:'近期动态' }, memoryDetail:'记忆详情', content:'内容', editTitle:label=>`编辑${label}`, userCallName:'用户称呼', assistantNickname:'助手昵称', callNameDesc:'助手称呼你的方式', assistantNameDesc:'你称呼助手的方式', unnamedMemory:'未命名记忆', view:'查看', enableMemory:'启用记忆', enableMemoryDesc:'PINVOU 会记住称呼、偏好、工作背景和近期事项', profile:'个人资料', notSet:'未设置', longMemory:'长期记忆', shortMemory:'短期记忆', noLongMemory:'暂无长期记忆', noShortMemory:'暂无短期记忆', hiddenTasks:'隐藏任务', archivedAt:date=>`收纳于 ${date}`, restore:'恢复', noHiddenTasks:'暂无隐藏任务', noHiddenTasksDesc:'收纳后的任务会显示在这里', system:'系统', advancedPermission:'高级执行权限', advancedPermissionDesc:'允许助手执行环境配置等高级指令', missing:'缺失', installMissing:'安装缺失依赖', feedbackTitle:'提交问题或建议', feedbackDesc:'支持图片和视频附件，提交前会显示隐私提示', submitFeedback:'提交反馈', editSearch:'编辑搜索源', apiKeyPlaceholder:'输入 API Key', hide:'隐藏', show:'显示', cancel:'取消', save:'保存', saving:'保存中', restartSearchTitle:'重启以应用搜索配置？', restartLanguageTitle:'重启以应用语言设置？', restartSearchDesc:'搜索源或凭据保存后，需要重启应用才能用于助手的联网搜索。', restartLanguageDesc:'界面语言已切换，重启后助手回复语言也会同步生效。', later:'稍后', restartNow:'现在重启', deleteModelTitle:'删除模型？', deleteModelDesc:'将移除该模型配置和已保存的凭据。', deleteModel:'删除模型', deleteSearchTitle:'删除搜索源？', deleteSearchDesc:name=>`将移除 ${name} 和已保存的凭据。`, deleteSearch:'删除搜索源', addSearchDesc:'选择搜索源后再填写必要凭据', closeSettings:'关闭设置', chooseModelDesc:'选择模型后再填写必要凭据', collapse:'收起', change:'更换', customModel:'自定义模型', modelAlias:'别名', modelAliasPlaceholder:'选填，例如：日常助手', localModelName:name=>name ? `本地 ${name}` : '本地模型', apiKeyReadFailed:'读取 API Key 失败', localModelId:'本地模型 ID', modelId:'模型 ID', modelIdPlaceholder:'输入模型 ID', customModelTitle:provider=>`自定义 ${provider} 模型`, customModelDesc:'手动填写模型 ID', customLocalDesc:'填写本地服务暴露的模型 ID', customCompatibleDesc:'手动填写模型 ID 和服务地址', localDetectionTargets:'检测 vLLM、Ollama、LM Studio 等本地服务', redetect:'重新检测', detect:'检测', noRunningLocalModel:'未检测到运行中的本地模型', localPortLabel:'端口', localPortPlaceholder:'如 8080', localPortInvalid:'端口无效：请输入 1-65535 之间的数字', modelNotLoadedTag:'未加载', modelNotLoadedHint:'尚未载入内存，首次使用时会自动加载', add:'添加', manualLocalModel:'手动添加本地模型', manualLocalModelDesc:'填写 API 地址和模型 ID', cloudModels:'云端模型', localModels:'本地模型', toolCalling:'工具调用', apiKeyRequired:'需要 API Key', testBeforeSave:'保存前可测试服务是否可用', modelContextWindowPlaceholder:'如 1048576', modelContextWindowHint:'留空使用系统默认（未收录模型按 128K 保守值）。新模型官方标称更大上下文时填写，如 1M 填 1048576。', modelDescriptions:{ '本地服务默认模型':'本地服务默认模型', '高能力模型':'高能力模型', '快速响应':'快速响应', '代码场景':'代码场景', '高性价比':'高性价比', '通用能力':'通用能力', '兼容保留':'兼容保留', '轻量模型':'轻量模型' } , noAuthToggleLabel:'此端点无需鉴权', noAuthHint:'适用于自建网关或免鉴权服务：请求不携带 Authorization 头，对话也不要求填写 API Key。' },
 
 
@@ -406,6 +410,7 @@ export const dictZh = {
         uiChatExtra: { transferRevision:type=>`Pinvou · ${type} · 转交修订`, draftingScheduled:'⏰ 正在整理定时任务草稿…' },
         expertPoolIndividualTab:'个人专家', expertPoolTeamTab:'专家团队',
         uiWorkflow: { pick:'选择一个工作流模板开始', empty:'没有可用的工作流（请检查工作流资源）', workflow:'工作流', stopFailed:e=>`停止工作流失败：${e}`, completed:'🎉 工作流完成' },
+        uiMegacube: { ...CMS_LAYOUT_COPY.zh, ...MEGACUBE_OWNERSHIP_COPY.zh, service:CMSD_SERVICE_COPY.zh, guidance:CMS_MODEL_GUIDANCE_COPY.zh, adoptNote:'仅发现，暂无启停权。接管并启用将交由设备服务管理，允许启停与默认切换，并登记自动启动。', adoptModel:'接管并启用', hideInactive:'收起已停止的外部容器', showInactive:n=>`查看 ${n} 个已停止的外部容器`, loading:'正在读取设备数据…', queryFailed:'查询失败，请刷新重试', taskContinueBackground:'转到后台，前往设备面板查看进度', offlineHelp:'设备服务失联，已暂停管理操作。恢复后台服务后可在此刷新；已有模型可能仍在运行。', partialError:'部分设备查询失败，缺失数据不代表资源不存在，请刷新重试。', startModel:'启用 / 恢复', stopModel:'停用', setDefault:'设为默认', stopWarning:'停用会中断该模型的会话并撤销自启。模型文件保留。', confirmStop:'确认停用', keepRunning:'保持运行', sectionTasks:'后台任务', noTasks:'暂无后台任务', cancelTask:'取消安装（保留断点）', taskStatus:{running:'进行中',succeeded:'已完成',failed:'失败 / 中断',cancelled:'已取消',cancelling:'取消中'},  taskSwitching:c=>`正在切换到 ${c}…`, taskBusyNote:'切换期间该模型服务可能暂不可用。成功后自动复用或登记目标模型，并在本轮生成结束后切换发起会话的模型；手动选择其他模型会保留你的选择。', taskElapsed:s=>`已用时 ${s} 秒`, taskDone:'已完成', taskFailedTitle:'操作失败', taskOk:'知道了', switchAutoSelected:n=>`已切换到 ${n}`, linkAutoSelected:n=>`已接入并切换到 ${n}`, linkAutoSelectFailed:'自动切换未完成，请在模型列表手动选择', sectionStatus:'管理面状态', daemon:'管理服务', online:'在线', uptime:'运行时长', uptimeHours:n=>`${n} 小时`, uptimeMinutes:n=>`${n} 分钟`, uptimeSeconds:n=>`${n} 秒`, gateway:'固定端点', activeModel:'设备默认模型', noActiveModel:'尚未设置默认模型', degradedBanner:(card,reason)=>`${card} 已降级：${reason}`, unavailable:'管理能力不可用', sectionModels:'模型', noModels:'暂无登记模型', port:'端口', residentMemory:'常驻内存实测', restarts:(n,time)=>`重启 ${n} 次（最近 ${time}）`, bootEnabled:'开机自启', activeTag:'默认', status:{ running:'运行中', starting:'启动中', stopped:'已停止', degraded:'已降级' }, sectionEngines:'引擎注册表', noEngines:'暂无登记引擎', engineIdle:'未在运行', sourceExternal:'外部资源（只读）', sourceManaged:'Cube Manage Software 托管', instanceGone:'进程已消失', sectionCapacity:'内存容量', memoryTotal:'总内存', memoryAvailable:'当前可用', safetyMargin:'安全边际', residentRow:card=>`${card} 常驻`, refresh:'刷新', lastRefresh:t=>`更新于 ${t}`, notRefreshed:'尚未刷新' },
         uiModelStore: {
           title:'模型商店', subtitle:'浏览、下载并在本机部署大模型。',
           tabStore:'模型市场', tabLibrary:'我的模型',
@@ -465,6 +470,8 @@ export const dictZh = {
           versionRemaining:"以下目录或其他文件仍保留；本次仅删除了已确认属于所选版本的文件。",
           operationErrors:{ model_store_linked_resource_path:'资源路径包含符号链接，现有资源和记录已保留。请先停用模型服务、退出应用并备份，再按迁移文档改用实际目录后重试。不要直接删除符号链接的目标目录。' },
           operationResultsTitle:"模型操作结果", operationResultDismiss:"已阅并关闭",
+          operationResultUnavailable:"结果未完整取得；释放空间和残留路径尚未核实。",
+          operationResultSummarized:"部分说明文字已摘要；记录的释放空间和残留路径保持原值。",
           operationUninstallRemaining:"模型已卸载，以下路径仍保留，请核对后自行清理。",
           versionInterrupted:"上次下载已中断，可以重试或清理已下载的文件。",
           versionUpgradeNextStep:"下载将使用额外磁盘空间。验证通过后，先停用当前模型，再到「历史版本」切换并启用新版。",
@@ -561,7 +568,7 @@ export const dictZh = {
           copy:'复制', copied:'已复制到剪贴板', copyFailed:'复制失败，请手动选中复制',
           notRunningHint:'这个模型当前未启用，Agent 现在调用会收到「模型未启用」。',
           tasksTitle:'正在进行', taskRunning:'正在执行…', taskCancelling:'正在取消…', taskCancelled: '已取消', taskWaitingInput:'等待你输入…',
-          taskCancel:'取消', taskClose:'关闭', taskExpand:'展开日志', taskCollapse:'收起日志', taskNoOutput:'（暂无输出）',
+          taskCancel:'取消', taskClose:'关闭', taskExpand:'展开日志', taskCollapse:'收起日志', taskNoOutput:'（暂无输出）', taskErrorSummarized:'部分错误说明文字已摘要；完整原因见下方日志。',
           taskProgress:(done,total)=>`${done} / ${total}`, taskSpeed:s=>`${s}/s`, taskEta:d=>`剩余约 ${d}`,
           etaSec:n=>`${n} 秒`, etaMin:n=>`${n} 分钟`, etaHour:(h,m)=>`${h} 小时 ${m} 分`,
           promptTitle:'需要你补充几项信息', promptSubmit:'确定', promptCancel:'取消', promptYes:'是', promptNo:'否',
@@ -642,7 +649,45 @@ export const dictZh = {
           testStoreDisabled: '测试模型商店已关闭。再次开启需重新输入口令',
           sourceOfficial: '正式商店',
           sourceTest: '测试商店',
-        },
+incompleteTitle:'未完成的模型安装',
+taskBackendPending:'设备任务已接单，正在等待商店建立运行记录…',
+taskLogRetained:'当前显示保留的最近日志；较早的内容已清理，任务结果和恢复记录仍保留。',
+taskBackendUnconfirmed:'设备任务的最新状态暂时无法核实，正在重新查询…',
+taskCancelUnconfirmed:'取消请求尚未确认，任务状态仍在查询。',
+incompleteHint:'安装在写入模型库前失败。保留已有文件，先核对当前安装包与存储设置，再按原任务类型重试。这里不授予模型托管或删除权限。',
+incompletePreview:'核对安装包并重试',
+incompleteRetry:'按此安装包重试',
+incompletePending:'原任务尚未核实结束，请刷新任务状态；不会自动重发。',
+incompleteUnknownSource:'旧下载记录没有原来源信息，请从已核实的商店卡片重新发起下载。',
+incompleteLegacy:'旧记录未保存原存储上下文。本次使用下方当前目录，已有成果能否复用由安装脚本检查。',
+incompleteConfirmHint:'请核实当前包的来源与内容。摘要只用于检查预览后内容是否变化；重试会重新检查引擎和权重，不删除现有成果，也不保证所有步骤都能从中断处继续。',
+incompleteDownloadOnly:'原任务是下载：重试完成后保持下载语义，不自动部署或启用。',
+incompleteLocalDeploy:'原任务是本地卡片安装：重新检查引擎、权重，再执行原有部署步骤。',
+incompletePackage:'安装包 SHA256：',
+incompleteStorage:'当前权重目录 / 暂存目录：',
+incompleteRetryTask:(name)=>`重试安装 ${name}`,
+incompleteCompleted:'重试已完成，请按实际模型状态继续部署或启用。',
+incompleteErrors:{installation_retry_capability_required:"当前设备服务缺少安装重试能力，请更新后重试。",cmsd_unavailable:"设备服务不可达，请先恢复服务；不会改走旧安装接口。",installation_admission_unconfirmed:"安装请求的受理结果待核实，请查看设备任务，勿重复提交。",installation_admission_rejected:"设备服务未允许本次重试，请按返回原因检查任务和维护状态。",installation_preview_changed:'预览已变化，请重新核对安装包。',installation_package_changed:'安装包内容已变化，尚未继续安装，请重新预览。',installation_storage_or_source_changed:'存储目录或来源配置与原任务不同，请先核对设置和已有成果。',installation_process_still_alive:'原安装器仍在后台运行，请核实并等待其结束后重试。',installation_process_evidence_unavailable:'无法核实后台安装器状态，请保留现场并检查任务记录。',installation_original_source_unknown:'旧记录未保存原下载来源，请从已核实的商店卡片重新发起。',installation_already_in_library:'模型已进入模型库，请使用模型库中的操作。',installation_not_terminal:'原任务尚未核实结束，不能重复发起。',installation_superseded:'已有更新的任务，请刷新后检查最新结果。',installation_record_corrupt:'安装任务记录损坏，请保留文件并检查记录。',installation_record_untrusted:'安装任务记录的权限或文件类型不可信，请核查。',installation_index_limit:'任务历史过多，请保留记录并整理后再重试。',installation_package_unavailable:'当前安装包不可用，请核对卡片目录与文件。'},
+maintenanceTitle:'模型维护需要核实',
+maintenanceReservation:'仅预留清理，未授予模型服务的启停或默认模型管理权。',
+maintenanceReservationRecover:'核实并解除清理预留',
+cmsdOwnership:'设备管理：',
+cmsdObserved:'未托管',
+cmsdObservedHint:'此模型尚未纳入当前 Cube Manage Software 托管；下载、部署和运行状态见上方标签。全新安装或清空管理状态后不会自动取得管理权，可显式启用已部署的标准卡以确认托管。',
+maintenanceHint:'存在尚未核实结束的卸载事务。恢复会先核实任务和脚本已结束，必要时停用该模型，再解除维护；不会重新删除文件。',
+maintenanceWorking:'原卸载或恢复任务仍在执行，请等待。',
+maintenancePending:'卸载未完成，请核实当前文件与记录后恢复。',
+maintenanceRecover:'停用并核实解除维护',
+maintenanceTask:n=>`核实并恢复「${n}」的维护`,
+maintenanceRecovered:'已核实并解除维护；未重跑卸载，请检查模型文件后再使用。',
+cmsdManaged:'Cube Manage Software 托管',
+cmsdManagedHint:'由 MegaCube 管理面托管（systemd 自愈/开机自启）',
+cmsdDegraded:'已降级',
+cmsdRestarts:n=>`管理面记录重启 ${n} 次`,
+cmsdLinkHealed:n=>`「${n}」的接入地址已更新到 MegaCube 固定端点`,
+cmsdCorrected:n=>`「${n}」的运行状态已按 MegaCube 管理面实况纠正`,
+keysUnavailable:'当前接入未声明可用的 API Key 管理能力，暂不提供密钥创建。请按推理服务的实际鉴权配置接入；本机地址不能当作已受保护的远程网关。'
+},
         uiToolStore: { title:'插件中心', search:'搜索连接器、技能、插件等', myTools:'我的插件', installedOnly:'仅显示已安装', results:'检索结果', back:'返回插件中心', internal:'集团内部 · 员工专属', internalTitle:'H3C 办公生态\n一键接入', internalDesc:'以你本人 SSO 身份直连集团内部系统，全程不填 key', internalTools:'H3C 集团内部插件', internalCount:n=>`${n} 个插件 · 需内网`, view:'查看', modePlain:'普通会话', modeCode:'代码会话', modeVisibilityHint:'按会话模式配置插件可见性', manageVisibility:'管理可见性', doneManagingVisibility:'完成', guide:{ title:'插件指南', close:'关闭', dragTitle:'拖入即装', dragDesc:'把标准 Skill、单个 .md、MCP 服务或 Pinvou 插件包 .zip 直接拖进本窗口即可导入；也可点右上角「上传」选择文件。', typesTitle:'支持的形式', types:['标准 Skill（SKILL.md 目录）','单个 .md 技能文件','MCP 服务','Pinvou 插件包（推荐）'], formatsNote:'标准 Skill、.md、MCP 和 Pinvou 插件包都可导入；Pinvou 插件包只是推荐的一种标准形态，其余形式会被自动规范化。', dragHintShort:'拖入插件包可上传自定义插件', introTitle:'什么是 Pinvou 插件包', introDesc:'一个插件包 = 一张卡 = 一个开关。把技能、MCP 服务（或它们的组合）打成一个 zip，导入后按内容自动识别类型、安全校验、落盘注册，并在商店与运行时统一开关、卸载。', specTitle:'插件包规范', specDesc:'完整规范见《插件包设计规范》：zip 布局、plugin.json（schema v1）、mcp manifest.json、SKILL.md、图标与命名安全。', downloadSpec:'下载规范文档（Markdown）', downloadHint:'下载后可直接分发给第三方包作者；桌面端会打开保存对话框。' } },
         artifactPreview: { download:'↓ 下载', openExternal:'↗ 外部打开', loading:'加载中…', fileMissing:'文件不存在或已被删除', readFailed:e=>`读取失败: ${e}`, imageReadFailed:e=>`图片读取失败: ${e}`, previewUnsupported:'此类型暂不支持预览', visualWarningTruncatedPages:'页数较多，仅渲染前 30 页', visualWarningConvertFailed:'该文件暂无法可视化预览（转换失败或缺少渲染组件）', downloadArtifact:'↓ 下载产物', openExternalArtifact:'↗ 外部打开' },
         uiToolDetails: { tools:{
@@ -1030,7 +1075,7 @@ dictZh.uiBuiltinPlugins = {
   versionNote:'随应用升级',
   dataAccessLabel:'数据访问范围',
   levels:{ L0:'只读：不修改任何状态，内容标注为不可信', L1:'写入：会产生用户可见的副作用（如发消息、建任务）', L2:'破坏性：删除/覆盖等不可逆操作，需显式授权' },
-  dataAccess:{ 'sessions.read':'本机会话存储（只读）', 'sessions.write':'向本机其他会话发送消息或创建会话（写入）', 'automations.read':'本机定时任务列表（只读）', 'automations.write':'创建、修改、删除本机定时任务（写入）' },
+  dataAccess:{ 'sessions.read':'本机会话存储（只读）', 'sessions.write':'向本机其他会话发送消息或创建会话（写入）', 'automations.read':'本机定时任务列表（只读）', 'automations.write':'创建、修改、删除本机定时任务（写入）' , 'models.manage':'本机模型服务（查询/启停/切换/下载安装）', 'network.download':'联网下载（模型商店与 HuggingFace 镜像）' },
 };
 
 // Shared copy for builtin-feature degradation (docs/builtin-toolset-contract.md

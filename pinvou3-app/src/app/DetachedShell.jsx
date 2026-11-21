@@ -15,7 +15,7 @@ import { VoiceShortcutRouter } from '../features/voice-composer/VoiceShortcutRou
 //   chunk is necessarily already loaded; a dynamic import would not produce a
 //   separate chunk, so statically import the same module from the main chunk.
 const LazyKnowledgeView = lazy(() => VIEW_LOADERS.knowledge().then(m => ({ default: m.KnowledgeView })));
-const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.MonitorView })));
+const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.DeviceManagementView })));
 const LazyToolStoreView = lazy(() => VIEW_LOADERS.toolStore().then(m => ({ default: m.ToolStoreView })));
 const LazyCardPoolView = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.CardPoolView })));
 const DetachedViewFallback = () => <div className="p-6 text-sm opacity-60">…</div>;
@@ -25,6 +25,8 @@ import { setStreamFadePreference } from '../features/conversation/stream-fade.js
 import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
 import { normalizeColorScheme, readStoredColorScheme, resolveTheme } from '../shared/color-scheme.js';
 import { listenTauri } from '../platform/tauri/client.js';
+import { useDeviceManagement } from '../features/megacube/use-device-management.js';
+import { deviceManagementTitle } from '../features/megacube/device-management-state.js';
 import { listAcpSessions } from '../features/codex/acpClient.js';
 import { dict, ensureLanguage, initialSystemLanguage, TAG_TO_LANG, zhDict } from '../shared/i18n.js';
 import { ensurePersonaI18nOverlay } from './personas-overlay.js';
@@ -178,7 +180,7 @@ function DetachedCodexSessionView({ id, theme, t, bs }) {
 const DETACHED_VIEWS = {
   session: ({ theme, t, bs }) => <ChatView theme={theme} t={t} bs={bs} prefill="" onPrefillConsumed={() => {}} onOpenEditor={() => {}} justInstalledTool={null} setJustInstalledTool={() => {}} onGotoSettings={() => {}} onGotoTools={() => {}} />,
   'codex-session': ({ id, theme, t, bs }) => <DetachedCodexSessionView id={id} theme={theme} t={t} bs={bs} />,
-  monitor: ({ theme, t, bs }) => <LazyMonitorView theme={theme} t={t} bs={bs} />,
+  monitor: ({ theme, t, bs, device }) => <LazyMonitorView theme={theme} t={t} bs={bs} device={device} />,
   cardpool: ({ theme, t, bs }) => <LazyCardPoolView theme={theme} t={t} bs={bs} onAICreate={() => {}} initialMyOnly={false} />,
   toolstore: ({ theme, t }) => <LazyToolStoreView theme={theme} t={t} onNewChat={() => {}} />,
   knowledge: ({ theme, t }) => <LazyKnowledgeView theme={theme} t={t} />,
@@ -199,10 +201,11 @@ const DETACHED_KIND_LABEL_KEYS = {
 
 export function DetachedShell({ kind, id }) {
   const { bs, activeTheme, t } = useDetachedBase();
+  const device = useDeviceManagement({ enabled: kind === 'monitor' });
 
   const View = DETACHED_VIEWS[kind] || DETACHED_VIEWS.monitor;
   const kindLabelFn = DETACHED_KIND_LABEL_KEYS[kind];
-  const kindLabel = kindLabelFn ? kindLabelFn(t) : kind;
+  const kindLabel = kind === 'monitor' ? deviceManagementTitle(device, t) : kindLabelFn ? kindLabelFn(t) : kind;
   return (
     <div className={`h-screen w-screen flex flex-col bg-white text-[#1F1F1F] dark:bg-[#1B1C1D] dark:text-[#E3E3E3]`}>
       <VoiceShortcutRouter />
@@ -215,7 +218,7 @@ export function DetachedShell({ kind, id }) {
       </div>
       <div className="flex-1 min-h-0 overflow-auto">
         {bs
-          ? <DetachedErrorBoundary t={t}><Suspense fallback={<DetachedViewFallback />}><View id={id} theme={activeTheme} t={t} bs={bs} /></Suspense></DetachedErrorBoundary>
+          ? <DetachedErrorBoundary t={t}><Suspense fallback={<DetachedViewFallback />}><View id={id} theme={activeTheme} t={t} bs={bs} device={device} /></Suspense></DetachedErrorBoundary>
           : <div className="p-6 text-sm opacity-60">…</div>}
       </div>
     </div>

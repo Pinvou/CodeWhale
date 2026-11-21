@@ -48,6 +48,8 @@ mod linked_model_route;
 // device/platform/linux.rs——linux 门控区）需要经由本路径拿 linux::config::TempHome
 // 做 HOME 隔离。测试依赖方向是 device→model_store（与运行时同向，不构成环）。
 pub(crate) mod platform;
+pub use platform::cmsd_inventory;
+pub use platform::run_background;
 
 #[cfg(test)]
 #[path = "platform/ipc_fixture.rs"]
@@ -102,9 +104,10 @@ pub type ModelStoreService = platform::backend::ModelStoreService;
 pub use platform::backend::{
     active_runs, answer_run, api_keys, cancel_run, check_card_update, create_api_key,
     disable_test_store, follow_deployment_context, force_remove, library, list_cards, model_detail,
-    run_log, run_startup_cleanup, run_startup_refresh, set_storage_settings, start_card_update,
-    start_deploy, start_download, start_lifecycle, start_version_action, startup_update_check,
-    storage_settings, take_startup_cleanup, test_store_state, unlock_test_store, versions,
+    preview_incomplete, retry_incomplete, run_log, run_startup_cleanup, run_startup_refresh,
+    set_storage_settings, start_card_update, start_deploy, start_download, start_lifecycle,
+    start_version_action, startup_update_check, storage_settings, take_startup_cleanup,
+    test_store_state, unlock_test_store, versions,
 };
 
 // 商店边界查询：供其他 feature（设备管理的外部模型登记/移除）判断某个名字

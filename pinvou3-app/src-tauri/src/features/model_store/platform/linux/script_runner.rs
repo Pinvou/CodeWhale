@@ -135,6 +135,8 @@ impl PromptSlot {
 pub struct RunControl {
     pub cancel: Option<Arc<AtomicBool>>,
     pub prompt: Option<Arc<PromptSlot>>,
+    pub run_id: Option<String>,
+    pub execution_fence: Option<super::execution_fence::ExecutionFence>,
 }
 
 impl RunControl {
@@ -197,7 +199,7 @@ const SECRET_ENV_KEYS: [&str; 1] = ["LMM_HF_TOKEN"];
 ///
 /// 拒绝绝对路径、`..`、以及 Windows 风格的盘符——卡片内容来自网络，路径直接
 /// 拿来拼接就等于把「往任意位置写文件」的能力交给了卡片作者（或中间人）。
-pub(super) fn sanitize_relative_path(rel: &str) -> Result<PathBuf, ScriptError> {
+pub(crate) fn sanitize_relative_path(rel: &str) -> Result<PathBuf, ScriptError> {
     let rel = rel.trim().replace('\\', "/");
     if rel.is_empty() {
         return Err(ScriptError::new("卡片里有一个空的文件路径"));
@@ -749,13 +751,28 @@ pub fn run_script(
         None
     };
 
+    let mut fenced_env = env_vars.clone();
+    let fenced_script = if let Some(fence) = opts.control.execution_fence.as_ref() {
+        if need_root {
+            return Err(ScriptError::new("维护卸载脚本不能通过提权绕过执行围栏"));
+        }
+        for (key, value) in fence.environment(script_path) {
+            fenced_env.insert(key.to_string(), value);
+        }
+        Some(fence.wrapper())
+    } else {
+        None
+    };
     let (master, mut cmd) = build_command(
-        script_path,
-        env_vars,
+        fenced_script.as_deref().unwrap_or(script_path),
+        &fenced_env,
         need_root,
         cancel_file.as_deref(),
         opts.cwd.as_deref(),
     )?;
+    if opts.control.execution_fence.is_some() {
+        cmd.env_remove("BASH_ENV").env_remove("ENV");
+    }
 
     if opts.download_lease.is_some() && need_root {
         return Err(ScriptError::new("下载租约不能传给提权脚本"));
@@ -812,11 +829,12 @@ pub fn run_script(
     // 登记这次派生的进程。应用要是被强杀/覆盖安装、没走到下面的销号逻辑，
     // 下次启动时 core::orphans 会照着这份登记把残留进程收掉——否则它会一直
     // 占着 huggingface_hub 的文件锁，把用户下一次点的下载堵死在那儿。
-    let mut run_guard = super::orphans::RunGuard::register_for_card(
+    let mut run_guard = super::orphans::RunGuard::register_association(
         child_pid,
         need_root,
         opts.label.as_deref().unwrap_or("后台脚本"),
         env_vars.get("LMM_CARD_ID").map(String::as_str),
+        opts.control.run_id.as_deref(),
     );
 
     let stop_process_tree = |sig: Signal| {
@@ -1340,6 +1358,34 @@ mod tests {
         let lines = with_isolated_data_dir(|| run_script(&path, &env, RunScriptOptions::default()))
             .unwrap();
         assert_eq!(lines, vec!["qwen38".to_string()]);
+    }
+
+    #[test]
+    fn maintenance_fence_runs_through_the_real_pty_executor() {
+        with_isolated_data_dir(|| {
+            let directory = tempfile::tempdir().unwrap();
+            let path = write_script("#!/bin/bash\necho fenced-uninstall\n");
+            let fence = super::super::execution_fence::ExecutionFence::prepare(
+                directory.path().join("execution"),
+            )
+            .unwrap();
+            let control = RunControl {
+                execution_fence: Some(fence.clone()),
+                ..Default::default()
+            };
+            let lines = run_script(
+                &path,
+                &HashMap::new(),
+                RunScriptOptions {
+                    control,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(lines, vec!["fenced-uninstall"]);
+            assert!(fence.directory.join("process.json").is_file());
+            assert!(fence.quiesce().is_ok());
+        });
     }
 
     /// 提权路径上必须剥掉秘密——pkexec 不透传 env，只能拼进 argv，而 argv

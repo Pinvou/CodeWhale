@@ -57,6 +57,7 @@ pub mod files;
 pub(crate) mod global_shortcut;
 pub mod knowledge;
 pub mod marketplace;
+pub(crate) mod megacube;
 pub mod memory;
 pub(crate) mod messaging;
 pub(crate) mod model_store;

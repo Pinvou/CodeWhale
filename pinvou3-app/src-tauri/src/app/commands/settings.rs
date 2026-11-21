@@ -767,6 +767,7 @@ pub(super) fn save_model_inner(
                 .as_ref()
                 .filter(|old| !old.model_store_link_detached)
                 .and_then(|old| old.model_store_card_id.as_deref());
+            let explicit_store = model.model_store_card_id.is_some();
             let requested = model
                 .model_store_card_id
                 .as_deref()
@@ -805,6 +806,21 @@ pub(super) fn save_model_inner(
                         old.model_store_link_detached || old.model_store_card_id.is_some()
                     })
                     || !same_route);
+            if same_route
+                && !explicit_store
+                && model.model_store_card_id.is_none()
+                && model.store_card_id.is_none()
+            {
+                model.store_card_id = old.as_ref().and_then(|old| old.store_card_id.clone());
+            }
+            if model.model_store_card_id.is_some()
+                || explicit_store
+                || old
+                    .as_ref()
+                    .is_some_and(|old| old.model_store_card_id.is_some())
+            {
+                model.store_card_id = model.model_store_card_id.clone();
+            }
             let (model, deferred) = apply_model_credential(model, old.as_ref(), store)
                 .map_err(|e| sanitize_command_error("save_model", e))?;
             *deferred_delete.borrow_mut() = deferred;
@@ -1071,6 +1087,11 @@ pub async fn set_active_model(id: String, app: AppHandle) -> Result<(), String> 
         }
     })
     .await?;
+    // r10 P2-A：手动选择意图在事务成功后广播（失败不登记抑制状态）。
+    let _ = app.emit(
+        "session:manual_model_selection",
+        serde_json::json!({"session_id":null}),
+    );
     if let Some(model) = UserPrefs::load().model_by_id(&id) {
         crate::features::behavior_telemetry::track_model_selected(
             &app,
@@ -1090,6 +1111,9 @@ pub async fn set_active_model(id: String, app: AppHandle) -> Result<(), String> 
 pub async fn set_session_model(
     session_id: String,
     model_id: Option<String>,
+    if_idle: Option<bool>,
+    expected_model_id: Option<String>,
+    expected_default_model_id: Option<String>,
     app: AppHandle,
     pool: State<'_, EnginePool>,
 ) -> Result<(), String> {
@@ -1111,9 +1135,26 @@ pub async fn set_session_model(
         .and_then(|id| prefs.model_by_id(id))
         .or_else(|| prefs.active_model())
         .cloned();
-    pool.switch_session_model(&session_id, model_id)
+    let result = if if_idle == Some(true) {
+        pool.switch_idle_session_model(
+            &session_id,
+            model_id,
+            expected_model_id,
+            expected_default_model_id,
+        )
         .await
-        .map_err(|error| format!("set_session_model({session_id}): {error:#}"))?;
+    } else {
+        pool.switch_session_model(&session_id, model_id).await
+    };
+    result.map_err(|error| format!("set_session_model({session_id}): {error:#}"))?;
+    // r9 P2-5：手动选择意图在切换成功后再广播——失败时不得登记该意图，
+    // 否则 megacube switch-follow 的抑制状态与实际绑定不一致。
+    if if_idle != Some(true) {
+        let _ = app.emit(
+            "session:manual_model_selection",
+            serde_json::json!({"session_id":session_id}),
+        );
+    }
     super::sessions::emit_session_event(&app, "session:model_changed", &session_id, "model");
     if let Some(model) = selected_model {
         crate::features::behavior_telemetry::track_model_selected(
@@ -3036,6 +3077,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: Default::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -3083,6 +3125,7 @@ mod tests {
                 model: "qwen3:latest".to_string(),
                 base_url: "http://127.0.0.1:11434/v1".to_string(),
                 model_store_card_id: None,
+                store_card_id: None,
                 model_store_link_detached: false,
                 model_store_link_requested: false,
                 model_store_link_only: false,
@@ -3113,6 +3156,7 @@ mod tests {
                 model: "other-model".to_string(),
                 base_url: "http://127.0.0.1:8001/v1".to_string(),
                 model_store_card_id: None,
+                store_card_id: None,
                 model_store_link_detached: false,
                 model_store_link_requested: false,
                 model_store_link_only: false,
@@ -3543,6 +3587,7 @@ mod tests {
         }
         let mut bridge = Pinvou3Bridge::test_fixture(None);
         bridge.prefs.advanced.saved_models = vec![SavedModel {
+            store_card_id: None,
             auth_mode: Some("none".to_string()),
             id: "wiring-model".to_string(),
             name: "wiring".to_string(),
@@ -3692,6 +3737,7 @@ mod tests {
             }
         }
         let record = |auth_mode: Option<&str>, ref_seeded: bool| SavedModel {
+            store_card_id: None,
             auth_mode: auth_mode.map(str::to_string),
             id: "ladder-fixtured".to_string(),
             name: "fixture".to_string(),
@@ -3824,6 +3870,7 @@ mod tests {
             }
         }
         let record = |auth_mode: Option<&str>, api_key: &str, ref_id: Option<&str>| SavedModel {
+            store_card_id: None,
             auth_mode: auth_mode.map(str::to_string),
             id: "save-fixtured".to_string(),
             name: "fixture".to_string(),
@@ -4388,6 +4435,7 @@ mod tests {
                 credential_action: None,
                 // Official SavedModel 字段(社区 #870 回流补齐;社区侧无这些字段):
                 model_store_card_id: None,
+                store_card_id: None,
                 model_store_link_detached: false,
                 model_store_link_requested: false,
                 model_store_link_only: false,
@@ -4418,6 +4466,7 @@ mod tests {
                 has_secret: false,
                 credential_action: None,
                 model_store_card_id: None,
+                store_card_id: None,
                 model_store_link_detached: false,
                 model_store_link_requested: false,
                 model_store_link_only: false,

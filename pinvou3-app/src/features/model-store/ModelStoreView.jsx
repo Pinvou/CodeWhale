@@ -30,9 +30,11 @@ import {
   startDeploy,
   startCardUpdate,
   startDownload,
+  retryIncomplete,
   startEnable,
   startStop,
   startUninstall,
+  startMaintenanceRecovery,
   storeAvailability,
   takeStartupCleanup,
   unlockTestStore,
@@ -73,6 +75,8 @@ import { StoreGuide } from './ModelStoreCards.jsx';
 import { ModelRow } from './ModelRow.jsx';
 import { CardUpdateDialog } from './CardUpdateDialog.jsx';
 import { ModelStoreTaskPanel } from './ModelStoreTaskPanel.jsx';
+import { MaintenanceRecoveryPanel } from './MaintenanceRecoveryPanel.jsx';
+import { IncompleteInstallPanel, describeIncompleteError } from './IncompleteInstallPanel.jsx';
 import { ModelDetailDialog } from './ModelDetailDialog.jsx';
 import { StoreCardDialog } from './StoreCardDialog.jsx';
 import { StorageSettingsDialog } from './StorageSettingsDialog.jsx';
@@ -169,6 +173,8 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
   // 那个判成过期。
   const cardsTokenRef = useRef(0);
   const libraryTokenRef = useRef(0);
+  const libraryInFlight = useRef(0);
+  const linkSyncErrorRef = useRef(null);
 
   const showToast = useCallback((text) => {
     setToast({ text });
@@ -216,10 +222,14 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
   }, [testMode]);
 
   /** 加载本地模型库。纯本进程查询,不该跟着远端商店一起失败,所以单独一条路。 */
-  const loadLibrary = useCallback(async () => {
+
+  const loadLibrary = useCallback(async (options) => {
+    const quiet = options?.quiet === true;
+    if (quiet && libraryInFlight.current > 0) return;
+    libraryInFlight.current += 1;
     const token = (libraryTokenRef.current += 1);
     const stale = () => token !== libraryTokenRef.current;
-    setLibraryLoading(true);
+    if (!quiet) setLibraryLoading(true);
     try {
       const libraryList = await fetchLibrary();
       if (stale()) return;
@@ -230,10 +240,24 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       // 已经不在了,不说一声他会以为模型还在服务。
       const corrected = libraryList?.corrected ?? [];
       if (corrected.length > 0) showToast(copy.corrected(corrected[0]));
-      if (libraryList?.link_sync_error) showToast(copy.linkSyncFailed(libraryList.link_sync_error));
+      // MegaCube 管理面融合纠正单独提示：事实源是 cmsd 实况而非容器探测
+      const cmsdCorrected = libraryList?.cmsd_corrected ?? [];
+      if (cmsdCorrected.length > 0) showToast(copy.cmsdCorrected(cmsdCorrected[0]));
+      // r11 P2-11：持久 link_sync_error 在 5s 轮询下每轮重弹同一条 toast，
+      // 故障持续时无法关闭。轮询路径按错误文本去重（仅弹一次）。
+      if (libraryList?.link_sync_error) {
+        const message = String(libraryList.link_sync_error);
+        if (!quiet || linkSyncErrorRef.current !== message) {
+          linkSyncErrorRef.current = message;
+          showToast(copy.linkSyncFailed(libraryList.link_sync_error));
+        }
+      } else {
+        linkSyncErrorRef.current = null;
+      }
     } catch (error) {
       if (!stale()) setLibraryError(String(error?.message || error));
     } finally {
+      libraryInFlight.current -= 1;
       if (!stale()) setLibraryLoading(false);
     }
   }, [copy, showToast, onLibrarySnapshot]);
@@ -258,6 +282,21 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     // eslint-disable-next-line react-hooks/set-state-in-effect -- 确认这个平台有模型商店之后才去拉商店和本地库
     if (guide === 'ready') loadAll();
   }, [guide, loadAll]);
+
+  // MCP and other windows can change the runtime without a store task in this renderer.
+  useEffect(() => {
+    if (guide !== 'ready') return undefined;
+    const refresh = () => { if (document.visibilityState !== 'hidden') loadLibrary({ quiet: true }); };
+    const timer = setInterval(refresh, 5000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+      libraryTokenRef.current += 1;
+    };
+  }, [guide, loadLibrary]);
 
   // 启动清理的结果：上次应用被强杀/崩溃后残留的脚本进程，这一轮启动时收掉了哪些。
   //
@@ -378,7 +417,11 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
       if (!cardId) return null;
       const model = mergedModels.find((item) => item.id === cardId) || null;
       const name = model?.name || model?.record?.card_name || cardId;
-      switch (run.kind) {
+      // 本地下载服务（service.sock）发起的安装（AI/MCP 代办经管理面委托的
+      // 执行）按下载类归一：与 UI 下载同 key 同标题——同一张卡任何入口都只有
+      // 一张任务卡
+      const runKind = run.kind === 'install_local' ? 'download' : run.kind;
+      switch (runKind) {
         case 'download':
           return { title: copy.taskDownload(name), key: downloadTaskKey(cardId) };
         case 'deploy':
@@ -395,6 +438,8 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
           return { title: copy.taskStop(name), key: lifecycleTaskKey(cardId) };
         case 'uninstall':
           return { title: copy.taskUninstall(name), cardName: name, key: lifecycleTaskKey(cardId) };
+        case 'uninstall_recovery':
+          return { title: copy.maintenanceTask(name), key: lifecycleTaskKey(cardId) };
         // 认不出的操作不接:宁可不显示,也不要一张说不清自己在干什么、却点得了
         // 取消的任务卡。卡片脚本和应用可以不同版本,这条兜底不能省。
         default:
@@ -485,6 +530,7 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     },
     [copy, showToast]
   );
+
 
   const handleDownload = useCallback(
     async (card) => {
@@ -799,6 +845,36 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
     );
   };
 
+  const handleMaintenanceRecovery = async (transaction) => {
+    const result = await runTask({
+      kind: 'uninstall_recovery',
+      key: lifecycleTaskKey(transaction.cardId),
+      title: copy.maintenanceTask(transaction.cardName || transaction.cardId),
+      start: () => startMaintenanceRecovery(transaction.cardId),
+    });
+    if (result?.ok) showToast(copy.maintenanceRecovered);
+    await loadLibrary();
+  };
+
+  const handleIncompleteRetry = async preview => {
+    const result = await runTask({
+      kind: preview.kind,
+      key: lifecycleTaskKey(preview.cardId),
+      title: copy.incompleteRetryTask(preview.cardName || preview.cardId),
+      start: async () => {
+        try {
+          const accepted = await retryIncomplete(preview.runId, preview.previewSha256);
+          void loadLibrary();
+          return accepted;
+        } catch (error) {
+          throw new Error(describeIncompleteError(copy, error), { cause: error });
+        }
+      },
+    });
+    if (result?.ok) showToast(copy.incompleteCompleted);
+    await loadLibrary();
+  };
+
   const renderModels = () => {
     if (cards === null && (library.models || []).length === 0) return null;
     if (visibleModels.length === 0) {
@@ -904,6 +980,22 @@ const ModelStoreView = ({ theme, t, bs, startupUpdates = EMPTY_STARTUP_UPDATES, 
             onRetry: loadLibrary,
           })
           : null}
+        <MaintenanceRecoveryPanel
+          transactions={library.maintenanceTransactions || []}
+          error={library.maintenanceError}
+          copy={copy}
+          onRecover={handleMaintenanceRecovery}
+          isRecovering={(cardId) => Boolean(runningTask(lifecycleTaskKey(cardId)))}
+          onRefresh={loadLibrary}
+        />
+        <IncompleteInstallPanel
+          installations={library.incompleteInstallations || []}
+          error={library.incompleteError}
+          copy={copy}
+          onRetry={handleIncompleteRetry}
+          onRefresh={loadLibrary}
+          isRetrying={cardId => Boolean(runningTask(lifecycleTaskKey(cardId)) || runningTask(downloadTaskKey(cardId)))}
+        />
         {renderModels()}
       </>
     );

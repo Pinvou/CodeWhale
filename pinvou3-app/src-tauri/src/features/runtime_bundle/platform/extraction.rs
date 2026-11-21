@@ -573,12 +573,13 @@ impl Pinvou3Bundle {
     /// `write_builtin_skills_releases_exactly_the_listed_dirs` — a builtin
     /// skill added to the write path without extending this constant
     /// would be written and self-heal-deleted in the same run.
-    pub(crate) const BUILTIN_RELEASED_SKILL_DIRS: &[&str] = &["visual-design", "device-doctor"];
+    pub(crate) const BUILTIN_RELEASED_SKILL_DIRS: &[&str] =
+        &["visual-design", "device-doctor", "megacube-admin"];
 
-    /// 本机实际释放/豁免的内置技能目录（纯函数，测试直打）：device-doctor 仅在
-    /// MegaCube 设备上释放——技能清单可见性是非 MegaCube 平台的用户可见面，
-    /// 不按能力位收窄就违背设计 §10「非 MegaCube 平台零行为变化」（五轮评审
-    /// P2）。非 MegaCube 上已存在的旧安装副本由自愈第 4 步按同一过滤结果收敛。
+    /// 硬件过滤后的内置候选/豁免目录（纯函数，测试直打）：device-doctor 仅在
+    /// MegaCube 设备上释放，非 MegaCube 的旧安装副本由自愈按同一过滤结果收敛。
+    /// megacube-admin 保留既有的同名用户副本豁免；候选存在不授予写出权限，
+    /// write_builtin_skills 仍独立核对 CMS socket/安装记录权限。
     pub(crate) fn released_builtin_skill_dirs(megacube: bool) -> Vec<&'static str> {
         Self::BUILTIN_RELEASED_SKILL_DIRS
             .iter()
@@ -611,21 +612,35 @@ impl Pinvou3Bundle {
     /// 后 catalogue 与 `load_skill` 都只扫描此目录，不再写 `~/.agents/skills`。
     /// 每次启动防御性写出(immutable 内置资源);内容一致则跳过写——这些资源不进
     /// BUNDLE_VERSION 的 hash,升级改内容但 VERSION 不变时靠逐文件比对兜住。
-    /// 释放面 = [`Self::released_builtin_skill_dirs`]：视觉设计全平台；设备管家
-    /// （device-doctor）仅 MegaCube（`megacube` 参数，五轮评审 P2）。
+    /// Device diagnostics use the hardware capability; CMS administration keeps
+    /// its independent socket/history authority, including explicitly configured hosts.
     pub(super) fn write_builtin_skills(&self, megacube: bool) -> std::io::Result<()> {
+        let admin_available = crate::features::megacube::tooling_available();
         for dir_name in Self::released_builtin_skill_dirs(megacube) {
             let content = match dir_name {
                 "visual-design" => VISUAL_DESIGN_SKILL_MD,
                 "device-doctor" => Self::DEVICE_DOCTOR_SKILL_MD,
-                // 常量的互锁测试把守：builtin_released_skill_dirs_match_
-                // embedded_resources 钉常量↔内嵌资源树；漏登记 match 臂时
-                // unreachable! 会在 write_builtin_skills_releases_exactly_
-                // the_listed_dirs 的真臂内爆掉。新增技能时在此登记内容映射。
+                "megacube-admin" if admin_available => MEGACUBE_ADMIN_SKILL_MD,
+                "megacube-admin" => continue,
                 other => unreachable!("未登记的内置技能目录：{other}"),
             };
             let dir = self.skills_dir.join(dir_name);
             self.write_if_changed(&dir.join("SKILL.md"), content)?;
+            if dir_name == "megacube-admin" {
+                Self::extract_dir_if_changed(&MEGACUBE_ADMIN_REFERENCES, &dir.join("references"))?;
+            }
+        }
+        // Only retire the unchanged application-owned CMS skill. Preserve a
+        // user's same-named replacement and its existing self-heal exemption.
+        let megacube_dir = self.skills_dir.join("megacube-admin");
+        let megacube_skill = megacube_dir.join("SKILL.md");
+        if !admin_available && megacube_skill.is_file() {
+            let ours = std::fs::read_to_string(&megacube_skill)
+                .map(|content| content == MEGACUBE_ADMIN_SKILL_MD)
+                .unwrap_or(false);
+            if ours {
+                let _ = std::fs::remove_dir_all(&megacube_dir);
+            }
         }
         Ok(())
     }
@@ -1023,6 +1038,78 @@ impl Pinvou3Bundle {
             .unwrap_or(false);
         if remove_browser_residue {
             servers.remove("browser");
+        }
+        // 按当前 socket 或设备已有安装记录门控；cmsd 离线不禁用独立下载。
+        // 普通机器只删我们自己写过的条目，用户同名配置不动。
+        // server key 用 megacube_admin（下划线）：连字符会让工具名编码出现
+        // mcp_megacube-admin_* 与 mcp_megacube--admin_* 两种形态（真机实证
+        // agent 调用打不中），全下划线消掉整类歧义。
+        let megacube_admin = paths::bundle_megacube_admin_server();
+        // 迁移：删掉我们今天写过的旧连字符 key 残留（含 env 的是我们的条目）
+        let remove_legacy = servers
+            .get("megacube-admin")
+            .map(|entry| {
+                entry
+                    .get("args")
+                    .and_then(|a| a.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|p| p.as_str())
+                    .map(|p| p.ends_with("megacube_admin_server.py"))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if remove_legacy {
+            servers.remove("megacube-admin");
+        }
+        if crate::features::megacube::tooling_available() {
+            // Preserve explicit configuration and XDG resolution, but do not
+            // turn a computed default socket into a user-configured authority.
+            let mut environment = serde_json::Map::new();
+            for name in [
+                "PINVOU3_HOME",
+                "CMSD_SOCKET",
+                "PINVOU3_CMSD_UNIT",
+                "XDG_RUNTIME_DIR",
+                "XDG_STATE_HOME",
+                "MEGACUBE_CARDS_DIR",
+                "PINVOU_STORE_URL",
+                "PINVOU_HF_ENDPOINT",
+            ] {
+                if let Some(value) = std::env::var_os(name) {
+                    let value = value.to_str().ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("{name} is not valid UTF-8"),
+                        )
+                    })?;
+                    environment.insert(name.into(), value.into());
+                }
+            }
+            let entry = serde_json::json!({
+                "command": python_cmd.clone(),
+                "args": [megacube_admin.to_string_lossy()],
+                "env": environment
+            });
+            servers.insert("megacube_admin".to_string(), entry);
+        } else {
+            // 两个 key 都只在「是我们写的」（args 指向 bundle 脚本）时才删
+            for key in ["megacube-admin", "megacube_admin"] {
+                let remove = servers
+                    .get(key)
+                    .map(|entry| {
+                        entry
+                            .get("args")
+                            .and_then(|a| a.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|p| p.as_str())
+                            .map(|p| p.ends_with("megacube_admin_server.py"))
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if remove {
+                    servers.remove(key);
+                }
+            }
         }
         self.refresh_mcp_python_commands(&mut mcp, &python_cmd);
         // 写回前与现有文件比对:内容一致则跳过写盘(避免每次启动重写 mcp.json)。
@@ -1489,6 +1576,13 @@ impl Pinvou3Bundle {
             &paths::bundle_mcp_python_runner(),
             MCP_PYTHON_DEPENDENCY_RUNNER_PY,
         )?;
+        // megacube-admin 脚本总是释放（注册与否由 mcp.json 条件 upsert 决定，
+        // 与脚本文件在不在解耦；socket 后出现的场景下次启动即接上）。
+        self.write_if_changed(
+            &paths::bundle_megacube_admin_server(),
+            MEGACUBE_ADMIN_SERVER_PY,
+        )?;
+        Self::extract_dir_if_changed(&MEGACUBE_TOOLS_DIR, &dir.join("megacube_tools"))?;
         if server_written {
             // 可执行位只在本次实际写出时补;内容未变时也不丢——上次写出后已设过。
             #[cfg(unix)]
@@ -2123,6 +2217,191 @@ mod tests {
     /// final file must contain the restored entry. Deleting the reconcile call
     /// from `run_mcp_startup_maintenance`, or moving it after the repair, turns
     /// this test red.
+    /// MegaCube 工具按本机配置和安装记录注册；离线后保留恢复能力。
+    /// 无本机证据时只移除本程序写出的条目，用户自定义条目不受影响。
+    #[test]
+    fn megacube_admin_preserves_explicit_configuration_without_inventing_local_history() {
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _env = crate::platform::paths::tests::EnvVarGuard::capture(&[
+            "PINVOU3_HOME",
+            "CMSD_SOCKET",
+            "PINVOU3_CMSD_UNIT",
+            "XDG_RUNTIME_DIR",
+            "XDG_STATE_HOME",
+            "MEGACUBE_CARDS_DIR",
+            "PINVOU_STORE_URL",
+            "PINVOU_HF_ENDPOINT",
+            "HF_TOKEN",
+        ]);
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-megacube-mcp-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: the caller holds platform::paths::tests::ENV_LOCK throughout.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        let bundle = super::Pinvou3Bundle::paths();
+        std::fs::create_dir_all(bundle.mcp_json.parent().unwrap()).unwrap();
+
+        // 场景一：socket 缺席 → 不注册；历史残留（我们写过的）被删掉
+        // SAFETY: 同上。
+        unsafe {
+            std::env::remove_var("CMSD_SOCKET");
+            std::env::remove_var("PINVOU3_CMSD_UNIT");
+            std::env::set_var("XDG_RUNTIME_DIR", tmp.join("runtime"));
+        }
+        std::fs::write(
+            &bundle.mcp_json,
+            r#"{"servers":{
+                "megacube-admin":{"command":"python3","args":["/old/bundle/mcp-servers/megacube_admin_server.py"]},
+                "user-mc":{"command":"node","args":["/opt/user/server.js"]}
+            }}"#,
+        )
+        .unwrap();
+        bundle.ensure_builtin_mcp_servers().unwrap();
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&bundle.mcp_json).unwrap()).unwrap();
+        let servers = mcp["servers"].as_object().unwrap();
+        assert!(
+            !servers.contains_key("megacube_admin"),
+            "socket 缺席时不得注册 megacube_admin"
+        );
+        assert!(
+            !servers.contains_key("megacube-admin"),
+            "旧连字符 key 的我们条目必须被迁移删除"
+        );
+        assert!(servers.contains_key("user-mc"), "用户条目不受影响");
+        assert!(
+            servers.contains_key("pinvou3"),
+            "内置 present_artifact 照常"
+        );
+
+        // Explicit but missing configuration keeps repair/independent tools.
+        unsafe { std::env::set_var("CMSD_SOCKET", tmp.join("missing.sock")) };
+        // SAFETY: ENV_LOCK is held and every changed key is captured above.
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", tmp.join("custom-state"));
+            std::env::set_var("MEGACUBE_CARDS_DIR", tmp.join("custom-cards"));
+            std::env::set_var("PINVOU_STORE_URL", "https://store.example.invalid");
+            std::env::set_var("PINVOU_HF_ENDPOINT", "https://hf.example.invalid");
+            std::env::set_var("HF_TOKEN", "fixture-secret-must-not-be-inherited");
+        }
+        bundle.ensure_builtin_mcp_servers().unwrap();
+        let configured: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&bundle.mcp_json).unwrap()).unwrap();
+        assert_eq!(
+            configured["servers"]["megacube_admin"]["env"]["CMSD_SOCKET"],
+            tmp.join("missing.sock").to_string_lossy().as_ref()
+        );
+        for (key, expected) in [
+            (
+                "XDG_STATE_HOME",
+                tmp.join("custom-state").to_string_lossy().into_owned(),
+            ),
+            (
+                "MEGACUBE_CARDS_DIR",
+                tmp.join("custom-cards").to_string_lossy().into_owned(),
+            ),
+            ("PINVOU_STORE_URL", "https://store.example.invalid".into()),
+            ("PINVOU_HF_ENDPOINT", "https://hf.example.invalid".into()),
+        ] {
+            assert_eq!(
+                configured["servers"]["megacube_admin"]["env"][key],
+                expected
+            );
+        }
+        assert!(
+            configured["servers"]["megacube_admin"]["env"]
+                .get("HF_TOKEN")
+                .is_none()
+        );
+        assert!(!crate::features::megacube::installation_records_dir().exists());
+
+        // 场景二：socket 在场（存在的路径）→ 注册且指向 bundle 内脚本
+        let fake_socket = tmp.join("cmsd.sock");
+        std::fs::write(&fake_socket, b"").unwrap();
+        // SAFETY: 同上。
+        unsafe { std::env::set_var("CMSD_SOCKET", &fake_socket) };
+        bundle.ensure_builtin_mcp_servers().unwrap();
+        let mcp: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&bundle.mcp_json).unwrap()).unwrap();
+        let entry = &mcp["servers"]["megacube_admin"];
+        assert!(
+            entry["args"][0]
+                .as_str()
+                .unwrap_or("")
+                .ends_with("megacube_admin_server.py"),
+            "注册条目必须指向 bundle 内脚本：{entry}"
+        );
+        assert_eq!(
+            entry["command"],
+            serde_json::Value::String(crate::platform::paths::python_command()),
+            "command 走统一 python 解析"
+        );
+        // CMSD_SOCKET 覆盖场景必须随条目透传 env（底座 spawn 有 env 白名单）
+        assert_eq!(
+            entry["env"]["CMSD_SOCKET"],
+            serde_json::Value::String(fake_socket.to_string_lossy().into_owned()),
+            "socket 覆盖路径必须透传给 server 进程"
+        );
+        assert_eq!(entry["env"]["PINVOU3_HOME"], tmp.to_string_lossy().as_ref());
+        assert!(entry["env"].as_object().unwrap().keys().all(|key| {
+            [
+                "PINVOU3_HOME",
+                "CMSD_SOCKET",
+                "PINVOU3_CMSD_UNIT",
+                "XDG_RUNTIME_DIR",
+                "XDG_STATE_HOME",
+                "MEGACUBE_CARDS_DIR",
+                "PINVOU_STORE_URL",
+                "PINVOU_HF_ENDPOINT",
+            ]
+            .contains(&key.as_str())
+        }));
+        bundle.write_mcp_servers(false).unwrap();
+        let tools = crate::platform::paths::bundle_mcp_servers_dir().join("megacube_tools");
+        for name in [
+            "__init__.py",
+            "state.py",
+            "transfers.py",
+            "store_recovery.py",
+        ] {
+            assert!(
+                tools.join(name).is_file(),
+                "missing runtime dependency: {name}"
+            );
+        }
+        for name in ["remote.py", "control.py", "broker.py"] {
+            assert!(
+                !tools.join(name).exists(),
+                "out-of-scope runtime module: {name}"
+            );
+        }
+        std::fs::remove_file(&fake_socket).unwrap();
+        bundle.ensure_builtin_mcp_servers().unwrap();
+        bundle.write_builtin_skills(false).unwrap();
+        let offline: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&bundle.mcp_json).unwrap()).unwrap();
+        assert!(
+            offline["servers"]["megacube_admin"].is_object(),
+            "显式本机配置离线后仍应保留独立工具"
+        );
+        assert!(
+            bundle
+                .skills_dir
+                .join("megacube-admin/references/experimental-install.md")
+                .is_file()
+        );
+
+        // SAFETY: 同上。
+        unsafe { std::env::remove_var("CMSD_SOCKET") };
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn startup_maintenance_restores_missing_entry_before_python_repair() {
         crate::platform::test_support::with_temp_home(

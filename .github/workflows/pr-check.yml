@@ -297,6 +297,7 @@ jobs:
     # job used for the identical step set.
     timeout-minutes: 10
     outputs:
+      cmsd: ${{ steps.filter.outputs.cmsd }}
       rust_code: ${{ steps.filter.outputs.rust_code }}
       rust_dependencies: ${{ steps.filter.outputs.rust_dependencies }}
       rust_full: ${{ steps.filter.outputs.rust_full }}
@@ -354,6 +355,17 @@ jobs:
         with:
           predicate-quantifier: some-with-excludes
           filters: |
+            cmsd:
+              - 'components/cmsd/**'
+              - 'scripts/check-cmsd-bundled-package.py'
+              - 'scripts/check-linux-glibc-floor.sh'
+              - 'scripts/check-linux-elf-policy.sh'
+              - 'scripts/release-deb.sh'
+              - 'scripts/tests/test_cmsd_release_policy.py'
+              - 'pinvou3-app/scripts/tauri/cmsd-component.js'
+              - 'pinvou3-app/tests/cmsd_bundled_packaging.test.js'
+              - '.github/workflows/pr-check.yml'
+              - '.github/workflows/release-packages.yml'
             # Desktop-only behavior notes and generated Portal assets are
             # covered by their frontend checks, not the Go/PostgreSQL suite.
             # All other platform paths stay included, including new ones.
@@ -419,6 +431,7 @@ jobs:
               - '.github/workflows/pr-check.yml'
               - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
+              - '!components/cmsd/**'
               - '**/*.rs'
               - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
               # Shared Linux memory preparation must reach real dependency
@@ -433,6 +446,7 @@ jobs:
               - '.gitmodules'
               - '.github/workflows/pr-check.yml'
             rust_dependencies:
+              - '!components/cmsd/**'
               - 'scripts/guard-chrono-maintenance-exception.py'
               - 'scripts/tests/test_chrono_maintenance_exception.py'
               - 'scripts/guard-webpki-roots-exception.py'
@@ -447,6 +461,7 @@ jobs:
             # isolated leaf-feature boundaries are explicitly low risk; changes
             # to their registration or app command surface still run full tests.
             rust_full:
+              - '!components/cmsd/**'
               - 'scripts/ci-memory-setup.sh'
               - 'scripts/ci-cargo-dev-profile.py'
               # Round-1 fix wave (PR #715 review): the loong64 cross-pipeline
@@ -775,6 +790,11 @@ jobs:
               - 'pinvou3-app/src/platform/tauri/bridge/*remote-control*'
               - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*'
               - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*/**'
+              - 'components/cmsd/**'
+              - 'scripts/check-cmsd-bundled-package.py'
+              - 'scripts/tests/test_cmsd_release_policy.py'
+              - 'pinvou3-app/scripts/tauri/cmsd-component.js'
+              - 'pinvou3-app/tests/cmsd_bundled_packaging.test.js'
               - 'scripts/package-deb-loongarch64.sh'
               - 'scripts/ci-build-linux-loongarch64.sh'
               - 'scripts/ci-loongarch64-toolchain.sh'
@@ -1320,6 +1340,12 @@ jobs:
       - name: Initialize gate test resource ledger
         run: python3 scripts/ci-resource-ledger.py --init
 
+      # r9 P1-2：jsonschema 的唯一消费者（megacube inventory 契约，经
+      # test_megacube_mcp 子进程运行）在本 suite 内执行，安装必须先行，
+      # 否则 skipIf 静默跳过且退出码为 0。
+      - name: Install gate suite python deps (jsonschema)
+        run: python3 -m pip install --quiet jsonschema
+
       # Full discovery includes cache server/deadline/checkout/npm contracts;
       # run them once, inside the same owned process tree as the other guards.
       - name: Gate policy test suite (scripts/tests)
@@ -1347,7 +1373,7 @@ jobs:
         # negative result when the list may be truncated or its size is unknown.
         if: ${{ steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000)) }}
         run: |
-          python3 -m pip install --quiet python-pptx python-docx
+          python3 -m pip install --quiet python-pptx python-docx jsonschema
           fail=0
           for t in pinvou3-app/resources/mcp-servers/*/test_*.py; do
             [ -f "$t" ] || continue
@@ -3099,6 +3125,8 @@ jobs:
           npm --prefix pinvou3-app run test:macos-phase2
           npm --prefix pinvou3-app run test:knowledge-host-packaging
           npm --prefix pinvou3-app run test:linux-asr-runtime
+          node --test pinvou3-app/tests/cmsd_bundled_packaging.test.js
+          python3 -m unittest discover -s scripts/tests -p test_cmsd_release_policy.py
 
       - name: Prepare CI transfer runtime (2)
         if: ${{ runner.os == 'Windows' && runner.environment == 'github-hosted' }}
@@ -3172,6 +3200,60 @@ jobs:
       - name: Warn when Windows release contract receipts are unavailable
         if: ${{ always() && runner.os == 'Windows' && steps.windows_release_contract_receipts.outcome == 'failure' }}
         run: echo '::warning::Windows release contract receipt upload failed; original receipts remain on the runner. Test and cleanup failures remain failures.'
+
+  # Standalone crate: app/CLI Cargo commands do not compile or test this tree.
+  cmsd-check:
+    name: cmsd-check (${{ matrix.os }})
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && (github.event_name == 'push' || needs.changes.outputs.cmsd == 'true') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
+      # r7 P2-6：cmsd 依赖图此前完全绕过 cargo-deny（rust_dependencies 过滤
+      # 排除 components/cmsd/**）。钉同版安装器与四类检查，与知识库/主仓同口径。
+      - name: cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: 独立 CMS 格式与严格 lint
+        run: |
+          cargo fmt --manifest-path components/cmsd/Cargo.toml --all -- --check
+          cargo clippy --manifest-path components/cmsd/Cargo.toml --locked --all-targets -- -D warnings
+      - name: 独立 CMS 原生测试与包装回归
+        run: |
+          cargo test --manifest-path components/cmsd/Cargo.toml --locked -- --test-threads=1
+          python3 -m unittest discover -s components/cmsd/tests -p 'test_*.py'
+          python3 -m unittest discover -s scripts/tests -p test_cmsd_release_policy.py
+      - name: 独立 CMS 依赖门禁（cargo-deny）
+        run: |
+          cargo deny --locked --manifest-path components/cmsd/Cargo.toml --config components/cmsd/deny.toml check advisories licenses bans sources
+      - name: 从当前提交构建并验证原生组件
+        run: |
+          package="$RUNNER_TEMP/cmsd-component"
+          python3 components/cmsd/scripts/build-linux-component.py --output "$package"
+          root="$RUNNER_TEMP/cmsd-package-root"
+          mkdir -p "$root/usr/lib/pinvou3/runtime"
+          cp -a "$package" "$root/usr/lib/pinvou3/runtime/cmsd"
+          case "$(uname -m)" in
+            x86_64) architecture=amd64 ;;
+            aarch64) architecture=arm64 ;;
+            *) echo 'Unexpected native CMS runner architecture' >&2; exit 1 ;;
+          esac
+          python3 scripts/check-cmsd-bundled-package.py "$root" "$architecture"
 
   # pinvou-knowledge 是可单独部署的 crate，必须直接验证自己的默认 feature 图、
   # 测试与部署入口，而不只依赖 Tauri 作为 client-only path dependency 的间接编译。
@@ -3565,6 +3647,9 @@ jobs:
         working-directory: pinvou3-app/src-tauri
         run: |
           cargo check --all-targets --features benchmark-hooks --locked
+          # megacube-handoff-acceptance bin 挂 required-features，上面的
+          # all-targets 不满足特性就不会编译它；单独一条让它进编译覆盖。
+          cargo check --all-targets --features megacube-handoff-acceptance --locked
           CARGO_TARGET_DIR=target cargo check --manifest-path ../../pinvou-cli/Cargo.toml --package pinvou-product-backend --locked
 
       # Cargo.lock drift guard (CodeWhale parity): every cargo invocation in
@@ -6518,6 +6603,7 @@ jobs:
       - team-relay-hub-test
       - update-release-console-test
       - release-contract-test
+      - cmsd-check
       - knowledge-rust
       - rust-lint
       - rust-test
@@ -6577,6 +6663,8 @@ jobs:
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
           UPDATE_RELEASE_CONSOLE_RESULT: ${{ needs.update-release-console-test.result }}
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
+          CMSD_RESULT: ${{ needs.cmsd-check.result }}
+          CMSD_REQUIRED_BY_POLICY: ${{ needs.changes.outputs.cmsd == 'true' }}
           KNOWLEDGE_RUST_RESULT: ${{ needs.knowledge-rust.result }}
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
           RUST_RESULT: ${{ needs.rust-test.result }}
@@ -6690,6 +6778,11 @@ jobs:
             exit 1
           fi
 
+          if [[ "$CMSD_REQUIRED_BY_POLICY" == "true" && "$CMSD_RESULT" != success ]]; then
+            echo "CMS 变更要求 x64 与 ARM64 原生检查成功: cmsd=$CMSD_RESULT" >&2
+            exit 1
+          fi
+
           failed=0
           for item in \
             "runner-pool-guard:$RUNNER_POOL_GUARD_RESULT" \
@@ -6706,6 +6799,7 @@ jobs:
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
             "update-release-console-test:$UPDATE_RELEASE_CONSOLE_RESULT" \
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \
+            "cmsd-check:$CMSD_RESULT" \
             "knowledge-rust:$KNOWLEDGE_RUST_RESULT" \
             "rust-lint:$RUST_LINT_RESULT" \
             "rust-test:$RUST_RESULT" \

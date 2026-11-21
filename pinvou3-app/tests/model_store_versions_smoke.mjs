@@ -89,7 +89,7 @@ try {
     }));
     window.answerVersions = ({ state, error = null }) => window.pendingVersions.shift()([{
       version_id: 'test-version', filename: 'test.weights', state,
-      can_switch: state === 'ready', can_retry: state === 'failed',
+      can_switch: ['ready', 'history'].includes(state), can_retry: state === 'failed',
       can_delete: state !== 'downloading', size_bytes: 128, error,
     }]);
     window.interruptedCopy = dictZh.uiModelStore.versionInterrupted;
@@ -122,6 +122,11 @@ try {
     }
     await page.evaluate(() => window.renderVersions(true));
   }
+  await answer('downloading');
+  await page.evaluate(() => window.renderVersions(false));
+  await answer('history');
+  await expectActions(2); // Explicit history rollback and cleanup remain available.
+  await page.evaluate(() => window.renderVersions(true));
   // A response from the previous busy state cannot overwrite the newer result.
   await waitRequest();
   await page.evaluate(() => {
@@ -968,7 +973,7 @@ try {
     window.__TAURI__ = { core: { invoke: async (command, payload) => {
       if (command === 'model_store_model_detail') {
         window.detailLoads.push(payload.cardId);
-        return { record: { card_id: payload.cardId, card_name: payload.cardId, model_name: payload.cardId,
+        return { api_key_enforced: true, record: { card_id: payload.cardId, card_name: payload.cardId, model_name: payload.cardId,
           endpoint_model: payload.cardId, endpoint_url: 'http://127.0.0.1:8911/v1', running: true, status: 'deployed' } };
       }
       if (command === 'model_store_api_keys') return [];
