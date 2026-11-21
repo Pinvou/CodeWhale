@@ -20,6 +20,8 @@ func TestF03ProviderStatusCannotHideConfirmedFact(t *testing.T) {
 			t.Run(kind+"/"+status, func(t *testing.T) {
 				row := ProviderBillEntry{EntryType: kind, ProviderReferenceID: "controlled-reference", MerchantOrderNo: "controlled-order", AmountFen: 100, Currency: "CNY", Status: status}
 				fact := ReconciliationInternalFact{EntryType: kind, ProviderReferenceID: row.ProviderReferenceID, MerchantOrderNo: row.MerchantOrderNo, PaymentOrderID: uuid.New(), AmountFen: row.AmountFen, Currency: row.Currency, LedgerPresent: true, EventDateVerified: true}
+				amount := "100"
+				fact.CashPrincipal = &ChargebackCashPrincipal{Status: "CONFIRMED", AmountFen: &amount, Currency: "CNY"}
 				counts := map[string]int{}
 				for _, difference := range CompareFourWayReconciliation([]ProviderBillEntry{row}, []ReconciliationInternalFact{fact}) {
 					counts[difference.CaseType]++

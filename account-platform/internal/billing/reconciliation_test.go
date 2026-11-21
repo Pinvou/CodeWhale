@@ -82,6 +82,8 @@ func TestF03FourWayMerchantOwnership(t *testing.T) {
 		t.Run(entry, func(t *testing.T) {
 			row := ProviderBillEntry{EntryType: entry, ProviderReferenceID: "controlled-reference", ChannelTransactionID: "controlled-reference", MerchantOrderNo: "other-order", AmountFen: 100, Currency: "CNY", Status: "SUCCESS"}
 			fact := ReconciliationInternalFact{EntryType: entry, EventDateVerified: true, ProviderReferenceID: "controlled-reference", MerchantOrderNo: "actual-order", AmountFen: 100, Currency: "CNY", LedgerPresent: true}
+			amount := "100"
+			fact.CashPrincipal = &ChargebackCashPrincipal{Status: "CONFIRMED", AmountFen: &amount, Currency: "CNY"}
 			prefix := map[string]string{"PAYMENT": "PAID", "REFUND": "REFUND", "CHARGEBACK": "CHARGEBACK"}[entry]
 			counts := map[string]int{}
 			for _, difference := range CompareFourWayReconciliation([]ProviderBillEntry{row}, []ReconciliationInternalFact{fact}) {

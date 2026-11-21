@@ -29,9 +29,10 @@ def distribution_path(value):
 
 
 class Distribution:
-    def __init__(self, root, cache, fetch=DOWNLOAD.fetch, capacity=DOWNLOAD.DEFAULT_CAPACITY):
+    def __init__(self, root, cache, fetch=DOWNLOAD.fetch, capacity=DOWNLOAD.DEFAULT_CAPACITY, mirror='official'):
         self.root, self.cache, self.fetch = Path(root), Path(cache), fetch
         self.capacity = capacity
+        self.mirror = mirror
         self.lock = threading.Lock()
         self.transfer_lock = threading.Lock()
         self.locks = {}
@@ -46,6 +47,19 @@ class Distribution:
             if remaining <= 0:
                 raise DOWNLOAD.DownloadError('Rust snapshot capacity reached')
             options['max_bytes'] = min(options.get('max_bytes', DOWNLOAD.MAX_OBJECT), remaining)
+            deadline = time.monotonic() + options.get('seconds', 180)
+            if self.mirror == 'rsproxy' and expected:
+                # Authenticate checksums at the official origin. Only component
+                # bytes may come from the mirror, under that independent hash.
+                try:
+                    self.fetch('https://rsproxy.cn' + name, target, expected, force_tls12=True,
+                               **{**options, 'seconds': min(30, options.get('seconds', 180)), 'attempts': 1})
+                    return
+                except DOWNLOAD.DownloadError:
+                    DOWNLOAD.event('mirror-fallback', host='rsproxy.cn')
+            options['seconds'] = deadline - time.monotonic()
+            if options['seconds'] <= 0:
+                raise DOWNLOAD.DownloadError('Rust distribution total budget exhausted')
             self.fetch(ORIGIN + name, target, expected, force_tls12=True, **options)
 
     def artifact(self, name):
@@ -146,13 +160,13 @@ class Server(http.server.ThreadingHTTPServer):
         pass
 
 
-def start(cache, temporary):
+def start(cache, temporary, *, mirror='official'):
     root = Path(tempfile.mkdtemp(prefix='rust-dist-', dir=temporary))
     state = root / 'ready.json'
     options = {'start_new_session': True} if os.name != 'nt' else {
         'creationflags': subprocess.CREATE_NO_WINDOW}
     child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
-                              '--serve', str(root), '--cache', str(cache)],
+                              '--serve', str(root), '--cache', str(cache), '--mirror', mirror],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, close_fds=True, **options)
     # Keep RUNNER_TRACKING_ID and the Windows Job Object: the Runner must retire
@@ -172,12 +186,12 @@ def start(cache, temporary):
     raise TimeoutError('Rust distribution listener startup failed')
 
 
-def serve(root, cache):
+def serve(root, cache, mirror='official'):
     # Only this verified origin downloader bypasses stale public NO_PROXY
     # entries. Business tests and package installation routing are unchanged.
     if any(os.environ.get(k) for k in ('HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy')):
-        os.environ['NO_PROXY'] = os.environ['no_proxy'] = 'localhost,127.0.0.1,::1'
-    server = Server(('127.0.0.1', 0), Distribution(root, cache))
+        os.environ['NO_PROXY'] = os.environ['no_proxy'] = 'localhost,127.0.0.1,::1' + (',rsproxy.cn,.rsproxy.cn' if mirror == 'rsproxy' else '')
+    server = Server(('127.0.0.1', 0), Distribution(root, cache, mirror=mirror))
     state = root / 'ready.json'
     temporary = root / 'ready.tmp'
     temporary.write_text(json.dumps({'pid': os.getpid(), 'port': server.server_address[1]}))
@@ -211,5 +225,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serve', required=True, type=Path)
     parser.add_argument('--cache', required=True, type=Path)
+    parser.add_argument('--mirror', choices=('official', 'rsproxy'), default='official')
     args = parser.parse_args()
-    serve(args.serve, args.cache)
+    serve(args.serve, args.cache, args.mirror)

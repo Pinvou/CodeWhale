@@ -86,8 +86,10 @@ func TestF14ChargebackActivationFinancialTransactionPostgres(t *testing.T) {
 			t.Fatal("BASE or BONUS entitlement changed", err)
 		}
 		var summaryVersion int64
-		var attention, open, lost string
-		if err := pool.QueryRow(ctx, `SELECT summary_version,attention_summary,chargeback_summary->>'open_count',chargeback_summary->>'lost_amount_fen' FROM payment_orders WHERE id=$1`, fixture.OrderID).Scan(&summaryVersion, &attention, &open, &lost); err != nil || summaryVersion != 2 || attention != "RECEIVABLE_OPEN" || open != "1" || lost != "100" {
+		var attention, open, cashStatus string
+		var unverified int64
+		var lost *string
+		if err := pool.QueryRow(ctx, `SELECT summary_version,attention_summary,chargeback_summary->>'open_count',chargeback_summary->>'lost_amount_fen',chargeback_summary->>'cash_principal_status',(chargeback_summary->>'unverified_count')::bigint FROM payment_orders WHERE id=$1`, fixture.OrderID).Scan(&summaryVersion, &attention, &open, &lost, &cashStatus, &unverified); err != nil || summaryVersion != 2 || attention != "RECEIVABLE_OPEN" || open != "1" || lost != nil || cashStatus != "UNVERIFIED" || unverified != 1 {
 			t.Fatal("retained order summary repair differs", err)
 		}
 		after := chargebackActivationFinancialSnapshot(t, ctx, repository)

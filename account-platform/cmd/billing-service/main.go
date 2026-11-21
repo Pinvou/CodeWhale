@@ -68,6 +68,15 @@ func main() {
 		log.Fatal("BILLING_DATABASE_INITIALIZATION_FAILED")
 	}
 	defer repository.Close()
+	schemaCheck, cancelSchemaCheck := context.WithTimeout(ctx, 5*time.Second)
+	err = repository.VerifyChargebackPrincipalSchema(schemaCheck)
+	cancelSchemaCheck()
+	if err != nil {
+		if errors.Is(err, billing.ErrChargebackPrincipalMigrationRequired) {
+			log.Fatal("BILLING_MIGRATION_900044_REQUIRED")
+		}
+		log.Fatal("BILLING_CHARGEBACK_PRINCIPAL_SCHEMA_CHECK_FAILED")
+	}
 	expiredHoldClient, err := expiredHoldClientFromEnvironment(credential)
 	if err != nil {
 		log.Fatal("BILLING_HOLD_EXPIRY_CONFIGURATION_INVALID")
@@ -219,7 +228,7 @@ func main() {
 	}
 	handler := service.Handler(credential, verify)
 	ready := func(c context.Context) error {
-		if err := repository.Ping(c); err != nil {
+		if err := repository.VerifyChargebackPrincipalSchema(c); err != nil {
 			return err
 		}
 		if err := broker.Ping(c); err != nil {

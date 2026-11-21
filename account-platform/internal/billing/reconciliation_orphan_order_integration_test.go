@@ -72,6 +72,9 @@ func TestReconciliationOrphanPaidOrderPostgres(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if upgrade {
+				coordinator.reconciliationFacts = listPrePrincipalReconciliationFacts
+			}
 			financialFacts := func() string {
 				t.Helper()
 				var value string

@@ -69,6 +69,10 @@ func TestProtectedMigrationIdentityUsesFrozenFacts(t *testing.T) {
 		{79, "registration_bonus", "changed", "billing"},
 		{6, "merchant_customer_key", "changed", "payment-simulator"},
 		{5, "renamed", "c10369f3c1201aa37752d686645fac25c435b6e68daba401158f54090ae4e0bb", "payment-simulator"},
+		{900044, "chargeback_cash_principal", "changed", "billing"},
+		{900040, "chargeback_cash_principal", "changed", "billing"},
+		{900040, "renamed", "baf6031690dc3598224b4298cd2b11c3c4b4f693b7ee0acbd0fc63f111c5bf62", "billing"},
+		{900039, "custom_business", "custom_checksum", ""},
 		{1, "custom_business", "custom_checksum", ""},
 	} {
 		if actual := protectedMigrationDomain(item.version, item.name, item.checksum); actual != item.domain {
