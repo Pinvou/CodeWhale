@@ -31,8 +31,10 @@ import json
 import os
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import zipfile
+from unittest.mock import patch
 
 # ── 所有产物落到临时目录,别污染真实 ~/.pinvou3 ──────────────────────────
 _TMP = tempfile.mkdtemp(prefix="pptx_test_")
@@ -124,6 +126,42 @@ def test_output_location():
     cwd = os.path.abspath(os.getcwd())
     assert not p.startswith(cwd) or _TMP.startswith(cwd), "不应落进进程当前目录: %s" % p
     assert "target" not in p and "Program Files" not in p, "不应落进构建/安装目录: %s" % p
+
+
+@case("3b. 已配置的产物目录不可用时报告失败")
+def test_configured_output_directory_unavailable():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        blocked = os.path.join(root, "artifacts")
+        with open(blocked, "w", encoding="utf-8") as f:
+            f.write("already a file")
+        with patch.object(server, "_session_artifacts_dir", blocked):
+            result = server.make_pptx(slides=[{"layout": "cover", "title": "位置测试"}])
+        assert result.get("ok") is False, result
+        assert "产物目录" in result.get("error", ""), result
+        assert os.listdir(root) == ["artifacts"], "不得改写到会话之外"
+
+
+@case("3c. 渲染写入部分文件后失败，不登记半成品")
+def test_partial_scoped_output_is_not_published():
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        destination = os.path.join(root, "sessions", "controlled-session", "artifacts")
+        deck = [{"layout": "cover", "title": "位置测试"}]
+
+        def render_then_fail(_spec, path):
+            with open(path, "wb") as f:
+                f.write(b"incomplete PPT package")
+            assert all(os.path.isdir(os.path.join(destination, name))
+                       for name in os.listdir(destination))
+            raise OSError("fixture write failure after partial output")
+
+        with patch.object(server, "_session_artifacts_dir", destination):
+            with patch.object(server, "render", side_effect=render_then_fail):
+                failed = server.make_pptx(slides=deck, filename="result")
+            assert not failed["ok"] and os.listdir(destination) == [], failed
+            recovered = server.make_pptx(slides=deck, filename="result")
+        assert recovered["ok"], recovered
+        assert os.listdir(destination) == ["result.pptx"]
+        assert len(Presentation(recovered["path"]).slides) == 1
 
 
 # ── 4. 9 套主题全渲染 ────────────────────────────────────────────────────
@@ -275,6 +313,35 @@ def test_mcp_protocol():
     payload = json.loads(content[0]["text"])
     assert payload.get("ok") is True and os.path.isfile(payload["path"]), \
         "tools/call(make_pptx) 应生成文件,实际 %r" % payload
+
+
+@case("9b. MCP 子进程按会话路径生成同名 PPT")
+def test_mcp_session_output():
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+        "name": "make_pptx", "arguments": {"filename": "same-output", "slides": [
+            {"layout": "cover", "title": "MCP 测试"}
+        ]},
+    }}
+    runner = os.path.abspath(os.path.join(_HERE, "..", "..", "..", "src-tauri",
+        "resources", "common", "bundle", "mcp-servers", "python_dependency_runner.py"))
+    command = [sys.executable, "-I", "-S", "-B", runner,
+               sysconfig.get_path("purelib"), os.path.join(_HERE, "server.py")]
+    with tempfile.TemporaryDirectory(dir=_TMP) as root:
+        outputs = []
+        for session in ("session-a", "session-b"):
+            destination = os.path.join(root, "sessions-${literal}", session, "artifacts")
+            proc = subprocess.run(
+                [*command, "--session-artifacts-dir=" + destination],
+                input=(json.dumps(request) + "\n").encode("utf-8"),
+                capture_output=True, check=True, timeout=60,
+            )
+            payload = json.loads(json.loads(proc.stdout)["result"]["content"][0]["text"])
+            assert payload["ok"], payload
+            assert payload["path"] == os.path.join(destination, "same-output.pptx")
+            assert len(Presentation(payload["path"]).slides) == 1
+            outputs.append(payload["path"])
+        assert len(set(outputs)) == 2
+        assert not os.path.lexists(os.path.join(_TMP, "same-output.pptx"))
 
 
 # ── 10. 非法 JSON 抢救 + 彻底空报错(本次修复:模型大纲一长常生成坏 JSON)──

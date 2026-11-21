@@ -93,6 +93,88 @@ pub(super) fn browser_last_error_hint(raw: &str, now: u64) -> Option<(&'static s
         .find(|(candidate, _)| *candidate == code)
 }
 
+fn bind_work_session_pptx_output(config: &mut serde_json::Value, session_id: &str) -> bool {
+    use crate::features::sessions::validators::validate_session_id;
+
+    if validate_session_id(session_id).is_err() {
+        return false;
+    }
+    let Some(server) = config
+        .pointer_mut("/servers/pptx")
+        .and_then(|entry| entry.as_object_mut())
+    else {
+        return false;
+    };
+    let Ok(entry) = serde_json::from_value::<deepseek_tui::mcp::McpServerConfig>(
+        serde_json::Value::Object(server.clone()),
+    ) else {
+        return false;
+    };
+    let Some(command) = entry.command.as_deref() else {
+        return false;
+    };
+    if entry.url.is_some()
+        || !entry.is_enabled()
+        || !entry.is_tool_enabled("make_pptx")
+        || (command != paths::python_command()
+            && paths::managed_python_command().ok().as_deref() != Some(command))
+        || entry
+            .env
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case("PINVOU3_SESSION_ARTIFACTS"))
+    {
+        return false;
+    }
+    let python_runner = paths::bundle_mcp_python_runner();
+    let python_envs = paths::marketplace_python_envs_dir();
+    let script = match entry.args.as_slice() {
+        [script] => script,
+        [isolated, no_site, no_cache, runner, site_packages, script]
+            if isolated == "-I"
+                && no_site == "-S"
+                && no_cache == "-B"
+                && std::path::Path::new(runner) == python_runner.as_path()
+                && std::path::Path::new(site_packages)
+                    .strip_prefix(&python_envs)
+                    .ok()
+                    .and_then(|path| path.to_str())
+                    .is_some_and(|path| {
+                        let mut parts = path.split(['/', '\\']);
+                        parts.next().is_some_and(|key| {
+                            key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        }) && parts.next() == Some("site-packages")
+                            && parts.next().is_none()
+                    }) =>
+        {
+            script
+        }
+        _ => return false,
+    };
+    let script = std::path::Path::new(script);
+    let managed = paths::bundle_mcp_package_dir("pptx").join("server.py");
+    let legacy = paths::bundle_mcp_servers_dir()
+        .join("pptx")
+        .join("server.py");
+    // The server name can also belong to a user-defined connector. Only
+    // entries targeting the installed or legacy bundled script are scoped.
+    if script != managed.as_path() && script != legacy.as_path() {
+        return false;
+    }
+    let destination = paths::session_artifacts_dir(session_id);
+    let Some(destination) = destination.to_str() else {
+        return false;
+    };
+    // The engine expands ${...} in environment values. The launcher must
+    // receive this locally derived path literally, including such components.
+    let Some(args) = server.get_mut("args").and_then(|args| args.as_array_mut()) else {
+        return false;
+    };
+    args.push(serde_json::json!(format!(
+        "--session-artifacts-dir={destination}"
+    )));
+    true
+}
+
 impl Pinvou3Bundle {
     pub fn paths() -> Self {
         Self {
@@ -1244,18 +1326,34 @@ impl Pinvou3Bundle {
     /// global configuration is unchanged. Concurrent Work-mode sessions rebuild the same
     /// deterministic file using an idempotent temporary-file-and-rename sequence.
     pub fn work_mode_mcp_config_path(&self) -> PathBuf {
-        self.write_work_mode_mcp_config(None)
+        self.write_work_mode_mcp_config(None).0
     }
 
     /// Returns a conversation-scoped Work-mode MCP configuration. It matches the global
-    /// Work-mode configuration, but the browser wrapper carries this conversation's
-    /// identity. Each Engine therefore has an isolated tool-routing context that another
-    /// conversation cannot change by switching pages.
+    /// Work-mode configuration, with this conversation's identity in the browser wrapper
+    /// and its private output directory in the bundled PPT server's arguments.
     pub fn work_mode_mcp_config_path_for_session(&self, session_id: &str) -> PathBuf {
-        self.write_work_mode_mcp_config(Some(session_id))
+        self.write_work_mode_mcp_config(Some(session_id)).0
     }
 
-    fn write_work_mode_mcp_config(&self, session_id: Option<&str>) -> PathBuf {
+    /// Retry a global fallback at spawn time. Derive the path and failure
+    /// together, from the same snapshot that was used to prepare the profile.
+    pub(crate) fn resolve_work_mode_mcp_fallback(
+        &self,
+        session_id: &str,
+        config_path: &std::path::Path,
+    ) -> Result<Option<PathBuf>, &'static str> {
+        if config_path != self.mcp_json.as_path() {
+            return Ok(None);
+        }
+        let (path, missing_ppt_scope) = self.write_work_mode_mcp_config(Some(session_id));
+        if missing_ppt_scope {
+            return Err("pptx_session_profile_unavailable");
+        }
+        Ok((path != self.mcp_json).then_some(path))
+    }
+
+    fn write_work_mode_mcp_config(&self, session_id: Option<&str>) -> (PathBuf, bool) {
         let base = self.mcp_json.clone();
         let browser_entry = self.browser_mcp_entry_for_session(session_id);
         // Fall back to the global configuration when parsing fails (for example, a manual
@@ -1266,20 +1364,23 @@ impl Pinvou3Bundle {
         // preserves the global behavior. The read is the hardened private-data read
         // (see `open_private_data_file_within`): every spawned session reaches this path,
         // so it must not hang the spawn.
-        let mcp: serde_json::Value =
+        let mut mcp: serde_json::Value =
             match crate::platform::filesystem::read_private_data_file(&base)
                 .ok()
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
             {
                 Some(v) if v.is_object() => v,
-                _ => return base,
+                _ => return (base, false),
             };
         let has_reserved_browser = mcp
             .get("servers")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|servers| servers.contains_key("browser"));
-        if browser_entry.is_none() && !has_reserved_browser {
-            return base;
+        // Remote Chat inventories the actual controlled session's artifact directory.
+        // Scope the PPT writer even when Browser MCP is unavailable.
+        let scoped_pptx = session_id.is_some_and(|id| bind_work_session_pptx_output(&mut mcp, id));
+        if browser_entry.is_none() && !has_reserved_browser && !scoped_pptx {
+            return (base, false);
         }
         let work_path = session_id.map_or_else(paths::browser_work_mcp_json, |session_id| {
             paths::browser_session_mcp_json(session_id)
@@ -1329,7 +1430,7 @@ impl Pinvou3Bundle {
                     .map(|existing| existing == json)
                     .unwrap_or(false)
                 {
-                    return work_path;
+                    return (work_path, false);
                 }
                 // The content includes a full global mcp.json copy and may contain secrets
                 // in user-defined server environments. Create it as 0600 immediately and
@@ -1337,16 +1438,16 @@ impl Pinvou3Bundle {
                 if crate::platform::filesystem::atomic_write_private(&work_path, json.as_bytes())
                     .is_ok()
                 {
-                    return work_path;
+                    return (work_path, false);
                 }
                 // On write failure, return the global configuration. Returning the
                 // session-specific path could make the Engine load stale or missing data;
                 // the global fallback degrades by omitting browser tools instead of failing.
-                base
+                (base, scoped_pptx)
             }
             // Serialization of a Value should not fail, but use the same global fallback
             // as a write failure if it does.
-            Err(_) => base,
+            Err(_) => (base, scoped_pptx),
         }
     }
 
