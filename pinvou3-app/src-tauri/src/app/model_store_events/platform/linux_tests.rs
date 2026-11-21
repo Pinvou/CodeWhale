@@ -185,7 +185,10 @@ fn same_route_enable_crosses_real_ipc_and_fanout_before_next_turn_rebuild() {
     let first = UserPrefs::load();
     let ready = first.model_by_id(MODEL_ID).unwrap().clone();
     assert_eq!(ready, expected);
-    assert_eq!(server.requests.load(Ordering::Relaxed), 1);
+    // 合并语义适配（r36 P1-2）：PR 侧 enable 入口的内存准入先做一次
+    // reconcile_running_status（身份核验探活=第 1 个请求，60s TTL 缓存），
+    // main 侧修复验证探活是第 2 个；main 原预算 1 不含准入探活。
+    assert_eq!(server.requests.load(Ordering::Relaxed), 2);
     assert_eq!(
         first.advanced.model_store_context_repairs.get(MODEL_ID),
         Some(&format!("verified-256k-v1/{CARD_ID}"))
@@ -210,7 +213,10 @@ fn same_route_enable_crosses_real_ipc_and_fanout_before_next_turn_rebuild() {
         serde_json::to_value(&second).unwrap(),
         serde_json::to_value(&first).unwrap()
     );
-    assert_eq!(server.requests.load(Ordering::Relaxed), 1);
+    // 合并语义（r36 P1-2 同 :188 注）：总预算 = 准入 reconcile 探活 1 + 修复
+    // 验证探活 1；二次启用本身零新增请求（修复已回执不再探、reconcile 走
+    // 60s TTL 缓存）。main 原预算 1 不含准入探活。
+    assert_eq!(server.requests.load(Ordering::Relaxed), 2);
     let after_cached = probe.snapshot(second.model_by_id(MODEL_ID).unwrap().clone());
     assert!(after_cached.requires_rebuild_from(&first_cached));
     assert!(

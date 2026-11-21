@@ -249,6 +249,7 @@ try {
       const records = ['qwen38-27b-nvfp4-mtp', 'network-neutral'].map((id) => ({
         card_id: id, card_name: id, model_name: id, status: 'deployed', running: false,
         size_bytes: 128, deploy_topology: 'single', card_update_pending: true,
+        weights_ready_at: '2026-10-01T00:00:00Z',
         default_profile_id: 'production-sampling', profiles: [
           { id: 'benchmark', name: 'Benchmark' }, { id: 'production-sampling', name: 'Production' },
         ],
@@ -257,7 +258,6 @@ try {
         if (command === 'model_store_availability') return { available: true };
         if (command === 'model_store_cards' || command === 'model_store_active_runs' || command === 'model_store_versions') return [];
         if (command === 'model_store_library') return { models: records, corrected: [] };
-        if (command === 'model_store_test_store_state') return { enabled: false };
         if (command === 'model_store_take_startup_cleanup') return null;
         throw Error(`Unexpected command: ${command}`);
       } } };
@@ -530,16 +530,23 @@ try {
     const { dictZh } = await import('/shared/i18n/zh.js');
     /* eslint-enable import-x/no-unresolved, n/no-missing-import */
     const record = { card_id: 'isolated-card', card_name: 'Test', model_name: 'test-wire',
-      status: 'deployed', running: false, size_bytes: 128, deploy_topology: 'single' };
+      status: 'deployed', running: false, size_bytes: 128, deploy_topology: 'single',
+      weights_ready_at: '2026-10-01T00:00:00Z' };
+    const modelDetailMock = (cmd, payload) => {
+      if (cmd === 'model_store_model_detail') return { record };
+      if (cmd === 'model_store_api_keys') return [];
+      return undefined;
+    };
     window.cleanupFinished = false;
     window.uninstallFinished = false;
     window.__TAURI__ = { core: { invoke: async (command, payload) => {
       if (command === 'model_store_availability') return { available: true };
       if (command === 'model_store_cards' || command === 'model_store_active_runs') return [];
       if (command === 'model_store_library') return { models: window.uninstallFinished ? [] : [record], corrected: [] };
+      const detail = modelDetailMock(command, payload);
+      if (detail !== undefined) return detail;
       if (command === 'list_models') return { models: [{ id: 'isolated-linked-row', model_store_card_id: record.card_id,
         base_url: 'http://127.0.0.1:8911/v1' }] };
-      if (command === 'model_store_test_store_state') return { enabled: false };
       if (command === 'model_store_take_startup_cleanup') return null;
       if (command === 'model_store_start_lifecycle' && payload.action === 'uninstall') return { run_id: 'isolated-uninstall' };
       if (command === 'model_store_run_log') {
@@ -560,8 +567,13 @@ try {
       bs: { savedModels: [{ id: 'isolated-linked-row', model_store_card_id: record.card_id, base_url: 'http://127.0.0.1:8911/v1' }] },
     }));
   });
-  await page.waitForSelector('[data-testid="model-store-uninstall"]');
-  await page.click('[data-testid="model-store-uninstall"]');
+  // 合并后卸载入口在详情弹窗（PR 重设计）；部分态下收在「更多」菜单里。
+  await page.waitForSelector('[data-testid="model-store-open-detail"]');
+  await page.click('[data-testid="model-store-open-detail"]');
+  const more = await page.$('[data-testid="model-store-detail-more"]');
+  if (more) await page.click('[data-testid="model-store-detail-more"]');
+  await page.waitForSelector('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
+  await page.click('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
   await page.waitForSelector('[data-testid="model-store-uninstall-keep"]');
   await page.click('[data-testid="model-store-uninstall-keep"]');
   await page.waitForFunction(() => window.cleanupFinished);
@@ -582,7 +594,17 @@ try {
     const createRoot = client.createRoot || client.default?.createRoot;
     const root = createRoot(document.getElementById('root'));
     const records = ['alpha', 'beta'].map((id) => ({ card_id: id, card_name: id,
-      model_name: id, status: 'deployed', running: false, size_bytes: 128, deploy_topology: 'single' }));
+      model_name: id, status: 'deployed', running: false, size_bytes: 128, deploy_topology: 'single',
+      weights_ready_at: '2026-10-01T00:00:00Z' }));
+    const detailByCard = new Map(records.map((r) => [r.card_id, r]));
+    const modelDetailMock = (cmd, payload) => {
+      if (cmd === 'model_store_model_detail') {
+        const record = detailByCard.get(payload?.cardId);
+        return record ? { record } : undefined;
+      }
+      if (cmd === 'model_store_api_keys') return [];
+      return undefined;
+    };
     const completed = new Map();
     const pending = new Map();
     let serial = 0;
@@ -608,8 +630,9 @@ try {
         window.versionLibraryLoads += 1;
         return { models: records, corrected: [] };
       }
+      const detail = modelDetailMock(command, payload);
+      if (detail !== undefined) return detail;
       if (command === 'list_models') return { models: [] };
-      if (command === 'model_store_test_store_state') return { enabled: false };
       if (command === 'model_store_take_startup_cleanup') return null;
       if (command === 'model_store_check_card_update') return { changed: true, revision: 'new',
         compatibility: { kind: 'weights_changed', can_stage: true, can_update: false } };
@@ -718,7 +741,13 @@ try {
   assert.deepEqual(await page.$$eval('[data-testid="model-version-cleanup-result"] li',
     (items) => items.map((item) => item.textContent)), ['/beta/retained.weights']);
   const beginForceRemove = async (cardId) => {
-    await page.click(`[data-card-id="${cardId}"] [data-testid="model-store-uninstall"]`);
+    // 合并后行卡无卸载按钮：先开该卡详情，再走弹窗卸载入口。
+    await page.click(`[data-card-id="${cardId}"] [data-testid="model-store-open-detail"]`);
+    // 卸载在部分态下是收进「更多」菜单的次要动作（11-16 反馈③）：先开菜单。
+    const more = await page.$('[data-testid="model-store-detail-more"]');
+    if (more) await page.click('[data-testid="model-store-detail-more"]');
+    await page.waitForSelector('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
+    await page.click('[data-testid="model-store-detail-action-uninstall"], [data-testid="model-store-detail-secondary-uninstall"]');
     await page.waitForSelector('[data-testid="model-store-uninstall-keep"]');
     await page.click('[data-testid="model-store-uninstall-keep"]');
     await page.waitForSelector('[data-testid="model-store-task-force-remove"]');
@@ -859,7 +888,7 @@ try {
     const root = createRoot(document.getElementById('root'));
     const record = { card_id: 'isolated-card', card_name: 'Test', model_name: 'old-wire',
       endpoint_model: 'old-wire', endpoint_url: 'http://127.0.0.1:8911/v1',
-      running: true, status: 'deployed' };
+      running: true, status: 'deployed', weights_ready_at: '2026-10-01T00:00:00Z' };
     window.savedDetailPayloads = [];
     window.detailActiveCalls = 0;
     window.detailToast = null;
