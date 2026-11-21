@@ -395,6 +395,14 @@ fn value_looks_secret(value: &str) -> bool {
 /// Authorization:basic dXNlcjpwYXNz… https://x`）——补设 redact_next，与
 /// Value 臂的 scheme 链同语义。scheme 判据带名字门：`X-Custom:basic` 后面跟
 /// 的多半是 URL 而不是凭据，无名字门会把下一个参数误吞。
+/// r45 P1-2：cookie 族名字的单一判定谓词——空值冒号臂 / -H Name 臂（冒号与
+/// 等号两形态）/ eq 臂 / push_header_colon_value 五处共用。此前各臂各写一份
+/// 名单，「每次加名漏一处」同族教训第五次复发（r29→r32→r43→r44→本次）：
+/// Set-Cookie 在三个臂里全缺席。
+fn header_name_is_cookie_family(bare_name: &str) -> bool {
+    bare_name.eq_ignore_ascii_case("cookie") || bare_name.eq_ignore_ascii_case("set-cookie")
+}
+
 fn push_header_colon_value(
     name: &str,
     value: &str,
@@ -410,8 +418,7 @@ fn push_header_colon_value(
         name.trim_matches(|c: char| matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | ','));
     let is_auth = bare_name.eq_ignore_ascii_case("authorization")
         || bare_name.eq_ignore_ascii_case("proxy-authorization");
-    let is_cookie =
-        bare_name.eq_ignore_ascii_case("cookie") || bare_name.eq_ignore_ascii_case("set-cookie");
+    let is_cookie = header_name_is_cookie_family(bare_name);
     // r44 P2-3：trim 集补反斜杠——转义引号形态（`\"Bearer`）不剥则 scheme
     // 判定失配、redact_next 不置位，凭据词裸落（磁盘+导出同漏）。
     let scheme = value.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | '\\'));
@@ -435,7 +442,7 @@ fn push_header_colon_value(
 /// 机密键判据 = query 表 ∪ key 表：r29 P1-1 只换 query 单表，漏掉了 SigV4 三员
 /// 里只在 key 表的 credential / security-token。命中写入 `名=[REDACTED]` 并返回
 /// true；无 `=` / 值空 / 键不机密返回 false（调用方走透传 + 等值）。
-fn push_header_equals_spec(spec: &str, out: &mut String) -> bool {
+fn push_header_equals_spec(spec: &str, out: &mut String, cookie_rest: &mut bool) -> bool {
     let Some((name, value)) = spec.split_once('=') else {
         return false;
     };
@@ -444,11 +451,16 @@ fn push_header_equals_spec(spec: &str, out: &mut String) -> bool {
     if !bare_value.is_empty()
         && (query_key_is_secret(bare_name)
             || key_is_secret(bare_name)
-            || bare_name.eq_ignore_ascii_case("cookie"))
+            || header_name_is_cookie_family(bare_name))
     {
         out.push_str(name);
         out.push('=');
         out.push_str(REDACTED);
+        // r45 P1-2：`-H 'Cookie=a=1; session=y'` 紧凑等号黏连形态——值是分号
+        // 多对且键名不在机密名单，该路径此前不置 cookie_rest，第二对起裸落。
+        if header_name_is_cookie_family(bare_name) {
+            *cookie_rest = true;
+        }
         true
     } else {
         false
@@ -714,13 +726,11 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
                 Some((name, _)) => {
                     out.push_str(name);
                     out.push(':');
-                    // r43 P1-2：Cookie 头（`-H 'Cookie: a=1; SID=…'）——值是分号
-                    // 多对且键名不在机密名单（SID/theme…），两段式 Value 臂抹一个
-                    // 词就收口会漏第二对。cookie_rest 把本行剩余词全抹（行末清）。
-                    if name
-                        .trim_matches(['"', '\''])
-                        .eq_ignore_ascii_case("cookie")
-                    {
+                    // r43 P1-2 + r45 P1-2：Cookie/Set-Cookie 头（`-H 'Cookie: a=1;
+                    // SID=…'）——值是分号多对且键名不在机密名单，两段式 Value
+                    // 臂抹一个词就收口会漏第二对。cookie_rest 把本行剩余词全抹
+                    // （行末清）。谓词统一走 header_name_is_cookie_family。
+                    if header_name_is_cookie_family(name.trim_matches(['"', '\''])) {
                         cookie_rest = true;
                     } else {
                         header_expect = Some(HeaderExpect::Value);
@@ -728,19 +738,19 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
                 }
                 None => {
                     // r30 P1-1/P1-3：`= `形态统一走 helper（三表并集 + 引号 trim）。
-                    // r43 P1-2：Cookie 的 `= ` 形态（-H 'Cookie=theme=…'）——值是
-                    // 分号多对，整段进 cookie_rest（折行延续同抹）。
+                    // r43 P1-2 + r45 P1-2：Cookie/Set-Cookie 的 `= ` 形态——值是
+                    // 分号多对，整段进 cookie_rest。谓词同源。
                     let is_cookie_eq = trimmed
                         .trim_matches(['"', '\''])
                         .split_once('=')
                         .is_some_and(|(n, _)| {
-                            n.trim_matches(['"', '\'']).eq_ignore_ascii_case("cookie")
+                            header_name_is_cookie_family(n.trim_matches(['"', '\'']))
                         });
                     if is_cookie_eq {
                         out.push_str(trimmed);
                         out.push_str(REDACTED);
                         cookie_rest = true;
-                    } else if !push_header_equals_spec(trimmed, &mut out) {
+                    } else if !push_header_equals_spec(trimmed, &mut out, &mut cookie_rest) {
                         out.push_str(trimmed);
                         header_expect = Some(HeaderExpect::Value);
                     }
@@ -826,6 +836,15 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
                 // 吃掉、真凭据漏网（P2-09 陷阱）。转 auth_pending（scheme 感知）。
                 if is_authorization_glued_name(name) {
                     auth_pending = true;
+                } else if header_name_is_cookie_family(name.trim_matches(|c: char| {
+                    matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | ',')
+                })) {
+                    // r45 P1-2：`> Set-Cookie: SID=x; session=y`（curl -v 回显等
+                    // 非 -H 语境的空值冒号形态）——值在下一词且是分号多对，单发
+                    // redact_next 只抹第一段，第二对起原样落盘（含导出侧）。
+                    // r44 提交曾声称修复此处但 diff 只落在非空值路径（评审实证）；
+                    // 本轮谓词统一后此臂与其它臂共用同一份名单。
+                    cookie_rest = true;
                 } else {
                     redact_next = true;
                 }
@@ -866,7 +885,7 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
                             );
                         }
                         _ => {
-                            if !push_header_equals_spec(rest, &mut out) {
+                            if !push_header_equals_spec(rest, &mut out, &mut cookie_rest) {
                                 out.push_str(rest);
                                 header_expect = Some(HeaderExpect::Value);
                             }
@@ -1430,6 +1449,33 @@ mod tests {
 
     /// r43 P1-2：三种泄漏形态的对抗用例——断言**原值不落盘**（对齐本模块既有
     /// 风格），外加跨行悬置态的接续与 Cookie 行末终止语义。
+    /// r45 P1-2：Cookie/Set-Cookie 四形态对抗——评审实证 r44 修复只覆盖了最罕见
+    /// 的紧凑黏连形态。session=y 是不在任何名单、无前缀、15 字符的裸键负控
+    /// （证明泄漏真实性的口径），四形态下它都不得存活；普通头不受影响。
+    #[test]
+    fn disk_sanitizer_blocks_r45_cookie_four_forms() {
+        let forms = [
+            // curl -v 回显（空值冒号+空格，非 -H 语境）
+            "> Set-Cookie: SID=x; session=y",
+            // -H 两段式 Name 臂冒号形态
+            "curl -H 'Set-Cookie: SID=x; session=y' https://x.example/api",
+            // -H 两段式 Name 臂等号形态
+            "curl -H 'Set-Cookie=SID=x; session=y' https://x.example/api",
+            // -H 紧凑黏连（r44 已修的形态，回归钉）
+            "curl -H 'Cookie: SID=x;session=y' https://x.example/api",
+        ];
+        for line in forms {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("session=y"),
+                "Cookie 多对泄漏（r45 四形态之一）: {line} -> {cleaned}"
+            );
+        }
+        // 负控的边界：非 cookie 头的多对参数不受整段抹牵连。
+        let plain = sanitize_for_disk("curl -H 'Accept: text/html; q=0.9' https://x.example/api");
+        assert!(plain.contains("https://x.example/api"), "过抹越界: {plain}");
+    }
+
     #[test]
     fn disk_sanitizer_blocks_r43_leak_forms() {
         // ① 紧凑 JSON：Bearer 后的真凭据不得存活（此前 `{"Authorization` 的

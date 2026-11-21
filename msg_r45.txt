@@ -1,0 +1,18 @@
+fix(model-store): r45 处置——存量 deployed 卡回填迁移 + Cookie 谓词统一五臂
+
+P1-1（升级存量卡三门死锁）：init_db 迁移对 status='deployed' 且
+weights_ready_at IS NULL 的存量行回填迁移时刻——能到 deployed 的卡
+历史上必然通过过部署脚本的权重校验（老流程部署即校验），回填即恢复
+「已部署」完整语义，前端 libraryStateOf 不再降级 incomplete，下载门/
+部署门/stale 门互指环解除。incomplete/cleanup_required 不回填（本来就
+缺凭据）。行为测试 legacy_deployed_rows_get_weights_ready_at_backfilled_on_reopen
+钉住（抹空后重开 init_db 验证回填+incomplete 不动）。
+
+P1-2（Cookie 声明与代码不符）：承认 r44 提交确实只落在非空值路径（过程
+失误，道歉）。本轮收敛为单一谓词 header_name_is_cookie_family，五处
+共用：空值冒号臂（本轮真正补上 cookie 分支置 cookie_rest）/-H Name 臂
+冒号形态/-H Name 臂等号形态/push_header_equals_spec（并补 cookie_rest
+置位——紧凑等号黏连形态第二对起不再漏）/push_header_colon_value。
+四形态对抗测试 disk_sanitizer_blocks_r45_cookie_four_forms（curl -v
+回显/-H 冒号/-H 等号/-H 黏连，session=y 裸键负控+Accept 头不受牵连的
+边界钉）。模块 40/40 绿（容器实跑）。

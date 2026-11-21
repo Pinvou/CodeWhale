@@ -363,6 +363,17 @@ pub fn init_db() -> rusqlite::Result<()> {
     // 顺序要紧：先把缺的列补齐（老表可能还没有 docker_image），再重建主键，
     // 否则搬数据那句 SELECT 会因为列不存在而失败。
     migrate_engine_primary_key(&conn)?;
+    // r45 P1-1：weights_ready_at 是本 PR 新列，存量行一律 NULL——而前端
+    // libraryStateOf 对 NULL 判 incomplete、下载门按裸 status 拒、部署门又指回
+    // 「继续下载」，三门互指成环，升级设备的每张存量已部署卡死锁。对
+    // `status='deployed'` 的存量行回填：能部署到这个状态的卡，历史上必然通过
+    // 过一次部署脚本的权重校验（老流程里部署即校验），回填为迁移时刻即恢复
+    // 「已部署」的完整语义。incomplete/cleanup_required 不动（它们本来就缺凭据）。
+    let _ = conn.execute(
+        "UPDATE store_models SET weights_ready_at = ?1 \
+         WHERE status = 'deployed' AND weights_ready_at IS NULL",
+        params![chrono::Utc::now().to_rfc3339()],
+    );
     Ok(())
 }
 
@@ -1957,6 +1968,58 @@ mod tests {
         let home = config::TempHome::new();
         init_db().unwrap();
         home
+    }
+
+    /// r45 P1-1：升级库形态的行为测试——存量行 `deployed` + `weights_ready_at`
+    /// NULL（新列迁移对存量行不回填的旧缺陷形态），再次 init_db 后必须回填，
+    /// 前端 libraryStateOf 据此不再降级 incomplete（三门死锁解环的落点）。
+    /// incomplete 行不回填（本来就缺凭据）。
+    #[test]
+    fn legacy_deployed_rows_get_weights_ready_at_backfilled_on_reopen() {
+        let _ctx = setup_temp_db();
+        // 造两条存量形态行：deployed+NULL（升级库）与 incomplete+NULL（真实缺凭据）。
+        for (card_id, status) in [("legacy-deployed", "deployed"), ("legacy-partial", "incomplete")] {
+            db_add_row_for_backfill_test(card_id, status);
+        }
+        // 手动抹掉回填（模拟「列刚加上、迁移还没跑」的升级库形态）。
+        connect()
+            .unwrap()
+            .execute("UPDATE store_models SET weights_ready_at = NULL", [])
+            .unwrap();
+        // 再次 init_db（= 应用升级后的下一次启动）触发回填。
+        init_db().unwrap();
+        let deployed = get_store_model("legacy-deployed").unwrap().unwrap();
+        assert!(
+            deployed.weights_ready_at.is_some(),
+            "存量 deployed 行必须回填 weights_ready_at（r45 P1-1 死锁解环）"
+        );
+        let partial = get_store_model("legacy-partial").unwrap().unwrap();
+        assert!(
+            partial.weights_ready_at.is_none(),
+            "incomplete 行不回填——它们本来就缺凭据"
+        );
+    }
+
+    fn db_add_row_for_backfill_test(card_id: &str, status: &str) {
+        add_store_model(AddStoreModelParams {
+            card_id,
+            model_name: card_id,
+            card_name: card_id,
+            org: None,
+            description: None,
+            engine_name: "vllm",
+            engine_version: None,
+            size_bytes: 1,
+            quantization: None,
+            source_repo_id: None,
+            source_filename: None,
+            scripts: &Default::default(),
+            status,
+            profiles: &[],
+            deploy_topology: DeployTopology::Single,
+            card_source: "store",
+        })
+        .unwrap();
     }
 
     /// 连接必须是 WAL 模式。回滚日志模式下写阻塞读，而这个库的常态就是
