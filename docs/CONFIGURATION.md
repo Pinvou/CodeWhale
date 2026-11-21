@@ -768,6 +768,12 @@ schema and ship without the strict flag, so they stay callable non-strict.
 `required` on an in-scope route even when some tools fail closed. The child
 sub-agent surface requests with `auto` regardless.
 
+Tools that stay strict but lose per-action parameters carry a note naming
+what stopped working: `todo_write` writes every item pending (the item
+`status` is removed), and `start_registry_mcp_server` cannot start a
+registry whose servers declare required launch arguments (`arguments` is
+removed).
+
 The setting is inert on every other route (third-party gateways, OpenAI
 wires, non-official hosts): their schemas ship unchanged, because the
 reshaping follows DeepSeek's documents and would strip keywords other

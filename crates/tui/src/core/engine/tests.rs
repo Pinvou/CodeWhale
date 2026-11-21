@@ -36793,7 +36793,9 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
             "retrieve_tool_result",
             "Run",
             "task_shell_wait",
-            "read_media"
+            "read_media",
+            "todo_write",
+            "start_registry_mcp_server"
         ],
         "STRICT_REMOVAL_CONTEXT_NOTES drifted from the census manifest — \
          add the tool here AND a context-note entry in the constant, with \
@@ -36807,6 +36809,13 @@ async fn strict_mode_full_catalog_census_pins_every_removal() {
             {
                 // Registered only when the binary exists on this host;
                 // the sentence is pinned on hosts that have it.
+                continue;
+            }
+            None if *name == "start_registry_mcp_server" => {
+                // Registered only when the engine carries an MCP pool (the
+                // launcher starts cached stdio candidates through it); this
+                // pool-less fixture has none, so the sentence is pinned by
+                // the tool's own real-schema test beside its definition.
                 continue;
             }
             None => panic!(

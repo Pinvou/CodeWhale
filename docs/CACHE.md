@@ -104,16 +104,16 @@ effect here per that rule: it is **frozen-prefix-compatible**. The removal
 note appended to a tool's description is a deterministic pure function of the
 pinned catalog and the route, so on a stable strict route the tools bytes are
 identical every step; the shaping runs on a per-request clone and never
-mutates the registry. Provider and token-budget changes re-pin through the
-header changes the header set actually declares (`change:model` for the
-resolved model, `change:route` for a re-planned route); provider identity by
-itself is not a declared header field today. A flip that
-changes the gate's verdict — official host ↔ foreign host, a padded URL, or a
-provider retype — changes the shaped tool bytes and surfaces as undeclared
-drift unless another pending change masks it; a flip inside the same scope
-(the canonical beta ↔ non-beta path) leaves the shaped bytes identical and
-produces no drift at all. When moving endpoints, prefer a change the header
-set can name.
+mutates the registry. Declared change fields cover provider identity
+(`change:provider`), the token budget (with the goal objective, as
+`change:goal`), the resolved model (`change:model`), and a re-planned route
+(`change:route`). A flip that changes the gate's verdict — official host ↔
+foreign host, a padded URL, or a provider retype — changes the shaped tool
+bytes: when one of those declared fields moved with the flip, the pin
+re-declares through it; only a flip no declared field moved with surfaces as
+undeclared drift. A flip inside the same scope (the canonical beta ↔ non-beta
+path) leaves the shaped bytes identical and produces no drift at all. When
+moving endpoints, prefer a change the header set can name.
 
 ## Permissions fragment budget compatibility
 

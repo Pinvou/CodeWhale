@@ -185,6 +185,18 @@ pub(crate) const STRICT_REMOVAL_CONTEXT_NOTES: &[(&str, &str)] = &[
          unavailable: `crop` and `detail` are no longer accepted, so the \
          full image is returned at the default detail.",
     ),
+    (
+        "todo_write",
+        "In strict mode item statuses are unavailable: `status` is no longer \
+         accepted on list items, so every written item is created pending — \
+         track progress outside strict mode.",
+    ),
+    (
+        "start_registry_mcp_server",
+        "In strict mode `arguments` is no longer accepted, so a registry \
+         whose servers declare required launch arguments cannot be started; \
+         registries without required arguments still start.",
+    ),
 ];
 
 /// Cap for the removal note. Names are schema-controlled (hostile MCP
@@ -640,7 +652,17 @@ fn strict_schema_supported(schema: &Value) -> Option<(Value, Vec<String>, usize)
     // an occurrence, so the cache is what keeps a long chain from costing
     // its length once per link.
     let mut ref_chain_cache = std::collections::HashMap::new();
-    if has_unresolvable_ref(&normalized, &normalized, &mut ref_chain_cache) {
+    let mut ref_edges = Vec::new();
+    if has_unresolvable_ref(
+        &normalized,
+        &normalized,
+        &mut ref_chain_cache,
+        "",
+        &mut ref_edges,
+    ) {
+        return None;
+    }
+    if has_structural_ref_cycle(&ref_edges) {
         return None;
     }
     // The strict documents describe `parameters` as an object schema, so
@@ -1057,10 +1079,22 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
                 // enforce pass makes the instance exactly this member, so
                 // an `enum` admitting only `{"a": 1}` beside a required
                 // `a: string` property admits nothing — the same
-                // no-satisfiable-value family as the bounds arms.
+                // no-satisfiable-value family as the bounds arms. The scan
+                // is bounded by the same caps the pair judge draws (256
+                // members, 4 KB serialized): an unbounded member scan per
+                // object node per request let a hostile enum park
+                // seconds of regex compiles on the per-request path, so
+                // past the caps the judgment abstains compatible — the
+                // same hostile-input line the pair judge draws. Within
+                // the caps the property patterns compile once per node,
+                // not once per member.
+                if !enum_members_within_judge_cap(members) {
+                    return false;
+                }
+                let property_patterns = compiled_property_patterns(obj);
                 !members.iter().any(|member| {
                     value_clears_bounds_with(member, obj, node_pattern.as_ref())
-                        && pinned_object_value_compatible(member, obj)
+                        && pinned_object_value_compatible_with(member, obj, &property_patterns)
                 })
             })
         {
@@ -1403,6 +1437,17 @@ fn compiled_documented_pattern(obj: &Map<String, Value>) -> Option<regex::Regex>
     if pattern.len() > 4_096 {
         return None;
     }
+    // Regex-dialect drift the judge cannot paper over: a case-insensitive
+    // flag folds Unicode case Rust-side where ECMA-262's Canonicalize does
+    // not (the KELVIN SIGN matches `(?i)k` here but not on the wire), and
+    // the word-boundary escapes use Rust's Unicode word definition where
+    // ECMA-262 is ASCII-only (`\béfoo` judges violating for a value the
+    // wire's `\b` matches). Both decide members differently than the wire,
+    // so the judge abstains and lets the pattern bind there alone — the
+    // same line the ECMA-only spellings draw.
+    if pattern.contains("(?i") || pattern.contains("\\b") || pattern.contains("\\B") {
+        return None;
+    }
     regex::Regex::new(pattern).ok()
 }
 
@@ -1704,6 +1749,42 @@ const ENUM_PAIR_MEMBER_CAP: usize = 256;
 /// `a: string` property admits no instance, and only the leaf comparison
 /// sees it.
 fn pinned_object_value_compatible(member: &Value, other: &Map<String, Value>) -> bool {
+    let property_patterns = compiled_property_patterns(other);
+    pinned_object_value_compatible_with(member, other, &property_patterns)
+}
+
+/// The compiled `pattern` judge for every property schema of one side,
+/// built once per scan: the per-member judgment below reads these instead
+/// of recompiling per member × per key, which let a hostile-but-cap-compliant
+/// enum (256 object members, total serialized size within the byte cap)
+/// pay up to member-count × regex-compile per pair call, and the node-level
+/// enum arm — which has no member cap of its own — pay it per node per
+/// request with no bound at all (measured 30-40 s for 2,000 members beside
+/// a 17-char nested-quantifier pattern before the hoist).
+fn compiled_property_patterns(
+    other: &Map<String, Value>,
+) -> std::collections::BTreeMap<String, Option<regex::Regex>> {
+    other
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| {
+            properties
+                .iter()
+                .filter_map(|(name, schema)| {
+                    schema
+                        .as_object()
+                        .map(|schema| (name.clone(), compiled_documented_pattern(schema)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn pinned_object_value_compatible_with(
+    member: &Value,
+    other: &Map<String, Value>,
+    property_patterns: &std::collections::BTreeMap<String, Option<regex::Regex>>,
+) -> bool {
     let Some(member_obj) = member.as_object() else {
         return true;
     };
@@ -1727,8 +1808,34 @@ fn pinned_object_value_compatible(member: &Value, other: &Map<String, Value>) ->
             .get(key)
             .and_then(Value::as_object)
             .is_none_or(|property_schema| {
-                let pattern = compiled_documented_pattern(property_schema);
-                value_clears_bounds_with(member_value, property_schema, pattern.as_ref())
+                // The property's own pins bind the carried value: an `enum`
+                // admitting only `{"a": "y"}` beside a node pinning
+                // `{"a": "x"}` admits no instance, and only the leaf
+                // comparison sees it. Past the membership caps the pin
+                // judgment abstains compatible — the same hostile-input
+                // line the enum arms draw. (Nested instance recursion — a
+                // pin whose members are themselves objects judged against
+                // deeper property schemas — stays the disclosed line.)
+                if let Some(const_value) = property_schema.get("const")
+                    && !pinned_values_equal(member_value, const_value)
+                {
+                    return false;
+                }
+                if let Some(members) = property_schema.get("enum").and_then(Value::as_array)
+                    && enum_members_within_judge_cap(members)
+                    && !members
+                        .iter()
+                        .any(|candidate| pinned_values_equal(candidate, member_value))
+                {
+                    return false;
+                }
+                // The map was built from this same `other` side's property
+                // schemas, and the arm above already checked the schema is an
+                // object, so the key is always present here.
+                let pattern = property_patterns
+                    .get(key)
+                    .and_then(|compiled| compiled.as_ref());
+                value_clears_bounds_with(member_value, property_schema, pattern)
             })
     })
 }
@@ -1818,21 +1925,45 @@ fn schema_pair_satisfiable(
         if alternatives.len() > ANYOF_PAIR_ALTERNATIVE_CAP {
             return true;
         }
+        // The sibling is the wrapper with `anyOf` removed; a bare wrapper has
+        // none. The witness must be judged JOINTLY: the instance satisfies
+        // some alternative AND the sibling keywords at once, so each
+        // alternative is judged against the other side AND against the
+        // sibling. Judging the halves separately — the witness through the
+        // alternatives alone, then the sibling against the other side —
+        // missed a wrapper whose sibling contradicts its OWN alternatives
+        // (`enum: ["a"]` beside `anyOf: [{"enum": ["b"]}]`, or the const
+        // twins): both halves compatible with a permissive other side while
+        // the conjunction admits no instance, and the union shipped strict
+        // callable by nothing. Each per-alternative judgment is a necessary
+        // condition for the joint satisfiability, and the pair judge returns
+        // false only on provable contradictions, so the conjunction cannot
+        // fail a satisfiable union: a compatible alternative that also clears
+        // the sibling still witnesses, and an incompatible one was never a
+        // witness at all.
+        let wrapper_obj = wrapper.as_object().expect("wrapper comes from a_obj/b_obj");
+        let sibling = if wrapper_obj.len() == 1 {
+            None
+        } else {
+            let mut sibling = wrapper.clone();
+            sibling
+                .as_object_mut()
+                .expect("checked above")
+                .remove("anyOf");
+            Some(sibling)
+        };
         let witness = alternatives.iter().any(|alternative| {
             schema_pair_satisfiable(alternative, other, root, depth + 1, &mut *budget)
+                && sibling.as_ref().is_none_or(|sibling| {
+                    schema_pair_satisfiable(alternative, sibling, root, depth + 1, &mut *budget)
+                })
         });
         if !witness {
             return false;
         }
-        let wrapper_obj = wrapper.as_object().expect("wrapper comes from a_obj/b_obj");
-        if wrapper_obj.len() == 1 {
+        let Some(sibling) = sibling else {
             return true;
-        }
-        let mut sibling = wrapper.clone();
-        sibling
-            .as_object_mut()
-            .expect("checked above")
-            .remove("anyOf");
+        };
         return schema_pair_satisfiable(&sibling, other, root, depth + 1, budget);
     }
     // Declared types: two disjoint string spellings admit no common value
@@ -1931,13 +2062,17 @@ fn schema_pair_satisfiable(
             {
                 return false;
             }
-            if enum_members_within_judge_cap(members)
-                && !members.iter().any(|member| {
+            if enum_members_within_judge_cap(members) {
+                // The property patterns compile once per pair call, not
+                // once per member × per key — the same hoist the node-level
+                // arm draws.
+                let property_patterns = compiled_property_patterns(other);
+                if !members.iter().any(|member| {
                     value_clears_bounds_with(member, other, other_pattern)
-                        && pinned_object_value_compatible(member, other)
-                })
-            {
-                return false;
+                        && pinned_object_value_compatible_with(member, other, &property_patterns)
+                }) {
+                    return false;
+                }
             }
         }
     }
@@ -2060,12 +2195,20 @@ fn has_unresolvable_ref(
     schema: &Value,
     root: &Value,
     chain_cache: &mut std::collections::HashMap<String, bool>,
+    site_path: &str,
+    edges: &mut Vec<(String, String)>,
 ) -> bool {
     let Some(obj) = schema.as_object() else {
         return schema.as_array().is_some_and(|values| {
-            values
-                .iter()
-                .any(|value| has_unresolvable_ref(value, root, chain_cache))
+            values.iter().enumerate().any(|(index, value)| {
+                has_unresolvable_ref(
+                    value,
+                    root,
+                    chain_cache,
+                    &format!("{site_path}/{}", escape_pointer_token(&index.to_string())),
+                    edges,
+                )
+            })
         });
     };
     if let Some(reference) = obj.get("$ref") {
@@ -2104,6 +2247,23 @@ fn has_unresolvable_ref(
         if !target_is_object || ref_targets_name_map(pointer) {
             return true;
         }
+        // A chain that hops to the site itself or one of its ancestors is a
+        // structural cycle no validator can expand: every individual chain
+        // resolves and terminates (the checks above pass), but the terminal
+        // stands for a subtree that contains the site again, so expansion
+        // re-enters the site forever — the documented server error under a
+        // strict flag, the same no-satisfiable-expansion class the chain-loop
+        // walk fails closed one branch up.
+        // Record the expansion edge (site path → chain-terminal pointer)
+        // for the document-level cycle check `strict_schema_supported` runs
+        // after this walk: a chain that hops to the site itself or one of
+        // its ancestors is a structural cycle, and so is any cycle the
+        // reference GRAPH closes across sites (mutual `$defs` recursion
+        // closes a loop no individual chain walk can see — every chain
+        // resolves and terminates while the expansion never does).
+        if let Some(terminal) = ref_chain_terminal_pointer(root, pointer) {
+            edges.push((site_path.to_string(), terminal));
+        }
     }
     for (key, value) in obj {
         if STRICT_NAME_MAP_KEYS.contains(&key.as_str()) {
@@ -2114,16 +2274,32 @@ fn has_unresolvable_ref(
             // ship under a strict flag — the round-8 bug class, recurred
             // in the newest walker.
             if value.as_object().is_some_and(|named_schemas| {
-                named_schemas
-                    .values()
-                    .any(|named_schema| has_unresolvable_ref(named_schema, root, chain_cache))
+                named_schemas.iter().any(|(named_key, named_schema)| {
+                    has_unresolvable_ref(
+                        named_schema,
+                        root,
+                        chain_cache,
+                        &format!(
+                            "{site_path}/{}/{}",
+                            escape_pointer_token(key),
+                            escape_pointer_token(named_key)
+                        ),
+                        edges,
+                    )
+                })
             }) {
                 return true;
             }
         } else if STRICT_LITERAL_KEYS.contains(&key.as_str()) {
             // Literal-keyword values are data: an enum member shaped like a
             // `{"$ref": …}` object is a value to ship, not a reference.
-        } else if has_unresolvable_ref(value, root, chain_cache) {
+        } else if has_unresolvable_ref(
+            value,
+            root,
+            chain_cache,
+            &format!("{site_path}/{}", escape_pointer_token(key)),
+            edges,
+        ) {
             return true;
         }
     }
@@ -2186,6 +2362,104 @@ fn resolve_local_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> 
 /// set is keyed on the reference string, so a diamond (two references
 /// reaching one definition) stays fine. The terminal node is returned
 /// whatever it is — the caller judges whether it is a schema form.
+/// Escape one JSON-pointer token the way RFC 6901 spells it: `~` as `~0`,
+/// `/` as `~1`. The ancestor-cycle comparison compares escaped segments on
+/// both sides — the walk builds site paths with this, and an author-written
+/// `$ref` addressing a key containing `~` or `/` is already escaped.
+fn escape_pointer_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
+/// The pointer of the node a `$ref` chain terminates at — the last hop's
+/// own text — or `None` for a chain the walk above already fails closed
+/// (dangling, malformed, looping, past the hop cap).
+fn ref_chain_terminal_pointer(root: &Value, start: &str) -> Option<String> {
+    let mut visited = std::collections::HashSet::new();
+    let mut current = start.to_string();
+    loop {
+        if !visited.insert(current.clone()) || visited.len() > STRICT_REF_MAX_HOPS {
+            return None;
+        }
+        let target = resolve_local_ref(root, &current)?;
+        match target.get("$ref").and_then(Value::as_str) {
+            Some(next) => current = next.to_string(),
+            // Normalize to the walk's path convention: no leading `#`, the
+            // root pointer is the empty string — the same spelling the site
+            // paths the walk builds use, so the cycle graph can connect a
+            // terminal to the sites inside its subtree.
+            None => {
+                return Some(
+                    current
+                        .strip_prefix('#')
+                        .map(str::to_string)
+                        .unwrap_or(current),
+                );
+            }
+        }
+    }
+}
+
+/// Whether the document's reference GRAPH closes an expansion cycle — a
+/// structural loop no individual chain walk can see. Every chain here is
+/// loop-free and resolves (the reference walk passed), but a site's
+/// expansion pulls in its terminal's subtree, and subtrees contain further
+/// sites: mutual `$defs` recursion (`A → B → A` through properties) closes
+/// a loop entirely across sites, and expansion never terminates — every
+/// strict call is the documented server error. The edges the walk collected
+/// (one per `$ref` site: site path → chain-terminal pointer) become
+/// dependence edges from every ancestor-or-self of the site to the
+/// terminal, and a cycle in that graph is exactly an expansion that
+/// re-expands its own input; each edge is a genuine containment
+/// requirement, so the check has no false cycle. Nodes are escaped
+/// JSON-pointer paths, bounded by the walk's parse-inherited depth.
+fn has_structural_ref_cycle(edges: &[(String, String)]) -> bool {
+    use std::collections::{HashMap, HashSet};
+    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+    for (site, terminal) in edges {
+        // The root contains every site: its expansion pulls each terminal in.
+        graph
+            .entry(String::new())
+            .or_default()
+            .push(terminal.clone());
+        let mut prefix = String::new();
+        for segment in site.split('/').skip(1) {
+            prefix.push('/');
+            prefix.push_str(segment);
+            graph
+                .entry(prefix.clone())
+                .or_default()
+                .push(terminal.clone());
+        }
+    }
+    fn visits_cycle(
+        node: &str,
+        graph: &HashMap<String, Vec<String>>,
+        visiting: &mut HashSet<String>,
+        settled: &mut HashSet<String>,
+    ) -> bool {
+        if settled.contains(node) {
+            return false;
+        }
+        if !visiting.insert(node.to_string()) {
+            return true;
+        }
+        if let Some(targets) = graph.get(node) {
+            for target in targets {
+                if visits_cycle(target, graph, visiting, settled) {
+                    return true;
+                }
+            }
+        }
+        visiting.remove(node);
+        settled.insert(node.to_string());
+        false
+    }
+    let roots: Vec<String> = graph.keys().cloned().collect();
+    roots
+        .iter()
+        .any(|node| visits_cycle(node, &graph, &mut HashSet::new(), &mut HashSet::new()))
+}
+
 fn ref_chain_target<'a>(root: &'a Value, start: &str) -> Option<&'a Value> {
     let mut visited = std::collections::HashSet::new();
     let mut reference = start;
@@ -2299,6 +2573,15 @@ fn collapse_single_element_unions(schema: &mut Value) {
                 .is_some_and(|parent| parent != v && !is_empty_container(parent))
         });
         if collides {
+            // Keeping the keyword is the lossless choice for strict mode —
+            // but it is not free on the sibling paths: the Moonshot MFJS
+            // validator rejects a nested `allOf`/`oneOf` outright
+            // (`UnsupportedNestedAllOf`/`ConflictingNestedUnion`), and base
+            // used to merge the colliding single-element branch away, so a
+            // schema that shipped on Moonshot before this guard now drops
+            // from every Moonshot request (`omitted_tool_names`). The
+            // direction is fail-closed and the shape is exotic; disclosed
+            // in the PR body rather than re-merged lossily here.
             continue;
         }
         obj.remove(key);
@@ -2454,7 +2737,17 @@ fn strip_unsupported_strict_keywords(obj: &mut Map<String, Value>) -> usize {
             let disjoint = obj
                 .get("enum")
                 .and_then(Value::as_array)
-                .is_some_and(|members| !members.contains(&const_value));
+                .is_some_and(|members| {
+                    // JSON Schema's single number type: `2` and `2.0` are the
+                    // same value, so the containment test must read them as
+                    // equal. The derived `Value` equality split the spellings
+                    // and dropped a const its enum actually contains — a
+                    // needless widening whose note claimed a disagreement
+                    // that does not exist.
+                    !members
+                        .iter()
+                        .any(|member| pinned_values_equal(member, &const_value))
+                });
             if !disjoint {
                 obj.insert("const".into(), const_value);
             } else {
@@ -8636,6 +8929,349 @@ mod tests {
         );
         assert_eq!(tool.strict, None);
         assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_fails_a_union_closed_when_the_wrapper_conflicts_with_its_own_alternatives() {
+        // Round-20 witness: the wrapper `enum: ["a"]` beside `anyOf:
+        // [{"enum": ["b"]}]` admits no instance — the sibling contradicts
+        // its OWN alternatives, both halves sit on one side of the OR, and
+        // a chase that judges the halves separately (each against the
+        // other side) finds a witness for both. The union must fail
+        // closed: every strict call would be the documented server error.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "u": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"enum": ["a"], "anyOf": [{"enum": ["b"]}]},
+                            "y": {"type": "string"}
+                        },
+                        "anyOf": [
+                            {"type": "object", "properties": {
+                                "a": {"type": "string"},
+                                "y": {"type": "string"}
+                            }, "required": ["a", "y"]}
+                        ],
+                        "required": ["a", "y"]
+                    }
+                },
+                "required": ["u"]
+            }),
+        );
+        let authored = tool.input_schema.clone();
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a wrapper whose sibling contradicts its own alternatives must fail closed"
+        );
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_fails_a_union_closed_when_the_wrapper_const_conflicts_with_its_own_alternatives()
+    {
+        // The const twins of the sibling-vs-own-alternatives miss: `const: 1`
+        // beside `anyOf: [{"const": 2}]` is the canonical const-vs-const
+        // contradiction, invisible to a chase that judges each half against
+        // the other side alone.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "u": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"const": 1, "anyOf": [{"const": 2}]},
+                            "y": {"type": "string"}
+                        },
+                        "anyOf": [
+                            {"type": "object", "properties": {
+                                "a": {"type": "number"},
+                                "y": {"type": "string"}
+                            }, "required": ["a", "y"]}
+                        ],
+                        "required": ["a", "y"]
+                    }
+                },
+                "required": ["u"]
+            }),
+        );
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a wrapper const contradicted by its own alternative must fail closed"
+        );
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn pair_judge_judges_an_alternative_against_the_wrapper_sibling() {
+        // Unit-level pin for the conjunctive chase: the wrapper's
+        // alternative must clear the sibling too. Deleting the per-
+        // alternative sibling judgment flips both assertions.
+        let wrapper = json!({"enum": ["a"], "anyOf": [{"enum": ["b"]}]});
+        let string = json!({"type": "string"});
+        let mut budget = STRICT_PAIR_JUDGE_CALL_BUDGET;
+        assert!(
+            !schema_pair_satisfiable(&wrapper, &string, &Value::Null, 0, &mut budget),
+            "the wrapper admits no instance against a permissive string side"
+        );
+        let consistent = json!({"enum": ["a"], "anyOf": [{"enum": ["a"]}]});
+        let mut budget = STRICT_PAIR_JUDGE_CALL_BUDGET;
+        assert!(
+            schema_pair_satisfiable(&consistent, &string, &Value::Null, 0, &mut budget),
+            "an internally consistent wrapper stays compatible"
+        );
+    }
+
+    #[test]
+    fn strict_mode_keeps_an_internally_consistent_wrapper_union_strict() {
+        // Keep-side of the conjunctive chase: a wrapper whose sibling agrees
+        // with its alternatives still covers, so the union ships strict.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {
+                    "u": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"enum": ["a"], "anyOf": [{"enum": ["a"]}]},
+                            "y": {"type": "string"}
+                        },
+                        "anyOf": [
+                            {"type": "object", "properties": {
+                                "a": {"type": "string"},
+                                "y": {"type": "string"}
+                            }, "required": ["a", "y"]}
+                        ],
+                        "required": ["a", "y"]
+                    }
+                },
+                "required": ["u"]
+            }),
+        );
+        assert!(
+            prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "an internally consistent wrapper union is satisfiable and ships strict"
+        );
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_node_level_enum_scan_abstains_past_the_member_cap() {
+        // The node-level enum scan draws the same hostile-input line the
+        // pair judge draws: within the 256-member cap a member set none of
+        // which satisfies the node fails the tool closed, past the cap the
+        // judgment abstains compatible instead of parking an unbounded
+        // per-member cost on the per-request path. Neutering the cap check
+        // flips the 257 half; shrinking the cap flips the 256 half.
+        let make = |count: usize| {
+            let members: Vec<Value> = (0..count).map(|_| json!({"x": 1})).collect();
+            test_tool(
+                "probe",
+                json!({
+                    "type": "object",
+                    "properties": {"x": {"type": "string"}},
+                    "required": ["x"],
+                    "enum": members
+                }),
+            )
+        };
+        let mut judged = make(ENUM_PAIR_MEMBER_CAP);
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut judged)),
+            "a fully judged member set that admits nothing fails closed"
+        );
+        let mut abstained = make(ENUM_PAIR_MEMBER_CAP + 1);
+        assert!(
+            prepare_tools_for_strict_mode(std::slice::from_mut(&mut abstained)),
+            "past the member cap the scan abstains and the tool keeps strict"
+        );
+        assert_eq!(abstained.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_an_enum_whose_members_miss_a_property_pin() {
+        // An object member is judged against the node's own property pins
+        // one level deep: an `enum` admitting only `{"a": "x"}` beside a
+        // property `a` whose own `enum` admits only `"y"` admits no
+        // instance — the leaf comparison is what sees it.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"enum": ["y"]}},
+                "required": ["a"],
+                "enum": [{"a": "x"}]
+            }),
+        );
+        let authored = tool.input_schema.clone();
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "no member clears the property's own enum: fail closed"
+        );
+        assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_keeps_an_enum_whose_members_clear_the_property_pin() {
+        // Keep-side of the property-pin leaf judgment: a member the
+        // property's own enum contains keeps the tool strict.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"enum": ["y"]}},
+                "required": ["a"],
+                "enum": [{"a": "y"}]
+            }),
+        );
+        assert!(
+            prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "the member clears the property pin and the tool ships strict"
+        );
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_const_its_enum_contains_across_number_spellings() {
+        // JSON Schema's single number type: `2` and `2.0` are the same
+        // value, so a const its enum contains under another spelling keeps
+        // shipping verbatim with no widened-const note. The derived `Value`
+        // equality split the spellings and dropped the const with a note
+        // claiming a disagreement that does not exist.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"type": "integer", "enum": [2.0], "const": 2}},
+                "required": ["a"]
+            }),
+        );
+        assert!(prepare_tools_for_strict_mode(std::slice::from_mut(
+            &mut tool
+        )));
+        assert_eq!(
+            tool.input_schema["properties"]["a"]["const"],
+            json!(2),
+            "the const its enum contains keeps shipping verbatim"
+        );
+        assert!(
+            !tool.description.contains("disagreed with its `enum`"),
+            "no widening note for an enum that contains the const: {}",
+            tool.description
+        );
+    }
+
+    #[test]
+    fn strict_mode_fails_a_required_structural_self_reference() {
+        // A `$ref` to the schema root (or any ancestor of its own site) is
+        // a structural cycle: every chain resolves and terminates, but
+        // expansion re-enters the site forever, so every strict call is the
+        // documented server error — the no-satisfiable-expansion class the
+        // chain-loop walk fails closed one branch up.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"$ref": "#"}},
+                "required": ["a"]
+            }),
+        );
+        let authored = tool.input_schema.clone();
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a required structural self-reference must fail closed"
+        );
+        assert_eq!(tool.strict, None);
+        assert_eq!(tool.input_schema, authored);
+    }
+
+    #[test]
+    fn strict_mode_fails_mutually_recursive_definitions() {
+        // Mutual `$defs` recursion (A → B → A): every individual chain is
+        // loop-free and resolves, and the cycle lives in the document shape
+        // — the expansion never terminates, so the tool fails closed.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"$ref": "#/$defs/a"}},
+                "required": ["a"],
+                "$defs": {
+                    "a": {"type": "object", "properties": {"b": {"$ref": "#/$defs/b"}}, "required": ["b"]},
+                    "b": {"type": "object", "properties": {"a": {"$ref": "#/$defs/a"}}, "required": ["a"]}
+                }
+            }),
+        );
+        assert!(
+            !prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "mutually recursive definitions must fail closed"
+        );
+        assert_eq!(tool.strict, None);
+    }
+
+    #[test]
+    fn strict_mode_keeps_a_reference_chain_that_does_not_re_enter_its_site() {
+        // Keep-side of the ancestor-cycle check: a chain that resolves
+        // elsewhere and never hops to the site's own subtree still ships.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"$ref": "#/$defs/shared"}},
+                "required": ["a"],
+                "$defs": {
+                    "shared": {"type": "string"},
+                    "unused": {"type": "object", "properties": {"back": {"$ref": "#/$defs/shared"}}, "required": ["back"]}
+                }
+            }),
+        );
+        assert!(
+            prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "a chain that never re-enters its site keeps strict mode"
+        );
+        assert_eq!(tool.strict, Some(true));
+    }
+
+    #[test]
+    fn pair_judge_abstains_on_a_case_insensitive_flag_pattern() {
+        // A `(?i)` flag folds Unicode case Rust-side where ECMA-262's
+        // Canonicalize does not, so the compiled judge would decide members
+        // differently than the wire; the judge abstains and the pattern
+        // binds there alone. Binding pin: the compile returns None.
+        assert!(
+            compiled_documented_pattern(json!({ "pattern": "(?i)k" }).as_object().expect("map"))
+                .is_none(),
+            "a case-insensitive flag pattern is not judged Rust-side"
+        );
+    }
+
+    #[test]
+    fn strict_mode_keeps_an_enum_member_the_wire_boundary_would_match() {
+        // Rust's `\b` uses Unicode word characters where ECMA-262 is
+        // ASCII-only: judging `\bfoo` against `éfoo` Rust-side reads a
+        // violation the wire's own boundary would not, dropping strict
+        // mode for nothing. The judge abstains on the escape and the tool
+        // keeps strict — deleting the abstention flips this pin.
+        let mut tool = test_tool(
+            "probe",
+            json!({
+                "type": "object",
+                "properties": {"a": {"type": "string", "enum": ["éfoo"], "pattern": "\\bfoo"}},
+                "required": ["a"]
+            }),
+        );
+        assert!(
+            prepare_tools_for_strict_mode(std::slice::from_mut(&mut tool)),
+            "the boundary drift abstains and the member keeps strict mode"
+        );
+        assert_eq!(tool.strict, Some(true));
     }
 
     #[test]

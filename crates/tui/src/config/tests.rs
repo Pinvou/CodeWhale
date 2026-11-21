@@ -13830,6 +13830,40 @@ fn official_host_gate_rejects_query_and_fragment_urls() {
 }
 
 #[test]
+fn official_host_gate_rejects_invisible_characters_and_dot_segments() {
+    // A path the HTTP layer would canonicalize or percent-encode describes
+    // no endpoint the wire surfaces string-match: zero-width characters
+    // are not whitespace (U+200B/U+FEFF slip past that check), control
+    // bytes are not whitespace either, and a dot segment lands the request
+    // on a canonical path after URL normalization — `/beta/../v1` reaches
+    // the canonical non-beta endpoint, the one class where the flag must
+    // be stripped. All degrade to out of scope.
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta\u{200b}"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/v1\u{feff}"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/v1\u{7}"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta/../v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/./v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/v1/.."
+    ));
+    // Plain paths the wire serves verbatim stay admitted.
+    assert!(url_is_official_deepseek_host("https://api.deepseek.com/v2"));
+    assert!(url_is_official_deepseek_host(
+        "https://api.deepseek.com/BETA/v1"
+    ));
+}
+
+#[test]
 fn deepseek_canonical_url_sets_stay_inside_the_official_host_gate() {
     // The chat strip, the beta routing, and the doctor's classifier all
     // read `DEEPSEEK_CANONICAL_*`; every canonical URL must keep passing

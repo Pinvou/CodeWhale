@@ -1059,10 +1059,28 @@ pub fn url_is_official_deepseek_host(base_url: &str) -> bool {
     }
     let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
     let official_host = |prefix: &str| {
-        normalized == prefix
-            || normalized
-                .strip_prefix(prefix)
-                .is_some_and(|rest| rest.starts_with('/'))
+        let Some(rest) = normalized.strip_prefix(prefix) else {
+            return false;
+        };
+        if !rest.is_empty() && !rest.starts_with('/') {
+            return false;
+        }
+        // The path must be text the wire surfaces describe: the client splices
+        // its path suffix onto the configured URL and the strip/beta sets
+        // string-match the text, so a path the HTTP layer would canonicalize
+        // or percent-encode admits the pipeline in scope on a route no
+        // surface's string model describes. Invisible characters (U+200B,
+        // U+FEFF and friends are not `char::is_whitespace`), control bytes,
+        // and dot segments (`/beta/../v1` lands on the canonical non-beta
+        // path after URL normalization — the one endpoint class where the
+        // flag must be stripped) all degrade to out of scope, the same line
+        // the whitespace and query/fragment rejections draw.
+        if !rest.bytes().all(|byte| (0x21..=0x7E).contains(&byte)) {
+            return false;
+        }
+        !rest
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
     };
     official_host("https://api.deepseek.com") || official_host("https://api.deepseeki.com")
 }
