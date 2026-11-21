@@ -267,10 +267,10 @@ else process.kill(process.pid,'SIGTERM');
             ledger = receipt_path.parent / (receipt_path.stem + '-resources') / 'signal-owned.json'
             self.assertEqual(json.loads(ledger.read_text())['state'], 'unconfirmed')
 
-    def invoke(self, source, directory, name='receipt'):
+    def invoke(self, source, directory, name='receipt', extra=()):
         receipt = Path(directory) / (name + '.json')
         try:
-            p = subprocess.run([sys.executable, str(SUPERVISOR), '--diagnostics', '--receipt', str(receipt), '--cleanup-seconds', '0.2', '--', sys.executable, '-c', source], capture_output=True, text=True, timeout=15)
+            p = subprocess.run([sys.executable, str(SUPERVISOR), '--diagnostics', '--receipt', str(receipt), '--cleanup-seconds', '0.2', *extra, '--', sys.executable, '-c', source], capture_output=True, text=True, timeout=15)
         except subprocess.TimeoutExpired as error:
             evidence = error.stderr or b''
             if isinstance(evidence, bytes):
@@ -279,6 +279,86 @@ else process.kill(process.pid,'SIGTERM');
             # stderr. Preserve bounded stage/stack evidence without printing argv.
             raise AssertionError('supervisor exceeded unchanged 15-second limit; stage/stack evidence:\n' + evidence[-16000:]) from None
         return p, json.loads(receipt.read_text()), receipt
+
+    @unittest.skipUnless(sys.platform == 'win32', 'short Windows staging workspace')
+    def test_short_scope_retires_files_even_when_child_skips_finally(self):
+        parent = next(p for p in SUPERVISOR.parents if p.parent != p and len(str(p))+10 <= 35 and not any(c.isspace() for c in str(p)))
+        source = "import os,pathlib; r=pathlib.Path(os.environ['PINVOU_CI_FIXTURE_ROOT']); assert len(str(r))<=35; (r/'fixture').mkdir(); (r/'fixture'/'proof').write_text('owned'); (r/'w123456.owner.json').write_text('owned clone marker'); os._exit(9)"
+        with tempfile.TemporaryDirectory() as directory:
+            # Keep an external short scope's registration in the enclosing job
+            # ledger if the test process is forcibly cancelled before teardown.
+            directory = os.environ.get('PINVOU_CI_RESOURCE_LEDGER', directory)
+            p, receipt, _ = self.invoke(source, directory, name='short-'+str(time.monotonic_ns()), extra=('--short-workspace-parent', str(parent)))
+            self.assertEqual(p.returncode, 9, p.stderr)
+            self.assertEqual(receipt['exit_code'], 9)
+            self.assertEqual(receipt['state'], 'released')
+            self.assertFalse(receipt['cleanup_failed'])
+            self.assertFalse(Path(receipt['workspace']['path']).exists())
+
+    @unittest.skipUnless(sys.platform == 'win32', 'short Windows staging workspace')
+    def test_short_scope_refuses_drive_root_before_creating_resources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory)/'refused.json'
+            p = subprocess.run([sys.executable, str(SUPERVISOR), '--receipt', str(receipt), '--short-workspace-parent', Path(directory).anchor, '--', sys.executable, '-c', "raise SystemExit('must not run')"], capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('short workspace parent', p.stderr)
+            self.assertFalse(receipt.exists())
+
+    @unittest.skipUnless(sys.platform == 'win32', 'short Windows staging workspace')
+    def test_short_scope_registration_failure_retires_owned_directory(self):
+        parent = next(p for p in SUPERVISOR.parents if p.parent != p and len(str(p))+10 <= 35 and not any(c.isspace() for c in str(p)))
+        original = WORKSPACE.atomic_receipt
+        def write(path, value):
+            if value['state'] == 'registered':
+                raise OSError('controlled receipt registration failure')
+            original(path, value)
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory)/'registration.json'
+            with patch.object(WORKSPACE, 'atomic_receipt', side_effect=write), patch.object(WORKSPACE, 'windows_run') as run, patch.object(WORKSPACE.signal, 'signal'):
+                with self.assertRaisesRegex(OSError, 'controlled receipt'):
+                    WORKSPACE.main(['--receipt', str(receipt), '--short-workspace-parent', str(parent), '--', sys.executable, '-c', 'pass'])
+            run.assert_not_called()
+            value = json.loads(receipt.read_text())
+            self.assertEqual(value['state'], 'released')
+            self.assertTrue(value['cleanup_failed'], 'setup failure must not become a successful test')
+            self.assertFalse(Path(value['workspace']['path']).exists())
+
+    @unittest.skipUnless(sys.platform == 'win32', 'short Windows staging workspace')
+    def test_short_scope_preserves_identity_when_registration_and_rollback_fail(self):
+        parent = next(p for p in SUPERVISOR.parents if p.parent != p and len(str(p))+10 <= 35 and not any(c.isspace() for c in str(p)))
+        original_write = WORKSPACE.atomic_receipt
+        original_remove = WORKSPACE.remove_owned_workspace
+        owned = None
+
+        def write(path, value):
+            if value['state'] == 'registered':
+                raise OSError('controlled receipt registration failure')
+            original_write(path, value)
+
+        def deny_rollback(root, identity):
+            nonlocal owned
+            owned = (root, identity)
+            raise PermissionError('controlled workspace rollback failure')
+
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory)/'registration.json'
+            try:
+                with patch.object(WORKSPACE, 'atomic_receipt', side_effect=write), patch.object(
+                    WORKSPACE, 'remove_owned_workspace', side_effect=deny_rollback
+                ), patch.object(WORKSPACE, 'windows_run') as run, patch.object(WORKSPACE.signal, 'signal'):
+                    with self.assertRaisesRegex(OSError, 'controlled receipt registration failure'):
+                        WORKSPACE.main(['--receipt', str(receipt), '--short-workspace-parent', str(parent), '--', sys.executable, '-c', 'pass'])
+                run.assert_not_called()
+                value = json.loads(receipt.read_text())
+                self.assertEqual(value['state'], 'unconfirmed')
+                self.assertTrue(value['cleanup_failed'])
+                self.assertEqual(value['error_class'], 'OSError')
+                self.assertEqual(value['cleanup_error_class'], 'PermissionError')
+                root, (dev, ino) = owned
+                self.assertEqual(value['workspace'], {'path': str(root), 'dev': dev, 'ino': ino})
+            finally:
+                if owned is not None:
+                    original_remove(*owned)
 
     def test_success_preserves_output_and_confirms_tree_exit(self):
         with tempfile.TemporaryDirectory() as directory:

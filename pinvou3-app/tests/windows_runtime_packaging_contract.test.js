@@ -38,6 +38,7 @@ const runtimeInitScript = readApp(
   "scripts",
   "init-submodule.ps1",
 );
+const releaseAssetsScript = readApp("src-tauri", "packaging", "windows", "runtime", "scripts", "release-assets.ps1");
 const runtimeScript = readApp(
   "src-tauri",
   "packaging",
@@ -93,6 +94,10 @@ const vcRedistTempPreflight = fs.readFileSync(vcRedistTempPreflightPath, "utf8")
 const runtimeCacheBehaviorHarness = readApp(
   "tests",
   "windows_runtime_cache_behavior.ps1",
+);
+const runtimeReleaseBehaviorHarness = readApp(
+  "tests",
+  "windows_runtime_release_behavior.ps1",
 );
 const runtimeWrapper = readApp("scripts", "tauri", "windows-runtime.js");
 const installerAdapter = readApp("scripts", "tauri", "windows-installer.js");
@@ -344,10 +349,9 @@ assert.match(runtimeInitScript, /Select-Object -First 1 -ExpandProperty Source/u
 assert.match(runtimeInitScript, /& \$gitExecutable -C/u);
 assert.match(runtimeInitScript, /\$exitCode = \$LASTEXITCODE/u);
 assert.match(runtimeInitScript, /if \(\$exitCode -ne 0\)/u);
-assert.match(runtimeInitScript, /git lfs pull/);
-assert.match(runtimeInitScript, /--include=/);
+assert.match(runtimeInitScript, /Sync-RuntimeReleaseAssets/);
 assert.match(runtimeInitScript, /\[switch\]\$OnnxOnly/);
-assert.match(runtimeInitScript, /onnxruntime-win-x64-\*-runtime\.zip/);
+assert.match(releaseAssetsScript, /component -ceq 'onnxruntime'/);
 assert.match(runtimeInitScript, /pinvou3-windows-runtime-\$cacheSchema-\$expectedCommit/u);
 
 assert.match(runtimeWrapper, /runtime-descriptor\.json/);
@@ -664,13 +668,23 @@ assert.match(
 );
 assert.match(
   runtimeInitScript,
-  /Get-LfsPointerPaths/u,
-  "runtime initialization must inspect materialized LFS files before pulling",
+  /Sync-RuntimeReleaseAssets/u,
+  "runtime initialization must invoke the verified Release transport",
 );
+assert.match(releaseAssetsScript, /\$handler\.AllowAutoRedirect = \$false/u,
+  "redirects must remain subject to per-hop endpoint validation");
+assert.ok(releaseAssetsScript.indexOf("Assert-RuntimeReleaseUri -Uri $Uri", releaseAssetsScript.indexOf("function Write-RuntimeReleaseDownload")) <
+  releaseAssetsScript.indexOf("$client.GetAsync"), "URI policy must execute before every request");
+assert.match(releaseAssetsScript, /Get-RuntimeReleaseProxy/u,
+  "the production transport must preserve explicit Runner proxy routing");
+assert.doesNotMatch(releaseAssetsScript, /ServerCertificateCustomValidationCallback|ServerCertificateValidationCallback|DangerousAcceptAnyServerCertificateValidator/u,
+  "transport tests must never weaken production certificate validation");
+assert.match(releaseAssetsScript, /& \$Download \$uri \$temporary \(\[long\]\$entry\.bytes\)/u,
+  "the byte budget must come from the verified immutable manifest");
 assert.match(
-  runtimeInitScript,
-  /git lfs pull was skipped/u,
-  "runtime initialization must expose the LFS reuse path",
+  releaseAssetsScript,
+  /Test-RuntimeReleaseFile -Path \$target -Entry \$entry/u,
+  "runtime initialization must verify materialized files before offline reuse",
 );
 assert.match(
   runtimeInitScript,
@@ -678,9 +692,9 @@ assert.match(
   "runtime initialization must emit a schema, commit and lock-scoped Jenkins cache key",
 );
 assert.ok(
-  runtimeInitScript.includes('$cacheSchema = "v5"') &&
+  runtimeInitScript.includes('$cacheSchema = "v6"') &&
     runtimeScript.includes('$verificationSchemaVersion = 5'),
-  "the external LFS cache and trusted staging marker must invalidate pre Python-dependency-gate caches",
+  "Release transport must use a fresh cache schema while retaining the trusted Python-dependency staging gate",
 );
 assert.match(
   runtimeScript,
@@ -699,28 +713,36 @@ assert.match(
 );
 assert.ok(
   runtimeInitScript.includes(
-    '$lfsStorageRoot = Join-Path $resolverCacheRoot "lfs-storage"',
+    '$releaseCacheRoot = Join-Path $resolverCacheRoot "release-assets"',
   ),
-  "Git LFS objects must be stored outside the submodule gitdir",
+  "verified Release assets must be cached outside the submodule gitdir",
 );
 assert.match(
   runtimeInitScript,
-  /\$lfsArguments = @\("-c", "lfs\.storage=\$lfsStorageRoot", "lfs", "pull"\)/u,
-  "Git LFS pulls must use the external workspace cache",
+  /Sync-RuntimeReleaseAssets -RuntimeRoot \$runtimeRoot -CacheRoot \$releaseCacheRoot/u,
+  "initialization must use the hash-verified Release transport",
 );
+assert.doesNotMatch(runtimeInitScript, /"lfs", "pull"/u, "initialization must not download Git LFS objects");
+assert.match(runtimeInitScript, /\[Alias\("ForceLfsPull"\)\]/u,
+  "legacy ForceLfsPull callers must retain their ForceDownload alias");
+const runtimePrJob = prCheckWorkflow.slice(prCheckWorkflow.indexOf("\n  windows-runtime-test:"),
+  prCheckWorkflow.indexOf("\n  macos-codex-runtime-test:"));
+for (const script of ["windows_runtime_cache_behavior.ps1", "windows_runtime_release_behavior.ps1"]) {
+  assert.ok(runtimePrJob.includes(script), `${script} must run in the ordinary PR runtime job`);
+}
+assert.match(runtimePrJob, /@\('powershell', 'pwsh'\)/u,
+  "runtime regressions must exercise both Windows PowerShell and PowerShell 7");
+assert.ok(runtimePrJob.includes("scripts/ci-fixture-process.py --receipt $receipt"),
+  "runtime behavior regressions must preserve process ownership and retirement receipts");
 assert.ok(
   runtimeInitScript.lastIndexOf("Update-RuntimeSubmoduleWithoutLfsSmudge") <
-    runtimeInitScript.indexOf(
-      "New-Item -ItemType Directory -Path $lfsStorageRoot",
-    ),
-  "a fresh submodule must be initialized before the external LFS cache is used",
+    runtimeInitScript.indexOf("  Sync-RuntimeReleaseAssets"),
+  "a fresh submodule must be initialized before its locked manifest selects Release assets",
 );
 assert.ok(
   runtimeInitScript.indexOf("if ($CacheKeyOnly)") <
-    runtimeInitScript.indexOf(
-      "New-Item -ItemType Directory -Path $lfsStorageRoot",
-    ),
-  "cache-key discovery must not create the external LFS storage directory",
+    runtimeInitScript.indexOf("  Sync-RuntimeReleaseAssets"),
+  "cache-key discovery must not initialize runtime payloads or contact GitHub",
 );
 assert.ok(
   runtimeGuide.includes(
@@ -734,7 +756,7 @@ assert.ok(
 assert.match(
   runtimeInitScript,
   /SetEnvironmentVariable\("GIT_LFS_SKIP_SMUDGE", "1", "Process"\)[\s\S]*?submodule", "update"/u,
-  "submodule checkout must disable automatic LFS smudge before selective pulls",
+  "submodule checkout must disable automatic LFS downloads before Release materialization",
 );
 assert.match(
   runtimeInitScript,
@@ -953,6 +975,41 @@ const windowsBuildJob = releaseWorkflow.slice(
 assert.match(prValidationJob, /github\.event_name == 'pull_request'/);
 assert.match(prValidationJob, /npm run test:windows-runtime/);
 assert.match(prValidationJob, /npm run test:codex-acp-windows-runtime/);
+function verifyRuntimePrSupervision(job) {
+  for (const entry of ["test:windows-runtime", "test:windows-runtime-cache"]) {
+    assert.ok(job.includes(`python ../scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/${entry === "test:windows-runtime" ? "packaging" : "cache-release"}.json" -- cmd.exe /d /c "npm run ${entry}"`),
+      `${entry} must execute inside the owned process supervisor`);
+  }
+  assert.doesNotMatch(job, /^    continue-on-error:/mu, "the release PR job must remain blocking");
+  const steps = job.split("\n      - name: ").slice(1);
+  const advisory = steps.filter(step => step.includes("\n        continue-on-error:"));
+  assert.equal(advisory.length, 1, "only the reviewed receipt upload may be advisory");
+  assert.ok(advisory[0].startsWith("上传 Windows runtime PR 资源收据\n"));
+  for (const field of ["timeout-minutes: 3", "retention-days: 7", "if: always()",
+    "uses: actions/upload-artifact@v7", "continue-on-error: true", "if-no-files-found: warn",
+    "path: ${{ runner.temp }}/windows-runtime-pr-${{ github.run_id }}-${{ github.run_attempt }}/"]) {
+    assert.ok(advisory[0].includes(field), `release PR resource receipts must preserve ${field}`);
+  }
+  const transportEnv = [
+    "        env:",
+    "          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}",
+    "          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}",
+    "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+    "",
+  ].join("\n");
+  assert.ok(advisory[0].includes(transportEnv), "receipt upload must use the scoped storage transport");
+  assert.doesNotMatch(advisory[0].replace(transportEnv, ""), /^        (?:run|env):/mu);
+}
+verifyRuntimePrSupervision(prValidationJob);
+for (const mutant of [
+  prValidationJob.replace('-- cmd.exe /d /c "npm run test:windows-runtime-cache"', '-- cmd.exe /d /c "echo ignored"'),
+  prValidationJob.replace('        timeout-minutes: 3\n', ''),
+  prValidationJob.replace('          retention-days: 7\n', '          retention-days: 90\n'),
+  prValidationJob.replace('        continue-on-error: true\n', '').replace('      - name: 验证 Windows 打包契约\n', '      - name: 验证 Windows 打包契约\n        continue-on-error: true\n'),
+]) {
+  assert.notEqual(mutant, prValidationJob, "the negative control must change the real entry");
+  assert.throws(() => verifyRuntimePrSupervision(mutant), "supervision or failure suppression must be rejected");
+}
 assert.match(prValidationJob, /submodules: false/);
 assert.doesNotMatch(
   prValidationJob,
@@ -971,6 +1028,34 @@ assert.doesNotMatch(
 );
 assert.match(windowsBuildJob, /npm run runtime:windows:init/);
 assert.match(windowsBuildJob, /npm run runtime:windows:onnx-smoke/);
+assert.match(prValidationJob, /test_windows_release_workspace\.ps1/);
+const workspacePrepareStep = windowsBuildJob.indexOf("id: windows-workspace");
+assert.ok(workspacePrepareStep > 0);
+assert.ok(
+  workspacePrepareStep < windowsBuildJob.indexOf("git submodule update"),
+  "the pinned checkout must be selected before any submodule is initialized",
+);
+// All run steps that consume source or output must use the same checkout.
+// Runner transport helpers use the original checkout, as does cleanup.
+const runnerTransport = /^node scripts\/(?:ci-rust-network\.cjs(?: --report)?|ci-network-node-options\.cjs|ci-artifact-node-options\.cjs --network)$/u;
+for (const step of windowsBuildJob.split(/\n      - name:/u).slice(1)) {
+  const run = /\n        run: ([^\n]+)/u.exec(step);
+  if (!run || /id: windows-workspace| -Mode Cleanup/u.test(step) || runnerTransport.test(run[1])) continue;
+  assert.match(
+    step,
+    /working-directory: \$\{\{ env\.PINVOU_WINDOWS_BUILD_ROOT \}\}/u,
+    "Windows source, runtime and installer steps must share the selected short checkout",
+  );
+}
+assert.match(
+  windowsBuildJob,
+  /path: \|\n\s+\$\{\{ env\.PINVOU_WINDOWS_BUILD_ROOT \}\}[^\n]+\.exe\n\s+\$\{\{ env\.PINVOU_WINDOWS_BUILD_ROOT \}\}[^\n]+\.sha256/u,
+);
+assert.match(
+  windowsBuildJob,
+  /if: always\(\) && steps\.windows-workspace\.outputs\.state != ''[\s\S]+-Mode Cleanup/u,
+  "failed or successful builds must clean up only their owned temporary checkout",
+);
 // The installer integration test self-skips unless the runtime is staged and
 // it is invoked directly with --require-staged-runtime; the release job goes
 // through the npm alias, and the pin below keeps that alias a direct node
@@ -1002,6 +1087,8 @@ assert.doesNotMatch(
 
 for (const triggerPath of [
   ".gitmodules",
+  "scripts/windows-release-workspace.ps1",
+  "scripts/tests/test_windows_release_workspace.ps1",
   "private-runtimes/windows",
   "pinvou3-app/package-lock.json",
   "pinvou3-app/scripts/tauri/windows-runtime.js",
@@ -1048,6 +1135,18 @@ assert.match(
   modulePathGuard,
   "the runtime init script must restore the 5.1 module path before its lock-file hashing",
 );
+for (const [name, harness, firstDependency] of [
+  ["windows_runtime_cache_behavior.ps1", runtimeCacheBehaviorHarness, "$appRoot ="],
+  ["windows_runtime_release_behavior.ps1", runtimeReleaseBehaviorHarness, ". (Join-Path"],
+]) {
+  assert.match(harness, modulePathGuard, `${name} must restore its own 5.1 module path`);
+  const guardStart = harness.indexOf("if ($PSVersionTable.PSVersion.Major -lt 6)");
+  const dependencyStart = harness.indexOf(firstDependency);
+  assert.ok(
+    guardStart >= 0 && dependencyStart > guardStart,
+    `${name} must restore the module path before resolving or importing fixture dependencies`,
+  );
+}
 assert.ok(
   runtimeScript.indexOf("PSVersionTable.PSVersion.Major -lt 6") <
     runtimeScript.indexOf("Add-Type -AssemblyName"),
