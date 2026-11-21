@@ -201,6 +201,15 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   a private temporary directory. A killed Linux controller can be recovered only
   by the registered scope marker, UID, cgroup and pidfd identity. No PID/name
   sweep or shared Runner Job Object is used.
+  For stalled-process investigation, `--diagnostics` emits bounded phase names
+  and one Python stack snapshot after a phase has stalled for three seconds.
+  It never changes the command, cleanup deadline, cancellation or exit verdict.
+  The Windows supervisor regression preserves captured evidence when its
+  existing 15-second subprocess limit expires. The release-contract artifact
+  action additionally opts into bounded passive file/HTTP transport evidence;
+  it excludes signed URLs, headers, payloads, file paths and raw error messages.
+  These logs distinguish local receipt reads, TCP/TLS and response waits without
+  suppressing stream errors or extending the artifact's three-minute limit.
   The Windows atomic regression suite runs each original patched-executable
   filter in an independent scope and retains attempted-receipt inventory even
   on failure. Its capture-retention fixtures hand off the child's creation
@@ -513,10 +522,17 @@ reuse or a non-applicable diff. Replace any existing requirements on those old
 names before enabling this behavior. This PR does not change server-side rules
 or make these auxiliary workflows mandatory where they were not required.
 
-The lightweight `changes` job verifies the entire tested Git tree (not only the
-PR head), base commit/ref, unchanged workflow/verifiers, all routing and policy
-outputs, repository-variable hashes, runner labels, source repository/PR/head,
-source run attempt and successful workflow aggregate gate. A matrix is reusable only if
+The lightweight `changes` job verifies immutable source and queue Git objects,
+unchanged workflow/verifiers, effective inputs, runner labels, source repository,
+PR/head, source run attempt and successful workflow aggregate gate. PR Check
+schema 2 compares each job's source/dependency entries, base-to-tested diff,
+effective configuration and routing independently. The currently reviewed
+Rust/CLI domains exclude the independent Account/Hub/release-console service
+trees; other jobs retain whole-tree inputs. Shared scripts, unknown paths and
+unknown configuration remain conservative fences. See
+[the input boundary](docs/ci-result-reuse.md) for the precise supported scope.
+Schema 1 and the two auxiliary workflow profiles retain exact whole-tree/base,
+all-variable and routing checks. A matrix is reusable only if
 all configured legs are present exactly once and every step required in the
 queue has successful execution evidence. A format-only or partial ready-PR run
 cannot replace full queue regression. Unknown expressions require successful
@@ -532,8 +548,10 @@ unknown or modified context-dependent runner expressions retain execution.
 Only a wholly successful ready-PR workflow donates proof; a red aggregate gate
 does not donate successful individual jobs. The recorded base comes from the
 actual tested merge commit's first parent, not the mutable PR event/API base SHA.
-Lookup independently verifies that immutable commit's base, head and tree against
-the queue. Ready-PR browser smoke selection uses that same actual merge parent
+Lookup independently verifies that immutable commit's own base, head and tree;
+schema 2 additionally recomputes the relevant inputs before comparing them with
+the queue. The PR Check proof producer fetches two generations so its real first
+parent is available even on a clean runner. Ready-PR browser smoke selection uses that same actual merge parent
 and tested tree, including main-side renames, so its named step can witness the
 queue selection. Expected record refusals emit notices without configuration values.
 

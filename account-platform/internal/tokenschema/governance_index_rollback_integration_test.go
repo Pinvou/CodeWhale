@@ -23,55 +23,6 @@ func testGovernanceIndexPublicRollback(t *testing.T, ctx context.Context, connec
 	if err != nil {
 		t.Fatal(err)
 	}
-	goTool, err := exec.LookPath("go")
-	if err != nil {
-		t.Fatal("Go tool is required to exercise the shipped migration command", err)
-	}
-	binary := filepath.Join(t.TempDir(), "migrate.exe")
-	build := exec.CommandContext(ctx, goTool, "build", "-tags=nomsgpack", "-mod=readonly", "-o", binary, "../../cmd/migrate")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build public migration command: %v\n%s", err, output)
-	}
-	// pgx ConnString retains the original parsed DSN, before this fixture sets
-	// its owned database and migrator. Serialize those current fields explicitly.
-	cliURL := url.URL{Scheme: "postgresql", User: url.User(config.User), Host: net.JoinHostPort(config.Host, strconv.Itoa(int(config.Port))), Path: "/" + config.Database, RawQuery: "sslmode=disable"}
-	run := func(role, direction string) {
-		t.Helper()
-		command := exec.CommandContext(ctx, binary, "--dir", "../../migrations/token", "--direction", direction)
-		command.Env = append(os.Environ(), "DATABASE_URL="+cliURL.String(), "MIGRATION_ROLE="+role, "PINVOU_DEPLOYMENT_ENVIRONMENT=test")
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("public migration command role=%s direction=%s: %v\n%s", role, direction, err, output)
-		}
-	}
-
-	// The current carrier may include the one known later statistics index.
-	// Retire that exact public identity before exercising governance's own
-	// owner/runtime boundary. Never select a target by rewriting the ledger.
-	var originalHead int64
-	if err = connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&originalHead); err != nil || (originalHead != 900009 && originalHead != 900010) {
-		t.Fatal("governance fixture requires its explicit public index heads", originalHead, err)
-	}
-	const laterIndexFacts = `SELECT count(*),coalesce(jsonb_agg(jsonb_build_object('definition',pg_get_indexdef(c.oid),'owner',pg_get_userbyid(c.relowner),'ready',i.indisready,'valid',i.indisvalid) ORDER BY c.relname),'[]'::jsonb)::text FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indexrelid=to_regclass('public.outbox_events_dead_statistics_idx')`
-	const lowerSnapshot = `SELECT jsonb_build_object('ledger',(SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m WHERE version<>900010),'outbox',(SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY e.event_id),'[]'::jsonb) FROM outbox_events e),'usage',(SELECT coalesce(jsonb_agg(to_jsonb(u) ORDER BY id),'[]'::jsonb) FROM usage_requests u),'evidence',(SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY id),'[]'::jsonb) FROM usage_cancellation_evidence e),'account_index',pg_get_indexdef('public.usage_governance_account_credential_idx'::regclass),'model_index',pg_get_indexdef('public.usage_governance_model_idx'::regclass))::text`
-	var originalLaterFacts string
-	if originalHead == 900010 {
-		var count int
-		if err = connection.QueryRow(ctx, laterIndexFacts).Scan(&count, &originalLaterFacts); err != nil || count != 1 {
-			t.Fatal("current statistics index must exist before its public rollback", count, err)
-		}
-		var before, after string
-		if err = connection.QueryRow(ctx, lowerSnapshot).Scan(&before); err != nil {
-			t.Fatal(err)
-		}
-		run("token_gateway", "down")
-		var removedOnlyLater bool
-		if err = connection.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM schema_migrations WHERE version=900010) AND EXISTS(SELECT 1 FROM schema_migrations WHERE version=900009) AND to_regclass('public.outbox_events_dead_statistics_idx') IS NULL AND to_regclass('public.usage_governance_account_credential_idx') IS NOT NULL AND to_regclass('public.usage_governance_model_idx') IS NOT NULL`).Scan(&removedOnlyLater); err != nil || !removedOnlyLater {
-			t.Fatal("first gateway CLI Down must retire only the newer statistics index", err)
-		}
-		if err = connection.QueryRow(ctx, lowerSnapshot).Scan(&after); err != nil || before != after {
-			t.Fatal("statistics rollback changed lower ledger, outbox, usage, evidence or governance indexes", err)
-		}
-	}
 	account, credential, actor, wallet := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	usage := nextIndexRollbackUsageID(t, ctx, connection)
 	if _, err := connection.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'controlled index rollback','ACTIVE',100,$2,now(),now(),'PLATFORM')`, account, actor, wallet); err != nil {
@@ -126,6 +77,26 @@ func testGovernanceIndexPublicRollback(t *testing.T, ctx context.Context, connec
 	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900009`).Scan(&retained); err != nil {
 		t.Fatal(err)
 	}
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal("Go tool is required to exercise the shipped migration command", err)
+	}
+	binary := filepath.Join(t.TempDir(), "migrate.exe")
+	build := exec.CommandContext(ctx, goTool, "build", "-tags=nomsgpack", "-mod=readonly", "-o", binary, "../../cmd/migrate")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build public migration command: %v\n%s", err, output)
+	}
+	// pgx ConnString retains the original parsed DSN, before this fixture sets
+	// its owned database and migrator. Serialize those current fields explicitly.
+	cliURL := url.URL{Scheme: "postgresql", User: url.User(config.User), Host: net.JoinHostPort(config.Host, strconv.Itoa(int(config.Port))), Path: "/" + config.Database, RawQuery: "sslmode=disable"}
+	run := func(role, direction string) {
+		t.Helper()
+		command := exec.CommandContext(ctx, binary, "--dir", "../../migrations/token", "--direction", direction)
+		command.Env = append(os.Environ(), "DATABASE_URL="+cliURL.String(), "MIGRATION_ROLE="+role, "PINVOU_DEPLOYMENT_ENVIRONMENT=test")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("public migration command role=%s direction=%s: %v\n%s", role, direction, err, output)
+		}
+	}
 	run("token_schema_owner", "down")
 	assertRetainedUsage()
 	var removed bool
@@ -148,13 +119,6 @@ func testGovernanceIndexPublicRollback(t *testing.T, ctx context.Context, connec
 	}
 	if verified, err := VerifyApplied(ctx, connection, loaded); err != nil || verified.AppliedCount != len(loaded) {
 		t.Fatal("reinstalled public package failed identity verification", err)
-	}
-	if originalHead == 900010 {
-		var count int
-		var restored string
-		if err = connection.QueryRow(ctx, laterIndexFacts).Scan(&count, &restored); err != nil || count != 1 || restored != originalLaterFacts {
-			t.Fatal("full public Up did not restore exact statistics index definition and owner", count, err)
-		}
 	}
 	t.Log("token_migrator session: gateway Down denied atomically; owner CLI Down and gateway CLI Up passed")
 }

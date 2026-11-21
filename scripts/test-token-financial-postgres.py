@@ -15,6 +15,7 @@ import math
 import os
 import re
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import time
@@ -23,6 +24,7 @@ from urllib.parse import parse_qs, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 ACTORS = {"billing_migrator", "billing_schema_owner", "billing_service"}
 REQUIRED = {
+    "TestEmergencyCancellationDurableRetryPostgres",
     "TestStreamStatePollingPublicPostgres",
     "TestGovernanceUsageResourcePrechecksPostgres",
     "TestEmergencyCancellationWorkerDiagnosticsPostgres",
@@ -87,6 +89,7 @@ ACCOUNT_REQUIRED = {
     "TestOrganizationStartupDiagnosticsPostgres",
     "TestApprovalDeliveryTerminalRecoveryPostgres",
     "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
+    "TestAccountFinancialJSONObjectsPostgres",
     "TestApprovalDecisionOriginalReceiptPostgres",
     "TestApprovalDecisionLegacyConcurrentReceiptPostgres",
     "TestMemberUnitsReceiptSurvivesLegalUnitDeletion",
@@ -102,6 +105,8 @@ ACCOUNT_REQUIRED = {
     "TestProfileRevocationClosureRuntimePostgres",
     "TestRegistrationCreateDispatchRuntimePostgres",
     "TestRegistrationUnknownInspectionPostgres",
+    "TestCommerceManualCompletionMigrationPostgres",
+    "TestCommerceManualCompletionPostgres",
     "TestRegistrationIdentityRejectionRuntimePostgres",
     "TestRegistrationCompensationDatabaseErrorIdentityPostgres",
     "TestRegistrationOutboxAggregateLookupPostgres",
@@ -144,6 +149,7 @@ ACCOUNT_LEAF_REQUIRED = {
 ACCOUNT_CHILD_REQUIRED = ACCOUNT_REQUIRED - ACCOUNT_LEAF_REQUIRED
 TOKEN_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/token"
 TOKEN_CHILD_REQUIRED = {
+    "TestEmergencyCancellationDurableRetryPostgres",
     "TestStreamStatePollingPublicPostgres",
     "TestGovernanceUsageResourcePrechecksPostgres",
     "TestOrganizationModelPolicyPublicPostgres",
@@ -172,13 +178,31 @@ BILLING_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billing"
 SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/billingschema"
 TOKEN_SCHEMA_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/tokenschema"
 TOKEN_SCHEMA_REQUIRED = {"TestManagementPublicMigrationInstallation"}
+MIGRATIONS_PACKAGE = "github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+MIGRATIONS_REQUIRED = {"TestPinnedMigrationLedgerPostgresIntegration", "TestRestrictedMigrationLedgerPostgresIntegration"}
 SCHEMA_REQUIRED = {"TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestF09EntitlementPackageIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestManualRetentionHistoricalHardeningPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestReconciliationFairRetryRegisteredIdentity", "TestTokenWalletReceiptSchemaPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestUsageWaiverHistoricalSchemaPostgres"}
 F12_UPGRADE_PARENT = "TestPaymentCreditF12DeployedCarriersUpgradePostgres"
 F12_UPGRADE_CHILD = "TestF12PaymentCreditUpgradeChildPostgres"
 F12_UPGRADE_MARKER = "PINVOU_F12_UPGRADE_PHASE_RESULT "
 # This parent verifies two exact child processes, not t.Run subcases. Its
 # phase evidence is required separately below; every old subcase stays required.
-SCHEMA_CHILD_REQUIRED = SCHEMA_REQUIRED - {F12_UPGRADE_PARENT}
+SCHEMA_REQUIRED |= {
+    "TestCommerceClaimMappingLockKeepsLeaseLive",
+    "TestCommerceClaimSubjectLockKeepsLeaseLive",
+    "TestCommerceClosureCallbacksRespectSubjectFence",
+    "TestF02CommerceClaimWaitStartsFreshLease",
+    "TestF02CommerceConfirmedProducersPreserveStatuses",
+    "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock",
+    "TestF02CommerceOriginal15LateUpgradePreservesFacts",
+    "TestF02CommerceSupersededGenerationCannotDispatch",
+    "TestF02PublicCommerceCustomerLifecycle",
+}
+SCHEMA_LEAF_REQUIRED = {
+    "TestCommerceClaimMappingLockKeepsLeaseLive",
+    "TestCommerceClaimSubjectLockKeepsLeaseLive",
+    "TestF02CommerceOriginal15LateUpgradePreservesFacts",
+}
+SCHEMA_CHILD_REQUIRED = SCHEMA_REQUIRED - SCHEMA_LEAF_REQUIRED - {F12_UPGRADE_PARENT}
 OWNER_REQUIRED = {
     "TestPaymentActionAdmissionPostgres",
     "TestF06OrganizationWalletRequiresLifecycleEvidence",
@@ -220,6 +244,7 @@ RETAINED_REQUIRED = {
     "TestF12PaymentRepairOrderLookupPostgres",
     "TestF12PaymentRepairDeployedBaselineUpgradePostgres",
     "TestRetainedOrganizationOrderHistoryPagination",
+    "TestBillingFinancialJSONObjectsPostgres",
     "TestClosedGrantEvidenceCurrentRoleGuardsPostgres",
     "TestF04ExpiredHoldRecoveryPreservesUnknownAndReplaysRelease",
     "TestExpiredHoldProofRetryDiagnosticsPostgres",
@@ -339,6 +364,71 @@ EXACT_REQUIRED_CHILDREN = {
         "pre-admission-fixture-rejects-current-schema",
         "runtime-immutable-command-and-exact-prefix-down",
     },
+    "TestAccountFinancialJSONObjectsPostgres": {"fresh-current-producer", "upgrade-current-producer", "dirty-critical-history", "dirty-financial-history"},
+    "TestBillingFinancialJSONObjectsPostgres": {"fresh-current-producer", "upgrade-current-producer", "dirty-details", "dirty-provider_capability_snapshot", "dirty-policy_snapshot", "dirty-evidence_summary", "dirty-payload_snapshot"},
+    "TestCommerceClosureCallbacksRespectSubjectFence": {
+        "complete-after-anonymize",
+        "complete-user-wait",
+        "retry-after-anonymize",
+        "retry-user-wait",
+    },
+    "TestCommerceManualCompletionMigrationPostgres": {
+        "late-catalog-collision-rolls-back",
+        "nonempty-upgrade-and-forward-only",
+    },
+    "TestCommerceManualCompletionPostgres": {
+        "audit-cancellation-rolls-back-completion",
+        "callback-evidence-invalidates-old-proposal",
+        "closed-identity-keeps-retired-facts",
+        "closed-job-can-open-evidence-only-case",
+        "concurrent-reviewers-write-one-receipt",
+        "current-success-http-and-receipt-replay",
+                "startup-wait-rechecks-committed-quarantine",
+                "busy-discovery-preserves-sla-and-next-candidate",
+        "expired-lease-quarantines-without-redispatch",
+        "no-effect-is-not-sync-success",
+        "observation-id-replay-and-payload-conflict",
+        "operator-wire-boundaries-preserve-original-facts",
+        "proposer-expiry-during-mapping-wait", "proposer-expiry-during-sla-wait",
+        "retired-active-lifecycle-keeps-business-facts",
+        "reviewer-expiry-during-mapping-wait", "reviewer-expiry-during-sla-wait",
+        "reviewer-revocation-during-role-wait",
+        "self-and-unprivileged-confirmations-block",
+        "stale-mapping-keeps-new-generation",
+        "unknown-and-superseded-observation-block",
+    },
+    "TestF02CommerceClaimWaitStartsFreshLease": {
+        "mapping",
+        "user",
+    },
+    "TestF02CommerceConfirmedProducersPreserveStatuses": {
+        "confirmed-mobile-ACTIVE",
+        "confirmed-mobile-DISABLED",
+        "confirmed-mobile-PROVISIONING",
+        "confirmed-mobile-REPAIR_REQUIRED",
+        "real-registration-provisioning",
+    },
+    "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock": {
+        "complete",
+        "retry",
+    },
+    "TestF02CommerceSupersededGenerationCannotDispatch": {
+        "confirmed-mobile-wins-lock",
+        "expired-lease",
+        "inflight-complete",
+        "inflight-retry",
+    },
+    "TestF02PublicCommerceCustomerLifecycle": {
+        "bootstrap-wallet-ack-and-get-me",
+        "current-schema-with-subject-lifecycle",
+        "detached-current-mapping-cannot-resume",
+        "disabled-user-cannot-claim-or-complete",
+        "mapping-generation-and-adapter-fence",
+        "quarantined-lease-rejects-previous-worker",
+        "quarantined-lease-rejects-previous-worker/complete",
+        "quarantined-lease-rejects-previous-worker/retry",
+        "startup-ensure-claim-retry-complete",
+    },
     "TestStreamStatePollingPublicPostgres": {"complete", "cancel", "disconnect",
         "complete/concurrent-last-event-id-public-replay", "disconnect/concurrent-last-event-id-public-replay",
         "external-committed", "external-released"},
@@ -402,6 +492,28 @@ EXACT_REQUIRED_CHILDREN = {
     },
     "TestOrganizationStartupDiagnosticsPostgres": {
         "profile", "token", "billing-earlier-wallet-guard",
+    },
+    "TestPinnedMigrationLedgerPostgresIntegration": {
+        "up-path-change-keeps-original-ledger",
+        "verify-rejects-original-drift-despite-shadow",
+        "down-path-change-removes-only-original-row",
+        "actual-cli-retains-bound-namespace",
+        "binding-cannot-cross-connections",
+        "missing-search-path-schema-rejects-before-preparation",
+        "another-workflow-selects-its-own-visible-ledger",
+        "temporary-shadow-does-not-hide-later-permanent-ledger",
+        "temporary-shadow-does-not-capture-creation-schema",
+        "temporary-only-path-rejects-before-preparation",
+    },
+    "TestRestrictedMigrationLedgerPostgresIntegration": {
+        "existing_ledger_upgrade_and_down",
+        "checksum_remains_closed",
+        "existing_ledger_without_permission",
+        "trusted_owner_switch_keeps_ledger_identity",
+        "after_hook_starts_as_migration_role_and_rolls_back",
+        "down_hooks_pin_roles_and_rollback_atomically",
+        "empty_schema_without_create",
+        "advisory_lock_still_serializes",
     },
     "TestPaymentCreditRetentionPublicPostgres": {"late-acknowledgement-survives-billing-retention", "waiting-old-ack-batch-does-not-starve-later-clearance"},
     "TestPaymentCreditClosureBoundaryPostgres": {
@@ -487,6 +599,11 @@ EXACT_REQUIRED_CHILDREN = {
         "retention-purges-submission-snapshot-and-review-reason",
     },
     "TestEmergencyCancellationClaimOwnershipPostgres": {"before-request", "after-request", "pending", "zero-attempt"},
+    "TestEmergencyCancellationDurableRetryPostgres": {
+        "failure-backoff-and-manual-case", "expired-claim-and-stale-result",
+        "late-financial-review-is-independent", "settlement-does-not-close-emergency-case",
+        "unstarted-tail-does-not-spend-budget",
+    },
     "TestReceivableSettlementGuardedWritesPostgres": {"recharge-and-write-off-lock-order"},
     "TestEmergencyCancellationRequestLocksClaimPostgres": {"usage-lock-reclaim"},
     "TestPasswordPreparationAuthorizationPostgres": {
@@ -511,17 +628,26 @@ EXACT_REQUIRED_CHILDREN = {
         "concurrent-new-order-does-not-shift-older-pages",
     },
     "TestManagementPublicMigrationInstallation": {
-        "fresh", "legacy-upgrade", "installed-29-upgrade", "installed-30-upgrade",
-        "installed-f05-34-upgrade", "retained-management-lifecycle-upgrade",
-        "installed-f07-36-upgrade", "installed-pre-runtime-37-upgrade",
-        "installed-pre-cleanup-39-upgrade",
-        "installed-pre-governance-index-40-upgrade",
-        "installed-pre-governance-index-40-upgrade/governance-index-public-cli-rollback",
+        "fresh",
+        "installed-29-upgrade",
+        "installed-30-upgrade",
+        "installed-f05-34-upgrade",
+        "installed-f07-36-upgrade",
         "installed-governance-before-dispatch-40-upgrade",
         "installed-governance-before-dispatch-40-upgrade/dispatch-index-public-cli-round-trip",
+        "installed-pre-cleanup-39-upgrade",
         "installed-pre-dispatch-index-40-upgrade",
         "installed-pre-dispatch-index-40-upgrade/dispatch-index-public-cli-round-trip",
+        "installed-pre-emergency-retry-40-upgrade",
+        "installed-pre-emergency-retry-40-upgrade/retry-forward-only-public-prefix",
+        "installed-pre-governance-index-40-upgrade",
+        "installed-pre-governance-index-40-upgrade/governance-index-public-cli-rollback",
         "installed-pre-publication-41-upgrade",
+        "installed-pre-runtime-37-upgrade",
+        "installed-published-42-upgrade",
+        "installed-published-42-upgrade/retry-forward-only-public-prefix",
+        "legacy-upgrade",
+        "retained-management-lifecycle-upgrade",
     },
     "TestUserUnusedIntentCancellationOwnerPostgres": {
         "before-claim", "after-claim", "waiting-owner-does-not-starve-later-target", "acquired-intent-control", "model-first-control",
@@ -644,6 +770,14 @@ EXACT_REQUIRED_CHILDREN = {
 }
 
 
+FAMILY_GO_CONTRACT = runpy.run_path(str(ROOT / "scripts/go-test-contract.py"))
+EXISTING_FAMILY_ROOTS = json.loads((ROOT / "scripts/account-financial-families.json").read_text(encoding="utf-8"))["existing_roots"]
+for family_root, family_children in EXISTING_FAMILY_ROOTS.items():
+    # Preserve all previously required subcases; the original issue roots now
+    # also retain their complete reviewed case-name contract.
+    EXACT_REQUIRED_CHILDREN.setdefault(family_root, set()).update(family_children)
+
+
 def local_database_url(raw):
     url = urlsplit(raw)
     query = parse_qs(url.query, keep_blank_values=True)
@@ -699,6 +833,7 @@ def f12_upgrade_phase(event):
 
 
 def verify_results(events, required=None, *, package=None, require_children=False, exact_roots=False, children_required=None):
+    events = list(events)
     required = REQUIRED if required is None else required
     started, passed = set(), set()
     children = set()
@@ -753,6 +888,9 @@ def verify_results(events, required=None, *, package=None, require_children=Fals
                 raise RuntimeError("required financial contract subcases did not complete: " + ", ".join(sorted(missing)))
     if package is not None and not package_passed:
         raise RuntimeError("financial package did not complete successfully")
+    family_roots = {root: children for root, children in EXISTING_FAMILY_ROOTS.items() if root in required}
+    if family_roots:
+        FAMILY_GO_CONTRACT["verify_lifecycles"](events, family_roots, package, allow_other_roots=True, allow_extra_children=True)
     if F12_UPGRADE_PARENT in required and (
             package != SCHEMA_PACKAGE or f12_phases != {"historical", "current"}
             or f12_root_actions != {"run": 1, "pass": 1}):
@@ -839,11 +977,11 @@ def require_exclusive_instance(query, databases, roles, *, timeout_seconds=15, n
 BILLING_GROUPS = tuple(f"billing-{index}" for index in range(4))
 GROUPS = ("owners", "token", *BILLING_GROUPS)
 OWNER_LANES = {
-    "account": ("owner-account", "lifecycle-reconciliation"),
+    "account": ("owner-ledger", "owner-account", "lifecycle-reconciliation"),
     "wallet": ("owner-wallet", "owner-token-schema", "owner-provisioning"),
     "schema": ("owner-schema-legacy-expiry", "owner-schema"),
 }
-OWNER_ORDER = ("owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema",
+OWNER_ORDER = ("owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema",
                "owner-provisioning", "lifecycle-reconciliation")
 EXACT_REQUIRED_CHILDREN["TestOwnerWalletTemplateScopePostgres"] = {
     "first", "first/case-a", "first/case-b", "second", "second/case-a", "second/case-b",
@@ -991,7 +1129,7 @@ def main(*, group="all", verify_fixture_cache=False, owner_lane=None):
             env["PINVOU_TEST_ACCOUNT_DATABASE_URL"] = raw
         elif target == "./internal/billingschema":
             env["PINVOU_TEST_SCHEMA_DATABASE_URL"] = raw
-        elif target == "./internal/tokenschema":
+        elif target in ("./internal/tokenschema", "./internal/platform/migrations"):
             env["PINVOU_TEST_TOKEN_DATABASE_URL"] = raw
         else:
             env["PINVOU_TEST_BILLING_DATABASE_URL"] = raw
@@ -1025,9 +1163,16 @@ def main(*, group="all", verify_fixture_cache=False, owner_lane=None):
         phase_timing(label, time.monotonic() - started, events, result.returncode, started_epoch=started_epoch)
         if result.returncode:
             raise RuntimeError("Go financial phase failed: " + label)
+        phase_children = {
+            "owner-account": ACCOUNT_CHILD_REQUIRED,
+            "retained-token": TOKEN_CHILD_REQUIRED,
+            "retained-billing": BILLING_CHILD_REQUIRED & required,
+            "owner-schema": SCHEMA_CHILD_REQUIRED & required,
+            "owner-schema-legacy-expiry": SCHEMA_CHILD_REQUIRED & required,
+        }.get(label)
         count = verify_results(events,
                                required, package=package, require_children=scoped or label == "retained-token", exact_roots=scoped,
-                               children_required=SCHEMA_CHILD_REQUIRED & required if label == "owner-schema" else ACCOUNT_CHILD_REQUIRED if label == "owner-account" else TOKEN_CHILD_REQUIRED if label == "retained-token" else BILLING_CHILD_REQUIRED & required if label == "retained-billing" else None)
+                               children_required=phase_children)
         print(f"Financial phase {label}: {count} named passes; all {len(required)} required roots completed", flush=True)
 
     if verify_fixture_cache:
@@ -1040,6 +1185,7 @@ def main(*, group="all", verify_fixture_cache=False, owner_lane=None):
         # Each existing owner fixture requires its own absent actors. Restoration
         # is checked between every phase, before any next fixture can write.
         phases = {
+            "owner-ledger": ("./internal/platform/migrations", MIGRATIONS_PACKAGE, MIGRATIONS_REQUIRED),
             "owner-account": ("./internal/account", ACCOUNT_PACKAGE, ACCOUNT_REQUIRED),
             "owner-wallet": ("./internal/billing", BILLING_PACKAGE, OWNER_REQUIRED),
             "owner-token-schema": ("./internal/tokenschema", TOKEN_SCHEMA_PACKAGE, TOKEN_SCHEMA_REQUIRED),

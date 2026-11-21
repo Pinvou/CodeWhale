@@ -37,7 +37,7 @@ CodeWhale #97 尚未合并，不改变宿主 gitlink，也不接入未通过的�
 ## R15 相邻传播与就绪接缝
 
 A08 R15 修复经普通合并传入，保留 guarded State、完整宿主端口安装后才发布 ready、
-流式脱敏、唯一时钟、20MiB B 上传 admission、稳定前端轮询及审批单飞刷新。
+流式脱敏、唯一时钟、50MiB B 上传 admission、稳定前端轮询及审批单飞刷新。
 ACP 瞬时 task_cleanup_busy 继续有界等待，A09 的精确运行时/回合 owner 与 panic
 收容不退回旧接口；旧 history 退役及 CodeWhale #97 未合入边界不变。
 

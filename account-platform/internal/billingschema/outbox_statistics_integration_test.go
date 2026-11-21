@@ -31,16 +31,16 @@ import (
 
 const statisticsBaseline = "4bbf359d8cf3547af401d7cdb561f7bc0477ebd6"
 
-// The real complete Token package whose installed head is the statistics index.
-// Current packages also contain the later, forward-only publication generation.
-const statisticsTokenIndexBaseline = "52ca1c447a3baa5479a7106284f5b69f21df258d"
+// The published main package ending at generation 900011 is the exact
+// predecessor of the new statistics index.
+const statisticsTokenBaseline = "5d8b45efc31e07299c4024cb5de2cbb58786feb3"
 
 func TestOutboxStatisticsMigrationIdentity(t *testing.T) {
 	for _, domain := range []struct {
 		name    string
 		version int64
 		ordered func([]migrations.Migration) ([]migrations.Migration, error)
-	}{{"account", 900021, accountschema.Ordered}, {"billing", 900046, Ordered}, {"token", 900010, tokenschema.Ordered}} {
+	}{{"account", 900021, accountschema.Ordered}, {"billing", 900046, Ordered}, {"token", 900012, tokenschema.Ordered}} {
 		t.Run(domain.name, func(t *testing.T) {
 			loaded, err := migrations.Load("../../migrations/" + domain.name)
 			if err != nil {
@@ -146,7 +146,7 @@ func statisticsMigrationCLIs(t *testing.T, ctx context.Context) (string, string,
 		t.Fatal(err)
 	}
 	baselineModule := statisticsArchiveModule(t, ctx, statisticsBaseline)
-	tokenModule := statisticsArchiveModule(t, ctx, statisticsTokenIndexBaseline)
+	tokenModule := statisticsArchiveModule(t, ctx, statisticsTokenBaseline)
 	historical, err := migrations.Load(filepath.Join(tokenModule, "migrations", "token"))
 	if err != nil {
 		t.Fatal(err)
@@ -158,8 +158,8 @@ func statisticsMigrationCLIs(t *testing.T, ctx context.Context) (string, string,
 	if _, err = tokenschema.Ordered(current); err != nil {
 		t.Fatal(err)
 	}
-	if len(historical) != 43 || historical[len(historical)-1].Version != 900010 || len(current) != 44 {
-		t.Fatal("frozen Token index fixture must be the real 43-entry package before generation 900011")
+	if len(historical) != 44 || historical[len(historical)-1].Version != 900011 || len(current) != 45 || current[len(current)-1].Version != 900012 {
+		t.Fatal("frozen Token fixture must be the complete published package through 900011 before statistics 900012")
 	}
 	for i, migration := range historical {
 		candidate := current[i]
@@ -184,7 +184,7 @@ func statisticsMigrationCLIs(t *testing.T, ctx context.Context) (string, string,
 		}
 		return binary
 	}
-	return build(baselineModule, "baseline-migrate"), build(module, "candidate-migrate"), baselineModule, build(tokenModule, "token-index-migrate"), filepath.Join(tokenModule, "migrations", "token")
+	return build(baselineModule, "baseline-migrate"), build(module, "candidate-migrate"), baselineModule, build(tokenModule, "token-baseline-migrate"), filepath.Join(tokenModule, "migrations", "token")
 }
 
 // Keep real SQL bytes and filenames; never manufacture an older installed head
@@ -294,7 +294,7 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	baselineCLI, candidateCLI, baselineModule, tokenIndexCLI, tokenIndexDirectory := statisticsMigrationCLIs(t, ctx)
+	baselineCLI, candidateCLI, baselineModule, tokenBaselineCLI, tokenBaselineDirectory := statisticsMigrationCLIs(t, ctx)
 	f := newStageFixture(t, ctx, raw)
 	tokenRoles := []string{"token_gateway", "token_schema_owner", "token_cap_policy_deployer", "token_migrator", "token_policy_operator"}
 	var existing int
@@ -343,7 +343,7 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 	}
 	for _, domain := range []string{"account", "billing", "token"} {
 		t.Run(domain, func(t *testing.T) {
-			indexVersion := map[string]int64{"account": 900021, "billing": 900046, "token": 900010}[domain]
+			indexVersion := map[string]int64{"account": 900021, "billing": 900046, "token": 900012}[domain]
 			owner := domain + "_service"
 			if domain == "billing" {
 				owner = "billing_schema_owner"
@@ -398,13 +398,10 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 				t.Fatal(e)
 			}
 			fullDirectory := newDirectory
-			upCLI := candidateCLI
 			downDirectory := fullDirectory
 			if domain == "account" {
 				newDirectory = statisticsAccountPackage(t, fullDirectory, 900021, 0)
 				downDirectory = newDirectory
-			} else if domain == "token" {
-				upCLI, newDirectory = tokenIndexCLI, tokenIndexDirectory
 			}
 			run(databaseURL, baselineCLI, oldDirectory, "up", true)
 			var absent bool
@@ -419,6 +416,29 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 					t.Fatal(e)
 				}
 			}
+			if domain == "token" {
+				// Exercise the published Token carrier before 900012. Preserve
+				// original outbox facts while 900011 initializes the new column.
+				oldFacts := statisticsFacts(t, ctx, operator)
+				oldAccess := statisticsAccessFacts(t, ctx, operator)
+				oldIndexes := statisticsOriginalIndexFacts(t, ctx, operator)
+				oldLedger := statisticsLedgerFacts(t, ctx, operator)
+				run(databaseURL, tokenBaselineCLI, tokenBaselineDirectory, "up", true)
+				requireStatisticsLedgerPreserved(t, ctx, operator, oldLedger, 0)
+				requireStatisticsOriginalIndexesPreserved(t, ctx, operator, oldIndexes)
+				var projectedFacts string
+				if e = operator.QueryRow(ctx, `SELECT string_agg((to_jsonb(e)-'publication_generation')::text,'' ORDER BY event_id) FROM public.outbox_events e`).Scan(&projectedFacts); e != nil {
+					t.Fatal(e)
+				}
+				sum := sha256.Sum256([]byte(projectedFacts))
+				var nonzero, rows int
+				if e = operator.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE publication_generation IS DISTINCT FROM 0) FROM public.outbox_events`).Scan(&rows, &nonzero); e != nil || rows != 25005 || nonzero != 0 || hex.EncodeToString(sum[:]) != oldFacts {
+					t.Fatal("publication upgrade changed retained delivery facts or failed to initialize every row", rows, nonzero, e)
+				}
+				if statisticsAccessFacts(t, ctx, operator) != oldAccess {
+					t.Fatal("publication upgrade changed persistent outbox authority")
+				}
+			}
 			if _, e = operator.Exec(ctx, `VACUUM (ANALYZE) public.outbox_events`); e != nil {
 				t.Fatal(e)
 			}
@@ -427,7 +447,7 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 			oldPlan := statisticsPlan(t, ctx, operator, oldQuery)
 			oldLedger := statisticsLedgerFacts(t, ctx, operator)
 			oldIndexes := statisticsOriginalIndexFacts(t, ctx, operator)
-			run(databaseURL, upCLI, newDirectory, "up", true)
+			run(databaseURL, candidateCLI, newDirectory, "up", true)
 			requireStatisticsLedgerPreserved(t, ctx, operator, oldLedger, 0)
 			requireStatisticsOriginalIndexesPreserved(t, ctx, operator, oldIndexes)
 			installedLedger := statisticsLedgerFacts(t, ctx, operator)
@@ -531,7 +551,12 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 			if statisticsAccessFacts(t, ctx, operator) != policy {
 				t.Fatal("rollback changed ownership or grants")
 			}
-			run(databaseURL, upCLI, newDirectory, "up", true)
+			if domain == "token" {
+				verifyStatisticsTokenGenerationRefusal(t, ctx, operator, databaseURL, fullDirectory, tokenBaselineDirectory, func() {
+					run(databaseURL, tokenBaselineCLI, tokenBaselineDirectory, "up", true)
+				})
+			}
+			run(databaseURL, candidateCLI, newDirectory, "up", true)
 			requireStatisticsLedgerPreserved(t, ctx, operator, installedLedger, indexVersion)
 			if statisticsOriginalIndexFacts(t, ctx, operator) != originalIndexes {
 				t.Fatal("index replay changed an unrelated original index")
@@ -541,25 +566,6 @@ func TestRetainedOutboxStatisticsPublicPostgres(t *testing.T) {
 				beforeRoleLedger := statisticsLedgerFacts(t, ctx, operator)
 				verifyStatisticsRollbackRole(t, ctx, domain, databaseURL, actor, fullDirectory)
 				requireStatisticsLedgerPreserved(t, ctx, operator, beforeRoleLedger, indexVersion)
-				if domain == "token" {
-					// The same-connection recovery above installs the complete current
-					// package, including generation 900011. Only this upgrade comparison
-					// projects away its new column; all later checks freeze full rows.
-					var oldFacts string
-					if e = operator.QueryRow(ctx, `SELECT string_agg((to_jsonb(e)-'publication_generation')::text,'' ORDER BY event_id) FROM public.outbox_events e`).Scan(&oldFacts); e != nil {
-						t.Fatal(e)
-					}
-					sum := sha256.Sum256([]byte(oldFacts))
-					var nonzero, rows int
-					if e = operator.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE publication_generation IS DISTINCT FROM 0) FROM public.outbox_events`).Scan(&rows, &nonzero); e != nil || rows != 25005 || nonzero != 0 || hex.EncodeToString(sum[:]) != facts {
-						t.Fatal("generation upgrade changed old delivery facts or failed to initialize every retained row", rows, nonzero, e)
-					}
-					if statisticsAccessFacts(t, ctx, operator) != policy || statisticsOriginalIndexFacts(t, ctx, operator) != originalIndexes {
-						t.Fatal("generation upgrade changed original authority or indexes")
-					}
-					verifyStatisticsTokenGenerationRefusal(t, ctx, operator, databaseURL, fullDirectory)
-					check()
-				}
 			} else {
 				// The actual historical 900022 head retains its exact refusal.
 				// Later current migrations are installed and verified separately.
@@ -891,9 +897,9 @@ func verifyStatisticsLedgerDenied(t *testing.T, ctx context.Context, conn *pgx.C
 	}
 }
 
-// A later forward-only migration must not masquerade as a successful test of
-// the reversible statistics index. It is checked only after that real roundtrip.
-func verifyStatisticsTokenGenerationRefusal(t *testing.T, ctx context.Context, operator *pgx.Conn, url, directory string) {
+// After the real statistics rollback, generation must be the head and refuse
+// rollback without changing data. Replay uses the exact pre-statistics package.
+func verifyStatisticsTokenGenerationRefusal(t *testing.T, ctx context.Context, operator *pgx.Conn, url, directory, previousDirectory string, replay func()) {
 	t.Helper()
 	current, err := pgx.Connect(ctx, url)
 	if err != nil {
@@ -907,7 +913,11 @@ func verifyStatisticsTokenGenerationRefusal(t *testing.T, ctx context.Context, o
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = tokenschema.VerifyApplied(ctx, current, loaded); err != nil {
+	previous, err := migrations.Load(previousDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = migrations.VerifyApplied(ctx, current, previous); err != nil {
 		t.Fatal(err)
 	}
 	var head int64
@@ -928,11 +938,9 @@ func verifyStatisticsTokenGenerationRefusal(t *testing.T, ctx context.Context, o
 	if len(statisticsLedgerFacts(t, ctx, operator)) != len(beforeLedger) || statisticsFacts(t, ctx, operator)+statisticsAccessFacts(t, ctx, operator)+statisticsOriginalIndexFacts(t, ctx, operator) != before {
 		t.Fatal("generation refusal changed retained facts or authority")
 	}
-	if err = tokenschema.Up(ctx, current, loaded); err != nil {
-		t.Fatal("next full migration after generation refusal", err)
-	}
-	if unlockErr := migrations.Unlock(ctx, current); unlockErr != nil {
-		t.Fatal(unlockErr)
+	replay()
+	if _, err = migrations.VerifyApplied(ctx, current, previous); err != nil {
+		t.Fatal("verify replay after generation refusal", err)
 	}
 	requireStatisticsLedgerPreserved(t, ctx, operator, beforeLedger, 0)
 	if len(statisticsLedgerFacts(t, ctx, operator)) != len(beforeLedger) || statisticsFacts(t, ctx, operator)+statisticsAccessFacts(t, ctx, operator)+statisticsOriginalIndexFacts(t, ctx, operator) != before {

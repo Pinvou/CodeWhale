@@ -98,6 +98,11 @@ func main() {
 			log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_ROLE_SELECTION_FAILED"))
 		}
 	}
+	pinnedCtx, err := migrations.PinLedger(ctx, connection)
+	if err != nil {
+		log.Fatal(migrationFailureCode(ctx, err, "MIGRATION_LEDGER_IDENTITY_INVALID"))
+	}
+	ctx = pinnedCtx
 
 	domain, err := migrationDomain(ctx, connection, loaded, *directory)
 	if err != nil {
@@ -186,12 +191,16 @@ func migrationDomain(ctx context.Context, connection *pgx.Conn, loaded []migrati
 			return "", err
 		}
 	}
+	ledger, err := migrations.LedgerTable(ctx, connection)
+	if err != nil {
+		return "", err
+	}
 	var exists bool
-	if err := connection.QueryRow(ctx, `SELECT to_regclass('schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {
+	if err := connection.QueryRow(ctx, `SELECT pg_catalog.to_regclass($1) IS NOT NULL`, ledger).Scan(&exists); err != nil {
 		return "", err
 	}
 	if exists {
-		rows, err := connection.Query(ctx, `SELECT version,name,checksum FROM schema_migrations`)
+		rows, err := connection.Query(ctx, `SELECT version,name,checksum FROM `+ledger)
 		if err != nil {
 			return "", err
 		}

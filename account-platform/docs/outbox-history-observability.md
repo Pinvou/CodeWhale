@@ -5,7 +5,7 @@
 
 ## 迁移与回滚
 
-通过既有公开迁移入口，分别安装 Account `900021`、Billing `900046`、Token `900010`
+通过既有公开迁移入口，分别安装 Account `900021`、Billing `900046`、Token `900012`
 `outbox_dead_statistics_index`。沿用各域独立 migrator、既有备份证据及发布流程。
 不修改已安装迁移；两个方向均固定 SQL 身份。新增的部分 B-tree 索引只包含死信事件。
 现有 pending 部分索引服务待发布聚合，已发布且非死信的历史不再参与统计输入。

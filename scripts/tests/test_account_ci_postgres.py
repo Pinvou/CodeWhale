@@ -312,9 +312,14 @@ class AccountCIAdmissionTests(unittest.TestCase):
         for root in roots:self.assertIsNotNone(re.fullmatch(pattern,root))
         self.assertIsNone(re.fullmatch(pattern,"TestUnrelatedOptionalFixture"))
         invitation="TestMembershipInvitationLegacyRollbackPublicPostgres"
+        history="TestAuditExportPublicDownRetainsOriginalHistory"
         children={
             "TestAccount039RollbackInventoryPostgres": {"empty-ledger", "before-approval-schema", "installed-039", "higher-version", "retained-v2-reference", "wrong-database", "missing-approval-column-grant"},
             invitation: {"retained-link-refuses-down-without-fact-or-schema-loss", "forward-upgrade-replays-original-and-accepts-next-command"},
+            history: {"three_scope_public_down", "three_scope_public_down/LF", "three_scope_public_down/CRLF",
+                      "unbound_public_down_forbids_incomplete_inverse", "expired_binding_public_down_retains_evidence",
+                      "public_governance_down_preserves_audit_history",
+                      "public_governance_down_preserves_audit_history/pinned_ledger_ignores_temp_shadow"},
         }
         events=[]
         for root in roots:
@@ -329,6 +334,16 @@ class AccountCIAdmissionTests(unittest.TestCase):
             "transient_database_errors_stop_at_three", "expired_third_attempt_is_terminal",
             "permanent_generation_error_is_not_retried", "pending_without_worker_retains_quota")}
         account.extend({"Test":case,"Action":"pass"} for case in retry_cases)
+        commerce = "TestCommerceSyncLifecycleFence"
+        commerce_cases = {commerce + "/" + case for case in (
+            "current_generation_completes", "stale_pending_not_claimed",
+            "late_completion_rejects_old_lifecycle_without_effects",
+            "late_retry_cannot_write_new_lifecycle_mapping",
+            "mapping_version_drift_records_stale_in_same_lifecycle",
+            "temporary_disable_preserves_same_generation_retry",
+        )}
+        account.append({"Test": commerce, "Action": "pass"})
+        account.extend({"Test":case,"Action":"pass"} for case in commerce_cases)
         with tempfile.TemporaryDirectory(prefix='audit-result-contract-') as directory:
             schema_path, account_path=Path(directory)/'schema.jsonl',Path(directory)/'account.jsonl'
             account_path.write_text('\n'.join(map(json.dumps,account)),encoding='utf-8')
@@ -337,12 +352,13 @@ class AccountCIAdmissionTests(unittest.TestCase):
                 with patch.object(sys,'argv',['audit-validator',str(schema_path),str(account_path)]):
                     exec(compile(code,'<actual-audit-workflow-validator>','exec'),{})
             verify(events)
-            for child in children[invitation]:
-                for invalid in ([e for e in events if e['Test']!=invitation+'/'+child],
-                                [dict(e,Action='skip') if e['Test']==invitation+'/'+child else e for e in events]):
-                    with self.subTest(child=child),self.assertRaises(AssertionError):verify(invalid)
-            with self.assertRaises(AssertionError):verify([e for e in events if not e['Test'].startswith(invitation)])
-            for case in lease_cases | retry_cases:
+            for root in (invitation,history):
+                for child in children[root]:
+                    for invalid in ([e for e in events if e['Test']!=root+'/'+child],
+                                    [dict(e,Action='skip') if e['Test']==root+'/'+child else e for e in events]):
+                        with self.subTest(root=root,child=child),self.assertRaises(AssertionError):verify(invalid)
+                with self.assertRaises(AssertionError):verify([e for e in events if not e['Test'].startswith(root)])
+            for case in lease_cases | retry_cases | commerce_cases:
                 for invalid in ([e for e in account if e['Test']!=case],
                                 [dict(e,Action='skip') if e['Test']==case else e for e in account]):
                     account_path.write_text('\n'.join(map(json.dumps,invalid)),encoding='utf-8')

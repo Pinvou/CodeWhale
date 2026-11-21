@@ -34,11 +34,16 @@ func TestManagementPublicMigrationInstallation(t *testing.T) {
 	})
 	t.Run("installed-pre-dispatch-index-40-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 40, false) })
 	t.Run("installed-pre-publication-41-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 41, false) })
+	t.Run("installed-published-42-upgrade", func(t *testing.T) { testManagementPublicMigrationInstallation(t, false, 42, false) })
+	t.Run("installed-pre-emergency-retry-40-upgrade", func(t *testing.T) {
+		testManagementPublicMigrationInstallation(t, false, 40, false, historicalIndexFixture{retryOnly: true})
+	})
 }
 
 type historicalIndexFixture struct {
 	head           int64
 	governanceOnly bool
+	retryOnly      bool
 }
 
 func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previousStage int, retainedManagement bool, indexFixtures ...historicalIndexFixture) {
@@ -46,6 +51,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	if dsn == "" {
 		t.Skip("PINVOU_TEST_TOKEN_DATABASE_URL is not configured")
 	}
+	retryOnly := len(indexFixtures) > 0 && indexFixtures[0].retryOnly
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	admin, err := pgx.Connect(ctx, dsn)
@@ -149,6 +155,7 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 	var previousAccountFacts string
 	var previousRuntimeCapabilityFacts string
 	var previousOutboxFacts string
+	var previousRetryHistory, retryPrefixLedger string
 	if previousStage > 0 {
 		previous := []migrations.Migration{}
 		for _, m := range loaded {
@@ -156,6 +163,12 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 				// These fixtures are the real predecessors, excluding any later
 				// recovery or index work from the package under test.
 				if m.Version <= 900005 || (previousStage == 40 && m.Version == 900006) {
+					previous = append(previous, m)
+				}
+				continue
+			}
+			if previousStage == 42 {
+				if m.Version <= 900009 {
 					previous = append(previous, m)
 				}
 				continue
@@ -183,7 +196,12 @@ func testManagementPublicMigrationInstallation(t *testing.T, legacy bool, previo
 		if e != nil || verified.AppliedCount != previousStage {
 			t.Fatal("installed previous stage fixture verification", verified, e)
 		}
-		if previousStage == 41 {
+		if previousStage == 42 || retryOnly {
+			if e = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history`).Scan(&previousRetryHistory); e != nil {
+				t.Fatal(e)
+			}
+		}
+		if previousStage == 41 || previousStage == 42 || retryOnly {
 			if _, e = connection.Exec(ctx, `INSERT INTO outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at)
  VALUES('11111111-1111-4111-8111-111111111117','token.manual-review.created.v1','11111111-1111-4111-8111-111111111118',1,'{"case_type":"ROUTE_PROVISIONING"}','retained-publication','2026-01-01')`); e != nil {
 				t.Fatal(e)
@@ -299,7 +317,15 @@ VALUES('11111111-1111-4111-8111-111111111116','11111111-1111-4111-8111-111111111
 			}
 		})
 	}
-	if previousStage == 40 {
+	if previousStage == 42 || retryOnly {
+		t.Run("retry-forward-only-public-prefix", func(t *testing.T) {
+			retryPrefixLedger = testEmergencyRetryHistoricalFence(t, ctx, connection, admin.Config(), config, loaded, previousStage, previousRetryHistory)
+		})
+		if retryPrefixLedger == "" {
+			t.Fatal("public retry forward-only boundary did not execute")
+		}
+	}
+	if previousStage == 40 && !retryOnly {
 		// Validate the complete current carrier before selecting the real
 		// historical SQL. Pending later migrations remain in the CLI package.
 		orderedCarrier, e := Ordered(loaded)
@@ -334,6 +360,13 @@ VALUES('11111111-1111-4111-8111-111111111116','11111111-1111-4111-8111-111111111
 	}
 	if err = Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
+	}
+	if retryPrefixLedger != "" {
+		var current string
+		if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history WHERE version<=900010`).Scan(&current); err != nil || current != retryPrefixLedger {
+			t.Fatal("complete publication upgrade changed the exact retry-prefix ledger", err)
+		}
+		assertPublishedTokenInventory(t, ctx, admin.Config(), config, 900012)
 	}
 	if previousOutboxFacts != "" {
 		var current string
@@ -421,9 +454,22 @@ WHERE i.indexrelid=to_regclass('public.usage_cancellation_dispatch_fence_idx')
 	if err != nil || !unlocked {
 		t.Fatalf("one Up followed by one Unlock retained the migration lock: acquired=%v err=%v", unlocked, err)
 	}
+	var completeRetryFacts string
+	if retryPrefixLedger != "" {
+		if err = connection.QueryRow(ctx, `SELECT jsonb_build_object('ledger',(SELECT jsonb_agg(to_jsonb(h) ORDER BY version) FROM schema_migrations h),'outbox',(SELECT jsonb_agg(to_jsonb(o) ORDER BY event_id) FROM outbox_events o))::text`).Scan(&completeRetryFacts); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err = Up(ctx, connection, loaded); err != nil {
 		t.Fatalf("exact installed migration replay: %v", err)
 	}
+	if retryPrefixLedger != "" {
+		var current string
+		if err = connection.QueryRow(ctx, `SELECT jsonb_build_object('ledger',(SELECT jsonb_agg(to_jsonb(h) ORDER BY version) FROM schema_migrations h),'outbox',(SELECT jsonb_agg(to_jsonb(o) ORDER BY event_id) FROM outbox_events o))::text`).Scan(&current); err != nil || current != completeRetryFacts {
+			t.Fatal("exact full-current replay changed retry/publication ledger or facts", err)
+		}
+	}
+
 	if previousStage == 37 {
 		var retainedFacts, profile string
 		if err := connection.QueryRow(ctx, `SELECT (to_jsonb(capability)-'runtime_protocol')::text,runtime_protocol FROM model_capability_versions capability WHERE id='11111111-1111-4111-8111-111111111116'`).Scan(&retainedFacts, &profile); err != nil || retainedFacts != previousRuntimeCapabilityFacts || profile != "" {
@@ -629,4 +675,77 @@ func connectManagementFixture(t *testing.T, ctx context.Context, config *pgx.Con
 	c, err := pgx.ConnectConfig(ctx, config)
 	t.Logf("fixture connection elapsed: %s", time.Since(started).Round(time.Millisecond))
 	return c, err
+}
+
+// Exercise the real historical maximum before publication 900011 is installed.
+// No installed higher identity is removed and no public CLI can select a version.
+func testEmergencyRetryHistoricalFence(t *testing.T, ctx context.Context, connection *pgx.Conn, admin, config *pgx.ConnConfig, loaded []migrations.Migration, previousStage int, previousHistory string) string {
+	t.Helper()
+	ordered, err := Ordered(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := func(highest int64) []migrations.Migration {
+		var selected []migrations.Migration
+		for _, m := range ordered {
+			if m.Version <= highest {
+				selected = append(selected, m)
+			}
+		}
+		return selected
+	}
+	if err = migrations.UpWithHooks(ctx, connection, prefix(900009), migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); err != nil {
+		t.Fatal(err)
+	}
+	migrations.Unlock(ctx, connection)
+	assertPublishedTokenInventory(t, ctx, admin, config, 900009)
+	var publishedLedger string
+	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history`).Scan(&publishedLedger); err != nil {
+		t.Fatal(err)
+	}
+	if previousStage == 42 && publishedLedger != previousHistory {
+		t.Fatal("published 42-item ledger changed before appended retry upgrade")
+	}
+	if err = migrations.UpWithHooks(ctx, connection, prefix(900010), migrations.UpHooks{BeforeApply: prepareTokenMigration, AfterApply: finishTokenMigration, LedgerRole: "token_schema_owner"}); err != nil {
+		t.Fatal(err)
+	}
+	migrations.Unlock(ctx, connection)
+	var highest int64
+	if err = connection.QueryRow(ctx, `SELECT max(version) FROM schema_migrations`).Scan(&highest); err != nil || highest != 900010 {
+		t.Fatal("retry forward-only check requires its exact installed public boundary", highest, err)
+	}
+	var kept, allPublished string
+	var columns, hardened bool
+	query := `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history WHERE version<900010`
+	if previousStage == 40 {
+		query += ` AND version NOT IN (900008,900009)`
+	}
+	if err = connection.QueryRow(ctx, query).Scan(&kept); err != nil || kept != previousHistory {
+		t.Fatal("emergency retry upgrade changed original predecessor ledger", err)
+	}
+	if err = connection.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history WHERE version<900010`).Scan(&allPublished); err != nil || allPublished != publishedLedger {
+		t.Fatal("emergency retry upgrade changed published 42-item ledger", err)
+	}
+	if err = connection.QueryRow(ctx, `SELECT
+ (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='public' AND table_name='model_emergency_cancellations' AND column_name IN ('retry_attempts','next_attempt_at')),
+ (SELECT pg_get_userbyid(relowner)='token_schema_owner' FROM pg_class WHERE oid='public.model_emergency_cancellations'::regclass)
+ AND NOT pg_has_role('token_gateway','token_schema_owner','MEMBER')
+ AND NOT has_table_privilege('token_gateway','public.model_emergency_cancellations','TRUNCATE')`).Scan(&columns, &hardened); err != nil || !columns || !hardened {
+		t.Fatal("emergency retry upgrade lost columns or runtime fence", columns, hardened, err)
+	}
+	const snapshot = `SELECT jsonb_agg(to_jsonb(history) ORDER BY version)::text FROM schema_migrations history`
+	var before, after string
+	if err = connection.QueryRow(ctx, snapshot).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	err = migrations.DownOne(ctx, connection, loaded)
+	var denied *pgconn.PgError
+	if err == nil || !strings.Contains(err.Error(), "emergency cancellation retry and review history is forward-only") || !errors.As(err, &denied) || denied.Code != "P0001" || denied.Message != "emergency cancellation retry and review history is forward-only" {
+		t.Fatalf("rollback did not reach the exact retry history guard: %v", err)
+	}
+	migrations.Unlock(ctx, connection)
+	if err = connection.QueryRow(ctx, snapshot).Scan(&after); err != nil || before != after {
+		t.Fatal("refused retry rollback changed an installed ledger row", err)
+	}
+	return after
 }

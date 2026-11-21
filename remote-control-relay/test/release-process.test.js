@@ -581,6 +581,36 @@ for (const shell of ["powershell.exe", "pwsh"]) {
       const result = ps(shell, script);
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stdout, "ok");
+      assert.match(result.stderr, /\[pinvou-owned-phase\] native-run-settled \d+/u);
+    });
+
+  test(`process diagnostics preserve the verdict when stderr is unavailable [${shell}]`,
+    { skip: process.platform !== "win32" }, () => {
+      const script = `$ErrorActionPreference='Stop'; . ${quote(guard)};
+        Add-Type 'public sealed class DiagnosticBrokenWriter : System.IO.StringWriter { public override void WriteLine(string value) { throw new System.IO.IOException("closed diagnostic stream"); } }';
+        [Console]::SetError([DiagnosticBrokenWriter]::new());
+        $r=Invoke-PinvouWhitelistedProcess -FilePath ${quote(process.execPath)} -ExpectedSha256 '${nodeHash}' -Arguments @('-e','process.stdout.write("ok")') -TimeoutMilliseconds 15000;
+        if($r.ExitCode -ne 0 -or $r.StdOut -ne 'ok'){throw 'diagnostic-changed-result'};[Console]::Out.Write('ok')`;
+      const result = ps(shell, script);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "ok");
+    });
+
+  test(`process failure diagnostics omit script contents and retain the exit code [${shell}]`,
+    { skip: process.platform !== "win32" }, () => {
+      const original = console.error;
+      const messages = [];
+      let result;
+      try {
+        console.error = (...args) => messages.push(args.join(" "));
+        result = ps(shell, "[Console]::Error.WriteLine('PRIVATE_SCRIPT_SENTINEL'); exit 7");
+      } finally { console.error = original; }
+      assert.equal(result.status, 7);
+      assert.equal(messages.length, 1);
+      assert.doesNotMatch(messages[0], /PRIVATE_SCRIPT_SENTINEL|EncodedCommand/u);
+      const diagnostic = JSON.parse(messages[0].slice("[release-powershell-result] ".length));
+      assert.equal(diagnostic.status, 7);
+      assert.equal(diagnostic.error_code, null);
     });
 
   test(`production Windows timeout kills its exact detached descendants [${shell}]`,
@@ -598,7 +628,18 @@ for (const shell of ["powershell.exe", "pwsh"]) {
       const code = "require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'inherit'}).unref();process.exit(0)";
       const script = `$ErrorActionPreference='Stop'; . ${quote(guard)};
         try { Invoke-PinvouWhitelistedProcess -FilePath ${quote(process.execPath)} -ExpectedSha256 '${nodeHash}' -Arguments @('-e',${quote(code)}) -TimeoutMilliseconds 1000 -RetainSuccessfulScope | Out-Null;throw 'incomplete-pipes-accepted' }
-        catch { $e=$_.Exception;while($e.InnerException){$e=$e.InnerException};if($e.Message -ne 'e2e_process_timeout' -or $e.ChildExitCode -ne 0 -or $e.CleanupFailed){throw} };
+        catch { $e=$_.Exception;while($e.InnerException){$e=$e.InnerException};
+          if($e.Message -ne 'e2e_process_timeout' -or $e.ChildExitCode -ne 0 -or $e.CleanupFailed){
+            try {
+              $rootExit=$null;$cleanup=$null;
+              if($e.PSObject.Properties['ChildExitCode'] -and $e.ChildExitCode -is [int]){$rootExit=$e.ChildExitCode};
+              if($e.PSObject.Properties['CleanupFailed'] -and $e.CleanupFailed -is [bool]){$cleanup=$e.CleanupFailed};
+              $kind=if($e.Message -eq 'e2e_process_timeout'){'timeout'}else{'other'};
+              [Console]::Error.WriteLine('[windows-pipe-retirement-witness] '+(@{phase='zero-root';failure=$kind;root_exit=$rootExit;cleanup_failed=$cleanup}|Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress))
+            } catch {};
+            throw
+          }
+        };
         $next=Invoke-PinvouWhitelistedProcess -FilePath ${quote(process.execPath)} -ExpectedSha256 '${nodeHash}' -Arguments @('-e','process.stdout.write("next")') -TimeoutMilliseconds 5000;
         if($next.ExitCode -ne 0 -or $next.StdOut -ne 'next'){throw 'next-command-failed'};[Console]::Out.Write('retired-and-recovered')`;
       const result = ps(shell, script);
@@ -662,6 +703,18 @@ for (const shell of ["powershell.exe", "pwsh"]) {
 function ps(shell, script) {
   const environment = { ...process.env };
   for (const key of Object.keys(environment)) if (key.toUpperCase() === "PSMODULEPATH") delete environment[key];
-  return spawnSync(shell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+  environment.PINVOU_CI_PROCESS_DIAGNOSTICS = "1";
+  const started = performance.now();
+  const result = spawnSync(shell, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
     { env: environment, encoding: "utf8", timeout: 30000, maxBuffer: 8 * 1024 * 1024, windowsHide: true });
+  if (result.status !== 0) {
+    const phases = (result.stderr || "").split(/\r?\n/u)
+      .filter(line => /^\[pinvou-owned-phase\] [a-z-]+ \d+$/u.test(line)).slice(-24);
+    console.error("[release-powershell-result]", JSON.stringify({
+      shell, status: result.status, signal: result.signal,
+      error_code: /^[A-Z0-9_]{1,64}$/u.test(result.error?.code || "") ? result.error.code : null,
+      elapsed_ms: Math.round(performance.now() - started), phases,
+    }));
+  }
+  return result;
 }

@@ -17,7 +17,7 @@ func DownOne(ctx context.Context, c *pgx.Conn, loaded []migrations.Migration) er
 	}
 	return migrations.DownOneWithHooks(ctx, c, ordered, migrations.DownHooks{
 		LedgerRole: func(m migrations.Migration) string {
-			if m.Version == 900010 {
+			if m.Version == 900012 {
 				return "token_schema_owner"
 			}
 			return ""

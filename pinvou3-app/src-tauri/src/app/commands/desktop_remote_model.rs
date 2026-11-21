@@ -287,6 +287,7 @@ mod tests {
 
     fn model(id: &str) -> SavedModel {
         SavedModel {
+            auth_mode: None,
             id: id.into(),
             name: "DeepSeek".into(),
             alias: None,

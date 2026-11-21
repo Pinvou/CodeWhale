@@ -13,6 +13,16 @@ import { join, matchesGlob } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
+import transportPolicy from "../ci-network-policy.cjs";
+import artifactPolicySupport from "./ci-artifact-policy-support.cjs";
+
+// Keep historical product/advisory contracts exact after validating the new
+// transport layer independently. Only the reviewed helper and exact scoped
+// environment are removed; arbitrary commands or environments still fail.
+function productPolicyText(text) {
+  return artifactPolicySupport.legacyArtifactPolicy(text);
+}
+import "./ci-artifact-tls-policy.test.cjs";
 
 const workflow = await readFile(
   new URL("../../.github/workflows/pr-check.yml", import.meta.url),
@@ -140,6 +150,7 @@ function stepRun(job, name) {
 }
 
 function assertAccountFailurePolicy(job) {
+  job = productPolicyText(job);
   assert.doesNotMatch(job, /secrets\./);
   let mandatory = job;
   // Only these reviewed, bounded transport steps are advisory. Remove their
@@ -153,13 +164,16 @@ function assertAccountFailurePolicy(job) {
     assert.match(diagnostic, /^ {8}uses: actions\/upload-artifact@v7$/m);
     assert.match(diagnostic, /^ {8}timeout-minutes: 3$/m);
     assert.match(diagnostic, /^ {8}continue-on-error: true$/m);
-    assert.doesNotMatch(diagnostic, /^ {8}(?:run|env):/m);
+    assert.ok(diagnostic.includes(artifactTLSOptionsEnv));
+    assert.doesNotMatch(diagnostic.replace(artifactTLSOptionsEnv, ""), /^ {8}(?:run|env):/m);
     mandatory = mandatory.replace(diagnostic, "");
   }
   assert.doesNotMatch(mandatory, /continue-on-error:/);
 }
 
 
+
+const artifactTLSOptionsEnv = "        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n";
 
 const goStepName = "Test and vet all Account Platform Go modules";
 const goGatePhase = "PINVOU_GO_GATE_PHASE";
@@ -199,7 +213,7 @@ function pgIdentityEnvironment(service) {
 }
 
 function assertFinancialDiagnosticExemption(job) {
-  const text = job.replaceAll("\r\n", "\n");
+  const text = productPolicyText(job.replaceAll("\r\n", "\n"));
   const diagnostic = namedStep(text, "Financial group lifecycle receipts");
   const withoutComments = diagnostic.replace(/^ *#.*\n/gm, "").trimEnd();
   assert.equal(withoutComments, [
@@ -209,9 +223,13 @@ function assertFinancialDiagnosticExemption(job) {
     "        timeout-minutes: 3",
     "        continue-on-error: true",
     "        uses: actions/upload-artifact@v7",
+    "        env:",
+    "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
     "        with:",
     "          name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}",
-    "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+    "          path: |",
+    "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+    "            ${{ runner.temp }}/financial-parallel-*/",
     "          if-no-files-found: error",
     "          retention-days: 7",
   ].join("\n"));
@@ -251,7 +269,7 @@ test("financial diagnostic exception rejects business and job exemptions", () =>
 // Match the Python gate policy across the complete workflow. Account-only
 // validation cannot detect a job/step exception added to a different leg.
 function assertWorkflowFailurePolicy(workflowText) {
-  const text = workflowText.replaceAll("\r\n", "\n").replace(/^ *#.*\n/gm, "");
+  const text = productPolicyText(workflowText.replaceAll("\r\n", "\n")).replace(/^ *#.*\n/gm, "");
   const financialJob = jobBlock("account-financial-test", text);
   assertFinancialDiagnosticExemption(financialJob);
   const financial = namedStep(financialJob, "Financial group lifecycle receipts");
@@ -272,6 +290,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: ci-success-proof-${{ github.run_attempt }}",
       "          path: ${{ steps.success_proof.outputs.directory }}/proof.json",
@@ -288,6 +308,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}",
       "          path: ${{ runner.temp }}/windows-relay-tools-process.json",
@@ -304,6 +326,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: gate-resource-lifecycle-${{ github.run_attempt }}",
       "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
@@ -324,6 +348,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: " + artifact,
       "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
@@ -343,6 +369,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: " + artifact + "-${{ github.run_id }}-${{ github.run_attempt }}",
       "          retention-days: 7",
@@ -362,6 +390,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: account-resource-lifecycle-${{ github.run_attempt }}",
       "          path: |",
@@ -381,6 +411,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: account-closure-resource-lifecycle-${{ github.run_attempt }}",
       "          path: |",
@@ -392,6 +424,12 @@ function assertWorkflowFailurePolicy(workflowText) {
   }
   {
     const receipt = namedStep(jobBlock("windows-rust-test", text), "Windows atomic lifecycle receipts");
+    assert.equal(namedStep(jobBlock("windows-rust-test", text), "Configure bounded Windows atomic upload diagnostics").trimEnd(), [
+      "      - name: Configure bounded Windows atomic upload diagnostics",
+      "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        working-directory: ${{ github.workspace }}",
+      "        run: node scripts/ci-artifact-node-options.cjs --diagnostics",
+    ].join("\n"));
     assert.equal(receipt.trimEnd(), [
       "      - name: Windows atomic lifecycle receipts",
       "        id: windows_atomic_receipts_upload",
@@ -399,6 +437,9 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}",
       "          path: |",
@@ -412,6 +453,12 @@ function assertWorkflowFailurePolicy(workflowText) {
   }
   {
     const receipt = namedStep(jobBlock("release-contract-test", text), "Preserve Windows release contract process receipts");
+    assert.equal(namedStep(jobBlock("release-contract-test", text), "Configure bounded Windows upload diagnostics").trimEnd(), [
+      "      - name: Configure bounded Windows upload diagnostics",
+      "        if: ${{ always() && runner.os == 'Windows' }}",
+      "        working-directory: ${{ github.workspace }}",
+      "        run: node scripts/ci-artifact-node-options.cjs --diagnostics",
+    ].join("\n"));
     assert.equal(receipt.trimEnd(), [
       "      - name: Preserve Windows release contract process receipts",
       "        id: windows_release_contract_receipts",
@@ -419,6 +466,9 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}",
       "          path: |",
@@ -441,6 +491,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        continue-on-error: true",
       "        timeout-minutes: 3",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: relay-process-${{ github.run_id }}-${{ github.run_attempt }}",
       "          path: |",
@@ -481,9 +533,12 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   assertWorkflowFailurePolicy(original);
   const windows = namedStep(jobBlock("windows-rust-test", original), "Windows 测试二进制导入诊断");
   const relayReceipt = namedStep(jobBlock("windows-relay-tools-test", original), "Preserve Windows relay tools process receipt");
+  const atomicConfig = namedStep(jobBlock("windows-rust-test", original), "Configure bounded Windows atomic upload diagnostics");
   const withoutWindowsExemption = original.replace(windows,
     windows.replace("        continue-on-error: true\n", ""));
   const mutants = [
+    original.replace("scripts/ci-artifact-node-options.cjs --network --diagnostics", "scripts/unreviewed-upload.cjs --configure-env"),
+    original.replace(atomicConfig, atomicConfig.replace("scripts/ci-artifact-node-options.cjs", "scripts/unreviewed-upload.cjs")),
     original.replace(relayReceipt, relayReceipt.replace("windows-relay-tools-process.json", "other-process.json")),
     original.replace("      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n",
       "      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n        continue-on-error: true\n"),
@@ -599,6 +654,40 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   assertWorkflowFailurePolicy(original);
 });
 
+function assertFinancialFamilyPolicy(job) {
+  const policy = namedStep(job.replaceAll("\r\n", "\n"), "Financial runner policy regressions");
+  assert.equal(policy.trimEnd(), [
+    "      - name: Financial runner policy regressions",
+    "        shell: bash",
+    "        run: |",
+    "          set -euo pipefail",
+    "          python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py",
+    "          python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py",
+    "          python3 -m unittest discover -s scripts/tests -p test_account_financial_families_postgres.py",
+    "          python3 -m unittest discover -s scripts/tests -p test_go_test_contract.py",
+    "          python3 -m unittest discover -s scripts/tests -p test_financial_owners.py",
+    "          policy_python=\"${{ steps.financial-policy-python.outputs.python-path }}\"",
+    "          policy_library=\"$(dirname \"$(dirname \"$policy_python\")\")/lib\"",
+    "          python3 scripts/ci-fixture-process.py --receipt \"$PINVOU_CI_RESOURCE_LEDGER/financial-policy-process.json\" -- env \"LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\" \"$policy_python\" -m unittest discover -s scripts/tests -p test_account_financial_ci.py",
+  ].join("\n"));
+}
+
+test("family policy commands cannot be removed, skipped or made advisory", () => {
+  const job = jobBlock("account-platform-test");
+  assertFinancialFamilyPolicy(job);
+  for (const module of ["test_account_financial_families_postgres.py", "test_go_test_contract.py"]) {
+    const command = `          python3 -m unittest discover -s scripts/tests -p ${module}`;
+    for (const replacement of ["", command + " || true"]) {
+      assert.ok(job.includes(command));
+      assert.throws(() => assertFinancialFamilyPolicy(job.replace(command, () => replacement)));
+    }
+  }
+  for (const field of ["if: ${{ false }}", "continue-on-error: true"]) {
+    assert.throws(() => assertFinancialFamilyPolicy(job.replace("      - name: Financial runner policy regressions\n",
+      `      - name: Financial runner policy regressions\n        ${field}\n`)));
+  }
+});
+
 
 const portalRedisServiceLines = [
   "      portal-redis:",
@@ -637,6 +726,7 @@ function assertPortalRedisSteps(job) {
 }
 
 function assertFiniteAuditPGSetup(job) {
+  assertFinancialFamilyPolicy(job);
   const text = job.replaceAll("\r\n", "\n");
   // These are exactly two approved PostgreSQL services plus one bounded Portal Redis,
   // services, production credentials, public ports or persistent volumes.
@@ -722,7 +812,7 @@ function assertFiniteAuditPGSetup(job) {
     "          set -euo pipefail",
     "          # Build the real previous CLI from this immutable public baseline.",
     "          git fetch --no-tags --depth=1 origin 4bbf359d8cf3547af401d7cdb561f7bc0477ebd6",
-    "          git fetch --no-tags --depth=1 origin 52ca1c447a3baa5479a7106284f5b69f21df258d",
+    "          git fetch --no-tags --depth=1 origin 5d8b45efc31e07299c4024cb5de2cbb58786feb3",
     "          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 -timeout=7m ./internal/billingschema -run '^TestRetainedOutboxStatisticsPublicPostgres$' | tee \"$RUNNER_TEMP/outbox-statistics.jsonl\"",
     "          python3 - \"$RUNNER_TEMP/outbox-statistics.jsonl\" <<'PY'",
     "          import json, pathlib, sys",
@@ -856,7 +946,11 @@ function assertFiniteFinancialPGSetup(job) {
     "          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
     ...pgIdentityEnvironment("financial").map(value => `          ${value}`),
     "        run: |", "          set -euo pipefail",
-    '          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP" --verify-fixture-cache',
+    "          diagnostics=\"$(mktemp -d \"$RUNNER_TEMP/financial-parallel-${ACCOUNT_FINANCIAL_GROUP}-XXXXXX\")\"",
+    "          python3 scripts/ci-fixture-process.py --receipt \"$PINVOU_CI_RESOURCE_LEDGER/financial-process.json\" -- python3 scripts/test-token-financial-postgres.py --group \"$ACCOUNT_FINANCIAL_GROUP\" --verify-fixture-cache 2>&1 | tee \"$diagnostics/group.log\"",
+    "          if [[ \"$ACCOUNT_FINANCIAL_GROUP\" == owners ]]; then",
+    "            PINVOU_FINANCIAL_CHILD_ARTIFACTS=\"$diagnostics/owners-families\" python3 scripts/ci-fixture-process.py --receipt \"$PINVOU_CI_RESOURCE_LEDGER/financial-families-process.json\" -- python3 scripts/test-account-financial-families-postgres.py 2>&1 | tee \"$diagnostics/owners-families.log\"",
+    "          fi",
   ].join("\n"));
   const stop = namedStep(text, pgStopStepName);
   assert.equal(stop.trimEnd(), [
@@ -1449,7 +1543,10 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
   for (const path of ["scripts/test-token-financial-postgres.py", "scripts/test-financial-parallel.py",
     "scripts/test-financial-owners.py", "scripts/tests/test_financial_owners.py",
     "scripts/tests/test_financial_parallel.py", "scripts/tests/test_token_financial_postgres.py",
-    "scripts/check-account-financial-ci.py", "scripts/tests/test_account_financial_ci.py"]) {
+    "scripts/check-account-financial-ci.py", "scripts/tests/test_account_financial_ci.py",
+    "scripts/test-account-financial-families-postgres.py", "scripts/account-financial-families.json",
+    "scripts/tests/test_account_financial_families_postgres.py", "scripts/go-test-contract.py",
+    "scripts/tests/test_go_test_contract.py"]) {
     assert.ok(paths.includes(path));
   }
   const job = jobBlock("account-financial-test");
@@ -1462,7 +1559,7 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
       const mock = `python3() { case "$*" in *check-account-financial-ci.py*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *account-ci-postgres.py*) ${failedPhase === "postgres" ? "return 7" : "return 0"};; *ci-fixture-process.py*) ${failedPhase === "group" ? "return 7" : "return 0"};; *) return 99;; esac; }; export -f python3;\n`;
       const result = spawnSync(bash, ["-e", "-c", mock + run], {
         encoding: "utf8", timeout: 30_000, windowsHide: true,
-        env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: directory, ACCOUNT_FINANCIAL_GROUP: "token", PINVOU_ACCOUNT_PG_PROFILE: "financial" },
+        env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: directory.replaceAll("\\", "/"), RUNNER_TEMP: directory.replaceAll("\\", "/"), ACCOUNT_FINANCIAL_GROUP: "token", PINVOU_ACCOUNT_PG_PROFILE: "financial" },
       });
       assert.equal(result.status, failedPhase === "none" ? 0 : 7,
         `${failedPhase} must preserve the selected gate result: ${result.stderr}`);
@@ -1470,6 +1567,29 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("owners family execution follows restored owners and preserves either failure", () => {
+  const run = stepRun(jobBlock("account-financial-test"), "Run isolated financial group");
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-family-order-"));
+  try {
+    const trace = join(directory, "calls").replaceAll("\\", "/");
+    for (const [group, failure, expected, calls] of [
+      ["owners", "none", 0, ["owners", "families"]],
+      ["owners", "owners", 7, ["owners"]],
+      ["owners", "families", 9, ["owners", "families"]],
+      ["token", "none", 0, ["token"]],
+    ]) {
+      writeFileSync(trace, "");
+      const mock = `python3() { case "$*" in *test-account-financial-families-postgres.py*) printf 'families\\n' >> "$FAMILY_TRACE"; ${failure === "families" ? "return 9" : "return 0"};; *test-token-financial-postgres.py*) printf '%s\\n' "$ACCOUNT_FINANCIAL_GROUP" >> "$FAMILY_TRACE"; ${failure === "owners" ? "return 7" : "return 0"};; *) return 99;; esac; }; export -f python3;\n`;
+      const result = spawnSync(bash, ["-e", "-c", mock + run], {
+        encoding: "utf8", timeout: 30_000, windowsHide: true,
+        env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/"), PINVOU_CI_RESOURCE_LEDGER: directory.replaceAll("\\", "/"), ACCOUNT_FINANCIAL_GROUP: group, FAMILY_TRACE: trace },
+      });
+      assert.equal(result.status, expected, `${group}/${failure}: ${result.stderr}`);
+      assert.deepEqual(readFileSync(trace,"utf8").trim().split(/\r?\n/),calls);
+    }
+  } finally { rmSync(directory,{recursive:true,force:true}); }
 });
 
 test("named step fixtures exclude later steps and fail closed on missing names", () => {

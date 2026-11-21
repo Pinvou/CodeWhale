@@ -16,7 +16,8 @@
     "account-platform/internal/account/organization_routes.go",
     "account-platform/internal/billing/organization_routes.go",
     "account-platform/internal/token/organization_finance_routes.go",
-    "account-platform/cmd/mock-newapi/main.go"
+    "account-platform/cmd/mock-newapi/main.go",
+    "account-platform/internal/account/commerce_repair_http.go"
   ],
   "http_policies": [
     {

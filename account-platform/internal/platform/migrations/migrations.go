@@ -111,6 +111,14 @@ func UpWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migrati
 	if err := verifyPublishedRollbacks(migrations); err != nil {
 		return err
 	}
+	ctx, err := PinLedger(ctx, connection)
+	if err != nil {
+		return err
+	}
+	ledger, err := LedgerTable(ctx, connection)
+	if err != nil {
+		return err
+	}
 	if err := prepare(ctx, connection); err != nil {
 		return err
 	}
@@ -121,7 +129,7 @@ func UpWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migrati
 	for _, migration := range migrations {
 		var existingChecksum string
 		err = connection.QueryRow(ctx,
-			`SELECT checksum FROM schema_migrations WHERE version = $1`, migration.Version,
+			`SELECT checksum FROM `+ledger+` WHERE version = $1`, migration.Version,
 		).Scan(&existingChecksum)
 		switch {
 		case err == nil:
@@ -168,7 +176,7 @@ func UpWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migrati
 		}
 		if err == nil {
 			_, err = tx.Exec(ctx,
-				`INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)`,
+				`INSERT INTO `+ledger+`(version, name, checksum) VALUES ($1, $2, $3)`,
 				migration.Version, migration.Name, migration.Checksum,
 			)
 		}
@@ -268,6 +276,14 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 	if err := verifyPublishedRollbacks(migrations); err != nil {
 		return err
 	}
+	ctx, err := PinLedger(ctx, connection)
+	if err != nil {
+		return err
+	}
+	ledger, err := LedgerTable(ctx, connection)
+	if err != nil {
+		return err
+	}
 	if err := prepare(ctx, connection); err != nil {
 		return err
 	}
@@ -277,7 +293,7 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 	}
 	var version int64
 	var appliedChecksum string
-	err = connection.QueryRow(ctx, `SELECT version,checksum FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version, &appliedChecksum)
+	err = connection.QueryRow(ctx, `SELECT version,checksum FROM `+ledger+` ORDER BY version DESC LIMIT 1`).Scan(&version, &appliedChecksum)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -325,7 +341,7 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 				}
 			}
 			if err == nil {
-				_, err = tx.Exec(ctx, `DELETE FROM schema_migrations WHERE version = $1`, version)
+				_, err = tx.Exec(ctx, `DELETE FROM `+ledger+` WHERE version = $1`, version)
 			}
 			if err == nil && hooks.LedgerRole != nil {
 				err = setMigrationRole(ctx, tx, role)
@@ -347,7 +363,11 @@ func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []Migration
 	if err := verifyPublishedRollbacks(loaded); err != nil {
 		return Verification{}, err
 	}
-	rows, err := connection.Query(ctx, `SELECT version, checksum FROM schema_migrations ORDER BY version`)
+	ledger, err := LedgerTable(ctx, connection)
+	if err != nil {
+		return Verification{}, err
+	}
+	rows, err := connection.Query(ctx, `SELECT version, checksum FROM `+ledger+` ORDER BY version`)
 	if err != nil {
 		return Verification{}, fmt.Errorf("query applied migration inventory: %w", err)
 	}
@@ -385,21 +405,25 @@ func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []Migration
 }
 
 func prepare(ctx context.Context, connection *pgx.Conn) error {
+	ledger, err := LedgerTable(ctx, connection)
+	if err != nil {
+		return err
+	}
 	if _, err := connection.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou_account_platform_migrations'))`); err != nil {
 		return fmt.Errorf("acquire migration lock: %w", err)
 	}
 	// PostgreSQL checks schema CREATE even for CREATE TABLE IF NOT EXISTS.
 	// Upgrades retain only ledger DML after schema creation is deliberately
-	// revoked; keep the same search_path and lock without requesting new DDL.
+	// revoked; retain the captured namespace without requesting new DDL.
 	var exists bool
-	if err := connection.QueryRow(ctx, `SELECT pg_catalog.to_regclass('schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {
+	if err := connection.QueryRow(ctx, `SELECT pg_catalog.to_regclass($1) IS NOT NULL`, ledger).Scan(&exists); err != nil {
 		return fmt.Errorf("locate schema migrations: %w", err)
 	}
 	if exists {
 		return nil
 	}
 	if _, err := connection.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS schema_migrations (
+CREATE TABLE IF NOT EXISTS `+ledger+` (
     version BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
     checksum TEXT NOT NULL,

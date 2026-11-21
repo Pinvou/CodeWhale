@@ -133,8 +133,28 @@ class ReusePlanTests(unittest.TestCase):
         self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
         verified_fetch = 'Fetch verified frontend setup bundle'
         job['steps'].append({'name': verified_fetch, 'conclusion': 'success'})
+        # Transport preparation is a new required command. Do not weaken the
+        # verifier or rewrite the historical payload to make it reusable.
+        frontend_transport = 'Configure artifact transport for Test resource lifecycle receipts'
+        browser_transport = 'Configure artifact transport for Browser shard resource lifecycle receipts'
+        self.assertFalse(PLAN.complete(policies['frontend-test'], {**job, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))
+        self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+        job['steps'].append({'name': frontend_transport, 'conclusion': 'success'})
         self.assertTrue(PLAN.complete(policies['frontend-test'], {**job, 'name': 'frontend-test'}, {}, 'refs/heads/queue', {}))
+        self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+        job['steps'].append({'name': browser_transport, 'conclusion': 'success'})
         self.assertTrue(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+        for name, selected_policy, display in (
+                (frontend_transport, policies['frontend-test'], 'frontend-test'),
+                (browser_transport, policy, 'frontend-browser-test (1)')):
+            for bad in ('failure', 'skipped', 'missing'):
+                broken = copy.deepcopy(job)
+                broken['name'] = display
+                for step in broken['steps']:
+                    if step['name'] == name: step['conclusion'] = bad
+                if bad == 'missing': broken['steps'] = [step for step in broken['steps'] if step['name'] != name]
+                with self.subTest(transport=name, conclusion=bad):
+                    self.assertFalse(PLAN.complete(selected_policy, broken, {}, 'refs/heads/queue', {}))
         for bad in ('failure', 'skipped', 'missing'):
             broken = copy.deepcopy(job)
             for step in broken['steps']:
@@ -308,6 +328,18 @@ jobs:
             for status in ('failure', 'cancelled', 'skipped'):
                 job['steps'][-1]['conclusion'] = status
                 self.assertFalse(PLAN.complete(policy, job, {}, 'refs/heads/queue', {}))
+
+    def test_transport_preparation_is_not_a_product_witness_or_a_name_based_waiver(self):
+        extra = '''      - name: Prepare transfer
+        run: node scripts/ci-network-node-options.cjs
+'''
+        workflow = self.workflow() + extra
+        steps = PLAN.catalog(workflow, jobs={'suite'})['suite']['steps']
+        self.assertTrue(steps[-1]['optional'])
+        mutant = workflow.replace('run: node scripts/ci-network-node-options.cjs',
+                                  'run: node scripts/ci-network-node-options.cjs && product-test')
+        steps = PLAN.catalog(mutant, jobs={'suite'})['suite']['steps']
+        self.assertFalse(steps[-1]['optional'])
 
     def test_unknown_conditions_require_execution_and_wrong_labels_reject(self):
         policy = PLAN.catalog(self.workflow().replace("env.RUN_HEAVY_RUST_CHECKS == 'true'", 'unknown.output'), jobs={'suite'})['suite']

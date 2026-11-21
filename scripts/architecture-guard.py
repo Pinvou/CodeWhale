@@ -26,7 +26,6 @@ SCHEMA_VERSION = 1
 DEFAULT_BASELINE = Path("scripts/architecture-baseline.json")
 FRONTEND_SUFFIXES = {".html", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}
 SESSION_APPLICATION_EXPORTS = (
-    "pub(crate) mod admission;",
     "pub(crate) mod dispatch_remote;",
     "pub(crate) mod ports;",
     "pub(crate) mod project_remote;",

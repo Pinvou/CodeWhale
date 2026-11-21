@@ -1,5 +1,11 @@
+#[cfg(test)]
+mod controller_start_tests;
+
+#[cfg(test)]
+mod controlled_start_tests;
 mod persistence;
 mod rpc;
+mod startup;
 mod transfer;
 mod workspace_grants;
 
@@ -233,6 +239,56 @@ pub const MAX_SESSION_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_WEB_ATTACHMENTS: usize = 16;
 const MAX_WEB_ATTACHMENT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_WEB_ATTACHMENTS_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+
+/// The serialized parsed result must fit the desktop Web-attachment cache
+/// (`MAX_WEB_ATTACHMENT_BYTES`). Overflow is an ordinary outcome at the
+/// raised 50 MiB ingest cap (community PR #894): a text-heavy upload
+/// transfers all chunks and only then lands here, so it must surface the
+/// stable wire code for localized zh/en/ja client copy — raw
+/// single-language text must never cross the Relay. Free fn so the code +
+/// boundary are pinnable without a full manager (no mock_app precedent in
+/// this repo).
+fn web_attachment_cache_overflow(bytes: usize) -> Option<String> {
+    (bytes > MAX_WEB_ATTACHMENT_BYTES)
+        .then(|| transfer::WEB_ATTACHMENT_PARSED_CACHE_TOO_LARGE.to_string())
+}
+
+/// The parsed-result cache total (`MAX_WEB_ATTACHMENTS_TOTAL_BYTES`) must
+/// absorb the incoming result, evicting unpinned entries first; entries
+/// pinned by an in-flight chat submission cannot be evicted. Overflow is an
+/// ordinary outcome at the raised 50 MiB ingest cap (community PR #894):
+/// two ~30 MiB parsed results fill the 64 MiB total, so it must surface the
+/// stable wire code for localized zh/en/ja client copy — raw single-language
+/// text must never cross the Relay. Free fn so the code + eviction order are
+/// pinnable without a full manager (no mock_app precedent in this repo).
+fn ensure_web_attachment_cache_room(inner: &mut Inner, bytes: usize) -> Result<(), String> {
+    let mut eviction_attempts = inner.web_attachment_order.len();
+    while (inner.web_attachments.len() >= MAX_WEB_ATTACHMENTS
+        || inner.web_attachment_bytes.saturating_add(bytes) > MAX_WEB_ATTACHMENTS_TOTAL_BYTES)
+        && eviction_attempts > 0
+    {
+        eviction_attempts -= 1;
+        let Some(oldest) = inner.web_attachment_order.pop_front() else {
+            break;
+        };
+        if inner
+            .web_attachments
+            .get(&oldest)
+            .is_some_and(|cached| cached.reservation_id.is_some())
+        {
+            inner.web_attachment_order.push_back(oldest);
+            continue;
+        }
+        if let Some(removed) = inner.web_attachments.remove(&oldest) {
+            inner.web_attachment_bytes = inner.web_attachment_bytes.saturating_sub(removed.bytes);
+            remove_web_attachment_upload_dir(&removed);
+        }
+    }
+    if inner.web_attachment_bytes.saturating_add(bytes) > MAX_WEB_ATTACHMENTS_TOTAL_BYTES {
+        return Err(transfer::WEB_ATTACHMENT_CACHE_FULL.into());
+    }
+    Ok(())
+}
 const MAX_WEB_ATTACHMENT_UPLOADS: usize = 4;
 const MAX_WEB_ATTACHMENT_UPLOAD_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 /// 浏览器本机上传在桌面端的短生命周期暂存目录前缀。仅带此前缀的目录会被
@@ -502,6 +558,10 @@ pub struct RemoteControlManager {
     lifecycle: Arc<Mutex<()>>,
     policy: Arc<AccessPolicy>,
     policy_error: Option<String>,
+    #[cfg(test)]
+    controller_start_hook: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    #[cfg(test)]
+    reader_retired_hook: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
 }
 
 struct Inner {
@@ -920,7 +980,7 @@ enum RpcCacheEntry {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct PendingRpc {
     lease_id: String,
     command: String,
@@ -931,12 +991,47 @@ struct PendingRpc {
     dispatched_at: Instant,
 }
 
-#[derive(Debug, Clone)]
+// 手写 Debug(同 PendingRevocation 先例):args 是 invoke 面原样载荷,
+// web-allowed 命令会携带用户在表单里输入的 key(probe_endpoint_models
+// 顶层 apiKey、web_access_update_settings 嵌套的搜索凭据),派生 Debug
+// 会把它们带进日志与 panic 信息;lease/command/fingerprint 保持可见以便
+// 定位,仅 args 打码。
+impl std::fmt::Debug for PendingRpc {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingRpc")
+            .field("lease_id", &self.lease_id)
+            .field("command", &self.command)
+            .field("args", &"[redacted]")
+            .field("fingerprint", &self.fingerprint)
+            .field("dispatched_generation", &self.dispatched_generation)
+            .field("acknowledged_generation", &self.acknowledged_generation)
+            .field("dispatched_at", &self.dispatched_at)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 struct RpcDispatch {
     request_id: String,
     command: String,
     args: Value,
     bridge_generation: String,
+}
+
+// 与 PendingRpc 同理:args 里会出现用户在表单输入的 key(probe_endpoint_models
+// 顶层 apiKey、web_access_update_settings 嵌套的搜索凭据),派生 Debug 会把它
+// 们带进日志与 panic 信息;request_id/command 保持可见以便定位。
+impl std::fmt::Debug for RpcDispatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RpcDispatch")
+            .field("request_id", &self.request_id)
+            .field("command", &self.command)
+            .field("args", &"[redacted]")
+            .field("bridge_generation", &self.bridge_generation)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1380,6 +1475,10 @@ impl RemoteControlManager {
             lifecycle: Arc::new(Mutex::new(())),
             policy: Arc::new(policy),
             policy_error,
+            #[cfg(test)]
+            controller_start_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            reader_retired_hook: Arc::new(Mutex::new(None)),
         };
         manager.start_web_session_transfer_reaper();
         manager
@@ -1412,79 +1511,21 @@ impl RemoteControlManager {
         &self,
         generation: &str,
     ) -> Result<ControllerRelayChannel, String> {
-        let (sender, receiver) = tokio::sync::mpsc::channel::<ControllerRelayFrame>(128);
-        let synthetic_registration;
-        {
-            let mut inner = self.inner.lock();
-            if inner.controller_inbound.is_some() {
-                return Err("desktop_controller_relay_busy".to_owned());
-            }
-            inner.controller_relay_generation = Some(generation.to_owned());
-            inner.controller_inbound = Some(sender.clone());
-            synthetic_registration = inner.endpoint.as_ref().map(|endpoint| {
-                json!({
-                    "v": 2,
-                    "type": "desktop_endpoint_registered",
-                    "endpoint_id": endpoint.config.endpoint_id,
-                    "web_client_connected": endpoint.web_client_connected,
-                    "lease_id": endpoint.lease_id,
-                })
-            });
-        }
+        self.start_controller_relay_sync(generation)
+    }
 
-        if let Err(error) = self.start(false) {
-            self.clear_controller_channel(generation);
-            return Err(error);
-        }
-        let (owner, binding, enqueue) = {
-            let mut inner = self.inner.lock();
-            if !inner
-                .controller_inbound
-                .as_ref()
-                .is_some_and(|active| active.same_channel(&sender))
-            {
-                return Err("desktop_controller_generation_stale".to_owned());
-            }
-            let Some(owner) = inner
-                .endpoint
-                .as_ref()
-                .map(|endpoint| endpoint.sender.clone())
-            else {
-                inner.controller_relay_generation = None;
-                inner.controller_inbound = None;
-                return Err("desktop_controller_authority_unavailable".to_owned());
-            };
-            let Some(binding) = owner.controller_authority.bind(generation) else {
-                inner.controller_relay_generation = None;
-                inner.controller_inbound = None;
-                return Err("desktop_controller_authority_unavailable".to_owned());
-            };
-            inner.controller_binding = Some(binding);
-            // An existing endpoint may already have registered. Do not await
-            // space before returning the only receiver to its consumer.
-            let already_registered = inner
-                .endpoint
-                .as_ref()
-                .is_some_and(|endpoint| endpoint.status != WebAccessStatusKind::ConnectingRelay);
-            let enqueue = if let Some(message) = synthetic_registration
-                && already_registered
-            {
-                enqueue_controller_inbound(
-                    &mut inner,
-                    ControllerRelayFrame {
-                        message,
-                        receipt: None,
-                    },
-                )
-            } else {
-                Ok(())
-            };
-            (owner, binding, enqueue)
-        };
-        if let Err(code) = enqueue {
-            report_controller_inbound_failure(code);
-            return Err(code.to_owned());
-        }
+    /// Synchronous installation lets the real ControlledOperation owner keep
+    /// its admission guard through every startup side effect. Registration and
+    /// subsequent protocol work run only after that owner releases the guard.
+    pub(crate) fn start_controller_relay_sync(
+        &self,
+        generation: &str,
+    ) -> Result<ControllerRelayChannel, String> {
+        let startup::ControllerRelayStart {
+            receiver,
+            owner,
+            binding,
+        } = self.begin_controller_relay(generation)?;
         Ok(ControllerRelayChannel {
             manager: self.clone(),
             generation: generation.to_owned(),
@@ -1709,53 +1750,7 @@ impl RemoteControlManager {
     /// instead of creating session-scoped rooms.
     pub fn start(&self, allow_host_workspace: bool) -> Result<WebAccessInfo, String> {
         let _lifecycle = self.lifecycle.lock();
-        self.ensure_policy()?;
-        self.ensure_process_ownership()?;
-        self.replay_pending_revocations()?;
-        let active_endpoint_id = self
-            .inner
-            .lock()
-            .endpoint
-            .as_ref()
-            .map(|endpoint| endpoint.config.endpoint_id.clone());
-        let (mut config, is_new) = match load_config()? {
-            Some(config) => {
-                validate_config(&config)?;
-                (config, false)
-            }
-            None if active_endpoint_id.is_some() => {
-                return Err("Web access endpoint configuration is missing".to_string());
-            }
-            None => (fresh_config(false), true),
-        };
-        if active_endpoint_id
-            .as_ref()
-            .is_some_and(|endpoint_id| endpoint_id != &config.endpoint_id)
-        {
-            return Err("Web access endpoint configuration changed".to_string());
-        }
-        let authorization_changed = allow_host_workspace && !config.allow_host_workspace;
-        config.allow_host_workspace |= allow_host_workspace;
-        if is_new || authorization_changed {
-            persist_config(&config)?;
-        }
-        if active_endpoint_id.is_some() {
-            let mut inner = self.inner.lock();
-            let endpoint = inner
-                .endpoint
-                .as_mut()
-                .ok_or_else(|| "Web access endpoint stopped while enabling access".to_string())?;
-            endpoint.config.allow_host_workspace = config.allow_host_workspace;
-            return Ok(pairing_info(endpoint));
-        }
-
-        self.activate(apply_runtime_relay_override(config))?;
-        let inner = self.inner.lock();
-        let endpoint = inner
-            .endpoint
-            .as_ref()
-            .ok_or_else(|| "Web access endpoint failed to start".to_string())?;
-        Ok(pairing_info(endpoint))
+        self.start_with_owner(allow_host_workspace, None)
     }
 
     /// Rotate both browser and desktop credentials. The previous endpoint is
@@ -1845,13 +1840,9 @@ impl RemoteControlManager {
         let latched = config.allow_host_workspace;
         if latched {
             config.allow_host_workspace = false;
-            // 并发 desktop_endpoint_revoked(消息泵臂,
-            // 不持生命周期锁)可能恰好在本读取与落盘之间删除了配置文件;
-            // 此时撤销目标已达成(relay 侧端点已入墓碑,本地凭据已清),
-            // 不得把 flag=false 的配置文件复活成「已配置」的幻影(否则下
-            // 次 start 拿墓碑端点空转一轮再被 handle_revoked 清理)。存在
-            // 性检查缩小而非闭合窗口(彻底闭合需泵臂持生命周期锁,死锁面
-            // 不划算);残余形状自愈且无访问增益,与本函数既有注释一致。
+            // Reader retirement now uses the same lifecycle commit. Keep this
+            // existence check for an externally removed file; it is not an
+            // atomicity promise against writers outside this manager.
             if config_path().exists() {
                 persist_config(&config)?;
             }
@@ -2331,11 +2322,8 @@ impl RemoteControlManager {
         let bytes = serde_json::to_vec(&result)
             .map_err(|error| format!("serialize Web attachment: {error}"))?
             .len();
-        if bytes > MAX_WEB_ATTACHMENT_BYTES {
-            return Err(format!(
-                "解析后的附件超过远程控制桌面缓存上限 {} MiB",
-                MAX_WEB_ATTACHMENT_BYTES / (1024 * 1024)
-            ));
+        if let Some(error) = web_attachment_cache_overflow(bytes) {
+            return Err(error);
         }
         let handle = format!(
             "attachment_{}",
@@ -2350,32 +2338,7 @@ impl RemoteControlManager {
             warning: result.warning.clone(),
         };
         let mut inner = self.inner.lock();
-        let mut eviction_attempts = inner.web_attachment_order.len();
-        while (inner.web_attachments.len() >= MAX_WEB_ATTACHMENTS
-            || inner.web_attachment_bytes.saturating_add(bytes) > MAX_WEB_ATTACHMENTS_TOTAL_BYTES)
-            && eviction_attempts > 0
-        {
-            eviction_attempts -= 1;
-            let Some(oldest) = inner.web_attachment_order.pop_front() else {
-                break;
-            };
-            if inner
-                .web_attachments
-                .get(&oldest)
-                .is_some_and(|cached| cached.reservation_id.is_some())
-            {
-                inner.web_attachment_order.push_back(oldest);
-                continue;
-            }
-            if let Some(removed) = inner.web_attachments.remove(&oldest) {
-                inner.web_attachment_bytes =
-                    inner.web_attachment_bytes.saturating_sub(removed.bytes);
-                remove_web_attachment_upload_dir(&removed);
-            }
-        }
-        if inner.web_attachment_bytes.saturating_add(bytes) > MAX_WEB_ATTACHMENTS_TOTAL_BYTES {
-            return Err("远程控制附件缓存已满，请移除一个附件后重试".into());
-        }
+        ensure_web_attachment_cache_room(&mut inner, bytes)?;
         inner.web_attachment_bytes = inner.web_attachment_bytes.saturating_add(bytes);
         inner.web_attachment_order.push_back(handle.clone());
         inner.web_attachments.insert(
@@ -2475,7 +2438,7 @@ impl RemoteControlManager {
 
     /// 累积浏览器本机文件的一个有界分块；最后一块 `commit` 时返回完整文件名
     /// 与字节。单文件上限收紧为 `file_ingest::MAX_FILE_BYTES`，避免传完
-    /// 20 MiB 才拿到一个 oversize 降级附件。
+    /// 50 MiB 才拿到一个 oversize 降级附件。
     pub fn append_web_attachment_upload(
         &self,
         upload_id: &str,
@@ -2940,68 +2903,33 @@ impl RemoteControlManager {
         }
     }
 
-    fn activate(&self, config: WebAccessConfig) -> Result<(), String> {
-        let rpc_ledger = load_or_initialize_rpc_ledger(&config.endpoint_id)?;
-        let url = public_url(&config);
-        let (sender, mut receiver) = relay_client::spawn(config.clone());
-        let reader_owner = sender.clone();
-        {
-            let mut inner = self.inner.lock();
-            inner.idle_error = None;
-            inner.idle_status = WebAccessStatusKind::Idle;
-            inner.rpc_ledger = rpc_ledger;
-            inner.rpc_cache.clear();
-            inner.rpc_order.clear();
-            // First controller startup installs its lane before this endpoint.
-            // Retire only a replaced socket, never the first pending lane.
-            if inner.endpoint.is_some()
-                && let Some(previous) = take_retired_endpoint(&mut inner)
-            {
-                let _ = previous.sender.try_send(RelayOutbound::Shutdown);
-            }
-            inner.endpoint = Some(ActiveEndpoint {
-                config: config.clone(),
-                url,
-                status: WebAccessStatusKind::ConnectingRelay,
-                web_client_connected: false,
-                client_ready: false,
-                lease_id: None,
-                last_lease_id: None,
-                fresh_baseline_seq: None,
-                last_error: None,
-                last_error_code: None,
-                sender,
-            });
-        }
+    fn start_endpoint_reader(&self, reader: startup::EndpointReader) {
         self.emit_status();
-
         let manager = self.clone();
         tauri::async_runtime::spawn(async move {
+            let startup::EndpointReader {
+                owner,
+                mut receiver,
+            } = reader;
             while let Some(inbound) = receiver.recv().await {
                 match inbound {
                     RelayInbound::Message(text) => match serde_json::from_str::<Value>(&text) {
-                        Ok(value) => manager.handle_relay_message(value, &reader_owner),
-                        Err(_) => {
-                            crate::features::remote_control::controller::relay_runtime::log_controlled_event(
-                                "relay_message_rejected",
-                                "rejected",
-                            )
-                        }
+                        Ok(value) => manager.handle_relay_message(value, &owner),
+                        Err(_) => crate::features::remote_control::controller::relay_runtime::log_controlled_event(
+                            "relay_message_rejected", "rejected",
+                        ),
                     },
                     RelayInbound::ControllerMessage { text, receipt } => {
                         if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                            manager.handle_relay_message_with_receipt(value, &reader_owner, Some(receipt));
+                            manager.handle_relay_message_with_receipt(value, &owner, Some(receipt));
                         }
                     }
-                    RelayInbound::Connection {
-                        endpoint_id,
-                        connected,
-                        error,
-                    } => manager.handle_connection(&endpoint_id, connected, error, &reader_owner),
+                    RelayInbound::Connection { endpoint_id, connected, error } => {
+                        manager.handle_connection(&endpoint_id, connected, error, &owner);
+                    }
                 }
             }
         });
-        Ok(())
     }
 
     fn handle_connection(
@@ -3384,32 +3312,47 @@ impl RemoteControlManager {
     }
 
     fn handle_revoked(&self, endpoint_id: &str, reader_owner: &RelaySender) {
-        let revoked = {
-            let mut inner = self.inner.lock();
-            if inner.endpoint.as_ref().is_none_or(|endpoint| {
-                endpoint.config.endpoint_id != endpoint_id
-                    || !endpoint.sender.same_channel(reader_owner)
-            }) {
-                return;
+        let (config_remove_failed, ledger_remove_failed) = {
+            // Production callers release inner/authority before this boundary.
+            // The same lifecycle -> inner order as start/refresh serializes the
+            // entire retirement + unlink commit against their filesystem writes.
+            let _lifecycle = self.lifecycle.lock();
+            let revoked = {
+                let mut inner = self.inner.lock();
+                if inner.endpoint.as_ref().is_none_or(|endpoint| {
+                    endpoint.config.endpoint_id != endpoint_id
+                        || !endpoint.sender.same_channel(reader_owner)
+                }) {
+                    return;
+                }
+                let revoked = take_retired_endpoint(&mut inner);
+                inner.rpc_ledger = RpcLedger::default();
+                reset_web_state(&mut inner);
+                inner.stream.reset();
+                inner.idle_status = WebAccessStatusKind::Revoked;
+                inner.idle_error = None;
+                revoked
+            };
+            if let Some(endpoint) = revoked {
+                let _ = endpoint.sender.try_send(RelayOutbound::Shutdown);
             }
-            let revoked = take_retired_endpoint(&mut inner);
-            inner.rpc_ledger = RpcLedger::default();
-            reset_web_state(&mut inner);
-            inner.stream.reset();
-            inner.idle_status = WebAccessStatusKind::Revoked;
-            inner.idle_error = None;
-            revoked
+            #[cfg(test)]
+            {
+                let hook = self.reader_retired_hook.lock().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+            (remove_config().is_err(), remove_rpc_ledger().is_err())
         };
-        if let Some(endpoint) = revoked {
-            let _ = endpoint.sender.try_send(RelayOutbound::Shutdown);
-        }
-        if remove_config().is_err() {
+        // No application callbacks or status emission while lifecycle is held.
+        if config_remove_failed {
             crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                 "revoked_config_remove_failed",
                 "failed",
             );
         }
-        if remove_rpc_ledger().is_err() {
+        if ledger_remove_failed {
             crate::features::remote_control::controller::relay_runtime::log_controlled_event(
                 "revoked_ledger_remove_failed",
                 "failed",
@@ -4341,7 +4284,7 @@ mod tests {
         persist_pending_revocations_to, queue_pending_revocation_at,
         queue_pending_revocation_for_removal_at,
     };
-    use super::rpc::{WebSessionScope, web_session_scope};
+    use super::rpc::{WebSessionScope, redact_secret_arg_lengths, web_session_scope};
     use super::*;
 
     const TEST_ENDPOINT_ID: &str = "ep_test";
@@ -4836,6 +4779,106 @@ mod tests {
     }
 
     #[test]
+    fn web_attachment_upload_rejects_when_the_buffer_aggregate_is_full() {
+        let mut inner = Inner::default();
+        let mib = 1024 * 1024_usize;
+        // One retained 40 MiB upload + a 25 MiB incoming chunk crosses the
+        // 64 MiB aggregate — the ordinary two-large-attachments case since
+        // the per-file cap rose to 50 MiB (community PR #894).
+        append_web_attachment_upload_chunk(
+            &mut inner,
+            "upload_device_1",
+            "a.bin",
+            0,
+            40 * mib,
+            &vec![0_u8; 40 * mib],
+            false,
+            None,
+        )
+        .expect("the first upload must fit the aggregate buffer");
+        let error = append_web_attachment_upload_chunk(
+            &mut inner,
+            "upload_device_2",
+            "b.bin",
+            0,
+            30 * mib,
+            &vec![0_u8; 25 * mib],
+            false,
+            None,
+        )
+        .expect_err("40 MiB retained + 25 MiB incoming must exceed the 64 MiB aggregate");
+        assert_eq!(
+            error,
+            transfer::WEB_ATTACHMENT_UPLOAD_CACHE_FULL,
+            "the aggregate-buffer failure must surface as a stable wire code for localized client copy"
+        );
+    }
+
+    #[test]
+    fn web_attachment_upload_accepts_the_exact_aggregate_bound() {
+        let mut inner = Inner::default();
+        let mib = 1024 * 1024_usize;
+        // One retained 40 MiB upload + a 24 MiB incoming chunk lands on
+        // exactly 64 MiB: the strict > boundary must accept it (the rejection
+        // side is pinned by the 40+25 leg above; without this leg a `>` →
+        // `>=` flip stays green on that test alone).
+        append_web_attachment_upload_chunk(
+            &mut inner,
+            "upload_device_1",
+            "a.bin",
+            0,
+            40 * mib,
+            &vec![0_u8; 40 * mib],
+            false,
+            None,
+        )
+        .expect("the first upload must fit the aggregate buffer");
+        append_web_attachment_upload_chunk(
+            &mut inner,
+            "upload_device_2",
+            "b.bin",
+            0,
+            24 * mib,
+            &vec![0_u8; 24 * mib],
+            false,
+            None,
+        )
+        .expect("40 MiB retained + 24 MiB incoming must exactly fill the 64 MiB aggregate");
+    }
+
+    #[test]
+    fn web_attachment_cache_overflow_surfaces_the_parsed_too_large_wire_code() {
+        assert_eq!(
+            web_attachment_cache_overflow(MAX_WEB_ATTACHMENT_BYTES),
+            None,
+            "exactly-at-cap serialized results must stay accepted (strict > boundary)"
+        );
+        assert_eq!(
+            web_attachment_cache_overflow(MAX_WEB_ATTACHMENT_BYTES + 1).as_deref(),
+            Some(transfer::WEB_ATTACHMENT_PARSED_CACHE_TOO_LARGE),
+            "the serialized-cache overflow must surface as a stable wire code for localized client copy"
+        );
+    }
+
+    #[test]
+    fn web_attachment_cache_full_surfaces_the_cache_full_wire_code() {
+        let mut inner = Inner::default();
+        let mib = 1024 * 1024_usize;
+        // Two ~30 MiB parsed results are ordinary at the raised per-file cap
+        // (community PR #894), so a full cache total is a routine state.
+        inner.web_attachment_bytes = 40 * mib;
+        let error = ensure_web_attachment_cache_room(&mut inner, 30 * mib)
+            .expect_err("40 MiB cached + 30 MiB incoming must exceed the 64 MiB total");
+        assert_eq!(
+            error,
+            transfer::WEB_ATTACHMENT_CACHE_FULL,
+            "the cache-total failure must surface as a stable wire code for localized client copy"
+        );
+        ensure_web_attachment_cache_room(&mut inner, 24 * mib)
+            .expect("exactly-at-cap totals (40 MiB + 24 MiB = 64 MiB) must stay accepted");
+    }
+
+    #[test]
     fn web_attachment_upload_requires_contiguous_offsets() {
         let mut inner = Inner::default();
         append_web_attachment_upload_chunk(
@@ -5239,6 +5282,19 @@ mod tests {
                 "{command} must be allowed on Web (aux chat)"
             );
         }
+        // The endpoint model probe is deliberately Web-allowed too: it is
+        // keyring-blind (the caller supplies the key; no saved credential is
+        // ever read), so a paired browser cannot use it to reach stored
+        // secrets. Its reach is GLOBAL, not loopback-private (round-3 review
+        // M5 amendment): the command validates only URL shape, and the
+        // remote ladders classify any public host — the disclosed tradeoff
+        // and its acceptance reasons live in tests/web_access_contract.test.mjs.
+        // This is the Rust-side positive pin, so dropping the entry from the
+        // embedded policy turns both red.
+        assert!(
+            policy.commands.contains("probe_endpoint_models"),
+            "probe_endpoint_models must stay Web-allowed (keyring-blind endpoint probe; GLOBAL reach disclosed in the JS contract test)"
+        );
         assert!(!policy.commands.contains("list_sessions"));
         assert!(!policy.commands.contains("list_archived_sessions"));
         // The native clipboard fallback must stay desktop-only: a browser relay
@@ -5647,6 +5703,162 @@ mod tests {
         assert_eq!(
             rpc_fingerprint("chat", &json!({ "a": 1, "b": { "x": 2, "y": 3 } })).unwrap(),
             rpc_fingerprint("chat", &json!({ "b": { "y": 3, "x": 2 }, "a": 1 })).unwrap()
+        );
+    }
+
+    /// round-3 审 M6 钉:持久化指纹绝不能成为凭据的离线爆破校验器——
+    /// `probe_endpoint_models` 顶层 `apiKey`(camelCase wire 拼写)只以
+    /// 长度占位进哈希:同 key 同指纹(重放/幂等语义不变),不同 key 同长
+    /// 同指纹(收口语义见 rpc.rs 的指纹材料注释:旧补全可能作为答案交付,
+    /// 重放永不再执行),内容任何一位不同但长度相同都无法从指纹区分——
+    /// 拖盘者拿不到 verifier。其余字段(base_url 等)照常参与,mutation
+    /// 把占位替换删掉(指纹重新覆盖 key 内容)时本测试红。
+    #[test]
+    fn rpc_fingerprint_redacts_secret_arg_content_to_length_marker() {
+        // 同长不同 key:指纹相同(内容不进哈希)。
+        assert_eq!(
+            rpc_fingerprint(
+                "probe_endpoint_models",
+                &json!({ "baseUrl": "http://127.0.0.1:11434", "apiKey": "aaaa" })
+            )
+            .unwrap(),
+            rpc_fingerprint(
+                "probe_endpoint_models",
+                &json!({ "baseUrl": "http://127.0.0.1:11434", "apiKey": "bbbb" })
+            )
+            .unwrap()
+        );
+        // 同 key 同长但 base_url 不同:指纹不同(其余字段照常参与)。
+        assert_ne!(
+            rpc_fingerprint(
+                "probe_endpoint_models",
+                &json!({ "baseUrl": "http://127.0.0.1:11434", "apiKey": "aaaa" })
+            )
+            .unwrap(),
+            rpc_fingerprint(
+                "probe_endpoint_models",
+                &json!({ "baseUrl": "http://127.0.0.1:11435", "apiKey": "aaaa" })
+            )
+            .unwrap()
+        );
+        // 长度变化仍可区分(长度占位参与哈希)。
+        assert_ne!(
+            rpc_fingerprint(
+                "probe_endpoint_models",
+                &json!({ "baseUrl": "http://127.0.0.1:11434", "apiKey": "aaaa" })
+            )
+            .unwrap(),
+            rpc_fingerprint(
+                "probe_endpoint_models",
+                &json!({ "baseUrl": "http://127.0.0.1:11434", "apiKey": "aaaaaaa" })
+            )
+            .unwrap()
+        );
+        // 无凭据字段的命令不受影响(既有顺序无关性测试已覆盖常规形状)。
+        assert_ne!(
+            rpc_fingerprint("delete_session", &json!({ "id": "s1" })).unwrap(),
+            rpc_fingerprint("delete_session", &json!({ "id": "s2" })).unwrap()
+        );
+    }
+
+    /// round-4 审 M3 钉:递归脱敏——`web_access_update_settings` 的搜索
+    /// 凭据嵌在 `patch.search.credentials.<provider>.api_key`(serde
+    /// snake_case),顶层-only 扫描对它完全不生效。同 provider 同 key 同
+    /// 指纹、同长不同 key 同指纹(内容不进哈希)、长度不同指纹不同(长度
+    /// 占位参与)——递归、内容排除、长度参与三者必须同时成立,删掉任意
+    /// 一半(只递归不占位 / 只占位顶层)本测试红。
+    #[test]
+    fn rpc_fingerprint_redacts_nested_search_credentials_recursively() {
+        let fingerprint_for = |key: &str| {
+            rpc_fingerprint(
+                "web_access_update_settings",
+                &json!({
+                    "patch": {
+                        "search": {
+                            "provider": "metaso",
+                            "credentials": { "metaso": { "api_key": key } }
+                        }
+                    }
+                }),
+            )
+            .unwrap()
+        };
+        // 同 key 重放:指纹相同(幂等语义不变)。
+        assert_eq!(
+            fingerprint_for("metaso-key-1"),
+            fingerprint_for("metaso-key-1")
+        );
+        // 同长不同 key:指纹相同(内容不进哈希)。
+        assert_eq!(
+            fingerprint_for("metaso-key-1"),
+            fingerprint_for("metaso-key-2")
+        );
+        // 长度不同:指纹不同(长度占位参与哈希)。
+        assert_ne!(
+            fingerprint_for("metaso-key-1"),
+            fingerprint_for("metaso-key-longer")
+        );
+        // 凭据之外的嵌套字段照常参与:provider 名不同 → 指纹不同。
+        assert_ne!(
+            rpc_fingerprint(
+                "web_access_update_settings",
+                &json!({ "patch": { "search": { "provider": "metaso" } } })
+            )
+            .unwrap(),
+            rpc_fingerprint(
+                "web_access_update_settings",
+                &json!({ "patch": { "search": { "provider": "bocha" } } })
+            )
+            .unwrap()
+        );
+    }
+
+    /// round-4 审 M3 钉:snake_case `api_key` 拼写同样脱敏(serde wire 面
+    /// 拼写;camelCase `apiKey` 由上一个测试钉住)。同长不同 key 同指纹、
+    /// 长度不同指纹不同,口径与 camelCase 完全一致。
+    #[test]
+    fn rpc_fingerprint_redacts_snake_case_api_key_spelling() {
+        assert_eq!(
+            rpc_fingerprint("probe_endpoint_models", &json!({ "api_key": "aaaa" })).unwrap(),
+            rpc_fingerprint("probe_endpoint_models", &json!({ "api_key": "bbbb" })).unwrap()
+        );
+        assert_ne!(
+            rpc_fingerprint("probe_endpoint_models", &json!({ "api_key": "aaaa" })).unwrap(),
+            rpc_fingerprint("probe_endpoint_models", &json!({ "api_key": "aaaaaaa" })).unwrap()
+        );
+    }
+
+    /// round-4 审 M3 钉:非凭据嵌套对象不受脱敏影响——键名是精确匹配
+    /// (`api_key_hint` 这类前缀/后缀同名不误伤),值原样保留并照常参与
+    /// 哈希。脱敏把非凭据值也改掉(指纹覆盖面被悄悄收窄)时本测试红。
+    #[test]
+    fn rpc_fingerprint_redaction_leaves_non_secret_nested_values_untouched() {
+        let args = json!({
+            "patch": { "search": { "api_key_hint": "keep me", "provider": "bing" } }
+        });
+        assert_eq!(redact_secret_arg_lengths(&args), args);
+        // 数组里的嵌套对象同样原样(递归不得改变非凭据分支的形状)。
+        let array_args = json!({ "items": [{ "api_key_hint": "keep" }, { "id": 1 }] });
+        assert_eq!(redact_secret_arg_lengths(&array_args), array_args);
+    }
+
+    /// round-4 审 M3 钉:占位标记的精确形状 `__redacted_len_{字节长}__`。
+    /// 直接断言脱敏后的 Value(不只是哈希相等),且在嵌套深度上命中——
+    /// 格式漂移(改词、改字节数口径)即红。
+    #[test]
+    fn rpc_fingerprint_redaction_marker_format_is_pinned() {
+        assert_eq!(
+            redact_secret_arg_lengths(&json!({
+                "patch": { "search": { "credentials": { "metaso": { "api_key": "sample-key-12" } } } }
+            })),
+            json!({
+                "patch": { "search": { "credentials": { "metaso": { "api_key": "__redacted_len_13__" } } } }
+            })
+        );
+        // 非字符串值(调用方规范化前的 null)按 0 长占位。
+        assert_eq!(
+            redact_secret_arg_lengths(&json!({ "apiKey": null })),
+            json!({ "apiKey": "__redacted_len_0__" })
         );
     }
 

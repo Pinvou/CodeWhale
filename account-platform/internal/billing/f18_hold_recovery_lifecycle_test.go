@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/cifixture"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -21,6 +22,7 @@ type f18Coordinator struct {
 	user, directory string
 	port            int
 	localOwned      bool
+	ciOwned         bool
 }
 
 // Database cleanup runs first through cifixture leases. Role retirement must
@@ -29,6 +31,11 @@ type f18Coordinator struct {
 func (owner f18Coordinator) cleanupRoles(ctx context.Context, admin *pgx.Conn, leases []f18RoleLease) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if owner.ciOwned {
+		if err := cifixture.Verify(ctx, admin); err != nil {
+			return err // Never retire roles through an unconfirmed CI backend.
+		}
 	}
 	names, ids := make([]string, 0, len(leases)), make([]uint32, 0, len(leases))
 	for _, lease := range leases {
@@ -102,17 +109,17 @@ func (owner f18Coordinator) cleanupRoles(ctx context.Context, admin *pgx.Conn, l
 func TestF18OwnedRoleCleanupPostgres(t *testing.T) {
 	raw := os.Getenv("PINVOU_TEST_BILLING_DATABASE_URL")
 	if raw == "" || os.Getenv("F18_TEST_DATABASE_PROFILE") == "" {
-		t.Skip("explicit local-owned PostgreSQL required")
+		t.Skip("explicit owned PostgreSQL required")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Second)
 	defer cancel()
 	config, directory, port := f18OwnedConnectionConfig(t, raw)
-	admin, err := pgx.ConnectConfig(ctx, config)
+	admin, err := f18ConnectOwned(ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer admin.Close(context.Background())
-	owner := f18Coordinator{user: config.User, directory: directory, port: port, localOwned: true}
+	owner := f18Coordinator{user: config.User, directory: directory, port: port, localOwned: os.Getenv("F18_TEST_DATABASE_PROFILE") == "local-owned", ciOwned: os.Getenv("F18_TEST_DATABASE_PROFILE") == "ci-owned"}
 	if err := owner.cleanupRoles(ctx, admin, nil); err != nil {
 		t.Fatal("exclusive empty coordinator required before any DDL", err)
 	}

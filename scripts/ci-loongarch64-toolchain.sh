@@ -129,7 +129,7 @@ toolchain_root="$prefix/$TRIPLE"
 toolchain_bin="$toolchain_root/bin"
 marker="$toolchain_root/$MARKER_NAME"
 
-for command_name in curl tar sha256sum strings; do
+for command_name in curl tar sha256sum strings python3; do
   command -v "$command_name" >/dev/null || fail "missing required command: $command_name"
 done
 
@@ -200,9 +200,8 @@ else
   trap 'rm -rf -- "$work_dir"' EXIT
 
   log "downloading $asset_url"
-  curl --proto '=https' --tlsv1.2 --location --silent --show-error --fail \
-    --retry 3 --retry-delay 2 \
-    -o "$work_dir/$asset_name" "$asset_url" \
+  python3 "$(dirname "${BASH_SOURCE[0]}")/ci-download.py" "$asset_url" \
+    --output "$work_dir/$asset_name" --sha256 "$pinned_sha256" --seconds 300 \
     || fail "download failed: $asset_url"
 
   echo "$pinned_sha256  $work_dir/$asset_name" | sha256sum --check --status \

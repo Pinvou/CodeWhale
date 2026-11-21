@@ -1,5 +1,7 @@
 # Windows 独立运行时 submodule
 
+> 相关 Windows 接手/验收史料（2026-11 回填留档）：[`Windows迁移与维护接手手册.md`](./Windows迁移与维护接手手册.md) · [`Windows端功能清单与测试用例.md`](./Windows端功能清单与测试用例.md)。
+
 ## 目标
 
 Windows 分支只维护代码、安装器模板和 submodule gitlink。Poppler、Tesseract、Python、
@@ -25,10 +27,11 @@ private-runtimes/windows  -> 公开运行时仓库的确定 commit
 确定性 ZIP；Python、Node.js、Pandoc、ONNX Runtime 继续使用各自的上游组件包；
 VC Runtime 保持独立文件。二进制由 Git LFS 管理。
 
-`windows-runtime.manifest.json` 当前锁定 9 个仓库级资源、四个组件 ZIP 内部
-112 个 7-Zip/Poppler/Tesseract/ASR 文件，以及 2145 个最终 staging 文件的路径、大小和 SHA-256。
-staging 会先校验 ZIP，解压后再按该 manifest 中的可信最终清单逐文件复核。ASR 安装资源只内置
-`fsmn-vad.gguf`；SenseVoice 识别模型由应用按需下载，不进入 Windows 安装包。
+`windows-runtime.manifest.json` 当前锁定 9 个仓库级资源，并额外记录四个组件 ZIP 内部
+112 个 7-Zip/Poppler/Tesseract/ASR 文件（2026-11 核验：7-Zip 5 + ASR 4 + Poppler 41 + Tesseract 62，按 gitlink `dcde8f01` manifest 计）的路径、大小和 SHA-256。staging 会先校验 ZIP，
+解压后再逐文件复核内部清单，并按 manifest 的 `stagedFiles` 校验最终 staging 文件集合、大小和 SHA-256。
+Windows 安装包不映射 `sensevoice-small-q8.gguf`，应用在用户首次启用本地语音识别时
+下载并校验到用户目录；resolver 在复核归档后会从 staging 删除主模型和已解包的 payload，只保留 ASR 引擎与 VAD 模型。
 
 主仓库 `pinvou3-app/src-tauri/config/platforms/windows/runtime/x86_64.lock.json` 再锁定：
 
@@ -37,8 +40,8 @@ staging 会先校验 ZIP，解压后再按该 manifest 中的可信最终清单�
 - 目标平台 `windows-x86_64`。
 
 因此版本完整性由三层保证：主仓库 gitlink、主仓库 lock、运行时文件级 manifest。缓存中的
-`.stage-manifest.json` 和 `.verified-lock` 只用于快速拒绝和诊断；缓存能否复用最终由主仓库 lock
-锁定的 `stagedFiles` 清单决定，缓存元数据不能自行构造信任。
+`.stage-manifest.json` 和 `.verified-lock` 只用于快速拒绝和诊断；最终文件的信任依据仍是主仓库 lock
+锁定的 manifest 中的 `stagedFiles` 清单，缓存元数据不能自行提供信任。
 
 ## 初始化和构建
 
@@ -65,16 +68,14 @@ npm --prefix pinvou3-app run runtime:windows:init
 `CodeWhale` 当前没有嵌套 submodule，因此不需要 `--recursive`。`runtime:windows:init` 会比较主仓库 gitlink 与本地 runtime
 commit；更新 checkout 时显式禁用 LFS smudge，一致且工作树中不存在 LFS pointer 时，跳过 submodule update 和
 `git lfs pull`。脚本输出的
-`PINVOU3_WINDOWS_RUNTIME_CACHE_KEY=pinvou3-windows-runtime-v5-<commit>-<lock-sha-prefix>` 可作为 Jenkins 缓存键，
-缓存外置 Git LFS objects 和 `pinvou3-app/src-tauri/target/windows-runtime` 中已验证的 staging。缓存 schema、gitlink 或
-主仓库 runtime lock 任一变化都会生成新键。
-
-同一工作区上的并发初始化与 staging 调用通过 `target/windows-runtime/.resolver.lock` 串行化；等待方最多阻塞 120 秒，
-超时即失败退出，稍后重试即可（元数据缓存与 staging 复用让重试代价很低）。
+`PINVOU3_WINDOWS_RUNTIME_CACHE_KEY=pinvou3-windows-runtime-v5-<commit>-<lock-sha-prefix>` 可作为 Jenkins 缓存键，缓存
+外置 Git LFS objects 和 `pinvou3-app/src-tauri/target/windows-runtime` 中已验证的 staging。缓存 schema、gitlink 或
+主仓库 runtime lock 任一变化都会生成新键；lock 文件缺失时脚本直接失败（不输出缓存键）。
 
 Jenkins 的 `CheckoutSubmodule` 阶段只负责准备 submodule，不再单独执行 `runtime:windows:validate`。后续直接运行
-`npm --prefix pinvou3-app run build:nsis`：统一的 `build.js` 入口只执行一次 runtime 校验和 staging，读取
+`npm --prefix pinvou3-app run build:nsis`：统一的 `build.js` 入口在 stage 阶段执行 runtime 校验和 staging，读取
 `runtime-descriptor.json`，再由 Windows installer adapter 为 NSIS 原子准备经过校验的 VC++ 引导程序。
+后续 bundle 阶段通过 `usesValidatedNsisStaging` 消费已验证的 descriptor，不重复执行 runtime 校验和 staging。
 
 恢复缓存前可直接从主仓库 gitlink 取得缓存键，不会访问 runtime 远端：
 
@@ -87,8 +88,12 @@ npm --prefix pinvou3-app run runtime:windows:cache-key
 不得把 `.git/modules/private-runtimes/windows/lfs/objects` 作为独立缓存路径恢复到全新 workspace；这会提前创建不完整的
 submodule gitdir，导致后续 `git submodule update --init` 无法初始化 runtime。
 
-恢复的 staging 会按 runtime manifest 中由主仓库 lock 锁定的完整文件集合和 SHA-256 清单重新核验；缓存损坏时会先重新校验
-运行时源文件，再原子重建 staging，不能把缓存本身或同缓存内的元数据视为可信发布输入。
+完整源校验通过后会在 `target/windows-runtime/.verified-lock` 记录源校验元数据缓存：Stage 模式命中时只复核源文件大小，
+Validate 模式仍逐文件重新核对 SHA-256。复用 staging 前还会按主仓库 lock 锁定的 manifest 中的完整 `stagedFiles` 清单
+重新核对全部文件路径、大小和 SHA-256；同缓存中的 `.stage-manifest.json` 和 `.verified-lock` 不能代替这份可信清单。
+缓存内容发生缺失或修改时自动回退到原子 staging，重建前会对源文件重新执行完整校验。
+同一 `target/windows-runtime` 目录上的并发初始化与 staging 调用通过 `.resolver.lock` 串行化；等待方最多阻塞 120 秒，
+超时即失败退出，稍后重试即可（元数据缓存与 staging 复用让重试代价很低）。
 
 仓库脚本只负责生成缓存键和验证恢复结果，不负责 Jenkins Job 的 restore/save 配置；构建平台必须显式配置上述缓存路径。
 GitHub Actions 当前也未跨 workflow run 持久化 runtime，只能复用单次构建工作区内的验证与 staging 结果。
@@ -111,38 +116,48 @@ push 或在 `main` 上执行的 `workflow_dispatch` 才能进入 `windows-releas
 生成有效合并配置和安装包资源清单。不要直接运行 `npx tauri build/bundle`。
 基础 Tauri 配置的构建/打包钩子会拒绝未经过包装器的调用。
 
-### Rust 工具链检查（Windows）
+### Rust toolchain check (Windows)
 
-在任何 Windows `tauri dev`、`build`、`bundle` 之前，`build.js` 都会对构建账号的
-rustup 执行 `scripts/ci/ensure-rust-toolchain.ps1 -CheckOnly`。当
-`src-tauri/rust-toolchain.toml` 配置的 channel（当前是浮动的 `stable`）能提供
-`cargo`、`rustc`、`clippy-driver`、`cargo-clippy`、`rustfmt`、`cargo-fmt` 以及
-非空的 rust-std target libdir 时，只读复用；否则构建切换到隔离的
-`RUSTUP_HOME`（`pinvou3-app/.cache/rustup/<channel>-<host-triple>`，可用
-`PINVOU3_RUSTUP_HOME` 覆盖）并在其中修复工具链：先尝试已配置的
-`RUSTUP_DIST_SERVER`，再依次 rsproxy、USTC 镜像，官方 Rust 源兜底，每次安装
-尝试有界超时，整体修复有预算（`-RepairTimeoutSeconds`，默认 1500s）。
-镜像优先的顺序服务于 #619 面向的人群（官方源会僵死的机器）；把
-`RUSTUP_DIST_SERVER` 设为官方地址即可回到官方优先、镜像兜底。注意完整性模型
-与 #619 的运行时下载不同：后者携带固定的 SHA-256 校验，而 rustup 只用同一镜像
-提供的 channel manifest 校验组件，因此镜像信任建立在到镜像运营方的 HTTPS 上。
-脚本拒绝修改构建账号共享的 `~/.rustup`、文件系统根目录、缺少
-`.pinvou3-managed-rustup` 标记的非空目录，以及没有隔离 `RUSTUP_HOME` 的运行。
-修复、重置或预算耗尽时，报错会点名隔离的 `RUSTUP_HOME`——它永远可以安全删除
-后重跑。探针只检查存在与健康，因此在浮动 `stable` channel 下，被复用的隔离
-工具链会停留在安装时的 stable，直到某次探针失败或 home 被删除；账号 home 的
-`rustup update` 与 CI 安装都不会刷新它。`npm run test:windows-rustup-repair`
-在 Windows 原生验证这条路径，包括不完整工具链的 `-CheckOnly` 分类与被删除的
-rust-std。Tauri 运行期间，`build.js` 每分钟记录一次 CLI PID、阶段和心跳。
+Before any Windows `tauri dev`, `build` or `bundle`, `build.js` runs
+`scripts/ci/ensure-rust-toolchain.ps1 -CheckOnly` against the build account's
+rustup. When the toolchain channel configured in `src-tauri/rust-toolchain.toml`
+(currently the floating `stable`) provides `cargo`, `rustc`, `clippy-driver`,
+`cargo-clippy`, `rustfmt`, `cargo-fmt` and a populated rust-std target
+libdir, it is reused read-only. Otherwise the build switches to an isolated
+`RUSTUP_HOME` (`pinvou3-app/.cache/rustup/<channel>-<host-triple>`, overridable
+with `PINVOU3_RUSTUP_HOME`) and repairs the toolchain there, trying a
+configured `RUSTUP_DIST_SERVER` first, then the rsproxy and USTC mirrors,
+and the official Rust source last, with a bounded timeout per install attempt
+and an overall repair budget (`-RepairTimeoutSeconds`, 1500 s by default).
+The mirror-first ordering serves the population #619 targets (machines where
+the official source stalls); set `RUSTUP_DIST_SERVER` to the official URL to
+get official-first with mirror fallback. Note the integrity model differs
+from #619's runtime downloads: those carry pinned SHA-256 sums, while rustup
+verifies components only against the channel manifest served by the same
+mirror, so mirror trust rests on HTTPS to the mirror operator. The script
+refuses to modify the account's shared `~/.rustup`, a filesystem root, any
+non-empty directory that lacks its `.pinvou3-managed-rustup` marker, or a run
+without an isolated `RUSTUP_HOME`. If a repair, reset, or the budget runs out,
+the error names the isolated `RUSTUP_HOME`, which is always safe to delete and
+re-run. The probes only check presence and health, so under the floating
+`stable` channel a reused isolated toolchain stays at the stable it was
+installed with until a probe fails or the home is deleted; account-home
+`rustup update` and CI installs do not refresh it. `npm run
+test:windows-rustup-repair`
+exercises this path natively on Windows, including the incomplete `-CheckOnly`
+classifications and a removed rust-std. While Tauri runs, `build.js` logs the
+CLI PID, phase and a heartbeat every minute.
 
-对每次 Windows `dev`、`build`、`bundle`，`build.js` 还会编译（或在不超过其
-源码 mtime 期间复用）`src-tauri/scripts/rustc-stack-wrapper.exe`，并经
-`RUSTC_WRAPPER` 传给 Tauri CLI，使 PowerShell 里直接运行的 `npm run dev` 与
-run-dev.sh、CI 一样拿到 16 MiB 编译器栈，且不会把 `RUST_MIN_STACK` 泄漏进
-应用。重新编译会先写临时输出再原子改名（shell selector 以同样方式编译），
-被中断的构建不会污染缓存。调用方显式指定的 `RUSTC_WRAPPER` 会被保留（日志会
-说明它是本 stack wrapper 还是 sccache 之类放弃了栈修复的外来 wrapper）；
-缺少 wrapper 源码或编译失败会终止构建。
+For every Windows `dev`, `build` and `bundle`, `build.js` also compiles (or
+reuses, while it is not older than its source) `src-tauri/scripts/rustc-stack-wrapper.exe`
+and passes it to the Tauri CLI through `RUSTC_WRAPPER`, so `npm run dev` from
+PowerShell gets the same 16 MiB compiler stack as `run-dev.sh` and CI without
+leaking `RUST_MIN_STACK` into the app. A recompilation writes a temporary
+output and renames it into place (the shell selector compiles the same way),
+so an interrupted build cannot poison the cache. An explicit caller
+`RUSTC_WRAPPER` is kept (the log states whether it is this stack wrapper or a
+foreign one such as sccache that forgoes the stack fix); a missing wrapper
+source or a failed compile stops the build.
 
 resolver 只负责验证、展开运行时并生成 `target/windows-runtime/runtime-descriptor.json`；
 `scripts/tauri/windows-installer.js` 只在目标包含 NSIS 时消费 descriptor 中的 VC Runtime。

@@ -10,8 +10,8 @@ func TestInstalledManagementMigrationPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded) != 44 {
-		t.Fatalf("complete installed Token migration package has %d identities, want 44", len(loaded))
+	if len(loaded) != 45 {
+		t.Fatalf("complete installed Token migration package has %d identities, want 45", len(loaded))
 	}
 	if _, err = Ordered(loaded); err != nil {
 		t.Fatal(err)

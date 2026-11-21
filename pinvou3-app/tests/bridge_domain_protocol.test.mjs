@@ -246,7 +246,17 @@ const expectedProtocolHashes = {
   // without the per-request field the meter froze at "—/…·0%" on every
   // tool-using conversation). Same event surface — no new invoke or listen
   // entries.
-  chat: 'a24529dea3d0dbd5b4abe08539abb6808c4e7197f448518aecec985f52e9083f',
+  // 834 回流重钉：chat:compaction 监听体新增 in-flight 标记维护块（含
+  // compactionStarts/compactionSeq 与 post_tokens 消费）；官方侧 addSystemItem
+  // 行保留 `compactId: compactId` 写法，与社区 shorthand 不同，故哈希为本仓实算值。
+  // 回流社区 #836 重算：chat.js/chat-events.js 的 <context_update> 序号基线
+  // （runtimeContextUpdatesBefore 随气泡下发、压缩后 vintage 重置）与
+  // committed 转写权威重同步监听体落在采集文本内；invoke/listen 调用面
+  // 无增删（dependencies 钉不变）。
+  // rebase 至 main e828f68fe6 重算：#2735（手动压缩入口）对
+  // bridge-shared-helpers.js 的 compaction 状态切片与 in-flight 缓冲豁免
+  // 与本分支 <context_update> vintage 重置叠加进哈希面，此钉=并集树实算值。
+  chat: '0a1ed5b87dcb42672256370ea5cdbd266da011164f3770b14d37363450860712',
   dependencies: 'd39f5a46b8e34c1c30d8f8e08ef62baccfe822ffb7fad8dbf3301c69c566e31c',
   // Recomputed for #445: the YOLO gate threads an adjudicated session id
   // through exitPlanToYolo and planStuckGo.
@@ -258,6 +268,20 @@ const expectedProtocolHashes = {
   // T0-b (#701 桥接面对齐) 重算：confirm/ignore/never 三支 invoke 移入
   // shared/bridge-shared-helpers.js 的 resolveMemoryCandidate（memory.js 留
   // 参数化薄包装），命令面无增删。
+  // Recomputed for the PR #834 review-fix wave: the chat:compaction listener
+  // now stores a timestamp (not a boolean) at start so the read side can
+  // expire a lost-terminal in-flight flag with the same 15-minute backstop
+  // as the Rust MAX_COMPACTION_LATCH_AGE latch, and the comment wording no
+  // longer calls post_tokens "accurate" (Rust emits a conservative estimate).
+  // Event names, invoke shapes and the payload contract unchanged; the web
+  // twin carries the identical body.
+  // Recomputed for review 5874108926 follow-up: the chat:compaction
+  // marker-maintenance block also records the persistent per-session
+  // compactionStarts signal (no invoke/listen surface change — the body
+  // text is part of the pinned call argument).
+  // Recomputed again for review 5876783763: the marker-maintenance block
+  // also advances the monotonic compactionSeq counter (no invoke/listen
+  // surface change).
   memory: 'ca88a71d9f0f9b15f1df52cf80218694f76b2295add98e65a0d167fc88b627c8',
   monitor: 'e63e8d5d4edf813640e08c9951a12abdbc3cad4991763d3dd956e883e277fb1c',
   // New domain: MegaCube 设备管理 (device manager). Six commands —
@@ -311,7 +335,9 @@ const expectedProtocolHashes = {
   // inherits main's Windows progress event and installation lifecycle.
   // Guarded store deletion, endpoint-conditional deletion and models:changed are retained; list_models
   // uses the shared loader so cross-cluster reads share one ordering boundary.
-  settings: 'c10e8fae21066d9b5c57f21d1b213734983dd9375c295e77fac5ac6b85cb14d6',
+  // Recomputed for the keyless-aware model and tier probes: the form's noAuth
+  // posture is forwarded so saved credentials cannot ride a keyless request.
+  settings: 'fd75c39aadcb8eedba062d1e1cf84a36c7e61cc851701894a9c953df8b394cc6',
   updater: 'cfe92470008c2dade64f891c36a5fa70930478f803d4d2a6d100e68d9c29392b',
   // Voice draft preparation now carries its typed source/model reference;
   // session bindings remain authoritative and the command set is unchanged.
@@ -355,9 +381,8 @@ for (const [domain, files] of Object.entries(protocolSources)) {
 // get_session_pinvou_reviews / resolveMemoryCandidate 的 invoke(command, args)
 // 参数化入口），合计 74 个签名。
 // kb_model_cancel 回流：共享知识模型 helper 新增取消命令，合计 75 个签名。
-// 社区 #841 回流：评审快照串行链在 record 时捕获 owning sid，避免排队写漂到
-// 切换后的会话；并集后按当前共享桥接面重算协议指纹。
-const expectedSharedBaseHash = '704c9375f0cc90d0a94c64c186ccaff688d193c155df7d6f6596de50bf3a7d44';
+// Recomputed for the merged main and keyless shared invoke/listen surface.
+const expectedSharedBaseHash = '21d0aec57949ee28e4f14d39762a0398eab246f19e405f071006dfbb9ace2945';
 const sharedBaseSource = fs.readFileSync(path.join(root, 'src', 'shared', 'bridge-shared-helpers.js'), 'utf8');
 const sharedBaseSignatures = [
   ...extractCalls(sharedBaseSource, 'invoke').map(call => `shared/bridge-shared-helpers.js:invoke:${call}`),
