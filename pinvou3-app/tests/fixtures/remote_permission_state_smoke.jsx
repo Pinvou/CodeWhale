@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { dictZh } from '../../src/shared/i18n/zh.js';
 import { dictEn } from '../../src/shared/i18n/en.js';
@@ -154,6 +155,16 @@ function App() {
   fixture.current = selected;
   permissionState.desktopRemoteControl = { ...permissionState.desktopRemoteControl, controllerConnection: selected.connection };
   fixture.select = (...args) => setSelected(session(...args));
+  fixture.projectQuestionTool = (toolId, toolState) => {
+    const sequence = selected.history.entries.at(-1).sequence + 1;
+    const history = { ...selected.history, entries: [...selected.history.entries, {
+      journalEpoch: 'epoch-wait', sequence, eventId: `question-tool-${sequence}`,
+      taskId: 'task-wait', kind: 'tool', body: JSON.stringify({
+        schema: 'remote_tool_display/v1', toolId, toolName: 'request_user_input', toolState,
+      }),
+    }] };
+    flushSync(() => setSelected({ ...selected, history, bs: { ...selected.bs, remoteProxyHistory: history } }));
+  };
   fixture.questionTerminal = status => {
     const sequence = selected.history.entries.at(-1).sequence + 1;
     const history = { ...selected.history, entries: [...selected.history.entries, {

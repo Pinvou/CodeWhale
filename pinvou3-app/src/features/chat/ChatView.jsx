@@ -148,7 +148,7 @@ import { createCapabilityRequestLoop } from '../remote-control/capability-reques
 import { prepareRemoteTaskCapabilities } from '../remote-control/remote-task-preflight.mjs';
 import { permissionStateCopyKey } from '../remote-control/permission-state.mjs';
 import RemoteUserInputPanel from '../remote-control/RemoteUserInputPanel.jsx';
-import { hasPendingRemoteQuestion, remoteQuestionOwner } from '../remote-control/remote-user-input.mjs';
+import { remoteQuestionOwner, remoteQuestionProjectionKeys } from '../remote-control/remote-user-input.mjs';
 import { permissionOperationCopyKey, permissionRedactionCopyKey } from '../remote-control/controlled-device-panel-state.mjs';
 import {
   canUseControllerTemporaryModel,
@@ -1166,6 +1166,7 @@ const openChatExternalUrl = (url) => {
       const [remoteTransferGuard] = useState(createRemoteTransferGuard);
       const [remotePermissions, setRemotePermissions] = useState([]);
       const [remoteQuestionWaiting, setRemoteQuestionWaiting] = useState(null);
+      const [remoteQuestionDecisionOwner, setRemoteQuestionDecisionOwner] = useState('');
       const [remotePermissionRefreshRevision, setRemotePermissionRefreshRevision] = useState(0);
       const [remoteArtifacts, setRemoteArtifacts] = useState([]);
       const [remoteArtifactPreview, setRemoteArtifactPreview] = useState(null);
@@ -1340,10 +1341,19 @@ const openChatExternalUrl = (url) => {
         ? JSON.stringify([remoteModelBindingKey, currentRemoteTaskId]) : '';
       const remotePermissionOwnerRef = useRef(remotePermissionOwner);
       const remoteInputOwner = remoteQuestionOwner(remoteHandshakeBinding, scopedRemoteConnection, currentRemoteTaskId);
+      const { pendingKey: remoteQuestionKey, retiredKey: remoteQuestionRetiredKey } = useMemo(
+        () => remoteQuestionProjectionKeys(projectedRemoteChatItems, currentRemoteTaskId),
+        [projectedRemoteChatItems, currentRemoteTaskId]);
       const remoteInputWaiting = !!remoteInputOwner && remoteQuestionWaiting?.owner === remoteInputOwner
         && remoteQuestionWaiting.waiting;
       const onRemoteInputWaiting = useCallback(waiting => {
         setRemoteQuestionWaiting({ owner: remoteInputOwner, waiting });
+      }, [remoteInputOwner]);
+      const onRemoteQuestionDecisionPending = useCallback(pending => {
+        setRemoteQuestionDecisionOwner(owner => {
+          if (pending) return remoteInputOwner;
+          return owner === remoteInputOwner ? '' : owner;
+        });
       }, [remoteInputOwner]);
       const remoteConversationCopy = useMemo(() => remoteInputWaiting
         ? { ...t.uiConversation, thinking: t.remoteConversation.userInputWaiting }
@@ -5269,10 +5279,13 @@ const openChatExternalUrl = (url) => {
               </fieldset>
             )}
 
-            {remoteChatActive && remoteHandshakeBinding && hasPendingRemoteQuestion(projectedRemoteChatItems, currentRemoteTaskId) && (
+            {remoteChatActive && remoteInputOwner
+              && (remoteQuestionKey || remoteQuestionDecisionOwner === remoteInputOwner) && (
               <RemoteUserInputPanel key={remoteInputOwner} localSessionId={remoteHandshakeBinding.localSessionId}
                 remoteRef={remoteHandshakeBinding.remoteRef} taskId={currentRemoteTaskId}
-                transport={bridge.desktopRemoteControl} t={t} onWaitingChange={onRemoteInputWaiting} />
+                pendingQuestionKey={remoteQuestionKey} retiredQuestionKey={remoteQuestionRetiredKey}
+                transport={bridge.desktopRemoteControl} t={t}
+                onWaitingChange={onRemoteInputWaiting} onDecisionPendingChange={onRemoteQuestionDecisionPending} />
             )}
             {remoteChatActive && (currentRemoteTaskId || remotePermissions.length > 0) && (
               <section data-testid="chat-remote-task-actions" data-coordination-id={remoteUiCoordinationId || undefined} aria-label={t.remoteConversation.taskActions}

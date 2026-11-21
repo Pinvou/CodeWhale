@@ -39,6 +39,17 @@ try {
       .filter(item => item.args.intent.operation === 'user_input_list')[index].resolve({ requests }), { index, requests });
     if (requests.length) await page.waitForSelector('[data-testid="remote-user-input"] input[type="checkbox"]');
   }
+  async function startNextQuestion() {
+    const nextListIndex = await page.evaluate(() => {
+      const listCount = window.dispatchFixture.permissionRequests
+        .filter(item => item.args.intent.operation === 'user_input_list').length;
+      window.dispatchFixture.projectQuestionTool('call-question-next', 'running');
+      return listCount;
+    });
+    await page.waitForFunction(index => window.dispatchFixture.permissionRequests
+      .filter(item => item.args.intent.operation === 'user_input_list').length > index, {}, nextListIndex);
+    return nextListIndex;
+  }
   async function clickCopy(key) {
     await page.evaluate(key => {
       const text = key === 'submit' ? window.dispatchFixture.copy.uiSubmit : window.dispatchFixture.copy.remoteConversation[key];
@@ -103,8 +114,12 @@ try {
   await load(); await supply(0); await clickCopy('userInputCancel');
   const cancellation = await decision(0);
   assert.equal(cancellation.intent.cancel, true); assert.deepEqual(cancellation.intent.answers, []);
-  await settle(0, { state: 'accepted' });
+  await page.evaluate(() => window.dispatchFixture.projectQuestionTool('call-question', 'completed'));
   await page.waitForFunction(() => !document.querySelector('[data-testid="remote-user-input"] input'));
+  assert.ok(await page.$('[data-testid="chat-remote-task-actions"]'), 'the task is still active');
+  assert.ok(await page.$('[data-testid="remote-user-input"]'), 'the decision stays mounted until acknowledgement');
+  await settle(0, { state: 'accepted' });
+  await page.waitForFunction(() => !document.querySelector('[data-testid="remote-user-input"]'));
   count += 1;
 
   await load(); await supply(0);
@@ -119,12 +134,36 @@ try {
     ?.textContent.includes(window.dispatchFixture.copy.remoteConversation.userInputUnknown));
   await page.waitForFunction(() => window.dispatchFixture.permissionRequests.filter(item => item.args.intent.operation === 'user_input_list').length > 1);
   await supply(1);
-  assert.equal(await page.evaluate(() => [...document.querySelectorAll('[data-testid="remote-user-input"] input')]
-    .every(input => input.matches(':disabled'))), true, 'the fieldset must disable every editable answer');
+  assert.equal(await page.evaluate(() => {
+    const inputs = [...document.querySelectorAll('[data-testid="remote-user-input"] input')];
+    return inputs.length > 0 && inputs.every(input => input.matches(':disabled'));
+  }), true, 'the fieldset must disable every editable answer');
+  await page.evaluate(() => window.dispatchFixture.projectQuestionTool('call-question', 'completed'));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="remote-user-input"] input'));
+  assert.ok(await page.$('[data-testid="chat-remote-task-actions"]'), 'the task is still active');
+  const nextListIndex = await startNextQuestion();
+  assert.equal(await page.$('[data-testid="remote-user-input"] input'), null, 'a successor must not show cached answers');
+  const nextQuestion = structuredClone(producer.requests);
+  nextQuestion[0].input_id = 'input-next-in-task';
+  nextQuestion[0].questions[0].question = 'Next question in this task';
+  await supply(nextListIndex, nextQuestion);
+  assert.match(await page.$eval('[data-testid="remote-user-input"]', element => element.textContent), /Next question in this task/);
   await clickCopy('retry'); const recovered = await decision(2);
   assert.equal(recovered.requestId, original.requestId); assert.deepEqual(recovered.intent, original.intent);
   await settle(2, { state: 'accepted' });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="remote-user-input"] input:not(:disabled)'));
+  count += 1;
+
+  await load(); await supply(0); await clickCopy('userInputCancel');
+  await decision(0);
+  await page.evaluate(() => window.dispatchFixture.projectQuestionTool('call-question', 'completed'));
   await page.waitForFunction(() => !document.querySelector('[data-testid="remote-user-input"] input'));
+  assert.ok(await page.$('[data-testid="remote-user-input"]'));
+  await page.evaluate(() => window.dispatchFixture.questionTerminal('failed'));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="remote-user-input"]'));
+  await settle(0, { state: 'accepted' });
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  assert.equal(await page.$('[data-testid="remote-user-input"]'), null, 'late acknowledgement cannot revive the panel');
   count += 1;
 
   await load(); await supply(0);
@@ -134,6 +173,10 @@ try {
   await supply(1);
   assert.equal(await page.$eval('[data-testid="remote-user-input"] input[type="checkbox"]', input => input.checked), true,
     'a capability refresh cannot erase an unsubmitted choice in the same task');
+  const overlappingListIndex = await startNextQuestion();
+  assert.equal(await page.$eval('[data-testid="remote-user-input"] input[type="checkbox"]', input => input.checked), true,
+    'a second tool marker cannot erase a still-active draft before the refreshed list');
+  await supply(overlappingListIndex);
   assert.deepEqual(errors, []); count += 1;
 
   for (const terminal of ['cancelled', 'interrupted', 'failed', 'result_unknown']) {

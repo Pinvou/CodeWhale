@@ -19,9 +19,30 @@ export function remoteQuestionAnswers(groups) {
   });
 }
 
-export function hasPendingRemoteQuestion(items, taskId) {
-  return !!taskId && items.some(item => item.type === 'tool' && item.remoteTaskId === taskId
-    && item.name === 'request_user_input' && item.state === 'running');
+export function remoteQuestionProjectionKeys(items, taskId) {
+  const pending = [];
+  const retired = [];
+  if (taskId) {
+    for (const item of items) {
+      if (item.type !== 'tool' || item.remoteTaskId !== taskId || item.name !== 'request_user_input') continue;
+      const destination = item.state === 'running' ? pending : retired;
+      destination.push(JSON.stringify([item.remoteJournalEpoch, item.remoteToolId]));
+    }
+  }
+  return {
+    pendingKey: pending.length ? JSON.stringify(pending) : '',
+    // Adding a tool can refresh the list without clearing an existing draft.
+    // A retirement invalidates the preceding list even if another tool remains.
+    retiredKey: JSON.stringify(retired),
+  };
+}
+
+export function advanceRemoteQuestionScope(scope, pendingKey, retiredKey) {
+  if (scope.pendingKey === pendingKey && scope.retiredKey === retiredKey) return scope;
+  const pending = new Set(JSON.parse(pendingKey || '[]'));
+  const invalidated = scope.retiredKey !== retiredKey
+    || JSON.parse(scope.pendingKey || '[]').some(id => !pending.has(id));
+  return { pendingKey, retiredKey, revision: scope.revision + Number(invalidated) };
 }
 
 export function remoteQuestionOwner(binding, connection, taskId) {
