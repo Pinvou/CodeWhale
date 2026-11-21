@@ -1459,3 +1459,14 @@ python scripts/architecture-guard.py
 9. 官方与自托管生产环境均启用正式 desktop endpoint enrollment/allowlist，未 enrolled 首次注册和生产 TOFU 被验证为失败关闭。
 10. 既有 endpoint 迁移、旧 Web 链接、安全回滚下限、tombstone 多 key 轮换、Finished receipt 固定向量、A→B 加密 liveness、保守 30 秒公式、角色隔离、provisional/pending-liveness resume 和 B 黑洞 watchdog 均通过确定性故障注入与真实客户端 fixture 验收。
 11. 普通本地、ACP 与远程会话通过统一 ChatView 和薄用例编排完成验收，分别使用 `SessionStore + EnginePool`、`SessionStore + AcpPool` 和 `SessionStore(RemoteProxy) + RemoteControl`；A 远程任务不进入 A 本机 EnginePool/AcpPool，B 保持唯一权威 Session；未发布旧正文 UI、Command/Bridge、独立历史存储与状态别名均已删除，不实施兼容代理、旧格式迁移、双写或保留窗口，已发布 Web v2 回归和安全迁移不变。
+# ACP 审批状态投影
+
+同一远程代码回合可以先后产生多个待处理 callback。同时到达的 callback 按现有单任务一个 active 审批的限制等待处理，不因第二项到达而退休回合。一个审批结束后，只要该精确任务 owner 仍有未完成 callback，任务保持 `WaitingPermission`；全部完成后才恢复 `Running`。迟到结果不得跨任务接纳序号、会话或完整租约更新状态，也不得恢复已取消或结束的任务。
+
+尚未生成审批的排队 callback 被请求级取消后，若本 owner 先前登记的审批均已完成终态投影，后续轮询仍须恢复 `Running`，不能只依赖当轮新增投影事件。未投递的 Allow、未完成的审批或空的审批记录不构成恢复依据；精确 owner 和剩余 callback 检查保持不变。
+
+A 端审批卡按实际状态显示允许、拒绝和过期的三语文案；未知状态不提供决定按钮。当前 B 列表只返回 active 项，已结束项的展示回归用于验证消费者的状态合同，不表示正常列表会返回历史审批。列表及决定回执须与发起时的控制端身份匹配，成功决定还要使较早的待批列表失效。
+
+成功决定及同租约的能力续约会为当前任务重新读取审批列表；新读取独立发起，避免复用决定前的快照。换任务、换租约或卸载后的旧决定不触发新 owner 的刷新。排队重试仅适用于 `task_cleanup_busy`、`permission_task_busy` 和 `remote_permission_callback_gone`；全局 active 容量或留存容量不足仍按既有失败关闭语义终止回合，不扩大准入容量或改变留存保证。
+
+`remote_permission_state_smoke.mjs` 挂载真实 ChatView 并使用实际桌面桥接。CI 的完整前端 smoke 集合包含本回归，默认输入为真实 Rust 产物固化的 JSON，应用测试逐字段验证它与当前生产者一致，仅归一化不可复用的审批 ID。专项跨端验证时，将应用测试 `actual_authority_and_controller_wire_projection_preserve_each_state` 输出的 `PERMISSION_PROJECTION_JSON` JSON 保存到文件，并以 `PINVOU_PERMISSION_PROJECTION_FILE` 指定该文件，直接消费此次原生产物；浏览器使用隔离夹具及 `CHROME` 指定的测试浏览器。该测试控制宿主调用及 provider 响应，不代表真实模型或网络双端验收。

@@ -363,7 +363,7 @@ Windows 迁移必须重做或拆分：
 | Tauri bundle 只配了 `deb` | `tauri.conf.json` | P0（⚠️ 快照条目：现行 Windows 打包已上线——配置含 `msi`+`nsis`，发布 CI 实际产出 nsis，见 §11 注） |
 | `HOME` 环境变量假设 | `bridge/paths.rs`、`file_ingest.rs` | P0（⚠️ 快照条目：已落地——现行 Windows 读 `USERPROFILE`，用户目录解析统一经 `platform::os`（`windows_path.rs`）） |
 | `which` 命令探测依赖 | `file_ingest.rs` | P0（⚠️ 快照条目：已落地跨平台探测 helper，见 §7 注） |
-| `pkexec` / `apt` 一键安装依赖 | `file_ingest.rs`、`updater.rs` | P0（⚠️ 快照条目：已拆平台策略 `features/dependencies/platform/`，Windows 走 winget/安装指引；updater 已拆 `features/updater/platform/`（现行仅 `unsupported` 占位，见 §17）） |
+| `pkexec` / `apt` 一键安装依赖 | `file_ingest.rs`、`updater.rs` | P0（⚠️ 快照条目：已拆平台策略 `features/dependencies/platform/`，Windows 走 winget/安装指引；updater 已拆 `features/updater/platform/`（⚠️ 订正 2026-11-21：非仅 `unsupported` 占位——Windows 侧已有完整单包静态 OTA 实现 `windows.rs`，见 §17 订正）） |
 | `.deb` 应用内升级 | `updater.rs`、前端设置页（⚠️ 快照平铺路径：现居 `app/commands/updater.rs` + `features/updater/platform/`） | P0 |
 | Linux GTK/WebKit env | `lib.rs::ensure_release_env` | P1（⚠️ 快照后已消解：Linux UI 变量按平台拆分至 `platform/ui_cache.rs`，见 §5 注） |
 | Bash 脚本启动 | `run-dev.sh`（现居 `pinvou3-app/` 下）、`scripts/*.sh` | P1 |
@@ -462,7 +462,7 @@ Windows 原生后建议增加这些测试：
 - 集中重构 `paths.rs` 的用户目录解析。（✅ 已完成：`platform/paths.rs` + `platform::os`）
 - 把外部工具探测封成跨平台 helper。（✅ 已完成：`platform::os::*_tool_path` 族）
 - 把依赖安装从 Linux `apt/pkexec` 拆成平台策略。（✅ 已完成：`features/dependencies/platform/`）
-- 把更新器拆成 Linux `.deb` 与 Windows installer 两条路径。（部分完成：Linux 侧完整；现行 Windows 无应用内更新，安装包走 GitHub Releases，`features/updater/platform/` 仅 mod+unsupported）
+- 把更新器拆成 Linux `.deb` 与 Windows installer 两条路径。（✅ 已完成：Linux 侧完整；Windows 侧已实现单包静态 OTA——`features/updater/platform/windows.rs` 按 `latest.json` 下载已签名 NSIS/MSI、SHA-256 强校验、UAC 安装，8 个 updater 命令注册于 `lib.rs`。⚠️ 订正 2026-11-21：本条原称「现行 Windows 无应用内更新、`features/updater/platform/` 仅 mod+unsupported」系失实）
 
 第三阶段补 Windows 产品化：
 
