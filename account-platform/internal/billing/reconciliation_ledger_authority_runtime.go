@@ -81,7 +81,7 @@ func (p *PaymentCoordinator) prefetchLedgerRepairProofs(ctx context.Context, run
 		return nil, err
 	}
 	start, end := reconciliationBusinessDateRange(date)
-	facts, err := listFourWayFactsForProvider(ctx, p.repository.pool, run.Channel, start, end, run.ProviderID, run.ProviderVersion, rows)
+	facts, err := p.loadReconciliationFacts(ctx, p.repository.pool, run, start, end, rows)
 	if err != nil {
 		return nil, err
 	}

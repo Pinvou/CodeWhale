@@ -150,6 +150,8 @@ func TestReconciliationUnknownDateOrphanLifecyclePostgres(t *testing.T) {
 			}
 			switch scenario {
 			case "query-index-upgrade":
+				// The original investigation predates the chargeback principal schema.
+				coordinator.reconciliationFacts = listPrePrincipalReconciliationFacts
 				first := read(observe(0), "OPEN")
 				reviewFacts := func() string {
 					t.Helper()
@@ -236,6 +238,7 @@ func TestReconciliationUnknownDateOrphanLifecyclePostgres(t *testing.T) {
 					}
 				}
 				migrations.Unlock(ctx, operator)
+				coordinator.reconciliationFacts = nil
 				if item := read(observe(1), "OPEN"); item.ID != first.ID {
 					t.Fatal("indexed consumer replaced the original investigation")
 				}

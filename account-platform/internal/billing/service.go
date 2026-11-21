@@ -149,6 +149,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/adjustments", serviceauth.Require("internal.billing.adjustment.request"), httpserver.AdaptFunc(s.requestAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/execute-approved", serviceauth.Require("internal.billing.adjustment.execute"), httpserver.AdaptFunc(s.executeApprovedAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", serviceauth.Require("internal.billing.adjustment.reject"), httpserver.AdaptFunc(s.rejectAdjustment))
+	protected.GET("/internal/v1/chargebacks/:case_id/principal-evidence", serviceauth.Require("internal.billing.chargeback.record"), httpserver.AdaptFunc(s.chargebackPrincipalEvidence))
 	protected.POST("/internal/v1/chargebacks/confirmed", serviceauth.Require("internal.billing.chargeback.record"), approvalpolicy.Require("BILLING_CHARGEBACK_RECORD", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.recordConfirmedChargeback))
 	protected.POST("/internal/v1/refunds/forced", serviceauth.Require("internal.billing.forced-refund.record"), approvalpolicy.Require("BILLING_FORCED_REFUND_RECORD", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.recordForcedRefund))
 	protected.GET("/v1/recharge/products", serviceauth.Require("internal.billing.product.read"), httpserver.AdaptFunc(s.listProducts))
@@ -380,6 +381,10 @@ type chargebackRepository interface {
 	RecordConfirmedChargebackForReview(context.Context, uuid.UUID, string, json.RawMessage) (ChargebackCase, error)
 }
 
+type chargebackPrincipalRepository interface {
+	RecordChargebackWithPrincipal(context.Context, uuid.UUID, string, json.RawMessage, *ChargebackPrincipalInput) (ChargebackCase, error)
+}
+
 type forcedRefundRepository interface {
 	RecordAndFreezeForcedRefund(context.Context, uuid.UUID, string, int64, json.RawMessage) (ForcedRefundCase, error)
 }
@@ -409,16 +414,28 @@ func (s *Service) addLatePaymentClaim(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) recordConfirmedChargeback(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		PaymentTransactionID uuid.UUID       `json:"payment_transaction_id"`
-		ProviderChargebackID string          `json:"provider_chargeback_id"`
-		PayloadSnapshot      json.RawMessage `json:"payload_snapshot"`
+		PrincipalEvidence    *ChargebackPrincipalInput `json:"principal_evidence"`
+		PaymentTransactionID uuid.UUID                 `json:"payment_transaction_id"`
+		ProviderChargebackID string                    `json:"provider_chargeback_id"`
+		PayloadSnapshot      json.RawMessage           `json:"payload_snapshot"`
 	}
 	repository, ok := s.repository.(chargebackRepository)
 	if err := api.DecodeJSON(w, r, &body); err != nil || !ok || body.PaymentTransactionID == uuid.Nil || strings.TrimSpace(body.ProviderChargebackID) == "" || len(body.PayloadSnapshot) == 0 {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid confirmed chargeback", httpserver.RequestID(r.Context()))
 		return
 	}
-	result, err := repository.RecordConfirmedChargebackForReview(r.Context(), body.PaymentTransactionID, body.ProviderChargebackID, body.PayloadSnapshot)
+	var result ChargebackCase
+	var err error
+	if body.PrincipalEvidence != nil {
+		principalRepository, supported := s.repository.(chargebackPrincipalRepository)
+		if !supported {
+			s.writeError(w, r, payment.ErrUnsupported)
+			return
+		}
+		result, err = principalRepository.RecordChargebackWithPrincipal(r.Context(), body.PaymentTransactionID, body.ProviderChargebackID, body.PayloadSnapshot, body.PrincipalEvidence)
+	} else {
+		result, err = repository.RecordConfirmedChargebackForReview(r.Context(), body.PaymentTransactionID, body.ProviderChargebackID, body.PayloadSnapshot)
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return

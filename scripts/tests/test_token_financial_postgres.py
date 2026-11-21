@@ -16,12 +16,13 @@ SPEC.loader.exec_module(RUNNER)
 
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
-EXPECTED_RETAINED_ROOT_COUNT = 92
-EXPECTED_SCHEMA_ROOT_COUNT = 28
+EXPECTED_RETAINED_ROOT_COUNT = 94
+EXPECTED_SCHEMA_ROOT_COUNT = 29
 
 # Fixed identities independently checked against each actual -run selector.
 EXPECTED_SCHEMA_ROOTS = {"TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres"}
 EXPECTED_SCHEMA_ROOTS |= {'TestF02CommerceClaimWaitStartsFreshLease', 'TestCommerceClosureCallbacksRespectSubjectFence', 'TestF02CommerceOriginal15LateUpgradePreservesFacts', 'TestCommerceClaimSubjectLockKeepsLeaseLive', 'TestCommerceClaimMappingLockKeepsLeaseLive', 'TestF02PublicCommerceCustomerLifecycle', 'TestF02CommerceSupersededGenerationCannotDispatch', 'TestF02CommerceLeaseExpiresWhileWaitingForMappingLock', 'TestF02CommerceConfirmedProducersPreserveStatuses'}
+EXPECTED_SCHEMA_ROOTS |= {"TestChargebackPrincipalRegisteredIdentity"}
 EXPECTED_SCHEMA_EXPIRY_ROOT = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
 
 
@@ -141,7 +142,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_f12_upgrade_roots_are_selected_in_their_real_actor_phases(self):
         parent = "TestPaymentCreditF12DeployedCarriersUpgradePostgres"
         billing = {"TestF12PaymentRepairOrderLookupPostgres", "TestF12PaymentRepairDeployedBaselineUpgradePostgres"}
-        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 28)
+        self.assertEqual(len(RUNNER.SCHEMA_REQUIRED), 29)
         self.assertIn(parent, RUNNER.SCHEMA_REQUIRED)
         self.assertEqual(RUNNER.SCHEMA_CHILD_REQUIRED, RUNNER.SCHEMA_REQUIRED - RUNNER.SCHEMA_LEAF_REQUIRED - {parent})
         self.assertTrue(billing <= RUNNER.RETAINED_REQUIRED)
@@ -2362,7 +2363,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_package_index_schema_contract_is_selected_and_cannot_skip(self):
         self.run_main_fixture()
         roots, package = RUNNER.SCHEMA_REQUIRED, RUNNER.SCHEMA_PACKAGE
-        self.assertEqual(roots, {"TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestCommerceClaimMappingLockKeepsLeaseLive", "TestCommerceClaimSubjectLockKeepsLeaseLive", "TestCommerceClosureCallbacksRespectSubjectFence", "TestF02CommerceClaimWaitStartsFreshLease", "TestF02CommerceConfirmedProducersPreserveStatuses", "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock", "TestF02CommerceOriginal15LateUpgradePreservesFacts", "TestF02CommerceSupersededGenerationCannotDispatch", "TestF02PublicCommerceCustomerLifecycle", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestF09EntitlementPackageIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestManualRetentionHistoricalHardeningPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestReconciliationFairRetryRegisteredIdentity", "TestTokenWalletReceiptSchemaPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestUsageWaiverHistoricalSchemaPostgres"})
+        self.assertEqual(roots, {"TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestCommerceClaimMappingLockKeepsLeaseLive", "TestCommerceClaimSubjectLockKeepsLeaseLive", "TestCommerceClosureCallbacksRespectSubjectFence", "TestF02CommerceClaimWaitStartsFreshLease", "TestF02CommerceConfirmedProducersPreserveStatuses", "TestF02CommerceLeaseExpiresWhileWaitingForMappingLock", "TestF02CommerceOriginal15LateUpgradePreservesFacts", "TestF02CommerceSupersededGenerationCannotDispatch", "TestF02PublicCommerceCustomerLifecycle", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestF09EntitlementPackageIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestManualRetentionHistoricalHardeningPostgres", "TestOrphanPaidOrderIndexPublicMigration", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestReconciliationFairRetryRegisteredIdentity", "TestTokenWalletReceiptSchemaPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestChargebackPrincipalRegisteredIdentity"})
         command = self.fixture_commands[self.fixture_phases.index("owner-schema")]
         selection = command[command.index("-run") + 1]
         self.assertIn("TestF09EntitlementPackageIndexPublicMigration", selection)
@@ -2722,7 +2723,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             self.assertEqual(self.fixture_writes, [] if phase in {"owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema", "owner-token-schema", "owner-provisioning", "lifecycle-reconciliation"} else ["create", "drop"])
 
     def test_schema_phase_partition_preserves_all_fixed_identities_and_boundaries(self):
-        self.assertEqual(len(EXPECTED_SCHEMA_ROOTS), 28)
+        self.assertEqual(len(EXPECTED_SCHEMA_ROOTS), 29)
         self.assertEqual(RUNNER.SCHEMA_REQUIRED, EXPECTED_SCHEMA_ROOTS)
         for group in ("owners", "all"):
             with self.subTest(group=group):
@@ -2740,7 +2741,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     self.assertEqual(command[-1], "./internal/billingschema")
                     self.assertEqual([arg for arg in command if arg.startswith("-timeout=")], ["-timeout=20m"])
                     selected.append(actual)
-                self.assertEqual([len(roots) for roots in selected], [1, 27])
+                self.assertEqual([len(roots) for roots in selected], [1, 28])
                 self.assertFalse(selected[0] & selected[1])
                 self.assertEqual(selected[0] | selected[1], EXPECTED_SCHEMA_ROOTS)
                 self.assertEqual(sum(map(len, selected)), len(EXPECTED_SCHEMA_ROOTS))
