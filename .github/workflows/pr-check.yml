@@ -379,6 +379,8 @@ jobs:
               - 'pinvou3-app/src/shared/account-closure-i18n.js'
               - 'pinvou3-app/src/shared/i18n.js'
               - 'scripts/account-platform*'
+              - 'scripts/export-account-history.ps1'
+              - 'scripts/tests/test_account_history_key.py'
               - 'scripts/check-account-platform*'
               - 'scripts/build-credential-handoff.mjs'
               - 'scripts/check-recharge-product-document-baseline.mjs'
@@ -1034,6 +1036,7 @@ jobs:
               - 'pinvou3-app/tests/helpers/browser-wrapper-fixture-cleanup.mjs'
               - 'pinvou3-app/tests/helpers/browser-wrapper-held-result.mjs'
               - 'pinvou3-app/tests/helpers/browser-wrapper-host-fixture.mjs'
+              - 'pinvou3-app/tests/helpers/browser-prepare-phase-observer.mjs'
               - 'scripts/test-windows-acp-runtime.py'
               - 'scripts/tests/test_windows_acp_runtime_scope.py'
               - '.gitmodules'
@@ -1479,7 +1482,9 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node scripts/ci-artifact-node-options.cjs --network
       - name: Upload frontend setup bundle
+        id: frontend_setup_upload
         if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
@@ -1495,12 +1500,13 @@ jobs:
       # 自建机上行到 GitHub 工件存储实测偶发 stall(见上方 Pack 注释的 run 证据),
       # 上传动作无内建重试;主上传失败时以 overwrite 重建同名工件,自动补试一次。
       - name: Configure artifact transport for Upload frontend setup bundle (retry)
-        if: ${{ failure() && steps.frontend_bundle.outputs.transport == 'github' }}
+        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
         run: node scripts/ci-artifact-node-options.cjs --network
       - name: Upload frontend setup bundle (retry)
-        if: ${{ failure() && steps.frontend_bundle.outputs.transport == 'github' }}
+        id: frontend_setup_upload_retry
+        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}
         uses: actions/upload-artifact@v7
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
@@ -1513,6 +1519,26 @@ jobs:
           # 同 run 内消费,最小保留。
           retention-days: 1
           overwrite: true
+
+      - name: Require frontend setup bundle upload
+        if: ${{ always() && !cancelled() }}
+        shell: bash
+        env:
+          FRONTEND_TRANSPORT: ${{ steps.frontend_bundle.outputs.transport }}
+          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}
+          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}
+          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
+        run: |
+          set -euo pipefail
+          case "$FRONTEND_TRANSPORT:$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in
+            github:success:skipped|github:failure:success) ;;
+            lan:skipped:skipped) ;;
+            *) echo '::error::Frontend setup bundle upload did not complete successfully.' >&2; exit 1 ;;
+          esac
+          if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then
+            echo '::error::Frontend setup bundle is missing or empty.' >&2
+            exit 1
+          fi
 
   frontend-test:
     name: frontend-test
@@ -2577,6 +2603,35 @@ jobs:
                   cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
                   assert cases == {"retained-link-refuses-down-without-fact-or-schema-loss", "forward-upgrade-replays-original-and-accepts-next-command"}, "retained invitation rollback cases did not execute"
           PY
+      - name: Prepare native history export tools
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-fixture-process.py --receipt "$RUNNER_TEMP/history-export-key-process.json" -- python3 scripts/tests/test_account_history_key.py
+          python3 scripts/ci-fixture-process.py --receipt "$RUNNER_TEMP/history-export-tools-process.json" -- bash scripts/account-platform-history-export-tools.sh
+
+      - name: Read-only history export on public domain schemas
+        timeout-minutes: 6
+        shell: bash
+        env:
+          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.audit_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.audit_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.audit_directory }}
+        run: |
+          set -euo pipefail
+          test -x "$PINVOU_HISTORY_EXPORT_TEST_PWSH"
+          test -x "$PINVOU_HISTORY_EXPORT_TEST_PGTOOLS/pg_dump"
+          python3 scripts/ci-fixture-process.py --receipt "$RUNNER_TEMP/history-export-process.json" -- go -C account-platform test -race -json -tags=nomsgpack -mod=readonly -count=1 -timeout 4m -run '^TestHistoryExportPublicDomainsPostgres$' ./internal/billingschema | tee "$RUNNER_TEMP/history-export.jsonl"
+          python3 - "$RUNNER_TEMP/history-export.jsonl" <<'PY'
+          import json, pathlib, sys
+          events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]
+          root = "TestHistoryExportPublicDomainsPostgres"
+          terminal = {e["Test"]: e["Action"] for e in events if e.get("Test") and e.get("Action") in ("pass", "fail", "skip")}
+          assert terminal == {name: "pass" for name in [root, *(root + "/" + d for d in ("account", "billing", "token"))]}, "history export public-domain roots failed or skipped"
+          PY
+
       - name: Prepare CI transfer runtime (4)
         timeout-minutes: 1
         working-directory: ${{ github.workspace }}
