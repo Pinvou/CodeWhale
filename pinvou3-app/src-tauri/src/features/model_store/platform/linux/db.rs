@@ -1052,7 +1052,9 @@ pub fn update_engine_identity(
 ) -> Result<(), String> {
     let conn = connect().map_err(|e| e.to_string())?;
     conn.execute(
-        "UPDATE store_models SET engine_name=?2, engine_version=?3 WHERE card_id=?1",
+        // r44 P2-5：身份变化即清部署回执——启用 stale-gate 只比脚本哈希，
+        // 脚本字节相同时旧回执会放行一次用旧引擎身份的启用（P1-5 同类漂移）。
+        "UPDATE store_models SET engine_name=?2, engine_version=?3, deployed_script_sha256='', card_update_pending=1 WHERE card_id=?1",
         params![card_id, engine_name, engine_version],
     )
     .map_err(|e| e.to_string())?;

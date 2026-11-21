@@ -71,11 +71,17 @@ for (const language of ['zh', 'en', 'ja']) {
   });
 }
 
+// r44 P1-1：`missing run` 场景从「剪贴板必须为空」改为「回落到结构化同步错误
+// 文本」——契约更新而非收回回落。安全性论证（评审 r44 已核）：脚本尾部密文
+// 只会在**有运行记录**的任务上出现（那是运行日志导出快照的成分）；no-runId
+// 任务的 task.error 只能是本 PR 后端 IPC 的同步拒绝消息（准入拒绝/参数校验），
+// 不含脚本产物。fail-closed 对其余四种场景（导出拒绝/旧后端/空快照/剪贴板
+// 不可用）保持不变——它们的共同点是「内容不可信或不可得」，而 no-runId 的
+// 同步错误是「内容可得且可信」。
 for (const scenario of [
   { label: 'export rejection', reject: true },
   { label: 'old backend without sanitized text', response: { path: '/test/export.log' } },
   { label: 'empty snapshot', response: { text: '' } },
-  { label: 'missing run', runId: null },
   { label: 'clipboard unavailable', clipboardReject: true },
 ]) {
   test(`copy fails closed without raw fallback: ${scenario.label}`, async (t) => {
@@ -83,11 +89,23 @@ for (const scenario of [
     await ui.click('model-store-task-tools');
     await ui.click('model-store-task-copy-log');
     assert.deepEqual(ui.clipboard, []);
-    if (scenario.runId === null) assert.deepEqual(ui.calls, []);
     await ui.click('model-store-task-tools');
     assert.equal(ui.container.querySelector('[data-testid="model-store-task-copy-log"]').textContent, ui.copy.copyFailed);
   });
 }
+
+test('copy with missing run falls back to structured sync error text', async (t) => {
+  const ui = await fixture(t, { runId: null });
+  await ui.click('model-store-task-tools');
+  await ui.click('model-store-task-copy-log');
+  // 同步错误的原文进剪贴板（r44 P1-1 契约：安全论证见上）——不是空。
+  // fixture 的 task.error 是它自己的哨兵串，这里只断言「非空字符串」，
+  // 不钉具体内容（内容来源由实现保证=task.error 同源）。
+  assert.equal(ui.clipboard.length, 1, `clipboard=${ui.clipboard}`);
+  assert.ok(String(ui.clipboard[0]).length > 0);
+  await ui.click('model-store-task-tools');
+  assert.equal(ui.container.querySelector('[data-testid="model-store-task-copy-log"]').textContent, ui.copy.copied);
+});
 
 test('duplicate copy clicks share one pending sanitized export', async (t) => {
   const pending = Promise.withResolvers();

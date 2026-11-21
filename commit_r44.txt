@@ -1,0 +1,21 @@
+fix(model-store): r44 处置——四组新 P1 + 两项 P2 快赢
+
+P1-1（契约冲突）：采纳评审给出的「更新契约」路线——no-runId 任务的
+task.error 只能是后端 IPC 同步拒绝消息（脚本尾部密文只存在于有运行记录
+的任务），fail-closed 对其余四种场景保持，missing-run 场景改为断言回落
+文本非空+copied 状态（9/9 过）。
+
+P1-2（stale 画像）：stage_verified 以 card.summary.resource_requirements
+覆盖克隆记录；write_active 的 UPDATE 列清单补 resource_requirements_json
+——切换/启用准入从此按目标版本真实预算评估，旧代画像不再滞留。
+
+P1-3（Cookie 非 -H 冒号形态）：空值冒号臂补 cookie/set-cookie 分支置
+cookie_rest（行内整段抹）——curl -v 回显形态第二对起不再泄漏。
+
+P1-4（走私对还原）：windows_runtime_packaging_contract.test.js 还原
+main 侧；release-packages.yml 对应 hunk 因 PAT 无 workflow scope 推不动，
+评审侧 merge-up 已取 main 侧即等效还原，请随合并落地。
+
+P2 快赢：scheme trim 集补反斜杠（转义引号形态泄漏）；update_engine_identity
+同步清 deployed_script_sha256 + 置 card_update_pending（堵启用 stale-gate
+用旧回执放行旧身份的 P1-5 同类漂移）。

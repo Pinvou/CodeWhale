@@ -1347,6 +1347,10 @@ impl ModelManager {
             rec.source_repo_id = card.source_repo_id.clone();
             rec.source_filename = card.source_filename.clone();
             rec.deploy_topology = card.summary.deploy_topology;
+            // r44 P1-2：资源画像随版本内容走——stage 克隆当前记录时若不覆盖，
+            // 旧代 8GiB 画像会滞留到 48GiB 新版权重的切换准入与后续启用准入
+            // （memory_admission* 都按 candidate.resource_requirements 评估）。
+            rec.resource_requirements = card.summary.resource_requirements.clone();
             rec.profiles = card.profiles.clone();
             rec.active_profile_id = current
                 .active_profile_id
