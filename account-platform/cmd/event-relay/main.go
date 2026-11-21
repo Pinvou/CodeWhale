@@ -169,6 +169,7 @@ func run(ctx context.Context, environment func(string) string, logger *slog.Logg
 		if statErr == nil {
 			metrics.record(stats)
 		} else if ctx.Err() == nil {
+			metrics.recordStatsError()
 			logger.Error("outbox metrics query failed", "error", "ACCOUNT_EVENT_STATS_UNAVAILABLE")
 		}
 		select {

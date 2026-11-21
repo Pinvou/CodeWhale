@@ -17,6 +17,9 @@ type relayMetrics struct {
 	pending                  atomic.Int64
 	deadLettered             atomic.Int64
 	oldestMillis             atomic.Int64
+	retainedBytes            atomic.Int64
+	statisticsAvailable      atomic.Int64
+	statisticsLastSuccess    atomic.Int64
 	authorizationPending     atomic.Int64
 	authorizationActive      atomic.Int64
 	authorizationReclaimable atomic.Int64
@@ -29,6 +32,7 @@ type relayMetrics struct {
 	approvalCycles           *prometheus.CounterVec
 	approvalEvents           *prometheus.CounterVec
 	approvalDuration         prometheus.Histogram
+	statisticsErrors         prometheus.Counter
 }
 
 func newRelayMetrics(source string) *relayMetrics {
@@ -37,6 +41,7 @@ func newRelayMetrics(source string) *relayMetrics {
 	metrics.cycles = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_relay_cycles_total", Help: "Event relay cycles by bounded outcome.", ConstLabels: labels}, []string{"outcome"})
 	metrics.events = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_relay_events_total", Help: "Event relay event outcomes.", ConstLabels: labels}, []string{"outcome"})
 	metrics.duration = prometheus.NewHistogram(prometheus.HistogramOpts{Name: "pinvou_relay_cycle_duration_seconds", Help: "Event relay cycle duration.", ConstLabels: labels})
+	metrics.statisticsErrors = prometheus.NewCounter(prometheus.CounterOpts{Name: "pinvou_outbox_statistics_errors_total", Help: "Failed outbox statistics queries; prior values are retained.", ConstLabels: labels})
 	metrics.approvalCycles = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_authorization_relay_cycles_total", Help: "Authorization relay cycles by bounded outcome.", ConstLabels: labels}, []string{"outcome"})
 	metrics.approvalEvents = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_authorization_relay_events_total", Help: "Authorization relay event outcomes.", ConstLabels: labels}, []string{"outcome"})
 	metrics.approvalDuration = prometheus.NewHistogram(prometheus.HistogramOpts{Name: "pinvou_authorization_relay_cycle_duration_seconds", Help: "Authorization relay cycle duration.", ConstLabels: labels})
@@ -44,6 +49,9 @@ func newRelayMetrics(source string) *relayMetrics {
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "pinvou_outbox_pending_events", Help: "Outbox events awaiting successful publication.", ConstLabels: labels}, func() float64 { return float64(metrics.pending.Load()) }),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "pinvou_outbox_dead_lettered_events", Help: "Outbox events that stopped automatic delivery retries.", ConstLabels: labels}, func() float64 { return float64(metrics.deadLettered.Load()) }),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "pinvou_outbox_oldest_pending_age_seconds", Help: "Age of the oldest unpublished outbox event.", ConstLabels: labels}, func() float64 { return float64(metrics.oldestMillis.Load()) / 1000 }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "pinvou_outbox_retained_storage_bytes", Help: "Physical outbox table storage including indexes and TOAST; excludes separate inbox and authorization sidecar storage.", ConstLabels: labels}, func() float64 { return float64(metrics.retainedBytes.Load()) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "pinvou_outbox_statistics_available", Help: "Whether the most recent outbox statistics query succeeded.", ConstLabels: labels}, func() float64 { return float64(metrics.statisticsAvailable.Load()) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "pinvou_outbox_statistics_last_success_timestamp_seconds", Help: "Process wall time of the last successful outbox statistics query.", ConstLabels: labels}, func() float64 { return float64(metrics.statisticsLastSuccess.Load()) }),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "pinvou_authorization_outbox_pending_events", Help: "Authorization events awaiting publication.", ConstLabels: labels}, func() float64 { return float64(metrics.authorizationPending.Load()) }),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "pinvou_authorization_outbox_active_claims", Help: "Authorization relay claims with a current lease.", ConstLabels: labels}, func() float64 { return float64(metrics.authorizationActive.Load()) }),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "pinvou_authorization_outbox_reclaimable_claims", Help: "Authorization relay claims whose lease expired.", ConstLabels: labels}, func() float64 { return float64(metrics.authorizationReclaimable.Load()) }),
@@ -52,6 +60,7 @@ func newRelayMetrics(source string) *relayMetrics {
 		metrics.cycles,
 		metrics.events,
 		metrics.duration,
+		metrics.statisticsErrors,
 		metrics.approvalCycles, metrics.approvalEvents, metrics.approvalDuration,
 	)
 	return metrics
@@ -105,6 +114,14 @@ func (metrics *relayMetrics) record(stats events.OutboxStats) {
 	metrics.pending.Store(stats.Pending)
 	metrics.deadLettered.Store(stats.DeadLettered)
 	metrics.oldestMillis.Store(stats.OldestPendingAge.Milliseconds())
+	metrics.retainedBytes.Store(stats.RetainedStorageBytes)
+	metrics.statisticsLastSuccess.Store(time.Now().Unix())
+	metrics.statisticsAvailable.Store(1)
+}
+
+func (metrics *relayMetrics) recordStatsError() {
+	metrics.statisticsErrors.Inc()
+	metrics.statisticsAvailable.Store(0)
 }
 
 type approvalMonitor struct {

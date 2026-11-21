@@ -15,7 +15,15 @@ func DownOne(ctx context.Context, conn *pgx.Conn, input []migrations.Migration) 
 	if err != nil {
 		return err
 	}
-	return migrations.DownOneWithGuard(ctx, conn, ordered, retainedRollbackGuard)
+	return migrations.DownOneWithHooks(ctx, conn, ordered, migrations.DownHooks{
+		Guard: retainedRollbackGuard,
+		LedgerRole: func(m migrations.Migration) string {
+			if m.Version == 900046 {
+				return "billing_schema_owner"
+			}
+			return ""
+		},
+	})
 }
 
 func retainedRollbackGuard(ctx context.Context, tx pgx.Tx, migration migrations.Migration) error {
