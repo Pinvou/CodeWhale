@@ -2718,9 +2718,22 @@ impl ModelManager {
                     "此原生引擎仍有运行实例或状态无法确认，请先停用使用该引擎的模型再{action}。"
                 )));
             }
-        } else if rec.status == "deployed" {
+        } else if rec.status == "deployed"
+            || rec.status == "incomplete"
+            || rec.status == "cleanup_required"
+        {
             // Unknown deployment must not be treated as safely stopped just
             // because a stale database flag says false.
+            //
+            // r49 P1-4：门扩到 incomplete/cleanup_required 两态——mark_weights_
+            // incomplete / mark_cleanup_required 会把 container_name 等身份
+            // 全抹 NULL 且改 status，此后唯一的容器核验（按 card_id 查真实
+            // docker 状态）被本门关死：docker 自行拉起（restart=unless-stopped）
+            // 的容器逃过停验，reconcile 认领臂同门挡死无法回灌，卸载/清理
+            // 预检对活容器放行 → 权重被删在活进程脚下 → 孤儿实例。扩门后
+            // 两态同样按 card_id 查容器：Running 拒（预检正确拦截），
+            // Stopped/Absent+镜像 放行（容器真没了才让过）——判据完全
+            // 不依赖被抹的身份字段。
             //
             // r19 P1-2：ollama 卡不走下面的 docker 判据——它既没有
             // container_name 也没有 docker 镜像，docker_owned_container_state

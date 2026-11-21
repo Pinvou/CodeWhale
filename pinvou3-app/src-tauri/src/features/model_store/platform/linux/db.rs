@@ -1978,7 +1978,11 @@ mod tests {
     fn legacy_deployed_rows_get_weights_ready_at_backfilled_on_reopen() {
         let _ctx = setup_temp_db();
         // 造两条存量形态行：deployed+NULL（升级库）与 incomplete+NULL（真实缺凭据）。
-        for (card_id, status) in [("legacy-deployed", "deployed"), ("legacy-partial", "incomplete")] {
+        let legacy_rows = [
+            ("legacy-deployed", "deployed"),
+            ("legacy-partial", "incomplete"),
+        ];
+        for (card_id, status) in legacy_rows {
             db_add_row_for_backfill_test(card_id, status);
         }
         // 手动抹掉回填（模拟「列刚加上、迁移还没跑」的升级库形态）。

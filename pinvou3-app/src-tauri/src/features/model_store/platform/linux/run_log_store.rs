@@ -475,10 +475,48 @@ fn redact_url_secrets(word: &str) -> String {
     // P2-15（r24）：相对 URL（`/x?token=secret`）无 `://` 也可能带机密 query。
     // 原门 `!word.contains("://")` 把这类词整体放行。改为：有 `://` 走完整
     // URL 脱敏（userinfo+query），无 scheme 但含 `?key=value` 形态也走 query 脱敏。
+    // r49 P1-2：无 scheme userinfo（`admin:pass@host`）——redact 前置判定
+    // （主链 URL 兜底臂前），此处只处理带 scheme 的形态。
+    // r49 P1-3：裸 query 黏连（`a=1&password=x`，无 `?` 断词）——`&` 分段
+    // 里含机密键值对即逐对脱敏（与 `?` 形态同构的逐对重写）。
     let has_scheme = word.contains("://");
     let has_query = !has_scheme && word.contains('?') && word.contains('=');
-    if !has_scheme && !has_query {
+    let has_bare_amp_query = !has_scheme
+        && !word.contains('?')
+        && word.contains('&')
+        && word.contains('=')
+        && !word.contains(' ')
+        && word.split('&').any(|pair| {
+            pair.split_once('=').is_some_and(|(k, v)| {
+                let bare = k.trim_matches(|c: char| matches!(c, '"' | '\''));
+                !v.is_empty() && query_key_is_secret(bare)
+            })
+        });
+    if !has_scheme && !has_query && !has_bare_amp_query {
         return word.to_string();
+    }
+    if has_bare_amp_query {
+        // 裸 query：整个词就是 `k1=v1&k2=v2…`——无路径前缀可保留，逐对重写。
+        let mut out = String::with_capacity(word.len());
+        for (idx, pair) in word.split('&').enumerate() {
+            if idx > 0 {
+                out.push('&');
+            }
+            match pair.split_once('=') {
+                Some((k, v)) if !v.is_empty() => {
+                    let bare = k.trim_matches(|c: char| matches!(c, '"' | '\''));
+                    out.push_str(k);
+                    out.push('=');
+                    if query_key_is_secret(bare) {
+                        out.push_str(REDACTED);
+                    } else {
+                        out.push_str(v);
+                    }
+                }
+                _ => out.push_str(pair),
+            }
+        }
+        return out;
     }
     if has_query {
         // 相对路径：只处理 query 部分，路径原样保留。
@@ -925,6 +963,23 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
             let flag_len = if word.starts_with("--user") { 6 } else { 2 };
             out.push_str(&word[..flag_len]);
             out.push_str(REDACTED);
+        } else if !word.contains("://")
+            && word.contains('@')
+            && word.split('@').next().is_some_and(|prefix| {
+                // r49 P1-2：无 scheme userinfo——`curl admin:pass@host/api`、
+                // `rsync admin:s3cr3tpw1@host:/x`。redact_url_secrets 只认带
+                // scheme 的 userinfo；无 scheme 时 `user:pass@` 前缀整词原样
+                // 落盘（评审 e1/e2 探针）。形状门：@ 前段含冒号（与 -u 同族
+                // 的 user:password 判据），避免 `user@host` 单冒号都没有的
+                // 普通地址误伤。
+                prefix.contains(':') && !prefix.contains(' ') && prefix.len() <= 128
+            })
+        {
+            // 保住 @host 部分（排查需要看到连去哪儿），抹掉 user:pass@。
+            let at = word.rfind('@').unwrap_or_default();
+            out.push_str(REDACTED);
+            out.push('@');
+            out.push_str(&word[at + 1..]);
         } else {
             out.push_str(&redact_url_secrets(word));
         }
@@ -1333,35 +1388,36 @@ impl RunLogFile {
     /// 是整份日志里最有价值的一行，绝不能因为前面的进度刷屏把它挤没了。
     /// 代价是预算越界一个 clamp_line 的行宽，有界且值得。
     pub fn finish(&self, outcome: &str) {
-        // r47 P1-2：结局文本**必须过脱敏器**——失败链的 outcome 里嵌着脚本最后
-        // 20 行原始输出（script_runner 的 ERROR_TAIL_LINES 摘要），set -x 回显
-        // 的 token 恰好高概率在其中；此前本写点是全文件唯一不经脱敏管线的，
-        // 「落盘定向脱敏」的核心声称被失败路径整体击穿。内嵌换行也在此按行
-        // 拆开——一行一条的文件结构是导出/轮转/截断的公共前提。多行合并过
-        // 单次 sanitize_for_disk 会丢跨行 pending，这里逐行 fresh carry 与
-        // append 主链同构（首行沿用磁盘 carry：与上一行衔接的 pending 链不悬空）。
-        let stamped: Vec<String> = outcome
-            .lines()
-            .map(|l| {
-                format!(
-                    "{} {}",
-                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                    l
-                )
-            })
-            .chain(std::iter::once(format!(
-                "{} ==== 结束（脱敏后落盘）====",
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-            )))
-            .collect();
+        // r47 P1-2 + r49 P1-1：结局文本**必须过脱敏器**——失败链的 outcome 里嵌着
+        // 脚本最后 20 行原始输出（script_runner 的 ERROR_TAIL_LINES 摘要），set -x
+        // 回显的 token 恰好高概率在其中，此前本写点是全文件唯一不经脱敏管线的。
+        // 内嵌换行按行拆开——一行一条的文件结构是导出/轮转/截断的公共前提。
+        //
+        // r49 P1-1（次序修正）：**先脱敏、后拼时间戳**——append 主链的顺序是
+        // sanitize(原文) 再由外层盖章；此前本处先盖章再脱敏，跨行 pending 链的
+        // 续行被时间戳词抢先消费（`2026-…Z` 匹配到 auth_pending/redact_next 等
+        // 臂），真值原样落盘（评审 C1–C4 四形态字节探针全灭）。行间 carry 延续，
+        // 与主链同构。
         let mut carry;
         {
             let mut state = self.state.lock();
             carry = std::mem::take(&mut state.carry);
         }
-        for raw in stamped {
-            let line = sanitize_line_with(&raw, &mut carry);
-            let clamped = clamp_line(&line);
+        let mut sanitized: Vec<String> = outcome
+            .lines()
+            .map(|l| sanitize_line_with(l, &mut carry))
+            .collect();
+        sanitized.push(sanitize_line_with("==== 结束 ====", &mut carry));
+        {
+            let mut state = self.state.lock();
+            state.carry = carry;
+        }
+        for line in sanitized {
+            let stamped = format!(
+                "{} {line}",
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            );
+            let clamped = clamp_line(&stamped);
             let mut state = self.state.lock();
             if let Some(file) = state.file.as_mut() {
                 let _ = file.write_all(format!("{clamped}\n").as_bytes());
@@ -1369,10 +1425,6 @@ impl RunLogFile {
                 state.written = state.written.saturating_add(clamped.len() as u64 + 1);
             }
             drop(state);
-        }
-        {
-            let mut state = self.state.lock();
-            state.carry = carry;
         }
         let mut state = self.state.lock();
         if let Some(mut file) = state.file.take() {
@@ -1491,6 +1543,69 @@ mod tests {
 
     /// r43 P1-2：三种泄漏形态的对抗用例——断言**原值不落盘**（对齐本模块既有
     /// 风格），外加跨行悬置态的接续与 Cookie 行末终止语义。
+    /// r49 P1-2/P1-3：无 scheme userinfo + 裸 query 黏连。
+    #[test]
+    fn disk_sanitizer_blocks_r49_userinfo_and_bare_query() {
+        // P1-2：无 scheme userinfo（curl/rsync 无 https:// 前缀形态）。
+        let u1 = sanitize_for_disk("curl admin:pass@internal.example.com/api");
+        assert!(!u1.contains("pass"), "无 scheme userinfo 泄漏: {u1}");
+        assert!(u1.contains("internal.example.com"), "host 过抹: {u1}");
+        let u2 = sanitize_for_disk("rsync admin:s3cr3tpw1@host.example.com:/x /y");
+        assert!(!u2.contains("s3cr3tpw1"), "rsync userinfo 泄漏: {u2}");
+        // 带带 scheme 负控（既有 URL 臂）。
+        let u3 = sanitize_for_disk("curl https://admin:pass@internal.example.com/api");
+        assert!(!u3.contains("pass"), "带 scheme userinfo 泄漏: {u3}");
+        // user@host 无冒号不受牵连。
+        let u4 = sanitize_for_disk("ssh user@host.example.com ls");
+        assert!(u4.contains("user@host.example.com"), "无密码地址误抹: {u4}");
+        // P1-3：裸 query 黏连（无 ? 断词）。
+        let q1 = sanitize_for_disk("curl -d 'a=1&password=x'");
+        assert!(!q1.contains("password=x"), "裸 query 泄漏: {q1}");
+        assert!(q1.contains("a=1"), "非机密对过抹: {q1}");
+        // 含空格普通句子不误伤。
+        let q2 = sanitize_for_disk("echo a=1 & password is set here");
+        assert!(q2.contains("password"), "普通句子过抹: {q2}");
+    }
+
+    /// r49 P1-1：finish **先脱敏后盖章**的跨行 pending 链四形态——此前次序相反
+    /// 时时间戳词抢先消费 pending 态，续行真值全部存活（评审 C1-C4 探针）。
+    #[test]
+    fn finish_multiline_pending_chains_survive_stamp_order() {
+        let _ctx = config::TempHome::new();
+        let forms: Vec<(&str, &str, &str)> = vec![
+            // C1: Authorization: Basic ⏎ b64
+            (
+                "curl -v Authorization: Basic",
+                "YWRtaW46c3VjcmV0cGFzcw==",
+                "YWRtaW46c3VjcmV0cGFzcw==",
+            ),
+            // C2: pretty-JSON 键行 ⏎ 值行
+            (
+                "body={\"api_key\":",
+                "\"supersecretvalue123\"}",
+                "supersecretvalue123",
+            ),
+            // C3: --user ⏎ 凭据
+            ("curl --user", "admin:s3cr3tp4ssw0rd", "s3cr3tp4ssw0rd"),
+            // C4: -H 键半行 ⏎ 值
+            (
+                "curl -H 'X-Api-Key:",
+                "topsecret87654321'",
+                "topsecret87654321",
+            ),
+        ];
+        for (first, second, secret) in forms {
+            let file = RunLogFile::open("finish-multiline-test", "跨行测试", &[]).unwrap();
+            file.append(first);
+            file.finish(second);
+            let content = std::fs::read_to_string(file.path()).unwrap();
+            assert!(
+                !content.contains(secret),
+                "finish 跨行 pending 泄漏（r49 P1-1）: {first} ⏎ {second} -> {content}"
+            );
+        }
+    }
+
     /// r47 P1-2：finish 结局行必须过脱敏——失败链 outcome 嵌着脚本最后 20 行
     /// 原始输出（set -x 回显的 token 高概率在其中），此前 finish 是全文件唯一
     /// 不经脱敏管线的写点。同时验内嵌换行按行拆开（一行一条结构）。
