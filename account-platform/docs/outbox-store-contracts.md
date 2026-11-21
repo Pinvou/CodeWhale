@@ -18,6 +18,12 @@
 
 主发布和必要的 dead-letter 发布的 context 预算从同一原绝对 lease 截止计算；context 预算不等于结果登记时的墙钟 lease 检查。broker 结果未知时保留未知，不凭超时推断成功、递增重试或进入 dead-letter。数据库提交结果未知时仅以原 claim 的精确持久结果恢复，不创建新授权或推断资金完成。
 
+## 历史保留
+
+事件、回执、案件及业务引用不按 TTL 自动删除。清理必须另行批准明确对象、期限与关联证据处置。
+只读存储盘点及选表校验导出见[历史保留手册](../deploy/runbooks/history-retention-export.md)；
+导出不授予重放或恢复权限，也不替代完整备份。容量统计与告警独立验收。
+
 ## 验证边界
 
 普通租约与 generation 的真实 PostgreSQL 载体为 `TestPostgresOrdinaryDeliveryLeaseAndGeneration`；冻结交付的实际角色、数据库函数及租约时序由 Account 审批集成测试覆盖。纯 `FrozenRelay` mock 测试只能证明调用与结果传递，不能替代上述数据库义务。真实 broker、部署 ACL、跨服务恢复和生产验收分别核验。
