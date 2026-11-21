@@ -419,6 +419,11 @@ jobs:
               - '.github/workflows/pr-check.yml'
               - 'scripts/tests/pr-check-routing.test.mjs'
             rust_code:
+              - '.github/actions/linux-rust-cache/**'
+              - 'scripts/ci-rust-cache-paths.cjs'
+              - 'scripts/ci-rust-network.cjs'
+              - 'scripts/ci-network-environment.py'
+              - 'scripts/ci-rust-dist.py'
               - '**/*.rs'
               - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
               # Shared Linux memory preparation must reach real dependency
@@ -502,6 +507,11 @@ jobs:
               - '!pinvou3-app/src-tauri/src/features/personas/**'
               - '!pinvou3-app/src-tauri/src/features/pet/**'
             cli_rust:
+              - '.github/actions/linux-rust-cache/**'
+              - 'scripts/ci-rust-cache-paths.cjs'
+              - 'scripts/ci-rust-network.cjs'
+              - 'scripts/ci-network-environment.py'
+              - 'scripts/ci-rust-dist.py'
               - 'scripts/ci-memory-setup.sh'
               - 'pinvou-cli/**/*.rs'
               - 'pinvou-cli/**/Cargo.toml'
@@ -595,6 +605,11 @@ jobs:
               # required-gate passing on `skipped`).
               - 'docs/gaia-benchmark.md'
             knowledge_rust:
+              - '.github/actions/linux-rust-cache/**'
+              - 'scripts/ci-rust-cache-paths.cjs'
+              - 'scripts/ci-rust-network.cjs'
+              - 'scripts/ci-network-environment.py'
+              - 'scripts/ci-rust-dist.py'
               - 'pinvou-knowledge/**/*.rs'
               - 'pinvou-knowledge/Cargo.toml'
               - 'pinvou-knowledge/Cargo.lock'
@@ -3237,7 +3252,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -3440,7 +3455,7 @@ jobs:
         run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -3851,7 +3866,7 @@ jobs:
         run: node scripts/ci-network-node-options.cjs
       - name: 检查 Rust test 缓存是否精确命中
         id: rust-test-cache-probe
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -3872,13 +3887,15 @@ jobs:
         run: node scripts/ci-network-node-options.cjs
       - name: 恢复 Rust lint 暖缓存
         if: ${{ steps.rust-test-cache-probe.outputs.cache-hit != 'true' }}
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
-          workspaces: pinvou3-app/src-tauri
+          workspaces: |
+            pinvou3-app/src-tauri
+            pinvou-knowledge
           # v2:镜像统一到 ubuntu-22.04 后与 24.04 时代缓存隔离(同 knowledge-rust)。
           shared-key: rust-lint-v2
           save-if: false
@@ -3889,7 +3906,7 @@ jobs:
         run: node scripts/ci-network-node-options.cjs
       - name: Cargo test cache
         id: rust-test-cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -3929,13 +3946,15 @@ jobs:
         run: node scripts/ci-network-node-options.cjs
       - name: 恢复被淘汰缓存的 Rust lint 回退
         if: ${{ steps.rust-test-cache-probe.outputs.cache-hit == 'true' && steps.rust-test-cache.outputs.cache-hit != 'true' }}
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
           PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
-          workspaces: pinvou3-app/src-tauri
+          workspaces: |
+            pinvou3-app/src-tauri
+            pinvou-knowledge
           shared-key: rust-lint-v2
           # rust-cache exports CACHE_ON_FAILURE globally; preserve the test
           # cache writer's failure behavior even though this step is read-only.
@@ -4204,7 +4223,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -4445,7 +4464,7 @@ jobs:
         id: cli_lint_cache
         # Pin the reviewed implementation to prevent action behavior drift;
         # the final disk gate enables failure caching only when safe to try.
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
@@ -6459,7 +6478,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}

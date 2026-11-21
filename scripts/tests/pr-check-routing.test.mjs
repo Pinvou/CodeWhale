@@ -38,6 +38,32 @@ const frontendUploadRetryStep = "Upload frontend setup bundle (retry)";
 const frontendUploadRequiredStep = "Require frontend setup bundle upload";
 const uploadPolicyLF = String.fromCharCode(10);
 
+test('Rust cache and download helper-only changes reach their real consumers', () => {
+  for (const name of ['rust_code', 'cli_rust', 'knowledge_rust']) {
+    const paths = filterPaths(workflow.replace(/^ {14}#.*\r?\n/gm, ''), name);
+    for (const changed of ['.github/actions/linux-rust-cache/action.yml',
+      'scripts/ci-rust-cache-paths.cjs', 'scripts/ci-network-environment.py', 'scripts/ci-rust-dist.py']) {
+      assert.ok(paths.some(pattern => !pattern.startsWith('!') && matchesGlob(changed, pattern)), `${name}: ${changed}`);
+    }
+  }
+});
+
+test('LoongArch64 checks share the stable Linux cache and keep cross-build inputs', () => {
+  const job = jobBlock('rust-loongarch64-check').replaceAll('\r\n', '\n');
+  const cache = namedStep(job, 'Cargo cache');
+  assert.match(cache, /^        uses: \.\/\.github\/actions\/linux-rust-cache$/m);
+  assert.doesNotMatch(cache, /^        (?:if|continue-on-error):/m);
+  assert.match(cache, /^          workspaces: \|\n            pinvou3-app\/src-tauri\n            pinvou-knowledge\n            pinvou-cli$/m);
+  assert.match(cache, /^          shared-key: rust-loongarch64-check$/m);
+  assert.match(cache, /^          save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}$/m);
+  assert.doesNotMatch(cache, /^          (?:cache-targets|lookup-only):/m);
+  for (const step of ['Configure verified Rust download source', 'Set up the deepin glibc-2.38 loong64 sysroot']) {
+    assert.ok(job.indexOf(namedStep(job, step)) < job.indexOf(cache), step);
+  }
+  assert.match(namedStep(job, 'Restore loong64 cross toolchain cache'), /uses: actions\/cache\/restore@/);
+  assert.match(namedStep(job, 'Restore loong64 sysroot cache'), /uses: actions\/cache\/restore@/);
+});
+
 test("browser wrapper helper-only changes select both native runtime gates", () => {
   const helpers = [
     "pinvou3-app/tests/helpers/ndjson-child-driver.mjs",
@@ -1888,8 +1914,9 @@ test("an exact Rust test cache hit skips only the redundant lint restore", () =>
   assert.equal(stepCondition(job, "恢复 Rust lint 暖缓存"), "steps.rust-test-cache-probe.outputs.cache-hit != 'true'");
   assert.equal(stepCondition(job, "恢复被淘汰缓存的 Rust lint 回退"), "steps.rust-test-cache-probe.outputs.cache-hit == 'true' && steps.rust-test-cache.outputs.cache-hit != 'true'");
   const recovery = job.split("- name: 恢复被淘汰缓存的 Rust lint 回退")[1].split("\n      - name:")[0];
-  assert.match(recovery, /uses: Swatinem\/rust-cache@v2/);
-  assert.match(recovery, /workspaces: pinvou3-app\/src-tauri/);
+  assert.match(recovery, /uses: \.\/\.github\/actions\/linux-rust-cache/);
+  assert.match(recovery, /pinvou3-app\/src-tauri/);
+  assert.match(recovery, /pinvou-knowledge/);
   assert.match(recovery, /shared-key: rust-lint-v2/);
   assert.match(recovery, /cache-on-failure: true/);
   assert.match(recovery, /save-if: false/);
