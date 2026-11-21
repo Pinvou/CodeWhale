@@ -780,6 +780,7 @@ impl StateStore {
     }
 
     /// r14 R2：稳态复测断言用——未变化的事件流不得再次置脏。
+    #[cfg(test)]
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
