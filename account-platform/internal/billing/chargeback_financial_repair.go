@@ -166,6 +166,12 @@ FROM chargeback_cases WHERE id=$1`, input.ChargebackCaseID).
 		strings.TrimSpace(plan.ProviderChargebackID) != plan.ProviderChargebackID || plan.ProviderChargebackID == "" {
 		return ChargebackFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
 	}
+	if err := requireWholeChargebackPrincipal(ctx, source, plan.ChargebackCaseID); err != nil {
+		if errors.Is(err, ErrConflict) {
+			return ChargebackFinancialRepairPlan{}, ErrApprovalSnapshotMismatch
+		}
+		return ChargebackFinancialRepairPlan{}, err
+	}
 	var evidenceType, evidenceStatus, evidenceKey, payloadDigest string
 	var evidenceOrderID, evidenceTransactionID uuid.UUID
 	if err := source.QueryRow(ctx, `SELECT payment_order_id,payment_transaction_id,evidence_type,evidence_key,
@@ -539,7 +545,7 @@ WHERE id=$1 AND anomaly_type='CHARGEBACK' AND financial_action_status='PENDING' 
 			return ChargebackFinancialRepairResult{}, chargebackRepairConflict("anomaly_cas", err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE payment_orders payment_order SET chargeback_summary=(SELECT jsonb_build_object('open_count',count(*) FILTER(WHERE chargeback.status='CONFIRMED'),'lost_amount_fen',COALESCE(sum(transaction.amount_fen) FILTER(WHERE chargeback.status='CONFIRMED'),0)::text) FROM chargeback_cases chargeback JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id WHERE chargeback.payment_order_id=$1),attention_summary=CASE WHEN EXISTS(SELECT 1 FROM receivables receivable WHERE receivable.payment_order_id=$1 AND receivable.outstanding_microcredits>0) THEN 'RECEIVABLE_OPEN' WHEN payment_order.attention_summary='RECEIVABLE_OPEN' THEN 'NORMAL' ELSE payment_order.attention_summary END,summary_version=summary_version+1,updated_at=$2 WHERE payment_order.id=$1`, plan.PaymentOrderID, now); err != nil {
+	if _, err := tx.Exec(ctx, chargebackCashSummaryUpdateSQL, plan.PaymentOrderID, now); err != nil {
 		return ChargebackFinancialRepairResult{}, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO chargeback_financial_repair_cases(id,approval_request_id,authorization_event_id,

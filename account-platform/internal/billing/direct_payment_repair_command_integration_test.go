@@ -299,7 +299,10 @@ func TestDirectPaymentRepairCommandReceiptPostgres(t *testing.T) {
 	})
 	t.Run("runtime-immutable-command-and-exact-prefix-down", func(t *testing.T) {
 		r, ctx := retainedFinanceRepository(t, 900031)
-		c, order, _ := directRepairFixture(t, r, ctx)
+		if err := requirePreAdmissionFixtureSchema(ctx, r.pool); err != nil {
+			t.Fatal(err)
+		}
+		c, order, _ := directRepairFixture(t, r, ctx, projectPrePrincipalFixtureOrder)
 		if _, err := c.repairPreAdmissionFixtureOrder(ctx, order.ID, uuid.New(), "controlled retained direct command", "direct-down-"+uuid.NewString()); err != nil {
 			t.Fatal(err)
 		}
@@ -393,7 +396,7 @@ func TestDirectPaymentRepairCommandReceiptPostgres(t *testing.T) {
 	})
 }
 
-func directRepairFixture(t *testing.T, r *PostgresRepository, ctx context.Context) (*PaymentCoordinator, PaymentOrder, *directRepairProvider) {
+func directRepairFixture(t *testing.T, r *PostgresRepository, ctx context.Context, project ...paymentOrderProjection) (*PaymentCoordinator, PaymentOrder, *directRepairProvider) {
 	t.Helper()
 	current := r.now
 	r.now = func() time.Time { return current().Add(-2 * time.Hour) }
@@ -403,6 +406,9 @@ func directRepairFixture(t *testing.T, r *PostgresRepository, ctx context.Contex
 	paid := current()
 	provider.result.PaidAt = &paid
 	c.provider = provider
+	if len(project) == 1 {
+		c.paymentOrderProjection = project[0]
+	}
 	review, err := c.SyncOrder(ctx, order.ID)
 	if err != nil || review.Status != "MANUAL_REVIEW" || review.FulfillmentStatus != "MANUAL_REVIEW" {
 		t.Fatal("real late payment producer did not require review", review, err)
