@@ -268,6 +268,10 @@ components:
         owner_id: {type: [string, 'null'], format: uuid}
         repair_action: {type: string}
         review_result: {type: string}
+        observed_observation_id:
+          type: string
+          format: uuid
+          description: For IGNORE of an unknown-date orphan order, bind the exact latest_observation displayed by the case read. A stale observation returns BILLING_CONFLICT and requires refresh. Legacy requests without this field may accept only the unchanged original case facts. Other actions reject this field.
     Case:
       type: object
       additionalProperties: false
@@ -294,6 +298,17 @@ components:
         resolved_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
         version: {type: integer, minimum: 1}
+        latest_observation:
+          type: object
+          additionalProperties: false
+          description: Latest associated immutable observation of an unknown-date orphan order; original case snapshots and original reconciliation_run_id stay unchanged. Financial integers in its snapshot use the same exact decimal-string read projection.
+          required: [observation_id, reconciliation_run_id, business_date, observed_at, internal_snapshot]
+          properties:
+            observation_id: {type: string, format: uuid}
+            reconciliation_run_id: {type: string, format: uuid}
+            business_date: {type: string, format: date, description: Observation context only; does not verify payment occurrence date.}
+            observed_at: {type: string, format: date-time}
+            internal_snapshot: {type: object}
     RunPage:
       type: object
       additionalProperties: false

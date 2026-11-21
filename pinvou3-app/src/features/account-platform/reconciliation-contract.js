@@ -78,12 +78,13 @@ export function reconciliationImportPreview(text) {
   }
   return { items, totals: Array.from(totals, ([currency, amount]) => ({ currency, fen: amount.toString() })) };
 }
-export function reconciliationCommand(action, fields) {
+export function reconciliationCommand(action, fields, observation) {
   if (!RECONCILIATION_ACTIONS.includes(action) || [...fields.reason.trim()].length < 10) throw new Error('INVALID_RECONCILIATION_INPUT');
   const body = { action, reason: fields.reason.trim() };
   if (action === 'ASSIGN') body.owner_id = requireFinanceID(fields.owner.trim());
   if (action === 'SET_REPAIR_ACTION') { if (!fields.repair.trim()) throw new Error('INVALID_RECONCILIATION_INPUT'); body.repair_action = fields.repair.trim(); }
   if (action === 'RESOLVE' || action === 'IGNORE') { if (!fields.review.trim()) throw new Error('INVALID_RECONCILIATION_INPUT'); body.review_result = fields.review.trim(); }
+  if (action === 'IGNORE' && observation) body.observed_observation_id = requireFinanceID(observation.observation_id);
   return body;
 }
 

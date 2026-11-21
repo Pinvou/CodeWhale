@@ -33,6 +33,11 @@ const titleWorkflow = await readFile(
   "utf8",
 );
 
+const frontendUploadStep = "Upload frontend setup bundle";
+const frontendUploadRetryStep = "Upload frontend setup bundle (retry)";
+const frontendUploadRequiredStep = "Require frontend setup bundle upload";
+const uploadPolicyLF = String.fromCharCode(10);
+
 test("browser wrapper helper-only changes select both native runtime gates", () => {
   const helpers = [
     "pinvou3-app/tests/helpers/ndjson-child-driver.mjs",
@@ -56,6 +61,24 @@ test("browser wrapper helper-only changes select both native runtime gates", () 
         `${gate} negative must detect removal of ${helper}`);
     }
   }
+});
+
+test("prepare observer helper-only changes select the required Windows lifecycle job", () => {
+  const helper = "pinvou3-app/tests/helpers/browser-prepare-phase-observer.mjs";
+  const text = workflow.replace(/^ {14}#.*\r?\n/gm, "");
+  const selected = (paths, file) => paths.some(pattern => !pattern.startsWith("!") && matchesGlob(file, pattern))
+    && !paths.some(pattern => pattern.startsWith("!") && matchesGlob(file, pattern.slice(1)));
+  const windows = filterPaths(text, "windows_codex");
+  assert.equal(selected(windows, helper), true, "helper-only must select Windows lifecycle");
+  assert.equal(windows.filter(path => path === helper).length, 1, "one explicit helper route");
+  assert.equal(selected(windows.filter(path => path !== helper), helper), false,
+    "removing the exact helper route must lose selection");
+  assert.equal(selected(windows, "pinvou3-app/tests/helpers/unrelated-observer.mjs"), false);
+  assert.equal(selected(filterPaths(text, "acp_runtime"), helper), false,
+    "this Windows-only observer does not broaden the independent ACP route");
+  const windowsJob = jobBlock("windows-codex-runtime-test");
+  assert.match(windowsJob, /needs\.changes\.outputs\.windows_codex == 'true' \|\| needs\.changes\.outputs\.acp_runtime == 'true'/);
+  assert.match(windowsJob, /node --test --test-concurrency=1 pinvou3-app\/tests\/browser-wrapper-host-control\.test\.mjs pinvou3-app\/tests\/browser_wrapper_windows_lifecycle\.test\.mjs/);
 });
 
 // Extract the path list of a named dorny/paths-filter output.
@@ -423,6 +446,10 @@ function assertWorkflowFailurePolicy(workflowText) {
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
+  // The primary transport failure is provisional only while the exact
+  // mandatory recovery reducer still protects this artifact and every build.
+  assertFrontendUploadRecovery(text);
+  remainder = remainder.replace(namedStep(jobBlock("frontend-setup", text), frontendUploadStep), "");
   {
     const receipt = namedStep(jobBlock("windows-rust-test", text), "Windows atomic lifecycle receipts");
     assert.equal(namedStep(jobBlock("windows-rust-test", text), "Configure bounded Windows atomic upload diagnostics").trimEnd(), [
@@ -2296,5 +2323,112 @@ test('all Linux frontend test entry points isolate their whole fixture tree afte
     assert.match(preflight, /PINVOU_TEST_NETWORK_ISOLATION: "1"/);
     assert.doesNotMatch(preflight, /^ {8}(?:if|continue-on-error):/m);
     assert.match(preflight, /python3 -m unittest discover -s \.\.\/scripts\/tests -p test_ci_browser_network\.py -v/);
+  }
+});
+
+function assertFrontendUploadRecovery(text) {
+  const setup = jobBlock("frontend-setup", text);
+  const primary = namedStep(setup, frontendUploadStep);
+  const retry = namedStep(setup, frontendUploadRetryStep);
+  const required = namedStep(setup, frontendUploadRequiredStep);
+  const line = (block, value) => block.split(uploadPolicyLF).includes(value);
+  const hasContinue = block => block.split(uploadPolicyLF).some(value => value.startsWith("        continue-on-error:"));
+  assert.ok(!setup.split(uploadPolicyLF).some(value => value.startsWith("    continue-on-error:")));
+  assert.ok(line(primary, "        id: frontend_setup_upload"));
+  assert.ok(line(primary, "        continue-on-error: true"));
+  assert.equal(stepCondition(setup, frontendUploadStep), "steps.frontend_bundle.outputs.transport == 'github'");
+  assert.ok(line(retry, "        id: frontend_setup_upload_retry"));
+  assert.equal(stepCondition(setup, frontendUploadRetryStep), "!cancelled() && steps.frontend_setup_upload.outcome == 'failure'");
+  assert.ok(!hasContinue(retry));
+  for (const step of [primary, retry]) {
+    assert.ok(line(step, "        uses: actions/upload-artifact@v7"));
+    assert.ok(line(step, "          name: frontend-setup-bundle"));
+    assert.ok(line(step, "          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz"));
+    assert.ok(line(step, "          if-no-files-found: error"));
+    assert.ok(line(step, "          retention-days: 1"));
+  }
+  assert.ok(line(retry, "          overwrite: true"));
+  assert.equal(stepCondition(setup, frontendUploadRequiredStep), "always() && !cancelled()");
+  assert.ok(!hasContinue(required));
+  assert.ok(line(required, "        shell: bash"));
+  assert.ok(line(required, "          FRONTEND_TRANSPORT: ${{ steps.frontend_bundle.outputs.transport }}"));
+  assert.ok(line(required, "          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}"));
+  assert.ok(line(required, "          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}"));
+  assert.ok(line(required, "          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz"));
+  const run = stepRun(setup, frontendUploadRequiredStep);
+  assert.ok(run.includes('case "$FRONTEND_TRANSPORT:$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in'));
+  assert.ok(run.includes("github:success:skipped|github:failure:success) ;;"));
+  assert.ok(run.includes("lan:skipped:skipped) ;;"));
+  assert.ok(run.includes('[[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]'));
+  assert.ok(setup.indexOf(namedStep(setup, "Pack frontend setup bundle")) < setup.indexOf(primary));
+  assert.ok(setup.indexOf(primary) < setup.indexOf(retry) && setup.indexOf(retry) < setup.indexOf(required));
+  for (const name of ["安装前端依赖", "Vite build", "Verify embedded Account Portal assets are current",
+    "Verify credential handoff built deployment boundary", "Vite web build (remote relay)", "Pack frontend setup bundle"]) {
+    assert.ok(!hasContinue(namedStep(setup, name)));
+  }
+}
+
+test("frontend setup upload recovery keeps successful retry and strict artifact gate", () => {
+  assertFrontendUploadRecovery(workflow);
+});
+
+test("frontend setup upload policy rejects broad retry, swallowed failures and payload drift", () => {
+  const setup = jobBlock("frontend-setup");
+  const primary = namedStep(setup, frontendUploadStep);
+  const retry = namedStep(setup, frontendUploadRetryStep);
+  const required = namedStep(setup, frontendUploadRequiredStep);
+  const variants = [
+    setup.replace(primary, primary.replace("        continue-on-error: true" + uploadPolicyLF, "")),
+    setup.replace(primary, primary.replace("id: frontend_setup_upload", "id: unrelated_upload")),
+    setup.replace(retry, retry.replace("!cancelled() && steps.frontend_setup_upload.outcome == 'failure'", "failure()")),
+    setup.replace(retry, retry.replace("steps.frontend_setup_upload.outcome", "steps.frontend_setup_upload.conclusion")),
+    setup.replace(retry, retry.replace("        uses:", "        continue-on-error: true" + uploadPolicyLF + "        uses:")),
+    setup.replace(retry, retry.replace("frontend-setup-bundle.tar.gz", "unrelated.tar.gz")),
+    setup.replace(primary, primary.replace("if-no-files-found: error", "if-no-files-found: warn")),
+    setup.replace(required, ""),
+    setup.replace(required, required.replace("always() && !cancelled()", "success()")),
+    setup.replace(required, required.replace("        shell:", "        continue-on-error: true" + uploadPolicyLF + "        shell:")),
+    setup.replace(required, required.replace("[[ ! -s", "[[ ! -e")),
+    setup.replace(required, required.replace("lan:skipped:skipped) ;;", "lan:skipped:skipped) error ;;")),
+    setup.replace(primary, primary.replace("if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}" + uploadPolicyLF, "")),
+  ];
+  for (const variant of variants) assert.throws(() => assertFrontendUploadRecovery(workflow.replace(setup, variant)));
+});
+
+test("frontend upload retry observes only primary outcome and preserves cancellation", () => {
+  const setup = jobBlock("frontend-setup");
+  for (const cancelled of [false, true]) {
+    for (const outcome of ["success", "failure", "skipped", "cancelled", "timed_out", ""]) {
+      const context = { cancelled: () => cancelled, always: () => true,
+        steps: { frontend_setup_upload: { outcome } } };
+      assert.equal(runInNewContext(stepCondition(setup, frontendUploadRetryStep), context), !cancelled && outcome === "failure");
+      assert.equal(runInNewContext(stepCondition(setup, frontendUploadRequiredStep), context), !cancelled);
+    }
+  }
+});
+
+test("frontend upload final shell accepts exactly recovered outcomes with a nonempty bundle", () => {
+  const run = stepRun(jobBlock("frontend-setup"), frontendUploadRequiredStep);
+  const directory = mkdtempSync(join(tmpdir(), "frontend-upload-policy-"));
+  try {
+    const file = join(directory, "frontend-setup-bundle.tar.gz");
+    const cases = [["github", "success", "skipped", true], ["github", "failure", "success", true],
+      ["lan", "skipped", "skipped", true],
+      ["github", "failure", "failure", false], ["github", "failure", "skipped", false], ["github", "failure", "cancelled", false],
+      ["github", "cancelled", "skipped", false], ["github", "skipped", "skipped", false], ["github", "success", "success", false],
+      ["lan", "success", "skipped", false], ["github", "", "", false]];
+    for (const [transport, primary, retry, accepted] of cases) {
+      for (const payload of accepted ? ["nonempty", "empty", "missing"] : ["nonempty"]) {
+        rmSync(file, { force: true });
+        if (payload !== "missing") writeFileSync(file, payload === "empty" ? "" : "fixed bundle");
+        const result = spawnSync(bash, ["-c", run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true,
+          env: { ...process.env, FRONTEND_TRANSPORT: transport, FIRST_UPLOAD_OUTCOME: primary, RETRY_UPLOAD_OUTCOME: retry,
+            FRONTEND_SETUP_BUNDLE: "frontend-setup-bundle.tar.gz" } });
+        assert.equal(result.status, accepted && payload === "nonempty" ? 0 : 1,
+          `${transport}/${primary}/${retry}/${payload}: ${result.error?.message || result.stderr}`);
+      }
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });

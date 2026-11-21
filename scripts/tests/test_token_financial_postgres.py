@@ -16,7 +16,7 @@ SPEC.loader.exec_module(RUNNER)
 
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
-EXPECTED_RETAINED_ROOT_COUNT = 91
+EXPECTED_RETAINED_ROOT_COUNT = 92
 EXPECTED_SCHEMA_ROOT_COUNT = 28
 
 # Fixed identities independently checked against each actual -run selector.
@@ -2093,6 +2093,9 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     phase = ("owner-schema-legacy-expiry" if required == {
                         "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
                     } else "owner-schema")
+                    expected_selection = ("^TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres$" if phase == "owner-schema-legacy-expiry"
+                                          else "^(" + "|".join(sorted(RUNNER.SCHEMA_REQUIRED - {"TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"})) + ")$")
+                    self.assertEqual(selection, expected_selection)
                     package = RUNNER.SCHEMA_PACKAGE
                     self.assertFalse(state["bootstrapped"])
                     state["schema_done"] = True
@@ -2312,6 +2315,13 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
         self.assertIn("TestF06OrganizationWalletRequiresLifecycleEvidence", selection)
         self.assertIn("TestTokenWalletReceiptSignedClientRecoveryPostgres", selection)
         self.assertIn("TestTokenWalletReceiptConservationAndLifecyclePostgres", selection)
+        for phase, package in (
+            ("owner-account", "./internal/account"), ("owner-schema-legacy-expiry", "./internal/billingschema"),
+            ("owner-schema", "./internal/billingschema"), ("owner-token-schema", "./internal/tokenschema"),
+            ("owner-provisioning", "./internal/token"), ("lifecycle-reconciliation", "./internal/account"),
+            ("retained-token", "./internal/token"), ("retained-billing", "./internal/billing"),
+        ):
+            self.assertEqual(self.fixture_commands[self.fixture_phases.index(phase)][-1], package)
         self.assertEqual([argv[-1] for argv in self.fixture_commands], [
             "./internal/platform/migrations", "./internal/account", "./internal/billing",
             "./internal/billingschema", "./internal/billingschema", "./internal/tokenschema",
@@ -3205,6 +3215,27 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             self.run_main_fixture(schema_leftover_phase="owner-schema")
         self.assertEqual(self.fixture_writes, [])
         self.assertEqual(self.fixture_phases, ["owner-ledger", "owner-account", "owner-wallet", "owner-schema-legacy-expiry", "owner-schema"])
+
+    def test_unknown_date_orphan_requires_cross_date_lifecycle(self):
+        root = "TestReconciliationUnknownDateOrphanLifecyclePostgres"
+        children = {"cross-date-concurrency", "legacy-and-ignore", "mixed-canonical-and-legacy", "resolved-cross-date-recurrence", "observation-rollback", "stale-review-binding", "query-index-upgrade", "case-identity-recovery-fence", "legacy-unbound-recovery-fence"}
+        self.assertIn(root, RUNNER.RETAINED_REQUIRED)
+        self.assertIn(root, RUNNER.BILLING_CHILD_REQUIRED)
+        self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("retained-billing")]
+        self.assertIsNotNone(re.fullmatch(command[command.index("-run") + 1], root))
+        events = self.events({root}, RUNNER.BILLING_PACKAGE, children=True)
+        options = {"package": RUNNER.BILLING_PACKAGE, "require_children": True, "exact_roots": True}
+        RUNNER.verify_results(events, {root}, **options)
+        for child in children:
+            for invalid in (
+                [event for event in events if event.get("Test") != root + "/" + child],
+                events + [{"Action": "skip", "Package": RUNNER.BILLING_PACKAGE, "Test": root + "/" + child}],
+            ):
+                with self.subTest(child=child), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(invalid, {root}, **options)
+
 
 if __name__ == "__main__":
     unittest.main()
