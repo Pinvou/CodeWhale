@@ -919,6 +919,27 @@ jobs:
               - 'pinvou3-app/src-tauri/src/app/commands/marketplace.rs'
               - 'pinvou3-app/src-tauri/src/features/connectors/skill_gate.rs'
               - 'pinvou3-app/src-tauri/src/app/connector_consent_tests.rs'
+              # mcp_python_dependencies_contract.test.js 读取
+              # python_dependencies.rs、connector_online_install_contract.test.js
+              # 读取 native_installer.rs 与 platform/download.rs(下载骨架收敛后
+              # HTTPS 候选门与 .part RAII 清理守卫随实现移入 download.rs,
+              # 契约断言随之 re-point)做跨语言契约断言;不列出则 Rust-only
+              # 改动会静默跳过该 node 门禁(test_ci_gate_policy 锁定此路由)。
+              - 'pinvou3-app/src-tauri/src/features/marketplace/python_dependencies.rs'
+              - 'pinvou3-app/src-tauri/src/features/connectors/native_installer.rs'
+              - 'pinvou3-app/src-tauri/src/platform/download.rs'
+              - 'pinvou3-app/src-tauri/src/platform/paths.rs'
+              - 'pinvou3-app/src-tauri/src/features/connectors/tmeet.rs'
+              - 'pinvou3-app/src-tauri/src/features/connectors/feishu.rs'
+              - 'pinvou3-app/src-tauri/src/features/connectors/wecom.rs'
+              - 'pinvou3-app/src-tauri/src/features/connectors/dingtalk.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/posix.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/linux/linux_path.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/macos/macos_path.rs'
+              - 'pinvou3-app/src-tauri/src/features/marketplace/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/marketplace/connectors.rs'
+              - 'pinvou3-app/src-tauri/src/features/runtime_bundle/platform/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/runtime_bundle/platform/extraction.rs'
               # behavior_telemetry_model_contract.test.mjs 读取根目录遥测
               # schema 做跨语言契约断言;不列出则 schema-only 改动会静默跳过
               # 该 node 门禁(test_ci_gate_policy 锁定此路由)。
@@ -2319,13 +2340,14 @@ jobs:
           printf '%s  %s\n' fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179 "$tools/helm.tar.gz" | sha256sum --check --strict
           tar -xzf "$tools/helm.tar.gz" -C "$tools" linux-amd64/helm
           python3 scripts/ci-download.py https://github.com/docker/compose/releases/download/v5.4.0/docker-compose-linux-x86_64 \
-            --output "$tools/docker-compose" --sha256 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be
+            --output "$tools/docker-compose" --sha256 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be --seconds 360
           printf '%s  %s\n' 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be "$tools/docker-compose" | sha256sum --check --strict
           chmod 0755 "$tools/docker-compose"
           # Test-only promtool; does not start or upgrade a Prometheus server.
           # SHA256 published at https://prometheus.io/download/ (3.13.5 LTS).
+          # Allow a cold runner to fetch the verified 100 MiB archive over a slow link.
           python3 scripts/ci-download.py https://github.com/prometheus/prometheus/releases/download/v3.13.5/prometheus-3.13.5.linux-amd64.tar.gz \
-            --output "$tools/prometheus.tar.gz" --sha256 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699
+            --output "$tools/prometheus.tar.gz" --sha256 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699 --seconds 360
           printf '%s  %s\n' 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699 "$tools/prometheus.tar.gz" | sha256sum --check --strict
           tar -xzf "$tools/prometheus.tar.gz" -C "$tools" prometheus-3.13.5.linux-amd64/promtool
           printf 'PINVOU_TEST_PROMTOOL_BINARY=%s\n' "$tools/prometheus-3.13.5.linux-amd64/promtool" >> "$GITHUB_ENV"
