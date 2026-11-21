@@ -212,7 +212,7 @@ test('authorization release gate classifies every HTTP task event callback and C
   // The existing complete graph includes the reconciliation repair-context GET.
   // It also includes the two profile-revocation receipt claim/confirm routes.
   // Also retain main's approval delivery terminal recovery worker.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 426, tasks: 35, events: 18, cli: 28 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 431, tasks: 35, events: 18, cli: 28 });
 });
 
 test('existing grant inventory CLI retains its bounded read-only Account identity', async () => {
@@ -783,6 +783,35 @@ test('all five production colon action registrations keep their first exact path
     for (const decoy of ['// ' + route, `var guardExample = \`${route}\``]) {
       assert.throws(() => check(source.replace(route, absent) + '\n' + decoy), undefined, path);
     }
+  }
+});
+
+test('grant recovery keeps five literal tuples and the original action and policy pairing', async () => {
+  const source = 'account-platform/internal/account/approval_grant_recovery_http.go';
+  const code = await readFile(new URL('../../internal/account/approval_grant_recovery_http.go', import.meta.url), 'utf8');
+  const expected = [
+    ['GET', '/approval-grant-recovery-cases', null, null],
+    ['GET', '/approval-grant-recovery-cases/:case_id', null, null],
+    ['POST', '/approval-grant-recovery-cases/:case_id/observations', 'OBSERVE', 'APPROVAL_GRANT_RECOVERY_OBSERVE'],
+    ['POST', '/approval-grant-recovery-cases/:case_id/proposals', 'PROPOSE', 'APPROVAL_GRANT_RECOVERY_PROPOSE'],
+    ['POST', '/approval-grant-recovery-cases/:case_id/reviews', 'REVIEW', 'APPROVAL_GRANT_RECOVERY_REVIEW'],
+  ];
+  const check = text => {
+    const routes = authorizationRoutes(source, text);
+    assert.deepEqual(routes.map(x => [x.receiver, x.method, x.path]), expected.map(([method, path]) => ['admin', method, path]));
+    for (const [index, [, , action, policy]] of expected.entries()) {
+      if (!action) continue;
+      const registration = routes[index].registration.replace(/\s+/g, '');
+      assert.ok(registration.includes(`approvalpolicy.Require("${policy}",approvalpolicy.AuditOnly)`));
+      assert.ok(registration.includes(`s.adminGrantRecoveryMutation(w,r,"${action}")`));
+    }
+  };
+  check(code);
+  for (const broken of [code.replace('APPROVAL_GRANT_RECOVERY_REVIEW', 'APPROVAL_GRANT_RECOVERY_OBSERVE'),
+    code.replace('s.adminGrantRecoveryMutation(w, r, "REVIEW")', 's.adminGrantRecoveryMutation(w, r, "OBSERVE")'),
+    code.replace('"/approval-grant-recovery-cases/:case_id/reviews"', '"/approval-grant-recovery-cases/:case_id/" + "reviews"')]) {
+    assert.notEqual(broken, code);
+    assert.throws(() => check(broken));
   }
 });
 
