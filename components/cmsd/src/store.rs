@@ -779,6 +779,11 @@ impl StateStore {
         self.dirty = true;
     }
 
+    /// r14 R2：稳态复测断言用——未变化的事件流不得再次置脏。
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     /// 有改动才写。tmp + rename 原子替换。
     pub fn save_if_dirty(&mut self) -> std::io::Result<()> {
         if !self.dirty {

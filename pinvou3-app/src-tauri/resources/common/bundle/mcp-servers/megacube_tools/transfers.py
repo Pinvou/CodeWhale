@@ -332,30 +332,39 @@ class Transfer:
                         remaining = (total - offset) if total is not None else 0
                         if remaining > shutil.disk_usage(target.parent).free:
                             raise ToolError("INSUFFICIENT_DISK", "目标磁盘空间不足，部分文件保留。")
-                        # r12 P2-6：无 Content-Length 且调用方未传 size_bytes 时，
-                        # 上面的磁盘检查与循环内大小上限双双跳过——流式/恶意源可
-                        # 写盘至耗尽。设绝对单文件上限兜底（与商店单文件上限同口径）。
-                        if item["size_bytes"] is None and total is None \
-                                and shutil.disk_usage(target.parent).free - offset < _MAX_UNKNOWN_FILE_BYTES:
-                            raise ToolError("FILE_TOO_LARGE", "无长度信息的下载超过安全上限，已中止。")
+                        # r12 P2-6（r14 R1 更正）：无 Content-Length 且调用方未传
+                        # size_bytes 时，上面的磁盘预检与循环内 expected 上限双双
+                        # 跳过。r12 曾以"余量不足 32GiB 即拒绝"兜底，但那不是绝对
+                        # 上限（盘大时仍可写满），又把小余量设备上的未知长度下载
+                        # 一律拒之门外。现改为循环内绝对单文件上限（与商店单文件
+                        # 上限同口径）：越限立即中止；磁盘中途写满按写失败报
+                        # INSUFFICIENT_DISK，不再前置要求整段余量。可用性边界：
+                        # 缺长度元数据的来源最多写入 _MAX_UNKNOWN_FILE_BYTES。
                         write_json(meta_path, {"etag": response.headers.get("ETag"), "last_modified": response.headers.get("Last-Modified")})
                         flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
                         flags |= os.O_APPEND if offset else os.O_TRUNC
                         with os.fdopen(os.open(part, flags, 0o600), "ab" if offset else "wb") as output:
                             size = offset
-                            while True:
-                                self.cancel()
-                                block = response.read1(1024 * 1024)
-                                if not block:
-                                    break
-                                size += len(block)
-                                expected = item["size_bytes"] if item["size_bytes"] is not None else total
-                                if expected is not None and size > expected:
-                                    raise ToolError("SIZE_MISMATCH", "下载超过预期大小。")
-                                output.write(block)
-                                self.progress(size)
-                            output.flush()
-                            os.fsync(output.fileno())
+                            try:
+                                while True:
+                                    self.cancel()
+                                    block = response.read1(1024 * 1024)
+                                    if not block:
+                                        break
+                                    size += len(block)
+                                    expected = item["size_bytes"] if item["size_bytes"] is not None else total
+                                    if expected is not None and size > expected:
+                                        raise ToolError("SIZE_MISMATCH", "下载超过预期大小。")
+                                    if expected is None and size > _MAX_UNKNOWN_FILE_BYTES:
+                                        raise ToolError("FILE_TOO_LARGE", "无长度信息的下载超过安全上限，已中止。")
+                                    output.write(block)
+                                    self.progress(size)
+                                output.flush()
+                                os.fsync(output.fileno())
+                            except OSError as exc:
+                                raise ToolError(
+                                    "INSUFFICIENT_DISK",
+                                    "写入分片失败（磁盘可能已满），部分文件保留。") from exc
                         if total is not None and size != total:
                             raise ToolError("INCOMPLETE_DOWNLOAD", "连接提前结束，文件不完整。")
                 size = part.stat().st_size

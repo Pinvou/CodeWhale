@@ -558,3 +558,43 @@ test('runtime task receipts reject errors, unknown lookup records and oversized 
   assert.deepEqual(runtimeTasksFromOutput(' '.repeat(262145)), []);
   assert.deepEqual(runtimeTasksFromOutput({ isError: true, data: { task_id: 'known', card: 'target', kind: 'enable' } }), []);
 });
+
+test('a watched task is observed once per (id, status) transition, not on every poll', async () => {
+  const effects = [], cleanups = [], intervals = [];
+  const observed = [];
+  const switchTask = { id: 'sw-1', kind: 'switch', card: 'target', status: 'succeeded' };
+  let stateIndex = 0;
+  const previousTauri = globalThis.__TAURI__;
+  globalThis.__TAURI__ = { core: { invoke: async () => ({}) } };
+  const context = {
+    useRef: value => ({ current: value }), useCallback: callback => callback, useEffect: callback => effects.push(callback),
+    useState: initial => {
+      const index = stateIndex++;
+      const slots = context.__slots || (context.__slots = []);
+      slots[index] = index === 0 ? true : initial; // cmsAvailable 直达 true
+      return [slots[index], value => { slots[index] = typeof value === 'function' ? value(slots[index]) : value; }];
+    },
+    fetchCmsStatus: async () => ({ available: true, data: { active_model: 'target' } }),
+    fetchCmsTasks: async () => ({ available: true, data: { tasks: [switchTask] } }),
+    fetchCmsTask: async () => ({ available: true, data: switchTask }),
+    probeCmsAvailable: async () => true,
+    setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; }, clearInterval: () => {},
+    setTimeout, clearTimeout, console,
+  };
+  vm.createContext(context);
+  vm.runInContext(hookSource('use-cmsd-tasks') + '\nthis.hook = useCmsdTaskWatch;', context);
+  context.hook({ onTaskObserved: task => observed.push(task.status) });
+  for (const effect of effects) { const cleanup = effect(); if (cleanup) cleanups.push(cleanup); }
+  try {
+    const tick = intervals.find(value => value.delay === 3000).callback;
+    await flush(); // 初始 tick
+    // r14 R3：同一 (id, succeeded) 在公开索引里长期可见，但观察回调只允许
+    // 触发一次——否则消费方的 reconcileRoutes 会每 3s 重跑。
+    for (let poll = 0; poll < 3; poll++) { await tick(); await flush(); }
+    assert.deepEqual(observed, ['succeeded']);
+    // running→succeeded 的真实迁移仍要再次触发。
+    switchTask.status = 'running'; await tick(); await flush();
+    switchTask.status = 'succeeded'; await tick(); await flush();
+    assert.deepEqual(observed, ['succeeded', 'running', 'succeeded']);
+  } finally { for (const cleanup of cleanups) cleanup(); globalThis.__TAURI__ = previousTauri; }
+});

@@ -29,6 +29,11 @@ export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserve
   const [settledTask, setSettledTask] = useState(null);
   const [hiddenTaskId, setHiddenTaskId] = useState(null);
   const settledRef = useRef(new Set());
+  // r14 R3：观察回调按 (id, status) 迁移触发。终结任务在公开索引里可长期
+  // 可见（索引返回最新 20 条，实际淘汰要等 100 条 prune），若每 tick 都重放
+  // succeeded 观察，消费方的 reconcileRoutes → refreshStoreRoutes(fresh) 会
+  // 无限重跑（docker ps + sqlite + cmsd HTTP，安静设备上永不停止）。
+  const observedStatusRef = useRef(new Map());
   // These are fact confirmations, not executable task receipts. Keep observed
   // unknowns outside the latest-20 index; one batch read per retry confirms all.
   const runtimeSettledRef = useRef(new Set());
@@ -98,7 +103,10 @@ export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserve
             continue;
           }
           if (!WATCHED_KINDS.includes(task.kind)) continue;
-          observedCallbackRef.current?.(task);
+          if (observedStatusRef.current.get(task.id) !== task.status) {
+            observedStatusRef.current.set(task.id, task.status);
+            observedCallbackRef.current?.(task);
+          }
           if (task.status === 'running') continue;
           if (settledRef.current.has(task.id)) continue;
           settledRef.current.add(task.id);
@@ -144,6 +152,9 @@ export function useCmsdTaskWatch({ onTaskSettled, onActiveChanged, onTaskObserve
         const indexedIds = new Set(tasks.map(task => task?.id));
         for (const id of runtimeSettledRef.current) {
           if (!indexedIds.has(id)) runtimeSettledRef.current.delete(id);
+        }
+        for (const id of observedStatusRef.current.keys()) {
+          if (!indexedIds.has(id)) observedStatusRef.current.delete(id);
         }
         if (res?.available) firstPollDoneRef.current = true;
         // 活跃指针跟随（set_default 这类无任务长操作的唯一可见通道）

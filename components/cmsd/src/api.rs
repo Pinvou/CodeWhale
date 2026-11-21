@@ -1087,9 +1087,11 @@ fn store_task_json(t: &crate::shop::StoreTask) -> Value {
     if t.last_line.is_empty() {
         v.set("last_event", Value::Null);
     } else {
+        // r14 R5：商店 run 日志可能含注入凭据行，与镜像落盘边界（install.rs）
+        // 和 logs_view 同口径——出站前必须过脱敏。
         let mut le = Value::obj();
         le.set("stage", "store".into());
-        le.set("message", t.last_line.clone().into());
+        le.set("message", redact::redact_text(&t.last_line).into());
         v.set("last_event", le);
     }
     v
@@ -1106,9 +1108,16 @@ fn task_view(app: &Arc<App>, id: &str) -> Result<Value, ApiErr> {
         .task(id)
         .map_err(|error| install::map_store_err(error, false))?;
     let mut out = store_task_json(&detail.task);
+    // r14 R5：同上——商店直通回退的 detail.lines 与镜像/日志边界同口径脱敏。
     out.set(
         "lines",
-        Value::Arr(detail.lines.into_iter().map(Into::into).collect()),
+        Value::Arr(
+            detail
+                .lines
+                .into_iter()
+                .map(|line| redact::redact_text(&line).into())
+                .collect(),
+        ),
     );
     Ok(out)
 }
@@ -2077,6 +2086,29 @@ mod store_merge_tests {
             value.get("store_run_id").and_then(Value::as_str),
             Some("original-run")
         );
+    }
+
+    /// r14 R5：商店直通路径的 last_event 与镜像落盘边界同口径脱敏。
+    #[test]
+    fn store_task_last_event_is_redacted_before_leaving_cmsd() {
+        let task = crate::shop::StoreTask {
+            run_id: "run".into(),
+            card_id: "card".into(),
+            kind: "download".into(),
+            status: "running".into(),
+            created_at: 0,
+            progress: None,
+            last_line: "download failed: token sk-ANTHROPUS-abc123 leaking".into(),
+            error: String::new(),
+        };
+        let value = store_task_json(&task);
+        let message = value
+            .get("last_event")
+            .and_then(|event| event.get("message"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(!message.contains("sk-ANTHROPUS-abc123"), "{message}");
+        assert!(message.contains("***"), "{message}");
     }
 
     /// /v1/tasks 合并透出：cmsd 任务 source="cmsd"，商店任务 source="store"

@@ -687,9 +687,61 @@ def redirect_policy_checks():
     srv2.server_close()
 
 
+def unknown_length_cap_checks(tmp):
+    """r14 R1：无长度信息下载必须在循环内按绝对上限中止，而非余量预检。"""
+    import importlib as _il
+    prev_home = os.environ.get("PINVOU3_HOME")
+    os.environ["PINVOU3_HOME"] = tmp
+    servers_dir = os.path.join(
+        ROOT, "src-tauri", "resources", "common", "bundle", "mcp-servers")
+    if servers_dir not in sys.path:
+        sys.path.insert(0, servers_dir)
+    transfers = _il.import_module("megacube_tools.transfers")
+
+    class EndlessStream(BaseHTTPRequestHandler):
+        def do_GET(self):
+            # 不带 Content-Length，连接关闭即边界：对端 total=None。
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"x" * (256 * 1024))
+
+        def log_message(self, *_args):
+            pass
+
+    srv = TCPServer(("127.0.0.1", 0), EndlessStream)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    default_cap = transfers._MAX_UNKNOWN_FILE_BYTES
+    transfers._MAX_UNKNOWN_FILE_BYTES = 64 * 1024
+    job = os.path.join(tmp, "cap-job")
+    os.makedirs(job, exist_ok=True)
+    dest = os.path.join(tmp, "cap-dest")
+    os.makedirs(dest, exist_ok=True)
+    try:
+        from pathlib import Path as _Path
+        transfers.Transfer(_Path(job), {"artifacts": [], "events": []}).file(
+            {"url": "http://127.0.0.1:%d/stream" % port, "path": "cap.bin",
+             "size_bytes": None, "sha256": ""}, _Path(dest), None)
+        check("B3 无长度下载循环内绝对上限越限即中止", False, "未抛错")
+    except transfers.ToolError as error:
+        check("B3 无长度下载循环内绝对上限越限即中止",
+              error.code == "FILE_TOO_LARGE", error.code)
+    except Exception as error:  # noqa: BLE001
+        check("B3 无长度下载循环内绝对上限越限即中止", False, type(error).__name__)
+    finally:
+        transfers._MAX_UNKNOWN_FILE_BYTES = default_cap
+        srv.shutdown()
+        srv.server_close()
+        if prev_home is None:
+            os.environ.pop("PINVOU3_HOME", None)
+        else:
+            os.environ["PINVOU3_HOME"] = prev_home
+
+
 def main():
     redirect_policy_checks()
     tmp = tempfile.mkdtemp(prefix="megacube-mcp-test-")
+    unknown_length_cap_checks(tmp)
     state = FixtureState()
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
     httpd.state = state

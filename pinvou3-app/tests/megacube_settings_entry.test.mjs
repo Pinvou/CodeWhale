@@ -120,3 +120,19 @@ test('device overview and CMS management coexist behind the same destination', (
     assert.ok(management.includes(copy.uiMegacube.overviewHint));
   }
 });
+
+test('unchanged device facts preserve object identity for the React bail-out', () => {
+  // r14 R4：30s 探测每 tick 都产出新对象身份会触发全 App 重渲染；
+  // 两字段未变化时必须原样返回 previous。
+  const fulfilled = { status: 'fulfilled', value: { supported: true, detected: true } };
+  const first = deviceManagementState(INITIAL_DEVICE_MANAGEMENT, fulfilled, [fulfilled], true);
+  assert.notEqual(first, INITIAL_DEVICE_MANAGEMENT);
+  assert.equal(deviceManagementState(first, fulfilled, [fulfilled], true), first);
+  const offline = { status: 'rejected', reason: new Error('probe offline') };
+  assert.equal(deviceManagementState(first, offline, [offline], true), first);
+  // 布尔翻转仍要产出新对象。
+  const cleared = deviceManagementState(first,
+    { status: 'fulfilled', value: { supported: false } }, [], true);
+  assert.notEqual(cleared, first);
+  assert.equal(cleared.isCube, false);
+});

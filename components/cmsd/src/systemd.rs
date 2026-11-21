@@ -251,6 +251,7 @@ impl Systemd {
             "model_unit_namespace_unverified: model template missing or unreadable".to_owned()
         })?;
         if existing != self.template_content().as_bytes()
+            && existing != self.pre_hardening_template_content().as_bytes()
             && existing != self.previous_template_content().as_bytes()
         {
             return Err("model_unit_namespace_conflict: model template belongs to another state/configuration; preserved".into());
@@ -484,19 +485,24 @@ impl Systemd {
                     self.assert_template_owner().map_err(|message| {
                         std::io::Error::new(std::io::ErrorKind::PermissionDenied, message)
                     })?;
-                    // Only the complete known previous template for this exact
-                    // account/state path is eligible. Keep its original bytes.
+                    // Only complete known previous templates for this exact
+                    // account/state path are eligible. Keep their original bytes.
                     let previous = self.previous_template_content();
-                    if Self::template_bytes(&path)? == previous.as_bytes() {
+                    // r14 R7：加固前的模板同样具备原地升级资格（备份后替换）。
+                    let pre_hardening = self.pre_hardening_template_content();
+                    let eligible = |bytes: &[u8]| {
+                        bytes == previous.as_bytes() || bytes == pre_hardening.as_bytes()
+                    };
+                    if eligible(&Self::template_bytes(&path)?) {
                         let backup = path.with_extension("service.cmsd-before-profile-v1");
                         match std::fs::hard_link(&path, &backup) {
                             Ok(()) => {}
                             Err(e)
                                 if e.kind() == std::io::ErrorKind::AlreadyExists
-                                    && Self::backup_bytes(&backup)? == previous.as_bytes() => {}
+                                    && eligible(&Self::backup_bytes(&backup)?) => {}
                             Err(e) => return Err(e),
                         }
-                        if Self::template_bytes(&path)? != previous.as_bytes() {
+                        if !eligible(&Self::template_bytes(&path)?) {
                             return Err(std::io::Error::other(
                                 "model template changed during upgrade",
                             ));
@@ -515,6 +521,16 @@ impl Systemd {
     }
 
     fn template_content(&self) -> String {
+        self.template_content_with(true)
+    }
+
+    /// r14 R7 之前的模板内容：既装设备上与之逐字节相同的模板可在升级时原地
+    /// 替换为加固版（管理员改过的模板仍不动）。
+    fn pre_hardening_template_content(&self) -> String {
+        self.template_content_with(false)
+    }
+
+    fn template_content_with(&self, hardening: bool) -> String {
         let mut s = String::new();
         s.push_str("[Unit]\n");
         s.push_str("Description=MegaCube model engine (card %i)\n");
@@ -527,6 +543,17 @@ impl Systemd {
         s.push_str("Type=simple\n");
         if self.mode == SystemdMode::System {
             s.push_str(&format!("User={}\n", self.run_user));
+        }
+        if hardening {
+            // r14 R7：与静态 deploy 单元同口径的基础加固；命名空间沙箱
+            // （ProtectSystem/PrivateTmp）仅在系统模式启用——user 管理器对
+            // 无特权命名空间的支持随发行版而异，宁缺毋滥。
+            s.push_str("UMask=0077\n");
+            s.push_str("NoNewPrivileges=true\n");
+            if self.mode == SystemdMode::System {
+                s.push_str("ProtectSystem=full\n");
+                s.push_str("PrivateTmp=true\n");
+            }
         }
         s.push_str(&format!(
             "EnvironmentFile={}\n",
@@ -831,6 +858,59 @@ mod tests {
         );
         assert!(a.assert_template_owner().is_ok());
         assert!(b.assert_template_owner().is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// r14 R7：生成单元带基础加固（UMask/NoNewPrivileges；系统模式另有
+    /// ProtectSystem/PrivateTmp），且加固前模板可原地升级并保留备份。
+    #[test]
+    fn pre_hardening_template_upgrades_into_hardened_unit() {
+        let root = crate::docker::fixtures::tmpdir("systemd-template-hardening");
+        let units = root.join("units");
+        std::fs::create_dir_all(&units).unwrap();
+        let sd = Systemd::new(
+            SystemdMode::System,
+            units.clone(),
+            root.join("state/env"),
+            "test".into(),
+        );
+        let hardened = sd.template_content();
+        assert!(hardened.contains("UMask=0077\n"));
+        assert!(hardened.contains("NoNewPrivileges=true\n"));
+        assert!(hardened.contains("ProtectSystem=full\n"));
+        assert!(hardened.contains("PrivateTmp=true\n"));
+        // user 模式不启用命名空间沙箱，但保留 UMask/NoNewPrivileges。
+        let user_sd = Systemd::new(
+            SystemdMode::User,
+            units.clone(),
+            root.join("state/env"),
+            "test".into(),
+        )
+        .with_state_namespace(true);
+        let user_content = user_sd.template_content();
+        assert!(user_content.contains("UMask=0077\n"));
+        assert!(user_content.contains("NoNewPrivileges=true\n"));
+        assert!(!user_content.contains("ProtectSystem="));
+        assert!(!user_content.contains("PrivateTmp="));
+        // 既装设备上的加固前模板：owner 校验通过，升级替换并保留备份。
+        let pre = sd.pre_hardening_template_content();
+        assert!(!pre.contains("UMask="));
+        std::fs::write(sd.template_path(), &pre).unwrap();
+        assert!(sd.assert_template_owner().is_ok());
+        assert!(sd.write_template().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(sd.template_path()).unwrap(),
+            hardened
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                sd.template_path()
+                    .with_extension("service.cmsd-before-profile-v1")
+            )
+            .unwrap(),
+            pre
+        );
+        assert!(!sd.write_template().unwrap());
         std::fs::remove_dir_all(root).unwrap();
     }
 

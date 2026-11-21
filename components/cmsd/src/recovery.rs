@@ -571,14 +571,35 @@ pub fn tick(app: &Arc<App>) {
                 continue;
             }
             let mut store = app.store.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(current) = store.state.models.get_mut(&model.card) {
-                if code == "recovery_circuit_open" {
-                    current.status = ModelStatus::Degraded;
-                }
-                current.degraded_reason = Some(format!("{code}: {message}"));
-                store.mark_dirty();
-            }
+            apply_observe_error(&mut store, &model.card, &code, &message);
         }
+    }
+}
+
+/// r14 R2：观测错误路径的 diff-before-mark——恢复循环每 10s 一跳，同一
+/// 错误码与消息重复出现时不重写 degraded_reason/status，也就不置脏
+/// store（避免 supervisor 的 2s save_store 反复全量落盘的写放大）。
+fn apply_observe_error(
+    store: &mut crate::store::StateStore,
+    card: &str,
+    code: &str,
+    message: &str,
+) {
+    let Some(current) = store.state.models.get_mut(card) else {
+        return;
+    };
+    let mut changed = false;
+    if code == "recovery_circuit_open" && current.status != ModelStatus::Degraded {
+        current.status = ModelStatus::Degraded;
+        changed = true;
+    }
+    let reason = format!("{code}: {message}");
+    if current.degraded_reason.as_deref() != Some(reason.as_str()) {
+        current.degraded_reason = Some(reason);
+        changed = true;
+    }
+    if changed {
+        store.mark_dirty();
     }
 }
 
@@ -677,18 +698,27 @@ fn observe(app: &Arc<App>, model: &ModelState) -> Result<(), ApiErr> {
             return Ok(());
         }
         let was_running = current.status == ModelStatus::Running;
-        current.status = if running {
+        // r14 R2：观测值未变化时不 mark_dirty——恢复循环每 10s 对每个受管
+        // 模型走到这里，无条件覆写会让 supervisor 的 2s save_store 每次都
+        // 全量序列化+双 fsync（单板机 eMMC 写放大与持锁抖动）。与
+        // supervisor.rs 的 diff-before-mark 纪律对齐。
+        let next_status = if running {
             ModelStatus::Running
         } else {
             ModelStatus::Stopped
         };
-        current.main_pid = Some(pid).filter(|p| *p > 0);
+        let next_pid = Some(pid).filter(|p| *p > 0);
+        let mut changed = current.status != next_status || current.main_pid != next_pid;
+        current.status = next_status;
+        current.main_pid = next_pid;
         if running {
             if model.main_pid.is_some_and(|old| old != pid) {
                 current.restart_count += 1;
                 current.last_restart_at = Some(crate::timeutil::now_epoch());
             }
-            current.degraded_reason = None;
+            if current.degraded_reason.take().is_some() {
+                changed = true;
+            }
         } else if current.degraded_reason.as_deref().is_some_and(|reason| {
             // These checks succeeded in this observation. A deliberately stopped
             // model need not be started just to clear a repaired control error.
@@ -698,6 +728,7 @@ fn observe(app: &Arc<App>, model: &ModelState) -> Result<(), ApiErr> {
                 || (!missing && reason.starts_with("runtime_missing:"))
         }) {
             current.degraded_reason = None;
+            changed = true;
         }
         if !running
             && clean
@@ -716,7 +747,9 @@ fn observe(app: &Arc<App>, model: &ModelState) -> Result<(), ApiErr> {
             store.mark_dirty();
             return Ok(());
         }
-        store.mark_dirty();
+        if changed {
+            store.mark_dirty();
+        }
         if new_boot {
             // Persist the fresh runtime state before stamping the new boot.
             // Otherwise a crash here could mistake a prior-boot running cache
@@ -788,6 +821,82 @@ mod tests {
             .is_ok());
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn steady_observation_does_not_remark_the_store_dirty() {
+        let (root, app, _) = fixture("steady-observe-diff-guard", 100);
+        arm(&app, "qa-recover", false).unwrap();
+        disarm(&app, "qa-recover").unwrap();
+        let model = {
+            let mut store = app.store.lock().unwrap();
+            let model = store.state.models.get_mut("qa-recover").unwrap();
+            model.status = ModelStatus::Stopped;
+            model.degraded_reason = None;
+            model.clone()
+        };
+        // 第一次观测把缓存对齐运行态；随后落盘清脏。
+        observe(&app, &model).unwrap();
+        {
+            let mut store = app.store.lock().unwrap();
+            store.save_if_dirty().unwrap();
+            assert!(!store.is_dirty());
+        }
+        // 稳态复测（r14 R2）：status/pid/reason 均未变化时不得再次置脏。
+        let model = app.store.lock().unwrap().state.models["qa-recover"].clone();
+        observe(&app, &model).unwrap();
+        let store = app.store.lock().unwrap();
+        assert!(
+            !store.is_dirty(),
+            "稳态观测不得再次置脏 store（r14 R2 写放大）"
+        );
+        assert_eq!(
+            store.state.models["qa-recover"].status,
+            ModelStatus::Stopped
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repeated_observe_error_does_not_remark_the_store_dirty() {
+        let (root, app, _) = fixture("steady-error-diff-guard", 100);
+        arm(&app, "qa-recover", false).unwrap();
+        disarm(&app, "qa-recover").unwrap();
+        let mut store = app.store.lock().unwrap();
+        store.state.models.get_mut("qa-recover").unwrap().status = ModelStatus::Stopped;
+        apply_observe_error(
+            &mut store,
+            "qa-recover",
+            "runtime_missing",
+            "container was recreated",
+        );
+        assert!(store.is_dirty());
+        assert_eq!(
+            store.state.models["qa-recover"].degraded_reason.as_deref(),
+            Some("runtime_missing: container was recreated")
+        );
+        store.save_if_dirty().unwrap();
+        // 同一错误码+消息重复出现（r14 R2）：不得再次置脏。
+        apply_observe_error(
+            &mut store,
+            "qa-recover",
+            "runtime_missing",
+            "container was recreated",
+        );
+        assert!(!store.is_dirty(), "重复错误不得再次置脏 store");
+        // 新消息或熔断仍要如实落账。
+        apply_observe_error(
+            &mut store,
+            "qa-recover",
+            "recovery_circuit_open",
+            "crash loop",
+        );
+        assert!(store.is_dirty());
+        assert_eq!(
+            store.state.models["qa-recover"].status,
+            ModelStatus::Degraded
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn fixture(tag: &str, available: u64) -> (PathBuf, Arc<App>, u16) {

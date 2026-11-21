@@ -25,6 +25,9 @@ use serde_json::{Value, json};
 // Match the daemon Store persistence contract; valid task history may exceed
 // 16 MiB. Smaller component/configuration receipts keep their own limits.
 const MAX_CMS_STATE_BYTES: u64 = 64 * 1024 * 1024;
+/// r14 R6：`backups/{job-id}` 每次卸载/成功更新新增一份（单份至多约 96MiB），
+/// 无界累积在单板机上不可接受；保留最近 N 份，归档后滚动清理。
+const BACKUP_RETENTION: usize = 5;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -649,6 +652,34 @@ fn archive_state(record: &Record, job: &Job) -> Result<(), String> {
     write_json(&directory.join("service.json"), record)
 }
 
+/// r14 R6：按 `service.json` 的 mtime 保留最近 BACKUP_RETENTION 份备份，
+/// 更旧的与无 service.json 的孤儿目录（归档中断残留）尽力删除；单个删除
+/// 失败不阻断归档主流程。
+fn prune_backups() {
+    prune_backups_with(|path| {
+        std::fs::metadata(path.join("service.json"))
+            .and_then(|meta| meta.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
+}
+
+fn prune_backups_with(stamp_of: impl Fn(&Path) -> std::time::SystemTime) {
+    let entries = match std::fs::read_dir(root().join("backups")) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    let mut stamped: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_dir())
+        .map(|path| (stamp_of(&path), path))
+        .collect();
+    stamped.sort_by(|a, b| a.0.cmp(&b.0));
+    while stamped.len() > BACKUP_RETENTION {
+        let (_, path) = stamped.remove(0);
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
 fn recover_locked() -> Result<(), String> {
     config_migration::recover_locked()?;
     registration::recover_locked()
@@ -1044,6 +1075,7 @@ fn replace_package(job: &mut Job, record: &mut Record) -> Result<(), String> {
     }
     if job.action == "update" {
         archive_state(record, job)?;
+        prune_backups();
     }
     let migration = prepare_config_receipts(record, &config_update)?;
     record.previous = if job.action == "update" {
@@ -1113,6 +1145,59 @@ fn replace_package(job: &mut Job, record: &mut Record) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn backup_retention_keeps_only_the_newest_directories() {
+        // r14 R6：backups 无界增长的滚动清理行为。root() 读 PINVOU3_HOME，
+        // 与其他 env 测试共用全 crate 单一 ENV_LOCK 串行化；时间键注入以
+        // 避开 mtime 粒度。
+        let _lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let directory = tempfile::tempdir().unwrap();
+        let prev = std::env::var("PINVOU3_HOME").ok();
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env 写入已串行化。
+        unsafe { std::env::set_var("PINVOU3_HOME", directory.path()) };
+        let backups = root().join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        for index in 0..(BACKUP_RETENTION + 2) {
+            let job = backups.join(format!("job-{index:02}"));
+            std::fs::create_dir_all(&job).unwrap();
+            std::fs::write(job.join("service.json"), format!("{{\"seq\":{index}}}")).unwrap();
+        }
+        // 孤儿目录（无 service.json 的归档中断残留）应最先被清掉。
+        std::fs::create_dir_all(backups.join("orphan")).unwrap();
+        prune_backups_with(|path| {
+            let seq = std::fs::read_to_string(path.join("service.json"))
+                .ok()
+                .and_then(|body| {
+                    body.split(':')
+                        .nth(1)
+                        .map(|rest| rest.trim_end_matches('}'))
+                        .and_then(|rest| rest.parse::<u64>().ok())
+                })
+                .unwrap_or(0);
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seq)
+        });
+        let mut left: Vec<String> = std::fs::read_dir(&backups)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left.len(), BACKUP_RETENTION, "{left:?}");
+        assert!(!left.contains(&"orphan".into()), "{left:?}");
+        assert!(!left.contains(&"job-00".into()), "{left:?}");
+        assert!(
+            left.contains(&format!("job-{:02}", BACKUP_RETENTION + 1)),
+            "{left:?}"
+        );
+        match prev {
+            // SAFETY: 同上，持有 ENV_LOCK。
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+    }
+
     #[test]
     fn pid_reuse_or_missing_worker_is_not_reported_as_running() {
         let job = Job {
