@@ -25,7 +25,7 @@ PINVOU 面向中国大陆网络设计：未显式配置镜像时，下载顺序�
 显式设置环境变量后不再回退（用户指定的源即唯一来源）：共享知识库服务可设置：
 
 ```bash
-PINVOU_KNOWLEDGE_HF_BASE_URL=https://hf-mirror.example.com
+PINVOU_KNOWLEDGE_HF_BASE_URL=https://hf-mirror.com
 ```
 
 桌面端可设置 `PINVOU3_KB_HF_BASE_URL`；未设置时回退到上述候选链。变量值必须是 Hugging Face `resolve` API 兼容的服务根地址，例如 `https://hf-mirror.com`，不要包含仓库名、revision、文件路径或查询参数。

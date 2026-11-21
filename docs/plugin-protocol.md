@@ -183,7 +183,8 @@ detect_plugin(zip):
 > 现状注记（六轮评审补）：当前实现（`plugin_import.rs::detect_components`）
 > 只识别 `mcp_servers` / `skills` 两类组件（含裸技能/裸 MCP 回退），伪代码中的
 > `workflow_roots` 与 §6 的 `Workflow` 变体为 v2 草案（§1 表），`derive_bundle_kind`
-> 现行签名为 `(mcp_servers, skills, cli)`，不含 workflows。
+> 现行签名为 `(mcp_servers, skills)`，不含 workflows（CLI kind 由内置常量表
+> `BUILTIN_CLI_BUNDLES` 注册，不经内容推导）。
 
 ### 5.3 识别结果（`PluginImportReport`）
 
@@ -338,7 +339,7 @@ workflows 非空                              → Workflow
 现状（与代码一致）：统一管线由命令 `import_plugin_package_cmd` /
 `import_plugin_package_bytes_cmd`（对话框 / 拖放 base64）暴露，内部走
 `plugin_import::import_plugin_package`。更早的旧命令 `import_skill_package` /
-`import_skill_package_bytes` 已随死代码清扫（PR #539）删除——删除前前端即已全部
+`import_skill_package_bytes` 已随死代码清扫（[pinjou-agent#539](https://github.com/Pinvou/pinvou-agent/pull/539)）删除——删除前前端即已全部
 切换到新命令，旧入口零调用方。命令层返回类型：`import_plugin_package_cmd`
 返回 `Result<Option<String>, String>`（Some=新包 id，None=用户取消），
 `import_plugin_package_bytes_cmd` 返回 `Result<String, String>`（返回新包 id；
