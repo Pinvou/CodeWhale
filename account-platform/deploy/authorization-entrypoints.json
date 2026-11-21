@@ -17,6 +17,7 @@
     "account-platform/internal/billing/organization_routes.go",
     "account-platform/internal/token/organization_finance_routes.go",
     "account-platform/cmd/mock-newapi/main.go",
+    "account-platform/internal/account/approval_grant_recovery_http.go",
     "account-platform/internal/account/commerce_repair_http.go"
   ],
   "http_policies": [
@@ -1443,6 +1444,49 @@
       "path": "/approval-requests/:approval_request_id/actions/decision-result",
       "scope": "platform",
       "strategy": "domain.approval-policy-decision-original-receipt"
+    },
+    {
+      "source": "account-platform/internal/account/approval_grant_recovery_http.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/approval-grant-recovery-cases",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-grant-recovery-list",
+      "permissions": [
+        "platform.billing.ledger.read"
+      ]
+    },
+    {
+      "source": "account-platform/internal/account/approval_grant_recovery_http.go",
+      "receiver": "admin",
+      "method": "GET",
+      "path": "/approval-grant-recovery-cases/:case_id",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-grant-recovery-detail"
+    },
+    {
+      "source": "account-platform/internal/account/approval_grant_recovery_http.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/approval-grant-recovery-cases/:case_id/observations",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-grant-recovery-observe"
+    },
+    {
+      "source": "account-platform/internal/account/approval_grant_recovery_http.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/approval-grant-recovery-cases/:case_id/proposals",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-grant-recovery-propose"
+    },
+    {
+      "source": "account-platform/internal/account/approval_grant_recovery_http.go",
+      "receiver": "admin",
+      "method": "POST",
+      "path": "/approval-grant-recovery-cases/:case_id/reviews",
+      "scope": "platform",
+      "strategy": "domain.approval-policy-v2-grant-recovery-review"
     }
   ],
   "tasks": [

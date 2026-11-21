@@ -1174,6 +1174,16 @@
         "sha256": "bb646987572a659091d293bdf781a39874e82d16aadd8346d9d740da7298fd10"
       },
       {
+        "file": "900023_approval_grant_manual_recovery.down.sql",
+        "version": 900023,
+        "sha256": "418626025543dde9ce6b36e9ad35200f974f5d05a4b74e3b4a71aaeecd3dbf86"
+      },
+      {
+        "file": "900023_approval_grant_manual_recovery.up.sql",
+        "version": 900023,
+        "sha256": "aee7a5cd278fdf8b0f5d6e2b96ae16a331c6203ac9c05f30d4a65b1b86f91ba9"
+      },
+      {
         "file": "900024_financial_json_object_contracts.down.sql",
         "version": 900024,
         "sha256": "d3a0e4b0e826c1ae512e9011c387dd33992c30b10c52500aff50fe5ac7e41108"
@@ -2354,6 +2364,16 @@
         "file": "900039_payment_credit_attempts.up.sql",
         "version": 900039,
         "sha256": "722e0334e4072c841704015f1f0a5b40e412f6b4a82a7c8477c4b1f6600df7e9"
+      },
+      {
+        "file": "900040_reconciliation_orphan_query_indexes.down.sql",
+        "version": 900040,
+        "sha256": "64a459880954c0cdbea57fd219ef67624e55311d0512ee3c5b0325223bbf049b"
+      },
+      {
+        "file": "900040_reconciliation_orphan_query_indexes.up.sql",
+        "version": 900040,
+        "sha256": "5f4dcd01b045c5135ae90d698ced87e86d8e93c1dce1adc2c39066dce1e72b50"
       },
       {
         "file": "900042_financial_json_object_contracts.down.sql",

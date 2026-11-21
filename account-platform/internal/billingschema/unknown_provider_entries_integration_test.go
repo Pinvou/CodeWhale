@@ -98,38 +98,29 @@ func TestUnknownProviderEntryPublicMigrationPostgres(t *testing.T) {
 				return
 			}
 			before := stageValue(t, ctx, c, `SELECT jsonb_build_object('rows',(SELECT jsonb_agg(to_jsonb(x) ORDER BY row_number) FROM reconciliation_provider_rows x),'ledger',(SELECT jsonb_agg(to_jsonb(x) ORDER BY version) FROM schema_migrations x))::text`)
-			if kind == "historical-forward-only" && stageValue(t, ctx, c, `SELECT max(version)::text FROM schema_migrations`) != "900025" {
+			if stageValue(t, ctx, c, `SELECT max(version)::text FROM schema_migrations`) != "900025" {
 				t.Fatal("forward-only probe is not at migration 900025")
 			}
 			downErr := DownOne(ctx, c, target)
-			if err := migrations.Unlock(ctx, c); err != nil {
-				t.Fatal(err)
-			}
-			if downErr == nil {
-				t.Fatal("forward-only evidence rollback accepted")
-			}
-			if kind == "historical-forward-only" {
-				var rejected *pgconn.PgError
-				if !errors.As(downErr, &rejected) || rejected.Code != "P0001" || rejected.Message != "unsupported provider entry evidence is forward-only" {
-					t.Fatal("unexpected 900025 rollback rejection", downErr)
-				}
+			unlockErr := migrations.Unlock(ctx, c)
+			var rejected *pgconn.PgError
+			if !errors.As(downErr, &rejected) || rejected.Code != "P0001" || rejected.Message != "unsupported provider entry evidence is forward-only" || unlockErr != nil {
+				t.Fatal("unexpected 900025 rollback rejection", downErr, unlockErr)
 			}
 			if before != stageValue(t, ctx, c, `SELECT jsonb_build_object('rows',(SELECT jsonb_agg(to_jsonb(x) ORDER BY row_number) FROM reconciliation_provider_rows x),'ledger',(SELECT jsonb_agg(to_jsonb(x) ORDER BY version) FROM schema_migrations x))::text`) {
 				t.Fatal("rejected rollback left changes")
 			}
-			if kind == "historical-forward-only" {
-				if err := Up(ctx, c, target); err != nil {
-					t.Fatal("public replay after refused rollback", err)
-				}
-				if err := migrations.Unlock(ctx, c); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := VerifyApplied(ctx, c, target); err != nil {
-					t.Fatal("applied identity after refused rollback and replay", err)
-				}
-				if before != stageValue(t, ctx, c, `SELECT jsonb_build_object('rows',(SELECT jsonb_agg(to_jsonb(x) ORDER BY row_number) FROM reconciliation_provider_rows x),'ledger',(SELECT jsonb_agg(to_jsonb(x) ORDER BY version) FROM schema_migrations x))::text`) {
-					t.Fatal("replay after refused rollback changed source facts or ledger")
-				}
+			if err := Up(ctx, c, target); err != nil {
+				t.Fatal("public replay after refused rollback", err)
+			}
+			if err := migrations.Unlock(ctx, c); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := VerifyApplied(ctx, c, target); err != nil {
+				t.Fatal("applied identity after refused rollback and replay", err)
+			}
+			if before != stageValue(t, ctx, c, `SELECT jsonb_build_object('rows',(SELECT jsonb_agg(to_jsonb(x) ORDER BY row_number) FROM reconciliation_provider_rows x),'ledger',(SELECT jsonb_agg(to_jsonb(x) ORDER BY version) FROM schema_migrations x))::text`) {
+				t.Fatal("replay after refused rollback changed source facts or ledger")
 			}
 		})
 	}

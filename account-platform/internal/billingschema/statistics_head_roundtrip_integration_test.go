@@ -102,6 +102,10 @@ func testStatisticsHeadRoundTrip(t *testing.T, ctx context.Context, c *pgx.Conn,
 	ledger := stageValue(t, ctx, c, retainedStatisticsLedger)
 	facts := stageValue(t, ctx, c, factsSQL)
 	outbox := stageValue(t, ctx, c, statisticsOutboxFacts)
+	assertBillingCurrentReplay(t, ctx, c, loaded)
+	if facts != stageValue(t, ctx, c, factsSQL) || outbox != stageValue(t, ctx, c, statisticsOutboxFacts) {
+		t.Fatal("current replay changed retained business facts")
+	}
 	err := DownOne(ctx, c, loaded)
 	unlockErr := migrations.Unlock(ctx, c)
 	if err != nil || unlockErr != nil {
@@ -156,16 +160,27 @@ func testHistoricalEvidenceRefusal(t *testing.T, ctx context.Context, c *pgx.Con
 	if _, err := VerifyApplied(ctx, c, prefix); err != nil {
 		t.Fatal(err)
 	}
+	var actor bool
+	if err := c.QueryRow(ctx, `SELECT session_user='billing_migrator' AND current_user='billing_service' AND NOT (SELECT rolsuper FROM pg_roles WHERE rolname=current_user)`).Scan(&actor); err != nil || !actor {
+		t.Fatal("historical rollback deployment identity", actor, err)
+	}
+	if _, err := c.Exec(ctx, stageBillingSeed); err != nil {
+		t.Fatal("historical wallet and event facts", err)
+	}
+	walletEvents := func() string {
+		return stageValue(t, ctx, c, `SELECT jsonb_build_object('wallets',(SELECT jsonb_agg(to_jsonb(w) ORDER BY id) FROM wallets w),'outbox',(SELECT jsonb_agg(to_jsonb(e) ORDER BY event_id) FROM outbox_events e))::text`)
+	}
 	shape := stageShape(t, ctx, c)
 	ledger := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`)
 	facts := stageValue(t, ctx, c, factsSQL)
+	seededFacts := walletEvents()
 	err := DownOne(ctx, c, prefix)
 	unlockErr := migrations.Unlock(ctx, c)
 	var rejected *pgconn.PgError
 	if !errors.As(err, &rejected) || rejected.Code != "P0001" || rejected.Message != message || unlockErr != nil {
 		t.Fatal("historical forward-only refusal differs", err, unlockErr)
 	}
-	if shape != stageShape(t, ctx, c) || ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) || facts != stageValue(t, ctx, c, factsSQL) {
+	if shape != stageShape(t, ctx, c) || ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) || facts != stageValue(t, ctx, c, factsSQL) || seededFacts != walletEvents() {
 		t.Fatal("refused historical Down changed persistent facts")
 	}
 	if err := Up(ctx, c, prefix); err != nil {
@@ -177,7 +192,7 @@ func testHistoricalEvidenceRefusal(t *testing.T, ctx context.Context, c *pgx.Con
 	if _, err := VerifyApplied(ctx, c, prefix); err != nil {
 		t.Fatal(err)
 	}
-	if shape != stageShape(t, ctx, c) || ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) || facts != stageValue(t, ctx, c, factsSQL) {
+	if shape != stageShape(t, ctx, c) || ledger != stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) || facts != stageValue(t, ctx, c, factsSQL) || seededFacts != walletEvents() {
 		t.Fatal("historical replay changed persistent facts")
 	}
 	if err := Up(ctx, c, loaded); err != nil {
@@ -194,7 +209,11 @@ func testHistoricalEvidenceRefusal(t *testing.T, ctx context.Context, c *pgx.Con
 		versions = append(versions, m.Version)
 	}
 	var retained string
-	if err := c.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version=ANY($1)`, versions).Scan(&retained); err != nil || retained != ledger || facts != stageValue(t, ctx, c, factsSQL) {
+	if err := c.QueryRow(ctx, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version=ANY($1)`, versions).Scan(&retained); err != nil || retained != ledger || facts != stageValue(t, ctx, c, factsSQL) || seededFacts != walletEvents() {
 		t.Fatal("complete upgrade changed historical ledger or evidence", err)
+	}
+	assertBillingCurrentReplay(t, ctx, c, loaded)
+	if seededFacts != walletEvents() || facts != stageValue(t, ctx, c, factsSQL) {
+		t.Fatal("current replay changed historical billing facts")
 	}
 }

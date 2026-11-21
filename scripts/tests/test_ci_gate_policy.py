@@ -3834,10 +3834,11 @@ python3() { fixture_mock python3 "$@"; }
             "'success' to required-gate, so the whole compile/test leg becomes "
             "advisory while the required check stays green",
         )
-        # These reviewed diagnostic-only steps cannot suppress a compiler,
-        # test or cleanup failure. Artifact transport is bounded separately;
-        # adding another advisory step still requires explicit review here.
+        # Reviewed diagnostics and the provisional frontend upload cannot
+        # suppress compiler, test or cleanup failures. The upload is accepted
+        # only with its exact retry and mandatory hard reducer below.
         reviewed_diagnostics = (
+            "Upload frontend setup bundle",
             "PR test success proof transport",
             "Gate test resource lifecycle receipts",
             "Windows 测试二进制导入诊断",
@@ -3856,7 +3857,7 @@ python3() { fixture_mock python3 "$@"; }
         self.assertEqual(
             len(step_level),
             len(reviewed_diagnostics),
-            "only reviewed diagnostic steps may opt out of blocking; "
+            "only reviewed diagnostic or strictly recovered upload steps may be provisional; "
             f"found {len(step_level)} continue-on-error settings: {step_level}",
         )
         release_receipt = _step_named(_extract_job_block(body, 'release-contract-test'), 'Preserve Windows release contract process receipts')
@@ -3903,6 +3904,27 @@ python3() { fixture_mock python3 "$@"; }
                 "continue-on-error belongs only to the reviewed diagnostic "
                 "step, not another step that moved under it",
             )
+        # This is recovery, not an unbounded advisory transport exception.
+        # The primary upload runs only on the github transport (the lan
+        # transport serves the bundle from its own cache), may fail exactly
+        # once and is then retried with overwrite; the mandatory reducer below
+        # accepts exactly github:success:skipped, github:failure:success and
+        # lan:skipped:skipped plus a nonempty bundle, so the artifact always
+        # ends up uploaded or lan-available and can never silently vanish.
+        frontend_setup = _extract_job_block(body, 'frontend-setup')
+        self.assertEqual(
+            _step_named(frontend_setup, 'Upload frontend setup bundle').rstrip(),
+            "      - name: Upload frontend setup bundle\n        id: frontend_setup_upload\n        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n        continue-on-error: true\n        uses: actions/upload-artifact@v7\n        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1",
+        )
+        self.assertEqual(
+            _step_named(frontend_setup, 'Upload frontend setup bundle (retry)').rstrip(),
+            "      - name: Upload frontend setup bundle (retry)\n        id: frontend_setup_upload_retry\n        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}\n        uses: actions/upload-artifact@v7\n        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1\n          overwrite: true",
+        )
+        self.assertEqual(
+            _step_named(frontend_setup, 'Require frontend setup bundle upload').rstrip(),
+            '      - name: Require frontend setup bundle upload\n        if: ${{ always() && !cancelled() }}\n        shell: bash\n        env:\n          FRONTEND_TRANSPORT: ${{ steps.frontend_bundle.outputs.transport }}\n          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}\n          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}\n          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n        run: |\n          set -euo pipefail\n          case "$FRONTEND_TRANSPORT:$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in\n            github:success:skipped|github:failure:success) ;;\n            lan:skipped:skipped) ;;\n            *) echo \'::error::Frontend setup bundle upload did not complete successfully.\' >&2; exit 1 ;;\n          esac\n          if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then\n            echo \'::error::Frontend setup bundle is missing or empty.\' >&2\n            exit 1\n          fi',
+        )
+        # All other COE occurrences retain the original exact diagnostic contracts.
         gate_diagnostic = _step_named(_extract_job_block(body, 'fast-gate'), 'Gate test resource lifecycle receipts')
         self.assertEqual(gate_diagnostic.rstrip(), textwrap.indent(textwrap.dedent("""\
             - name: Gate test resource lifecycle receipts
@@ -4159,6 +4181,37 @@ python3() { fixture_mock python3 "$@"; }
                 atomic_without_exemption + f'      - {first_line}\n{remaining}        continue-on-error: true\n',
                 1,
             )
+        # 前端 setup 上传恢复并集的负例:传输门、重试触发或 Require 硬门
+        # (结局白名单含 lan 分支、空包兜底)任一弱化都必须让上方 pin 变红,
+        # 否则工件可能在 github 上传与 lan 缓存之外静默消失。
+        frontend_primary_gate = (
+            "        id: frontend_setup_upload\n"
+            "        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n"
+            "        continue-on-error: true\n"
+        )
+        frontend_require_start = "      - name: Require frontend setup bundle upload\n"
+        frontend_require_block = frontend_require_start + original.split(
+            frontend_require_start, maxsplit=1
+        )[1].split("\n  frontend-test:", maxsplit=1)[0]
+        for label, old, new in (
+            ('frontend primary loses transport gate', frontend_primary_gate,
+             "        id: frontend_setup_upload\n        continue-on-error: true\n"),
+            ('frontend primary loses continue-on-error', frontend_primary_gate,
+             "        id: frontend_setup_upload\n        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n"),
+            ('frontend retry trigger drifts to failure()',
+             "        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}",
+             '        if: failure()'),
+            ('frontend require gate deleted', frontend_require_block, ''),
+            ('frontend require gate weakened to success()',
+             frontend_require_start + "        if: ${{ always() && !cancelled() }}",
+             frontend_require_start + "        if: ${{ success() }}"),
+            ('frontend lan arm rejects lan availability', 'lan:skipped:skipped) ;;',
+             'lan:skipped:skipped) error ;;'),
+            ('frontend require gate accepts empty bundle',
+             'if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then',
+             'if [[ ! -e "$FRONTEND_SETUP_BUNDLE" ]]; then'),
+        ):
+            mutations[label] = original.replace(old, new, 1)
         try:
             self.test_no_job_level_continue_on_error_disarms_a_gate_job()
             for label, mutant in mutations.items():
@@ -7253,7 +7306,7 @@ exit 0
         env = dict(os.environ)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         env["REPAIR_TEST_STATE"] = str(self.state)
-        env["PINVOU3_CI_DPKG_UPDATES_DIR"] = str(self.updates)
+        env["PINVOU3_CI_DPKG_UPDATES_DIR"] = self.updates.as_posix()
         env.pop("GITHUB_ACTIONS", None)
         # 行为夹具必须走 hosted 主路径:生产脚本在 RUNNER_ENVIRONMENT=self-hosted
         # 时于 repair/trap 安装前安全早退(保留管理员预置内存),该早退本身

@@ -92,6 +92,9 @@ func VerifyApplied(ctx context.Context, c *pgx.Conn, input []migrations.Migratio
 	if err := validateOutboxAggregateLookup(input); err != nil {
 		return migrations.Verification{}, err
 	}
+	if err := validateManualGrantRecovery(input); err != nil {
+		return migrations.Verification{}, err
+	}
 	if err := validateFinancialJSONObjects(input); err != nil {
 		return migrations.Verification{}, err
 	}
