@@ -1164,6 +1164,16 @@
         "sha256": "bb646987572a659091d293bdf781a39874e82d16aadd8346d9d740da7298fd10"
       },
       {
+        "file": "900023_approval_grant_manual_recovery.down.sql",
+        "version": 900023,
+        "sha256": "418626025543dde9ce6b36e9ad35200f974f5d05a4b74e3b4a71aaeecd3dbf86"
+      },
+      {
+        "file": "900023_approval_grant_manual_recovery.up.sql",
+        "version": 900023,
+        "sha256": "aee7a5cd278fdf8b0f5d6e2b96ae16a331c6203ac9c05f30d4a65b1b86f91ba9"
+      },
+      {
         "file": "900024_financial_json_object_contracts.down.sql",
         "version": 900024,
         "sha256": "d3a0e4b0e826c1ae512e9011c387dd33992c30b10c52500aff50fe5ac7e41108"

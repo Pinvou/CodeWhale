@@ -1110,6 +1110,31 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
             with self.subTest(action=action), self.assertRaises(RuntimeError):
                 RUNNER.verify_results(events + [{"Action": action, "Package": RUNNER.ACCOUNT_PACKAGE, "Test": name}], RUNNER.ACCOUNT_REQUIRED, **options)
 
+    def test_manual_grant_recovery_roots_and_actual_scenarios_are_required(self):
+        expected = {
+            "TestManualGrantRecoverySchemaPostgres": {"official-schema-runtime-and-migration-identities"},
+            "TestManualGrantRecoveryWorkflowPostgres": {"expired-grant-dual-human-recovery"},
+        }
+        self.run_main_fixture()
+        command = self.fixture_commands[self.fixture_phases.index("owner-account")]
+        valid = self.events(RUNNER.ACCOUNT_REQUIRED, RUNNER.ACCOUNT_PACKAGE, children=True)
+        options = dict(package=RUNNER.ACCOUNT_PACKAGE, require_children=True, exact_roots=True, children_required=RUNNER.ACCOUNT_CHILD_REQUIRED)
+        self.assertGreater(RUNNER.verify_results(valid, RUNNER.ACCOUNT_REQUIRED, **options), 0)
+        for root, children in expected.items():
+            self.assertIn(root, RUNNER.ACCOUNT_REQUIRED)
+            self.assertIn(root, RUNNER.ACCOUNT_CHILD_REQUIRED)
+            self.assertIn(root, command[command.index("-run") + 1])
+            self.assertEqual(RUNNER.EXACT_REQUIRED_CHILDREN[root], children)
+            for bad in (
+                [e for e in valid if e.get("Test", "").split("/", 1)[0] != root],
+                [e for e in valid if not e.get("Test", "").startswith(root + "/")],
+                [e for e in valid if e.get("Test") != root + "/" + next(iter(children))],
+                valid + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root}],
+                valid + [{"Action": "skip", "Package": RUNNER.ACCOUNT_PACKAGE, "Test": root + "/" + next(iter(children))}],
+            ):
+                with self.subTest(root=root), self.assertRaises(RuntimeError):
+                    RUNNER.verify_results(bad, RUNNER.ACCOUNT_REQUIRED, **options)
+
     def test_financial_json_contract_roots_and_each_dirty_column_are_required(self):
         account = "TestAccountFinancialJSONObjectsPostgres"
         billing = "TestBillingFinancialJSONObjectsPostgres"
@@ -2406,6 +2431,8 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
     def test_account_phase_requires_real_cas_lifecycle_and_review_governance_roots(self):
         self.assertEqual(RUNNER.ACCOUNT_REQUIRED, {
             "TestOrganizationStartupDiagnosticsPostgres",
+            "TestManualGrantRecoverySchemaPostgres",
+            "TestManualGrantRecoveryWorkflowPostgres",
             "TestApprovalDeliveryTerminalRecoveryPostgres",
             "TestRestoredAdminReadsWithPublicMigrationsAndRuntimeActor",
             "TestAccountFinancialJSONObjectsPostgres",
