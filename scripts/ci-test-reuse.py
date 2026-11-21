@@ -7,8 +7,10 @@ run the tests. Git history/policy checks are deliberately outside the allowlist.
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import http.client
 import io
 import json
+import lzma
 import os
 from pathlib import Path
 import re
@@ -346,7 +348,8 @@ def lookup(event, configuration, api, *, now=None):
             raw = read_evidence('artifact_download_failed', api.request,
                                 f'actions/artifacts/{number(artifact["id"])}/zip', binary=True)
             proof = read_evidence('artifact_decode_failed', read_proof, raw)
-        except (OSError, ValueError, EOFError, zipfile.BadZipFile, RuntimeError, zlib.error):
+        except (OSError, ValueError, EOFError, http.client.HTTPException,
+                lzma.LZMAError, zipfile.BadZipFile, RuntimeError, zlib.error):
             # A broken artifact does not invalidate independently verified
             # evidence from another run for the same head.
             continue

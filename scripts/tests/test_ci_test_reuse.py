@@ -2,9 +2,11 @@
 import copy
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
+import http.client
 import importlib.util
 import io
 import json
+import lzma
 import os
 from pathlib import Path
 import re
@@ -142,21 +144,34 @@ class ReuseTests(unittest.TestCase):
                 return [later_artifact]
             return api_pages(path, field)
 
-        for error, reason in ((OSError('private download detail'), 'artifact_download_failed'),
-                              (None, 'artifact_decode_failed')):
+        original_read_proof = REUSE.read_proof
+        cases = (
+            (OSError('private download detail'), None, 'artifact_download_failed'),
+            (http.client.IncompleteRead(b'private response'), None, 'artifact_download_failed'),
+            (None, None, 'artifact_decode_failed'),
+            (None, lzma.LZMAError('private LZMA detail'), 'artifact_decode_failed'),
+        )
+        for download_error, decode_error, reason in cases:
             for keep_valid in (True, False):
-                with self.subTest(reason=reason, keep_valid=keep_valid):
+                with self.subTest(reason=reason, error=type(download_error or decode_error).__name__,
+                                  keep_valid=keep_valid):
                     def request(path, *, binary=False):
                         if path.startswith('actions/workflows/'):
                             return {'workflow_runs': [later_run, self.run] if keep_valid else [later_run]}
                         if path == 'actions/artifacts/100/zip':
-                            if error:
-                                raise error
+                            if download_error:
+                                raise download_error
                             return b'private invalid archive contents'
                         return api_request(path, binary=binary)
 
+                    def read_proof(raw):
+                        if decode_error and raw == b'private invalid archive contents':
+                            raise decode_error
+                        return original_read_proof(raw)
+
                     with (patch.object(self.api, 'request', side_effect=request),
                           patch.object(self.api, 'pages', side_effect=pages),
+                          patch.object(REUSE, 'read_proof', side_effect=read_proof),
                           patch('sys.stdout', new_callable=io.StringIO) as stdout):
                         expected = (sorted(TARGETS), 12) if keep_valid else ([], None)
                         self.assertEqual(self.lookup(), expected)
