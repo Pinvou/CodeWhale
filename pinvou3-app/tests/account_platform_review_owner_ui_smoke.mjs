@@ -9,6 +9,11 @@ import { createServer } from './helpers/vite-fixture.mjs';
 import { findBrowserExecutable } from './helpers/browser-executable.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const archivedUnpaidLabel = {
+  zh: '已归档且确认未支付',
+  en: 'Archived and confirmed unpaid',
+  ja: '未払い確認後に保管済み',
+};
 const chrome = findBrowserExecutable();
 assert.ok(chrome, 'Browser unavailable; review ownership UI was not validated');
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-review-owner-'));
@@ -62,6 +67,10 @@ try {
     });
     assert.equal(await page.$('[data-retained-finance-command]'), null);
   };
+  const begin = async key => {
+    await click(key, 'article button'); await page.waitForSelector('[role="alertdialog"]');
+    await click('confirmQueryAction', '[role="alertdialog"] button');
+  };
   const hasAction = key => page.evaluate(key => [...document.querySelectorAll('article button')].some(node => node.textContent.trim() === window.reviewOwnerProbe.copy[key]), key);
   for (const language of ['zh', 'en', 'ja']) for (const anomaly of [false, true]) {
     for (const owner of ['other', 'none', 'self']) {
@@ -107,7 +116,7 @@ try {
         assert.equal(await page.$('[data-retained-finance-command]') !== null, archive === 'transport');
         if (archive === 'transport') {
           await click('retry');
-          await page.waitForFunction(() => document.querySelector('article')?.textContent.includes('ARCHIVED_CONFIRMED_UNPAID'));
+          await page.waitForFunction(label => document.querySelector('article > p')?.textContent.includes(label), {}, archivedUnpaidLabel[language]);
           const writes = await page.evaluate(() => window.reviewOwnerProbe.calls.filter(call => call.method === 'POST'));
           assert.equal(writes.length, 2); assert.ok(writes[0].key);
           assert.equal(writes[0].key, writes[1].key); assert.equal(writes[0].body, writes[1].body);
@@ -123,10 +132,6 @@ try {
         ...(scenario === 'legacy' ? { legacyQuery: 'true' } : { queryRecovery: scenario }) };
       await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-review-owner.html?${new URLSearchParams(query)}`);
       await page.waitForSelector('tbody tr'); await click('details'); await page.waitForSelector('article');
-      const begin = async key => {
-        await click(key, 'article button'); await page.waitForSelector('[role="alertdialog"]');
-        await click('confirmQueryAction', '[role="alertdialog"] button');
-      };
       const retryOriginal = async key => {
         const clicked = await page.evaluate(key => {
           const row = [...document.querySelectorAll('[role="alert"]')].find(node => node.querySelector('code')?.textContent.includes(key));
@@ -186,7 +191,7 @@ try {
       await page.waitForFunction(() => { const button = document.querySelector('[data-retained-query-archive-command] button'); return button && !button.disabled; });
       const retried = await page.evaluate(() => { const button = document.querySelector('[data-retained-query-archive-command] button'); if (button.disabled) return false; button.click(); return true; });
       assert.ok(retried, 'new archive receipt recovery unavailable');
-      await page.waitForFunction(() => document.querySelector('article')?.textContent.includes('ARCHIVED_CONFIRMED_UNPAID'));
+      await page.waitForFunction(label => document.querySelector('article > p')?.textContent.includes(label), {}, archivedUnpaidLabel[language]);
       const writes = await page.evaluate(() => window.reviewOwnerProbe.calls.filter(call => call.url.endsWith('/archive-command')));
       assert.equal(writes.length, 2); assert.equal(writes[0].key, writes[1].key);
       assert.equal(await page.evaluate(() => window.reviewOwnerProbe.state.archiveEffects), 1);
@@ -201,6 +206,24 @@ try {
       assert.deepEqual(errors, []); passed++;
     }
   }
+  await page.goto(`http://127.0.0.1:${vite.httpServer.address().port}/tests/fixtures/account-platform-review-owner.html?${new URLSearchParams({ owner: 'self', twoCases: 'true', queryRecovery: 'other-case-completed' })}`);
+  await page.waitForSelector('tbody tr');
+  const selectCase = async (row, caseID) => {
+    await page.evaluate(index => document.querySelectorAll('tbody tr')[index].querySelector('button').click(), row);
+    await page.waitForFunction(id => document.querySelector('article > h4')?.textContent === id, {}, caseID);
+  };
+  await selectCase(1, '33333333-3333-4333-8333-333333333333');
+  await begin('query');
+  await page.waitForFunction(() => [...document.querySelectorAll('[role="status"]')].some(node => node.textContent === window.reviewOwnerProbe.copy.queryRecorded));
+  assert.equal(await enabledAction('archive'), true, 'ordinary archive should be available before another case becomes UNKNOWN');
+  await selectCase(0, '11111111-1111-4111-8111-111111111111');
+  await begin('query');
+  await page.waitForFunction(() => window.reviewOwnerProbe.state.queryRows.length === 2 &&
+    [...document.querySelectorAll('[role="alert"] code')].some(node => node.textContent.includes(window.reviewOwnerProbe.state.queryRows[1].key)));
+  await selectCase(1, '33333333-3333-4333-8333-333333333333');
+  assert.equal(await enabledAction('archive'), false, 'prior successful query must not unlock a different case with a retained UNKNOWN');
+  assert.equal(await page.evaluate(() => window.reviewOwnerProbe.state.archiveCalls), 0);
+  assert.deepEqual(errors, []); passed++;
   console.log(`Review ownership UI: ${passed} passed; 0 failed (controlled backend, actual React and admin client)`);
 } finally {
   if (browser) await browser.close();

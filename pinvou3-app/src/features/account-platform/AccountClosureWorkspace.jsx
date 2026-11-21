@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { accountClosureCopy, financeCopy, accountCenterCopy } from '../../shared/i18n.js';
 import { hasPermission } from './authorization-ui.js';
@@ -222,7 +223,7 @@ export function AccountClosureWorkspace({ client, me, language }) {
     {query.status === 'error' && <p role="alert">{copy.queryFailed}</p>}
     <button disabled={operation.busy} onClick={() => { polling.current?.resume(); void load(); }}>{copy.queryRetry}</button>
     {query.status === 'ready' && !item && <p><strong>{center.closureStatus}: </strong>{center.closureIdle}</p>}
-    {item && <><p><strong>{center.closureStatus}: </strong>{copy.statuses[item.status]} · {copy.stages[item.stage]}</p><p>{copy.sla}: {item.sla_expires_at}</p>
+    {item && <><p><strong>{center.closureStatus}: </strong>{statusLabel(item.status, language, copy.statuses)} · {statusLabel(item.stage, language, copy.stages)}</p><p>{copy.sla}: {item.sla_expires_at}</p>
       {item.blockers.length ? <div><h3>{center.closureChecklist}</h3><ul>{item.blockers.map((blocker, index) => <li key={`${blocker.domain}:${blocker.code}:${index}`}>{accountClosureBlockerLabel(blocker, copy)}</li>)}</ul></div> : <p>{copy.noBlockers}</p>}</>}
     <details className="ap-closure-rules"><summary>{copy.beforeTitle}</summary><p>{copy.lead}</p><p>{copy.before}</p></details>
     {canRequest && (presentation.canRequest || operation.unknown) && <button className="ap-danger" disabled={operation.busy || operation.blocked || !sameIdentity(ready.current)} onClick={() => void request()}>{operation.pendingFacts || operation.unknown ? financeCopy[language].retry : copy.start}</button>}

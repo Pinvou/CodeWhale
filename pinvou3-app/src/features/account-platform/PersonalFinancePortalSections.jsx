@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import { PortalDialogScope } from './portal-dialog-scope.jsx';
 import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -25,7 +26,7 @@ export function PersonalFinancePortalSections({ view, targets, language }) {
   const detailReady = dialog?.kind === 'order' && order?.order_id === dialog.id;
   const displayedOrder = detailReady ? order : data?.orders.find(item => item.order_id === dialog?.id);
   const historyOrder = data?.orders.find(item => item.order_id === dialog?.id);
-  const status = value => center.orderStatuses[value] || words.statuses[value] || value;
+  const status = value => statusLabel(value, language, { ...words.statuses, ...center.orderStatuses });
   const productCard = item => {
     const points = productPointFacts(item);
     return <label key={item.product_id} className={item.product_id === view.selected?.product_id ? 'selected' : ''}>

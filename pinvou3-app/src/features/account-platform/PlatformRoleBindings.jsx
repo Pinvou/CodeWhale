@@ -1,10 +1,11 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useState } from 'react';
 import { platformRoleName } from './platform-role-presentation.js';
 import { PlatformRoleBindingIdentity } from './PlatformRoleBindingIdentity.jsx';
 import { usePlatformBindingUsers } from './platform-binding-users.js';
 import { usePortalDialogScope } from './portal-dialog-scope.jsx';
 
-export function PlatformRoleBindings({ words, copy, bindings, target, draftTarget = target, hasUserCondition = Boolean(target), blocked, onApplyTarget, canRevoke, onRevoke, onView, client, me, acceptedSessionEpoch, routeScope, active }) {
+export function PlatformRoleBindings({ words, language, copy, bindings, target, draftTarget = target, hasUserCondition = Boolean(target), blocked, onApplyTarget, canRevoke, onRevoke, onView, client, me, acceptedSessionEpoch, routeScope, active }) {
   const scopeActive = usePortalDialogScope();
   const [query, setQuery] = useState(''), [status, setStatus] = useState(''), [pageNumber, setPageNumber] = useState(1);
   const [targetDraft, setTargetDraft] = useState(draftTarget);
@@ -49,7 +50,7 @@ export function PlatformRoleBindings({ words, copy, bindings, target, draftTarge
             <td><strong>{platformRoleName(words, item.role_code)}</strong><small>{item.role_code}</small></td>
             <td>{words.validFrom}: {date(item.starts_at)}<small>{words.validUntil}: {item.expires_at == null ? words.noExpiry : date(item.expires_at)}</small></td>
             <td>{typeof words.sources[item.grant_source] === 'string' ? words.sources[item.grant_source] : item.grant_source}</td>
-            <td><span className={`adm-status ${item.status === 'ACTIVE' ? 'ok' : item.status === 'SCHEDULED' ? 'warn' : 'neutral'}`}>{words.statuses[item.status]}</span></td>
+            <td><span className={`adm-status ${item.status === 'ACTIVE' ? 'ok' : item.status === 'SCHEDULED' ? 'warn' : 'neutral'}`}>{statusLabel(item.status, language, words.statuses)}</span></td>
             <td><div className="adm-row-actions"><button type="button" onClick={() => onView(item)}>{words.view}</button>{canRevoke(item) && <button type="button" className="adm-binding-danger" disabled={blocked} onClick={() => onRevoke(item)}>{copy.revoke}</button>}</div></td>
           </tr>)}</tbody>
         </table>{!items.length && <p className="adm-empty">{words.noBindings}</p>}

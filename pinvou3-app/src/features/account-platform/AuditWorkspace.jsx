@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, {useCallback,useEffect,useId,useLayoutEffect,useRef,useState} from 'react';
 import { auditActionCopy, auditActionLabels, auditPrivacyCopy, auditExportPresentation, auditListCopy } from '../../shared/i18n.js';
 import './admin-audit-presentation.css';
@@ -475,7 +476,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
     {
       key: 'result',
       label: copy.audit.result,
-      render: (item) => <Status value={item.result} />,
+      render: (item) => <Status value={item.result} copy={copy} />,
     },
     {
       key: 'request_id',
@@ -504,7 +505,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
         <label>{copy.audit.action}<input aria-label={copy.audit.actionFilter} placeholder={copy.audit.actionFilter} value={filters.action} onChange={event => setFilters(current => ({ ...current, action: event.target.value }))} /></label>
         <label>{copy.audit.resource}<input aria-label={copy.audit.resourceFilter} placeholder={copy.audit.resourceFilter} value={filters.resource} onChange={event => setFilters(current => ({ ...current, resource: event.target.value }))} /></label>
         <label>{copy.audit.result}<select aria-label={copy.audit.result} value={filters.result} onChange={event => setFilters(current => ({ ...current, result: event.target.value }))}>
-          <option value="">{copy.audit.allResults}</option><option>SUCCEEDED</option><option>DENIED</option><option>FAILED</option>
+          <option value="">{copy.audit.allResults}</option>{['SUCCEEDED', 'DENIED', 'FAILED'].map(value => <option key={value} value={value}>{statusLabel(value, copy.statusLanguage)}</option>)}
         </select></label>
         <label className="adm-filter-date">
           <span>{copy.audit.from}</span>
@@ -544,7 +545,7 @@ function Audit({ copy, data, client, setData, permissions, currentUserID, langua
       {exportJob && (
         <div className="adm-inline-message">
           <strong>
-            {copy.audit.exportStatus}: {exportWords.status[exportJob.status] || exportWords.statusUnknown}
+            {copy.audit.exportStatus}: {statusLabel(exportJob.status, copy.statusLanguage, exportWords.status, true)}
           </strong>
           {typeof ticketExpiry === 'string' && Number.isFinite(Date.parse(ticketExpiry)) && <p>{exportWords.ticketExpiry}: <time dateTime={ticketExpiry}>{formatDate(ticketExpiry)}</time></p>}
           {exportKey && (
@@ -601,7 +602,7 @@ function AuditDetail({ copy, item, onBack, language }) {
     [copy.audit.action, actionLabel || actionCode],
     ...(actionLabel ? [[actionWords.code, actionCode]] : []),
     [copy.audit.resource, <span key="audit.resource">{item.resource_type} · <TechnicalID value={item.resource_id} copy={copy} compact={false} /></span>],
-    [copy.audit.result, <Status key="audit.result" value={item.result} />],
+    [copy.audit.result, <Status key="audit.result" value={item.result} copy={copy} />],
     [copy.audit.request, <TechnicalID key="audit.request" value={item.request_id} copy={copy} compact={false} />],
     [copy.audit.organization, <TechnicalID key="audit.organization" value={item.active_organization_id} copy={copy} compact={false} />],
     [copy.audit.occurred, formatDate(item.occurred_at)],
@@ -628,7 +629,7 @@ function AuditDetail({ copy, item, onBack, language }) {
   );
 }
 
-function Status({value}) {return <span className="adm-status">{String(value || '—')}</span>;}
+function Status({value,copy}) {return <span className="adm-status">{statusLabel(value, copy.statusLanguage)}</span>;}
 export function AuditWorkspace({client,copy,permissions,currentUserID,language = 'zh'}){
  const [data,setData]=useState({audits:[]});
  const [loading,setLoading]=useState(true);

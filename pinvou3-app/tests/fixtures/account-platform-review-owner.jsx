@@ -12,10 +12,11 @@ const other = '33333333-3333-4333-8333-333333333333';
 const language = params.get('language') || 'en';
 const anomaly = params.get('anomaly') === 'true';
 const state = { calls: [], owner: params.get('owner') === 'self' ? user : params.get('owner') === 'none' ? null : other, archiveCalls: 0, archiveEffects: 0, archiveReceipts: [], archived: false, resolved: false, queried: false, queryRows: [] };
+const queryObservation = { last_query_at: '2026-11-18T00:00:00Z', last_query_result: 'EXPIRED' };
 const item = (caseID = id) => ({ case_id: caseID, payment_order_id: caseID, owner_id: state.owner, status: state.resolved ? 'RESOLVED' : 'OPEN',
   anomaly_type: 'PAYMENT_FACT_CONFLICT', review_status: state.archived && caseID === id ? 'ARCHIVED_CONFIRMED_UNPAID' : 'REVIEW_REQUIRED_LATE_PAYMENT', severity: 'P2',
   provider_id: '44444444-4444-4444-8444-444444444444', provider_version: 'fixture-version-1', merchant_order_no: 'review-owner-order',
-  ...(state.queried && caseID === id ? { last_query_at: '2026-11-18T00:00:00Z', last_query_result: 'EXPIRED' } : {}),
+  ...(state.queried && caseID === id ? queryObservation : {}),
   provider_capability_snapshot: { authoritative_unpaid_terminal: params.get('archive') !== 'unsupported' } });
 globalThis.fetch = async (url, options = {}) => {
   const method = options.method || 'GET'; state.calls.push({ url, method, key: options.headers?.['Idempotency-Key'], body: options.body });
@@ -26,10 +27,12 @@ globalThis.fetch = async (url, options = {}) => {
       let row = state.queryRows.find(value => value.key === key);
       if (!row) {
         const index = state.queryRows.length;
-        const unknown = index === 0 || (params.get('queryRecovery') === 'later-old-receipt' && index === 1);
+        const caseID = url.split('/').at(-2);
+        const unknown = params.get('queryRecovery') === 'other-case-completed' ? caseID === id :
+          index === 0 || (params.get('queryRecovery') === 'later-old-receipt' && index === 1);
         state.queried = !unknown;
-        row = { key, receipt: { command_protocol: 1, query_reference: key, case_id: id, payment_order_id: id, actor_id: user,
-          state: unknown ? 'UNKNOWN' : 'COMPLETED', ...(!unknown ? { result: item() } : {}) } };
+        row = { key, receipt: { command_protocol: 1, query_reference: key, case_id: caseID, payment_order_id: caseID, actor_id: user,
+          state: unknown ? 'UNKNOWN' : 'COMPLETED', ...(!unknown ? { result: { ...item(caseID), ...queryObservation } } : {}) } };
         state.queryRows.push(row);
       }
       return respond(row.receipt);

@@ -1,5 +1,6 @@
 import './desktop-account.css';
 import React, { useEffect, useRef, useState } from 'react';
+import { accountUserStatusLabel } from './status-label.js';
 import { accountDesktopCopy, accountLayoutCopy } from '../../shared/i18n.js';
 import { supportedLocales, localeNames } from '../../shared/supported-locales.js';
 import { accountDisplayLabel, maskedAccountMobile } from './account-display-label.js';
@@ -36,7 +37,7 @@ export function DesktopAccountCenter({ client, me, balance, copy, language, onLa
     <nav className="ap-center-tabs" aria-label={copy.title}>{['profile', 'recharge'].map(value => <button type="button" key={value} aria-pressed={section === value} onClick={() => { setSection(value); if (value === 'recharge') setRechargeOpened(true); }}>{words[value]}</button>)}</nav>
     {error && <p className="ap-alert error" role="alert">{error}</p>}{notice && <p className="ap-alert" role="status">{notice}</p>}
     <div hidden={section !== 'profile'} className="ap-center-panel">
-      <section className="ap-identity-card"><div className="ap-identity-summary"><span className="ap-identity-avatar" aria-hidden="true">{name.slice(0, 1).toUpperCase()}</span><div><h2>{name}</h2><span className="ap-muted">{copy.username}</span></div><button type="button" title={words.openWeb} disabled={webBusy} onClick={() => void openWeb()}>{copy.profileSettings}<span aria-hidden="true"> ↗</span></button></div><dl><div><dt>{copy.mobile}</dt><dd>{maskedAccountMobile(me.mobile)}</dd></div><div><dt>{copy.accountStatus}</dt><dd>{accountLayoutCopy[language].statuses[me.status] || me.status}</dd></div></dl><p className="ap-profile-lead">{words.profileLead}</p></section>
+      <section className="ap-identity-card"><div className="ap-identity-summary"><span className="ap-identity-avatar" aria-hidden="true">{name.slice(0, 1).toUpperCase()}</span><div><h2>{name}</h2><span className="ap-muted">{copy.username}</span></div><button type="button" title={words.openWeb} disabled={webBusy} onClick={() => void openWeb()}>{copy.profileSettings}<span aria-hidden="true"> ↗</span></button></div><dl><div><dt>{copy.mobile}</dt><dd>{maskedAccountMobile(me.mobile)}</dd></div><div><dt>{copy.accountStatus}</dt><dd>{accountUserStatusLabel(me.status, language)}</dd></div></dl><p className="ap-profile-lead">{words.profileLead}</p></section>
       <OrganizationDirectory key={`${me.user_id}:${client.financeSessionEpoch || 0}`} client={client} me={me} language={language} contextOnly onChanged={onRefresh} />
     </div>
     <div hidden={section !== 'recharge'} className="ap-center-panel"><PortalDialogScope active={section === 'recharge'}>

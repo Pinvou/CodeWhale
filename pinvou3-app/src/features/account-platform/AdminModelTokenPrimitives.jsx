@@ -1,3 +1,4 @@
+import { statusLabel, tokenStatusLabel } from './status-label.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { previousAdminModelTokenCursor, rememberAdminModelTokenNextCursor, synchronizeAdminModelTokenCursorHistory } from './admin-navigation.js';
 import { executeAdminSourceRequest, initialAdminSourceState, reduceAdminSourceState, visibleAdminSourceState } from './admin-model-token-state.js';
@@ -36,8 +37,8 @@ function sourceCursorHistory(cursorHistory, source, query) {
 }
 
 export function Status({ value, copy }) {
-  const label = copy.enumLabels?.[value] || value || '—';
-  const normalized = String(value || '').toUpperCase();
+  const label = tokenStatusLabel(value, copy.statusLanguage);
+  const normalized = typeof value === 'string' ? value : '';
   const tone = ['ACTIVE', 'READY', 'PUBLISHED', 'HEALTHY', 'SETTLED', 'SUCCEEDED'].includes(normalized)
     ? 'ok'
     : ['PENDING', 'REPAIR_REQUIRED', 'DEGRADED', 'SETTLEMENT_PENDING'].includes(normalized) ? 'warn' : '';
@@ -172,7 +173,7 @@ export function FilterForm({ source, query, fields, copy, onQueryChange, resetDr
           {field.options ? (
             <select value={draft[field.key] || ''} onChange={(event) => setDraft((current) => ({ ...current, [field.key]: event.target.value }))}>
               <option value="">{copy.all}</option>
-              {field.options.map((option) => <option key={option} value={option}>{copy.enumLabels?.[option] || option}</option>)}
+              {field.options.map((option) => <option key={option} value={option}>{statusLabel(option, copy.statusLanguage, copy.enumLabels)}</option>)}
             </select>
           ) : (
             <input type={field.type || 'search'} value={fieldValue(field)} placeholder={field.placeholder || ''} onChange={(event) => setDraft((current) => ({ ...current, [field.key]: event.target.value }))} />

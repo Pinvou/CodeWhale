@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { accountCenterCopy, financeCopy, accountLayoutCopy } from '../../shared/i18n.js';
 import { CopyIdentifier } from './CopyIdentifier.jsx';
@@ -55,7 +56,7 @@ export function OrganizationOrderHistory({ api, org, owner, language, version, e
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, org, owner, epoch, enabled, version]);
   if (!enabled) return null;
-  const status = item => words.orderStatuses[orderSummaryStatus(item)] || layout.statuses[orderSummaryStatus(item)] || orderSummaryStatus(item);
+  const status = item => statusLabel(orderSummaryStatus(item), language, { ...layout.statuses, ...words.orderStatuses });
   return <section className="ap-organization-orders" aria-busy={loading}>
     <div className="ap-section-heading"><h4>{words.myOrganizationOrders}</h4><button type="button" disabled={loading} onClick={() => void load()}>{loading ? copy.loading : copy.refresh}</button></div>
     <p className="ap-muted">{words.ordersScope}</p>

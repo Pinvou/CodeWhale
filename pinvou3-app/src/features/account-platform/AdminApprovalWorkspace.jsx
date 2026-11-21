@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { financeCopy, approvalReadCopy, pendingApprovalReadCopy, executionApprovalReadCopy, approvalDirectoryCopy, approvalDirectoryToolbarCopy } from '../../shared/i18n.js';
 import { Approvals } from './AdminFinanceWorkspace.jsx';
@@ -125,10 +126,10 @@ export function AdminApprovalWorkspace({ client, copy, language, me, onNavigate,
         <div className="adm-approval-expiry-help" id={expiryHelpID}>{pendingWords.expiryHelp}{invalidExpiry && <p role="alert">{pendingWords.invalidExpiry}</p>}</div>
       </>}
       {route.view !== 'pending' && <label>{c.status}<select disabled={blocked} value={route.view === 'execution' ? query.status : mineStatus} onChange={event => mine ? setMineStatus(event.target.value) : changeRoute({ status: event.target.value, requestID: '' })}>
-        {route.view === 'mine' && <option value="">{c.allStatuses}</option>}{(route.view === 'execution' ? executionStatuses : approvalStatuses).map(status => <option key={status} value={status}>{approvalLabel(c.statusLabels, status)}</option>)}
+        {route.view === 'mine' && <option value="">{c.allStatuses}</option>}{(route.view === 'execution' ? executionStatuses : approvalStatuses).map(status => <option key={status} value={status}>{statusLabel(status, language, c.statusLabels)}</option>)}
       </select></label>}{mine || pending ? <div className="adm-approval-query-actions"><button type="submit" className="adm-approval-query" disabled={blocked}>{listWords.query}</button><button type="button" disabled={blocked} onClick={() => mine ? applyMine(true) : applyPendingDeadline(true)}>{listWords.reset}</button></div> : <button disabled={blocked}>{copy.refresh}</button>}
     </form>}
-    {route.view === 'execution' && <p className="adm-approval-execution-scope">{c.executionScopeLabel}: <strong>{approvalLabel(c.statusLabels, query.status)}</strong><small>{c.executionDefaultHelp}</small></p>}
+    {route.view === 'execution' && <p className="adm-approval-execution-scope">{c.executionScopeLabel}: <strong>{statusLabel(query.status, language, c.statusLabels)}</strong><small>{c.executionDefaultHelp}</small></p>}
     {route.view === 'directory' ? <>
       <div className="adm-approval-toolbar adm-approval-directory-toolbar" role="group" aria-label={directoryTools.filters}>
         <label>{directoryTools.search}<input type="search" value={directoryFilters.query} onChange={event => setDirectoryFilters(value => ({ ...value, query: event.target.value }))} /></label>

@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React from 'react';
 import { formatUsagePoints } from './credit-units.js';
 import { summarizeUsageRecords, usageRecordReference } from './usage-summary.js';
@@ -54,7 +55,7 @@ export function Usage({ copy, language, records, unavailable, page, hasPrevious,
                   <strong className="ap-usage-amount">
                     {consumed} {copy.points}
                   </strong>
-                  <span className={`ap-status ap-usage-status-${statusClass}`}>{copy.usageStatuses[record.display_status] || record.display_status}</span>
+                  <span className={`ap-status ap-usage-status-${statusClass}`}>{statusLabel(record.display_status, language, copy.usageStatuses)}</span>
                   {record.usage_request_count === 1 && (
                     <small>
                       {copy.executionState}: {copy.executionStatuses?.[record.execution_status] || record.execution_status} · {copy.settlementState}: {copy.settlementStatuses?.[record.settlement_status] || record.settlement_status}

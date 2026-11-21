@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { registrationRepairCopy } from '../../shared/i18n.js';
 import { registrationQueueCopy } from '../../shared/admin-registration-queue-i18n.js';
@@ -214,7 +215,7 @@ export function AdminRepairQueue({ client, copy, language, profile = false }) {
       const allowed = registrationRepairActions(item);
       const age = !profile && receivedAt !== null && typeof item.updated_at === 'string' && !item.updated_at.startsWith('0001-')
         ? registrationOperationAge(item.updated_at, receivedAt) : null;
-      return <tr key={id} data-operation-id={id} data-operation-status={item.status}><td><code>{id}</code><small>{labels.stages[item.stage] || item.stage}</small></td><td>{labels.statuses[item.status] || item.status}</td>
+      return <tr key={id} data-operation-id={id} data-operation-status={item.status}><td><code>{id}</code><small>{statusLabel(item.stage, language, labels.stages)}</small></td><td>{statusLabel(item.status, language, labels.statuses)}</td>
         {!profile && <><td>{labels.responsibilities[item.responsibility] || item.responsibility}</td><td>{age === null ? queryCopy.notReported : labels.minutes(age)}</td><td><RegistrationQueueTime value={item.next_retry_at} queryCopy={queryCopy} /></td><td><RegistrationQueueTime value={item.sla_expires_at} queryCopy={queryCopy} /></td></>}
         <td>{allowed.retry && <button disabled={busy} onClick={() => void act(item)}>{allowed.query ? labels.stages.IDENTITY_CREATING : copy.userManagement.retry}</button>}{allowed.compensate && <button disabled={busy} onClick={() => void act(item, true)}>{copy.userManagement.compensate}</button>}{!profile && (allowed.query || (!allowed.retry && !allowed.compensate)) && <small>{item.status === 'IDENTITY_CREATING' ? labels.identityUnknown : labels.readOnly}</small>}{!profile && <RegistrationEvidence {...{ item, labels, queryCopy, id }} />}</td></tr>;
     })}</tbody></table></div>}
