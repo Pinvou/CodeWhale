@@ -200,6 +200,8 @@ export const PR_RELEASE_CONTRACT_EXTRA_PATHS = Object.freeze([
 export const RELEASE_PACKAGES_EXTRA_PATHS = Object.freeze([
   "VERSION",
   "scripts/sync-version.mjs",
+  "scripts/windows-release-workspace.ps1",
+  "scripts/tests/test_windows_release_workspace.ps1",
   "scripts/asr/build-sensevoice-runtime.sh",
   "scripts/asr/sensevoice-source.env",
   "scripts/check-linux-elf-policy.sh",
