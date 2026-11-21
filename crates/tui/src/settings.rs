@@ -770,7 +770,7 @@ impl Settings {
 
     /// Load normalized disk values for a diagnostic without creating a
     /// primary settings file from a legacy fallback.
-    fn load_persisted_read_only() -> Result<Self> {
+    pub(crate) fn load_persisted_read_only() -> Result<Self> {
         let (primary, legacy_home, legacy_config_dir) = settings_path_candidates();
         Self::load_persisted_from_candidates_with_migration(
             primary,

@@ -738,6 +738,53 @@ official GitHub API endpoint. If a configured `update_uri` cannot be fetched or
 parsed and a release mirror env var is set, the TUI falls back to that mirror
 instead of failing startup.
 
+### DeepSeek strict tool schema mode (`strict_tool_mode`)
+
+```toml
+strict_tool_mode = true
+```
+
+Off by default. When enabled, requests routed to an **official DeepSeek-family
+route** (provider-typed DeepSeek — the `deepseek` and legacy `deepseek-cn`
+typings — on `api.deepseek.com`, including the legacy `api.deepseeki.com`
+alias and the Anthropic-compatible Messages route) also set
+`tool_choice: "required"` and reshape every active tool schema to DeepSeek's
+strict contract: optional parameters are removed from the schema (each removal
+is reported in the tool description), non-numeric `const` values land on
+`enum`, and conditional-requirement tables (`dependentRequired`) are stripped.
+Two carve-outs: on thinking-enabled chat requests to the DeepSeek dialect the
+`tool_choice` key is omitted entirely (the wire rejects the combination), and
+on routes whose model resolves to the Responses endpoint the wire hardcodes
+`strict: false` per tool and sends `tool_choice: "auto"` (the doctor's
+`responses_dialect` verdict reports this). `required` applies to every other
+request on the route.
+
+Tools whose schema cannot be represented faithfully under the strict subset —
+root alternatives, required nullables, or tools whose runtime demands
+schema-optional parameters (`update_goal`, `send_later`, `agents/message`,
+`agents/followup`, `Web`) — fail closed per tool: they keep their original
+schema and ship without the strict flag, so they stay callable non-strict.
+`tool_choice` follows the route gate, not per-tool outcomes: it stays
+`required` on an in-scope route even when some tools fail closed. The child
+sub-agent surface requests with `auto` regardless.
+
+Tools that stay strict but lose per-action parameters carry a note naming
+what stopped working: `todo_write` writes every item pending (the item
+`status` is removed), and `start_registry_mcp_server` cannot start a
+registry whose servers declare required launch arguments (`arguments` is
+removed).
+
+The setting is inert on every other route (third-party gateways, OpenAI
+wires, non-official hosts): their schemas ship unchanged, because the
+reshaping follows DeepSeek's documents and would strip keywords other
+providers document. Two schema tightenings apply on every route (including
+strict-off ones) because the strict contract needs them: the shared schema
+sanitizer no longer corrupts literal values or keyword-named properties, and
+the `remember` tool's schema marks `note` required (its runtime already
+rejects a missing `note` for append and revise, and an all-optional schema
+would leave strict mode nothing to keep). `run_doctor`'s strict-mode verdict
+reports whether the current route is in scope.
+
 ## Workshop output budgets
 
 `[workshop]` still routes oversized tool results through the synthesis

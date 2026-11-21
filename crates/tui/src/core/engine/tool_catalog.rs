@@ -883,6 +883,17 @@ pub(crate) fn active_tools_for_request(
     }
     let mut tools = active_tools_for_step(catalog, active);
     if strict_tool_mode {
+        // `prepare_tools_for_strict_mode` returns whether EVERY tool shipped
+        // `strict: true`. The return is intentionally not consulted: a
+        // per-tool fail-closed outcome (a schema that needs an undocumented
+        // keyword, or a runtime demanding parameters the strict removal
+        // takes away) ships that tool unchanged without the flag beside
+        // `strict: true` siblings, while `tool_choice` follows the route
+        // gate rather than per-tool results. The documents describe strict
+        // mode with every function flagged and leave the server's mixed-set
+        // behavior undocumented; if a probe ever shows the endpoint
+        // rejecting or silently downgrading mixed sets, this discarded
+        // boolean is the lever for an all-or-nothing policy.
         crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools);
     }
     Some(tools)

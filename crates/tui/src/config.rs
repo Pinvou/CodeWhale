@@ -976,6 +976,136 @@ pub fn requested_model_for_provider(provider: ApiProvider, model: &str) -> Optio
     }
 }
 
+/// Whether the route is an official DeepSeek-family endpoint — the only place
+/// the DeepSeek strict tool pipeline may act on the wire.
+///
+/// The pipeline (`prepare_tools_for_strict_mode` plus
+/// `tool_choice: "required"`) encodes DeepSeek's beta strict contract: every
+/// property required, `additionalProperties: false`, optional properties
+/// removed, `minItems`/`maxItems`/`minLength`/`maxLength`/`dependentRequired`
+/// stripped, and schemas carrying undocumented `nullable`/null-type union
+/// shapes left non-strict. Applied
+/// anywhere else it would strip keywords the other provider's documents
+/// explicitly support (OpenAI, for one, documents `minItems`/`maxItems`) and
+/// remove optional properties no other provider's contract asks to remove.
+/// Provider typing plus the official host keeps a misconfigured
+/// `provider`/`base_url` entry from receiving DeepSeek-only reshaping.
+///
+/// Source: the DeepSeek strict function-calling contract, "`strict` Mode
+/// (Beta)" (<https://api-docs.deepseek.com/guides/tool_calls/>, fetched
+/// 2026-11-05). `api.deepseeki.com` is not an official host — the docs never
+/// mention it, and `docs/REBRAND.md` records it as a legacy typo kept only in
+/// URL heuristics for existing configs (#1079); it is accepted here to mirror
+/// the compat set the rest of the codebase already recognizes
+/// (`client.rs`, `client/chat.rs`, the doctor).
+pub fn route_is_official_deepseek_family(provider: ApiProvider, base_url: &str) -> bool {
+    if !matches!(
+        provider,
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
+    ) {
+        return false;
+    }
+    url_is_official_deepseek_host(base_url)
+}
+
+/// The canonical official DeepSeek beta endpoints, lowercase with any
+/// trailing `/` trimmed: where the wire keeps the `function.strict` flag
+/// (the chat strip), where the request is routed to
+/// `beta/chat/completions` (`client.rs`), where the Responses dialect
+/// resolves its URL (`client.rs`), and where the doctor reports the beta
+/// verdict — one constant so the four consumers cannot drift.
+pub const DEEPSEEK_CANONICAL_BETA_URLS: &[&str] = &[
+    "https://api.deepseek.com/beta",
+    "https://api.deepseeki.com/beta",
+];
+
+/// The canonical official DeepSeek non-beta chat endpoints, lowercase
+/// with any trailing `/` trimmed: the chat wire strips `function.strict`
+/// here (only `/beta` supports it) and the doctor reports
+/// `fallback_non_beta`. The strict host gate
+/// (`url_is_official_deepseek_host`) is deliberately broader than both
+/// canonical lists — any path on the official hosts — and every URL in
+/// these lists is pinned to pass that gate in `config` tests.
+pub const DEEPSEEK_CANONICAL_NON_BETA_URLS: &[&str] = &[
+    "https://api.deepseek.com",
+    "https://api.deepseek.com/v1",
+    "https://api.deepseeki.com",
+    "https://api.deepseeki.com/v1",
+];
+
+/// Whether the URL sits on an official DeepSeek host: the scheme-and-host
+/// prefixes the strict gate, the client, and the doctor all recognize,
+/// matched with an exact boundary — a prefix must be the whole URL or be
+/// followed by a path (`/`), so `api.deepseek.com.evil.example`, userinfo
+/// tricks, explicit ports, and lookalike hosts all fail. No whitespace
+/// trimming anywhere in the match: the client's strict-host sets and the
+/// doctor's classifier string-match the URL without trimming, so
+/// admitting a padded URL here alone would put the pipeline in scope on a
+/// route the wire does not canonicalize — the flag would leak past the
+/// non-beta strip. A padded URL (leading, trailing, or interior
+/// whitespace) degrades to out-of-scope instead.
+pub fn url_is_official_deepseek_host(base_url: &str) -> bool {
+    if base_url.chars().any(char::is_whitespace) {
+        return false;
+    }
+    // A query or fragment is not part of any canonical endpoint the wire
+    // surfaces know: the client splices the path suffix directly after the
+    // configured URL, so `https://api.deepseek.com/beta?x=1` would request
+    // `.../beta?x=1/v1/chat/completions` and 404 while the gate and the
+    // doctor still reported the pipeline as acting. Such a URL degrades to
+    // out of scope, the same line the whitespace rejection draws.
+    if base_url.contains('?') || base_url.contains('#') {
+        return false;
+    }
+    let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
+    let official_host = |prefix: &str| {
+        let Some(rest) = normalized.strip_prefix(prefix) else {
+            return false;
+        };
+        if !rest.is_empty() && !rest.starts_with('/') {
+            return false;
+        }
+        // The path must be text the wire surfaces describe: the client splices
+        // its path suffix onto the configured URL and the strip/beta sets
+        // string-match the text, so a path the HTTP layer would canonicalize
+        // or percent-encode admits the pipeline in scope on a route no
+        // surface's string model describes. Invisible characters (U+200B,
+        // U+FEFF and friends are not `char::is_whitespace`), control bytes,
+        // and dot segments (`/beta/../v1` lands on the canonical non-beta
+        // path after URL normalization — the one endpoint class where the
+        // flag must be stripped) all degrade to out of scope, the same line
+        // the whitespace and query/fragment rejections draw. The literal
+        // segment compare misses the ENCODED spellings of exactly that
+        // class: WHATWG URL normalization (the parser under reqwest)
+        // percent-decodes `%2e` for dot-segment detection, so
+        // `/beta/%2e%2e/v1` lands on `/v1/...` with the flag kept, and it
+        // folds backslashes into path separators for special schemes, so
+        // `/beta\..\v1` normalizes the same way. Every official endpoint
+        // path is plain letters and slashes, so any `%` escape or `\` in
+        // the path degrades to out of scope outright — the conservative
+        // direction: the flag is withheld, never leaked.
+        if !rest.bytes().all(|byte| (0x21..=0x7E).contains(&byte)) {
+            return false;
+        }
+        if rest.contains('%') || rest.contains('\\') {
+            return false;
+        }
+        !rest
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    };
+    official_host("https://api.deepseek.com") || official_host("https://api.deepseeki.com")
+}
+
+/// Whether the DeepSeek strict tool pipeline (schema reshaping plus
+/// `tool_choice: "required"`) acts on a route: the user flag AND the
+/// official-route gate. The engine turn-surface build, the child sub-agent
+/// surface, and the doctor all answer from this one composition so the
+/// surfaces can never disagree about where strict mode is in scope.
+pub fn strict_tool_mode_for_route(flag: bool, provider: ApiProvider, base_url: &str) -> bool {
+    flag && route_is_official_deepseek_family(provider, base_url)
+}
+
 /// Reject a provider/model tuple that we can be confident is invalid *before*
 /// it reaches the network (#3227).
 ///
@@ -3058,8 +3188,28 @@ pub struct Config {
     pub notes_path: Option<String>,
     pub memory_path: Option<String>,
     /// When true, set `tool_choice: "required"` and opt compatible function
-    /// schemas into DeepSeek beta strict mode. Schemas with root alternatives
-    /// stay non-strict to avoid changing optional/one-of tool semantics.
+    /// schemas into DeepSeek beta strict mode — effective only on official
+    /// DeepSeek-family routes (provider-typed DeepSeek on the
+    /// `api.deepseek.com` / legacy `api.deepseeki.com` hosts), because the
+    /// schema reshaping follows DeepSeek's strict documents and would
+    /// otherwise strip keywords other providers document (e.g. OpenAI's
+    /// `minItems`/`maxItems`). On those routes optional parameters are removed
+    /// from the schema (reported in the tool description), non-numeric
+    /// `const` values land on `enum`, and `dependentRequired` tables are
+    /// stripped, per the strict contract. Schemas the strict subset cannot
+    /// represent faithfully — root alternatives, required nullables
+    /// (`nullable` / null-type union branches), or tools whose runtime
+    /// demands schema-optional parameters (`update_goal`, `send_later`,
+    /// `agents/message`, `agents/followup`, `Web`) —
+    /// stay non-strict: they keep their original schema. `tool_choice`
+    /// follows the route gate on the parent turn surface, not per-tool
+    /// outcomes: it stays `required` on an in-scope route even when some
+    /// tools fail closed, and falls back to `auto` only when the route
+    /// itself is out of scope. (The child sub-agent surface requests with
+    /// `auto`, thinking-mode chat requests may drop `tool_choice`
+    /// entirely, and the `/preview-request` surface mirrors this same
+    /// route-gated selection — pre-existing surfaces this field does not
+    /// change.)
     pub strict_tool_mode: Option<bool>,
     /// Additional user-owned system-prompt sources concatenated in declared
     /// order (#454). Paths are expanded via `expand_path` so `~` and env vars

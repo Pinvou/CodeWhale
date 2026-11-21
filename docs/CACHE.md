@@ -99,6 +99,22 @@ change, a project-file change) into the prefix — append it as a user-role
 message instead. A later request must be `previous ⊕ suffix` unless a logged
 header change or a history reset explains the difference.
 
+DeepSeek strict-mode tool shaping (`prepare_tools_for_strict_mode`) states its
+effect here per that rule: it is **frozen-prefix-compatible**. The removal
+note appended to a tool's description is a deterministic pure function of the
+pinned catalog and the route, so on a stable strict route the tools bytes are
+identical every step; the shaping runs on a per-request clone and never
+mutates the registry. Declared change fields cover provider identity
+(`change:provider`), the token budget (with the goal objective, as
+`change:goal`), the resolved model (`change:model`), and a re-planned route
+(`change:route`). A flip that changes the gate's verdict — official host ↔
+foreign host, a padded URL, or a provider retype — changes the shaped tool
+bytes: when one of those declared fields moved with the flip, the pin
+re-declares through it; only a flip no declared field moved with surfaces as
+undeclared drift. A flip inside the same scope (the canonical beta ↔ non-beta
+path) leaves the shaped bytes identical and produces no drift at all. When
+moving endpoints, prefer a change the header set can name.
+
 ## Permissions fragment budget compatibility
 
 Configured `instructions = [...]` files have an existing 100 KiB per-file

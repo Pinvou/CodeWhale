@@ -30,6 +30,25 @@ base_url = "https://api.deepseek.com/beta"
 # Authorization and Content-Type are managed by the client and cannot be overridden here.
 # http_headers = { "X-Model-Provider-Id" = "your-model-provider" }
 
+# DeepSeek beta strict tool schema mode (default: false). Only effective on
+# official DeepSeek-family routes (provider-typed deepseek / deepseek-cn /
+# deepseek-anthropic on api.deepseek.com, including the legacy api.deepseeki.com
+# alias); there it sets `tool_choice: "required"` (omitted on thinking-enabled
+# DeepSeek-dialect chat requests, where the wire rejects the combination, and
+# forced to "auto" on routes whose model resolves to the Responses endpoint,
+# where the wire hardcodes strict: false per tool) and reshapes tool schemas
+# to the strict contract (optional parameters are removed and reported in the
+# tool description; tools that lose per-action parameters keep working with a
+# note naming what stopped — `todo_write` statuses and the Registry launcher's
+# launch arguments among them). Tools whose schemas cannot be represented
+# faithfully keep their original schema and ship non-strict. Two schema
+# tightenings apply on every route, strict on or off: the shared sanitizer
+# never rewrites literal values (enum members, const, default, examples), and
+# `remember` marks `note` required (its runtime already demands it for append
+# and revise).
+# See `strict_tool_mode` in docs/CONFIGURATION.md.
+# strict_tool_mode = true
+
 # ─────────────────────────────────────────────────────────────────────────────────
 # Default Models
 # ─────────────────────────────────────────────────────────────────────────────────

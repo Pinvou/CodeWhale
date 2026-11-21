@@ -1149,6 +1149,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn strict_mode_keeps_registry_mcp_start_usable_with_its_arguments_note() {
+        // The launcher's `arguments` is schema-optional and the runtime reads
+        // it for every registry that declares `required_args` (the population
+        // is non-empty: the test below pins a placeholder positional landing
+        // in `required_args`), so strict mode removes it and those starts
+        // fail at the runtime check with only the generic removal note
+        // pointing away from the needed value. Registries without required
+        // arguments still start, so the tool ships strict with the context
+        // note naming the loss instead of failing closed — and this
+        // real-schema pin is what keeps the context-note entry bound (the
+        // full-catalog census fixture runs pool-less and never registers
+        // this tool).
+        let pool = std::sync::Arc::new(tokio::sync::Mutex::new(crate::mcp::McpPool::new(
+            crate::mcp::McpConfig::default(),
+        )));
+        let tool = StartRegistryMcpServer::new(pool);
+        let schema = tool.input_schema();
+        let mut tools = vec![crate::models::Tool {
+            tool_type: None,
+            name: tool.name().to_string(),
+            description: tool.description().to_string(),
+            input_schema: schema.clone(),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }];
+        assert!(
+            crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools),
+            "start_registry_mcp_server's schema is strict-representable: {schema}"
+        );
+        assert_eq!(tools[0].strict, Some(true));
+        let properties = tools[0].input_schema["properties"]
+            .as_object()
+            .expect("the shipped schema keeps a properties map");
+        assert!(
+            !properties.contains_key("arguments"),
+            "the optional `arguments` is removed in strict mode: {properties:?}"
+        );
+        assert!(
+            properties.contains_key("registry_name"),
+            "the required `registry_name` survives: {properties:?}"
+        );
+        assert!(
+            tools[0]
+                .description
+                .contains("declare required launch arguments cannot be started"),
+            "the context note must name the arguments loss verbatim: {}",
+            tools[0].description
+        );
+    }
+
+    #[test]
     fn server_no_packages_filtered() {
         let server = RegistryServer {
             name: "test".into(),

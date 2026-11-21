@@ -989,4 +989,58 @@ mod tests {
         let due = manager.collect_due_triggers(chrono::Utc::now()).unwrap();
         assert_eq!(due.len(), 1, "should fire a past-due trigger");
     }
+
+    #[test]
+    fn strict_mode_fails_the_send_later_tool_closed() {
+        // `send_later` keeps only `action` in strict mode while
+        // `schedule` runtime-requires `message` and `read`/`cancel`
+        // runtime-require `trigger_id` — only `list` would stay reachable.
+        // The strict pipeline fails the tool closed by name
+        // (`STRICT_UNUSABLE_TOOLS`) so it ships unchanged, non-strict, and
+        // usable. This census test feeds the real schema through the
+        // pipeline so the two cannot drift.
+        let tool = SendLaterTool::new("send_later");
+        let schema = tool.input_schema();
+        assert_eq!(schema["required"], json!(["action"]));
+        let mut tools = vec![crate::models::Tool {
+            tool_type: None,
+            name: tool.name().to_string(),
+            description: tool.description().to_string(),
+            input_schema: schema.clone(),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }];
+
+        assert!(
+            !crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools),
+            "send_later must fail closed, not ship strict with only `action`"
+        );
+        assert_eq!(tools[0].strict, None);
+        assert_eq!(tools[0].input_schema, schema);
+        assert_eq!(tools[0].description, tool.description());
+
+        // The read-only variant advertises the same discriminator-only
+        // shape, so it fails closed identically.
+        let read_only = SendLaterTool::read_only("send_later");
+        let read_only_schema = read_only.input_schema();
+        let mut read_only_tools = vec![crate::models::Tool {
+            tool_type: None,
+            name: read_only.name().to_string(),
+            description: read_only.description().to_string(),
+            input_schema: read_only_schema.clone(),
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }];
+        assert!(
+            !crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut read_only_tools)
+        );
+        assert_eq!(read_only_tools[0].strict, None);
+        assert_eq!(read_only_tools[0].input_schema, read_only_schema);
+    }
 }
