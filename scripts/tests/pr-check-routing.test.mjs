@@ -202,6 +202,7 @@ const auditPGStepName = "Audit export finite PostgreSQL rollback and persisted b
 const existingBrokerStepName = "Existing broker compatibility on owned PostgreSQL and TLS NATS";
 const tokenOutboxStepName = "Token outbox publication on owned PostgreSQL and TLS NATS";
 const pgPreflightStepName = "Verify account CI PostgreSQL service isolation";
+const historyPGStepName = "Read-only history export on public domain schemas";
 const pgStopStepName = "Stop owned temporary PostgreSQL services";
 
 function pgIdentityEnvironment(service) {
@@ -778,7 +779,7 @@ function assertFiniteAuditPGSetup(job) {
     "          python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py",
     "          python3 scripts/account-ci-postgres.py --profile core --with-portal-redis",
   ].join("\n"));
-  for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName]) {
+  for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName, historyPGStepName]) {
     assert.ok(text.indexOf(preflight) < text.indexOf(namedStep(text, name)),
       `service identity verification must precede ${name}`);
   }
@@ -805,7 +806,7 @@ function assertFiniteAuditPGSetup(job) {
     "        run: |",
     "          python3 scripts/account-ci-postgres.py --profile core --with-portal-redis --stop-owned-services",
   ].join("\n"));
-  for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName]) {
+  for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName, historyPGStepName]) {
     assert.ok(text.indexOf(namedStep(text, name)) < text.indexOf(stop), "stop must follow database consumers");
   }
   let outsidePGSteps = text.replace(pg, "").replace(preflight, "").replace(stop, "");
@@ -831,6 +832,32 @@ function assertFiniteAuditPGSetup(job) {
     "          npm --prefix account-platform run test:existing-broker",
   ].join("\n"));
   outsidePGSteps = outsidePGSteps.replace(existingBroker, "");
+  // Admit precisely the bounded readonly export consumer of the verified audit
+  // service; commands, identities and no-skip evidence cannot be broadened.
+  const historyPG = namedStep(text, historyPGStepName);
+  assert.equal(historyPG.trimEnd(), [
+    "      - name: Read-only history export on public domain schemas",
+    "        timeout-minutes: 6",
+    "        shell: bash",
+    "        env:",
+    "          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}",
+    "          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.audit_port }}",
+    "          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.audit_system }}",
+    "          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.audit_directory }}",
+    "        run: |",
+    "          set -euo pipefail",
+    "          test -x \"$PINVOU_HISTORY_EXPORT_TEST_PWSH\"",
+    "          test -x \"$PINVOU_HISTORY_EXPORT_TEST_PGTOOLS/pg_dump\"",
+    "          python3 scripts/ci-fixture-process.py --receipt \"$RUNNER_TEMP/history-export-process.json\" -- go -C account-platform test -race -json -tags=nomsgpack -mod=readonly -count=1 -timeout 4m -run '^TestHistoryExportPublicDomainsPostgres$' ./internal/billingschema | tee \"$RUNNER_TEMP/history-export.jsonl\"",
+    "          python3 - \"$RUNNER_TEMP/history-export.jsonl\" <<'PY'",
+    "          import json, pathlib, sys",
+    "          events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]",
+    "          root = \"TestHistoryExportPublicDomainsPostgres\"",
+    "          terminal = {e[\"Test\"]: e[\"Action\"] for e in events if e.get(\"Test\") and e.get(\"Action\") in (\"pass\", \"fail\", \"skip\")}",
+    "          assert terminal == {name: \"pass\" for name in [root, *(root + \"/\" + d for d in (\"account\", \"billing\", \"token\"))]}, \"history export public-domain roots failed or skipped\"",
+    "          PY",
+  ].join("\n"));
+  outsidePGSteps = outsidePGSteps.replace(historyPG, "");
   const tokenOutbox = namedStep(text, tokenOutboxStepName);
   assert.equal(tokenOutbox.trimEnd(), [
     `      - name: ${tokenOutboxStepName}`,
@@ -1413,7 +1440,7 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     }
     assert.throws(() => assertFiniteAuditPGSetup(mutated), expected);
   };
-  for (const [name, service] of [[auditPGStepName, "audit"], [existingBrokerStepName, "broker"], [tokenOutboxStepName, "broker"]]) {
+  for (const [name, service] of [[auditPGStepName, "audit"], [historyPGStepName, "audit"], [existingBrokerStepName, "broker"], [tokenOutboxStepName, "broker"]]) {
     const step = namedStep(job, name);
     const miswired = step.replace(`outputs.${service}_url`, "outputs.unrelated_url");
     assert.notEqual(miswired, step, "URL mutation must hit the selected consumer");
@@ -1983,6 +2010,31 @@ function inputSelects(text, filter, input) {
   return patterns.some(pattern => !pattern.startsWith("!") && matchesGlob(input, pattern))
     && !patterns.some(pattern => pattern.startsWith("!") && matchesGlob(input, pattern.slice(1)));
 }
+
+function assertHistoryExportRouting(text) {
+  for (const input of ["scripts/export-account-history.ps1", "scripts/account-platform-history-export-tools.sh",
+    "account-platform/test/integration/history-export-directory-race.ps1", "scripts/tests/test_account_history_key.py"]) {
+    assert.ok(inputSelects(text, "account_platform", input), `${input} alone must select the export fixture job`);
+  }
+  const job = jobBlock("account-platform-test", text);
+  const preparation = namedStep(job, "Prepare native history export tools");
+  const acceptance = namedStep(job, "Read-only history export on public domain schemas");
+  assert.doesNotMatch(preparation + acceptance, /^ {8}(?:if|continue-on-error):/m);
+  assert.match(stepRun(job, "Prepare native history export tools"), /ci-fixture-process\.py.*bash scripts\/account-platform-history-export-tools\.sh/);
+  assert.ok(job.indexOf(preparation) < job.indexOf(acceptance), "native tools must be prepared before the real fixture");
+  assert.match(stepRun(job, "Read-only history export on public domain schemas"), /\^TestHistoryExportPublicDomainsPostgres\$/);
+  assert.match(job, /needs\.changes\.outputs\.account_platform == 'true'/);
+  assert.match(jobBlock("required-gate", text), /ACCOUNT_PLATFORM_REQUIRED: \$\{\{ needs\.changes\.outputs\.account_platform \}\}/);
+}
+
+test("History export executable-only inputs select prepared real acceptance", () => {
+  assertHistoryExportRouting(workflow);
+  const withoutRoute = workflow.replace(/^ {14}- 'scripts\/export-account-history\.ps1'\r?\n/m, "");
+  assert.notEqual(withoutRoute, workflow);
+  assert.throws(() => assertHistoryExportRouting(withoutRoute));
+  const job = jobBlock("account-platform-test");
+  assert.throws(() => assertHistoryExportRouting(workflow.replace(namedStep(job, "Prepare native history export tools"), "")));
+});
 
 function assertAccountPlatformInputChecks(text) {
   assert.match(text, /predicate-quantifier: some-with-excludes/);
