@@ -43,6 +43,22 @@ test('Rust cache and download helper-only changes reach their real consumers', (
   }
 });
 
+test('LoongArch64 checks share the stable Linux cache and keep cross-build inputs', () => {
+  const job = jobBlock('rust-loongarch64-check').replaceAll('\r\n', '\n');
+  const cache = namedStep(job, 'Cargo cache');
+  assert.match(cache, /^        uses: \.\/\.github\/actions\/linux-rust-cache$/m);
+  assert.doesNotMatch(cache, /^        (?:if|continue-on-error):/m);
+  assert.match(cache, /^          workspaces: \|\n            pinvou3-app\/src-tauri\n            pinvou-knowledge\n            pinvou-cli$/m);
+  assert.match(cache, /^          shared-key: rust-loongarch64-check$/m);
+  assert.match(cache, /^          save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}$/m);
+  assert.doesNotMatch(cache, /^          (?:cache-targets|lookup-only):/m);
+  for (const step of ['Configure verified Rust download source', 'Set up the deepin glibc-2.38 loong64 sysroot']) {
+    assert.ok(job.indexOf(namedStep(job, step)) < job.indexOf(cache), step);
+  }
+  assert.match(namedStep(job, 'Restore loong64 cross toolchain cache'), /uses: actions\/cache\/restore@/);
+  assert.match(namedStep(job, 'Restore loong64 sysroot cache'), /uses: actions\/cache\/restore@/);
+});
+
 test("browser wrapper helper-only changes select both native runtime gates", () => {
   const helpers = [
     "pinvou3-app/tests/helpers/ndjson-child-driver.mjs",

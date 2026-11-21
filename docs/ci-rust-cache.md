@@ -1,9 +1,13 @@
 # Linux Rust CI 缓存与国内下载源
 
-Linux Rust lint、测试、knowledge 和 CLI 使用同一个薄封装
+Linux Rust lint、测试、knowledge、CLI 和 LoongArch64 交叉编译检查使用同一个薄封装
 `.github/actions/linux-rust-cache`，仍由固定版本的 Swatinem/rust-cache
 负责 Rust 版本、编译环境、Cargo manifest 和锁文件的兼容性哈希及清理。
 保存权限沿用调用者的 main-only 策略；PR 和合并队列只读。
+LoongArch64 的三个 Cargo workspace 复用独立的归档键。交叉工具链和 sysroot
+仍分别使用 `.pinvou-loong64-cache/` 下的现有缓存。
+交叉编译器、链接器和 CMake 工具链的路径仍参与兼容键。工作目录路径不同时，
+LoongArch64 可能需要重新预热。
 
 自托管的一实例一容器环境中，缓存 action 将 Cargo/Rustup Home 通过容器私有
 `/tmp/pinvou-rust-cache-v1/` 别名访问原实例目录。它们没有共享可写 Home，
@@ -31,6 +35,7 @@ Rust 工具链的大文件优先从 rsproxy 获取，SHA-256 来自官方 HTTPS 
 并继续复用已有内容寻址下载缓存。镜像失败或校验失败后，仅在原总预算剩余时间内
 尝试官方源；不绕过 TLS、校验或增加 CI 超时。官方校验元数据本身仍需要可达。
 镜像 component 尝试最多 30 秒、一次，不叠加无界重试。
+若慢镜像耗尽这 30 秒，官方回源能使用的时间会相应减少。接近总预算的组件可能需要显式使用官方源。
 
 在 Job 环境显式设置 `PINVOU_CI_RUST_MIRROR=official` 可恢复官方下载策略；
 `rsproxy` 可显式启用国内策略。Windows、macOS 和 GitHub 托管环境默认保持官方策略。

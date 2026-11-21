@@ -6356,7 +6356,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/linux-rust-cache
         env:
           NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
           PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}

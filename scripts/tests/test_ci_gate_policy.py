@@ -6328,6 +6328,7 @@ python3() { fixture_mock python3 "$@"; }
             ("knowledge-rust", "\n  rust-lint:"),
             ("rust-lint", "\n  rust-test:"),
             ("cli-test", "\n  cli-lint:"),
+            ("rust-loongarch64-check", "\n  required-gate:"),
         ):
             job = self.pr_workflow.split(
                 f"\n  {job_name}:", maxsplit=1
@@ -6342,7 +6343,10 @@ python3() { fixture_mock python3 "$@"; }
                 else job
             )
             cache_action = ("uses: ./.github/actions/linux-rust-cache"
-                            if job_name in ("rust-test", "knowledge-rust", "rust-lint", "cli-test")
+                            if job_name in (
+                                "rust-test", "knowledge-rust", "rust-lint", "cli-test",
+                                "rust-loongarch64-check",
+                            )
                             else "uses: Swatinem/rust-cache@v2")
             cache_step = _without_yaml_comments(
                 job_scope.split(cache_action, maxsplit=1)[1].split(
