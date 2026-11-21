@@ -138,6 +138,81 @@ func TestLatePaymentArchiveQueryAdmissionPublicMigration(t *testing.T) {
 		t.Fatal("production-set fixture requires published original053 plus exactly113 current source entries")
 	}
 
+	seedOrder := func(t *testing.T, c *pgx.Conn) (uuid.UUID, uuid.UUID) {
+		t.Helper()
+		wallet, owner, order := uuid.New(), uuid.New(), uuid.New()
+		if _, err := c.Exec(ctx, `INSERT INTO wallets(id,owner_type,owner_id,status,created_at,updated_at) VALUES($1,'PERSONAL',$2,'ACTIVE',now(),now())`, wallet, owner); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Exec(ctx, `INSERT INTO payment_orders(id,merchant_order_no,requester_id,payer_user_id,wallet_id,product_id,product_snapshot,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,expires_at,provider_payable_until,late_review_boundary_at,final_archive_eligible_at,last_successful_query_at,last_authoritative_unpaid_at,created_at,updated_at,provider_id,provider_version) VALUES($1,$2,$3,$3,$4,'QUERY_ADMISSION_LEGACY','{}','ALIPAY',100,'CNY',100,'PENDING','PENDING',now()-interval '9 days',now()-interval '9 days',now()-interval '7 days',now()-interval '1 hour',now(),now(),now()-interval '10 days',now(),'controlled-legacy','v1')`, order, "query-admission-"+order.String(), owner, wallet); err != nil {
+			t.Fatal(err)
+		}
+		return owner, order
+	}
+	t.Run("installed-binding-head-fills-statistics-gap", func(t *testing.T) {
+		c := f.database(t, ctx, "billing", "billing_schema_owner")
+		var beforeStatistics []migrations.Migration
+		for _, migration := range loaded {
+			if migration.Version != statisticsHeadVersion {
+				beforeStatistics = append(beforeStatistics, migration)
+			}
+		}
+		if err := Up(ctx, c, beforeStatistics); err != nil {
+			t.Fatal("install genuine query package without statistics", err)
+		}
+		if err := migrations.Unlock(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := VerifyApplied(ctx, c, beforeStatistics); err != nil {
+			t.Fatal("verify query predecessor", err)
+		}
+		if stageValue(t, ctx, c, `SELECT ((SELECT max(version) FROM schema_migrations)=900048 AND NOT EXISTS(SELECT FROM schema_migrations WHERE version=900046) AND to_regclass('public.outbox_events_dead_statistics_idx') IS NULL)::text`) != "true" {
+			t.Fatal("fixture must have 900048 installed and no 900046")
+		}
+		_, order := seedOrder(t, c)
+		pool, err := pgxpool.New(ctx, f.serviceURL(t, c, "billing_service"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pool.Close()
+		repository := billing.NewPostgresRepositoryWithPool(pool)
+		item, err := repository.EscalateLatePaymentReview(ctx, order, "CLOSED")
+		if err != nil {
+			t.Fatal(err)
+		}
+		actor, key := uuid.New(), "retained-query-"+uuid.NewString()
+		if _, err := repository.ClaimLatePaymentReview(ctx, item.ID, actor); err != nil {
+			t.Fatal(err)
+		}
+		input := billing.LatePaymentQueryInput{CommandProtocol: 1, PaymentOrderID: order, ProviderID: item.ProviderID, ProviderVersion: item.ProviderVersion, MerchantOrderNo: item.MerchantOrderNo}
+		if receipt, err := repository.PrepareLatePaymentQuery(ctx, item.ID, actor, key, input); err != nil || receipt.State != "UNKNOWN" {
+			t.Fatal("record real committed UNKNOWN with generation binding", err)
+		}
+		const bindingFacts = `SELECT jsonb_agg(jsonb_build_array(to_jsonb(q),to_jsonb(g),to_jsonb(p)) ORDER BY q.idempotency_key)::text FROM late_payment_query_commands q JOIN late_payment_query_generations g USING(idempotency_key) JOIN payment_orders p ON p.id=q.payment_order_id WHERE p.archive_query_generation=g.generation AND p.archive_query_authoritative_unpaid IS NULL`
+		oldBinding := stageValue(t, ctx, c, bindingFacts)
+		oldLedger := stageValue(t, ctx, c, retainedStatisticsLedger)
+		oldOutbox := stageValue(t, ctx, c, statisticsOutboxFacts)
+		oldShape := canonicalStageShape(t, stageShape(t, ctx, c))
+		upCLI(t, c)
+		assertStatisticsHeadIndex(t, ctx, c)
+		if shapeWithoutStatisticsIndex(t, stageShape(t, ctx, c)) != oldShape || stageValue(t, ctx, c, bindingFacts) != oldBinding || stageValue(t, ctx, c, retainedStatisticsLedger) != oldLedger || stageValue(t, ctx, c, statisticsOutboxFacts) != oldOutbox {
+			t.Fatal("lower statistics migration changed prior schema, authority, binding, ledger or outbox")
+		}
+		before := retainedDataRollbackSnapshot(t, ctx, c)
+		upCLI(t, c)
+		if receipt, err := repository.ReadLatePaymentQuery(ctx, item.ID, actor, key, input); err != nil || receipt.Reference != key || receipt.State != "UNKNOWN" {
+			t.Fatal("retained receipt diverged after replay", err)
+		}
+		if _, err := repository.ArchiveLatePaymentReview(ctx, item.ID, actor, "archive-"+uuid.NewString()); !errors.Is(err, billing.ErrConflict) {
+			t.Fatal("restored unknown no longer blocks archive", err)
+		}
+		err = DownOne(ctx, c, loaded)
+		unlockErr := migrations.Unlock(ctx, c)
+		var rejected *pgconn.PgError
+		if !errors.As(err, &rejected) || rejected.Code != "P0001" || rejected.Message != "late payment query generation bindings are forward-only" || unlockErr != nil || retainedDataRollbackSnapshot(t, ctx, c) != before {
+			t.Fatal("replay or refused 900048 Down changed the combined schema or facts", err, unlockErr)
+		}
+	})
 	upgradeFrom := func(t *testing.T, predecessor []migrations.Migration, legacy53 bool) {
 		t.Helper()
 		c := f.database(t, ctx, "billing", "billing_schema_owner")
@@ -191,13 +266,7 @@ func TestLatePaymentArchiveQueryAdmissionPublicMigration(t *testing.T) {
 			}
 			legacyLedgerBefore = stageValue(t, ctx, c, `SELECT to_jsonb(m)::text FROM schema_migrations m WHERE version=53`)
 		}
-		wallet, owner, order := uuid.New(), uuid.New(), uuid.New()
-		if _, err := c.Exec(ctx, `INSERT INTO wallets(id,owner_type,owner_id,status,created_at,updated_at) VALUES($1,'PERSONAL',$2,'ACTIVE',now(),now())`, wallet, owner); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := c.Exec(ctx, `INSERT INTO payment_orders(id,merchant_order_no,requester_id,payer_user_id,wallet_id,product_id,product_snapshot,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,expires_at,provider_payable_until,late_review_boundary_at,final_archive_eligible_at,last_successful_query_at,last_authoritative_unpaid_at,created_at,updated_at,provider_id,provider_version) VALUES($1,$2,$3,$3,$4,'QUERY_ADMISSION_LEGACY','{}','ALIPAY',100,'CNY',100,'PENDING','PENDING',now()-interval '9 days',now()-interval '9 days',now()-interval '7 days',now()-interval '1 hour',now(),now(),now()-interval '10 days',now(),'controlled-legacy','v1')`, order, "query-admission-"+order.String(), owner, wallet); err != nil {
-			t.Fatal(err)
-		}
+		owner, order := seedOrder(t, c)
 		old := stageValue(t, ctx, c, `SELECT jsonb_agg(to_jsonb(p) ORDER BY p.id)::text FROM payment_orders p`)
 		injected := errors.New("owned current-query migration post-DDL rollback")
 		ordered, err := Ordered(loaded)

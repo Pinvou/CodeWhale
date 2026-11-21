@@ -72,7 +72,8 @@ func TestLatePaymentQueryAdmissionMigrationIdentity(t *testing.T) {
 		},
 	} {
 		t.Run(name+"-reserved-version-before-db", func(t *testing.T) {
-			if err := run(); err == nil || !strings.Contains(err.Error(), "late payment query admission") {
+			// The statistics validator owns 900046 in the combined migration chain.
+			if err := run(); err == nil || err.Error() != "outbox statistics index is not the frozen SQL" {
 				t.Fatal("misnumbered query identity reached DB", err)
 			}
 		})

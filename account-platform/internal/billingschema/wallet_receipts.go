@@ -80,6 +80,9 @@ func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []migration
 	if err := validateFinancialJSONObjects(loaded); err != nil {
 		return migrations.Verification{}, err
 	}
+	if err := validateOutboxStatisticsIndex(loaded); err != nil {
+		return migrations.Verification{}, err
+	}
 	if err := validatePackageExpiryScan(loaded); err != nil {
 		return migrations.Verification{}, err
 	}

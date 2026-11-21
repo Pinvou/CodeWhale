@@ -28,13 +28,15 @@ const registrationOutboxIndexVersion int64 = 900020
 func registrationOutboxFacts(t *testing.T, ctx context.Context, r *PostgresRepository) string {
 	t.Helper()
 	var facts string
+	// Account 900020 and 900021 add the aggregate lookup and retained-history
+	// statistics indexes. Keep every other original outbox index frozen.
 	err := r.pool.QueryRow(ctx, `SELECT jsonb_build_object(
 'events',(SELECT md5(COALESCE(string_agg(to_jsonb(e)::text,E'\n' ORDER BY event_id),'')) FROM outbox_events e),
 'ledger',(SELECT jsonb_agg(to_jsonb(m) ORDER BY version) FROM schema_migrations m WHERE version<>900020),
 'outbox_owner',(SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid='public.outbox_events'::regclass),
 'outbox_acl',(SELECT relacl::text FROM pg_class WHERE oid='public.outbox_events'::regclass),
 'schema_acl',(SELECT nspacl::text FROM pg_namespace WHERE nspname='public'),
-'original_indexes',(SELECT jsonb_agg(jsonb_build_array(indexname,indexdef) ORDER BY indexname) FROM pg_indexes WHERE schemaname='public' AND tablename='outbox_events' AND indexname<>'outbox_events_aggregate_idx'),
+'original_indexes',(SELECT jsonb_agg(jsonb_build_array(indexname,indexdef) ORDER BY indexname) FROM pg_indexes WHERE schemaname='public' AND tablename='outbox_events' AND indexname NOT IN ('outbox_events_aggregate_idx','outbox_events_dead_statistics_idx')),
 'triggers',(SELECT jsonb_agg(pg_get_triggerdef(oid) ORDER BY tgname) FROM pg_trigger WHERE tgrelid='public.outbox_events'::regclass AND NOT tgisinternal)
 )::text`).Scan(&facts)
 	if err != nil {

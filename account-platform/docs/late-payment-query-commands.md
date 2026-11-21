@@ -101,10 +101,23 @@ ledger/备份核验和人工维护窗口，由 operator 显式完成以下步骤
    非本编排管理的实例，暂停会恢复 replica 的站点控制器/计划任务。不能确认全集则停止迁移。
 2. Helm 站点按已渲染的真实 `<namespace>`、`<fullname>` 使用
    `kubectl -n <namespace> scale deployment/<fullname>-billing-service --replicas=0`，
-   并确认旧 Pod/进程和在途事务实际退出；仅 scale 命令成功不代表已经排空。执行受审计的
-   `helm upgrade <release> <chart> <已核验站点参数> --set replicas.billingService=0 --wait`
-   保持 Billing 停用，由原 hook 完成迁移。确认目标制品、完整 ledger 和权限验证成功后，
-   再通过同一站点受审计发布参数恢复新版 replica；不得让 HPA/GitOps 提前恢复旧版。
+   并确认旧 Pod/进程和在途事务实际退出。保持站点控制器暂停，保留发布值中通过 chart 校验的
+   副本数，离线渲染目标版本的迁移模板：
+
+   ~~~sh
+   helm template <release> <chart> --namespace <namespace> --is-upgrade \
+     <已核验站点参数> --show-only templates/migrations.yaml > migration-jobs.yaml
+   ~~~
+
+   从渲染结果仅提取 `migrate-billing` Job，核对其 namespace、迁移镜像 digest、
+   `/migrations/billing`、`MIGRATION_ROLE=billing_service`、ServiceAccount 和 Secret 引用。
+   确认目标站点已有匹配的 ServiceAccount、镜像拉取和数据库迁移配置。为 Job 设置明确
+   namespace 和本次维护专用的新名称，去掉 Helm hook 注解，保留原 Pod spec。
+   在旧写方持续停用时，用 `kubectl -n <namespace> create -f <审核后的单个Job文件>`
+   创建此一次性 Job。若任一依赖、身份、迁移执行或结果无法确认，停在维护窗口内。
+   Job 到达 Complete 后记录迁移日志，核对 `migration.post_verification`、完整 ledger
+   和权限。验证成功后使用相同制品与正常副本值执行受审计的 `helm upgrade`，
+   保留原 hook 执行及其相同包的幂等核验。确认启动的是新版，完成下方烟测后恢复入口与控制器。
 3. Compose 站点先核完整 `<compose>` 参数及 `config --services`，使用
    `docker compose <compose> stop billing-service` 并核实际旧容器退出，再由原
    `docker compose <compose> run --rm billing-migrate` 执行迁移及其已有依赖检查。

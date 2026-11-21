@@ -229,6 +229,7 @@ func main() {
 		return err
 	}
 	collectors := append(repository.AdminPaginationCollectors(), service.AdminModelPriceProjectionCollectors()...)
+	collectors = append(collectors, repository.HealthRetentionCollectors()...)
 	if err := httpserver.RunWithApplicationAndCollectors("billing-service", handler, ready, collectors...); err != nil {
 		log.Fatal("BILLING_SERVER_FAILED")
 	}
