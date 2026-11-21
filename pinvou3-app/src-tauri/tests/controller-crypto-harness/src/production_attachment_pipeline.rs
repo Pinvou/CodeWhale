@@ -6,8 +6,8 @@ mod tests {
     use std::sync::Arc;
     #[test]
     fn rejected_chunk_can_be_reconciled_as_absent_before_next_upload() {
+        use crate::app::commands::desktop_remote_action::action_state::DesktopRemoteActionState;
         use crate::crypto::ControllerRole;
-        use crate::desktop_remote_action_state::DesktopRemoteActionState;
         use crate::encrypted_lane::EncryptedLane;
         use crate::features::remote_control::controller::transfer::{
             TransferContext, TransferDirection, TransferMetadata, TransferRegistry,
@@ -97,7 +97,7 @@ mod tests {
             TransferContext::new(&lease, "session-1", "other-task", TransferDirection::Upload)
                 .unwrap();
         let other = uploads.begin(other_context, metadata.clone(), 1).unwrap();
-        let mut receiver = state
+        let (_, mut receiver) = state
             .register(
                 "request-begin".into(),
                 "local-1".into(),
@@ -119,7 +119,7 @@ mod tests {
         let error = uploads
             .accept_chunk(&first.handle_id, 1, b"abc", 2)
             .unwrap_err();
-        let mut receiver = state
+        let (_, mut receiver) = state
             .register(
                 "request-chunk".into(),
                 "local-1".into(),
@@ -146,7 +146,7 @@ mod tests {
                 )
                 .is_err()
         );
-        let _unknown_reply = state
+        let (unknown_registration, _unknown_reply) = state
             .register(
                 "unknown-abort".into(),
                 "local-1".into(),
@@ -157,7 +157,7 @@ mod tests {
                 Some(first.handle_id.clone()),
             )
             .unwrap();
-        state.detach_uncertain("unknown-abort");
+        state.detach_uncertain("unknown-abort", &unknown_registration);
         assert!(
             state
                 .validate_completed_uploads(
@@ -172,7 +172,7 @@ mod tests {
         uploads
             .require_upload_binding(&other.handle_id, &lease, "session-1", "other-task")
             .unwrap();
-        let mut late = state
+        let (_, mut late) = state
             .register(
                 "late-chunk".into(),
                 "local-1".into(),
@@ -206,7 +206,7 @@ mod tests {
             .require_upload_binding(&first.handle_id, &lease, "session-1", "task-1")
             .unwrap_err();
         assert_eq!(absent, "transfer_unknown");
-        let mut receiver = state
+        let (_, mut receiver) = state
             .register(
                 "request-abort".into(),
                 "local-1".into(),
@@ -227,7 +227,7 @@ mod tests {
         );
         let second = uploads.begin(context, metadata, 3).unwrap();
         assert_ne!(first.handle_id, second.handle_id);
-        let mut second_begin = state
+        let (_, mut second_begin) = state
             .register(
                 "second-begin".into(),
                 "local-1".into(),
@@ -252,7 +252,7 @@ mod tests {
                 .unwrap(),
             crate::transfer::upload::UploadProgress::Completed { .. }
         ));
-        let mut second_chunk = state
+        let (_, mut second_chunk) = state
             .register(
                 "second-chunk".into(),
                 "local-1".into(),
@@ -293,7 +293,7 @@ mod tests {
                 .collect(),
         };
         let lost = uploads.begin(lost_context, lost_metadata, 5).unwrap();
-        let mut begin_waiter = state
+        let (_, mut begin_waiter) = state
             .register(
                 "lost-begin".into(),
                 "local-1".into(),
@@ -309,7 +309,7 @@ mod tests {
         );
         assert!(state.settle_authenticated(&lease, &live, &reply));
         assert!(begin_waiter.try_recv().unwrap().is_ok());
-        let _abort_waiter = state
+        let (abort_registration, _abort_waiter) = state
             .register(
                 "lost-abort".into(),
                 "local-1".into(),
@@ -325,7 +325,7 @@ mod tests {
             .unwrap();
         assert!(uploads.abort(&lost.handle_id));
         // Test seam: B succeeded, but the authenticated reply is intentionally never delivered.
-        state.detach_uncertain("lost-abort");
+        state.detach_uncertain("lost-abort", &abort_registration);
         assert!(
             state
                 .validate_completed_uploads(
@@ -343,7 +343,7 @@ mod tests {
                 .unwrap_err(),
             "transfer_unknown"
         );
-        let mut retry = state
+        let (_, mut retry) = state
             .register(
                 "lost-abort-retry".into(),
                 "local-1".into(),
@@ -390,9 +390,10 @@ mod tests {
         )
         .unwrap();
         const TWENTY_MIB: usize = 20 * 1024 * 1024;
+        // The ingest limit is independent of the fixed upload fixture size.
         assert_eq!(
             crate::features::files::file_ingest::MAX_FILE_BYTES,
-            TWENTY_MIB as u64
+            50 * 1024 * 1024
         );
         let mut bytes = vec![b'a'; TWENTY_MIB];
         bytes[..12].copy_from_slice(b"start-marker");

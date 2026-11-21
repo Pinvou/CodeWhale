@@ -18,6 +18,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcredit"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 )
 
@@ -48,6 +49,10 @@ func main() {
 		log.Fatal("ACCOUNT_DATABASE_UNAVAILABLE")
 	}
 	defer repository.Close()
+	revocationCapacity, err := configuredProfileRevocationCapacity(os.Getenv("PROFILE_REVOCATION_CAPACITY"))
+	if err != nil || repository.ConfigureProfileRevocationCapacity(revocationCapacity) != nil {
+		log.Fatal("ACCOUNT_PROFILE_REVOCATION_CAPACITY_INVALID")
+	}
 	workers := []accountBackgroundTask{{"mobile-retention", account.NewMobileRetentionWorker(repository, time.Hour).Run}}
 	walletPolicyVersion := strings.TrimSpace(os.Getenv("WALLET_PROVISIONING_POLICY_VERSION"))
 	if walletPolicyVersion == "" {
@@ -117,6 +122,11 @@ func main() {
 	if err != nil {
 		log.Fatal("ACCOUNT_CLOSURE_CONFIGURATION_INVALID")
 	}
+	creditResolver, err := paymentcredit.NewHTTPClient(os.Getenv("BILLING_HTTP_URL"), credential)
+	if err != nil {
+		log.Fatal("ACCOUNT_PAYMENT_CREDIT_CONFIGURATION_INVALID")
+	}
+	workers = append(workers, accountBackgroundTask{"payment-credit-recovery", func(ctx context.Context) { repository.RunPaymentCreditRecovery(ctx, creditResolver) }})
 	workers = append(workers, accountBackgroundTask{"account-closure", account.NewAccountClosureWorker(repository, 5*time.Second, closureBilling, closureToken).WithCleanup(identities, closureBilling, closureToken).Run})
 
 	if enabled("MOBILE_AUTH_ENABLED") {
@@ -230,6 +240,17 @@ func main() {
 		repository.Close()
 		log.Fatal("ACCOUNT_HTTP_SERVER_FAILED")
 	}
+}
+
+func configuredProfileRevocationCapacity(raw string) (int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return account.DefaultProfileRevocationCapacity, nil
+	}
+	capacity, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || capacity < 1 || capacity > 1000000 {
+		return 0, errors.New("profile revocation capacity is outside the bounded range")
+	}
+	return capacity, nil
 }
 
 func configuredWalletSLA(raw string) (time.Duration, error) {

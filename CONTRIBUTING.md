@@ -40,7 +40,7 @@ Every human-authored commit must include a valid `Signed-off-by`:
 git commit -s
 ```
 
-Use `--signoff` when amending or rebasing existing commits. See the [Developer Certificate of Origin](https://developercertificate.org/) and [DCO.md](DCO.md) for what the trailer certifies and how CI enforces it. CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits and merge commits (more than one parent) are exempt.
+Use `--signoff` when amending or rebasing existing commits. See the [Developer Certificate of Origin](https://developercertificate.org/) and [DCO.md](DCO.md) for what the trailer certifies and how CI enforces it. CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits and merge commits (more than one parent) are exempt. The dedicated `DCO` workflow runs its sign-off verification on pull requests only (the merge-queue leg merely re-reports the per-PR result), but direct pushes to `main` are still sign-off-checked: the `commit-message` gate in `pr-check` runs `scripts/validate-commit-msg.py` over the pushed range and validates message format and sign-offs together — relaxing only the signer-must-match-author rule on push, to accept GitHub's squash commits; on pull requests the signer must match the commit author. See [DCO.md](DCO.md) for the division of labor between the two gates.
 
 The fixed historical squash-commit registry documented in [the commit convention](docs/Git%20Commit%20信息规范文档.md#10-固定历史-squash-提交的签署登记) preserves the recorded original signers of 20 explicitly registered integration commits. It is not an identity alias or an exemption for new commits; titles and the registered signoffs remain checked.
 
@@ -79,10 +79,32 @@ Run additional frontend, Relay, Rust, CodeWhale, or platform checks when relevan
 
 The retained Token financial phase has a 40-minute Go test-binary timeout,
 including the complete selected package. Retained Billing keeps its 75-minute
-budget and other financial phases keep 20 minutes. Compilation, startup and
-ownership checks are outside these test-binary budgets; the Account job retains
-its existing outer limit. Increasing the Token budget does not accelerate tests
-or relax required roots, subcases, race detection or resource retirement.
+budget and other financial test binaries keep 20 minutes. Within the existing
+owners job, Billing schema contracts run as two sequential binaries: the complete
+LegacyExpiry historical-upgrade root, then all remaining required schema roots.
+Each keeps its 20-minute limit, making the schema portion's cumulative test budget
+40 minutes instead of 20. Compilation, startup and ownership checks are outside
+these test-binary budgets; the Account job retains its existing outer limit.
+Each batch must restore the pristine instance before the next can run. No roots,
+subcases, race detection, actor checks or ordinary resource-retirement gates are
+removed, and the existing job groups and runner concurrency are unchanged.
+
+The six financial Jobs keep the same root selection and race checks. With
+`PINVOU_CI_FIXTURE_TEMPLATES=1`, retained Billing business fixtures may clone a
+process-owned, frozen baseline prepared by the real migration actor. The cache
+key includes complete SQL/checksums, fixture policy, cluster identity, role OIDs,
+attributes and memberships. Every case still owns a new UUID database and an
+opaque cleanup lease. Sources refuse connections and retire before phase-level
+role cleanup. Token's absent-role setup is not shared; historical expiry baselines
+are scoped inside their original actor-owning root, and all 36 upgrade/replay
+cases still run. No cached test success, shared mutable database, forced backend
+termination or durability-setting change is permitted. The six Jobs execute a
+real snapshot-isolation probe before their contracts. Unconfirmed preparation,
+changed source identity/owner, writable source, cleanup failure or a skipped
+probe remains a failure. Local runs retain the original empty-create setup by
+default. Set `PINVOU_CI_FIXTURE_TIMING=1` to report bounded setup/cleanup costs;
+financial phases stream their original output and store timing/root-pass diagnostics
+in the existing lifecycle artifact for before/after comparison.
 
 When a change regenerates a `package-lock.json`, regenerate against the official
 registry (`https://registry.npmjs.org/`): a mirror configured in a local npmrc is
@@ -94,7 +116,24 @@ up to 11.10 silently strips them and the same guard fails the strip.
 
 Tests requiring a live model, network service, credential, or large model asset must be ignored by default and provide an explicit opt-in command.
 
+Windows relay signer regressions report only closed spawn-error/signal categories,
+bounded status and elapsed time, and the last observed test instrumentation stage.
+Unknown values remain unknown; these observations do not establish an underlying
+timeout or infrastructure root cause. Invalid stored-key cases must prove refusal
+by the signer itself before publication, independently of the writer's safeguards.
+Raw child output and exception text must not enter failure diagnostics.
+
+Controller bootstrap workers retain a separate bounded diagnostic IPC cache.
+Unexpected exits report only closed opening/post-open, store-error and native-cause
+observations, plus an ancestor phase only when that verifier actually failed.
+Missing observations stay unknown and never add a wait. Ordinary worker messages,
+native defaults and the exact 81/82/83 fault-qualification exits remain unchanged;
+better diagnostics do not establish the cause of a previously unexplained exit.
+
 ### Test resource lifetime
+
+Release command ownership, failure diagnostics and supported interpreter setup are
+documented in [the release process lifetime guide](docs/remote-release-process-lifetime.md).
 
 One-shot CI fixtures must create resources through the shared lifetime boundary:
 
@@ -109,6 +148,18 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   loopback ports; Vite optimizer output and browser profiles are private. Await
   close acknowledgement before deleting directories. Legacy explicit exits use
   `fixture-exit.cjs` so cleanup completes without replacing the original failure.
+  A smoke with a large Vite import graph may explicitly call
+  `prepareFixtureModules(server, ['/tests/fixtures/entry.jsx'])` before its first
+  case. It waits for static module transforms and optimizer crawl in that owned
+  server, with one setup budget capped at 30 seconds and no retry. Keep the
+  original navigation/action deadlines and readiness assertions; close the
+  server in `finally` even when setup fails. Never share optimizer output across
+  jobs or use module preparation to bypass a browser/application failure.
+  Vite's initial crawl-idle promise is one-shot: readiness must also traverse
+  each requested static import/re-export graph and await its optimizer generation.
+  Lazy `import()` branches stay case-triggered, and modules are transformed,
+  never executed during preparation. HTTP fixtures may explicitly include
+  `/@vite/client` so browser-client compilation is covered by the same budget.
   When `PINVOU_CI_RESOURCE_LEDGER` is set, the shared browser adapter also keeps
   bounded console/page errors, failed requests and HTTP errors under
   `browser-diagnostics/` in that job's existing resource artifact. Before close,
@@ -150,6 +201,42 @@ One-shot CI fixtures must create resources through the shared lifetime boundary:
   a private temporary directory. A killed Linux controller can be recovered only
   by the registered scope marker, UID, cgroup and pidfd identity. No PID/name
   sweep or shared Runner Job Object is used.
+  For stalled-process investigation, `--diagnostics` emits bounded phase names
+  and one Python stack snapshot after a phase has stalled for three seconds.
+  It never changes the command, cleanup deadline, cancellation or exit verdict.
+  The Windows supervisor regression preserves captured evidence when its
+  existing 15-second subprocess limit expires. The release-contract artifact
+  action additionally opts into bounded passive file/HTTP transport evidence;
+  it excludes signed URLs, headers, payloads, file paths and raw error messages.
+  These logs distinguish local receipt reads, TCP/TLS and response waits without
+  suppressing stream errors or extending the artifact's three-minute limit.
+  The Windows atomic regression suite runs each original patched-executable
+  filter in an independent scope and retains attempted-receipt inventory even
+  on failure. Its capture-retention fixtures hand off the child's creation
+  identity before launcher exit and verify the same kernel object's exit;
+  a `finished` phase marker alone is not resource retirement.
+  This Windows atomic chain validates the job's existing native 64-bit CPython
+  (3.12 or newer) and binds its absolute executable for initialization, each
+  filter and retirement. Missing or incompatible interpreters fail before the
+  ledger starts; this fixture setup does not install or reconfigure system Python.
+- Node test Workers register with the shared fixture scope as `worker` resources.
+  Configuration changes require acknowledgement, and snapshots come from the
+  worker that owns the state. Close the owned listeners and observe Worker exit
+  before releasing its receipt or removing fixture files; a sent stop request
+  alone does not confirm retirement. Workers are never recovered by a PID sweep.
+- A deliberately blocked browser observer waits on shared counters of real
+  accepted host replies, after their IPC response files have been published.
+  Keep a bounded observer deadline and the intended minimum stall; do not infer
+  a reply count from a fixed sleep or compare different processes' wall clocks.
+  For cancellation cases, hold the fake upstream behind an owned release file
+  until its cancellation audit exists; assert that completion and host-end have
+  not happened, then release it and verify completion-before-end. A fixed fake
+  tool lifetime does not guarantee that a heartbeat has already failed. Release
+  finite barriers during cleanup even when assertions fail; intentionally
+  uncooperative shutdown fixtures retain their separate never-release path.
+  Keep live process fixtures behind explicit release barriers until ownership
+  assertions finish, rather than giving them fixed lifetimes that can expire
+  during another scope's startup.
 - Account CI installs `ci-fixture-docker.py` on **that job's PATH only**. Docker
   writes a fresh cidfile for every CLI `run`/`create`; the always-run ledger step
   validates all leases before stopping exact IDs and checks anonymous volumes.
@@ -435,10 +522,17 @@ reuse or a non-applicable diff. Replace any existing requirements on those old
 names before enabling this behavior. This PR does not change server-side rules
 or make these auxiliary workflows mandatory where they were not required.
 
-The lightweight `changes` job verifies the entire tested Git tree (not only the
-PR head), base commit/ref, unchanged workflow/verifiers, all routing and policy
-outputs, repository-variable hashes, runner labels, source repository/PR/head,
-source run attempt and successful workflow aggregate gate. A matrix is reusable only if
+The lightweight `changes` job verifies immutable source and queue Git objects,
+unchanged workflow/verifiers, effective inputs, runner labels, source repository,
+PR/head, source run attempt and successful workflow aggregate gate. PR Check
+schema 2 compares each job's source/dependency entries, base-to-tested diff,
+effective configuration and routing independently. The currently reviewed
+Rust/CLI domains exclude the independent Account/Hub/release-console service
+trees; other jobs retain whole-tree inputs. Shared scripts, unknown paths and
+unknown configuration remain conservative fences. See
+[the input boundary](docs/ci-result-reuse.md) for the precise supported scope.
+Schema 1 and the two auxiliary workflow profiles retain exact whole-tree/base,
+all-variable and routing checks. A matrix is reusable only if
 all configured legs are present exactly once and every step required in the
 queue has successful execution evidence. A format-only or partial ready-PR run
 cannot replace full queue regression. Unknown expressions require successful
@@ -454,8 +548,10 @@ unknown or modified context-dependent runner expressions retain execution.
 Only a wholly successful ready-PR workflow donates proof; a red aggregate gate
 does not donate successful individual jobs. The recorded base comes from the
 actual tested merge commit's first parent, not the mutable PR event/API base SHA.
-Lookup independently verifies that immutable commit's base, head and tree against
-the queue. Ready-PR browser smoke selection uses that same actual merge parent
+Lookup independently verifies that immutable commit's own base, head and tree;
+schema 2 additionally recomputes the relevant inputs before comparing them with
+the queue. The PR Check proof producer fetches two generations so its real first
+parent is available even on a clean runner. Ready-PR browser smoke selection uses that same actual merge parent
 and tested tree, including main-side renames, so its named step can witness the
 queue selection. Expected record refusals emit notices without configuration values.
 

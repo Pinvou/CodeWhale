@@ -13,6 +13,16 @@ import { join, matchesGlob } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
+import transportPolicy from "../ci-network-policy.cjs";
+import artifactPolicySupport from "./ci-artifact-policy-support.cjs";
+
+// Keep historical product/advisory contracts exact after validating the new
+// transport layer independently. Only the reviewed helper and exact scoped
+// environment are removed; arbitrary commands or environments still fail.
+function productPolicyText(text) {
+  return artifactPolicySupport.legacyArtifactPolicy(text);
+}
+import "./ci-artifact-tls-policy.test.cjs";
 
 const workflow = await readFile(
   new URL("../../.github/workflows/pr-check.yml", import.meta.url),
@@ -22,6 +32,54 @@ const titleWorkflow = await readFile(
   new URL("../../.github/workflows/pr-title-check.yml", import.meta.url),
   "utf8",
 );
+
+const frontendUploadStep = "Upload frontend setup bundle";
+const frontendUploadRetryStep = "Upload frontend setup bundle (retry)";
+const frontendUploadRequiredStep = "Require frontend setup bundle upload";
+const uploadPolicyLF = String.fromCharCode(10);
+
+test("browser wrapper helper-only changes select both native runtime gates", () => {
+  const helpers = [
+    "pinvou3-app/tests/helpers/ndjson-child-driver.mjs",
+    "pinvou3-app/tests/helpers/browser-wrapper-fixture-cleanup.mjs",
+    "pinvou3-app/tests/helpers/browser-wrapper-held-result.mjs",
+    "pinvou3-app/tests/helpers/browser-wrapper-host-fixture.mjs",
+  ];
+  for (const gate of ["windows_codex", "acp_runtime"]) {
+    // Comments inside a filter must not hide later patterns from these
+    // positive/negative assertions.
+    const paths = filterPaths(workflow.replace(/^ {14}#.*\r?\n/gm, ""), gate);
+    const selected = file => paths.some(pattern => !pattern.startsWith("!") && matchesGlob(file, pattern))
+      && !paths.some(pattern => pattern.startsWith("!") && matchesGlob(file, pattern.slice(1)));
+    for (const helper of helpers) assert.equal(selected(helper), true, `${gate}: ${helper}`);
+    for (const unrelated of ["docs/unrelated.md", "pinvou3-app/tests/helpers/unrelated-fixture.mjs"]) {
+      assert.equal(selected(unrelated), false, `${gate}: ${unrelated}`);
+    }
+    for (const helper of helpers) {
+      const narrowed = paths.filter(pattern => pattern !== helper);
+      assert.equal(narrowed.some(pattern => !pattern.startsWith("!") && matchesGlob(helper, pattern)), false,
+        `${gate} negative must detect removal of ${helper}`);
+    }
+  }
+});
+
+test("prepare observer helper-only changes select the required Windows lifecycle job", () => {
+  const helper = "pinvou3-app/tests/helpers/browser-prepare-phase-observer.mjs";
+  const text = workflow.replace(/^ {14}#.*\r?\n/gm, "");
+  const selected = (paths, file) => paths.some(pattern => !pattern.startsWith("!") && matchesGlob(file, pattern))
+    && !paths.some(pattern => pattern.startsWith("!") && matchesGlob(file, pattern.slice(1)));
+  const windows = filterPaths(text, "windows_codex");
+  assert.equal(selected(windows, helper), true, "helper-only must select Windows lifecycle");
+  assert.equal(windows.filter(path => path === helper).length, 1, "one explicit helper route");
+  assert.equal(selected(windows.filter(path => path !== helper), helper), false,
+    "removing the exact helper route must lose selection");
+  assert.equal(selected(windows, "pinvou3-app/tests/helpers/unrelated-observer.mjs"), false);
+  assert.equal(selected(filterPaths(text, "acp_runtime"), helper), false,
+    "this Windows-only observer does not broaden the independent ACP route");
+  const windowsJob = jobBlock("windows-codex-runtime-test");
+  assert.match(windowsJob, /needs\.changes\.outputs\.windows_codex == 'true' \|\| needs\.changes\.outputs\.acp_runtime == 'true'/);
+  assert.match(windowsJob, /node --test --test-concurrency=1 pinvou3-app\/tests\/browser-wrapper-host-control\.test\.mjs pinvou3-app\/tests\/browser_wrapper_windows_lifecycle\.test\.mjs/);
+});
 
 // Extract the path list of a named dorny/paths-filter output.
 function filterPaths(text, name) {
@@ -35,6 +93,14 @@ function filterPaths(text, name) {
     .filter((line) => line.startsWith("- "))
     .map((line) => line.slice(2).trim().replace(/^['"]|['"]$/g, ""));
 }
+
+test("Windows runtime regressions follow changes to their process supervisor", () => {
+  const paths = filterPaths(workflow, "windows_runtime");
+  for (const file of ["scripts/ci-fixture-process.py", "scripts/tests/test_ci_fixture_process.py"]) {
+    assert.ok(paths.some(pattern => matchesGlob(file, pattern)), file);
+  }
+  assert.ok(!paths.some(pattern => matchesGlob("scripts/check-version.mjs", pattern)));
+});
 
 // Extract the `if:` condition of a named workflow step.
 function stepCondition(text, stepName) {
@@ -115,6 +181,7 @@ function stepRun(job, name) {
 }
 
 function assertAccountFailurePolicy(job) {
+  job = productPolicyText(job);
   assert.doesNotMatch(job, /secrets\./);
   let mandatory = job;
   // Only these reviewed, bounded transport steps are advisory. Remove their
@@ -128,13 +195,16 @@ function assertAccountFailurePolicy(job) {
     assert.match(diagnostic, /^ {8}uses: actions\/upload-artifact@v7$/m);
     assert.match(diagnostic, /^ {8}timeout-minutes: 3$/m);
     assert.match(diagnostic, /^ {8}continue-on-error: true$/m);
-    assert.doesNotMatch(diagnostic, /^ {8}(?:run|env):/m);
+    assert.ok(diagnostic.includes(artifactTLSOptionsEnv));
+    assert.doesNotMatch(diagnostic.replace(artifactTLSOptionsEnv, ""), /^ {8}(?:run|env):/m);
     mandatory = mandatory.replace(diagnostic, "");
   }
   assert.doesNotMatch(mandatory, /continue-on-error:/);
 }
 
 
+
+const artifactTLSOptionsEnv = "        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n";
 
 const goStepName = "Test and vet all Account Platform Go modules";
 const goGatePhase = "PINVOU_GO_GATE_PHASE";
@@ -161,7 +231,9 @@ function runGoGateFixture(prefix, run, directory) {
 
 const auditPGStepName = "Audit export finite PostgreSQL rollback and persisted boundaries";
 const existingBrokerStepName = "Existing broker compatibility on owned PostgreSQL and TLS NATS";
+const tokenOutboxStepName = "Token outbox publication on owned PostgreSQL and TLS NATS";
 const pgPreflightStepName = "Verify account CI PostgreSQL service isolation";
+const historyPGStepName = "Read-only history export on public domain schemas";
 const pgStopStepName = "Stop owned temporary PostgreSQL services";
 
 function pgIdentityEnvironment(service) {
@@ -173,7 +245,7 @@ function pgIdentityEnvironment(service) {
 }
 
 function assertFinancialDiagnosticExemption(job) {
-  const text = job.replaceAll("\r\n", "\n");
+  const text = productPolicyText(job.replaceAll("\r\n", "\n"));
   const diagnostic = namedStep(text, "Financial group lifecycle receipts");
   const withoutComments = diagnostic.replace(/^ *#.*\n/gm, "").trimEnd();
   assert.equal(withoutComments, [
@@ -183,9 +255,13 @@ function assertFinancialDiagnosticExemption(job) {
     "        timeout-minutes: 3",
     "        continue-on-error: true",
     "        uses: actions/upload-artifact@v7",
+    "        env:",
+    "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
     "        with:",
     "          name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}",
-    "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+    "          path: |",
+    "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+    "            ${{ runner.temp }}/financial-parallel-*/",
     "          if-no-files-found: error",
     "          retention-days: 7",
   ].join("\n"));
@@ -225,7 +301,7 @@ test("financial diagnostic exception rejects business and job exemptions", () =>
 // Match the Python gate policy across the complete workflow. Account-only
 // validation cannot detect a job/step exception added to a different leg.
 function assertWorkflowFailurePolicy(workflowText) {
-  const text = workflowText.replaceAll("\r\n", "\n").replace(/^ *#.*\n/gm, "");
+  const text = productPolicyText(workflowText.replaceAll("\r\n", "\n")).replace(/^ *#.*\n/gm, "");
   const financialJob = jobBlock("account-financial-test", text);
   assertFinancialDiagnosticExemption(financialJob);
   const financial = namedStep(financialJob, "Financial group lifecycle receipts");
@@ -246,11 +322,49 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: ci-success-proof-${{ github.run_attempt }}",
       "          path: ${{ steps.success_proof.outputs.directory }}/proof.json",
       "          if-no-files-found: error",
       "          retention-days: 2",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
+    const receipt = namedStep(jobBlock("windows-relay-tools-test", text), "Preserve Windows relay tools process receipt");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Preserve Windows relay tools process receipt",
+      "        if: always()",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
+      "        with:",
+      "          name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: ${{ runner.temp }}/windows-relay-tools-process.json",
+      "          if-no-files-found: warn",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
+    const receipt = namedStep(jobBlock("fast-gate", text), "Gate test resource lifecycle receipts");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Gate test resource lifecycle receipts",
+      "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
+      "        with:",
+      "          name: gate-resource-lifecycle-${{ github.run_attempt }}",
+      "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
+      "          if-no-files-found: error",
+      "          retention-days: 7",
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
@@ -266,6 +380,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: " + artifact,
       "          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
@@ -285,6 +401,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: " + artifact + "-${{ github.run_id }}-${{ github.run_attempt }}",
       "          retention-days: 7",
@@ -304,6 +422,8 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: account-resource-lifecycle-${{ github.run_attempt }}",
       "          path: |",
@@ -323,12 +443,117 @@ function assertWorkflowFailurePolicy(workflowText) {
       "        timeout-minutes: 3",
       "        continue-on-error: true",
       "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
       "        with:",
       "          name: account-closure-resource-lifecycle-${{ github.run_attempt }}",
       "          path: |",
       "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/",
       "          if-no-files-found: error",
       "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  // The primary transport failure is provisional only while the exact
+  // mandatory recovery reducer still protects this artifact and every build.
+  assertFrontendUploadRecovery(text);
+  remainder = remainder.replace(namedStep(jobBlock("frontend-setup", text), frontendUploadStep), "");
+  {
+    const receipt = namedStep(jobBlock("windows-runtime-test", text), "上传 Windows runtime 资源收据");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: 上传 Windows runtime 资源收据",
+      "        if: always()",
+      "        timeout-minutes: 3",
+      "        uses: actions/upload-artifact@v7",
+      "        continue-on-error: true",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
+      "        with:",
+      "          name: windows-runtime-receipts-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: ${{ runner.temp }}/windows-runtime-${{ github.run_id }}-${{ github.run_attempt }}/",
+      "          retention-days: 7",
+      "          if-no-files-found: warn",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
+    const receipt = namedStep(jobBlock("windows-rust-test", text), "Windows atomic lifecycle receipts");
+    assert.equal(namedStep(jobBlock("windows-rust-test", text), "Configure bounded Windows atomic upload diagnostics").trimEnd(), [
+      "      - name: Configure bounded Windows atomic upload diagnostics",
+      "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        working-directory: ${{ github.workspace }}",
+      "        run: node scripts/ci-artifact-node-options.cjs --diagnostics",
+    ].join("\n"));
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Windows atomic lifecycle receipts",
+      "        id: windows_atomic_receipts_upload",
+      "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
+      "        with:",
+      "          name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/atomic-expected.txt",
+      "            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/ledger.txt",
+      "          if-no-files-found: error",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
+    const receipt = namedStep(jobBlock("release-contract-test", text), "Preserve Windows release contract process receipts");
+    assert.equal(namedStep(jobBlock("release-contract-test", text), "Configure bounded Windows upload diagnostics").trimEnd(), [
+      "      - name: Configure bounded Windows upload diagnostics",
+      "        if: ${{ always() && runner.os == 'Windows' }}",
+      "        working-directory: ${{ github.workspace }}",
+      "        run: node scripts/ci-artifact-node-options.cjs --diagnostics",
+    ].join("\n"));
+    assert.equal(receipt.trimEnd(), [
+      "      - name: Preserve Windows release contract process receipts",
+      "        id: windows_release_contract_receipts",
+      "        if: ${{ always() && runner.os == 'Windows' }}",
+      "        timeout-minutes: 3",
+      "        continue-on-error: true",
+      "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
+      "        with:",
+      "          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json",
+      "            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json",
+      "            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json",
+      "          if-no-files-found: warn",
+      "          retention-days: 7",
+    ].join("\n"));
+    remainder = remainder.replace(receipt, "");
+  }
+  {
+    const receipt = namedStep(jobBlock("relay-test", text), "保留 Relay 进程作用域原始回执");
+    assert.equal(receipt.trimEnd(), [
+      "      - name: 保留 Relay 进程作用域原始回执",
+      "        if: always()",
+      "        continue-on-error: true",
+      "        timeout-minutes: 3",
+      "        uses: actions/upload-artifact@v7",
+      "        env:",
+      "          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}",
+      "        with:",
+      "          name: relay-process-${{ github.run_id }}-${{ github.run_attempt }}",
+      "          path: |",
+      "            ${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}.json",
+      "            ${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/",
+      "          retention-days: 7",
+      "          if-no-files-found: warn",
     ].join("\n"));
     remainder = remainder.replace(receipt, "");
   }
@@ -361,9 +586,16 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   const original = workflow.replaceAll("\r\n", "\n");
   assertWorkflowFailurePolicy(original);
   const windows = namedStep(jobBlock("windows-rust-test", original), "Windows 测试二进制导入诊断");
+  const relayReceipt = namedStep(jobBlock("windows-relay-tools-test", original), "Preserve Windows relay tools process receipt");
+  const atomicConfig = namedStep(jobBlock("windows-rust-test", original), "Configure bounded Windows atomic upload diagnostics");
   const withoutWindowsExemption = original.replace(windows,
     windows.replace("        continue-on-error: true\n", ""));
   const mutants = [
+    original.replace("scripts/ci-artifact-node-options.cjs --network --diagnostics", "scripts/unreviewed-upload.cjs --configure-env"),
+    original.replace(atomicConfig, atomicConfig.replace("scripts/ci-artifact-node-options.cjs", "scripts/unreviewed-upload.cjs")),
+    original.replace(relayReceipt, relayReceipt.replace("windows-relay-tools-process.json", "other-process.json")),
+    original.replace("      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n",
+      "      - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）\n        continue-on-error: true\n"),
     original.replace("  frontend-test:\n", "  frontend-test:\n    continue-on-error: true\n"),
     original.replace("  frontend-test:\n", "  frontend-test:\n    'continue-on-error': true\n"),
     original.replace("  windows-rust-test:\n", "  windows-rust-test:\n    continue-on-error: true\n"),
@@ -384,12 +616,18 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
     original.replace("  frontend-test:\n", '  frontend-test:\n    ? continue-on-error # label\n    : true\n'),
   ];
   for (const [jobName, stepName] of [
+    ["fast-gate", "Gate test resource lifecycle receipts"],
     ["frontend-test", "Test resource lifecycle receipts"],
     ["frontend-browser-test", "Browser shard resource lifecycle receipts"],
     ["account-platform-test", "Account test resource lifecycle receipts"],
     ["account-closure-test", "Account closure resource lifecycle receipts"],
     ["windows-codex-runtime-test", "Preserve browser fixture exit receipts"],
     ["windows-codex-runtime-test", "Preserve ACP fixture exit receipt"],
+    ["windows-runtime-test", "上传 Windows runtime 资源收据"],
+    ["windows-rust-test", "Windows atomic lifecycle receipts"],
+    ["windows-relay-tools-test", "Preserve Windows relay tools process receipt"],
+    ["release-contract-test", "Preserve Windows release contract process receipts"],
+    ["relay-test", "保留 Relay 进程作用域原始回执"],
   ]) {
     const receipt = namedStep(jobBlock(jobName, original), stepName);
     const withoutReceiptExemption = original.replace(receipt,
@@ -409,6 +647,61 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
         `${receipt.replace("        continue-on-error: true\n", "")}      - ${first}\n${rest}        continue-on-error: true\n`));
     }
   }
+  const gateReceipt = namedStep(jobBlock("fast-gate", original), "Gate test resource lifecycle receipts");
+  for (const [old, replacement] of [
+    ["if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", "if: always()"],
+    ["${{ env.PINVOU_CI_RESOURCE_LEDGER }}/", "${{ github.workspace }}/**/*"],
+    ["retention-days: 7", "retention-days: 30"],
+    ["        uses: actions/upload-artifact@v7", "        env:\n          UNREVIEWED: yes\n        uses: actions/upload-artifact@v7"],
+  ]) mutants.push(original.replace(gateReceipt, gateReceipt.replace(old, replacement)));
+  mutants.push(original.replace(gateReceipt, gateReceipt + gateReceipt));
+  const frontendForGate = namedStep(jobBlock("frontend-test", original), "Test resource lifecycle receipts");
+  mutants.push(original.replace(gateReceipt, "").replace(frontendForGate, frontendForGate + gateReceipt));
+  const withoutGateExemption = original.replace(gateReceipt, gateReceipt.replace("        continue-on-error: true\n", ""));
+  for (const name of ["Gate policy test suite (scripts/tests)", "Confirm gate test resource retirement"]) {
+    const mandatory = namedStep(jobBlock("fast-gate", original), name);
+    for (const variant of [original, withoutGateExemption]) {
+      mutants.push(variant.replace(mandatory, mandatory.replace("      - name: " + name + "\n",
+        "      - name: " + name + "\n        continue-on-error: true\n")));
+    }
+  }
+  const releaseReceipt = namedStep(jobBlock("release-contract-test", original), "Preserve Windows release contract process receipts");
+  for (const [old, replacement] of [
+    ["if: ${{ always() && runner.os == 'Windows' }}", "if: always()"],
+    ["${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json", "${{ runner.temp }}/**/*"],
+    ["retention-days: 7", "retention-days: 30"],
+  ]) mutants.push(original.replace(releaseReceipt, releaseReceipt.replace(old, replacement)));
+  mutants.push(original.replace(releaseReceipt, releaseReceipt + releaseReceipt));
+  const withoutReleaseExemption = original.replace(releaseReceipt, releaseReceipt.replace("        continue-on-error: true\n", ""));
+  for (const name of ["Windows 原生命令退出码回归", "Windows 远控发布与安全契约", "Windows 共享进程监督器兼容回归"]) {
+    const mandatory = namedStep(jobBlock("release-contract-test", original), name);
+    for (const variant of [original, withoutReleaseExemption]) {
+      mutants.push(variant.replace(mandatory, mandatory.replace("      - name: " + name + "\n", "      - name: " + name + "\n        continue-on-error: true\n")));
+    }
+  }
+  const atomicReceipt = namedStep(jobBlock("windows-rust-test", original), "Windows atomic lifecycle receipts");
+  for (const [old, replacement] of [
+    ["id: windows_atomic_receipts_upload", "id: unreviewed_upload"],
+    ["if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", "if: always()"],
+    ["${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json", "${{ github.workspace }}/**/*"],
+    ["retention-days: 7", "retention-days: 30"],
+    ["name: Windows atomic lifecycle receipts", "name: Unreviewed transport"],
+    ["        uses: actions/upload-artifact@v7", "        env:\n          UNREVIEWED: yes\n        uses: actions/upload-artifact@v7"],
+  ]) {
+    mutants.push(original.replace(atomicReceipt, atomicReceipt.replace(old, replacement)));
+  }
+  mutants.push(original.replace(atomicReceipt, atomicReceipt + atomicReceipt));
+  const frontendReceipt = namedStep(jobBlock("frontend-test", original), "Test resource lifecycle receipts");
+  mutants.push(original.replace(atomicReceipt, "").replace(frontendReceipt, frontendReceipt + atomicReceipt));
+  const withoutAtomicExemption = original.replace(atomicReceipt,
+    atomicReceipt.replace("        continue-on-error: true\n", ""));
+  for (const name of ["Windows 原子替换状态机回归", "Confirm Windows atomic resource retirement"]) {
+    const mandatory = namedStep(jobBlock("windows-rust-test", original), name);
+    mutants.push(original.replace(mandatory,
+      mandatory.replace("      - name: " + name + "\n", "      - name: " + name + "\n        continue-on-error: true\n")));
+    mutants.push(withoutAtomicExemption.replace(mandatory,
+      mandatory.replace("      - name: " + name + "\n", "      - name: " + name + "\n        continue-on-error: true\n")));
+  }
   for (const mutant of mutants) {
     assert.notEqual(mutant, original, "the counterexample must change the actual workflow");
     assert.throws(() => assertWorkflowFailurePolicy(mutant));
@@ -416,14 +709,87 @@ test("all workflow legs reject unreviewed job and step failure exemptions", () =
   assertWorkflowFailurePolicy(original);
 });
 
-function assertFiniteAuditPGSetup(job) {
+function assertFinancialFamilyPolicy(job) {
+  const policy = namedStep(job.replaceAll("\r\n", "\n"), "Financial runner policy regressions");
+  assert.equal(policy.trimEnd(), [
+    "      - name: Financial runner policy regressions",
+    "        shell: bash",
+    "        run: |",
+    "          set -euo pipefail",
+    "          python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py",
+    "          python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py",
+    "          python3 -m unittest discover -s scripts/tests -p test_account_financial_families_postgres.py",
+    "          python3 -m unittest discover -s scripts/tests -p test_go_test_contract.py",
+    "          python3 -m unittest discover -s scripts/tests -p test_financial_owners.py",
+    "          policy_python=\"${{ steps.financial-policy-python.outputs.python-path }}\"",
+    "          policy_library=\"$(dirname \"$(dirname \"$policy_python\")\")/lib\"",
+    "          python3 scripts/ci-fixture-process.py --receipt \"$PINVOU_CI_RESOURCE_LEDGER/financial-policy-process.json\" -- env \"LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\" \"$policy_python\" -m unittest discover -s scripts/tests -p test_account_financial_ci.py",
+  ].join("\n"));
+}
+
+test("family policy commands cannot be removed, skipped or made advisory", () => {
+  const job = jobBlock("account-platform-test");
+  assertFinancialFamilyPolicy(job);
+  for (const module of ["test_account_financial_families_postgres.py", "test_go_test_contract.py"]) {
+    const command = `          python3 -m unittest discover -s scripts/tests -p ${module}`;
+    for (const replacement of ["", command + " || true"]) {
+      assert.ok(job.includes(command));
+      assert.throws(() => assertFinancialFamilyPolicy(job.replace(command, () => replacement)));
+    }
+  }
+  for (const field of ["if: ${{ false }}", "continue-on-error: true"]) {
+    assert.throws(() => assertFinancialFamilyPolicy(job.replace("      - name: Financial runner policy regressions\n",
+      `      - name: Financial runner policy regressions\n        ${field}\n`)));
+  }
+});
+
+
+const portalRedisServiceLines = [
+  "      portal-redis:",
+  "        image: redis:8.2-alpine@sha256:fe9daae35cd4fd6ec22416aa4fe0cf6b3e36741e06ff45b9986253fe2a81c041",
+  "        ports:", '          - "127.0.0.1::6379"',
+  "        options: >-", "          --rm", "          --memory 256m", "          --memory-swap 256m",
+  '          --health-cmd "redis-cli ping"', "          --health-interval 5s", "          --health-timeout 5s", "          --health-retries 12",
+];
+function assertPortalRedisSteps(job) {
   const text = job.replaceAll("\r\n", "\n");
-  // These are exactly two approved ephemeral services, not permission for arbitrary
+  const specifications = [
+    ["Verify Portal Redis service isolation", [
+      "        id: portal-redis", "        env:", "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}",
+      "        run: |", "          python3 -m unittest discover -s scripts/tests -p test_portal_redis.py", "          python3 scripts/account-ci-redis.py",
+    ]],
+    ["Require real Portal Redis admission and session contracts", [
+      "        timeout-minutes: 12", "        env:",
+      ...[["URL","url"],["PORT","port"],["RUN_ID","run_id"],["OWNER_ID","owner_id"],["CONTAINER_ID","container_id"]].map(([name,key]) => `          PINVOU_PORTAL_TEST_REDIS_${name}: \u0024{{ steps.portal-redis.outputs.${key} }}`),
+      "          PINVOU_PORTAL_TEST_REDIS_PROFILE: ci-owned", "        run: >-",
+      "          python3 scripts/ci-fixture-process.py",
+      '          --receipt "$PINVOU_CI_RESOURCE_LEDGER/portal-redis-process.json" --',
+      '          python3 scripts/test-portal-redis.py --log "$PINVOU_CI_RESOURCE_LEDGER/portal-redis-tests.jsonl"',
+    ]],
+    ["Stop owned temporary Portal Redis service", [
+      "        if: ${{ always() }}", "        env:",
+      "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "        run: python3 scripts/account-ci-redis.py --stop",
+    ]],
+  ];
+  const steps = specifications.map(([name, body]) => {
+    const step = namedStep(text,name);
+    assert.equal(step.trimEnd(), [`      - name: ${name}`, ...body].join("\n"));
+    return step;
+  });
+  assert.ok(text.indexOf(steps[0]) < text.indexOf(steps[1]) && text.indexOf(steps[1]) < text.indexOf(steps[2]), "Redis identity admission, consumers and retirement must remain ordered");
+  return steps;
+}
+
+function assertFiniteAuditPGSetup(job) {
+  assertFinancialFamilyPolicy(job);
+  const text = job.replaceAll("\r\n", "\n");
+  // These are exactly two approved PostgreSQL services plus one bounded Portal Redis,
   // services, production credentials, public ports or persistent volumes.
   const service = text.match(/^ {4}services:\n[\s\S]*?(?=^ {4}\S|$(?![\s\S]))/m);
   assert.ok(service, "isolated audit PostgreSQL service not found");
   assert.equal(service[0].trimEnd(), [
     "    services:",
+    ...portalRedisServiceLines,
     "      audit-export-postgres:",
     "        image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea",
     "        env:",
@@ -465,9 +831,9 @@ function assertFiniteAuditPGSetup(job) {
     "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}",
     "        run: |",
     "          python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py",
-    "          python3 scripts/account-ci-postgres.py --profile core",
+    "          python3 scripts/account-ci-postgres.py --profile core --with-portal-redis",
   ].join("\n"));
-  for (const name of [existingBrokerStepName, auditPGStepName]) {
+  for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName, historyPGStepName]) {
     assert.ok(text.indexOf(preflight) < text.indexOf(namedStep(text, name)),
       `service identity verification must precede ${name}`);
   }
@@ -492,12 +858,13 @@ function assertFiniteAuditPGSetup(job) {
     "        if: ${{ always() }}", "        env:",
     "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}",
     "        run: |",
-    "          python3 scripts/account-ci-postgres.py --profile core --stop-owned-services",
+    "          python3 scripts/account-ci-postgres.py --profile core --with-portal-redis --stop-owned-services",
   ].join("\n"));
-  for (const name of [existingBrokerStepName, auditPGStepName]) {
+  for (const name of [existingBrokerStepName, tokenOutboxStepName, auditPGStepName, historyPGStepName]) {
     assert.ok(text.indexOf(namedStep(text, name)) < text.indexOf(stop), "stop must follow database consumers");
   }
   let outsidePGSteps = text.replace(pg, "").replace(preflight, "").replace(stop, "");
+  for (const redisStep of assertPortalRedisSteps(text)) outsidePGSteps = outsidePGSteps.replace(redisStep, "");
   // Admit only this bounded acceptance step before enforcing the job-wide ban
   // on incidental database inputs. The complete step is fixed deliberately.
   const existingBroker = namedStep(text, existingBrokerStepName);
@@ -519,6 +886,50 @@ function assertFiniteAuditPGSetup(job) {
     "          npm --prefix account-platform run test:existing-broker",
   ].join("\n"));
   outsidePGSteps = outsidePGSteps.replace(existingBroker, "");
+  // Admit precisely the bounded readonly export consumer of the verified audit
+  // service; commands, identities and no-skip evidence cannot be broadened.
+  const historyPG = namedStep(text, historyPGStepName);
+  assert.equal(historyPG.trimEnd(), [
+    "      - name: Read-only history export on public domain schemas",
+    "        timeout-minutes: 6",
+    "        shell: bash",
+    "        env:",
+    "          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}",
+    "          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.audit_port }}",
+    "          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.audit_system }}",
+    "          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.audit_directory }}",
+    "        run: |",
+    "          set -euo pipefail",
+    "          test -x \"$PINVOU_HISTORY_EXPORT_TEST_PWSH\"",
+    "          test -x \"$PINVOU_HISTORY_EXPORT_TEST_PGTOOLS/pg_dump\"",
+    "          python3 scripts/ci-fixture-process.py --receipt \"$RUNNER_TEMP/history-export-process.json\" -- go -C account-platform test -race -json -tags=nomsgpack -mod=readonly -count=1 -timeout 4m -run '^TestHistoryExportPublicDomainsPostgres$' ./internal/billingschema | tee \"$RUNNER_TEMP/history-export.jsonl\"",
+    "          python3 - \"$RUNNER_TEMP/history-export.jsonl\" <<'PY'",
+    "          import json, pathlib, sys",
+    "          events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]",
+    "          root = \"TestHistoryExportPublicDomainsPostgres\"",
+    "          terminal = {e[\"Test\"]: e[\"Action\"] for e in events if e.get(\"Test\") and e.get(\"Action\") in (\"pass\", \"fail\", \"skip\")}",
+    "          assert terminal == {name: \"pass\" for name in [root, *(root + \"/\" + d for d in (\"account\", \"billing\", \"token\"))]}, \"history export public-domain roots failed or skipped\"",
+    "          PY",
+  ].join("\n"));
+  outsidePGSteps = outsidePGSteps.replace(historyPG, "");
+  const tokenOutbox = namedStep(text, tokenOutboxStepName);
+  assert.equal(tokenOutbox.trimEnd(), [
+    `      - name: ${tokenOutboxStepName}`,
+    "        timeout-minutes: 4", "        shell: bash", "        env:",
+    "          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}",
+    ...pgIdentityEnvironment("broker").map(value => `          ${value}`),
+    "          PINVOU_TEST_NATS_SERVER_BINARY: ${{ runner.temp }}/pinvou-test-nats-server",
+    "        run: |", "          set -euo pipefail",
+    "          # Reuse only the preceding step's pinned executable; the test starts",
+    "          # its own TLS broker and applies public Token migrations. The shared",
+    "          # supervisor owns the complete Python/Go/NATS process tree, including",
+    "          # panic, timeout and cancellation; always-run ledger recovery verifies it.",
+    "          python3 -m unittest discover -s scripts/tests -p test_token_outbox_acceptance.py",
+    '          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/token-outbox-process.json" -- npm --prefix account-platform run test:token-outbox',
+  ].join("\n"));
+  assert.ok(text.indexOf(existingBroker) < text.indexOf(tokenOutbox),
+    "Token outbox must follow the pinned NATS executable verification");
+  outsidePGSteps = outsidePGSteps.replace(tokenOutbox, "");
 
   assert.doesNotMatch(outsidePGSteps, /DATABASE_URL|DATABASE_PROFILE|F17_TEST_|PINVOU_ACCOUNT_CI_PG_|ACCOUNT_CI_SERVICES|ACCOUNT_FINANCIAL_SERVICES/);
   const defaultStep = namedStep(job, goStepName);
@@ -555,7 +966,18 @@ function assertFiniteFinancialPGSetup(job) {
     "          --rm", "          --cpus 2", "          --memory 1g", "          --memory-swap 1g",
     "          --health-cmd \"pg_isready -U postgres -d postgres\"",
     "          --health-interval 5s", "          --health-timeout 5s", "          --health-retries 12",
+    ...["account", "wallet"].flatMap(lane => [
+      `      financial-owner-${lane}-postgres:`,
+      "        # Empty image disables these extra services for the other five Jobs.",
+      "        image: ${{ matrix.group == 'owners' && 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea' || '' }}",
+      "        env:", "          POSTGRES_HOST_AUTH_METHOD: trust", "          POSTGRES_DB: postgres",
+      "        ports:", '          - "127.0.0.1::5432"', "        options: >-",
+      "          --rm", "          --cpus 1", "          --memory 1g", "          --memory-swap 1g",
+      '          --health-cmd "pg_isready -U postgres -d postgres"',
+      "          --health-interval 5s", "          --health-timeout 5s", "          --health-retries 12",
+    ]),
   ].join("\n"));
+  assert.match(text, /^      PINVOU_ACCOUNT_PG_PROFILE: \$\{\{ matrix.group == 'owners' && 'owners' \|\| 'financial' \}\}$/m);
   const guard = namedStep(text, "Verify complete financial CI group selection");
   assert.deepEqual(stepRun(text, "Verify complete financial CI group selection").trim().split("\n"),
     ["set -euo pipefail", "python3 scripts/check-account-financial-ci.py"]);
@@ -564,22 +986,30 @@ function assertFiniteFinancialPGSetup(job) {
   assert.equal(preflight.trimEnd(), [
     `      - name: ${pgPreflightStepName}`, "        id: account-pg", "        env:",
     "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "        run: |",
-    "          set -euo pipefail", "          python3 scripts/account-ci-postgres.py --profile financial",
+    "          set -euo pipefail", '          python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE"' ,
   ].join("\n"));
   const execute = namedStep(text, "Run isolated financial group");
   assert.equal(execute.trimEnd(), [
     "      - name: Run isolated financial group", "        shell: bash", "        env:",
     "          ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}",
+    "          PINVOU_CI_OWNER_PARALLEL: ${{ matrix.group == 'owners' && '1' || '0' }}",
+    "          ACCOUNT_FINANCIAL_OWNER_SERVICES: ${{ steps.account-pg.outputs.owners_services }}",
+    '          PINVOU_CI_FIXTURE_TEMPLATES: "1"',
+    '          PINVOU_CI_FIXTURE_TIMING: "1"',
     "          PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}",
     ...pgIdentityEnvironment("financial").map(value => `          ${value}`),
     "        run: |", "          set -euo pipefail",
-    '          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP"',
+    "          diagnostics=\"$(mktemp -d \"$RUNNER_TEMP/financial-parallel-${ACCOUNT_FINANCIAL_GROUP}-XXXXXX\")\"",
+    "          python3 scripts/ci-fixture-process.py --receipt \"$PINVOU_CI_RESOURCE_LEDGER/financial-process.json\" -- python3 scripts/test-token-financial-postgres.py --group \"$ACCOUNT_FINANCIAL_GROUP\" --verify-fixture-cache 2>&1 | tee \"$diagnostics/group.log\"",
+    "          if [[ \"$ACCOUNT_FINANCIAL_GROUP\" == owners ]]; then",
+    "            PINVOU_FINANCIAL_CHILD_ARTIFACTS=\"$diagnostics/owners-families\" python3 scripts/ci-fixture-process.py --receipt \"$PINVOU_CI_RESOURCE_LEDGER/financial-families-process.json\" -- python3 scripts/test-account-financial-families-postgres.py 2>&1 | tee \"$diagnostics/owners-families.log\"",
+    "          fi",
   ].join("\n"));
   const stop = namedStep(text, pgStopStepName);
   assert.equal(stop.trimEnd(), [
     `      - name: ${pgStopStepName}`, "        if: ${{ always() }}", "        env:",
     "          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}", "        run: |",
-    "          python3 scripts/account-ci-postgres.py --profile financial --stop-owned-services",
+    '          python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE" --stop-owned-services' ,
   ].join("\n"));
   const retirement = namedStep(text, "Confirm Account test resource retirement");
   assert.deepEqual([...retirement.matchAll(/^        if: (.+)$/gm)].map(match => match[1]),
@@ -605,7 +1035,12 @@ test("independent financial services reject identity, profile and retirement mut
   for (const [before, after] of [
     ['"127.0.0.1::5432"', '"5432:5432"'],
     ["          --rm\n", ""], ["          --cpus 2", "          --cpus 4"],
-    ["--profile financial", "--profile core"],
+    ['--profile "$PINVOU_ACCOUNT_PG_PROFILE"', '--profile core'],
+    ["matrix.group == 'owners' && 'owners' || 'financial'", "'financial'"],
+    ["          --cpus 1", "          --cpus 2"],
+    ["matrix.group == 'owners' && 'mirror.gcr.io/library/postgres", "matrix.group != 'owners' && 'mirror.gcr.io/library/postgres"],
+    ["outputs.owners_services", "outputs.financial_services"],
+    ['--profile "$PINVOU_ACCOUNT_PG_PROFILE"', '--profile "$PINVOU_ACCOUNT_PG_PROFILE" --with-portal-redis'],
     ['ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}', 'ACCOUNT_CI_SERVICES: ${{ toJSON(needs.other.outputs.services) }}'],
     ['ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}', 'ACCOUNT_FINANCIAL_GROUP: all'],
     ['outputs.financial_url', 'outputs.unrelated_url'],
@@ -613,7 +1048,7 @@ test("independent financial services reject identity, profile and retirement mut
     ['outputs.financial_system', 'outputs.unrelated_system'],
     ['outputs.financial_directory', 'outputs.unrelated_directory'],
     ['-- python3 scripts/test-token-financial-postgres.py', '-- python3 scripts/test-token-financial-postgres.py || true'],
-    ['python3 scripts/account-ci-postgres.py --profile financial --stop-owned-services', 'true'],
+    ['python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE" --stop-owned-services', 'true'],
     ['python3 scripts/ci-resource-ledger.py --recover', 'true'],
     ["      CGO_ENABLED: \"1\"", "      CGO_ENABLED: \"0\""],
   ]) {
@@ -1054,12 +1489,12 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
     // original suffix), which would make rejection pass for duplicated steps.
     const mutated = job.replace(step, () => changed);
     assert.equal(namedStep(mutated, name), changed, "mutation must preserve the literal step payload");
-    for (const required of [pgPreflightStepName, auditPGStepName, existingBrokerStepName]) {
+    for (const required of [pgPreflightStepName, auditPGStepName, existingBrokerStepName, tokenOutboxStepName]) {
       namedStep(mutated, required); // Missing/duplicate steps cannot satisfy a negative control.
     }
     assert.throws(() => assertFiniteAuditPGSetup(mutated), expected);
   };
-  for (const [name, service] of [[auditPGStepName, "audit"], [existingBrokerStepName, "broker"]]) {
+  for (const [name, service] of [[auditPGStepName, "audit"], [historyPGStepName, "audit"], [existingBrokerStepName, "broker"], [tokenOutboxStepName, "broker"]]) {
     const step = namedStep(job, name);
     const miswired = step.replace(`outputs.${service}_url`, "outputs.unrelated_url");
     assert.notEqual(miswired, step, "URL mutation must hit the selected consumer");
@@ -1074,6 +1509,20 @@ test("finite audit PostgreSQL exception rejects unsafe or unrelated service and 
       step.replace("        run:", () => "        if: ${{ false }}\n        run:"),
       name === auditPGStepName ? /finite audit PostgreSQL gate must execute unconditionally/ : undefined);
   }
+  const tokenOutbox = namedStep(job, tokenOutboxStepName);
+  for (const [before, after] of [
+    ["timeout-minutes: 4", "timeout-minutes: 40"],
+    ["${{ runner.temp }}/pinvou-test-nats-server", "/unverified/nats-server"],
+    ["python3 -m unittest discover -s scripts/tests -p test_token_outbox_acceptance.py", "true"],
+    ["npm --prefix account-platform run test:token-outbox", "npm --prefix account-platform run test:token-outbox || true"],
+    ['python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/token-outbox-process.json" -- ', ""],
+  ]) {
+    rejectStepMutation(tokenOutboxStepName, tokenOutbox, tokenOutbox.replace(before, () => after));
+  }
+  assert.throws(() => assertFiniteAuditPGSetup(job.replace(tokenOutbox, "")));
+  const existingBroker = namedStep(job, existingBrokerStepName);
+  const earlyTokenOutbox = job.replace(tokenOutbox, "").replace(existingBroker, () => tokenOutbox + existingBroker);
+  assert.throws(() => assertFiniteAuditPGSetup(earlyTokenOutbox), /Token outbox must follow/);
   const preflight = namedStep(job, pgPreflightStepName);
   assert.throws(() => assertFiniteAuditPGSetup(job.replace(preflight, "")));
   rejectStepMutation(pgPreflightStepName, preflight,
@@ -1145,8 +1594,12 @@ test("Keycloak contract gate invokes the existing suite and propagates failure",
 test("Token financial PostgreSQL gate is required and cannot swallow a failed runner", () => {
   const paths = filterPaths(workflow, "account_platform");
   for (const path of ["scripts/test-token-financial-postgres.py", "scripts/test-financial-parallel.py",
+    "scripts/test-financial-owners.py", "scripts/tests/test_financial_owners.py",
     "scripts/tests/test_financial_parallel.py", "scripts/tests/test_token_financial_postgres.py",
-    "scripts/check-account-financial-ci.py", "scripts/tests/test_account_financial_ci.py"]) {
+    "scripts/check-account-financial-ci.py", "scripts/tests/test_account_financial_ci.py",
+    "scripts/test-account-financial-families-postgres.py", "scripts/account-financial-families.json",
+    "scripts/tests/test_account_financial_families_postgres.py", "scripts/go-test-contract.py",
+    "scripts/tests/test_go_test_contract.py"]) {
     assert.ok(paths.includes(path));
   }
   const job = jobBlock("account-financial-test");
@@ -1159,7 +1612,7 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
       const mock = `python3() { case "$*" in *check-account-financial-ci.py*) ${failedPhase === "guard" ? "return 7" : "return 0"};; *account-ci-postgres.py*) ${failedPhase === "postgres" ? "return 7" : "return 0"};; *ci-fixture-process.py*) ${failedPhase === "group" ? "return 7" : "return 0"};; *) return 99;; esac; }; export -f python3;\n`;
       const result = spawnSync(bash, ["-e", "-c", mock + run], {
         encoding: "utf8", timeout: 30_000, windowsHide: true,
-        env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: directory, ACCOUNT_FINANCIAL_GROUP: "token" },
+        env: { ...process.env, PINVOU_CI_RESOURCE_LEDGER: directory.replaceAll("\\", "/"), RUNNER_TEMP: directory.replaceAll("\\", "/"), ACCOUNT_FINANCIAL_GROUP: "token", PINVOU_ACCOUNT_PG_PROFILE: "financial" },
       });
       assert.equal(result.status, failedPhase === "none" ? 0 : 7,
         `${failedPhase} must preserve the selected gate result: ${result.stderr}`);
@@ -1167,6 +1620,29 @@ test("Token financial PostgreSQL gate is required and cannot swallow a failed ru
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("owners family execution follows restored owners and preserves either failure", () => {
+  const run = stepRun(jobBlock("account-financial-test"), "Run isolated financial group");
+  const directory = mkdtempSync(join(tmpdir(), "pinvou-family-order-"));
+  try {
+    const trace = join(directory, "calls").replaceAll("\\", "/");
+    for (const [group, failure, expected, calls] of [
+      ["owners", "none", 0, ["owners", "families"]],
+      ["owners", "owners", 7, ["owners"]],
+      ["owners", "families", 9, ["owners", "families"]],
+      ["token", "none", 0, ["token"]],
+    ]) {
+      writeFileSync(trace, "");
+      const mock = `python3() { case "$*" in *test-account-financial-families-postgres.py*) printf 'families\\n' >> "$FAMILY_TRACE"; ${failure === "families" ? "return 9" : "return 0"};; *test-token-financial-postgres.py*) printf '%s\\n' "$ACCOUNT_FINANCIAL_GROUP" >> "$FAMILY_TRACE"; ${failure === "owners" ? "return 7" : "return 0"};; *) return 99;; esac; }; export -f python3;\n`;
+      const result = spawnSync(bash, ["-e", "-c", mock + run], {
+        encoding: "utf8", timeout: 30_000, windowsHide: true,
+        env: { ...process.env, RUNNER_TEMP: directory.replaceAll("\\", "/"), PINVOU_CI_RESOURCE_LEDGER: directory.replaceAll("\\", "/"), ACCOUNT_FINANCIAL_GROUP: group, FAMILY_TRACE: trace },
+      });
+      assert.equal(result.status, expected, `${group}/${failure}: ${result.stderr}`);
+      assert.deepEqual(readFileSync(trace,"utf8").trim().split(/\r?\n/),calls);
+    }
+  } finally { rmSync(directory,{recursive:true,force:true}); }
 });
 
 test("named step fixtures exclude later steps and fail closed on missing names", () => {
@@ -1198,14 +1674,21 @@ test("required-gate rejects skipped applicable Go checks and permits unrelated s
 
 test('frontend shards are independently scheduled only on applicable Ready and queue trees', () => {
   const browser = jobBlock('frontend-browser-test');
-  assert.match(browser, /^    needs: changes$/m);
+  // Setup 工件化:分片经 needs 消费 frontend-setup 的单次构建,仍必须挂在
+  // changes 路由上(否则无前端改动的 PR 会拉起浏览器腿)。
+  assert.match(browser, /^    needs: \[changes, frontend-setup\]$/m);
+  assert.match(jobBlock('frontend-setup'), /^    needs: changes$/m);
   assert.match(browser, /^      fail-fast: false$/m);
   assert.match(browser, /^      max-parallel: 4$/m);
   assert.match(browser, /^        shard: \[1, 2, 3, 4\]$/m);
   assert.doesNotMatch(browser, /--receipt.*frontend-logic|-- npm test/);
   assert.doesNotMatch(jobBlock('frontend-test'), /run-frontend-smokes\.mjs/);
-  for (const name of ['Vite build', 'Vite web build (remote relay)', 'Verify embedded Account Portal assets are current',
-    'Initialize owned test resource ledger', 'Confirm test resource retirement']) namedStep(browser, name);
+  // 构建/安装步只允许出现在 frontend-setup(setup ×5 → ×1),分片内不得回流。
+  for (const name of ['Vite build', 'Vite web build (remote relay)', 'Verify embedded Account Portal assets are current']) {
+    namedStep(jobBlock('frontend-setup'), name);
+    assert.throws(() => namedStep(browser, name));
+  }
+  for (const name of ['Initialize owned test resource ledger', 'Confirm test resource retirement']) namedStep(browser, name);
   for (const name of ['Ready PR 定向浏览器 smoke', 'Merge Queue diff-selected browser smoke']) {
     const run = stepRun(browser, name);
     assert.match(run, /^set -euo pipefail$/m);
@@ -1218,7 +1701,7 @@ test('frontend shards are independently scheduled only on applicable Ready and q
       for (const release of ['true', 'false']) for (const reused of [true, false]) {
         const actual = runInNewContext(expression, {
           github: { event_name: event, event: { action: 'synchronize', pull_request: { draft } } },
-          needs: { changes: { outputs: { frontend, pet: 'false', pure_release_backflow: release,
+          needs: { 'frontend-setup': { result: 'success' }, changes: { outputs: { frontend, pet: 'false', pure_release_backflow: release,
             reuse_verified: reused ? 'true' : 'false', reused_jobs: '["frontend-browser-test"]' } } },
           cancelled: () => false, fromJSON: JSON.parse, contains: (items, value) => items.includes(value),
         });
@@ -1318,7 +1801,7 @@ test("MCP checks are selected by their inputs and fail closed on unknown routing
     ".github/workflows/pr-check.yml",
   ]) assert.ok(paths.includes(input), `MCP input ${input} must select its tests`);
 
-  const job = workflow.split("\n  fast-gate:")[1].split("\n  frontend-test:")[0];
+  const job = workflow.split("\n  fast-gate:")[1].split("\n  frontend-setup:")[0];
   assert.doesNotMatch(job, /\n    needs: changes\s*\n/);
   const condition = "steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000))";
   for (const name of [
@@ -1523,6 +2006,9 @@ const frontendProbeInstallStep = "Install Account Platform probe dependencies";
 const frontendLogicStep = "前端逻辑测试 (pet 全套 + diff parser + markdown)";
 
 function assertFrontendProbeDependencies(text) {
+  // Setup 工件化:三次 vite build 在 frontend-setup 一次完成,npm ci 保留在
+  // 消费方(网络绑定、CPU 低)。AP probe 依赖安装在 frontend-test,原「安装
+  // 先于 npm test」次序契约保持;另钉住消费方 needs 解线。
   const job = jobBlock("frontend-test", text).replaceAll("\r\n", "\n");
   assert.match(job, /^ {8}working-directory: pinvou3-app$/m);
   const install = namedStep(job, frontendProbeInstallStep);
@@ -1531,6 +2017,7 @@ function assertFrontendProbeDependencies(text) {
     "The logic test loads AP dependencies on Draft too, in the inherited app cwd");
   assert.ok(job.indexOf(install) < job.indexOf(namedStep(job, frontendLogicStep)),
     "AP tools must be installed before npm test module discovery");
+  assert.match(job, /^ {4}needs: \[changes, frontend-setup\]$/m);
   const setup = job.match(/^ {6}- uses: actions\/setup-node@\S+\n[\s\S]*?(?=^ {6}- |$(?![\s\S]))/m);
   assert.ok(setup, "frontend setup-node block not found");
   assert.match(setup[0], /^ {12}account-platform\/package-lock\.json$/m);
@@ -1545,6 +2032,7 @@ test("frontend probe tool dependencies are installed before logic tests on Draft
 });
 
 test("frontend probe dependency guard rejects incomplete or conditional installation and missing imports", () => {
+  // Setup 工件化:三次 build 在 frontend-setup,AP probe 安装保留在 frontend-test。
   const job = jobBlock("frontend-test");
   const install = namedStep(job, frontendProbeInstallStep);
   const variants = [
@@ -1577,6 +2065,31 @@ function inputSelects(text, filter, input) {
     && !patterns.some(pattern => pattern.startsWith("!") && matchesGlob(input, pattern.slice(1)));
 }
 
+function assertHistoryExportRouting(text) {
+  for (const input of ["scripts/export-account-history.ps1", "scripts/account-platform-history-export-tools.sh",
+    "account-platform/test/integration/history-export-directory-race.ps1", "scripts/tests/test_account_history_key.py"]) {
+    assert.ok(inputSelects(text, "account_platform", input), `${input} alone must select the export fixture job`);
+  }
+  const job = jobBlock("account-platform-test", text);
+  const preparation = namedStep(job, "Prepare native history export tools");
+  const acceptance = namedStep(job, "Read-only history export on public domain schemas");
+  assert.doesNotMatch(preparation + acceptance, /^ {8}(?:if|continue-on-error):/m);
+  assert.match(stepRun(job, "Prepare native history export tools"), /ci-fixture-process\.py.*bash scripts\/account-platform-history-export-tools\.sh/);
+  assert.ok(job.indexOf(preparation) < job.indexOf(acceptance), "native tools must be prepared before the real fixture");
+  assert.match(stepRun(job, "Read-only history export on public domain schemas"), /\^TestHistoryExportPublicDomainsPostgres\$/);
+  assert.match(job, /needs\.changes\.outputs\.account_platform == 'true'/);
+  assert.match(jobBlock("required-gate", text), /ACCOUNT_PLATFORM_REQUIRED: \$\{\{ needs\.changes\.outputs\.account_platform \}\}/);
+}
+
+test("History export executable-only inputs select prepared real acceptance", () => {
+  assertHistoryExportRouting(workflow);
+  const withoutRoute = workflow.replace(/^ {14}- 'scripts\/export-account-history\.ps1'\r?\n/m, "");
+  assert.notEqual(withoutRoute, workflow);
+  assert.throws(() => assertHistoryExportRouting(withoutRoute));
+  const job = jobBlock("account-platform-test");
+  assert.throws(() => assertHistoryExportRouting(workflow.replace(namedStep(job, "Prepare native history export tools"), "")));
+});
+
 function assertAccountPlatformInputChecks(text) {
   assert.match(text, /predicate-quantifier: some-with-excludes/);
   for (const input of [handoffGenerator, documentBaselineChecker]) {
@@ -1590,7 +2103,9 @@ function assertAccountPlatformInputChecks(text) {
   assert.deepEqual(stepRun(account, generatedInputsStep).trim().split(/\r?\n/), [
     "set -euo pipefail", `node ${handoffGenerator} --check`, `node ${documentBaselineChecker}`,
   ]);
-  const frontend = jobBlock("frontend-test", text);
+  // Setup 工件化:Portal build 与 handoff 部署边界检查随构建迁入 frontend-setup
+  // (build:account-portal 只跑一次,检查紧随其后);次序契约保持不变。
+  const frontend = jobBlock("frontend-setup", text);
   const deployment = namedStep(frontend, handoffDeploymentStep);
   assert.match(deployment, /^ {8}shell: bash$/m);
   assert.doesNotMatch(deployment, /^ {8}(?:if|continue-on-error|working-directory|env):/m);
@@ -1620,7 +2135,8 @@ test("Account Platform generator/checker inputs reach exact applicable CI legs",
 test("Account Platform generator/checker CI guard rejects old routes and bypassed checks", () => {
   assertAccountPlatformInputChecks(workflow);
   const account = jobBlock("account-platform-test");
-  const frontend = jobBlock("frontend-test");
+  // Setup 工件化:变异面与 assertAccountPlatformInputChecks 同步迁到 frontend-setup。
+  const frontend = jobBlock("frontend-setup");
   const generated = namedStep(account, generatedInputsStep);
   const deployment = namedStep(frontend, handoffDeploymentStep);
   const portalBuild = namedStep(frontend, "Verify embedded Account Portal assets are current");
@@ -1681,10 +2197,10 @@ test("Account Platform generator/checker steps run real inputs and propagate fai
     put("account-platform/docs/requirements.md", "售价为 10 元\n");
     const catalog = execute("account-platform-test", generatedInputsStep);
     assert.equal(catalog.status, 1); assert.match(catalog.stderr, /baseline contains runtime catalog facts/);
-    const cleanDeployment = execute("frontend-test", handoffDeploymentStep, join(directory, "pinvou3-app"));
+    const cleanDeployment = execute("frontend-setup", handoffDeploymentStep, join(directory, "pinvou3-app"));
     assert.equal(cleanDeployment.status, 0, cleanDeployment.stderr);
     put("account-platform/internal/portal/static/unsafe.js", "navigator.serviceWorker.register('/controlled-worker.js');\n");
-    const worker = execute("frontend-test", handoffDeploymentStep, join(directory, "pinvou3-app"));
+    const worker = execute("frontend-setup", handoffDeploymentStep, join(directory, "pinvou3-app"));
     assert.equal(worker.status, 1); assert.match(worker.stderr, /Service Worker registration may cover/);
   } finally {
     assert.ok(directory.startsWith(join(tmpdir(), "pinvou-generated-ci-")));
@@ -1800,6 +2316,29 @@ test("credential origin browser matrix shell rejects failed, empty or skipped re
   }
 });
 
+
+test("Portal real Redis gate rejects changed identity, skipped execution and unsafe lifecycle", () => {
+  const job = jobBlock("account-platform-test").replaceAll("\r\n", "\n");
+  assertFiniteAuditPGSetup(job);
+  const stop = namedStep(job, "Stop owned temporary Portal Redis service");
+  const gatedStop = stop.replace("if: ${{ always() }}", "if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}");
+  assert.notEqual(gatedStop,stop);
+  assert.throws(() => assertFiniteAuditPGSetup(job.replace(stop,gatedStop)));
+  for (const [before, after] of [
+    ['"127.0.0.1::6379"','"0.0.0.0::6379"'],
+    ["redis:8.2-alpine@sha256:fe9daae35cd4fd6ec22416aa4fe0cf6b3e36741e06ff45b9986253fe2a81c041","redis:latest"],
+    ["PINVOU_PORTAL_TEST_REDIS_PROFILE: ci-owned","PINVOU_PORTAL_TEST_REDIS_PROFILE: local-owned"],
+    ["PINVOU_PORTAL_TEST_REDIS_RUN_ID: ${{ steps.portal-redis.outputs.run_id }}","PINVOU_PORTAL_TEST_REDIS_RUN_ID: another-job"],
+    ['python3 scripts/test-portal-redis.py --log "$PINVOU_CI_RESOURCE_LEDGER/portal-redis-tests.jsonl"','true'],
+    ['python3 scripts/account-ci-redis.py --stop','python3 scripts/account-ci-redis.py --stop || true'],
+    ["Verify Portal Redis service isolation","Missing Portal preflight"],
+  ]) {
+    const mutant = job.replace(before,after);
+    assert.notEqual(mutant,job);
+    assert.throws(() => assertFiniteAuditPGSetup(mutant));
+  }
+});
+
 test('all Linux frontend test entry points isolate their whole fixture tree after preparation', () => {
   const job = jobBlock('frontend-test');
   const logic = namedStep(job, '前端逻辑测试 (pet 全套 + diff parser + markdown)');
@@ -1811,5 +2350,112 @@ test('all Linux frontend test entry points isolate their whole fixture tree afte
     assert.match(preflight, /PINVOU_TEST_NETWORK_ISOLATION: "1"/);
     assert.doesNotMatch(preflight, /^ {8}(?:if|continue-on-error):/m);
     assert.match(preflight, /python3 -m unittest discover -s \.\.\/scripts\/tests -p test_ci_browser_network\.py -v/);
+  }
+});
+
+function assertFrontendUploadRecovery(text) {
+  const setup = jobBlock("frontend-setup", text);
+  const primary = namedStep(setup, frontendUploadStep);
+  const retry = namedStep(setup, frontendUploadRetryStep);
+  const required = namedStep(setup, frontendUploadRequiredStep);
+  const line = (block, value) => block.split(uploadPolicyLF).includes(value);
+  const hasContinue = block => block.split(uploadPolicyLF).some(value => value.startsWith("        continue-on-error:"));
+  assert.ok(!setup.split(uploadPolicyLF).some(value => value.startsWith("    continue-on-error:")));
+  assert.ok(line(primary, "        id: frontend_setup_upload"));
+  assert.ok(line(primary, "        continue-on-error: true"));
+  assert.equal(stepCondition(setup, frontendUploadStep), "steps.frontend_bundle.outputs.transport == 'github'");
+  assert.ok(line(retry, "        id: frontend_setup_upload_retry"));
+  assert.equal(stepCondition(setup, frontendUploadRetryStep), "!cancelled() && steps.frontend_setup_upload.outcome == 'failure'");
+  assert.ok(!hasContinue(retry));
+  for (const step of [primary, retry]) {
+    assert.ok(line(step, "        uses: actions/upload-artifact@v7"));
+    assert.ok(line(step, "          name: frontend-setup-bundle"));
+    assert.ok(line(step, "          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz"));
+    assert.ok(line(step, "          if-no-files-found: error"));
+    assert.ok(line(step, "          retention-days: 1"));
+  }
+  assert.ok(line(retry, "          overwrite: true"));
+  assert.equal(stepCondition(setup, frontendUploadRequiredStep), "always() && !cancelled()");
+  assert.ok(!hasContinue(required));
+  assert.ok(line(required, "        shell: bash"));
+  assert.ok(line(required, "          FRONTEND_TRANSPORT: ${{ steps.frontend_bundle.outputs.transport }}"));
+  assert.ok(line(required, "          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}"));
+  assert.ok(line(required, "          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}"));
+  assert.ok(line(required, "          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz"));
+  const run = stepRun(setup, frontendUploadRequiredStep);
+  assert.ok(run.includes('case "$FRONTEND_TRANSPORT:$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in'));
+  assert.ok(run.includes("github:success:skipped|github:failure:success) ;;"));
+  assert.ok(run.includes("lan:skipped:skipped) ;;"));
+  assert.ok(run.includes('[[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]'));
+  assert.ok(setup.indexOf(namedStep(setup, "Pack frontend setup bundle")) < setup.indexOf(primary));
+  assert.ok(setup.indexOf(primary) < setup.indexOf(retry) && setup.indexOf(retry) < setup.indexOf(required));
+  for (const name of ["安装前端依赖", "Vite build", "Verify embedded Account Portal assets are current",
+    "Verify credential handoff built deployment boundary", "Vite web build (remote relay)", "Pack frontend setup bundle"]) {
+    assert.ok(!hasContinue(namedStep(setup, name)));
+  }
+}
+
+test("frontend setup upload recovery keeps successful retry and strict artifact gate", () => {
+  assertFrontendUploadRecovery(workflow);
+});
+
+test("frontend setup upload policy rejects broad retry, swallowed failures and payload drift", () => {
+  const setup = jobBlock("frontend-setup");
+  const primary = namedStep(setup, frontendUploadStep);
+  const retry = namedStep(setup, frontendUploadRetryStep);
+  const required = namedStep(setup, frontendUploadRequiredStep);
+  const variants = [
+    setup.replace(primary, primary.replace("        continue-on-error: true" + uploadPolicyLF, "")),
+    setup.replace(primary, primary.replace("id: frontend_setup_upload", "id: unrelated_upload")),
+    setup.replace(retry, retry.replace("!cancelled() && steps.frontend_setup_upload.outcome == 'failure'", "failure()")),
+    setup.replace(retry, retry.replace("steps.frontend_setup_upload.outcome", "steps.frontend_setup_upload.conclusion")),
+    setup.replace(retry, retry.replace("        uses:", "        continue-on-error: true" + uploadPolicyLF + "        uses:")),
+    setup.replace(retry, retry.replace("frontend-setup-bundle.tar.gz", "unrelated.tar.gz")),
+    setup.replace(primary, primary.replace("if-no-files-found: error", "if-no-files-found: warn")),
+    setup.replace(required, ""),
+    setup.replace(required, required.replace("always() && !cancelled()", "success()")),
+    setup.replace(required, required.replace("        shell:", "        continue-on-error: true" + uploadPolicyLF + "        shell:")),
+    setup.replace(required, required.replace("[[ ! -s", "[[ ! -e")),
+    setup.replace(required, required.replace("lan:skipped:skipped) ;;", "lan:skipped:skipped) error ;;")),
+    setup.replace(primary, primary.replace("if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}" + uploadPolicyLF, "")),
+  ];
+  for (const variant of variants) assert.throws(() => assertFrontendUploadRecovery(workflow.replace(setup, variant)));
+});
+
+test("frontend upload retry observes only primary outcome and preserves cancellation", () => {
+  const setup = jobBlock("frontend-setup");
+  for (const cancelled of [false, true]) {
+    for (const outcome of ["success", "failure", "skipped", "cancelled", "timed_out", ""]) {
+      const context = { cancelled: () => cancelled, always: () => true,
+        steps: { frontend_setup_upload: { outcome } } };
+      assert.equal(runInNewContext(stepCondition(setup, frontendUploadRetryStep), context), !cancelled && outcome === "failure");
+      assert.equal(runInNewContext(stepCondition(setup, frontendUploadRequiredStep), context), !cancelled);
+    }
+  }
+});
+
+test("frontend upload final shell accepts exactly recovered outcomes with a nonempty bundle", () => {
+  const run = stepRun(jobBlock("frontend-setup"), frontendUploadRequiredStep);
+  const directory = mkdtempSync(join(tmpdir(), "frontend-upload-policy-"));
+  try {
+    const file = join(directory, "frontend-setup-bundle.tar.gz");
+    const cases = [["github", "success", "skipped", true], ["github", "failure", "success", true],
+      ["lan", "skipped", "skipped", true],
+      ["github", "failure", "failure", false], ["github", "failure", "skipped", false], ["github", "failure", "cancelled", false],
+      ["github", "cancelled", "skipped", false], ["github", "skipped", "skipped", false], ["github", "success", "success", false],
+      ["lan", "success", "skipped", false], ["github", "", "", false]];
+    for (const [transport, primary, retry, accepted] of cases) {
+      for (const payload of accepted ? ["nonempty", "empty", "missing"] : ["nonempty"]) {
+        rmSync(file, { force: true });
+        if (payload !== "missing") writeFileSync(file, payload === "empty" ? "" : "fixed bundle");
+        const result = spawnSync(bash, ["-c", run], { cwd: directory, encoding: "utf8", timeout: 30_000, windowsHide: true,
+          env: { ...process.env, FRONTEND_TRANSPORT: transport, FIRST_UPLOAD_OUTCOME: primary, RETRY_UPLOAD_OUTCOME: retry,
+            FRONTEND_SETUP_BUNDLE: "frontend-setup-bundle.tar.gz" } });
+        assert.equal(result.status, accepted && payload === "nonempty" ? 0 : 1,
+          `${transport}/${primary}/${retry}/${payload}: ${result.error?.message || result.stderr}`);
+      }
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });

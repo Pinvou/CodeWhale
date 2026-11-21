@@ -109,18 +109,22 @@ pub(crate) async fn set_voice_shortcut_enabled(enabled: bool) -> Result<(), Stri
 /// arbitrary window as the recording window and hijack the global Alt gesture.
 /// The returned bool tells whether the claim/release landed; a failed claim
 /// fails the recording start before any microphone is opened.
+///
+/// The handle is injected as a `Webview`, not a `WebviewWindow`: the main
+/// window hosts browser-tab child WebViews (agent-browser-*), and Tauri's
+/// single-WebView `WebviewWindow` injection fails once any tab exists.
 #[tauri::command]
 pub(crate) fn set_voice_shortcut_recording(
-    window: tauri::WebviewWindow,
+    webview: tauri::Webview,
     label: Option<String>,
     token: String,
 ) -> Result<bool, String> {
     if let Some(label) = &label {
-        if label != window.label() {
+        if label != webview.label() {
             return Err("voice shortcut recording label must match the calling window".to_string());
         }
     }
-    crate::features::voice_shortcut::set_recording_owner(window.label(), &token, label.is_some())
+    crate::features::voice_shortcut::set_recording_owner(webview.label(), &token, label.is_some())
 }
 
 impl VoiceCommandError {
@@ -541,8 +545,9 @@ fn voice_postprocess_changed(mode: &str, text: &str, draft_text: Option<&str>) -
 }
 
 /// voice 域的推理控制薄壳：dialect 判定与请求体写入统一委托
-/// `core::reasoning_dialect`（与 review/memory 同一实现；本域的 preset 分发
-/// 保留 memory 同款的 model-name 回退，见下方函数注释）。
+/// `core::reasoning_dialect`（与 memory 同一实现；review 自 2026-11-06 起改走
+/// 永不关闭的 features/review::apply_review_thinking_controls，不再经本模块。
+/// 本域的 preset 分发保留 memory 同款的 model-name 回退，见下方函数注释）。
 fn apply_voice_reasoning_controls(
     body: &mut Value,
     preset: crate::platform::prefs::ModelPreset,
@@ -740,16 +745,22 @@ async fn call_voice_postprocess_model(
     let max_tokens = voice_postprocess_max_tokens(mode, retry);
     let mut body = voice_postprocess_request_body(model_name, &system, &user, max_tokens);
     apply_voice_reasoning_controls(&mut body, preset, &bridge.provider(), &base_url, model_name);
-    let request = crate::core::model_endpoint::with_opencode_session_header(
+    let mut request = crate::core::model_endpoint::with_opencode_session_header(
         client.post(format!(
             "{}/chat/completions",
             base_url.trim_end_matches('/')
         )),
         &base_url,
         bridge.opencode_conversation_key("voice-postprocess"),
-    )
-    .bearer_auth(bridge.api_key())
-    .json(&body);
+    );
+    // A keyless-declared endpoint receives no Authorization header at all —
+    // an empty `Bearer ` would contradict the toggle's "no credentials are
+    // sent" contract (keyed records keep the bearer; undeclared empty-key
+    // records keep the historical empty-bearer shape).
+    if !bridge.effective_model_declares_no_auth() {
+        request = request.bearer_auth(bridge.api_key());
+    }
+    let request = request.json(&body);
     // One ID per actual generation. The proxy reuses it for transport/401
     // retries; a content retry changes facts and therefore enters here anew.
     let request = match bridge
@@ -1073,9 +1084,12 @@ use voice_asr_domain::*;
 
 /// 麦克风权限重置命令：feature 侧为裸 fn（原 microphone_permission 转发壳已扁平化），
 /// 不适用 domain 模块的 passthrough 宏，直接薄转发。
+/// The handle is injected as a `Webview`, not a `WebviewWindow`: the main
+/// window hosts browser-tab child WebViews (agent-browser-*), and Tauri's
+/// single-WebView `WebviewWindow` injection fails once any tab exists.
 #[tauri::command]
-pub async fn reset_microphone_permission(window: tauri::WebviewWindow) -> Result<bool, String> {
-    crate::features::voice::reset_microphone_permission(window).await
+pub async fn reset_microphone_permission(webview: tauri::Webview) -> Result<bool, String> {
+    crate::features::voice::reset_microphone_permission(webview).await
 }
 async_command_passthrough!(voice_asr_domain, voice_asr_status() -> VoiceAsrStatus);
 async_command_passthrough!(

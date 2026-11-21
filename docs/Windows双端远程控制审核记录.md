@@ -214,7 +214,7 @@
 审核轮次 1（提交 f2796d15、d38abd0b、9f18061e）
 
 - 逐条核对：B 面板含开关、7 位码+秒级倒计时（aria-live 节流）、刷新、全状态、主控设备、模型来源、预授权工作区、立即断开、停止远程任务与只读审批，且无 Allow/Approve 入口；A 连接壳做码归一化、统一失效文案、隐藏窗口≠断开、显式断开；远程会话窗口覆盖模型来源（仅传 opaque modelId）、模式由能力快照决定、任务状态三语映射、result_unknown 提示、审批 A 决定、成果下载与离线副本标识；三语词条与 `ui_language_coverage` 通过。
-- 发现（major，已修复，DEV-21 关联）：B 面板与命令面都依赖 watchdog，但见第 14 节 DEV-10 修复；面板本身不轮询。
+- 发现（major，已修复，DEV-21 关联）：B 面板与命令面都依赖 watchdog，但见第 10 节 DEV-10 修复；面板本身不轮询。
 - 登记缺口（未修）：三个 UI 面未跑浏览器 smoke（puppeteer），当前证据为源码契约 + vite build；发布前需补 UI 冒烟与真机可访问性检查。
 - 验证：`controlled_device_panel_contract` 5、`connect_remote_device_contract` 5、`remote_conversation_contract` 5 通过；`npm run build:ui` 通过。
 - 结论：**REVIEW: PASS**（含 1 项已登记缺口）。

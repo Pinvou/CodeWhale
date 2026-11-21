@@ -83,6 +83,12 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
+	internal.POST("/payment-credit-admissions", serviceauth.Require("internal.account.payment-credit.admit"), httpserver.AdaptFunc(s.admitPaymentCredit))
+	internal.POST("/payment-credit-admissions/retention-check", serviceauth.Require("internal.account.payment-credit.admit"), httpserver.AdaptFunc(s.checkPaymentCreditRetention))
+	if s.profiles != nil {
+		internal.POST("/profile-revocation-receipts/claim", serviceauth.Require("internal.account.profile-revocation.claim"), httpserver.AdaptFunc(s.claimProfileRevocation))
+		internal.POST("/profile-revocation-receipts/confirm", serviceauth.Require("internal.account.profile-revocation.confirm"), httpserver.AdaptFunc(s.confirmProfileRevocation))
+	}
 	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account.closure.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.GET("/client-compatibility", serviceauth.Require("internal.client-compatibility.read"), httpserver.AdaptFunc(s.internalClientCompatibility))
 	internal.GET("/registration-bonus-eligibility/readiness", serviceauth.Require("internal.registration-bonus-eligibility.read"), httpserver.AdaptFunc(s.internalRegistrationBonusEligibilityReadiness))
@@ -134,6 +140,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	}
 	admin := protected.Group("/admin/v1")
 	s.registerPlatformRoleRoutes(admin)
+	s.registerCommerceRepairRoutes(admin)
 	admin.GET("/audit-logs", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLogs))
 	admin.GET("/audit-logs/:audit_id", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLog))
 	if s.auditExports != nil {
@@ -161,6 +168,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	}
 	admin.GET("/approval-policies", httpserver.AdaptFunc(s.adminApprovalPolicies))
 	admin.GET("/approval-requests", httpserver.AdaptFunc(s.adminApprovalRequests))
+	s.registerGrantRecoveryRoutes(admin)
 	admin.POST("/approval-requests", approvalpolicy.Require("APPROVAL_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateApprovalDraft))
 	admin.GET("/approval-requests/:approval_request_id", httpserver.AdaptFunc(s.adminApprovalRequest))
 	admin.PUT("/approval-requests/:approval_request_id", approvalpolicy.Require("APPROVAL_DRAFT_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateApprovalDraft))
@@ -227,6 +235,8 @@ func (s *Service) getAuthorizationContext(w http.ResponseWriter, r *http.Request
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the request could not be completed"
 	switch {
+	case errors.Is(err, ErrInvalidCommerceRepair):
+		status, code, message = http.StatusBadRequest, "INVALID_COMMERCE_REPAIR", "the commerce repair request is invalid"
 	case accountClosureSerializationConflict(r, err):
 		status, code, message = http.StatusConflict, "ACCOUNT_CLOSURE_SERIALIZATION_CONFLICT", "the account closure request conflicted with another request; retry with the same idempotency key"
 	case errors.Is(err, ErrInvalidAccountClosureRequest):

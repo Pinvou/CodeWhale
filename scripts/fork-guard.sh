@@ -79,11 +79,16 @@ fingerprints=(
   "T1|约束拒绝与配置注入关闭回归           |CodeWhale/crates/tui/src/client/transport_policy_tests.rs|async fn forkguard_host_http_policy_denial_fails_primary_and_vision_closed()"
   "T1|终态错误来源随真实选中结果传递     |CodeWhale/crates/tui/src/core/events.rs|error_source: Option<TurnErrorSource>,"
   "T1|普通路由本地准备失败保持运行时来源 |CodeWhale/crates/tui/src/core/engine/tests.rs|ordinary_route_preparation_failure_is_runtime_without_sending_http"
-  "T1|宿主显式保留新增来源字段兼容边界   |pinvou3-app/src-tauri/src/features/assistant/forwarder.rs|error_source: _,"
+  "T1|宿主只消费明确模型来源终态         |pinvou3-app/src-tauri/src/features/assistant/forwarder.rs|== Some(deepseek_tui::core::events::TurnErrorSource::Model))"
   "T2|待办缺省状态契约保持内容必填       |CodeWhale/crates/tui/src/tools/todo.rs|todo_item_status_is_optional_with_a_pending_default"
   "T2|待办缺省执行结果保持 pending       |CodeWhale/crates/tui/src/tools/todo.rs|work_update_treats_a_missing_status_as_pending"
+  "T2|会话读取面归入只读助手精确名匹配   |CodeWhale/crates/tui/src/tools/registry.rs|\"mcp_session-reader_read_session\""
+  "T2|会话列举面归入只读助手精确名匹配   |CodeWhale/crates/tui/src/tools/registry.rs|\"mcp_session-reader_list_sessions\""
   "T1|宿主输出预算复用真实组合导出       |CodeWhale/crates/tui/src/core/engine.rs|pub use context::route_effective_max_output_tokens;"
   "T1|输出预算导出覆盖真实组合结果       |CodeWhale/crates/tui/src/core/engine/context.rs|route_effective_max_output_tokens_matches_the_transport_composition"
+  "T1|Terminal error producer is explicit|CodeWhale/crates/tui/src/core/events.rs|pub enum TurnErrorSource"
+  "T1|Chosen failure owns its provenance|CodeWhale/crates/tui/src/core/engine/turn_loop.rs|struct TurnFailure"
+  "T1|Model and real local REPL EOF recover independently|pinvou3-app/src-tauri/src/features/behavior_telemetry/model_producer_tests.rs|fn forkguard_model_terminal_provenance_excludes_repl_eof_and_recovers"
   "T1|宿主单 execution-root 显式配置     |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|workspace_roots: _, // host exposes one execution root"
   "T1|宿主同步使用当前会话冻结根集合    |pinvou3-app/src-tauri/src/features/assistant/engine.rs|sync_session_workspace_roots(&session_id,"
   "T1|宿主同步保持非辅助会话完整根回归  |pinvou3-app/src-tauri/src/features/assistant/engine.rs|fn session_sync_root_selection_preserves_the_frozen_non_aux_keychain()"
@@ -372,6 +377,10 @@ fingerprints=(
   "APP|spawn 前安装 Engine session id   |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|cfg.session_id = Some(session_id.to_string());"
   "APP|产品白名单复用原生 allowed_tools |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|allowed_tools: Some(crate::features::assistant::tool_policy::allowed_tool_names())"
   "APP|宿主申报输出事实抵达钢丝回归        |pinvou3-app/src-tauri/src/features/assistant/route_wire_cap_tests.rs|fn host_declared_output_fact_reaches_the_wire_for_both_wire_policies"
+  "APP|审查线材预算与主对话同链钉        |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn main_wire_max_output_tokens_matches_engine_budget_for_k3"
+  "APP|审查思考永不关闭档位表钉        |pinvou3-app/src-tauri/src/features/review/mod.rs|fn review_thinking_controls_pick_lowest_tier_never_off"
+  "APP|审查线材型号规范化引擎同表钉    |pinvou3-app/src-tauri/src/features/review/mod.rs|fn canonical_wire_model_mirrors_engine_family_maps"
+  "APP|账目解码失败拒绝核账           |pinvou3-app/src-tauri/src/features/review/mod.rs|fn ledger_undecodable_issues_reject_reconcile"
   "APP|会话工具开关走动态禁用整形        |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|pub fn shape_disallowed_tools("
   "APP|subagent ledger root 透传       |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|cfg.subagent_state_root = Some(roots.ledger);"
   "APP|逐轮精确安全策略下发               |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|turn_tool_security: Some(Arc::new(turn_tool_security))"
@@ -477,6 +486,14 @@ fingerprints=(
   "APP|2000-step budget behavior regression       |pinvou3-app/src-tauri/src/features/assistant/platform/bridge.rs|fn engine_config_defaults_to_unified_step_budget_and_respects_override"
   "APP|chainable panic-hook registry module       |pinvou3-app/src-tauri/src/core/panic_hooks.rs|pub(crate) fn chain("
   "APP|worker panic redaction behavior regression |pinvou3-app/src-tauri/src/features/computer_use/backend.rs|fn worker_thread_panics_are_redacted_and_other_panics_forwarded"
+  # 定时会话 EngineCumulative 令牌核算内核（登记于 docs/fork-modifications.md §11）：
+  # 第一轮 Rust 死代码清扫已把单变体前身与管道移除一次，本 PR 随 #865 回流恢复；
+  # 变体在生产者接线（应用侧后续 PR）落地前仍仅由测试构造，属 tests-only 面。
+  # 回归测试沿用共享测试名（刻意不加 forkguard_ 前缀）。这些指纹把内核、共享
+  # 生存期编码与测试存在性拉进亚秒层——后续清扫或对齐同步无声移除它们时在此变红。
+  "APP|scheduled EngineCumulative accounting variant         |pinvou3-app/src-tauri/src/features/sessions/scheduled.rs|EngineCumulative {"
+  "APP|shared scheduled lifetime-total encoding              |pinvou3-app/src-tauri/src/features/sessions/retention.rs|fn scheduled_lifetime_total(base_total_tokens: u64, engine_total_tokens: u64) -> u64"
+  "APP|scheduled token-accounting contract regression       |pinvou3-app/src-tauri/src/features/sessions/tests.rs|fn scheduled_engine_token_accounting_preserves_persisted_totals_across_restarts"
 )
 
 for fp in "${fingerprints[@]}"; do
@@ -528,9 +545,43 @@ run_pinned_todo_schema_tests() {
 }
 run_pinned_todo_schema_tests || fail=1
 
+# #157 session-reader 只读分类不新增测试函数，而是扩展两个既有测试的表驱动
+# 条目；同样不落入 forkguard_ 过滤器，按名钉住防止改名或删除后静默 no-op。
+run_pinned_session_reader_tests() {
+  local test output
+  for test in \
+    mcp_read_helpers_remain_auto_and_eagerly_loaded \
+    mcp_actions_require_approval_with_exact_helper_matching; do
+    output=$( cd "$CODEWHALE" && cargo test -p codewhale-tui --lib --locked \
+      "$test" -- --test-threads=1 2>&1 ) || { printf '%s\n' "$output"; return 1; }
+    if ! grep -q '1 passed' <<<"$output"; then
+      printf '%s\n' "$output"
+      red "❌ pinned test $test did not run (renamed or deleted?)"
+      return 1
+    fi
+  done
+}
+run_pinned_session_reader_tests || fail=1
+
 echo
 bold "── 第 3 层：pinvou3-app forkguard 回归 ──"
 ( cd "$APP" && cargo test --lib --locked forkguard_ -- --test-threads=1 ) || fail=1
+# This registered producer regression lives in the feature-gated standalone
+# telemetry harness, not the lib harness above. Pin the full test path and
+# require execution: libtest otherwise succeeds even when it selects zero tests.
+run_model_provenance_test() {
+  local output
+  output=$( cd "$APP" && cargo test --test behavior_telemetry --locked \
+    --features behavior-telemetry-test \
+    behavior_telemetry::tests::model_producer::forkguard_model_terminal_provenance_excludes_repl_eof_and_recovers \
+    -- --exact --test-threads=1 2>&1 ) || { printf '%s\n' "$output"; return 1; }
+  printf '%s\n' "$output"
+  if ! grep -q 'test result: ok\. 1 passed; 0 failed; 0 ignored;' <<<"$output"; then
+    red "❌ pinned model provenance regression did not execute exactly once"
+    return 1
+  fi
+}
+run_model_provenance_test || fail=1
 ( cd "$APP" && cargo check --all-targets --features benchmark-hooks --locked ) || fail=1
 ( cd "$APP" && cargo test --lib --locked --features benchmark-hooks eval_send_message_op_isolated_from_gui_authority_and_installs_exact_policy -- --test-threads=1 ) || fail=1
 ( cd "$APP" && cargo test --lib --locked --features benchmark-hooks features::assistant::product_runtime::headless_bridge::tests -- --test-threads=1 ) || fail=1

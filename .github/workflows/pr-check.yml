@@ -7,6 +7,10 @@ name: PR Check
 #   compliance linkage + actionlint + Python determinism tests.
 # - merge-authored-audit: complete historical merge-resolution disclosure, independently bounded.
 # - changes:检测本 PR 有没有 Rust 代码、发布契约、L1 harness 或前端改动,给后续 job 做 paths filter。
+# - runner-pool-guard:显式校验 6 个自建池 vars 齐全,缺失即红并阻断 required-gate,
+#   消灭重任务静默回落 2 核托管机的降级路径。
+# - frontend-setup:前端依赖安装 + 三次 vite build 一次完成,产物打成工件供
+#   frontend-test 与 4 个 browser 分片复用(setup ×5 → ×1)。
 # - frontend-test:Draft/Ready lint、build、逻辑测试。
 # - frontend-browser-test:Ready PR 与 Merge Queue 按实际 base/head diff 选择
 #   smoke，四个独立 runner job 并行；未知或共享路径保守执行全部 smoke。
@@ -108,6 +112,9 @@ concurrency:
 # across runs (each job restores a fresh cache), so they are pure cache-bloat
 # under the 10GB quota. CodeWhale CI sets the same value in every lane.
 env:
+  # Use the verified official source; do not inherit a failing runner mirror.
+  RUSTUP_DIST_SERVER: https://static.rust-lang.org
+  RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
   CARGO_INCREMENTAL: "0"
 
 jobs:
@@ -191,8 +198,16 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
 
@@ -201,6 +216,8 @@ jobs:
           node --test
           scripts/tests/community-backflow-automation.test.mjs
           scripts/tests/community-backflow.test.mjs
+          scripts/tests/ci-artifact-tls-policy.test.cjs
+          scripts/tests/ci-artifact-upload-diagnostics.test.cjs
           scripts/tests/sync-version.test.mjs
           scripts/tests/select-frontend-smokes.test.mjs
           scripts/tests/run-frontend-smokes.test.mjs
@@ -212,6 +229,53 @@ jobs:
 
       - name: 校验 VERSION 与各版本文件一致
         run: node scripts/sync-version.mjs --check
+
+  # 2026-11-16 调查(g1 池普查)结论:所有重 job 的 runs-on 都是
+  # `vars.<池> || vars.<fallback> || '["ubuntu-22.04"]'` 回落链,六个池 vars
+  # 意外清空时 heavy/medium 任务会静默落到 2 核托管机跑(真实降级路径)。
+  # 本 job 把缺失变成 1 分钟内的显式红并阻断 required-gate,回落链保留为
+  # 防御纵深。runs-on 用托管 ubuntu-22.04 元门禁层:被检查对象正是这些 vars,
+  # 不能依赖它们(与 DCO/secret-scan 同层)。
+  runner-pool-guard:
+    name: runner-pool-guard
+    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: 校验自建 runner 池 vars 必须齐全
+        env:
+          PINVOU_LINUX_LIGHT_RUNNER: ${{ vars.PINVOU_LINUX_LIGHT_RUNNER }}
+          PINVOU_LINUX_MEDIUM_RUNNER: ${{ vars.PINVOU_LINUX_MEDIUM_RUNNER }}
+          PINVOU_LINUX_HEAVY_RUNNER: ${{ vars.PINVOU_LINUX_HEAVY_RUNNER }}
+          PINVOU_WINDOWS_LIGHT_RUNNER: ${{ vars.PINVOU_WINDOWS_LIGHT_RUNNER }}
+          PINVOU_WINDOWS_MEDIUM_RUNNER: ${{ vars.PINVOU_WINDOWS_MEDIUM_RUNNER }}
+          PINVOU_WINDOWS_HEAVY_RUNNER: ${{ vars.PINVOU_WINDOWS_HEAVY_RUNNER }}
+          PINVOU_LINUX_RUNNER: ${{ vars.PINVOU_LINUX_RUNNER }}
+          PINVOU_WINDOWS_RUNNER: ${{ vars.PINVOU_WINDOWS_RUNNER }}
+        run: |
+          missing=0
+          for name in \
+            PINVOU_LINUX_LIGHT_RUNNER \
+            PINVOU_LINUX_MEDIUM_RUNNER \
+            PINVOU_LINUX_HEAVY_RUNNER \
+            PINVOU_WINDOWS_LIGHT_RUNNER \
+            PINVOU_WINDOWS_MEDIUM_RUNNER \
+            PINVOU_WINDOWS_HEAVY_RUNNER; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "缺失仓库 vars: $name"
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "::error::runner 池 vars 缺失。这是显式失败:禁止静默回落到 2 核托管机跑重任务;请补齐上述 6 个 vars 后重跑。"
+            exit 1
+          fi
+          for name in PINVOU_LINUX_RUNNER PINVOU_WINDOWS_RUNNER; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::notice::fallback 中间层 $name 未设置(允许,但六个主层池 vars 必须齐全)"
+            fi
+          done
+          echo "6 个池 vars 齐全;fallback 中间层 linux=${PINVOU_LINUX_RUNNER:+已设置} windows=${PINVOU_WINDOWS_RUNNER:+已设置}"
 
   # PR、Merge Queue 与 main push 均按实际改动路径选择检查。
   # paths-filter v4 在 merge_group 上使用事件 base/head SHA 比较队列组合提交。
@@ -282,6 +346,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/ci-rust-policy.py
 
+      - name: Check generated release path contracts
+        run: node scripts/generate-remote-control-release-paths.mjs --check
+
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -293,6 +360,8 @@ jobs:
             account_platform:
               - 'scripts/ci-test-reuse.py'
               - 'scripts/ci-reuse-policy.py'
+              - 'scripts/ci-job-inputs.py'
+              - 'scripts/tests/test_ci_job_inputs.py'
               - 'scripts/tests/test_ci_reuse_policy.py'
               - 'scripts/tests/test_ci_test_reuse.py'
               - 'account-platform/**'
@@ -310,16 +379,29 @@ jobs:
               - 'pinvou3-app/src/shared/account-closure-i18n.js'
               - 'pinvou3-app/src/shared/i18n.js'
               - 'scripts/account-platform*'
+              - 'scripts/export-account-history.ps1'
+              - 'scripts/tests/test_account_history_key.py'
               - 'scripts/check-account-platform*'
               - 'scripts/build-credential-handoff.mjs'
               - 'scripts/check-recharge-product-document-baseline.mjs'
               - 'scripts/account-ci-postgres.py'
+              - 'scripts/account-ci-redis.py'
+              - 'scripts/test-portal-redis.py'
+              - 'scripts/tests/test_portal_redis.py'
               - 'scripts/tests/test_account_ci_postgres.py'
+              - 'scripts/tests/test_token_outbox_acceptance.py'
               - 'scripts/account-financial-test-durations.json'
               - 'scripts/test-financial-parallel.py'
+              - 'scripts/test-financial-owners.py'
               - 'scripts/check-account-financial-ci.py'
               - 'scripts/tests/test_account_financial_ci.py'
               - 'scripts/tests/test_financial_parallel.py'
+              - 'scripts/test-account-financial-families-postgres.py'
+              - 'scripts/account-financial-families.json'
+              - 'scripts/tests/test_account_financial_families_postgres.py'
+              - 'scripts/go-test-contract.py'
+              - 'scripts/tests/test_go_test_contract.py'
+              - 'scripts/tests/test_financial_owners.py'
               - 'scripts/test-token-financial-postgres.py'
               - 'scripts/tests/test_token_financial_postgres.py'
               - 'scripts/test-account-closure-postgres.py'
@@ -351,6 +433,8 @@ jobs:
               - '.gitmodules'
               - '.github/workflows/pr-check.yml'
             rust_dependencies:
+              - 'scripts/guard-chrono-maintenance-exception.py'
+              - 'scripts/tests/test_chrono_maintenance_exception.py'
               - 'scripts/guard-webpki-roots-exception.py'
               - 'scripts/tests/test_webpki_roots_exception.py'
               - '**/Cargo.toml'
@@ -395,6 +479,10 @@ jobs:
               # attribution positive control); a change confined to it must
               # run the leg that executes the guard it pins.
               - 'scripts/tests/test_registry_guard.py'
+              # This cleanup runs between the real Rust harnesses; script-only
+              # changes must exercise that same job before entering the queue.
+              - 'scripts/prune-rust-test-artifacts.py'
+              - 'scripts/tests/test_prune_rust_test_artifacts.py'
               - 'pinvou3-app/src-tauri/**/*.rs'
               - 'pinvou3-app/src-tauri/src/features/updater/platform/windows_handoff.cs'
               # diagnostics.rs 在生产校验中 include_str! v1 schema，
@@ -456,6 +544,17 @@ jobs:
               - 'pinvou3-app/src-tauri/src/features/feedback/**'
               - 'pinvou3-app/src-tauri/src/features/personas/**'
               - 'pinvou3-app/src-tauri/src/features/pet/**'
+              # platform/prefs/ defines the SavedModel schema the CLI reads
+              # and writes (pinvou-cli path-depends on pinvou3-tauri and
+              # constructs SavedModel literals in models.rs, so a schema
+              # field addition is a CLI compile input). Today a prefs change
+              # already fires the CLI legs transitively via rust_full (any
+              # src-tauri .rs matches); this entry asserts the coverage
+              # directly — same discipline as the feedback/personas/pet
+              # entries above — so the CLI suite keeps gating schema changes
+              # even if rust_full ever gains a prefs exclusion the way it
+              # excludes those leaf features.
+              - 'pinvou3-app/src-tauri/src/platform/prefs/**'
               # The CLI compiles the connector lock tables in with
               # `include_str!` (src-tauri/src/platform/connector_lock.rs), so
               # editing or deleting one is a CLI source change in all but
@@ -507,6 +606,8 @@ jobs:
               - 'pinvou-knowledge/deploy/**'
               - '.github/workflows/pr-check.yml'
             knowledge_dependencies:
+              - 'scripts/guard-chrono-maintenance-exception.py'
+              - 'scripts/tests/test_chrono_maintenance_exception.py'
               - 'scripts/guard-webpki-roots-exception.py'
               - 'scripts/tests/test_webpki_roots_exception.py'
               - 'pinvou-knowledge/Cargo.toml'
@@ -514,52 +615,17 @@ jobs:
               - 'pinvou3-app/src-tauri/deny.toml'
               - '.github/workflows/pr-check.yml'
             release_contract:
-              # Round-1 fix wave (PR #715 review): the loong64 packaging
-              # pipeline scripts are read (and bash -n'd) by the loong64
-              # release policy suite, which fast-gate runs unconditionally;
-              # these filter entries are belt-and-braces so a script-only PR
-              # also re-runs release-contract-test instead of passing the
-              # gate on `skipped`.
-              - 'scripts/package-deb-loongarch64.sh'
-              - 'scripts/ci-build-linux-loongarch64.sh'
-              - 'scripts/ci-loongarch64-toolchain.sh'
-              - 'scripts/ci-loongarch64-sysroot.sh'
-              - 'VERSION'
-              - 'scripts/sync-version.mjs'
-              - 'scripts/check-linux-glibc-floor.sh'
-              - 'scripts/check-linux-elf-policy.sh'
-              - 'scripts/asr/build-sensevoice-runtime.sh'
-              - 'scripts/asr/sensevoice-source.env'
-              - 'scripts/repack-deb-xz.sh'
-              - 'scripts/convert-dmg-ulmo.sh'
-              - 'scripts/release-deb.sh'
-              - 'scripts/release-macos.sh'
-              - 'scripts/build-windows-ota.ps1'
-              - 'scripts/tests/sync-version.test.mjs'
-              - 'remote-control-relay/test/windows-release-exit-code.test.js'
-              - 'scripts/tests/test_ci_gate_policy.py'
-              - 'scripts/tests/test_release_arm64_policy.py'
-              - 'scripts/tests/test_release_cache_policy.py'
-              - 'scripts/tests/test_release_linux_floor_policy.py'
-              - 'scripts/tests/test_release_loongarch64_policy.py'
-              - 'scripts/tests/test_release_manifest_probe.py'
-              - 'scripts/tests/test_release_size_policy.py'
-              - 'scripts/run-windows-remote-control-e2e.ps1'
-              - 'scripts/windows-e2e-process-guard.ps1'
-              - 'scripts/windows-e2e-orchestrator-helpers.ps1'
-              - 'scripts/create-installer-spdx.mjs'
-              - 'scripts/check-enrollment-gated-v2-rollback.mjs'
-              - 'scripts/remote-control-release-path-policy.mjs'
-              - 'scripts/remote-control-*'
-              - 'scripts/remote-control-*/**'
-              - 'scripts/run-remote-control-*'
-              - 'scripts/run-remote-control-*/**'
-              - 'remote-control-relay/scripts/verify-github-workflow-run.cjs'
-              - 'remote-control-relay/test/github-workflow-run-identity.test.js'
-              - 'remote-control-relay/test/installer-spdx.test.js'
-              - 'remote-control-relay/test/release-path-policy.test.js'
+              # BEGIN GENERATED release paths
+              - '.github/workflows/pr-check.yml'
+              - '.github/workflows/release-packages.yml'
+              - '.github/workflows/windows-remote-control-build-evidence.yml'
+              - '.github/workflows/windows-remote-control-evidence.yml'
+              - 'pinvou3-app/package.json'
+              - 'pinvou3-app/package-lock.json'
               - 'pinvou3-app/scripts/codex-bridge-runtime/package.json'
               - 'pinvou3-app/scripts/codex-bridge-runtime/package-lock.json'
+              - 'pinvou3-app/scripts/tauri/codex-bridge.js'
+              - 'pinvou3-app/scripts/prepare-codex-bridge-runtime.sh'
               - 'pinvou3-app/src-tauri/src/features/assistant/runtime_model.rs'
               - 'pinvou3-app/src-tauri/src/core/panic_scope.rs'
               - 'pinvou3-app/src-tauri/src/core/panic_hooks.rs'
@@ -568,27 +634,17 @@ jobs:
               - 'pinvou3-app/src-tauri/src/platform/credential_store.rs'
               - 'pinvou3-app/src-tauri/src/features/assistant/turn_shell_tasks.rs'
               - 'pinvou3-app/src-tauri/Cargo.lock'
-              - 'remote-control-relay/test/windows-e2e-*.test.js'
-              - 'remote-control-relay/docs/schemas/**'
-              - 'pinvou3-app/tests/nsis_resource_staging_contract.test.js'
-              - 'pinvou3-app/scripts/remote-control-*'
-              - 'pinvou3-app/scripts/remote-control-*/**'
-              - 'pinvou3-app/src/features/remote-control/**'
-              - 'pinvou3-app/src/features/chat/ChatView.jsx'
+              - 'pinvou3-app/scripts/tauri/startup-window-config.js'
+              - 'pinvou3-app/scripts/tauri/require-wrapper.js'
+              - 'pinvou3-app/scripts/tauri/npm-invocation.js'
               - 'pinvou3-app/src/components/Toggle.jsx'
+              - 'pinvou3-app/src/features/chat/ChatView.jsx'
               - 'pinvou3-app/src/app/main.jsx'
               - 'pinvou3-app/src/features/settings/SettingsView.jsx'
               - 'pinvou3-app/src/hooks/useBridge.js'
               - 'pinvou3-app/src/platform/tauri/bridge.js'
               - 'pinvou3-app/src/shared/platform.js'
-              - 'pinvou3-app/src/platform/tauri/bridge/*remote-control*'
-              - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*'
-              - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*/**'
-              - 'pinvou3-app/src-tauri/src/features/remote_control/**'
-              - 'pinvou3-app/src-tauri/src/features/behavior_telemetry/remote_control.rs'
-              - 'pinvou3-app/src-tauri/src/features/sessions/remote_proxy/**'
-              - 'pinvou3-app/src-tauri/src/app/commands/desktop_remote_*.rs'
-              - 'pinvou3-app/src-tauri/src/app/commands/**'
+              - 'pinvou3-app/src-tauri/capabilities/default.json'
               - 'pinvou3-app/src-tauri/src/app/desktop_remote_composition.rs'
               - 'pinvou3-app/src-tauri/src/lib.rs'
               - 'pinvou3-app/src-tauri/src/features/sessions/application/dispatch_remote.rs'
@@ -653,7 +709,10 @@ jobs:
               - 'pinvou3-app/src-tauri/src/platform/os/linux/linux_system.rs'
               - 'pinvou3-app/src-tauri/src/features/files/spreadsheet_structure.rs'
               - 'pinvou3-app/scripts/vite-runtime-assets.mjs'
+              - 'pinvou3-app/src-tauri/tauri.conf.json'
+              - 'pinvou3-app/src-tauri/Cargo.toml'
               - 'pinvou3-app/src-tauri/src/main.rs'
+              - 'pinvou3-app/scripts/tauri/effective-config.js'
               - 'pinvou3-app/src-tauri/src/features/files/ingest_pdf.rs'
               - 'pinvou3-app/src-tauri/src/features/files/file_ingest.rs'
               - 'pinvou3-app/src-tauri/src/platform/os/linux/linux_path.rs'
@@ -672,55 +731,79 @@ jobs:
               - 'pinvou3-app/src-tauri/src/platform/mod.rs'
               - 'pinvou3-app/src-tauri/src/core/mod.rs'
               - 'pinvou3-app/src-tauri/src/features/mod.rs'
+              - 'pinvou3-app/scripts/tauri/build.js'
+              - 'pinvou3-app/scripts/tauri/platform-config.js'
               - 'pinvou3-app/src-tauri/src/app/remote_projection_adapter.rs'
               - 'pinvou3-app/src-tauri/src/app/commands/remote_control.rs'
+              - 'pinvou3-app/src-tauri/src/features/behavior_telemetry/remote_control.rs'
               - 'pinvou3-app/src-tauri/src/platform/capabilities.rs'
               - 'pinvou3-app/src-tauri/build.rs'
               - 'pinvou3-app/src-tauri/build_support/desktop_controller.rs'
-              - 'pinvou3-app/src-tauri/capabilities/default.json'
+              - 'scripts/check-enrollment-gated-v2-rollback.mjs'
+              - 'scripts/create-installer-spdx.mjs'
+              - 'scripts/remote-control-release-path-policy.mjs'
+              - 'scripts/run-windows-remote-control-e2e.ps1'
+              - 'scripts/windows-e2e-orchestrator-helpers.ps1'
+              - 'scripts/windows-e2e-process-guard.ps1'
+              - 'scripts/ci-fixture-process.py'
+              - 'scripts/tests/test_ci_fixture_process.py'
+              - 'scripts/release-owned-process.py'
+              - 'scripts/windows-owned-process.cs'
+              - 'scripts/generate-remote-control-release-paths.mjs'
+              - 'scripts/remote-control-*'
+              - 'scripts/remote-control-*/**'
+              - 'scripts/run-remote-control-*'
+              - 'scripts/run-remote-control-*/**'
+              - 'pinvou3-app/scripts/remote-control-*'
+              - 'pinvou3-app/scripts/remote-control-*/**'
+              - 'pinvou3-app/src/features/remote-control/**'
+              - 'pinvou3-app/src/platform/tauri/bridge/remote-control*'
+              - 'pinvou3-app/src/platform/tauri/bridge/remote-control*/**'
+              - 'pinvou3-app/src/platform/tauri/bridge/desktop-remote-control*'
+              - 'pinvou3-app/src/platform/tauri/bridge/desktop-remote-control*/**'
+              - 'pinvou3-app/src-tauri/src/app/commands/**'
+              - 'pinvou3-app/src-tauri/src/features/sessions/remote_proxy/**'
+              - 'pinvou3-app/src-tauri/src/features/remote_control/**'
+              - 'pinvou3-app/src-tauri/packaging/windows/nsis/**'
               - 'pinvou3-app/tests/remote_*'
               - 'pinvou3-app/tests/remote_*/**'
               - 'pinvou3-app/tests/desktop_remote_*'
               - 'pinvou3-app/tests/desktop_remote_*/**'
               - 'pinvou3-app/tests/connect_remote_device_*'
               - 'pinvou3-app/tests/connect_remote_device_*/**'
-              - 'pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs'
-              - 'pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs'
-              - 'remote-control-relay/docs/schemas/**'
               - 'remote-control-relay/**'
-              - 'remote-control-relay/package.json'
-              - 'remote-control-relay/package-lock.json'
-              - 'remote-control-relay/scripts/controller-release-gate.mjs'
-              - 'remote-control-relay/scripts/validate-controller-release-evidence.mjs'
-              - 'remote-control-relay/scripts/query-controller-release-telemetry.mjs'
-              - 'remote-control-relay/scripts/deploy-controller-preflight.mjs'
-              - 'remote-control-relay/scripts/prepare-legacy-gateway-route.mjs'
-              - 'remote-control-relay/scripts/verify-provider-attestation.mjs'
-              - 'remote-control-relay/scripts/verify-installer-supply-chain.mjs'
-              - 'remote-control-relay/controller-sensitive-scan.js'
-              - 'remote-control-relay/test/controller-sensitive-scan.test.js'
-              - 'remote-control-relay/test/controller-telemetry.test.js'
-              - 'remote-control-relay/test/controller-release-*.test.js'
-              - 'remote-control-relay/test/windows-e2e-*.test.js'
-              - 'remote-control-relay/test/installer-spdx.test.js'
+              - 'pinvou3-app/src/platform/tauri/bridge/*remote-control*'
+              - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*'
+              - 'pinvou3-app/src/platform/tauri/bridge/**/*remote-control*/**'
+              - 'scripts/package-deb-loongarch64.sh'
+              - 'scripts/ci-build-linux-loongarch64.sh'
+              - 'scripts/ci-loongarch64-toolchain.sh'
+              - 'scripts/ci-loongarch64-sysroot.sh'
+              - 'VERSION'
+              - 'scripts/sync-version.mjs'
+              - 'scripts/check-linux-glibc-floor.sh'
+              - 'scripts/check-linux-elf-policy.sh'
+              - 'scripts/asr/build-sensevoice-runtime.sh'
+              - 'scripts/asr/sensevoice-source.env'
+              - 'scripts/repack-deb-xz.sh'
+              - 'scripts/convert-dmg-ulmo.sh'
+              - 'scripts/release-deb.sh'
+              - 'scripts/release-macos.sh'
+              - 'scripts/build-windows-ota.ps1'
+              - 'scripts/tests/sync-version.test.mjs'
+              - 'scripts/tests/test_ci_gate_policy.py'
+              - 'scripts/tests/test_release_arm64_policy.py'
+              - 'scripts/tests/test_release_cache_policy.py'
+              - 'scripts/tests/test_release_linux_floor_policy.py'
+              - 'scripts/tests/test_release_loongarch64_policy.py'
+              - 'scripts/tests/test_release_manifest_probe.py'
+              - 'scripts/tests/test_release_size_policy.py'
+              - 'pinvou3-app/tests/nsis_resource_staging_contract.test.js'
               - 'docs/Windows双端远程控制发布与回滚.md'
               - 'docs/Windows双端远程控制双机演练清单.md'
-              - '.github/workflows/release-packages.yml'
-              - '.github/workflows/windows-remote-control-evidence.yml'
-              - '.github/workflows/windows-remote-control-build-evidence.yml'
-              - '.github/workflows/pr-check.yml'
               - '.gitmodules'
               - 'private-runtimes/windows'
-              - 'pinvou3-app/package.json'
-              - 'pinvou3-app/package-lock.json'
               - 'pinvou3-app/scripts/tauri/**'
-              # tauri_effective_config.test.js 会解析备料脚本的 --target 目标词表，
-              # 钉住交叉构建的 Node 架构映射；该测试跑在 release-contract-test，
-              # 不列入则只改备料脚本的 PR 会静默跳过这条契约门禁
-              # (test_ci_gate_policy 锁定此路由)。
-              - 'pinvou3-app/scripts/prepare-codex-bridge-runtime.sh'
-              - 'pinvou3-app/src-tauri/Cargo.toml'
-              - 'pinvou3-app/src-tauri/tauri.conf.json'
               - 'pinvou-knowledge/Cargo.toml'
               - 'pinvou3-app/src-tauri/config/**'
               - 'pinvou3-app/src-tauri/packaging/**'
@@ -730,6 +813,8 @@ jobs:
               - 'pinvou3-app/tests/macos_phase2_contract.test.js'
               - 'pinvou3-app/tests/linux_asr_runtime_packaging.test.js'
               - 'pinvou3-app/tests/tauri_effective_config.test.js'
+              - 'pinvou3-app/tests/tauri_config_schema.test.js'
+              # END GENERATED release paths
             l1:
               - 'pinvou3-app/src-tauri/tests/l1_dialog_harness.rs'
               - 'pinvou3-app/src-tauri/src/features/assistant/strict_mode_validation_tests.rs'
@@ -766,8 +851,18 @@ jobs:
               - 'pinvou3-app/eslint.config.mjs'
               - '.github/workflows/pr-check.yml'
             frontend:
+              - 'scripts/ci-frontend-bundle.py'
+              - 'scripts/ci-frontend-cache-server.py'
+              - 'scripts/lib/ci_frontend_cache.py'
+              - 'scripts/lib/ci_transfer_deadline.py'
+              - 'scripts/tests/test_ci_frontend_bundle.py'
+              - 'scripts/tests/test_ci_frontend_cache_server.py'
+              - 'scripts/tests/test_ci_frontend_checkout.py'
+              - 'scripts/tests/test_ci_transfer_deadline.py'
               - 'scripts/ci-test-reuse.py'
               - 'scripts/ci-reuse-policy.py'
+              - 'scripts/ci-job-inputs.py'
+              - 'scripts/tests/test_ci_job_inputs.py'
               - 'scripts/tests/test_ci_reuse_policy.py'
               - 'scripts/tests/test_ci_test_reuse.py'
               - 'scripts/tests/account-platform-invocation-environment.test.mjs'
@@ -826,6 +921,27 @@ jobs:
               - 'pinvou3-app/src-tauri/src/app/commands/marketplace.rs'
               - 'pinvou3-app/src-tauri/src/features/connectors/skill_gate.rs'
               - 'pinvou3-app/src-tauri/src/app/connector_consent_tests.rs'
+              # mcp_python_dependencies_contract.test.js 读取
+              # python_dependencies.rs、connector_online_install_contract.test.js
+              # 读取 native_installer.rs 与 platform/download.rs(下载骨架收敛后
+              # HTTPS 候选门与 .part RAII 清理守卫随实现移入 download.rs,
+              # 契约断言随之 re-point)做跨语言契约断言;不列出则 Rust-only
+              # 改动会静默跳过该 node 门禁(test_ci_gate_policy 锁定此路由)。
+              - 'pinvou3-app/src-tauri/src/features/marketplace/python_dependencies.rs'
+              - 'pinvou3-app/src-tauri/src/features/connectors/native_installer.rs'
+              - 'pinvou3-app/src-tauri/src/platform/download.rs'
+              - 'pinvou3-app/src-tauri/src/platform/paths.rs'
+              - 'pinvou3-app/src-tauri/src/features/connectors/tmeet.rs'
+              - 'pinvou3-app/src-tauri/src/features/connectors/feishu.rs'
+              - 'pinvou3-app/src-tauri/src/features/connectors/wecom.rs'
+              - 'pinvou3-app/src-tauri/src/features/connectors/dingtalk.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/posix.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/linux/linux_path.rs'
+              - 'pinvou3-app/src-tauri/src/platform/os/macos/macos_path.rs'
+              - 'pinvou3-app/src-tauri/src/features/marketplace/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/marketplace/connectors.rs'
+              - 'pinvou3-app/src-tauri/src/features/runtime_bundle/platform/mod.rs'
+              - 'pinvou3-app/src-tauri/src/features/runtime_bundle/platform/extraction.rs'
               # behavior_telemetry_model_contract.test.mjs 读取根目录遥测
               # schema 做跨语言契约断言;不列出则 schema-only 改动会静默跳过
               # 该 node 门禁(test_ci_gate_policy 锁定此路由)。
@@ -864,6 +980,8 @@ jobs:
               - '.github/workflows/pr-check.yml'
             relay:
               - 'remote-control-relay/**'
+              - 'scripts/ci-fixture-process.py'
+              - 'scripts/release-owned-process.py'
               - 'scripts/deploy-remote-relay.sh'
               - 'scripts/deploy-remote-relay-test.sh'
               - 'scripts/run-windows-relay-dacl.mjs'
@@ -873,12 +991,18 @@ jobs:
               - 'scripts/run-windows-relay-tools-tests.mjs'
               - 'scripts/windows-relay-tools-test-summary.mjs'
               - 'scripts/windows-relay-tools-preflight.mjs'
+              - 'scripts/ci-fixture-process.py'
+              - 'scripts/tests/test_ci_fixture_process.py'
               - '.github/workflows/pr-check.yml'
             team_relay_hub:
+              - 'scripts/ci-npm-audit.py'
+              - 'scripts/tests/test_ci_npm_audit.py'
               - 'team-relay-hub/**'
               - 'docs/team-relay/migrations/**'
               - '.github/workflows/pr-check.yml'
             update_release_console:
+              - 'scripts/ci-npm-audit.py'
+              - 'scripts/tests/test_ci_npm_audit.py'
               - 'update-release-console/**'
               - 'scripts/ci-update-release-console-container.sh'
               - 'deploy/nginx-pinvou3-updates.conf'
@@ -886,6 +1010,10 @@ jobs:
               - 'docs/windows-update-release-console.md'
               - '.github/workflows/pr-check.yml'
             acp_runtime:
+              - 'pinvou3-app/tests/helpers/ndjson-child-driver.mjs'
+              - 'pinvou3-app/tests/helpers/browser-wrapper-fixture-cleanup.mjs'
+              - 'pinvou3-app/tests/helpers/browser-wrapper-held-result.mjs'
+              - 'pinvou3-app/tests/helpers/browser-wrapper-host-fixture.mjs'
               # 开发启动器。开源侧把 run-dev.sh 变更路由进 acp_runtime 门禁,
               # 本仓同路由:launcher-only PR 不再静默跳过运行时门禁。
               - 'pinvou3-app/run-dev.sh'
@@ -901,6 +1029,14 @@ jobs:
               - 'pinvou3-app/package-lock.json'
               - '.github/workflows/pr-check.yml'
             windows_codex:
+              - 'pinvou3-app/tests/browser-wrapper-host-control.test.mjs'
+              - 'pinvou3-app/tests/helpers/claude-acp-startup-probe.cjs'
+              - 'pinvou3-app/tests/claude_acp_startup_probe.test.mjs'
+              - 'pinvou3-app/tests/helpers/ndjson-child-driver.mjs'
+              - 'pinvou3-app/tests/helpers/browser-wrapper-fixture-cleanup.mjs'
+              - 'pinvou3-app/tests/helpers/browser-wrapper-held-result.mjs'
+              - 'pinvou3-app/tests/helpers/browser-wrapper-host-fixture.mjs'
+              - 'pinvou3-app/tests/helpers/browser-prepare-phase-observer.mjs'
               - 'scripts/test-windows-acp-runtime.py'
               - 'scripts/tests/test_windows_acp_runtime_scope.py'
               - '.gitmodules'
@@ -927,6 +1063,8 @@ jobs:
               - '.github/workflows/release-packages.yml'
               - '.github/workflows/pr-check.yml'
             windows_runtime:
+              - 'scripts/ci-fixture-process.py'
+              - 'scripts/tests/test_ci_fixture_process.py'
               - 'pinvou3-app/resources/mcp-servers/**/manifest.json'
               - 'pinvou3-app/src-tauri/packaging/windows/runtime/**'
               - 'pinvou3-app/src-tauri/config/platforms/windows/runtime/**'
@@ -1034,8 +1172,16 @@ jobs:
           }
           git fetch --no-tags --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
 
@@ -1084,7 +1230,7 @@ jobs:
       # installer code and a tampered artifact fails the gate here.
       - name: workflow lint (actionlint)
         run: |
-          curl --retry 3 -fsSL -o actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          python3 scripts/ci-download.py https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz --output actionlint.tar.gz --sha256 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
           echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint.tar.gz" | sha256sum --check -
           tar -xzf actionlint.tar.gz actionlint
           ./actionlint -shellcheck= .github/workflows/*.yml
@@ -1100,6 +1246,17 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p test_ci_resource_ledger.py
           python3 -m unittest discover -s scripts/tests -p test_ci_fixture_docker.py
           python3 -m unittest discover -s scripts/tests -p test_ci_fixture_process.py
+
+      - name: CI network transfer and cache boundaries
+        run: |
+          node scripts/ci-network-policy.cjs
+          node --test scripts/tests/ci-artifact-tls-policy.test.cjs scripts/tests/ci-artifact-upload-diagnostics.test.cjs
+          python3 -m unittest discover -s scripts/tests -p test_ci_download.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_https.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_egress_proxy.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_apt_prepare.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_network_environment.py
+          python3 -m unittest discover -s scripts/tests -p test_ci_rust_dist.py
 
       - name: 架构边界门禁
         run: |
@@ -1135,19 +1292,41 @@ jobs:
       - name: fork-guard 指纹层 (秒级,不编译)
         run: ./scripts/fork-guard.sh --fast
 
+      - name: unicode-width patch guard
+        # The CJK-aware patch tables in pinvou-cli and pinvou3-app/src-tauri
+        # point into the CodeWhale submodule (#4479 follow-up): fail loudly
+        # if a table, the patched copy, or the lock resolution regresses.
+        run: python3 scripts/guard-unicode-width-patch.py
+
       - name: fork 合规联动 (gitlink ↔ fork-modifications)
         run: |
           base_ref="${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}"
           base_ref="${base_ref#refs/heads/}"
           ./scripts/ci-fork-link-check.sh "origin/$base_ref"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Setup Python
         uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           python-version: "3.12"
 
+      - name: Initialize gate test resource ledger
+        run: python3 scripts/ci-resource-ledger.py --init
+
+      # Full discovery includes cache server/deadline/checkout/npm contracts;
+      # run them once, inside the same owned process tree as the other guards.
       - name: Gate policy test suite (scripts/tests)
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+        run: python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/gate-policy.json" -- python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
+      - name: Expiring chrono maintenance exception
+        run: python3 scripts/guard-chrono-maintenance-exception.py
 
       # Keep the other fast checks independent of the changes job. This filter
       # runs only after them and uses the same PR / merge-group diff semantics.
@@ -1181,13 +1360,197 @@ jobs:
         if: ${{ steps.mcp-filter.outputs.mcp_contract != 'false' || (github.event_name == 'pull_request' && (github.event.pull_request.changed_files == null || github.event.pull_request.changed_files >= 3000)) }}
         run: python3 scripts/mcp-server-contract-smoke.py
 
+      - name: Confirm gate test resource retirement
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        run: python3 scripts/ci-resource-ledger.py --recover
+
+      - name: Configure artifact transport for Gate test resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
+      - name: Gate test resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          name: gate-resource-lifecycle-${{ github.run_attempt }}
+          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Setup 工件化(2026-11-16 调查结论:3 台宿主共置算力摊薄是失败主机理,#2641
+  # 后 frontend-test + 4 个 browser 分片各自重复三次 vite build,构建期满核
+  # 高峰 ×5)。分工:本 job 只做「构建产物」——三次 vite build 一次完成,只把
+  # 体积仅数十 MB 的 dist 输出打成工件;npm ci 保留在各消费 job(网络绑定、
+  # CPU 占用低)。这样避开 2026-11-16 实测的自建机↔GitHub 存储上行瓶颈:
+  # 156MB 的 node_modules bundle 上传两次 stall 至死(run 43890217142),而
+  # 产物小件不受影响。vite build 才是 CPU 大头,去重它即达成摊薄目标。
+  # build:account-portal 的一致性检查与 credential handoff 部署边界检查随
+  # 构建留在本 job(产物 = git 跟踪的 static 目录,消费方 checkout 自带,
+  # 无需传输)。测试行为零变化:vite 产物、CHROME 探针、工作目录与环境变量
+  # 与原 setup 完全一致;各消费 job 下载解包独立副本,分片间无可变共享状态。
+  frontend-setup:
+    name: frontend-setup
+    needs: changes
+    outputs:
+      commit: ${{ steps.frontend_bundle.outputs.commit }}
+      sha256: ${{ steps.frontend_bundle.outputs.sha256 }}
+      size: ${{ steps.frontend_bundle.outputs.size }}
+      transport: ${{ steps.frontend_bundle.outputs.transport }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test') && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    # npm ci(app) + 三次 vite build + 小件打包上传;30min 含冷缓存与慢 registry 余量。
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: pinvou3-app
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up zram and swap
+        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
+        # 本 job 只跑 ubuntu,无需 runner.os 门控;构建期峰 2-4GB,zram 先行。
+        run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
+      - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          node-version: "24"
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          package-manager-cache: ${{ runner.environment == 'github-hosted' }}
+          cache-dependency-path: |
+            pinvou3-app/package-lock.json
+            remote-control-relay/package-lock.json
+            account-platform/package-lock.json
+
+      - name: 安装前端依赖
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Vite build
+        run: npm run build:ui
+
+      - name: Verify embedded Account Portal assets are current
+        run: |
+          npm run build:account-portal
+          git diff --exit-code -- ../account-platform/internal/portal/static
+          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
+
+      - name: Verify credential handoff built deployment boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          node ../scripts/build-credential-handoff.mjs --check-deployment
+
+      # Web (relay) build: the startup-bundle layer and the web index contract
+      # test (tests/vite_static_assets_contract.test.mjs) only cover the web
+      # dist when it exists, so build it unconditionally here instead of
+      # relying on the diff-selected test:webui smoke.
+      - name: Vite web build (remote relay)
+        run: npm run build:web
+
+      # 只打包构建产物(本地实测 ui dist 15MB + web dist 14MB,tar.gz 共 19MB):
+      # 156MB 的 node_modules bundle 在自建机上行实测两次 stall 至死
+      # (run 43890217142),产物小件才是该链路扛得动的体积。dist 与 web/dist
+      # 是 gitignore 产物,checkout 不会带,必须随包下发;build:account-portal
+      # 产物是 git 跟踪的 static 目录,消费方 checkout 自带,不进包。
+      - name: Pack frontend setup bundle
+        run: |
+          set -euo pipefail
+          tar -czf "$RUNNER_TEMP/frontend-setup-bundle.tar.gz" -C "$GITHUB_WORKSPACE" \
+            pinvou3-app/dist remote-control-relay/web/dist
+          du -h "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
+
+      - name: Publish verified frontend setup bundle
+        id: frontend_bundle
+        env:
+          PINVOU_FRONTEND_CACHE_URL: ${{ vars.PINVOU_FRONTEND_CACHE_URL }}
+        run: python3 ../scripts/ci-frontend-bundle.py publish --bundle "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
+
+      - name: Configure artifact transport for Upload frontend setup bundle
+        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
+      - name: Upload frontend setup bundle
+        id: frontend_setup_upload
+        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          name: frontend-setup-bundle
+          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
+          if-no-files-found: error
+          # 同 run 内消费,最小保留。
+          retention-days: 1
+
+      # 自建机上行到 GitHub 工件存储实测偶发 stall(见上方 Pack 注释的 run 证据),
+      # 上传动作无内建重试;主上传失败时以 overwrite 重建同名工件,自动补试一次。
+      - name: Configure artifact transport for Upload frontend setup bundle (retry)
+        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
+      - name: Upload frontend setup bundle (retry)
+        id: frontend_setup_upload_retry
+        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}
+        uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          name: frontend-setup-bundle
+          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
+          if-no-files-found: error
+          # 同 run 内消费,最小保留。
+          retention-days: 1
+          overwrite: true
+
+      - name: Require frontend setup bundle upload
+        if: ${{ always() && !cancelled() }}
+        shell: bash
+        env:
+          FRONTEND_TRANSPORT: ${{ steps.frontend_bundle.outputs.transport }}
+          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}
+          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}
+          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz
+        run: |
+          set -euo pipefail
+          case "$FRONTEND_TRANSPORT:$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in
+            github:success:skipped|github:failure:success) ;;
+            lan:skipped:skipped) ;;
+            *) echo '::error::Frontend setup bundle upload did not complete successfully.' >&2; exit 1 ;;
+          esac
+          if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then
+            echo '::error::Frontend setup bundle is missing or empty.' >&2
+            exit 1
+          fi
+
   frontend-test:
     name: frontend-test
-    needs: changes
+    # Setup 工件化:依赖与三份 build 产物来自 frontend-setup 的单次构建
+    # (共置宿主算力摊薄 × setup ×5 重复,见 frontend-setup 注释)。
+    needs: [changes, frontend-setup]
     # Draft/Ready quality, builds and logic. Ready/queue browser smokes run
     # independently below, without waiting for this job's ~17-minute logic suite.
-    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-test')) && needs['frontend-setup'].result == 'success' }}
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_BROWSER_HEAVY_RUNNER || vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     defaults:
       run:
@@ -1195,7 +1558,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
@@ -1209,7 +1572,15 @@ jobs:
           PINVOU_TEST_NETWORK_ISOLATION: "1"
         run: timeout --kill-after=15 60 python3 -m unittest discover -s ../scripts/tests -p test_ci_browser_network.py -v
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -1220,6 +1591,8 @@ jobs:
             account-platform/package-lock.json
 
       - name: 安装前端依赖
+        # npm ci 保留在各消费 job(网络绑定、CPU 占用低,~1-2min);被去重的
+        # 是 CPU 大头——三次 vite build ×5 → ×1(见 frontend-setup 注释)。
         run: npm ci --prefer-offline --no-audit
 
       # The Node probe imports AP schema tooling before any browser skip.
@@ -1232,6 +1605,30 @@ jobs:
       - name: 安装 Remote relay 依赖 (供 test:webui smoke)
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
         run: npm --prefix ../remote-control-relay ci --prefer-offline --no-audit
+
+      # Setup 工件化:下载 frontend-setup 的单次构建产物(ui dist + web dist,
+      # 实测 tar.gz 19MB),跳过本 job 原先重复的三次 vite build;测试行为零
+      # 变化。走 REST zip 通道(download-artifact@v8 的 results blob 通道在本
+      # 池实测 hang,见 frontend-setup 注释),小件上传/下载均实测可行。
+      - name: Fetch verified frontend setup bundle
+        env:
+          PINVOU_FRONTEND_CACHE_URL: ${{ vars.PINVOU_FRONTEND_CACHE_URL }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 ../scripts/ci-frontend-bundle.py fetch
+          --commit "${{ needs.frontend-setup.outputs.commit }}"
+          --sha256 "${{ needs.frontend-setup.outputs.sha256 }}"
+          --size "${{ needs.frontend-setup.outputs.size }}"
+          --transport "${{ needs.frontend-setup.outputs.transport }}"
+          --output "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
+
+      - name: Unpack frontend setup bundle
+        run: >-
+          python3 ../scripts/ci-frontend-bundle.py unpack
+          --commit "${{ needs.frontend-setup.outputs.commit }}"
+          --sha256 "${{ needs.frontend-setup.outputs.sha256 }}"
+          --bundle "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
+          --workspace "$GITHUB_WORKSPACE"
 
       - name: ESLint (含 pet 缺失项,现已全覆盖)
         # Official 的存量 warning 仍可由本地 lint 完整查看；CI 只打印会阻断的
@@ -1255,33 +1652,10 @@ jobs:
       - name: madge (circular imports)
         run: npm run lint:cycles
 
-      - name: Vite build
-        run: npm run build:ui
-
-      - name: Verify embedded Account Portal assets are current
-        run: |
-          npm run build:account-portal
-          git diff --exit-code -- ../account-platform/internal/portal/static
-          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
-
-      - name: Verify credential handoff built deployment boundary
-        shell: bash
-        run: |
-          set -euo pipefail
-          node ../scripts/build-credential-handoff.mjs --check-deployment
-
-      # Web (relay) build: the startup-bundle layer and the web index contract
-      # test (tests/vite_static_assets_contract.test.mjs) only cover the web
-      # dist when it exists, so build it unconditionally here instead of
-      # relying on the diff-selected test:webui smoke. That smoke reuses this
-      # dist via PINVOU_WEBUI_SKIP_BUILD=1 (smoke steps below) instead of
-      # running a second identical vite build.
-      - name: Vite web build (remote relay)
-        run: npm run build:web
-
       # Dist-layer compatibility audit (a marked@16-style lookbehind parse
-      # regression is caught by exactly this layer); build:ui above already
-      # produced dist/, while the contract test only covers static/inline layers.
+      # regression is caught by exactly this layer); dist/ comes from the
+      # frontend-setup bundle (single build, four consumers), while the
+      # contract test only covers static/inline layers.
       - name: WebView compatibility audit (Safari 14 baseline)
         run: npm run audit:compat
 
@@ -1316,6 +1690,11 @@ jobs:
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         run: python3 ../scripts/ci-resource-ledger.py --recover
 
+      - name: Configure artifact transport for Test resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Test resource lifecycle receipts
         id: frontend_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -1323,6 +1702,10 @@ jobs:
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: frontend-resource-lifecycle-${{ github.run_attempt }}
           path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -1335,10 +1718,14 @@ jobs:
 
   frontend-browser-test:
     name: frontend-browser-test (${{ matrix.shard }})
-    needs: changes
-    # Each shard installs/builds its own tested tree and owns its fixtures.
-    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) }}
-    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
+    # Setup 工件化:依赖与三份 build 产物来自 frontend-setup 的单次构建;
+    # 每个分片只下载解包自己的独立副本,分片间无可变共享状态。
+    needs: [changes, frontend-setup]
+    # Each shard runs on the shared tested tree artifact and owns its fixtures.
+    if: ${{ (!cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true')) && !(github.event_name == 'merge_group' && needs.changes.outputs.reuse_verified == 'true' && contains(fromJSON(needs.changes.outputs.reused_jobs || '[]'), 'frontend-browser-test')) && needs['frontend-setup'].result == 'success' }}
+    # Browser shards share the heavy pool so CPU-bound smoke suites can use
+    # its larger per-runner quota; all four shards retain independent fixtures.
+    runs-on: ${{ fromJSON(vars.PINVOU_LINUX_BROWSER_HEAVY_RUNNER || vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}
     timeout-minutes: 75
     strategy:
       fail-fast: false
@@ -1351,7 +1738,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          # The tested PR merge and its two parents are sufficient for selection.
+          fetch-depth: 2
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
@@ -1365,7 +1753,15 @@ jobs:
           PINVOU_TEST_NETWORK_ISOLATION: "1"
         run: timeout --kill-after=15 60 python3 -m unittest discover -s ../scripts/tests -p test_ci_browser_network.py -v
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -1376,6 +1772,8 @@ jobs:
             account-platform/package-lock.json
 
       - name: 安装前端依赖
+        # npm ci 保留在各分片(网络绑定、CPU 占用低);去重的是三次 vite
+        # build ×5 → ×1(CPU 大头,见 frontend-setup 注释)。
         run: npm ci --prefer-offline --no-audit
 
       # The Node probe imports AP schema tooling before any browser skip.
@@ -1388,17 +1786,29 @@ jobs:
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
         run: npm --prefix ../remote-control-relay ci --prefer-offline --no-audit
 
-      - name: Vite build
-        run: npm run build:ui
+      # Setup 工件化:下载 frontend-setup 的单次构建产物(实测 tar.gz 19MB),
+      # 跳过每分片重复的三次 vite build;各分片解包独立副本,分片间无可变共享
+      # 状态;dist/CHROME/工作目录与原 setup 一致。走 REST zip 通道(通道实测
+      # 证据见 frontend-setup 注释)。
+      - name: Fetch verified frontend setup bundle
+        env:
+          PINVOU_FRONTEND_CACHE_URL: ${{ vars.PINVOU_FRONTEND_CACHE_URL }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 ../scripts/ci-frontend-bundle.py fetch
+          --commit "${{ needs.frontend-setup.outputs.commit }}"
+          --sha256 "${{ needs.frontend-setup.outputs.sha256 }}"
+          --size "${{ needs.frontend-setup.outputs.size }}"
+          --transport "${{ needs.frontend-setup.outputs.transport }}"
+          --output "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
 
-      - name: Verify embedded Account Portal assets are current
-        run: |
-          npm run build:account-portal
-          git diff --exit-code -- ../account-platform/internal/portal/static
-          test -z "$(git ls-files --others --exclude-standard -- ../account-platform/internal/portal/static)"
-
-      - name: Vite web build (remote relay)
-        run: npm run build:web
+      - name: Unpack frontend setup bundle
+        run: >-
+          python3 ../scripts/ci-frontend-bundle.py unpack
+          --commit "${{ needs.frontend-setup.outputs.commit }}"
+          --sha256 "${{ needs.frontend-setup.outputs.sha256 }}"
+          --bundle "$RUNNER_TEMP/frontend-setup-bundle.tar.gz"
+          --workspace "$GITHUB_WORKSPACE"
 
       - name: 准备浏览器
         if: ${{ github.event_name == 'merge_group' || github.event.pull_request.draft == false }}
@@ -1444,6 +1854,12 @@ jobs:
           PINVOU_WEBUI_SKIP_BUILD: "1"
         run: |
           set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ && "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          # A queue batch can place the immutable base outside the shallow graph.
+          if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          fi
           git diff --name-only "$BASE_SHA" "$HEAD_SHA" \
             | node ../scripts/select-frontend-smokes.mjs \
             | node ../scripts/run-frontend-smokes.mjs --selected --shard "${{ matrix.shard }}/4" --isolate-network
@@ -1452,6 +1868,11 @@ jobs:
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         run: python3 ../scripts/ci-resource-ledger.py --recover
 
+      - name: Configure artifact transport for Browser shard resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Browser shard resource lifecycle receipts
         id: browser_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -1459,6 +1880,10 @@ jobs:
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: frontend-browser-${{ matrix.shard }}-resource-lifecycle-${{ github.run_attempt }}
           path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -1482,7 +1907,15 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           # No npm cache here: the install is seconds and setup-node would
@@ -1497,6 +1930,7 @@ jobs:
         # images may lack ss even though Node dependencies are installed.
         run: |
           if ! command -v ss >/dev/null 2>&1; then
+            sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends iproute2
           fi
@@ -1520,7 +1954,29 @@ jobs:
         run: |
           bash -n scripts/deploy-remote-relay.sh
           bash -n scripts/deploy-remote-relay-test.sh
-          npm --prefix remote-control-relay test
+          python3 scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}.json" -- npm --prefix remote-control-relay test
+
+      - name: Configure artifact transport for 保留 Relay 进程作用域原始回执
+        if: always()
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
+      - name: 保留 Relay 进程作用域原始回执
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          name: relay-process-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/relay-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/
+          retention-days: 7
+          if-no-files-found: warn
 
   account-financial-test:
     name: account-financial-test (${{ matrix.group }})
@@ -1552,9 +2008,44 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      financial-owner-account-postgres:
+        # Empty image disables these extra services for the other five Jobs.
+        image: ${{ matrix.group == 'owners' && 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea' || '' }}
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 1
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      financial-owner-wallet-postgres:
+        # Empty image disables these extra services for the other five Jobs.
+        image: ${{ matrix.group == 'owners' && 'mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea' || '' }}
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1::5432"
+        options: >-
+          --rm
+          --cpus 1
+          --memory 1g
+          --memory-swap 1g
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       GOTOOLCHAIN: local
       CGO_ENABLED: "1"
+      PINVOU_ACCOUNT_PG_PROFILE: ${{ matrix.group == 'owners' && 'owners' || 'financial' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -1565,8 +2056,16 @@ jobs:
       - name: Set up zram and swap
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Go toolchain
         uses: actions/setup-go@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           go-version-file: account-platform/go.mod
           cache-dependency-path: account-platform/**/go.sum
@@ -1577,8 +2076,16 @@ jobs:
           set -euo pipefail
           python3 scripts/check-account-financial-ci.py
 
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js for financial contract consumers
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           package-manager-cache: ${{ runner.environment == 'github-hosted' }}
@@ -1595,6 +2102,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends postgresql-client
           command -v psql
@@ -1605,26 +2113,34 @@ jobs:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
           set -euo pipefail
-          python3 scripts/account-ci-postgres.py --profile financial
+          python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE"
 
       - name: Run isolated financial group
         shell: bash
         env:
           ACCOUNT_FINANCIAL_GROUP: ${{ matrix.group }}
+          PINVOU_CI_OWNER_PARALLEL: ${{ matrix.group == 'owners' && '1' || '0' }}
+          ACCOUNT_FINANCIAL_OWNER_SERVICES: ${{ steps.account-pg.outputs.owners_services }}
+          PINVOU_CI_FIXTURE_TEMPLATES: "1"
+          PINVOU_CI_FIXTURE_TIMING: "1"
           PINVOU_ACCOUNT_FINANCIAL_TEST_DATABASE_URL: ${{ steps.account-pg.outputs.financial_url }}
           PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.financial_port }}
           PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.financial_system }}
           PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.financial_directory }}
         run: |
           set -euo pipefail
-          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP"
+          diagnostics="$(mktemp -d "$RUNNER_TEMP/financial-parallel-${ACCOUNT_FINANCIAL_GROUP}-XXXXXX")"
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-process.json" -- python3 scripts/test-token-financial-postgres.py --group "$ACCOUNT_FINANCIAL_GROUP" --verify-fixture-cache 2>&1 | tee "$diagnostics/group.log"
+          if [[ "$ACCOUNT_FINANCIAL_GROUP" == owners ]]; then
+            PINVOU_FINANCIAL_CHILD_ARTIFACTS="$diagnostics/owners-families" python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-families-process.json" -- python3 scripts/test-account-financial-families-postgres.py 2>&1 | tee "$diagnostics/owners-families.log"
+          fi
 
       - name: Stop owned temporary PostgreSQL services
         if: ${{ always() }}
         env:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
-          python3 scripts/account-ci-postgres.py --profile financial --stop-owned-services
+          python3 scripts/account-ci-postgres.py --profile "$PINVOU_ACCOUNT_PG_PROFILE" --stop-owned-services
 
       - name: Confirm Account test resource retirement
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -1633,15 +2149,26 @@ jobs:
           set -euo pipefail
           python3 scripts/ci-resource-ledger.py --recover --directory "$PINVOU_CI_RESOURCE_LEDGER"
 
+      - name: Configure artifact transport for Financial group lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Financial group lifecycle receipts
         id: financial_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}
-          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+          path: |
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+            ${{ runner.temp }}/financial-parallel-*/
           if-no-files-found: error
           retention-days: 7
 
@@ -1659,6 +2186,18 @@ jobs:
     # Nonfinancial contracts retain their original tools and isolated services.
     timeout-minutes: 180
     services:
+      portal-redis:
+        image: redis:8.2-alpine@sha256:fe9daae35cd4fd6ec22416aa4fe0cf6b3e36741e06ff45b9986253fe2a81c041
+        ports:
+          - "127.0.0.1::6379"
+        options: >-
+          --rm
+          --memory 256m
+          --memory-swap 256m
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
       audit-export-postgres:
         image: mirror.gcr.io/library/postgres@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
         env:
@@ -1701,16 +2240,32 @@ jobs:
       - name: Set up zram and swap
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Go toolchain
         uses: actions/setup-go@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           go-version-file: account-platform/go.mod
           cache-dependency-path: account-platform/**/go.sum
           cache: ${{ runner.environment == 'github-hosted' }}
 
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Python for real PDF validator tests
         id: evidence_pdf_python
         uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           python-version: '3.12.14'
           update-environment: false
@@ -1749,8 +2304,16 @@ jobs:
           PY
           EVIDENCE_PDF_TEST_PYTHON="$pdf_child_python" EVIDENCE_PDF_AUDIT_DIR="$pdf_root/lxml-wheels" EVIDENCE_PDF_REQUIRE_SYMLINK=1 "$py" -I -B account-platform/cmd/evidence-image-validator/run_pdf_gate.py --strict
 
+      - name: Prepare CI transfer runtime (3)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js for Token authorization contracts
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           package-manager-cache: ${{ runner.environment == 'github-hosted' }}
@@ -1800,18 +2363,19 @@ jobs:
         run: |
           set -euo pipefail
           tools="$(mktemp -d "$RUNNER_TEMP/account-render.XXXXXX")"
-          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 180 \
-            https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz -o "$tools/helm.tar.gz"
+          python3 scripts/ci-download.py https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz \
+            --output "$tools/helm.tar.gz" --sha256 fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179
           printf '%s  %s\n' fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179 "$tools/helm.tar.gz" | sha256sum --check --strict
           tar -xzf "$tools/helm.tar.gz" -C "$tools" linux-amd64/helm
-          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 180 \
-            https://github.com/docker/compose/releases/download/v5.4.0/docker-compose-linux-x86_64 -o "$tools/docker-compose"
+          python3 scripts/ci-download.py https://github.com/docker/compose/releases/download/v5.4.0/docker-compose-linux-x86_64 \
+            --output "$tools/docker-compose" --sha256 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be --seconds 360
           printf '%s  %s\n' 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be "$tools/docker-compose" | sha256sum --check --strict
           chmod 0755 "$tools/docker-compose"
           # Test-only promtool; does not start or upgrade a Prometheus server.
           # SHA256 published at https://prometheus.io/download/ (3.13.5 LTS).
-          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 --max-time 180 \
-            https://github.com/prometheus/prometheus/releases/download/v3.13.5/prometheus-3.13.5.linux-amd64.tar.gz -o "$tools/prometheus.tar.gz"
+          # Allow a cold runner to fetch the verified 100 MiB archive over a slow link.
+          python3 scripts/ci-download.py https://github.com/prometheus/prometheus/releases/download/v3.13.5/prometheus-3.13.5.linux-amd64.tar.gz \
+            --output "$tools/prometheus.tar.gz" --sha256 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699 --seconds 360
           printf '%s  %s\n' 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699 "$tools/prometheus.tar.gz" | sha256sum --check --strict
           tar -xzf "$tools/prometheus.tar.gz" -C "$tools" prometheus-3.13.5.linux-amd64/promtool
           printf 'PINVOU_TEST_PROMTOOL_BINARY=%s\n' "$tools/prometheus-3.13.5.linux-amd64/promtool" >> "$GITHUB_ENV"
@@ -1879,6 +2443,7 @@ jobs:
         run: |
           set -euo pipefail
           # Test-only official Ubuntu Lua5.1 CLI; no product Lua dependency.
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends lua5.1 postgresql-client
           command -v psql
@@ -1891,7 +2456,29 @@ jobs:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
           python3 -m unittest discover -s scripts/tests -p test_account_ci_postgres.py
-          python3 scripts/account-ci-postgres.py --profile core
+          python3 scripts/account-ci-postgres.py --profile core --with-portal-redis
+
+      - name: Verify Portal Redis service isolation
+        id: portal-redis
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_portal_redis.py
+          python3 scripts/account-ci-redis.py
+
+      - name: Require real Portal Redis admission and session contracts
+        timeout-minutes: 12
+        env:
+          PINVOU_PORTAL_TEST_REDIS_URL: ${{ steps.portal-redis.outputs.url }}
+          PINVOU_PORTAL_TEST_REDIS_PORT: ${{ steps.portal-redis.outputs.port }}
+          PINVOU_PORTAL_TEST_REDIS_RUN_ID: ${{ steps.portal-redis.outputs.run_id }}
+          PINVOU_PORTAL_TEST_REDIS_OWNER_ID: ${{ steps.portal-redis.outputs.owner_id }}
+          PINVOU_PORTAL_TEST_REDIS_CONTAINER_ID: ${{ steps.portal-redis.outputs.container_id }}
+          PINVOU_PORTAL_TEST_REDIS_PROFILE: ci-owned
+        run: >-
+          python3 scripts/ci-fixture-process.py
+          --receipt "$PINVOU_CI_RESOURCE_LEDGER/portal-redis-process.json" --
+          python3 scripts/test-portal-redis.py --log "$PINVOU_CI_RESOURCE_LEDGER/portal-redis-tests.jsonl"
 
       - name: Test and vet all Account Platform Go modules
         shell: bash
@@ -1944,6 +2531,24 @@ jobs:
           export PINVOU_TEST_NATS_SERVER_BINARY="$RUNNER_TEMP/pinvou-test-nats-server"
           npm --prefix account-platform run test:existing-broker
 
+      - name: Token outbox publication on owned PostgreSQL and TLS NATS
+        timeout-minutes: 4
+        shell: bash
+        env:
+          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.broker_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.broker_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.broker_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.broker_directory }}
+          PINVOU_TEST_NATS_SERVER_BINARY: ${{ runner.temp }}/pinvou-test-nats-server
+        run: |
+          set -euo pipefail
+          # Reuse only the preceding step's pinned executable; the test starts
+          # its own TLS broker and applies public Token migrations. The shared
+          # supervisor owns the complete Python/Go/NATS process tree, including
+          # panic, timeout and cancellation; always-run ledger recovery verifies it.
+          python3 -m unittest discover -s scripts/tests -p test_token_outbox_acceptance.py
+          python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/token-outbox-process.json" -- npm --prefix account-platform run test:token-outbox
+
       - name: Audit export finite PostgreSQL rollback and persisted boundaries
         working-directory: account-platform
         env:
@@ -1958,12 +2563,12 @@ jobs:
           # Fixed actor names are exclusive to this ephemeral service. Keep
           # package execution serial and run only the bounded audit fixtures.
           go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/accountschema -run '^Test(AuditExport(RollbackRoleStorageGuard|PublicDownRetainsOriginalHistory|GuardedRollbackTransactions)|Account039RollbackInventoryPostgres|MembershipInvitationLegacyRollbackPublicPostgres)$' | tee "$RUNNER_TEMP/f17-audit-schema.jsonl"
-          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/account -run '^TestAuditExportPersistedBoundaries$' | tee "$RUNNER_TEMP/f17-audit-account.jsonl"
+          go test -race -json -tags=nomsgpack -mod=readonly -count=1 -parallel=1 ./internal/account -run '^Test(AuditExportPersistedBoundaries|CommerceSyncLifecycleFence)$' | tee "$RUNNER_TEMP/f17-audit-account.jsonl"
           python3 - "$RUNNER_TEMP/f17-audit-schema.jsonl" "$RUNNER_TEMP/f17-audit-account.jsonl" <<'PY'
           import json, pathlib, sys
           expected = [
               {"TestAuditExportRollbackRoleStorageGuard", "TestAuditExportPublicDownRetainsOriginalHistory", "TestAuditExportGuardedRollbackTransactions", "TestAccount039RollbackInventoryPostgres", "TestMembershipInvitationLegacyRollbackPublicPostgres"},
-              {"TestAuditExportPersistedBoundaries"},
+              {"TestAuditExportPersistedBoundaries", "TestCommerceSyncLifecycleFence"},
           ]
           for filename, required in zip(sys.argv[1:], expected, strict=True):
               events = [json.loads(line) for line in pathlib.Path(filename).read_text().splitlines() if line.strip()]
@@ -1972,6 +2577,15 @@ jobs:
               assert all(event["Action"] == "pass" for event in terminal), "finite PostgreSQL tests failed or skipped"
               roots = {event["Test"] for event in terminal if "/" not in event["Test"]}
               assert roots == required, "required finite PostgreSQL test selection did not execute"
+              commerce = "TestCommerceSyncLifecycleFence"
+              if commerce in required:
+                  cases = {event["Test"].removeprefix(commerce + "/") for event in terminal if event["Test"].startswith(commerce + "/")}
+                  assert cases == {"current_generation_completes", "stale_pending_not_claimed", "late_completion_rejects_old_lifecycle_without_effects", "late_retry_cannot_write_new_lifecycle_mapping", "mapping_version_drift_records_stale_in_same_lifecycle", "temporary_disable_preserves_same_generation_retry"}, "Commerce lifecycle cases did not execute"
+              history = "TestAuditExportPublicDownRetainsOriginalHistory"
+              if history in required:
+                  prefix = history + "/"
+                  cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
+                  assert cases == {"three_scope_public_down", "three_scope_public_down/LF", "three_scope_public_down/CRLF", "unbound_public_down_forbids_incomplete_inverse", "expired_binding_public_down_retains_evidence", "public_governance_down_preserves_audit_history", "public_governance_down_preserves_audit_history/pinned_ledger_ignores_temp_shadow"}, "public rollback and pinned ledger cases did not execute"
               audit = "TestAuditExportPersistedBoundaries"
               if audit in required:
                   prefix = audit + "/generation_renews_and_recovers/"
@@ -1991,9 +2605,46 @@ jobs:
                   cases = {event["Test"].removeprefix(prefix) for event in terminal if event["Test"].startswith(prefix)}
                   assert cases == {"retained-link-refuses-down-without-fact-or-schema-loss", "forward-upgrade-replays-original-and-accepts-next-command"}, "retained invitation rollback cases did not execute"
           PY
+      - name: Prepare native history export tools
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci-fixture-process.py --receipt "$RUNNER_TEMP/history-export-key-process.json" -- python3 scripts/tests/test_account_history_key.py
+          python3 scripts/ci-fixture-process.py --receipt "$RUNNER_TEMP/history-export-tools-process.json" -- bash scripts/account-platform-history-export-tools.sh
+
+      - name: Read-only history export on public domain schemas
+        timeout-minutes: 6
+        shell: bash
+        env:
+          PINVOU_TEST_SCHEMA_DATABASE_URL: ${{ steps.account-pg.outputs.audit_url }}
+          PINVOU_ACCOUNT_CI_PG_PORT: ${{ steps.account-pg.outputs.audit_port }}
+          PINVOU_ACCOUNT_CI_PG_SYSTEM_ID: ${{ steps.account-pg.outputs.audit_system }}
+          PINVOU_ACCOUNT_CI_PG_DIRECTORY: ${{ steps.account-pg.outputs.audit_directory }}
+        run: |
+          set -euo pipefail
+          test -x "$PINVOU_HISTORY_EXPORT_TEST_PWSH"
+          test -x "$PINVOU_HISTORY_EXPORT_TEST_PGTOOLS/pg_dump"
+          python3 scripts/ci-fixture-process.py --receipt "$RUNNER_TEMP/history-export-process.json" -- go -C account-platform test -race -json -tags=nomsgpack -mod=readonly -count=1 -timeout 4m -run '^TestHistoryExportPublicDomainsPostgres$' ./internal/billingschema | tee "$RUNNER_TEMP/history-export.jsonl"
+          python3 - "$RUNNER_TEMP/history-export.jsonl" <<'PY'
+          import json, pathlib, sys
+          events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]
+          root = "TestHistoryExportPublicDomainsPostgres"
+          terminal = {e["Test"]: e["Action"] for e in events if e.get("Test") and e.get("Action") in ("pass", "fail", "skip")}
+          assert terminal == {name: "pass" for name in [root, *(root + "/" + d for d in ("account", "billing", "token"))]}, "history export public-domain roots failed or skipped"
+          PY
+
+      - name: Prepare CI transfer runtime (4)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Python for financial runner policy regressions
         id: financial-policy-python
         uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           python-version: '3.12'
           update-environment: false
@@ -2004,16 +2655,25 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s scripts/tests -p test_token_financial_postgres.py
           python3 -m unittest discover -s scripts/tests -p test_financial_parallel.py
+          python3 -m unittest discover -s scripts/tests -p test_account_financial_families_postgres.py
+          python3 -m unittest discover -s scripts/tests -p test_go_test_contract.py
+          python3 -m unittest discover -s scripts/tests -p test_financial_owners.py
           policy_python="${{ steps.financial-policy-python.outputs.python-path }}"
           policy_library="$(dirname "$(dirname "$policy_python")")/lib"
           python3 scripts/ci-fixture-process.py --receipt "$PINVOU_CI_RESOURCE_LEDGER/financial-policy-process.json" -- env "LD_LIBRARY_PATH=$policy_library${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$policy_python" -m unittest discover -s scripts/tests -p test_account_financial_ci.py
+
+      - name: Stop owned temporary Portal Redis service
+        if: ${{ always() }}
+        env:
+          ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
+        run: python3 scripts/account-ci-redis.py --stop
 
       - name: Stop owned temporary PostgreSQL services
         if: ${{ always() }}
         env:
           ACCOUNT_CI_SERVICES: ${{ toJSON(job.services) }}
         run: |
-          python3 scripts/account-ci-postgres.py --profile core --stop-owned-services
+          python3 scripts/account-ci-postgres.py --profile core --with-portal-redis --stop-owned-services
 
       - name: Confirm Account test resource retirement
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
@@ -2026,12 +2686,21 @@ jobs:
           done
           python3 scripts/ci-resource-ledger.py --recover "${args[@]}"
 
+      - name: Configure artifact transport for Account test resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Account test resource lifecycle receipts
         id: account_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: account-resource-lifecycle-${{ github.run_attempt }}
           path: |
@@ -2082,15 +2751,25 @@ jobs:
       - name: Set up zram and swap
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup did not finish; continuing with runner default memory"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Go toolchain
         uses: actions/setup-go@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           go-version-file: account-platform/go.mod
           cache-dependency-path: account-platform/**/go.sum
           cache: ${{ runner.environment == 'github-hosted' }}
 
       - name: Install PostgreSQL client
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client
+        run: |
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client
 
       - name: Verify account CI PostgreSQL service isolation
         id: account-pg
@@ -2125,12 +2804,21 @@ jobs:
           set -euo pipefail
           python3 scripts/ci-resource-ledger.py --recover --directory "$PINVOU_CI_RESOURCE_LEDGER"
 
+      - name: Configure artifact transport for Account closure resource lifecycle receipts
+        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Account closure resource lifecycle receipts
         id: account_receipts_upload
         if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: account-closure-resource-lifecycle-${{ github.run_attempt }}
           path: |
@@ -2150,7 +2838,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -2169,7 +2865,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -2178,7 +2882,26 @@ jobs:
       - name: 安装 relay 依赖
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit
       - name: Windows PowerShell 5.1 与实际工具回归（禁止跳过）
-        run: node scripts/run-windows-relay-tools-tests.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs
+      - name: Configure artifact transport for Preserve Windows relay tools process receipt
+        if: always()
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
+      - name: Preserve Windows relay tools process receipt
+        if: always()
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          name: windows-relay-tools-exit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-relay-tools-process.json
+          if-no-files-found: warn
+          retention-days: 7
 
   team-relay-hub-test:
     name: team-relay-hub-test
@@ -2208,7 +2931,15 @@ jobs:
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -2224,7 +2955,7 @@ jobs:
         run: npm --prefix team-relay-hub test
 
       - name: Hub 依赖审计
-        run: npm --prefix team-relay-hub audit --registry=https://registry.npmjs.org --audit-level=high
+        run: python3 scripts/ci-npm-audit.py --prefix team-relay-hub
 
   update-release-console-test:
     name: update-release-console-test (Node ${{ matrix.node-version }})
@@ -2243,7 +2974,15 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: ${{ matrix.node-version }}
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -2257,7 +2996,7 @@ jobs:
         run: npm --prefix update-release-console test
 
       - name: 发布台依赖审计
-        run: npm --prefix update-release-console audit --registry=https://registry.npmjs.org --audit-level=high
+        run: python3 scripts/ci-npm-audit.py --prefix update-release-console
 
       - name: 发布台容器与 Compose 配置校验
         if: ${{ matrix.node-version == '20' }}
@@ -2283,7 +3022,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(vars.PINVOU_WINDOWS_ENABLED != 'false' && (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}' || '{"include":[{"os":"ubuntu-22.04"},{"os":"windows-latest"}]}') || (vars.PINVOU_MACOS_ENABLED != 'false' && '{"include":[{"os":"ubuntu-22.04"}]}' || '{"include":[{"os":"ubuntu-22.04"}]}')) }}
     runs-on: ${{ matrix.os == 'ubuntu-22.04' && fromJSON(vars.PINVOU_LINUX_MEDIUM_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') || matrix.os == 'windows-latest' && fromJSON((github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.repository != '' && github.repository_id != '' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id)) && (vars.PINVOU_WINDOWS_MEDIUM_RUNNER || vars.PINVOU_WINDOWS_RUNNER || '["windows-latest"]') || '["windows-latest"]') || matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 20 || 15 }}
     steps:
       - uses: actions/checkout@v7
 
@@ -2291,7 +3030,15 @@ jobs:
         if: ${{ runner.os == 'Linux' }}
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           # No npm cache here: a PR-scoped copy is never shared cross-PR, so
@@ -2303,11 +3050,18 @@ jobs:
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
 
       - name: 安装 Relay 发布门禁依赖
-        if: ${{ runner.os == 'Windows' }}
         run: npm --prefix remote-control-relay ci --prefer-offline --no-audit --ignore-scripts
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust（构建期开关的实际产物回归）
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
+      - name: 桌面远控发布平台与构建期开关契约
+        run: node --test remote-control-relay/test/release-path-policy.test.js pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/desktop_remote_loaded_capability.test.mjs
 
       # 版本一致性校验(--check)由 version-consistency job 无路径门全事件覆盖,
       # 此处不重复;仅跑 Tauri overlay、各平台打包与知识宿主契约。
@@ -2316,9 +3070,24 @@ jobs:
         run: |
           npm --prefix pinvou3-app run test:tauri-layout
           npm --prefix pinvou3-app run test:tauri-effective-config
+          npm --prefix pinvou3-app run test:tauri-config-schema
           npm --prefix pinvou3-app run test:macos-phase2
           npm --prefix pinvou3-app run test:knowledge-host-packaging
           npm --prefix pinvou3-app run test:linux-asr-runtime
+
+      - name: Prepare CI transfer runtime (2)
+        if: ${{ runner.os == 'Windows' && runner.environment == 'github-hosted' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
+      - uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        if: ${{ runner.os == 'Windows' && runner.environment == 'github-hosted' }}
+        with:
+          python-version: "3.13"
 
       - name: Windows 原生命令退出码回归
         if: ${{ runner.os == 'Windows' }}
@@ -2328,13 +3097,56 @@ jobs:
         if: ${{ runner.os == 'Windows' }}
         env:
           PINVOU_DESKTOP_CONTROLLER_ENABLED: '0'
+        # Windows 默认 pwsh 只把最后一行原生命令的退出码作为步骤退出码,
+        # 中间行失败会被静默掩蔽;逐行检查 $LASTEXITCODE 并立即传播。
         run: |
+          $ErrorActionPreference = 'Stop'
           npm --prefix remote-control-relay run release:gate
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/release-evidence-artifacts.test.js remote-control-relay/test/controller-release-source-binding.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js
+          python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test --test-concurrency=1 remote-control-relay/test/controller-release-evidence.test.js remote-control-relay/test/release-evidence-artifacts.test.js remote-control-relay/test/controller-release-source-binding.test.js remote-control-relay/test/controller-release-gates.test.js remote-control-relay/test/controller-release-telemetry-query.test.js remote-control-relay/test/github-workflow-run-identity.test.js remote-control-relay/test/installer-spdx.test.js remote-control-relay/test/release-path-policy.test.js remote-control-relay/test/windows-e2e-orchestrator-contract.test.js remote-control-relay/test/windows-e2e-orchestrator-helpers.test.js remote-control-relay/test/windows-e2e-path-guard.test.js remote-control-relay/test/release-process.test.js remote-control-relay/test/windows-release-owned-service.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test pinvou3-app/tests/remote_control_feature_gate_contract.test.mjs pinvou3-app/tests/remote_control_real_ui_smoke_contract.test.mjs pinvou3-app/tests/nsis_resource_staging_contract.test.js
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+
+      - name: Windows 共享进程监督器兼容回归
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json" -- python -m unittest discover -s scripts/tests -p test_ci_fixture_process.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test scripts/tests/ci-artifact-upload-diagnostics.test.cjs scripts/tests/ci-artifact-tls-policy.test.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Configure bounded Windows upload diagnostics
+        if: ${{ always() && runner.os == 'Windows' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network --diagnostics
+      - name: Preserve Windows release contract process receipts
+        id: windows_release_contract_receipts
+        if: ${{ always() && runner.os == 'Windows' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json
+            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json
+            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json
+            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Warn when Windows release contract receipts are unavailable
+        if: ${{ always() && runner.os == 'Windows' && steps.windows_release_contract_receipts.outcome == 'failure' }}
+        run: echo '::warning::Windows release contract receipt upload failed; original receipts remain on the runner. Test and cleanup failures remain failures.'
 
   # pinvou-knowledge 是可单独部署的 crate，必须直接验证自己的默认 feature 图、
   # 测试与部署入口，而不只依赖 Tauri 作为 client-only path dependency 的间接编译。
@@ -2374,10 +3186,16 @@ jobs:
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
         run: timeout --kill-after=15 240 sudo --preserve-env=GITHUB_ACTIONS,PINVOU3_CI_DISABLE_ZRAM,RUNNER_ENVIRONMENT bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # rust-toolchain.toml lives under pinvou-knowledge, so it does not apply
       # to cargo invoked from the repo root via --manifest-path; set the
@@ -2389,8 +3207,16 @@ jobs:
         working-directory: pinvou-knowledge
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou-knowledge
           # v2:2026-09 CI 镜像统一到 ubuntu-22.04,旧 key 缓存由 24.04 构建,
@@ -2436,6 +3262,14 @@ jobs:
           cargo check --manifest-path pinvou-knowledge/Cargo.toml --tests --no-default-features --features client --locked
           cargo test --manifest-path pinvou-knowledge/Cargo.toml --lib --no-default-features --features client --locked -- embedding::stub_tests
 
+      # App-facing consumption combo (pinvou3-tauri -> knowledge
+      # default-features = false, features = ["client","discovery"]):
+      # compile lib + tests under exactly that pair so a dependency wired
+      # into only one side of the client/server split breaks here instead
+      # of in an app build.
+      - name: cargo check (app combo client,discovery)
+        run: cargo check --manifest-path pinvou-knowledge/Cargo.toml --tests --no-default-features --features client,discovery --locked
+
       - name: 部署脚本 shell 语法
         run: bash -n pinvou-knowledge/deploy/install.sh
 
@@ -2459,9 +3293,18 @@ jobs:
           # hard gate nondeterministically.
           tool: cargo-deny@0.20.2
 
+      - name: Prepare CI transfer runtime (2)
+        if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Python for dependency exception guard
         if: ${{ needs.changes.outputs.knowledge_dependencies == 'true' }}
         uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           python-version: '3.12'
 
@@ -2472,6 +3315,7 @@ jobs:
         working-directory: .
         run: |
           python3 scripts/guard-webpki-roots-exception.py
+          python3 scripts/guard-chrono-maintenance-exception.py
           cargo deny --locked --manifest-path pinvou-knowledge/Cargo.toml --config pinvou3-app/src-tauri/deny.toml check advisories licenses bans sources
 
   # clippy/fmt/deny 独立 job:与 rust-test 并行,各自独立 cache。
@@ -2554,14 +3398,28 @@ jobs:
       # 本 step 只作 rustup 引导;实际工具链由 pinvou3-app/src-tauri/rust-toolchain.toml
       # 锁定具体版本(下方 cargo 步骤 working-directory 在 src-tauri,rustup 按该文件
       # 自动安装并使用 pinned 版本,本地与 CI 不漂移)。
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
+      - name: Prepare CI transfer runtime (1)
+        if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: |
             pinvou3-app/src-tauri
@@ -2590,6 +3448,7 @@ jobs:
       - name: 装 Tauri + pinvou3 Linux 系统依赖
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' }}
         run: |
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
@@ -2702,9 +3561,18 @@ jobs:
           # nondeterministically. Keep in sync with the knowledge-rust
           # cargo-deny pin.
           tool: cargo-deny@0.20.2
+      - name: Prepare CI transfer runtime (2)
+        if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' && needs.changes.outputs.rust_dependencies == 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Python for dependency exception guard
         if: ${{ env.RUN_HEAVY_RUST_CHECKS == 'true' && needs.changes.outputs.rust_dependencies == 'true' }}
         uses: actions/setup-python@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           python-version: '3.12'
       - name: cargo deny check (hard gate)
@@ -2713,6 +3581,7 @@ jobs:
         working-directory: pinvou3-app/src-tauri
         run: |
           python3 ../../scripts/guard-webpki-roots-exception.py
+          python3 ../../scripts/guard-chrono-maintenance-exception.py
           cargo deny --locked check advisories licenses bans sources
 
   rust-test:
@@ -2838,6 +3707,7 @@ jobs:
       # library explicitly rather than relying on a hosted/self-hosted image.
       - name: 装 Tauri + pinvou3 Linux 系统依赖
         run: |
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update
           # 清单经 2026-09-15 探针逐包冗余审计(剔除单包模拟安装,安装集合
           # 不变即可移除):libgtk-3-dev/libsoup-3.0-dev/libx11-dev/libxi-dev/
@@ -2878,8 +3748,14 @@ jobs:
       # no runner-image drift. See scripts/ci-libpipewire-build.sh for the full rationale.
       - name: Build PipeWire 1.0.7 dev prefix (jammy SPA headers too old)
         run: bash scripts/ci-libpipewire-build.sh
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # rust-toolchain.toml 在 src-tauri 下,对从仓库根用 --manifest-path 调用的 cargo 不生效;
       # 把该文件锁定的工具链设为 default,保证 CI 与本地同一 pinned 版本(单一真相源是文件,
@@ -2895,9 +3771,18 @@ jobs:
       # remote_control 的真实 relay 下载 e2e 需要 node + relay 依赖,缺 node_modules/ws 时
       # 该 e2e 会自动 skip —— 装上依赖让 CI 真正执行它,而不是绿灯假过。
       # push(main) 只编译不执行测试(见下方 --no-run),不需要 relay/Chrome 运行时依赖。
+      - name: Prepare CI transfer runtime (1)
+        if: ${{ github.event_name != 'push' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js (relay e2e)
         if: ${{ github.event_name != 'push' }}
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -2935,9 +3820,17 @@ jobs:
       # Probe the test cache without downloading it. An exact hit makes the
       # separate lint-cache extraction redundant; a miss still takes the
       # existing lint fallback before restoring the test cache.
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: 检查 Rust test 缓存是否精确命中
         id: rust-test-cache-probe
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou3-app/src-tauri
           shared-key: rust-test-v2
@@ -2947,18 +3840,35 @@ jobs:
       # rust-test 的独立缓存缺失时，全冷测试会超过当前 runner 的执行窗口。
       # 先只读恢复同一工具链与锁文件下已由 main 保存的 rust-lint 目标缓存，
       # 再恢复/保存独立 rust-test 缓存；不降低测试范围，也不让 PR 写缓存。
+      - name: Prepare CI transfer runtime (3)
+        if: ${{ steps.rust-test-cache-probe.outputs.cache-hit != 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: 恢复 Rust lint 暖缓存
         if: ${{ steps.rust-test-cache-probe.outputs.cache-hit != 'true' }}
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou3-app/src-tauri
           # v2:镜像统一到 ubuntu-22.04 后与 24.04 时代缓存隔离(同 knowledge-rust)。
           shared-key: rust-lint-v2
           save-if: false
 
+      - name: Prepare CI transfer runtime (4)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo test cache
         id: rust-test-cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou3-app/src-tauri
           # 2026-08-29/30 incident: every test binary linked from a restored
@@ -2987,9 +3897,18 @@ jobs:
 
       # An entry can be evicted between lookup and restore. In that case the
       # skipped lint restore must still be attempted before compilation.
+      - name: Prepare CI transfer runtime (5)
+        if: ${{ steps.rust-test-cache-probe.outputs.cache-hit == 'true' && steps.rust-test-cache.outputs.cache-hit != 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: 恢复被淘汰缓存的 Rust lint 回退
         if: ${{ steps.rust-test-cache-probe.outputs.cache-hit == 'true' && steps.rust-test-cache.outputs.cache-hit != 'true' }}
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou3-app/src-tauri
           shared-key: rust-lint-v2
@@ -3074,10 +3993,7 @@ jobs:
       - name: 回收已完成的主测试产物
         if: ${{ github.event_name != 'push' }}
         run: |
-          target="pinvou3-app/src-tauri/target/debug/deps"
-          find "$target" -maxdepth 1 -type f \
-            \( -name 'pinvou3_lib-*' -o -name 'libpinvou3_lib-*' \) \
-            -print -delete
+          python3 scripts/prune-rust-test-artifacts.py
           df -h "$GITHUB_WORKSPACE"
 
       - name: cargo test --test behavior_telemetry (standalone memory-bounded harness)
@@ -3179,6 +4095,7 @@ jobs:
       # library requirements as the rust-test job.
       - name: Install Tauri Linux system dependencies
         run: |
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update
           # 清单与 rust-test/release 同源,经 2026-09-15 探针逐包冗余审计:
           # libgtk-3-dev/libsoup-3.0-dev/libx11-dev/libxi-dev/libxtst-dev 均被
@@ -3237,10 +4154,16 @@ jobs:
       # Profiles are chosen by the top-level workspace, and the pinvou-cli
       # workspace has no [profile] section, so the same crate compiles at O0
       # in this job and the overflow trigger is absent.
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # rust-toolchain.toml lives under src-tauri and does not apply to cargo
       # invoked from the repo root with --manifest-path; like rust-test, make
@@ -3251,8 +4174,16 @@ jobs:
         working-directory: pinvou3-app/src-tauri
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou-cli
           # rust-test's 2026-08-29/30 restored-target incident was root-caused
@@ -3310,8 +4241,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
 
@@ -3406,6 +4345,7 @@ jobs:
       # and its computer_use capture headers need the same libraries).
       - name: Install Tauri Linux system dependencies
         run: |
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update
           # Package list audited per-package on 2026-09-15: gtk/soup/x11 are installed
           # transitively via webkit-dev — that transitive set is what covers the pure-Rust
@@ -3436,10 +4376,16 @@ jobs:
       - name: Build PipeWire 1.0.7 dev prefix (jammy SPA headers too old)
         run: bash scripts/ci-libpipewire-build.sh
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # Same as cli-test: the version pinned by src-tauri/rust-toolchain.toml
       # must become the default so cargo invoked from the repo root with
@@ -3466,11 +4412,19 @@ jobs:
             RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
             python3 scripts/ci-rust-disk.py
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         id: cli_lint_cache
         # Pin the reviewed implementation to prevent action behavior drift;
         # the final disk gate enables failure caching only when safe to try.
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou-cli
           shared-key: cli-lint
@@ -3657,8 +4611,14 @@ jobs:
           echo "WINDOWS_RUST_TIMING phase=${{ matrix.phase }} step=codewhale-init elapsed_seconds=$((SECONDS-started)) status=$status"
           exit "$status"
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # Same as rust-test: set the toolchain pinned by
       # src-tauri/rust-toolchain.toml as the default, so cargo invoked from
@@ -3749,8 +4709,16 @@ jobs:
       # Node only for a dependency-free static updater contract, so setup-node
       # and npm ci remain unnecessary.
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           # This job compiles the CodeWhale Windows-only regression target,
           # the application workspace, AND the pinvou-cli workspace (the
@@ -3984,12 +4952,52 @@ jobs:
         if: ${{ matrix.phase == 'regression' }}
         run: npm --prefix pinvou3-app run test:windows-static-updater
 
+      - name: Windows atomic fixture Python
+        if: ${{ matrix.phase == 'regression' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Compilation helpers already require Python in this job. Bind the
+          # verified native executable without changing the runner installation.
+          python -X utf8 - <<'PY' >> "$GITHUB_ENV"
+          import ctypes
+          import os
+          import struct
+          import sys
+          if (
+              sys.platform != 'win32'
+              or sys.implementation.name != 'cpython'
+              or sys.version_info < (3, 12)
+              or struct.calcsize('P') != 8
+          ):
+              raise SystemExit('Windows atomic fixtures require native 64-bit CPython 3.12 or newer')
+          executable = sys.executable
+          if (
+              not os.path.isabs(executable)
+              or not os.path.isfile(executable)
+              or any(char in executable for char in '\r\n\0')
+          ):
+              raise SystemExit('Windows atomic fixture Python executable is unavailable')
+          ctypes.WinDLL('kernel32', use_last_error=True)
+          print('Windows atomic fixture Python ' + sys.version.split()[0] + ' (native, 64-bit)', file=sys.stderr)
+          print('PINVOU_WINDOWS_ATOMIC_PYTHON=' + executable)
+          PY
+
+      - name: Initialize Windows atomic resource ledger
+        if: ${{ matrix.phase == 'regression' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"
+          "$python_exe" scripts/ci-resource-ledger.py --init
+
       - name: Windows 原子替换状态机回归
         if: ${{ matrix.phase == 'regression' }}
         shell: bash
         run: |
           set -euo pipefail
           total_started=$SECONDS
+          python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"
           # 直接运行已经由 mt.exe 修补的链接产物。这里不能再次调用 cargo test，
           # 否则 Cargo 可能重链并覆盖 exe，导致 Common-Controls v6 清单丢失。
           test_exe="$(cygpath -u "$PINVOU3_TEST_EXE")"
@@ -3997,6 +5005,10 @@ jobs:
             echo "FAIL: 测试 exe 不存在:$test_exe" >&2
             exit 1
           }
+          test_exe_windows="$(cygpath -w "$test_exe")"
+          ledger="$(cygpath -u "$PINVOU_CI_RESOURCE_LEDGER")"
+          : > "$ledger/atomic-expected.txt"
+          sha256sum "$test_exe"
           cd pinvou3-app/src-tauri
           # 逐过滤器断言至少命中 1 个测试,避免测试改名后过滤器 0 匹配却 exit 0
           # 导致的静默空跑。staging::tests 是 cfg(all(test, windows)) 的传输
@@ -4071,6 +5083,7 @@ jobs:
             'reap_killed_child_' \
             'features::browser::platform::windows::tests::' \
             'features::updater::platform::windows::tests::' \
+            'features::monitor::cpu_math::tests::' \
             'features::monitor::platform::windows_cpu::tests::' \
             'features::monitor::platform::windows_memory::tests::' \
             'features::monitor::platform::windows_gpu::tests::' \
@@ -4092,6 +5105,7 @@ jobs:
             'features::remote_control::controller::controlling_service::tests::actual_adapter_' \
             'features::remote_control::controller::controlling_service::tests::connect_attempt_' \
             'features::computer_use::platform::windows::tests::' \
+            'features::computer_use::platform::virtual_display::windows_virtual::tests::' \
             'failed_probe_never_deletes_an_existing_store_windows' \
             'features::voice_shortcut::platform::tests::' \
             'app::commands::dependencies::platform::windows::tests::' \
@@ -4104,14 +5118,70 @@ jobs:
             'windows_attachment_runtime_stays_security_gated'; do
             index=$((index+1))
             started=$SECONDS
-            "$test_exe" "$filter" --test-threads=1 2>&1 | tee /tmp/windows_regression.log
-            grep -qE 'running [1-9][0-9]* tests?' /tmp/windows_regression.log || {
+            printf 'atomic-%s.json\n' "$index" >> "$ledger/atomic-expected.txt"
+            report="$ledger/atomic-$index.log"
+            receipt="$(cygpath -w "$ledger/atomic-$index.json")"
+            "$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"
+            grep -qE 'running [1-9][0-9]* tests?' "$report" || {
               echo "FAIL: 回归过滤器 '$filter' 匹配 0 个测试(疑似测试改名导致静默空跑)" >&2
               exit 1
             }
             echo "WINDOWS_RUST_TIMING phase=regression step=test-filter-$index elapsed_seconds=$((SECONDS-started)) status=0"
           done
           echo "WINDOWS_RUST_TIMING phase=regression step=regression-filter-suite elapsed_seconds=$((SECONDS-total_started)) status=0"
+
+      - name: Confirm Windows atomic resource retirement
+        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_exe="$(cygpath -u "$PINVOU_WINDOWS_ATOMIC_PYTHON")"
+          "$python_exe" - "$PINVOU_CI_RESOURCE_LEDGER" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          root = Path(sys.argv[1])
+          expected = root / 'atomic-expected.txt'
+          if expected.is_symlink() or not expected.is_file() or expected.stat().st_size > 65536:
+              raise SystemExit('Windows atomic receipt inventory unavailable')
+          names = expected.read_text(encoding='utf-8').splitlines()
+          if not names or len(names) != len(set(names)) or any(not re.fullmatch(r'atomic-[1-9][0-9]*\.json', name) for name in names):
+              raise SystemExit('Windows atomic receipt inventory invalid or empty')
+          for name in names:
+              receipt = root / name
+              if receipt.is_symlink() or not receipt.is_file():
+                  raise SystemExit('Windows atomic resource receipt missing: ' + name)
+          PY
+          "$python_exe" scripts/ci-resource-ledger.py --directory "$PINVOU_CI_RESOURCE_LEDGER"
+
+      - name: Configure bounded Windows atomic upload diagnostics
+        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network --diagnostics
+      - name: Windows atomic lifecycle receipts
+        id: windows_atomic_receipts_upload
+        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/atomic-expected.txt
+            ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/ledger.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Warn when Windows atomic receipt delivery fails
+        if: ${{ always() && steps.windows_atomic_receipts_upload.outcome == 'failure' }}
+        shell: bash
+        run: echo '::warning::Windows atomic receipt upload failed; original receipts remain on the runner. Tests and retirement remain mandatory.'
 
       # Round-42 review: the pinvou-cli workspace's own cfg(windows) unit
       # tests previously ran on NO CI leg — the Linux cli-test leg cannot
@@ -4185,11 +5255,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: 安装锁定的 Rust 工具链
         shell: pwsh
         run: |
@@ -4205,6 +5285,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "rustup toolchain install failed with exit code $LASTEXITCODE."
           }
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # scripts/ci/** 不在任何其它 job filter 里,因此本 job 是
       # ensure-rust-toolchain.ps1 改动触发的唯一门禁;frontend-test(Linux)
@@ -4352,8 +5436,16 @@ jobs:
         with:
           submodules: false
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js (isolated macOS deployment regression)
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
 
@@ -4371,8 +5463,14 @@ jobs:
       - name: Init CodeWhale submodule
         run: bash "${{ github.workspace }}/scripts/ci-prepare-codewhale.sh"
 
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
 
       # Same as rust-test/windows-rust-test: set the toolchain resolved by
       # src-tauri/rust-toolchain.toml as default (currently floating stable), so
@@ -4487,8 +5585,16 @@ jobs:
             : > "$d/$f"
           done
 
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou3-app/src-tauri
           # Separate key: macOS artifacts are not interchangeable with Linux/Windows; do not
@@ -4618,9 +5724,18 @@ jobs:
       # PR legs (check + computer_use) are verified not to need
       # node_modules, so they skip the install to save time. Same two
       # steps as the old mac-build.yml.
+      - name: Prepare CI transfer runtime (3)
+        if: ${{ github.event_name == 'push' && needs.changes.outputs.bundle_chain == 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js (universal bundle smoke, push only)
         if: ${{ github.event_name == 'push' && needs.changes.outputs.bundle_chain == 'true' }}
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: '24'
           cache: 'npm'
@@ -4775,8 +5890,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
           cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
@@ -4798,18 +5921,27 @@ jobs:
       - name: Windows browser wrapper lifecycle regression
         env:
           PINVOU3_TEST_BROWSER_NO_HOST: "1"
-        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
+        run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node --test --test-concurrency=1 pinvou3-app/tests/browser-wrapper-host-control.test.mjs pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs
 
       - name: Windows browser wrapper lazy regression
         env:
           PINVOU3_TEST_BROWSER_NO_HOST: "1"
         run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-browser-lazy-${{ github.run_id }}-${{ github.run_attempt }}.json" -- node pinvou3-app/tests/browser_wrapper_lazy.test.mjs
 
+      - name: Configure artifact transport for Preserve browser fixture exit receipts
+        if: always()
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Preserve browser fixture exit receipts
         if: always()
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
@@ -4833,11 +5965,20 @@ jobs:
       - name: Windows ACP bridge runtime smoke
         run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-acp-${{ github.run_id }}-${{ github.run_attempt }}.json" -- python scripts/test-windows-acp-runtime.py
 
+      - name: Configure artifact transport for Preserve ACP fixture exit receipt
+        if: always()
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: Preserve ACP fixture exit receipt
         if: always()
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: windows-acp-exit-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 7
@@ -4856,8 +5997,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Windows 私有 runtime 缓存行为回归
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File pinvou3-app/tests/windows_runtime_cache_behavior.ps1
+      - name: Windows runtime 缓存与 Release 行为回归（PowerShell 5.1 和 7）
+        shell: pwsh
+        run: |
+          # Let each host build its own module search path. Inheriting pwsh's
+          # PSModulePath can hide built-in 5.1 modules such as Get-FileHash.
+          Remove-Item Env:PSModulePath -ErrorAction SilentlyContinue
+          $receipts = Join-Path $env:RUNNER_TEMP 'windows-runtime-${{ github.run_id }}-${{ github.run_attempt }}'
+          New-Item -ItemType Directory -Path $receipts -ErrorAction Stop | Out-Null
+          & python scripts/ci-fixture-process.py --receipt (Join-Path $receipts 'process-scope-tests.json') -- python -m unittest discover -s scripts/tests -p test_ci_fixture_process.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($runtimeShell in @('powershell', 'pwsh')) {
+            foreach ($runtimeTest in @('windows_runtime_cache_behavior.ps1', 'windows_runtime_release_behavior.ps1')) {
+              $receipt = Join-Path $receipts "$runtimeShell-$runtimeTest.json"
+              & python scripts/ci-fixture-process.py --receipt $receipt -- $runtimeShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "pinvou3-app/tests/$runtimeTest"
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
+
+      - name: Configure artifact transport for Windows runtime resource receipts
+        if: always()
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
+      - name: 上传 Windows runtime 资源收据
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+        with:
+          name: windows-runtime-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-runtime-${{ github.run_id }}-${{ github.run_attempt }}/
+          retention-days: 7
+          if-no-files-found: warn
 
   macos-codex-runtime-test:
     name: macos-codex-runtime-test
@@ -4869,8 +6045,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Node.js
         uses: actions/setup-node@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           node-version: "24"
 
@@ -4954,9 +6138,14 @@ jobs:
       # bootstraps rustup; the version pinned by src-tauri/rust-toolchain.toml
       # must become the default so cargo invoked from the repo root with
       # --manifest-path uses the same toolchain as local development.
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       - name: Align the toolchain pinned by rust-toolchain.toml
         working-directory: pinvou3-app/src-tauri
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
@@ -4973,8 +6162,16 @@ jobs:
       # anti-death-loop rationale: save-on-success-only + eviction left a
       # failed main push with a cold cache namespace). Without it a failed
       # main push strands this cache cold, defeating the retention goal.
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           workspaces: pinvou-cli
           shared-key: macos-cli-check
@@ -5092,11 +6289,10 @@ jobs:
         run: |
           set -euo pipefail
           sudo mkdir -p /etc/apt/keyrings
-          curl --proto '=https' --tlsv1.2 --location --silent --show-error --fail \
-            --retry 3 --retry-delay 2 https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | sudo gpg --dearmor --yes -o /etc/apt/keyrings/pinvou-llvm.gpg
+          # The checked-in public certificate is independently SHA-256 pinned.
           echo "deb [signed-by=/etc/apt/keyrings/pinvou-llvm.gpg] https://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" \
             | sudo tee /etc/apt/sources.list.d/pinvou-llvm-18.list > /dev/null
+          sudo python3 "$GITHUB_WORKSPACE/scripts/ci-apt-prepare.py" --apply
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config cmake libclang-18-dev file
@@ -5115,18 +6311,34 @@ jobs:
       # 配额策略:main 写、PR/MQ/发布只读;发布 job 只 restore 这两个键)。
       # 键把 setup 脚本内容 hash 进去,脚本(钉的 sha256/包清单)一变即换代,
       # 旧代由 scripts/cache-janitor.sh 规则 E 去重。
+      - name: Prepare CI transfer runtime (1)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Restore loong64 cross toolchain cache
         id: loong64-toolchain-cache
         uses: actions/cache/restore@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           path: ${{ github.workspace }}/.pinvou-loong64-cache/cross-tools
           key: release-linux-loong64-jammy-toolchain-${{ hashFiles('scripts/ci-loongarch64-toolchain.sh') }}
           restore-keys: |
             release-linux-loong64-jammy-toolchain-
 
+      - name: Prepare CI transfer runtime (2)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Restore loong64 sysroot cache
         id: loong64-sysroot-cache
         uses: actions/cache/restore@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           path: ${{ github.workspace }}/.pinvou-loong64-cache/sysroot
           key: release-linux-loong64-jammy-sysroot-${{ hashFiles('scripts/ci-loongarch64-sysroot.sh') }}
@@ -5138,9 +6350,14 @@ jobs:
       # rust-toolchain.toml must become the default so cargo invoked from the
       # repo root with --manifest-path (and rustup target add below) uses the
       # same toolchain as local development.
+      - name: Configure verified Rust download source
+        run: node scripts/ci-rust-network.cjs
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
+      - name: Report verified Rust download diagnostics
+        if: ${{ always() }}
+        timeout-minutes: 1
+        run: node scripts/ci-rust-network.cjs --report
       - name: Align the toolchain pinned by rust-toolchain.toml
         working-directory: pinvou3-app/src-tauri
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
@@ -5176,22 +6393,48 @@ jobs:
       # 缓存保存:仅 main push 且 setup 全部成功(success():两个 setup 脚本
       # 都会先 mkdir 目标目录再下载,setup 失败留下的半空树若被存进 exact
       # key,后续 restore 会永远命中这份空代;cache-hit 时无需重写同一键)。
+      - name: Prepare CI transfer runtime (3)
+        if: ${{ success() && github.ref == 'refs/heads/main' && steps.loong64-toolchain-cache.outputs.cache-hit != 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Save loong64 cross toolchain cache
         if: ${{ success() && github.ref == 'refs/heads/main' && steps.loong64-toolchain-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           path: ${{ github.workspace }}/.pinvou-loong64-cache/cross-tools
           key: release-linux-loong64-jammy-toolchain-${{ hashFiles('scripts/ci-loongarch64-toolchain.sh') }}
 
+      - name: Prepare CI transfer runtime (4)
+        if: ${{ success() && github.ref == 'refs/heads/main' && steps.loong64-sysroot-cache.outputs.cache-hit != 'true' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Save loong64 sysroot cache
         if: ${{ success() && github.ref == 'refs/heads/main' && steps.loong64-sysroot-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v6
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           path: ${{ github.workspace }}/.pinvou-loong64-cache/sysroot
           key: release-linux-loong64-jammy-sysroot-${{ hashFiles('scripts/ci-loongarch64-sysroot.sh') }}
 
+      - name: Prepare CI transfer runtime (5)
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-network-node-options.cjs
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           # 三个 workspace 的交叉产物共享一份缓存(交叉 target 目录都在各自
           # workspace 的 target 下;工具链/sysroot 在 target 之外,不被吞)。
@@ -5233,6 +6476,8 @@ jobs:
       - backflow-portability
       - fast-gate
       - merge-authored-audit
+      - runner-pool-guard
+      - frontend-setup
       - frontend-test
       - frontend-browser-test
       - relay-test
@@ -5264,6 +6509,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # schema 2 records the base→tested diff, so the first parent must exist.
+          fetch-depth: 2
 
       - name: Set up zram and swap
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
@@ -5277,6 +6525,9 @@ jobs:
           BACKFLOW_PORTABILITY_RESULT: ${{ needs.backflow-portability.result }}
           FAST_GATE_RESULT: ${{ needs.fast-gate.result }}
           MERGE_AUTHORED_AUDIT_RESULT: ${{ needs.merge-authored-audit.result }}
+          # 池 vars 守卫与前端 setup 工件化 leg:缺失 vars / 构建失败在 gate 直接显红。
+          RUNNER_POOL_GUARD_RESULT: ${{ needs.runner-pool-guard.result }}
+          FRONTEND_SETUP_RESULT: ${{ needs.frontend-setup.result }}
           CI_REUSE_VERIFIED: ${{ needs.changes.outputs.reuse_verified }}
           CI_REUSE_IDS: ${{ join(fromJSON(needs.changes.outputs.reused_jobs || '[]'), ',') }}
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
@@ -5412,6 +6663,8 @@ jobs:
 
           failed=0
           for item in \
+            "runner-pool-guard:$RUNNER_POOL_GUARD_RESULT" \
+            "frontend-setup:$FRONTEND_SETUP_RESULT" \
             "backflow-portability:$BACKFLOW_PORTABILITY_RESULT" \
             "frontend-test:$FRONTEND_RESULT" \
             "frontend-browser-test:$FRONTEND_BROWSER_RESULT" \
@@ -5464,11 +6717,20 @@ jobs:
           CI_REUSE_NEEDS: ${{ toJSON(needs) }}
         run: python3 scripts/ci-test-reuse.py record
 
+      - name: Configure artifact transport for PR test success proof transport
+        if: ${{ success() && steps.success_proof.outputs.directory != '' }}
+        timeout-minutes: 1
+        working-directory: ${{ github.workspace }}
+        run: node scripts/ci-artifact-node-options.cjs --network
       - name: PR test success proof transport
         if: ${{ success() && steps.success_proof.outputs.directory != '' }}
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/upload-artifact@v7
+        env:
+          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}
+          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}
+          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
         with:
           name: ci-success-proof-${{ github.run_attempt }}
           path: ${{ steps.success_proof.outputs.directory }}/proof.json

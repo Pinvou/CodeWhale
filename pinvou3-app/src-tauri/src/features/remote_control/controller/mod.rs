@@ -25,6 +25,8 @@ pub(crate) mod redaction;
 pub(crate) mod relay_runtime;
 pub(crate) mod relay_transport;
 pub(crate) mod resume;
+#[cfg(test)]
+mod retirement_model_tests;
 pub(crate) mod runtime_egress;
 pub(crate) mod shared_transport;
 pub(crate) mod task;

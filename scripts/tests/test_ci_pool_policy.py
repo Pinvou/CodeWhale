@@ -15,8 +15,9 @@ class RunnerPoolPolicyTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/pr-check.yml').read_text(encoding='utf-8')
         expected = {
             'LIGHT': ['commit-message', 'version-consistency', 'changes', 'fast-gate', 'required-gate', 'backflow-portability'],
-            'MEDIUM': ['frontend-test', 'relay-test', 'team-relay-hub-test', 'update-release-console-test', 'release-contract-test'],
-            'HEAVY': ['knowledge-rust', 'rust-lint', 'rust-test', 'cli-test', 'cli-lint', 'rust-loongarch64-check'],
+            # setup 构建一次；逻辑测试及浏览器分片在具备隔离能力的 heavy 池消费产物。
+            'MEDIUM': ['frontend-setup', 'relay-test', 'team-relay-hub-test', 'update-release-console-test', 'release-contract-test'],
+            'HEAVY': ['frontend-test', 'frontend-browser-test', 'knowledge-rust', 'rust-lint', 'rust-test', 'cli-test', 'cli-lint', 'rust-loongarch64-check'],
         }
         jobs = dict(re.findall(r'(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow))
         for pool, names in expected.items():

@@ -29,7 +29,7 @@ use super::controlled::{
     ControlledDeviceManager, ControlledLease, ControlledOperation, ControlledRegistration,
     ControlledResumeMaterial, ControlledResumeStep, ControlledStateError, ControlledStatus,
     ControlledStatusKind, ControlledTransportAuthority, ControlledTransportOwner,
-    MAX_HANDSHAKE_TTL_MS,
+    MAX_HANDSHAKE_TTL_MS, PERMISSION_DISPATCH_DEFERRED,
 };
 use super::controlled_handshake::ControlledHandshake;
 use super::controlling_handshake::JoinedLease;
@@ -59,7 +59,7 @@ const REMOTE_ACTION_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 #[derive(Clone)]
 struct CachedRemoteActionResult {
     fingerprint: [u8; 32],
-    response: Value,
+    response: Option<Value>,
     touched_at: Instant,
 }
 
@@ -85,19 +85,29 @@ impl RemoteActionResultCache {
         match entries.get_mut(request_id) {
             Some(entry) if entry.fingerprint == fingerprint => {
                 entry.touched_at = now;
-                RemoteActionCacheLookup::Hit(entry.response.clone())
+                entry
+                    .response
+                    .clone()
+                    .map_or(RemoteActionCacheLookup::Miss, RemoteActionCacheLookup::Hit)
             }
             Some(_) => RemoteActionCacheLookup::Conflict,
             None => RemoteActionCacheLookup::Miss,
         }
     }
 
-    fn insert(&self, request_id: String, fingerprint: [u8; 32], response: Value) {
+    fn insert(&self, request_id: String, fingerprint: [u8; 32], response: Option<Value>) {
         let mut entries = self.entries.lock();
         let now = Instant::now();
         entries.retain(|_, entry| {
             now.saturating_duration_since(entry.touched_at) <= REMOTE_ACTION_CACHE_TTL
         });
+        if let Some(entry) = entries.get_mut(&request_id) {
+            if entry.fingerprint == fingerprint && entry.response.is_none() {
+                entry.response = response;
+                entry.touched_at = now;
+            }
+            return;
+        }
         if entries.len() >= REMOTE_ACTION_CACHE_CAPACITY {
             if let Some(oldest) = entries
                 .iter()
@@ -942,13 +952,17 @@ impl ControlledHandshakeDriver {
     }
 
     /// `controller_pairing_reserved`：验签 transcript、派生会话密钥与 receipt，
-    /// 产出本端 `finished_receipt_commit`。未验签或重复接管都失败关闭。
+    /// 产出本端 `finished_receipt_commit`。同一已验签预留的通知仅忽略；
+    /// 不同绑定或无效签名仍失败关闭，不重发一次性帧。
     pub(crate) fn accept_reserved(
         &mut self,
         message: &Value,
         trust: &AuthenticatedRelayTrustConfig,
-    ) -> Result<Value, &'static str> {
-        if self.handshake.is_some() {
+    ) -> Result<Option<Value>, &'static str> {
+        if let Some(handshake) = self.handshake.as_ref() {
+            if handshake.is_reserved_replay(message, trust) {
+                return Ok(None);
+            }
             return Err("controller_handshake_stage_invalid");
         }
         let keys = self.keys.take().ok_or("controller_handshake_key_invalid")?;
@@ -956,7 +970,7 @@ impl ControlledHandshakeDriver {
             ControlledHandshake::new(message, keys, trust).map_err(|error| error.code)?;
         let commit = handshake.commit().map_err(|error| error.code)?;
         self.handshake = Some(handshake);
-        Ok(commit)
+        Ok(Some(commit))
     }
 
     /// `finished_receipt_commit`：记录对端 commitment 后产出本端 Finished。
@@ -1160,7 +1174,12 @@ impl ControlledRelayWorker {
     ) -> Result<ControlledRegistrationTask, String> {
         let code_wrap = CodeWrapKeyPair::generate().map_err(|_| "pairing_key_invalid")?;
         let handshake = HandshakeKeyPair::generate().map_err(|_| "handshake_key_invalid")?;
-        let channel = relay.start_controller_relay(operation.generation()).await?;
+        let channel = {
+            let manager = app.state::<ControlledDeviceManager>();
+            manager.with_registration_start(&operation, || {
+                relay.start_controller_relay_sync(operation.generation())
+            })?
+        };
         log_controlled_event("worker_started", "channel_ready");
         let (done_tx, done_rx) = oneshot::channel();
         let mut worker = Self {
@@ -1774,12 +1793,18 @@ impl ControlledRelayWorker {
         message: &Value,
         driver: &mut ControlledHandshakeDriver,
     ) -> Result<Option<Value>, String> {
+        let manager = self.app.state::<ControlledDeviceManager>();
+        if !manager.is_pending_handshake(self.operation.clone()) {
+            return Err("controller_handshake_stage_invalid".to_owned());
+        }
         let trust = load_relay_trust_config(|name| std::env::var(name).ok())
             .map_err(|_| RELAY_TRUST_UNCONFIGURED.to_owned())?;
-        let manager = self.app.state::<ControlledDeviceManager>();
-        let commit = driver
+        let Some(commit) = driver
             .accept_reserved(message, &trust)
-            .map_err(str::to_owned)?;
+            .map_err(str::to_owned)?
+        else {
+            return Ok(None);
+        };
         let now_b = controlled_monotonic_millis();
         let deadline_b =
             handshake_deadline_b(driver.signed_expires_at_ms().map_err(str::to_owned)?, now_b)?;
@@ -1888,7 +1913,10 @@ impl ControlledRelayWorker {
         // Exact operation validation precedes all cleanup. A retired worker
         // must not clear the replacement generation's keys or projection.
         let result = match self.transport_owner.as_ref() {
-            Some(owner) => manager.fail_owned_transport(owner, sanitize_error(error)),
+            Some(owner) => {
+                let lane = self.app.state::<ControlledLaneState>();
+                manager.fail_owned_transport(owner, sanitize_error(error), || lane.clear())
+            }
             None => manager.fail_operation(self.operation.clone(), sanitize_error(error)),
         };
         if let Ok(status) = result {
@@ -2274,6 +2302,16 @@ async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
             let action = port
                 .remote_action(lease, session_ref, operation, body)
                 .await;
+            if operation == "permission_decide"
+                && action
+                    .as_ref()
+                    .is_err_and(|code| code == PERMISSION_DISPATCH_DEFERRED)
+            {
+                // Bind the request ID across the pause without inventing a
+                // terminal result or replaying a failure after the SDK commit.
+                action_results.insert(request_id.to_owned(), fingerprint, None);
+                return Ok(Vec::new());
+            }
             match &action {
                 Ok(_) => log_remote_action_event(
                     "controlled",
@@ -2290,7 +2328,7 @@ async fn dispatch_decrypted_payload_cached<P: ControlledBusinessPort + ?Sized>(
             }
             let response =
                 remote_action_response(lease, session_ref, request_id, operation, action);
-            action_results.insert(request_id.to_owned(), fingerprint, response.clone());
+            action_results.insert(request_id.to_owned(), fingerprint, Some(response.clone()));
             Ok(vec![("remote_action_result", response)])
         }
         "capability_snapshot_request" => {
@@ -2658,8 +2696,9 @@ pub(crate) enum ControlledResumeOutcome {
 
 /// E2E-06：`desktop socket` 掉线后启动 B 端恢复：投影 reconnecting、取恢复材料，
 /// 并按冻结协议发出 `controller_resume_prepare`。任一步失败返回 false，调用方
-/// 必须结束本代通道。管理器内部的恢复失败会立即清理租约与本代凭证；构造或
-/// 入队等管理器外失败由已冻结的 watchdog 截止及命令层
+/// 必须结束本代通道。仅管理器 resume_gate.prepare 失败分支会立即清理
+/// 租约与本代凭证；operation 失效、非 Reconnecting、缺 lease context 的
+/// 前置拒绝不执行该清理。构造或入队等管理器外失败由已冻结的 watchdog 截止及命令层
 /// `desktop_remote_controlled::spawn_watchdog_reaper`（应用 setup 注册、独立每秒轮询）
 /// 有界收口；它独立于本 worker 的两秒 poll，不随本 worker 退出而停止。
 /// 不表示所有返回 false 的路径都已经完成清理，也不会因恢复而延长截止。
@@ -2794,6 +2833,15 @@ pub(crate) fn handle_controlled_resume_frame<P: ControlledRelayPort + ?Sized>(
         || manager.with_transport_owner(&owner, || ()).is_err()
     {
         return ControlledResumeOutcome::Ignored;
+    }
+    // This notice is synthesized by the current local reader, not a wire
+    // protocol message (the manager rejects wire imitations). It deliberately
+    // has no lease tuple. The captured transport owner above supplies the
+    // authority; a second loss terminates this candidate without a new budget.
+    if kind == "desktop_relay_connection"
+        && message.get("connected").and_then(Value::as_bool) == Some(false)
+    {
+        return ControlledResumeOutcome::Failed;
     }
     let advance = |step, now| manager.advance_owned_resume(&owner, step, now);
     if kind == "desktop_relay_connection"
@@ -3557,7 +3605,10 @@ mod tests {
             a_keys,
             relay.trust.clone(),
         );
-        let b_commit = driver.accept_reserved(&reservation, &relay.trust).unwrap();
+        let b_commit = driver
+            .accept_reserved(&reservation, &relay.trust)
+            .unwrap()
+            .unwrap();
         let a_commit = a.accept_reserved(&reservation).unwrap();
         let b_finished = driver.accept_peer_commitment(&a_commit).unwrap();
         let a_finished = a.accept_peer_commitment(&b_commit).unwrap();
@@ -4208,7 +4259,7 @@ mod tests {
         trust: &AuthenticatedRelayTrustConfig,
     ) -> (ControlledHandshakeDriver, ControllingHandshake) {
         let mut driver = ControlledHandshakeDriver::new(b_keys);
-        let b_commit = driver.accept_reserved(reservation, trust).unwrap();
+        let b_commit = driver.accept_reserved(reservation, trust).unwrap().unwrap();
         let mut a = ControllingHandshake::new(
             reservation["request_id"].as_str().unwrap(),
             "claim-0001",
@@ -4258,16 +4309,24 @@ mod tests {
         );
         assert!(!driver.is_active());
 
-        let b_commit = driver.accept_reserved(&reservation, &relay.trust).unwrap();
+        let b_commit = driver
+            .accept_reserved(&reservation, &relay.trust)
+            .unwrap()
+            .unwrap();
         assert!(driver.is_active());
         assert_eq!(b_commit["type"], "finished_receipt_commit");
         assert_eq!(b_commit["sender_role"], "B");
-        // 重复接管同一预留必须拒绝。
-        assert_eq!(
+        // 同一已验签通知是无副作用重放，不重发commit或生成收据秘密。
+        assert!(
             driver
                 .accept_reserved(&reservation, &relay.trust)
-                .unwrap_err(),
-            "controller_handshake_stage_invalid"
+                .unwrap()
+                .is_none()
+        );
+        assert!(driver.keys.is_none());
+        assert_eq!(
+            driver.handshake.as_ref().unwrap().stage(),
+            super::super::controlled_handshake::ControlledHandshakeStage::Committed
         );
         // 收到 A 的 commitment 之前不能回送 Finished。
         assert_eq!(
@@ -4388,6 +4447,7 @@ mod tests {
             action_calls: std::sync::atomic::AtomicUsize,
             task_calls: std::sync::atomic::AtomicUsize,
             block: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+            defer_action: std::sync::atomic::AtomicBool,
         }
 
         #[async_trait::async_trait]
@@ -4401,6 +4461,12 @@ mod tests {
             ) -> Result<Value, String> {
                 self.action_calls
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self
+                    .defer_action
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(PERMISSION_DISPATCH_DEFERRED.into());
+                }
                 if let Some((started, release)) = &self.block {
                     started.notify_one();
                     release.notified().await;
@@ -4547,6 +4613,62 @@ mod tests {
             port.action_calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a reused request id with a different binding must never execute"
+        );
+
+        let deferred = StubPort {
+            defer_action: std::sync::atomic::AtomicBool::new(true),
+            ..Default::default()
+        };
+        let deferred_results = RemoteActionResultCache::default();
+        assert!(
+            dispatch_decrypted_payload_cached(
+                &deferred,
+                &deferred_results,
+                &lease,
+                "remote_action_request",
+                &action,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        let mut conflict_action = action.clone();
+        conflict_action["session_id"] = json!("different-session");
+        let conflict = dispatch_decrypted_payload_cached(
+            &deferred,
+            &deferred_results,
+            &lease,
+            "remote_action_request",
+            &conflict_action,
+        )
+        .await
+        .unwrap();
+        assert_eq!(conflict[0].1["error_code"], "result_unknown");
+        let resumed = dispatch_decrypted_payload_cached(
+            &deferred,
+            &deferred_results,
+            &lease,
+            "remote_action_request",
+            &action,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed, first);
+        let repeated = dispatch_decrypted_payload_cached(
+            &deferred,
+            &deferred_results,
+            &lease,
+            "remote_action_request",
+            &action,
+        )
+        .await
+        .unwrap();
+        assert_eq!(repeated, resumed);
+        assert_eq!(
+            deferred
+                .action_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
         );
 
         let frames = dispatch_decrypted_payload(
@@ -4770,9 +4892,8 @@ mod tests {
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let blocking = Arc::new(StubPort {
-            action_calls: Default::default(),
-            task_calls: Default::default(),
             block: Some((started.clone(), release.clone())),
+            ..Default::default()
         });
         let cache = Arc::new(RemoteActionResultCache::default());
         let epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));

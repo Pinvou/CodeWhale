@@ -322,12 +322,13 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
       attachments: attachmentsPayload ? attachmentsPayload.length : 0,
     });
     turnUsageDirty[sid] = false; // 新一轮开始，重置口径保护
-    var turnOwnerBuffer = getBuffer(sid);
-    var submittedMessage = null;
-    var submittedMessagePos = -1;
-    var submittedUserItemId = 0;
-    var submittedStreamId = 0;
-    var submittedTimelineAnchor = null;
+    const turnOwnerBuffer = getBuffer(sid);
+    let submittedMessage = null;
+    let submittedMessagePos = -1;
+    let submittedUserItemId = 0;
+    let submittedStreamId = 0;
+    let submittedTimelineAnchor = null; // Official 既有：时间线锚点
+    let submittedContextUpdates = 0; // 来源 #836：<context_update> 序号基线
     if (turnOwnerBuffer && turnOwnerBuffer.remoteTurnActive) {
       recordAuthoritySyncDiagnostic("local_send_blocked_by_remote_sync", authoritySyncBufferSnapshot(sid, turnOwnerBuffer));
       return Promise.reject(new Error(bt("sessionSyncingTurn")));
@@ -351,7 +352,13 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
         text: displayText,
         time: timeStr(),
         messageIndex: state.messages.length,
+        // 引擎 <context_update> 运行时消息的待消费边界计数（重放回种/live
+        // 事件累加，见 chat-events.js 同名字段）：fork/rewind 入口表据此
+        // 前移序号，随气泡下发后清零。
+        runtimeContextUpdatesBefore: (turnOwnerBuffer && turnOwnerBuffer.runtimeContextUpdatesPending) || 0,
       };
+      submittedContextUpdates = uitem.runtimeContextUpdatesBefore;
+      if (turnOwnerBuffer) turnOwnerBuffer.runtimeContextUpdatesPending = 0;
       if (meta && meta.pinvouTransfer) uitem.pinvouTransfer = meta.pinvouTransfer; // 仅展示层,不进 messages/LLM
       if (meta && meta.pinvouScene) uitem.pinvouScene = meta.pinvouScene; // 仅展示层,不进 messages/LLM
       addChatItem(uitem);
@@ -445,6 +452,14 @@ function timeStr() { return pinvouSharedtauriChat().timeStr(); }
           state.busy = false;
           stopThinking();
         });
+        // The failed turn's bubble never rendered, so its <context_update>
+        // boundary count was never handed out: return it to the trailing
+        // pending count (the transcript_committed resync would also converge
+        // this, but the immediate restore keeps mid-turn ordinals exact).
+        if (turnOwnerBuffer && submittedContextUpdates > 0) {
+          turnOwnerBuffer.runtimeContextUpdatesPending =
+            (turnOwnerBuffer.runtimeContextUpdatesPending || 0) + submittedContextUpdates;
+        }
         if (concurrentTurn && turnOwnerBuffer) {
           markRemoteTurn(sid, turnOwnerBuffer, false, "local_send_concurrent_turn");
         }
@@ -1313,7 +1328,11 @@ function inspectPinvou(focus) { return pinvouSharedtauriChat().inspectPinvou(foc
 
   // B2: 审查卡进 sidecar 时间线(pos=当前 messages 数),落盘。同 recordPersonaEvent
   // 范式,**不进 messages/LLM**;rerenderFromMessages 按 pos 插回,切会话/重载不丢。
-function recordPinvouReview(review) { return pinvouSharedtauriChat().recordPinvouReview(review); }
+/**
+ * @param {any} review
+ * @param {number} [seq]
+ */
+function recordPinvouReview(review, seq) { return pinvouSharedtauriChat().recordPinvouReview(review, seq); }
 
   // §2 按勾选裁决:resolution 已由前端写回 review 对象(引用→sidecar),这里持久化 +
   // 把勾「让AI改」的条目走 B1 发定向修订指令(只改对应段落、禁全文重写)。Boss 驾驶,非自动。
@@ -1753,7 +1772,9 @@ function persistPinvouReviews() { return pinvouSharedtauriChat().persistPinvouRe
             if (state.chatItems[i] && state.chatItems[i].type === "user") { lastUser = state.chatItems[i]; break; }
           }
           if (lastUser && lastUser.text === withdrawnText) return;
-          addChatItem({ type: "user", text: withdrawnText, time: timeStr(), steeredMidTurn: true });
+          const steerBuffer = getBuffer(sid);
+          addChatItem({ type: "user", text: withdrawnText, time: timeStr(), steeredMidTurn: true, runtimeContextUpdatesBefore: (steerBuffer && steerBuffer.runtimeContextUpdatesPending) || 0 });
+          if (steerBuffer) steerBuffer.runtimeContextUpdatesPending = 0;
         });
         // A committed event means the engine injected the message regardless
         // of which path rendered the bubble: the persisted position must be
@@ -1779,7 +1800,9 @@ function persistPinvouReviews() { return pinvouSharedtauriChat().persistPinvouRe
       state.chatItems = state.chatItems.filter(function (ci) {
         return !ci.turnErrorNotice && !ci.authoritySyncNotice;
       });
-      addChatItem({ type: "user", text: item.text, time: timeStr(), steeredMidTurn: true });
+      const steerBuffer = getBuffer(sid);
+      addChatItem({ type: "user", text: item.text, time: timeStr(), steeredMidTurn: true, runtimeContextUpdatesBefore: (steerBuffer && steerBuffer.runtimeContextUpdatesPending) || 0 });
+      if (steerBuffer) steerBuffer.runtimeContextUpdatesPending = 0;
       noteSteerCommittedForPosition(sid, item.text);
     });
     notify();

@@ -89,7 +89,7 @@ test('literal task registries cannot mutate identities or escape through writabl
 test('Account approval worker producer returns only its direct literal registry', async () => {
   const source = 'account-platform/cmd/account-service/approval_runtime.go';
   const text = await readFile(new URL('../../cmd/account-service/approval_runtime.go', import.meta.url), 'utf8');
-  assert.equal(authorizationTasks(source, text).length, 3);
+  assert.equal(authorizationTasks(source, text).length, 4);
   const start = 'return []accountBackgroundTask{', end = '\n\t}, nil';
   assert.ok(text.includes(start) && text.includes(end));
   for (const replacement of [
@@ -123,7 +123,7 @@ test('production Account main consumes its complete registry at main scope', asy
   const wallet = walletLines[0];
   assert.equal(text.split(startup).length, 2);
   assert.equal(text.split(merge).length, 2);
-  assert.equal(authorizationTasks(source, text).length, 8);
+  assert.equal(authorizationTasks(source, text).length, 9);
   for (const replacement of [
     text.replace(startup, 'workersDone := make(chan struct{})'),
     text.replace(startup, 'workersDone := startAccountBackground(ctx, []accountBackgroundTask{})'),
@@ -154,8 +154,8 @@ test('Account approval worker producer binding cannot be shadowed or aliased', a
 test('supervised Account catalog identities remain exact and required', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
   for (const [file, names] of [
-    ['main.go', ['mobile-retention', 'audit-export', 'wallet-provisioning', 'role-binding-expiry', 'account-closure', 'profile-change', 'registration-recovery', 'commerce-customer-sync']],
-    ['approval_runtime.go', ['approval-expiry', 'approval-pagination-cleanup', 'manual-review-sla']],
+    ['main.go', ['mobile-retention', 'audit-export', 'wallet-provisioning', 'role-binding-expiry', 'payment-credit-recovery', 'account-closure', 'profile-change', 'registration-recovery', 'commerce-customer-sync']],
+    ['approval_runtime.go', ['approval-expiry', 'approval-pagination-cleanup', 'approval-delivery-terminal-recovery', 'manual-review-sla']],
   ]) {
     const source = `account-platform/cmd/account-service/${file}`;
     const text = await readFile(new URL(`../../cmd/account-service/${file}`, import.meta.url), 'utf8');
@@ -208,8 +208,11 @@ test('authorization release gate classifies every HTTP task event callback and C
   ]);
   // The real checker still rejects missing, stale, duplicate or mis-scoped
   // entries before returning these exact inventory sizes.
+  // Preserve the independently declared entrypoints of both parents.
   // The existing complete graph includes the reconciliation repair-context GET.
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 412, tasks: 32, events: 18, cli: 28 });
+  // It also includes the two profile-revocation receipt claim/confirm routes.
+  // Also retain main's approval delivery terminal recovery worker.
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 430, tasks: 35, events: 18, cli: 28 });
 });
 
 test('existing grant inventory CLI retains its bounded read-only Account identity', async () => {
@@ -368,6 +371,10 @@ test('usage waiver restores one human audit-only command and two distinct worklo
 test('history recovery routes retain exact workload permissions and handlers without human fallback', async () => {
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
   const expected = [
+    {source: 'account-platform/internal/account/service.go', receiver: 'internal', method: 'POST',
+      path: '/profile-revocation-receipts/claim', permission: 'internal.account.profile-revocation.claim', handler: 'claimProfileRevocation'},
+    {source: 'account-platform/internal/account/service.go', receiver: 'internal', method: 'POST',
+      path: '/profile-revocation-receipts/confirm', permission: 'internal.account.profile-revocation.confirm', handler: 'confirmProfileRevocation'},
     {source: 'account-platform/internal/identityadapter/service.go', receiver: 'internal', method: 'POST',
       path: '/users/:subject/profile-revocations', permission: 'internal.identity.sessions.revoke', handler: 'revokeProfileSessions'},
     {source: 'account-platform/internal/billing/service.go', receiver: 'protected', method: 'POST',
@@ -776,5 +783,61 @@ test('all five production colon action registrations keep their first exact path
     for (const decoy of ['// ' + route, `var guardExample = \`${route}\``]) {
       assert.throws(() => check(source.replace(route, absent) + '\n' + decoy), undefined, path);
     }
+  }
+});
+
+test('grant recovery keeps five literal tuples and the original action and policy pairing', async () => {
+  const source = 'account-platform/internal/account/approval_grant_recovery_http.go';
+  const code = await readFile(new URL('../../internal/account/approval_grant_recovery_http.go', import.meta.url), 'utf8');
+  const expected = [
+    ['GET', '/approval-grant-recovery-cases', null, null],
+    ['GET', '/approval-grant-recovery-cases/:case_id', null, null],
+    ['POST', '/approval-grant-recovery-cases/:case_id/observations', 'OBSERVE', 'APPROVAL_GRANT_RECOVERY_OBSERVE'],
+    ['POST', '/approval-grant-recovery-cases/:case_id/proposals', 'PROPOSE', 'APPROVAL_GRANT_RECOVERY_PROPOSE'],
+    ['POST', '/approval-grant-recovery-cases/:case_id/reviews', 'REVIEW', 'APPROVAL_GRANT_RECOVERY_REVIEW'],
+  ];
+  const check = text => {
+    const routes = authorizationRoutes(source, text);
+    assert.deepEqual(routes.map(x => [x.receiver, x.method, x.path]), expected.map(([method, path]) => ['admin', method, path]));
+    for (const [index, [, , action, policy]] of expected.entries()) {
+      if (!action) continue;
+      const registration = routes[index].registration.replace(/\s+/g, '');
+      assert.ok(registration.includes(`approvalpolicy.Require("${policy}",approvalpolicy.AuditOnly)`));
+      assert.ok(registration.includes(`s.adminGrantRecoveryMutation(w,r,"${action}")`));
+    }
+  };
+  check(code);
+  for (const broken of [code.replace('APPROVAL_GRANT_RECOVERY_REVIEW', 'APPROVAL_GRANT_RECOVERY_OBSERVE'),
+    code.replace('s.adminGrantRecoveryMutation(w, r, "REVIEW")', 's.adminGrantRecoveryMutation(w, r, "OBSERVE")'),
+    code.replace('"/approval-grant-recovery-cases/:case_id/reviews"', '"/approval-grant-recovery-cases/:case_id/" + "reviews"')]) {
+    assert.notEqual(broken, code);
+    assert.throws(() => check(broken));
+  }
+});
+
+test('commerce recovery preserves its five authorized HTTP tuples', async () => {
+  const source = 'account-platform/internal/account/commerce_repair_http.go';
+  const code = await readFile(new URL('../../internal/account/commerce_repair_http.go', import.meta.url), 'utf8');
+  const expected = [
+    ['GET', '/commerce-repairs', 'PermissionCommerceRepairsRead', null],
+    ['GET', '/commerce-repairs/:case_id', 'PermissionCommerceRepairsRead', null],
+    ['POST', '/commerce-repairs', 'PermissionCommerceRepairsRequest', 'ACCOUNT_COMMERCE_REPAIR_QUARANTINE'],
+    ['POST', '/commerce-repairs/:case_id/observations', 'PermissionCommerceRepairsRequest', 'ACCOUNT_COMMERCE_REPAIR_OBSERVE'],
+    ['POST', '/commerce-repairs/:case_id/actions/confirm', 'PermissionCommerceRepairsApprove', 'ACCOUNT_COMMERCE_REPAIR_CONFIRM'],
+  ];
+  const check = text => {
+    const routes = authorizationRoutes(source, text);
+    assert.deepEqual(routes.map(x => [x.receiver, x.method, x.path]), expected.map(([method, path]) => ['admin', method, path]));
+    for (const [index, [, , permission, policy]] of expected.entries()) {
+      const registration = routes[index].registration.replace(/\s+/g, '');
+      assert.ok(registration.includes(`requirePermission(${permission})`));
+      if (policy) assert.ok(registration.includes(`approvalpolicy.Require("${policy}",approvalpolicy.AuditOnly)`));
+    }
+  };
+  check(code);
+  for (const broken of [code.replace('PermissionCommerceRepairsApprove', 'PermissionCommerceRepairsRead'),
+    code.replace('ACCOUNT_COMMERCE_REPAIR_CONFIRM', 'ACCOUNT_COMMERCE_REPAIR_OBSERVE')]) {
+    assert.notEqual(broken, code);
+    assert.throws(() => check(broken));
   }
 });

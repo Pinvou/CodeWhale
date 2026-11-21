@@ -24,7 +24,8 @@ test('download accepts exactly4096 contiguous small chunks and refuses request40
   const blob = await downloadRemoteArtifact(exact.api, binding, artifact);
   assert.equal(blob.size, 4096);
   assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), new Uint8Array(4096).fill(1));
-  assert.deepEqual(exact.state, { calls: 4096, aborts: 0 });
+  // Verified bytes are returned after the exact completed receipt is retired.
+  assert.deepEqual(exact.state, { calls: 4096, aborts: 1 });
   // Advertised two-byte chunks can fit; one-byte actual reads consume the
   // independent count ceiling before the declared byte ceiling is reached.
   const over = apiFor(4097, index => receipt(index, 4097));

@@ -1,6 +1,8 @@
 {{- $root := . -}}
 {{- $fullname := include "pinvou.fullname" . -}}
-{{- range $source := list "account" "billing" }}
+{{- $sources := list "account" "billing" -}}
+{{- if .Values.tokenEventRelay.enabled -}}{{- $sources = append $sources "token" -}}{{- end -}}
+{{- range $source := $sources }}
 ---
 apiVersion: v1
 kind: Service
@@ -41,7 +43,7 @@ spec:
       {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" (printf "%s-event-relay" $source)) | nindent 6 }}
       securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
       initContainers:
-        {{- include "pinvou.natsCredentialsInit" (dict "image" $root.Values.images.eventRelay "client" (printf "%s-event-relay" $source)) | nindent 8 }}
+        {{- include "pinvou.natsCredentialsInit" (dict "image" $root.Values.images.eventRelay "client" (printf "%s-event-relay" $source) "seed" (eq $source "token")) | nindent 8 }}
         {{- if eq $source "account" }}
         {{- include "pinvou.natsCredentialsInit" (dict "image" $root.Values.images.eventRelay "client" "account-approval-relay") | nindent 8 }}
         {{- end }}
@@ -57,9 +59,18 @@ spec:
             - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
             - { name: EVENT_SOURCE, value: {{ $source | quote }} }
             - name: DATABASE_URL
-              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "%s-service-database-url" $source }} } }
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ if eq $source "token" }}token-event-relay-database-url{{ else }}{{ printf "%s-service-database-url" $source }}{{ end }} } }
             - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
+            {{- if ne $source "token" }}
             - { name: NATS_CREDENTIALS_FILE, value: {{ printf "/run/pinvou/nats/private/%s-event-relay.creds" $source | quote }} }
+            {{- end }}
+            {{- if eq $source "token" }}
+            - { name: NATS_NKEY_SEED_FILE, value: "/run/pinvou/nats/private/token-event-relay.seed" }
+            - { name: NATS_CREDENTIALS_FILE, value: "" }
+            - { name: TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE, value: "/run/pinvou/token-relay-identities/current.json" }
+            - name: TOKEN_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-event-relay-nats-current-public-keys-sha256 } }
+            {{- end }}
             {{- if eq $source "account" }}
             {{- if $root.Values.approvalRelay.requireReady }}
             # Used by the explicit release check. The ordinary Kubernetes probe is independent.
@@ -84,6 +95,9 @@ spec:
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
             - { name: nats-private, mountPath: /run/pinvou/nats, readOnly: true }
+            {{- if eq $source "token" }}
+            - { name: token-relay-public-artifact, mountPath: /run/pinvou/token-relay-identities/current.json, subPath: current-v2.json, readOnly: true }
+            {{- end }}
             {{- if eq $source "account" }}
             # subPath produces a real bind-mounted file at the checked path;
             # the default ConfigMap ..data symlink layout is deliberately not
@@ -97,7 +111,13 @@ spec:
       volumes:
         - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
         - { name: nats-private, emptyDir: { medium: Memory, sizeLimit: 1Mi } }
-        {{- include "pinvou.natsCredentialsSource" (dict "client" (printf "%s-event-relay" $source) "secret" $root.Values.global.runtimeSecret "key" (printf "%s-event-relay.creds" $source)) | nindent 8 }}
+        {{- include "pinvou.natsCredentialsSource" (dict "client" (printf "%s-event-relay" $source) "secret" $root.Values.global.runtimeSecret "key" (printf "%s-event-relay.%s" $source (ternary "seed" "creds" (eq $source "token"))) "seed" (eq $source "token")) | nindent 8 }}
+        {{- if eq $source "token" }}
+        - name: token-relay-public-artifact
+          configMap:
+            name: {{ $root.Values.approvalRelay.natsPublicArtifactConfigMap }}
+            items: [{ key: current-v2.json, path: current-v2.json }]
+        {{- end }}
         {{- if eq $source "account" }}
         {{- include "pinvou.natsCredentialsSource" (dict "client" "account-approval-relay" "secret" $root.Values.global.runtimeSecret "key" "account-approval-relay.creds") | nindent 8 }}
         - name: approval-nats-public-artifacts

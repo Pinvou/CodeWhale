@@ -40,6 +40,8 @@ Set these variables before opening the registry:
 |---|---|
 | `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT` | Required: `official`, `self_hosted`, or `development`. |
 | `PINVOU_REMOTE_CONTROLLER_STATE_PATH` | Absolute path for the new controller state file. It must not equal the existing `PINVOU_REMOTE_STATE_PATH`. The caller passes this value to `RelayStateStore.open`. |
+| `PINVOU_REMOTE_CONTROLLER_STATE_MAX_BYTES` | Shared controller-state UTF-8 byte budget, 1024 to 268435456, default 16777216. Use the same limit for the Relay, enrollment gateway and operator CLI. |
+| `PINVOU_REMOTE_ENROLLMENT_MAX_ENTRIES` | Enrollment admission limit for active plus revoked identities, 1 to 1000000, default 100000. Existing identities and revocations remain readable when the admission limit is lowered. |
 | `PINVOU_REMOTE_STATE_PATH` | Required absolute path of the legacy Web v2 state. It is used only for alias detection; this module never reads or changes it. |
 | `PINVOU_DESKTOP_CONTROLLER_ENABLED` | Set to `1` only when enabling the controller-v1 dispatcher. Any other value preserves legacy Web v2-only behavior. |
 | `PINVOU_REMOTE_PAIRING_HMAC_KEY_ID` / `PINVOU_REMOTE_PAIRING_HMAC_KEY` | Stable independent HMAC key used for pairing-code digests and quarantine lookup. Do not reuse the enrollment key. |
@@ -206,6 +208,42 @@ administrator-only rollback build disables new-device onboarding; already
 enrolled role digests keep their authentication meaning. The new audit origin
 must remain readable by that build as described above.
 
+### Capacity maintenance for permanent denials
+
+Enrollment counts active and revoked identities against its admission limit.
+It also shares the configured serialized byte budget with pairing and migration
+state. Legacy Web revocation has a separate byte budget (`MAX_RELAY_STATE_BYTES`,
+default 16 MiB) and an entry limit (`MAX_REVOKED_ENDPOINTS`, default 100000,
+effectively at most one entry per 256 configured bytes). Each owning process logs
+a `[relay-capacity]` warning at 80 percent of its first reached limit. The shared
+controller-state owner observes every successful namespace commit and restored
+snapshot, including pairing-only growth, independently of enrollment activity.
+Its byte warning is emitted at most once per store open; enrollment separately
+warns about its entry count. The warnings give aggregate counts and bytes, with
+no endpoint IDs, namespace values, paths or credentials. Warning-sink failures
+cannot change a committed authorization result.
+
+At enrollment admission capacity, new identities are refused with
+`enrollment_capacity_reached` or `enrollment_registry_capacity_reached`.
+A registry revocation that cannot fit the shared byte budget returns
+`enrollment_revocation_capacity_reached`. The Legacy Web protocol retains
+`revoked_endpoint_capacity_reached` for its own exhausted budget and
+`revoke_persistence_failed` for an I/O failure. A repeated revocation of a
+committed identity keeps its prior result. A refusal does not create a denial.
+
+For planned expansion, stop the writer and capture a current consistent
+offline backup of both authorization stores. Check disk and memory capacity,
+then raise the limits as needed and restart using the same files, role keys
+and state paths. Confirm a known revoked identity remains denied before
+restoring admission. Keep the full stores in protected backups and do not
+expire or delete denials to free slots. Enrollment snapshot import and
+migration restore reject any snapshot that would remove or reactivate a
+currently revoked identity. Offline file restoration requires evidence that
+the selected snapshots retain the current denial sets, since an offline copy
+has no live state against which to check. A controller state above the
+previous 100000-entry or 16 MiB bounds requires a compatible build during
+rollback. Legacy Web state keeps its existing on-disk format.
+
 ### Gateway transport keepalive
 
 The [gateway idle transport contract](../docs/windows-desktop-remote-control-a05-gateway-idle.md)
@@ -237,8 +275,9 @@ of a dedicated directory whose parent already exists. The store creates and
 protects only that final directory. If it already exists, the store verifies its
 owner and protection and never chmods or rewrites a caller-owned parent. A
 marker identifies the directory, and unexpected entries fail closed. A dedicated
-regression creates a real foreign file, directory, and directory link (Windows
-junction), repeats the refusal, and checks that primary/backup/marker bytes and
+regression creates a real foreign file, directory, and directory link (a junction
+on Windows; a directory symlink elsewhere), repeats the refusal, and checks that
+primary/backup/marker bytes and
 foreign evidence remain unchanged. Its Windows security injection is not a DACL
 qualification. Each
 namespace has a canonical unsigned-decimal revision. A caller reads a namespace
@@ -288,8 +327,14 @@ the store enters a permanent degraded state and rejects all reads and writes;
 the process must be restarted after operators resolve the disk problem. On
 startup the valid primary and backup must be byte-equivalent after canonical
 parsing; a mismatch, a missing peer copy, or a damaged backup fails closed. A
-valid backup may restore a malformed primary; a missing primary fails closed so
-a staged but uncommitted backup cannot become authoritative. Malformed,
+valid backup may restore a malformed primary. A missing primary is recreated
+only for a validated current-format backup with revision `"0"` and no namespaces:
+this is the exact empty initialization written before the first primary, with
+no authorization to activate. Recovery holds the normal guard and owner lock,
+preserves the backup, and publishes the primary through the existing private,
+alias-checked atomic writer. A later revision, any namespace, an older-format
+migration, or uncertain/nonempty backup still fails closed so a staged but
+uncommitted commit cannot become authoritative. Malformed,
 oversized, unsupported, or ambiguous candidates otherwise fail closed.
 Recognizable controller-state versions newer than this implementation are
 reported as `relay_state_unsupported` before validating the current field set,
@@ -337,8 +382,8 @@ fails, and a live store becomes unavailable.
 
 ### Offline recovery after an interrupted commit
 
-There is no supported automatic repair CLI. A failed open must not be bypassed
-by deleting a candidate, editing JSON, resetting the registry, or enabling TOFU.
+Startup fails closed on unexplained disagreement. Do not bypass a failed open by
+deleting a candidate, editing JSON, resetting the registry, or enabling TOFU.
 Stop the Relay and confirm no process still owns or writes the store before any
 recovery. First archive the entire dedicated directory unchanged, including the
 primary, `.bak`, lock, marker, temporary/stale files and their owner/permission
@@ -358,15 +403,52 @@ copy is not sufficient for automatic migration.
 For non-equivalent copies, a damaged peer or uncertain provenance, restore a
 verified pair from the same coordinated offline snapshot. Do not combine
 different snapshots or choose a copy solely because its revision is higher.
-Alternatively, an administrator may undertake an **offline, audited manual
-recovery** only after external commit/incident evidence establishes that the
-valid primary is the last committed state and the newer backup was merely
-staged. After archiving and validating that decision, reconstruct the backup
-from that confirmed primary through a same-directory temporary file, file sync,
-atomic replacement and directory sync; preserve and re-verify restrictive
-owner/permissions. Leave the primary unchanged. Do not promote the staged
-backup or apply this recipe to an unexplained mismatch. Without sufficient
-evidence, keep the service stopped and escalate rather than guessing.
+For a valid v1 primary and a valid v1 backup exactly one revision ahead, the
+offline recovery command can reconstruct the backup. First establish from
+external commit or incident records that the primary is the last committed
+state and the backup was only staged. Record the confirmed primary revision
+and exact SHA-256 of both files as part of that decision. The revision order
+alone does not establish which authorization state was committed. Keep the
+service stopped if the evidence is missing or the mismatch is unexplained.
+
+Run as the Relay state owner with the same supported Node runtime. Set
+`PINVOU_REMOTE_CONTROLLER_STATE_PATH` and `PINVOU_REMOTE_STATE_PATH` to the
+absolute paths used by the stopped Relay, then run from `remote-control-relay`.
+Use the installed Relay application directory for a managed production or
+test deployment, or the `remote-control-relay` directory of the matching
+source checkout for a self-hosted installation. The recovery entry is shipped
+with the other root JavaScript modules of both deployments.
+
+Choose an existing private archive directory outside the dedicated controller
+state directory. It must be owned by the Relay state owner, with mode `0700`
+on POSIX or the same private ACL as the state directory on Windows. The archive
+root may live elsewhere when the parent of the state directory is read-only.
+When `--archive-root` is omitted, the state directory's parent is used and must
+pass the same ownership and private-mode/ACL checks, including on Windows.
+Recovery does not repair a non-private parent; choose an existing private
+alternate root instead.
+
+```sh
+node recover-controller-state.js \
+  --confirmed-primary-revision "$CONFIRMED_PRIMARY_REVISION" \
+  --primary-sha256 "$CONFIRMED_PRIMARY_SHA256" \
+  --staged-backup-sha256 "$STAGED_BACKUP_SHA256" \
+  --archive-root "$ABSOLUTE_PRIVATE_ARCHIVE_ROOT"
+```
+
+The command takes the same exclusive writer lock as startup. It copies both
+files byte for byte to a new private directory under the archive root. It
+uses a bounded `controller-recovery-<random>` directory name so valid long state
+directory names remain recoverable. It
+rechecks both source files, the archives and the actual staged file before
+publishing the backup. It then verifies the installed pair and archives while
+still holding the writer lock. The success result gives the archive path and
+recovered revision. Keep the whole-directory incident archive and these copies
+access-restricted. If installation happened before a verification or lock
+release error, the command exits unsuccessfully and reports the archive path.
+Keep the Relay stopped and inspect the current pair and retained copies before
+attempting recovery again. The writer lock coordinates Relay and maintenance
+processes using the store. Stop any other offline writer before recovery.
 
 Before restarting, verify that both candidates are valid, canonically equivalent
 and have the correct owner/protection. Retain the archive and recovery decision
@@ -450,6 +532,12 @@ preserves historical digests and does not infer plaintext length from a digest.
 
 Callers use:
 
+- `getStatus(endpointId)` for a read-only status lookup: a frozen object containing
+  `endpoint_id`, `status`, endpoint `revision`, `enrolled_at`, `rotated_at` and
+  `revoked_at`, or `null` for an unknown valid ID. Invalid IDs throw; unavailable
+  stores fail with `enrollment_registry_unavailable` even on a cache hit, and
+  registry validation errors retain their typed codes. A read failure is never
+  returned as `null`. No digest or credential is returned;
 - `EnrollmentRegistry.enroll` for an already authenticated official/admin flow;
 - `authorizeWebRegistration` with `accessToken` for Web joins;
 - `authorizeDesktopRegistration` verifies `accessToken` and `desktopSecret`
@@ -471,6 +559,39 @@ Callers use:
   of a failed batch becomes durable;
 - `beginMigrationRequest` and `completeMigrationRequest` for explicit crash
   boundaries, or `executeMigrationRequest` for the normal composed path.
+
+### Namespace revision and endpoint revision
+
+`exportSnapshot()` supplies `namespace_revision`; it is the decimal-string CAS
+fence for the entire enrollment namespace. It is distinct from an endpoint's
+`revision`, used by rotation, revocation and individual batch operations. An
+unrelated namespace's store revision is neither of these fences. Do not pass an
+endpoint revision as `expectedNamespaceRevision` or increment a captured value
+locally to guess the next fence.
+
+| Method | `expectedNamespaceRevision` | Read/validation and commit contract |
+|---|---|---|
+| `enroll({ endpointId, credential, desktopCredential, expectedNamespaceRevision })` | Optional; when supplied it must match the read namespace revision | Validate input, read current registry, check the optional fence and endpoint absence, then one CAS against that read snapshot. Omitting the parameter does not bypass the final CAS. |
+| `importSnapshot({ snapshot, expectedNamespaceRevision })` | Required valid revision string | Strictly validate snapshot, read and compare current revision, preserve the current migration ledger, then one CAS; return the written snapshot and revision. |
+| `applyAtomicBatch({ operations, expectedNamespaceRevision })` | Required valid revision string | Prevalidate all operations, read and check namespace/restore fences, apply in memory, then at most one CAS. A no-change batch returns the current revision without a write. |
+
+Missing or malformed required fences fail with
+`expected_namespace_revision_invalid`; a stale fence or a concurrent write at
+the final CAS fails with `enrollment_revision_conflict`. No endpoint-operation
+prefix becomes durable. `previewAtomicBatch({ operations })` returns a read-only
+preview and its captured `namespace_revision`; use that exact value for apply.
+For example, with synthetic non-secret operator input:
+
+```js
+const preview = registry.previewAtomicBatch({ operations });
+await registry.applyAtomicBatch({
+  operations,
+  expectedNamespaceRevision: preview.namespace_revision,
+});
+```
+
+A conflict requires a fresh read and deliberate review of the intended operation;
+it is not permission to silently rebase a restore or reset stable request IDs.
 
 Migration begin durably creates `pending`. Completion recomputes and verifies
 the keyed parameter digest, builds the entire new registry in memory, then
@@ -653,6 +774,32 @@ under the same ID conflicts. A failed request may persist a secret-free failed
 ledger row, but no endpoint-operation prefix can persist. Backup restore accepts
 only the current strict registry format and executes as a stable migration
 request while preserving the monotonic request ledger.
+
+### Migration failure and response-loss recovery
+
+Keep the original request ID, exact parameters and protected input; never
+automatically generate another ID after an error or response loss. Programmatic
+callers can read `getMigrationRequest(requestId)` through the existing trusted
+store owner. For an offline private-file CLI retry, stop the live store owner
+first and use the same protected state and original ID/input. Do not open a
+second writer or edit the ledger directly.
+
+| Observation | Operator action and expected retry |
+|---|---|
+| Success response lost | Query/retry the same ID and parameters. A sealed successful outcome replays without executing endpoint changes again, even if records have subsequently changed. |
+| Failure response lost | Query/retry the same ID. A sealed `failed` row repeats its original outcome code; it cannot execute again. Check that row and actual endpoint state before deciding on remediation. |
+| `pending` | Preserve the ID and input. A matching retry resumes completion under the existing fences; it never dispatches a replacement operation. Investigate typed failures such as a missing retained digest key or restore fence. |
+| Persistence failure or no row visible | This is not proof of a sealed failure or of no prior commit. Restore store availability, reopen through the normal lock-owning path, and query/retry the original ID. Do not report success or reset authorization while the outcome is uncertain. |
+| Same ID, changed parameters | `migration_request_conflict`; recover the original input. A changed credential, revision, endpoint set or snapshot is a different operation, not a retry. |
+| Confirmed sealed failure requiring corrected parameters | Diagnose the cause, inspect actual state and review the intended new operation. Only then explicitly choose a new stable ID for that operation. Preserve the failed row and original evidence; never delete it to free or reuse the ID. |
+
+Completion seals endpoint changes and the terminal outcome in one CAS. A failed
+operation may seal a secret-free failed row, but cannot persist a partial
+authorization prefix. A persistence failure can instead leave a pending intent
+or an outcome whose response was lost; the follow-up read and same-ID retry
+resolve that uncertainty. These instructions do not change Legacy Web v2
+credentials, reset enrollment, or grant production `official` claim authority.
+
 The ledger has a separate 100,000-request safety ceiling and shares the store's
 16 MiB default byte budget with other namespaces; byte capacity can be reached
 first. There is no automatic ledger pruning. Never delete terminal IDs merely
@@ -720,7 +867,8 @@ default or set the same nonempty path for every process. The generator
 requires HTTPS public entrypoints even where runtime preflight permits HTTP
 localhost probes; it is an offline production perimeter contract, not a change
 to the runtime preflight's accepted URLs.
-The generated WS location explicitly uses 75-second read and send timeouts,
+The generated WS location explicitly uses 75-second read and send timeouts
+(`ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS` in `enrollment-nginx-config.js`),
 preserving the checked-in sample's idle proxy budget. The offline checker
 rejects missing or changed timeout directives as configuration drift. This
 does not add gateway heartbeat behavior or change authentication deadlines;

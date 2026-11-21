@@ -994,7 +994,10 @@ func TestLifecycleForceCancelApprovalPostgres(t *testing.T) {
 			if !sample.force {
 				return
 			}
-			r.now = func() time.Time { return effective.Add(time.Second) }
+			initialTime := effective.Add(time.Second)
+			var testTime atomic.Pointer[time.Time]
+			testTime.Store(&initialTime)
+			r.now = func() time.Time { return *testTime.Load() }
 			defer func() { r.now = func() time.Time { return time.Now().UTC() } }()
 			// A real dispatch owner on replica A waits on its existing heartbeat.
 			// The existing emergency worker below uses separate Service B.
@@ -1028,6 +1031,14 @@ func TestLifecycleForceCancelApprovalPostgres(t *testing.T) {
 				}
 			})
 			failRelease.Store(false)
+			var retryAt time.Time
+			if err := r.pool.QueryRow(ctx, `SELECT cancellation.next_attempt_at
+FROM model_emergency_cancellations cancellation
+JOIN model_emergency_cancellation_policies policy ON policy.id=cancellation.policy_id
+WHERE cancellation.usage_request_id=$1 AND policy.model_id=$2 AND cancellation.status='PENDING'`, pre, model).Scan(&retryAt); err != nil || !retryAt.After(initialTime) {
+				t.Fatal("failed release did not schedule a future retry", retryAt, err)
+			}
+			testTime.Store(&retryAt)
 			if e = NewEmergencyModelCancellationWorker(r, service, time.Second).runOnce(ctx); e != nil {
 				t.Fatal("real emergency worker", e)
 			}

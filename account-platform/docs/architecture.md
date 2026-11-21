@@ -133,7 +133,9 @@ flowchart LR
 - `user_active_contexts`：以 `user_id` 唯一保存 PERSONAL/ORGANIZATION、目标组织和单调 `context_version`；最近有效 Session 只用于迁移初值，切换使用期望版本 CAS。
 - `user_sessions`：按 issuer + OIDC Session 保存登录观察和兼容投影，不再作为聊天或计费上下文事实源。
 - `slider_captcha_challenges`、`sms_challenges`：滑块和短信挑战元数据；平台生成验证码模式只保存带密钥校验数据，不保存明文。
-- `sms_send_attempts`：手机号、来源和设备的单向摘要、用途、结果与时间，用于短信多维限流和反枚举审计。
+- `sms_send_attempts`、`sms_verification_attempts`：手机号、来源和设备的单向摘要、用途、服务商、结果与时间，用于短信多维限流和反枚举审计。发送与验证各自持有原服务商配额锁，将窗口聚合限定为匹配手机号、来源、设备或服务商的 `ACCEPTED` 记录。迁移 `900017` 为服务商时间窗口添加部分索引，配额、时间边界、审计记录及事务内写入保持原语义。索引安装会在构建期间阻塞相关表的写入，应在 Account 数据库维护窗口执行并核对索引有效性。
+  迁移 `900018` 在发送表写锁内为历史已接受发送的服务商初始化围栏，随后让每次已接受的发送与对应的共享数据库记录在同一事务更新。注册或资料改号事务若在等服务商锁前已经取得旧快照，PostgreSQL 会中止其写入。两条入口只对明确中止的 `40001` 用原请求重新检查，最多执行三次完整事务；请求未取消且三次均因该冲突中止时，返回既有 `SMS_UNAVAILABLE`（HTTP 503），并在内部保留数据库原因。提交结果未知、请求取消及其他错误保留原失败边界，不因此重试。先安装迁移再发布应用。回滚应用时保留数据库围栏，避免恢复旧快照下超额放行。
+  性能归因须区分窗口聚合查询收窄与 `900017` 索引：前者排除无关历史，后者补齐服务商一分钟窗口的访问路径，不能将两者的总体收益都归于新索引。PR 中的既有耗时数字仅供对应作者环境参考；当前版本的可复算基准与生产现场性能结论，均须匹配各自的数据和执行计划证据。现场容量与维护窗口仍须单独核验。
 - `profile_change_requests`：用户名/手机号变更的旧值、新值、独立资料版本、短信验证和 Identity/Account/会话阶段；活跃请求对用户字段及新值分别唯一预约。
 - `password_reset_operations`：只保存已验证挑战、稳定用户/Identity 引用及完成事实，不保存密码、密码摘要或验证码。
 - `commerce_customer_mappings`：用户/组织到外部客户的供应商中立映射，只保存 Provider ID、Adapter 版本、脱敏外部引用和通用状态；不参与认证或业务授权。
@@ -180,6 +182,7 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 - `pricing_publish_commands`、`pricing_lifecycle_commands`、`pricing_version_audits`、`pricing_blocks`：发布与撤销/结束的幂等命令、不可变审计和显式阻断窗口。
 - `usage_holds`、`idempotency_records`：预占/结算和通用幂等记录；Hold 冻结请求上下文、协议/公式、估算器、逐单位价格及来源，后续续租、追加预占和结算不重新定价。
 - `payment_orders`、`payment_transactions`、`payment_evidence`、`refunds`、`refund_component_reservations`、`refund_grant_reservations`、`forced_refund_cases`、`payment_notifications`：当前支付和退款模型；订单冻结 Provider ID/版本、商品映射 ID、完整映射、能力声明、实际付款人及受益主体，后续不以新版本重新解释历史订单。一个订单可关联多笔不可变 Provider 支付流水；回调、查询、Provider 账单、关单观察和人工修复先保存原始载荷摘要与快照，再归并流水状态。普通退款以支付流水和权益包为唯一目标，退款预约保存 BASE/BONUS 组成及授予快照；渠道强制退款保存独立外部资金事实并冻结目标权益包，不能覆盖支付成功事实。订单还冻结支付期限、晚到复核边界和最终归档期限。
+  对已有验签来源的回调，若 inbox 第 12 次或之后的处理失败是本地找不到商户订单号，worker 原子地将通知移入 `MANUAL_REVIEW` 并创建一条 `PAYMENT_FACT_CONFLICT` 案件。认领、查证和处理边界见 [F02 支付与退款恢复边界](f02-financial-recovery-contract.md#找不到订单的可信回调)。
 - `manual_review_cases`、`manual_review_case_events`、`manual_review_assignments`：Account、Billing、Token 各自在领域数据库保存形状一致的人工案件投影、不可变时间线和转派证据；共享 `manualreview` 时钟从源案件创建时间冻结 P0/P1 的 7×24 SLA 与 P2 上海工作时 SLA，任何认领、重试或转派都不重置截止时间。生产必须配置有序值班负责人链，逾期 worker 实际更新 `owner_id` 并递增升级级别。Billing 另以 `late_payment_review_cases`、`late_payment_review_evidence` 保存晚到支付复核事实。
 - `provider_bill_imports`、`provider_bill_rows`：不可变账单文件批次和逐行记录；事实盲区可原子停用关联 Provider/商品的新单，但不能直接改写历史能力快照或目录发布事实。
 - `manual_adjustments`、`payment_order_repairs`：运营调整和支付修复。
@@ -241,6 +244,12 @@ Web 个人中心的信息架构固定为三个一级 Tab：“额度与用量”
 商品三语展示名只允许通过 Billing 受治理命令更新：请求必须携带目录版本 CAS、幂等键、变更原因和近期认证，并复用 `platform.products.publish` 权限与命令审计。名称属于商品准入指纹；修改 `ON_SALE` 商品时必须在同一事务关闭当前准入绑定、退役当前映射并将商品转为 `OFF_SALE`，待新名称重新验证和发布后才能接受新订单。`DRAFT`、`OFF_SALE`、`DELETED` 只更新目录投影；已购权益和历史订单的 `plan_name` 快照始终不改。
 
 同一轮次的费用和状态不是从任意一笔请求复制：只把 `SETTLED` 请求计入消费，`RELEASED / CANCELLED_BEFORE_DISPATCH` 计零，存在执行中、待结算或核对请求时轮次总额保持未知。展示代表请求按“可取消执行 → 待结算/核对 → 已结算 → 全部未消费”选择，停止/取消入口只绑定仍处于 `RECEIVED / HOLD_RESERVING / HOLD_RESERVED / DISPATCH_INTENT_PERSISTED / UPSTREAM_DISPATCHING / STREAMING` 的具体 `usage_request_id`，不得向已进入结算或核对阶段的请求提供无效操作。
+
+Token 迁移 `900009` 为七种活动执行状态增加账户/凭证复合部分索引及模型部分索引，供治理用量计数和完整事实指纹使用。目录回退依赖聚合在连接用量时采用相同活动状态条件，保留路由、装配和会话的原去重计数。指纹继续逐条读取全部命中事实并计算完整摘要。
+
+发布先排空 Token 进程，在维护窗口安装迁移并部署识别 `900009` 身份的服务版本。安装沿用 Token 所有权硬化流程，维护窗口须覆盖全部 Token 表的锁等待，索引构建会阻塞用量表写入。合成执行计划只支持本地查询对照，现场规模、持锁预算、磁盘与写入成本仍需验收。
+
+如获授权回退 `900009`，先停止相关写入、保留备份回执并确认最高迁移版本及 checksum 恰为本发布包。复用 `token_migrator` 登录，仅该次命令选择 `MIGRATION_ROLE=token_schema_owner`，运行原迁移入口 `/service --dir /migrations/token --direction down`。核对仅两个新索引及对应账本行被移除，原用量与此前迁移保留。索引归 `token_schema_owner` 所有，默认 `token_gateway` 的 Down 权限检查会返回拒绝结果。重新安装使用同一发布包，将角色恢复为 `token_gateway` 后执行原 Up 入口，核对索引、迁移身份与运行权限。服务恢复版本须识别当前账本身份，旧清单版本的启动校验会拒绝新增账本。
 
 ## 5. 身份、上下文和权限
 

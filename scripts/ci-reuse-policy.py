@@ -184,7 +184,8 @@ def catalog(workflow, *, jobs=None):
             uses = re.search(r'(?:^      - |^        )uses: (.+)', text, re.M)
             # Caches and diagnostic transport do not prove product execution.
             optional = bool((uses and uses[1].startswith(('actions/cache', 'Swatinem/rust-cache')))
-                            or re.search(r'^        continue-on-error: true$', text, re.M))
+                            or re.search(r'^        continue-on-error: true$', text, re.M)
+                            or re.search(r'^        run: node scripts/ci-network-node-options\.cjs$', text, re.M))
             if label and label[1].startswith('Warn when ') and re.search(r"^        run: echo '::warning::[^\n]*'$", text, re.M):
                 optional = True
             steps.append({'name': literal(label[1]) if label else None, 'run': run,
@@ -253,7 +254,7 @@ def labels(policy, matrix, configuration):
     if '${{' not in runner: return [runner.strip("'\"")]
     if machine and machine.startswith('macos'): return [machine]
     system = 'WINDOWS' if machine and machine.startswith('windows') else 'LINUX' if machine and machine.startswith('ubuntu') else None
-    names = re.findall(r'vars\.(PINVOU_(?:LINUX|WINDOWS)(?:_(?:HEAVY|MEDIUM|LIGHT))?_RUNNER)', runner)
+    names = re.findall(r'vars\.(PINVOU_(?:LINUX|WINDOWS)(?:_(?:BROWSER_HEAVY|HEAVY|MEDIUM|LIGHT))?_RUNNER)', runner)
     if names:
         system = system or ('WINDOWS' if '_WINDOWS' in names[0] else 'LINUX')
         for name in names:

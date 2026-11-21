@@ -34,6 +34,9 @@ func validateOutboxGeneration(input []migrations.Migration) error {
 // The caller holds the shared migration lock during Up. Read-only verification
 // uses the same exact legacy identity without changing the packaged SQL.
 func expectedEventDeliveryHistory(ctx context.Context, c *pgx.Conn, input []migrations.Migration) ([]migrations.Migration, error) {
+	if err := migrations.VerifyPublishedRollbackPackage(input); err != nil {
+		return nil, err
+	}
 	if closureReplaySQLChecksum(originalEventDeliverySQL) != originalEventDeliveryChecksum {
 		return nil, errors.New("original Account event delivery resource changed")
 	}
@@ -89,7 +92,20 @@ func VerifyApplied(ctx context.Context, c *pgx.Conn, input []migrations.Migratio
 	if err := validateOutboxAggregateLookup(input); err != nil {
 		return migrations.Verification{}, err
 	}
+	if err := validateManualGrantRecovery(input); err != nil {
+		return migrations.Verification{}, err
+	}
+	if err := validateFinancialJSONObjects(input); err != nil {
+		return migrations.Verification{}, err
+	}
+	if err := validateCommerceManualCompletion(input); err != nil {
+		return migrations.Verification{}, err
+	}
 	if err := validateOrganizationEvidenceGuard(input); err != nil {
+		return migrations.Verification{}, err
+	}
+	ctx, err := migrations.PinLedger(ctx, c)
+	if err != nil {
 		return migrations.Verification{}, err
 	}
 	expected, err := expectedEventDeliveryHistory(ctx, c, input)

@@ -23,6 +23,10 @@ func (r *PostgresRepository) SyncManualReviewCases(ctx context.Context, limit in
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
+	grantCases, err := r.syncGrantRecoveryCases(ctx, limit)
+	if err != nil {
+		return grantCases, err
+	}
 	rows, err := r.pool.Query(ctx, `
 SELECT case_type,resource_type,resource_id,severity,created_at FROM (
  SELECT 'REGISTRATION_REPAIR' AS case_type,'REGISTRATION_OPERATION' AS resource_type,operation.id AS resource_id,'P2' AS severity,operation.created_at
@@ -34,24 +38,24 @@ SELECT case_type,resource_type,resource_id,severity,created_at FROM (
  SELECT 'HIGH_RISK_COMMAND_REPAIR','APPROVAL_REQUEST',id,'P1',created_at FROM approval_requests WHERE status='EXECUTION_FAILED'
 ) source
 WHERE NOT EXISTS(SELECT 1 FROM manual_review_cases review WHERE review.domain='ACCOUNT' AND review.case_type=source.case_type AND review.resource_type=source.resource_type AND review.resource_id=source.resource_id)
-ORDER BY created_at,resource_id LIMIT $1`, limit)
+ORDER BY created_at,resource_id LIMIT $1`, limit-grantCases)
 	if err != nil {
-		return 0, err
+		return grantCases, err
 	}
 	candidates := []accountManualReviewCandidate{}
 	for rows.Next() {
 		var item accountManualReviewCandidate
 		if err := rows.Scan(&item.caseType, &item.resourceType, &item.resourceID, &item.severity, &item.createdAt); err != nil {
 			rows.Close()
-			return 0, err
+			return grantCases, err
 		}
 		candidates = append(candidates, item)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return grantCases, err
 	}
-	created := 0
+	created := grantCases
 	for _, candidate := range candidates {
 		deadlines, err := manualreview.DeadlinesFor(candidate.createdAt, candidate.severity)
 		if err != nil {
@@ -204,6 +208,7 @@ func evaluateAccountStopLoss(ctx context.Context, tx pgx.Tx, item struct {
 
 type manualReviewSLARepository interface {
 	SyncManualReviewCases(context.Context, int) (int, error)
+	SyncCommerceRepairCases(context.Context, int) (int, error)
 	EscalateOverdueManualReviews(context.Context, manualreview.OnCallSchedule, int) (int, error)
 }
 
@@ -240,5 +245,8 @@ func (worker *ManualReviewSLAWorker) runOne(ctx context.Context) {
 	}
 	if _, err := worker.repository.EscalateOverdueManualReviews(ctx, worker.schedule, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
 		slog.ErrorContext(ctx, "manual_review_escalation_failed", "error_code", "MANUAL_REVIEW_ESCALATION_FAILED")
+	}
+	if _, err := worker.repository.SyncCommerceRepairCases(ctx, 100); err != nil && (ctx.Err() == nil || !errors.Is(err, ctx.Err())) {
+		slog.ErrorContext(ctx, "commerce_manual_review_sync_failed", "error_code", "COMMERCE_MANUAL_REVIEW_SYNC_FAILED")
 	}
 }

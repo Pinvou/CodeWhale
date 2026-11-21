@@ -101,6 +101,7 @@ func TestUserUnusedIntentCancellationOwnerPostgres(t *testing.T) {
 			if err := f.bp.QueryRow(f.ctx, `SELECT state FROM usage_hold_expiry_recovery WHERE hold_id=$1`, *u.HoldID).Scan(&state); err != nil || state != "COMPLETED" {
 				t.Fatal("lost expiry response did not recover", state, err)
 			}
+			makeEmergencyTestClaimDue(t, f.r, f.ctx, target)
 			worker := NewEmergencyModelCancellationWorker(f.r, f.service, time.Second)
 			for range 2 {
 				if err := worker.runOnce(f.ctx); err != nil {

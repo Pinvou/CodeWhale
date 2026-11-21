@@ -71,7 +71,20 @@ func providerHealthTableFacts(t *testing.T, ctx context.Context, r *PostgresRepo
 	var facts []string
 	for _, table := range tables {
 		var value string
-		statement := `SELECT COALESCE(md5(string_agg(md5(to_jsonb(row_value)::text),'' ORDER BY COALESCE(to_jsonb(row_value)->>'id',to_jsonb(row_value)->>'event_id',to_jsonb(row_value)::text))),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
+		order := `COALESCE(to_jsonb(row_value)->>'id',to_jsonb(row_value)->>'event_id',to_jsonb(row_value)::text)`
+		rowHash := `md5(to_jsonb(row_value)::text)`
+		switch table {
+		case "wallets", "credit_lots", "entitlement_packages", "entitlement_components":
+			// These published tables have a non-null UUID primary key. Its
+			// canonical text equals the first JSON key above, without another
+			// full-row conversion for each large retained-history sort key.
+			order = `row_value.id::text`
+			// These fixed-schema carrier tables can hold 100000 rows. Retain
+			// every row/column (including null/type/length information) in the
+			// same-database fingerprint without rebuilding JSON at each check.
+			rowHash = `md5(record_send(row_value))`
+		}
+		statement := `SELECT COALESCE(md5(string_agg(` + rowHash + `,'' ORDER BY ` + order + `)),'empty') FROM ` + pgx.Identifier{table}.Sanitize() + ` row_value`
 		if err := r.pool.QueryRow(ctx, statement).Scan(&value); err != nil {
 			t.Fatal(table, err)
 		}
@@ -207,10 +220,18 @@ func TestProviderHealthGlobalWindowIndexPostgres(t *testing.T) {
 	statement := providerHealthWindowStatement(t)
 	for _, scenario := range []string{"fresh-install", "retained-upgrade"} {
 		t.Run(scenario, func(t *testing.T) {
+			// Isolate main's exact45 Down and unchanged038 upgrade first.
+			// The complete branch carrier is installed on these same facts below.
+			var source, staged string
+			if scenario == "retained-upgrade" {
+				source, staged = stageBillingMigrationContract(t, 900045, 900045)
+			} else {
+				source, staged = stageBillingMigrationContract(t, 900045)
+			}
 			var r *PostgresRepository
 			var ctx context.Context
 			if scenario == "retained-upgrade" {
-				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second, 900038)
+				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second, 900032)
 			} else {
 				r, ctx = retainedFinanceRepositoryWithBudgets(t, 3*time.Minute, 45*time.Second)
 			}
@@ -221,6 +242,12 @@ func TestProviderHealthGlobalWindowIndexPostgres(t *testing.T) {
 			for n := 0; n < 5; n++ {
 				_, order, _, _ := retainedFinanceOrder(t, r, ctx, 1000000, true)
 				orders = append(orders, order)
+			}
+			if scenario == "retained-upgrade" {
+				// The frozen pre-admission writer remains restricted to31/32.
+				// Create real paid facts there, then install the real038 prefix
+				// before taking the original health-upgrade snapshot.
+				installBillingFixturePrefix(t, ctx, r, 900038)
 			}
 			originalFinancial := providerHealthFinancialFacts(t, ctx, r)
 			for n := 0; n < 5; n++ {
@@ -350,6 +377,7 @@ func TestProviderHealthGlobalWindowIndexPostgres(t *testing.T) {
 			if providerHealthFinancialFacts(t, ctx, r) != originalFinancial {
 				t.Fatal("observation pipeline changed actual payment financial facts")
 			}
+			completeBillingMigrationContract(t, ctx, r, source, staged, product)
 			t.Logf("PROVIDER_HEALTH_GLOBAL_VERIFIED scenario=%s synthetic_archived_observations=100000 source_observations=42 global_partitions=3 current_candidates=2 retained_evaluation_members=30", scenario)
 		})
 	}

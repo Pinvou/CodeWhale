@@ -81,6 +81,8 @@ func seedOrganizationEvidence(t *testing.T, ctx context.Context, r *PostgresRepo
 	}
 }
 
+const organizationEvidenceTruncateMigrationVersion int64 = 900015
+
 func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 	f := retainedWalletFenceActors(t)
 	for _, scenario := range []string{"fresh-install", "retained-upgrade"} {
@@ -93,7 +95,7 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 				initial = func(ctx context.Context, connection *pgx.Conn, loaded []migrations.Migration) error {
 					old := make([]migrations.Migration, 0, len(loaded)-1)
 					for _, m := range loaded {
-						if m.Version != 900015 {
+						if m.Version != organizationEvidenceTruncateMigrationVersion {
 							old = append(old, m)
 						}
 					}
@@ -119,7 +121,7 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 			}
 			// This test owns the 900015 release's forward-only statement guard.
 			// Later reversible index migrations must not mask that exact Down.
-			r := f.repositoryThroughVersion(t, 900015, initial)
+			r := f.repositoryThroughVersion(t, organizationEvidenceTruncateMigrationVersion, initial)
 			if scenario == "fresh-install" {
 				replay = seedOrganizationEvidence(t, ctx, r)
 				before = organizationEvidenceFacts(t, ctx, r)
@@ -163,7 +165,7 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 				}
 			})
 			t.Run("forward-only-public-down", func(t *testing.T) {
-				loaded, err := migrations.Load("../../migrations/account")
+				loaded, err := accountMigrationsThrough(organizationEvidenceTruncateMigrationVersion)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -174,15 +176,27 @@ func TestOrganizationEvidenceTruncatePublicPostgres(t *testing.T) {
 					}
 				}
 				loaded = guardRelease
-				connection, err := pgx.ConnectConfig(ctx, r.pool.Config().ConnConfig.Copy())
+				configuration := r.pool.Config().ConnConfig.Copy()
+				configuration.User, configuration.Password = "account_migrator", ""
+				connection, err := pgx.ConnectConfig(ctx, configuration)
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer connection.Close(context.Background())
 				defer migrations.Unlock(context.Background(), connection)
+				if _, err := connection.Exec(ctx, "SET ROLE account_service"); err != nil {
+					t.Fatal(err)
+				}
+				var actor, session string
+				var super bool
+				if err := connection.QueryRow(ctx, `SELECT current_user,session_user,(SELECT rolsuper FROM pg_roles WHERE rolname=current_user)`).Scan(&actor, &session, &super); err != nil || actor != "account_service" || session != "account_migrator" || super {
+					t.Fatal("public Down requires the genuine non-superuser migration identity", err)
+				}
+				assertHistoricalForwardOnlyMigration(t, r, loaded, 900015, "organization evidence truncate protection is forward-only")
+				wanted := "organization evidence truncate protection is forward-only"
 				err = accountschema.DownOne(ctx, connection, loaded)
 				var databaseError *pgconn.PgError
-				if !errors.As(err, &databaseError) || databaseError.Code != "55000" || !strings.Contains(err.Error(), "truncate protection is forward-only") {
+				if !errors.As(err, &databaseError) || databaseError.Code != "55000" || databaseError.Message != wanted {
 					t.Fatal("public Down removed the statement protection", err)
 				}
 				migrations.Unlock(ctx, connection)

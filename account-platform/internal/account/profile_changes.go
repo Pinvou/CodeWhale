@@ -292,6 +292,9 @@ func (s *ProfileChangeService) resume(ctx context.Context, change ProfileChange)
 	if change.SessionsRevokedAt == nil {
 		first, err := s.store.StartProfileSessionRevocation(ctx, change.ID)
 		if err != nil {
+			if errors.Is(err, ErrProfileSessionRevocationCapacity) {
+				recordProfileRecoveryFailure(ctx, "PROFILE_RETRY_SCHEDULE_FAILED", s.store.ScheduleProfileChangeRetry(context.WithoutCancel(ctx), change.ID, "SESSION_REVOCATION_CAPACITY"))
+			}
 			return change, err
 		}
 		if err := s.identities.RevokeProfileSessions(ctx, change.IdentitySubject, change.ID, first); err != nil {
@@ -710,6 +713,12 @@ const profileSMSDeliveryLease = 30 * time.Second
 // while only FAILED/EXPIRED delivery may be replaced by a fresh captcha-bound
 // challenge.
 func (r *PostgresRepository) ReserveProfileSMSChallenge(ctx context.Context, id, userID, captchaID uuid.UUID, offset int, candidate SMSChallenge) (SMSChallenge, error) {
+	return retrySMSAdmission(ctx, func() (SMSChallenge, error) {
+		return r.reserveProfileSMSChallenge(ctx, id, userID, captchaID, offset, candidate)
+	})
+}
+
+func (r *PostgresRepository) reserveProfileSMSChallenge(ctx context.Context, id, userID, captchaID uuid.UUID, offset int, candidate SMSChallenge) (SMSChallenge, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return SMSChallenge{}, err

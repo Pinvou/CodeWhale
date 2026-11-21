@@ -26,6 +26,8 @@
 
 ## 本地验证
 
+Commerce 客户同步耗尽重试、过期租约及未知结果的授权、证据、双人收尾与回执恢复见 [人工收尾运行说明](docs/commerce-manual-completion.md)。
+
 在本目录执行 `go test -count=1 ./...`、`go vet ./...`。工具使用独立模块，在 `tools/kms-recovery/` 执行同样命令。真实 PostgreSQL、Keycloak 和 OpenBao 用例为显式 opt-in；条件跳过不代表实际集成或部署验收通过。Windows 的文件 mode 测试不证明 POSIX 权限或 Windows ACL，实际使用须按各工具文档限制宿主权限。
 
 普通 relay 的真实 TLS/NATS/PG 用例需要显式 `PINVOU_TEST_NATS_SERVER_BINARY` 与 `PINVOU_TEST_EVENTS_DATABASE_URL`；测试仅启动独有 loopback NATS、生成临时测试密钥并创建独有数据库 schema，结束后核对自身进程、监听器和 schema 已清理。它验证实际 broker ACK、SQL 标记和同代次去重，不等同生产部署或完整 E2E 验收。
@@ -47,6 +49,8 @@ PR Check 对账号平台路径改动在 Draft、Ready 和 Merge Queue 均执行 
 Billing 的本地与部署初始化、升级角色前置见 [数据库运行说明](deploy/postgres/README.md)。迁移必须由独立 migrator 执行，服务启动不创建 owner 或扩大权限。
 
 迁移包的身份校验、已知旧快照的实际拒绝条件和核验限制见[迁移准入与快照识别](docs/migration-snapshot-admission.md)。该说明不替代历史库升级实证，也不撤销已有兼容承诺。
+
+Portal 的跨实例速率、未过期票据容量、首次旧数据盘点与失败恢复见 [Portal 共享准入手册](docs/portal-shared-admission.md)。默认阈值按全站总量计算，所有副本应保持一致。
 
 Breakglass 结束后的专用临时凭据、在线/离线会话、桌面及 Portal 收尾见 [应急访问回收手册](deploy/runbooks/breakglass-retirement.md)。Account 角色到期不代替凭据回收，不自动停用既有正常 Keycloak 用户。
 

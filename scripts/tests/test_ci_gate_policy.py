@@ -1,6 +1,7 @@
 import json
 import re
 from ci_routing_test_support import default_ci_routing
+from ci_artifact_policy_support import legacy_artifact_policy
 import os
 import shutil
 import subprocess
@@ -11,6 +12,8 @@ import unittest
 from fnmatch import fnmatchcase
 from pathlib import Path
 
+
+ARTIFACT_TLS_ENV = '        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n'
 
 ROOT = Path(__file__).resolve().parents[2]
 PR_WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
@@ -237,6 +240,97 @@ def _changes_block(workflow_text):
             "\n  fast-gate:", maxsplit=1
         )[0]
     )
+
+def _extract_install_contract_src_tauri_reads(contract_test):
+    r"""从 connector_online_install_contract.test.js 源码派生全部 src-tauri 读取目标。
+
+    `read("src-tauri", …)` 多段字面量逐段拼接成精确文件目标;无扩展名的
+    字面量段落累积为目录前缀,带文件扩展名(.rs/.jsx/.js/.mjs/.sh/.json/.md)
+    的字面量发射目标且**不消费**前缀——三元选择分支(connector === "lark-cli"
+    ? "feishu.rs" : …)的三个分支字面量因此各成一条目标。三元比较分支的
+    字面量(`\w+ === "…"` 形态)先剔除,不参与路径拼接。首参必须是完整的
+    引号字面量 "src-tauri"(scripts 读取由 _extract_install_contract_script_reads
+    锁定,前端 src 读取天然被前端任务触发,均不在本提取器范围);含计算段
+    (osDir/archDir 变量)的调用按字面前缀目录派生 `/**` 目录目标——路由宁过
+    勿漏。精确文件目标必须真实存在(注释里提及的 .rs 不在 read( 内,不受
+    影响);目录目标其目录必须存在。派生结果为空即红。
+    """
+    targets = set()
+    for args in re.findall(r"read\(([^)]*)\)", contract_test, re.S):
+        parts = re.findall(r'"([^"]*)"', args)
+        if not parts or parts[0] != "src-tauri":
+            continue
+        if not re.match(r'\s*"src-tauri"', args):
+            raise AssertionError(
+                f"read() 首参必须是完整的 \"src-tauri\" 字面量: {args[:80]}"
+            )
+        # 剔除比较分支字面量(三元条件),它们不是路径段。
+        args_wo_cmp = re.sub(r'\w+\s*===\s*"[^"]*"', "", args)
+        # 逐项切分:引号字面量内容 vs 标识符(变量参数,单组交替下捕获为 '')。
+        items = re.findall(r'"([^"]*)"|[A-Za-z_$][A-Za-z0-9_$.]*', args_wo_cmp)
+        computed_idx = next((i for i, s in enumerate(items) if s == ""), None)
+        prefix = ["pinvou3-app/src-tauri"]
+        emitted = 0
+        for i, lit in enumerate(items[1:], start=1):
+            if computed_idx is not None and i >= computed_idx:
+                break  # 计算段之后的字面量不再参与精确拼接(路由取宽前缀)
+            if re.search(r"\.(rs|jsx|js|mjs|sh|json|md)$", lit):
+                targets.add("/".join(prefix + [lit]))
+                emitted += 1
+            else:
+                prefix.append(lit)
+        if computed_idx is not None:
+            targets.add("/".join(prefix) + "/**")
+        elif emitted == 0:
+            raise AssertionError(
+                f"read(\"src-tauri\", …) 未能派生任何文件目标(形态变更须同步"
+                f"本提取器): {args[:80]}"
+            )
+    if not targets:
+        raise AssertionError(
+            "connector_online_install_contract.test.js 未派生出任何 src-tauri"
+            " 读取目标——读取形态变更须同步本提取器"
+        )
+    for target in sorted(targets):
+        if target.endswith("/**"):
+            if not (ROOT / target[:-3]).is_dir():
+                raise AssertionError(
+                    f"派生的目录目标不存在(提取器解析出错误路径): {target}"
+                )
+        elif not (ROOT / target).is_file():
+            raise AssertionError(
+                f"派生的读取目标不存在(提取器解析出错误路径): {target}"
+            )
+    return sorted(targets)
+
+
+def _extract_mcp_wheel_contract_src_tauri_reads(contract_test):
+    """从 mcp_python_dependencies_contract.test.js 源码派生全部 src-tauri 读取目标。
+
+    该测试的读取形态:`read('src-tauri/<rel>.rs')` 单引号整相对路径,每个以
+    src-tauri/ 开头、.rs 结尾的引号字面量即一条精确文件目标(与
+    _extract_consent_marker_read_targets 同款归一化)。manifest() 的模板串
+    读取(resources/mcp-servers JSON)非 Rust 源,不在此列。目标必须真实
+    存在;派生结果为空即红;数量断言防正则漂移——新增读取会使计数失配,
+    强制同步提取器与路由。
+    """
+    targets = sorted(
+        {
+            "pinvou3-app/" + literal
+            for literal in re.findall(r"'(src-tauri/[^']*\.rs)'", contract_test)
+        }
+    )
+    if not targets:
+        raise AssertionError(
+            "mcp_python_dependencies_contract.test.js 未派生出任何 src-tauri"
+            " 读取目标——读取形态变更须同步本提取器"
+        )
+    for target in targets:
+        if not (ROOT / target).is_file():
+            raise AssertionError(
+                f"派生的读取目标不存在(提取器解析出错误路径): {target}"
+            )
+    return targets
 
 
 def _frontend_filter_entries(workflow_text):
@@ -877,6 +971,11 @@ def _with_verified_reuse_guard(value, name):
 
 GATE_JOB_LEVEL_IFS = {name: _with_verified_reuse_guard(value, name) if name not in {'merge-authored-audit', 'fast-gate', 'commit-message', 'changes', 'backflow-portability', 'required-gate'} else value for name, value in GATE_JOB_LEVEL_IFS.items()}
 
+# Frontend setup artifact gate: frontend-test / frontend-browser-test 追加
+# needs.frontend-setup.result == 'success' 尾卫,setup 失败时消费者显式跳过,
+# 不再空跑后死于工件缺失(与 pr-check.yml 的 job 级 if 逐字一致)。
+GATE_JOB_LEVEL_IFS = {name: (value.removesuffix(" }}") + " && needs['frontend-setup'].result == 'success' }}") if name in {'frontend-test', 'frontend-browser-test'} else value for name, value in GATE_JOB_LEVEL_IFS.items()}
+
 
 class CiGatePolicyTests(unittest.TestCase):
     @classmethod
@@ -908,6 +1007,10 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("runs-on: windows-latest", job)
         self.assertIn("needs: changes", job)
         self.assertIn("node scripts/run-windows-relay-tools-tests.mjs", job)
+        self.assertIn('run: python scripts/ci-fixture-process.py --receipt "${{ runner.temp }}/windows-relay-tools-process.json" -- node scripts/run-windows-relay-tools-tests.mjs', job)
+        receipt = _step_named(job, "Preserve Windows relay tools process receipt")
+        self.assertIn('if: always()', receipt)
+        self.assertIn('path: ${{ runner.temp }}/windows-relay-tools-process.json', receipt)
         self.assertIn('node-version: "24"', job)
         self.assertIn("timeout-minutes: 10", job)
         expression = re.search(r"if: \$\{\{ (.*?) \}\}", job).group(1)
@@ -932,6 +1035,7 @@ class CiGatePolicyTests(unittest.TestCase):
                      "scripts/remote-control-local-selftest.ps1", "scripts/run-remote-control-endpoint.ps1",
                      "scripts/run-windows-relay-tools-tests.mjs", "scripts/windows-relay-tools-test-summary.mjs",
                      "scripts/windows-relay-tools-preflight.mjs",
+                     "scripts/ci-fixture-process.py", "scripts/tests/test_ci_fixture_process.py",
                      ".github/workflows/pr-check.yml"):
             self.assertTrue(_matches_paths_filter(path, paths), path)
 
@@ -1168,10 +1272,24 @@ class CiGatePolicyTests(unittest.TestCase):
             self.assertIn('node-version: "24"', job)
             if job_name == "frontend-test":
                 self.assertIn("working-directory: pinvou3-app", job)
+                # Setup 工件化(2026-11-16 调查:三次 vite build ×5 → ×1):
+                # 构建产物在 frontend-setup 一次完成,frontend-test 经 needs
+                # 消费产物工件;npm ci 保留在本 job(网络绑定、CPU 占用低,
+                # 156MB node_modules 包在自建机上行实测 stall 至死,产物小件
+                # 才是链路扛得动的体积)。双向钉住防解线:消费方必须 needs
+                # frontend-setup、本 job 安装先于 npm test,setup 安装先于 build。
+                self.assertRegex(job, r"(?m)^    needs: \[changes, frontend-setup\]$")
                 install = _step_named(job, "安装前端依赖")
                 self.assertIn("run: npm ci --prefer-offline --no-audit", install)
                 self.assertNotRegex(install, r"(?m)^        (?:if|continue-on-error):")
                 self.assertLess(job.index(install), job.index(step))
+                setup_job = _without_inline_comments(
+                    _extract_job_block(self.pr_workflow, "frontend-setup")
+                )
+                self.assertIn("working-directory: pinvou3-app", setup_job)
+                setup_install = _step_named(setup_job, "安装前端依赖")
+                self.assertIn("run: npm ci --prefer-offline --no-audit", setup_install)
+                self.assertLess(setup_job.index(setup_install), setup_job.index("npm run build:ui"))
                 for name in ("personal", "models", "invocation"):
                     source = f"account-platform/deploy/production/compose.{name}.yaml"
                     self.assertIn(source, entries)
@@ -1481,7 +1599,7 @@ python3() { fixture_mock python3 "$@"; }
         )
         self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/admin.html", paths))
         self.assertTrue(_matches_paths_filter("account-platform/internal/portal/static/assets/admin.js", paths))
-        frontend = self.pr_workflow.split("\n  frontend-test:", maxsplit=1)[1].split(
+        frontend = self.pr_workflow.split("\n  frontend-setup:", maxsplit=1)[1].split(
             "\n  relay-test:", maxsplit=1
         )[0]
         gate = frontend.split("      - name: Verify embedded Account Portal assets are current", maxsplit=1)[1].split(
@@ -1608,6 +1726,62 @@ python3() { fixture_mock python3 "$@"; }
                 f"install contract 测试读取的 {target}"
                 " 未被 frontend filter 覆盖,scripts-only 改动会静默跳过该"
                 " node 门禁",
+            )
+
+    def test_install_contract_src_tauri_reads_fully_routed(self):
+        # connector_online_install_contract.test.js 除 scripts/ 外还读取十处
+        # src-tauri Rust 源与 platforms resources 锁(版本钉/HTTPS 门/重定向
+        # 守卫断言都在这些源上)——Rust-only PR 若不在 frontend filter 中,
+        # frontend-test 被静默跳过,契约漂移在该 node 门禁不可见。从测试
+        # 源码派生全部 src-tauri 读取目标逐一断言 frontend filter 覆盖;
+        # 新增读取而未路由、或已路由文件被挪走,都会在这里失败(本套件在
+        # fast-gate 每个 PR 必跑)。
+        frontend_paths = _frontend_filter_entries(self.pr_workflow)
+        contract_test = (
+            ROOT
+            / "pinvou3-app/tests/connector_online_install_contract.test.js"
+        ).read_text(encoding="utf-8")
+
+        targets = _extract_install_contract_src_tauri_reads(contract_test)
+
+        # 数量锁防正则漂移:一次重构若把字面量读改成模板串/计算值,派生
+        # 集合会静默缩水而覆盖循环照常通过——计数失配宁可误红。
+        self.assertEqual(
+            len(targets),
+            12,
+            f"install contract src-tauri 读取目标漂移，实际解析出： {targets}",
+        )
+        for target in targets:
+            self.assertTrue(
+                _is_covered_by_trigger(target, frontend_paths),
+                f"install contract 测试读取的 {target} 未被 frontend filter "
+                "覆盖,Rust-only 改动会静默跳过该 node 门禁",
+            )
+
+    def test_mcp_wheel_contract_src_tauri_reads_fully_routed(self):
+        # mcp_python_dependencies_contract.test.js 读取六处 src-tauri Rust 源
+        # (wheel 钉扎/runtime bundle 提取断言)——Rust-only PR 若不在
+        # frontend filter 中,frontend-test 被静默跳过,契约漂移在该 node
+        # 门禁不可见。从测试源码派生全部 src-tauri 读取目标逐一断言
+        # frontend filter 覆盖;新增读取而未路由会使计数锁失配,在这里失败
+        #(本套件在 fast-gate 每个 PR 必跑)。
+        frontend_paths = _frontend_filter_entries(self.pr_workflow)
+        contract_test = (
+            ROOT / "pinvou3-app/tests/mcp_python_dependencies_contract.test.js"
+        ).read_text(encoding="utf-8")
+
+        targets = _extract_mcp_wheel_contract_src_tauri_reads(contract_test)
+
+        self.assertEqual(
+            len(targets),
+            6,
+            f"mcp wheel contract src-tauri 读取目标漂移，实际解析出： {targets}",
+        )
+        for target in targets:
+            self.assertTrue(
+                _is_covered_by_trigger(target, frontend_paths),
+                f"mcp wheel contract 测试读取的 {target} 未被 frontend filter "
+                "覆盖,Rust-only 改动会静默跳过该 node 门禁",
             )
 
     def test_script_read_derivation_covers_quote_and_shape_variants(self):
@@ -2008,8 +2182,7 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn("npm --prefix team-relay-hub ci", hub_job)
         self.assertIn("npm --prefix team-relay-hub test", hub_job)
         self.assertIn(
-            "npm --prefix team-relay-hub audit "
-            "--registry=https://registry.npmjs.org --audit-level=high",
+            "python3 scripts/ci-npm-audit.py --prefix team-relay-hub",
             hub_job,
         )
 
@@ -2025,8 +2198,7 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn('node-version: ["20", "24"]', console_job)
         self.assertIn("node-version: ${{ matrix.node-version }}", console_job)
         self.assertIn(
-            "npm --prefix update-release-console audit "
-            "--registry=https://registry.npmjs.org --audit-level=high",
+            "python3 scripts/ci-npm-audit.py --prefix update-release-console",
             console_job,
         )
         self.assertIn("bash scripts/ci-update-release-console-container.sh", console_job)
@@ -2842,6 +3014,17 @@ python3() { fixture_mock python3 "$@"; }
             "pet is exempted from rust_full like feedback/personas, so pet Rust "
             "changes must gate through the CLI suite too",
         )
+        # platform/prefs defines the SavedModel schema the CLI reads and
+        # writes (pinvou-cli path-depends on pinvou3-tauri and constructs
+        # SavedModel literals). Today the CLI legs fire transitively via
+        # rust_full for any src-tauri .rs change; the direct entry keeps the
+        # CLI suite gating schema changes even if rust_full ever gains a
+        # prefs exclusion like the leaf features above.
+        assert_extracted_entry(
+            "pinvou3-app/src-tauri/src/platform/prefs/**",
+            "prefs schema changes must gate through the CLI suite (the CLI "
+            "constructs SavedModel literals)",
+        )
         # Policy: the workflow file itself is deliberately excluded from
         # cli_rust — workflow edits must not link the full-app test suites
         # (this test enforces that). cli-test changes are instead validated
@@ -3344,7 +3527,10 @@ python3() { fixture_mock python3 "$@"; }
         ]
         self.assertEqual([name for name in names if name in expected], expected)
         self.assertEqual(names.index("Set up zram and swap"), names.index(initial) + 1)
-        self.assertEqual(names.index("Cargo cache"), names.index(precache) + 1)
+        self.assertEqual(names.index("Cargo cache"), names.index(precache) + 2)
+        preparation = _step_named(job, names[names.index(precache) + 1])
+        self.assertIn('run: node scripts/ci-network-node-options.cjs', preparation)
+        self.assertNotIn('continue-on-error:', preparation)
         self.assertEqual(names.index(postcache), names.index("Cargo cache") + 1)
         self.assertEqual(
             names.index("cargo clippy (workspace, all targets)"),
@@ -3358,6 +3544,8 @@ python3() { fixture_mock python3 "$@"; }
             "- name: Cargo cache",
             "id: cli_lint_cache",
             "uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0",
+            "env:", "NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}", "PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}",
+            "PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
             "with:", "workspaces: pinvou-cli", "shared-key: cli-lint",
             "cache-on-failure: false", "save-if: ${{ github.ref == 'refs/heads/main' }}",
         ])
@@ -3381,6 +3569,8 @@ python3() { fixture_mock python3 "$@"; }
         self.assertEqual(uncommented.count("GITHUB_ENV"), 1)
         # Job/step env overrides GITHUB_ENV for the post condition. This job
         # currently has no env mapping; pin that fact, including quoted keys.
+        uncommented = uncommented.replace("        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}\n          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}\n"
+                                          "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'\n", '')
         self.assertNotRegex(uncommented, r"(?m)^\s*(?:env|['\"]env['\"])\s*:")
 
     def test_cli_lint_cache_guard_rejects_step_env_override(self):
@@ -3626,6 +3816,10 @@ python3() { fixture_mock python3 "$@"; }
         # header's prose and the "no continue-on-error" annotations on the
         # clippy gate do not count as settings.
         body = _without_yaml_comments(self.pr_workflow)
+        # The separate all-workflow network policy guard validates pairing,
+        # conditions and the exact helper. Keep this test's original product
+        # failure-policy assertions after removing only reviewed transport.
+        body = legacy_artifact_policy(body)
         job_level = []
         step_level = []
         for number, line in enumerate(body.splitlines(), start=1):
@@ -3640,11 +3834,13 @@ python3() { fixture_mock python3 "$@"; }
             "'success' to required-gate, so the whole compile/test leg becomes "
             "advisory while the required check stays green",
         )
-        # These reviewed diagnostic-only steps cannot suppress a compiler,
-        # test or cleanup failure. Artifact transport is bounded separately;
-        # adding another advisory step still requires explicit review here.
+        # Reviewed diagnostics and the provisional frontend upload cannot
+        # suppress compiler, test or cleanup failures. The upload is accepted
+        # only with its exact retry and mandatory hard reducer below.
         reviewed_diagnostics = (
+            "Upload frontend setup bundle",
             "PR test success proof transport",
+            "Gate test resource lifecycle receipts",
             "Windows 测试二进制导入诊断",
             "Test resource lifecycle receipts",
             "Browser shard resource lifecycle receipts",
@@ -3653,13 +3849,52 @@ python3() { fixture_mock python3 "$@"; }
             "Account closure resource lifecycle receipts",
             "Preserve browser fixture exit receipts",
             "Preserve ACP fixture exit receipt",
+            "上传 Windows runtime 资源收据",
+            "Windows atomic lifecycle receipts",
+            "Preserve Windows relay tools process receipt",
+            "Preserve Windows release contract process receipts",
+            "保留 Relay 进程作用域原始回执",
         )
         self.assertEqual(
             len(step_level),
             len(reviewed_diagnostics),
-            "only reviewed diagnostic steps may opt out of blocking; "
+            "only reviewed diagnostic or strictly recovered upload steps may be provisional; "
             f"found {len(step_level)} continue-on-error settings: {step_level}",
         )
+        release_receipt = _step_named(_extract_job_block(body, 'release-contract-test'), 'Preserve Windows release contract process receipts')
+        self.assertEqual(release_receipt.rstrip(), '\n'.join([
+            '      - name: Preserve Windows release contract process receipts',
+            '        id: windows_release_contract_receipts',
+            "        if: ${{ always() && runner.os == 'Windows' }}",
+            '        timeout-minutes: 3',
+            '        continue-on-error: true',
+            '        uses: actions/upload-artifact@v7',
+            '        env:',
+            "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+            '          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}',
+            '        with:',
+            '          name: windows-release-contract-resources-${{ github.run_id }}-${{ github.run_attempt }}',
+            '          path: |',
+            '            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}.json',
+            '            ${{ runner.temp }}/remote-native-exit-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json',
+            '            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}.json',
+            '            ${{ runner.temp }}/remote-evidence-contract-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json',
+            '            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}.json',
+            '            ${{ runner.temp }}/remote-fixture-process-${{ github.run_id }}-${{ github.run_attempt }}-resources/**/*.json',
+            '          if-no-files-found: warn',
+            '          retention-days: 7',
+        ]))
+
+        atomic_receipt = _step_named(
+            _extract_job_block(body, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
+        )
+        self.assertEqual(_step_named(_extract_job_block(body, 'windows-rust-test'),
+            'Configure bounded Windows atomic upload diagnostics').rstrip(), '\n'.join([
+                '      - name: Configure bounded Windows atomic upload diagnostics',
+                "        if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+                '        working-directory: ${{ github.workspace }}',
+                '        run: node scripts/ci-artifact-node-options.cjs --diagnostics',
+            ]))
         for name in reviewed_diagnostics:
             diagnostic_step = body.split(
                 "- name: " + name + "\n", maxsplit=1
@@ -3670,6 +3905,42 @@ python3() { fixture_mock python3 "$@"; }
                 "continue-on-error belongs only to the reviewed diagnostic "
                 "step, not another step that moved under it",
             )
+        # This is recovery, not an unbounded advisory transport exception.
+        # The primary upload runs only on the github transport (the lan
+        # transport serves the bundle from its own cache), may fail exactly
+        # once and is then retried with overwrite; the mandatory reducer below
+        # accepts exactly github:success:skipped, github:failure:success and
+        # lan:skipped:skipped plus a nonempty bundle, so the artifact always
+        # ends up uploaded or lan-available and can never silently vanish.
+        frontend_setup = _extract_job_block(body, 'frontend-setup')
+        self.assertEqual(
+            _step_named(frontend_setup, 'Upload frontend setup bundle').rstrip(),
+            "      - name: Upload frontend setup bundle\n        id: frontend_setup_upload\n        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n        continue-on-error: true\n        uses: actions/upload-artifact@v7\n        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1",
+        )
+        self.assertEqual(
+            _step_named(frontend_setup, 'Upload frontend setup bundle (retry)').rstrip(),
+            "      - name: Upload frontend setup bundle (retry)\n        id: frontend_setup_upload_retry\n        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}\n        uses: actions/upload-artifact@v7\n        env:\n          NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}\n        with:\n          name: frontend-setup-bundle\n          path: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n          if-no-files-found: error\n          retention-days: 1\n          overwrite: true",
+        )
+        self.assertEqual(
+            _step_named(frontend_setup, 'Require frontend setup bundle upload').rstrip(),
+            '      - name: Require frontend setup bundle upload\n        if: ${{ always() && !cancelled() }}\n        shell: bash\n        env:\n          FRONTEND_TRANSPORT: ${{ steps.frontend_bundle.outputs.transport }}\n          FIRST_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload.outcome }}\n          RETRY_UPLOAD_OUTCOME: ${{ steps.frontend_setup_upload_retry.outcome }}\n          FRONTEND_SETUP_BUNDLE: ${{ runner.temp }}/frontend-setup-bundle.tar.gz\n        run: |\n          set -euo pipefail\n          case "$FRONTEND_TRANSPORT:$FIRST_UPLOAD_OUTCOME:$RETRY_UPLOAD_OUTCOME" in\n            github:success:skipped|github:failure:success) ;;\n            lan:skipped:skipped) ;;\n            *) echo \'::error::Frontend setup bundle upload did not complete successfully.\' >&2; exit 1 ;;\n          esac\n          if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then\n            echo \'::error::Frontend setup bundle is missing or empty.\' >&2\n            exit 1\n          fi',
+        )
+        # All other COE occurrences retain the original exact diagnostic contracts.
+        gate_diagnostic = _step_named(_extract_job_block(body, 'fast-gate'), 'Gate test resource lifecycle receipts')
+        self.assertEqual(gate_diagnostic.rstrip(), textwrap.indent(textwrap.dedent("""\
+            - name: Gate test resource lifecycle receipts
+              if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+              timeout-minutes: 3
+              continue-on-error: true
+              uses: actions/upload-artifact@v7
+              env:
+                NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+              with:
+                name: gate-resource-lifecycle-${{ github.run_attempt }}
+                path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                if-no-files-found: error
+                retention-days: 7
+        """).rstrip(), '      '))
         diagnostic_job = _extract_job_block(body, 'windows-rust-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Windows 测试二进制导入诊断\n.*?(?=^      - |\Z)", diagnostic_job
@@ -3685,11 +3956,20 @@ python3() { fixture_mock python3 "$@"; }
                   run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
             """).rstrip(), "      "),
         )
+        runtime_receipt = _step_named(_extract_job_block(body, 'windows-runtime-test'), '上传 Windows runtime 资源收据')
+        for setting in ('if: always()', 'timeout-minutes: 3', 'uses: actions/upload-artifact@v7',
+                        'retention-days: 7', 'if-no-files-found: warn',
+                        'name: windows-runtime-receipts-${{ github.run_id }}-${{ github.run_attempt }}',
+                        'path: ${{ runner.temp }}/windows-runtime-${{ github.run_id }}-${{ github.run_attempt }}/'):
+            self.assertIn(setting, runtime_receipt)
+        self.assertIn(ARTIFACT_TLS_ENV, runtime_receipt)
+        self.assertNotRegex(runtime_receipt.replace(ARTIFACT_TLS_ENV, '', 1), r'(?m)^        (?:run|env):')
         transport = _step_named(_extract_job_block(body, 'required-gate'), 'PR test success proof transport')
         self.assertIn('timeout-minutes: 3', transport)
         self.assertIn('uses: actions/upload-artifact@v7', transport)
         self.assertIn('path: ${{ steps.success_proof.outputs.directory }}/proof.json', transport)
-        self.assertNotRegex(transport, r'(?m)^        (?:run|env):')
+        self.assertIn(ARTIFACT_TLS_ENV, transport)
+        self.assertNotRegex(transport.replace(ARTIFACT_TLS_ENV, '', 1), r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'windows-codex-runtime-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Preserve browser fixture exit receipts\n.*?(?=^      - |\Z)", diagnostic_job
@@ -3703,6 +3983,8 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: windows-browser-exit-${{ github.run_id }}-${{ github.run_attempt }}
                     retention-days: 7
@@ -3726,6 +4008,8 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: frontend-resource-lifecycle-${{ github.run_attempt }}
                     path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
@@ -3737,7 +4021,8 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn('timeout-minutes: 3', closure_receipt)
         self.assertIn('uses: actions/upload-artifact@v7', closure_receipt)
         self.assertIn('name: account-closure-resource-lifecycle-${{ github.run_attempt }}', closure_receipt)
-        self.assertNotRegex(closure_receipt, r'(?m)^        (?:run|env):')
+        self.assertIn(ARTIFACT_TLS_ENV, closure_receipt)
+        self.assertNotRegex(closure_receipt.replace(ARTIFACT_TLS_ENV, '', 1), r'(?m)^        (?:run|env):')
         diagnostic_job = _extract_job_block(body, 'account-platform-test')
         matches = list(re.finditer(
             r"(?ms)^      - name: Account test resource lifecycle receipts\n.*?(?=^      - |\Z)", diagnostic_job
@@ -3752,6 +4037,8 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: account-resource-lifecycle-${{ github.run_attempt }}
                     path: |
@@ -3775,9 +4062,36 @@ python3() { fixture_mock python3 "$@"; }
                   timeout-minutes: 3
                   continue-on-error: true
                   uses: actions/upload-artifact@v7
+                  env:
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
                   with:
                     name: account-financial-${{ matrix.group }}-resource-lifecycle-${{ github.run_attempt }}
-                    path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                    path: |
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/
+                      ${{ runner.temp }}/financial-parallel-*/
+                    if-no-files-found: error
+                    retention-days: 7
+            """).rstrip(), "      "),
+        )
+
+        self.assertEqual(
+            atomic_receipt.rstrip(),
+            textwrap.indent(textwrap.dedent("""\
+                - name: Windows atomic lifecycle receipts
+                  id: windows_atomic_receipts_upload
+                  if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}
+                  timeout-minutes: 3
+                  continue-on-error: true
+                  uses: actions/upload-artifact@v7
+                  env:
+                    PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'
+                    NODE_OPTIONS: ${{ env.PINVOU_CI_ARTIFACT_NODE_OPTIONS }}
+                  with:
+                    name: windows-atomic-resources-${{ matrix.phase }}-${{ github.run_attempt }}
+                    path: |
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/atomic-expected.txt
+                      ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/ledger.txt
                     if-no-files-found: error
                     retention-days: 7
             """).rstrip(), "      "),
@@ -3813,6 +4127,50 @@ python3() { fixture_mock python3 "$@"; }
                 1,
             ),
         }
+        gate_upload = _step_named(_extract_job_block(original, 'fast-gate'), 'Gate test resource lifecycle receipts')
+        gate_without_exemption = original.replace(gate_upload, gate_upload.replace('        continue-on-error: true\n', '', 1), 1)
+        mutations['move gate diagnostic exemption to full test discovery'] = gate_without_exemption.replace(
+            '      - name: Gate policy test suite (scripts/tests)\n',
+            '      - name: Gate policy test suite (scripts/tests)\n        continue-on-error: true\n', 1)
+        mutations['turn gate diagnostic upload into a command'] = original.replace(
+            gate_upload, gate_upload.replace('uses: actions/upload-artifact@v7', 'run: exit 37', 1), 1)
+        atomic = _step_named(
+            _extract_job_block(original, 'windows-rust-test'), 'Windows atomic lifecycle receipts'
+        )
+        atomic_config = _step_named(_extract_job_block(original, 'windows-rust-test'),
+            'Configure bounded Windows atomic upload diagnostics')
+        mutations['unreviewed atomic preload'] = original.replace(atomic_config,
+            atomic_config.replace('scripts/ci-artifact-node-options.cjs', 'scripts/unreviewed.cjs'), 1)
+        for label, old, new in (
+            ('atomic upload action', 'uses: actions/upload-artifact@v7', 'run: exit 37'),
+            ('atomic upload id', 'id: windows_atomic_receipts_upload', 'id: unreviewed_upload'),
+            ('atomic upload condition', "if: ${{ always() && matrix.phase == 'regression' && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", 'if: always()'),
+            ('atomic upload timeout', '        timeout-minutes: 3\n', ''),
+            ('atomic upload path', '${{ env.PINVOU_CI_RESOURCE_LEDGER }}/**/*.json', '${{ github.workspace }}/**/*'),
+            ('atomic upload retention', 'retention-days: 7', 'retention-days: 30'),
+            ('atomic upload name', 'name: Windows atomic lifecycle receipts', 'name: Unreviewed transport'),
+            ('atomic upload environment', '        uses: actions/upload-artifact@v7', '        env:\n          UNREVIEWED: yes\n        uses: actions/upload-artifact@v7'),
+        ):
+            mutations[label] = original.replace(atomic, atomic.replace(old, new, 1), 1)
+        mutations['duplicate atomic upload'] = original.replace(atomic, atomic + atomic, 1)
+        frontend = _step_named(
+            _extract_job_block(original, 'frontend-test'), 'Test resource lifecycle receipts'
+        )
+        mutations['atomic upload in another job'] = original.replace(atomic, '', 1).replace(
+            frontend, frontend + atomic, 1
+        )
+        atomic_without_exemption = atomic.replace('        continue-on-error: true\n', '', 1)
+        without_atomic_exemption = original.replace(atomic, atomic_without_exemption, 1)
+        for name in ('Windows 原子替换状态机回归', 'Confirm Windows atomic resource retirement'):
+            mandatory = _step_named(_extract_job_block(original, 'windows-rust-test'), name)
+            mutations['add atomic exemption to ' + name] = original.replace(
+                mandatory, mandatory.replace('      - name: ' + name + '\n',
+                    '      - name: ' + name + '\n        continue-on-error: true\n', 1), 1
+            )
+            mutations['move atomic exemption to ' + name] = without_atomic_exemption.replace(
+                mandatory, mandatory.replace('      - name: ' + name + '\n',
+                    '      - name: ' + name + '\n        continue-on-error: true\n', 1), 1
+            )
         for first_line, remaining in (
             ("run: exit 37", "        name: Required business command\n"),
             ("id: business_guard", '        name: Required business command\n        "run": exit 37\n'),
@@ -3820,13 +4178,49 @@ python3() { fixture_mock python3 "$@"; }
             ("env:", "          FIXTURE: yes\n        run: exit 37\n"),
         ):
             # Moving the exception must fail even when the next valid YAML
-            # step starts with run/id/if/env and the total count stays five.
+            # step starts with run/id/if/env and the total count stays unchanged.
             mutations[f"move exemption to {first_line} next step"] = without_upload_exemption.replace(
                 "      - name: Stop owned temporary PostgreSQL services\n",
                 f"      - {first_line}\n{remaining}        continue-on-error: true\n\n"
                 "      - name: Stop owned temporary PostgreSQL services\n",
                 1,
             )
+            mutations[f'move atomic exemption to {first_line} next step'] = without_atomic_exemption.replace(
+                atomic_without_exemption,
+                atomic_without_exemption + f'      - {first_line}\n{remaining}        continue-on-error: true\n',
+                1,
+            )
+        # 前端 setup 上传恢复并集的负例:传输门、重试触发或 Require 硬门
+        # (结局白名单含 lan 分支、空包兜底)任一弱化都必须让上方 pin 变红,
+        # 否则工件可能在 github 上传与 lan 缓存之外静默消失。
+        frontend_primary_gate = (
+            "        id: frontend_setup_upload\n"
+            "        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n"
+            "        continue-on-error: true\n"
+        )
+        frontend_require_start = "      - name: Require frontend setup bundle upload\n"
+        frontend_require_block = frontend_require_start + original.split(
+            frontend_require_start, maxsplit=1
+        )[1].split("\n  frontend-test:", maxsplit=1)[0]
+        for label, old, new in (
+            ('frontend primary loses transport gate', frontend_primary_gate,
+             "        id: frontend_setup_upload\n        continue-on-error: true\n"),
+            ('frontend primary loses continue-on-error', frontend_primary_gate,
+             "        id: frontend_setup_upload\n        if: ${{ steps.frontend_bundle.outputs.transport == 'github' }}\n"),
+            ('frontend retry trigger drifts to failure()',
+             "        if: ${{ !cancelled() && steps.frontend_setup_upload.outcome == 'failure' }}",
+             '        if: failure()'),
+            ('frontend require gate deleted', frontend_require_block, ''),
+            ('frontend require gate weakened to success()',
+             frontend_require_start + "        if: ${{ always() && !cancelled() }}",
+             frontend_require_start + "        if: ${{ success() }}"),
+            ('frontend lan arm rejects lan availability', 'lan:skipped:skipped) ;;',
+             'lan:skipped:skipped) error ;;'),
+            ('frontend require gate accepts empty bundle',
+             'if [[ ! -s "$FRONTEND_SETUP_BUNDLE" ]]; then',
+             'if [[ ! -e "$FRONTEND_SETUP_BUNDLE" ]]; then'),
+        ):
+            mutations[label] = original.replace(old, new, 1)
         try:
             self.test_no_job_level_continue_on_error_disarms_a_gate_job()
             for label, mutant in mutations.items():
@@ -4378,6 +4772,11 @@ python3() { fixture_mock python3 "$@"; }
         self.assertGreaterEqual(len(linux_jobs), 10)
         for job in linux_jobs:
             job_name = job.strip().split(":", maxsplit=1)[0]
+            # runner-pool-guard 是唯一故意跑在托管 ubuntu-22.04 的元门禁:它
+            # 校验的对象正是池 vars,不能依赖它们(2026-11-16 调查的显式失败
+            # 化改造);纯 env 检查无重任务,无需 zram,按名豁免。
+            if job_name == "runner-pool-guard":
+                continue
             # Round-11 review: judge the contract on EXECUTABLE lines only —
             # a commented-out step otherwise satisfies every assertIn below
             # while the job actually runs on stock memory.
@@ -4703,9 +5102,7 @@ python3() { fixture_mock python3 "$@"; }
         job = _without_yaml_comments(
             _extract_job_block(self.pr_workflow, "windows-rust-test")
         )
-        step = job.split(
-            "\n      - name: Windows 原子替换状态机回归\n", 1
-        )[1].split("\n      - name:", 1)[0]
+        step = _step_named(job, "Windows 原子替换状态机回归")
         loop = step.split("for filter in \\\n", 1)[1].split("; do", 1)[0]
         filters = re.findall(r"(?m)^\s*'([^']+)'(?:\s*\\)?\s*$", loop)
         for module in (
@@ -4714,9 +5111,9 @@ python3() { fixture_mock python3 "$@"; }
         ):
             with self.subTest(module=module):
                 self.assertEqual(filters.count(module), 1)
-        self.assertIn('"$test_exe" "$filter" --test-threads=1', step)
+        self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', step)
         self.assertIn(
-            "grep -qE 'running [1-9][0-9]* tests?' /tmp/windows_regression.log || {",
+            "grep -qE 'running [1-9][0-9]* tests?' \"$report\" || {",
             step,
         )
         self.assertIn("exit 1", step.split("grep -qE", 1)[1])
@@ -4976,10 +5373,8 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn('"-outputresource:$($testExe.FullName);#1"', windows_rust_test)
         self.assertIn('"PINVOU3_TEST_EXE=$testExe" | Out-File', windows_rust_test)
         self.assertIn('test_exe="$(cygpath -u "$PINVOU3_TEST_EXE")"', windows_rust_test)
-        regression = windows_rust_test.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1]
-        self.assertIn('"$test_exe" "$filter" --test-threads=1', regression)
+        regression = _step_named(windows_rust_test, "Windows 原子替换状态机回归")
+        self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', regression)
         self.assertNotIn("cargo test", regression)
         self.assertIn(
             "'connector_introspection_guard_matches_complete_names_only'",
@@ -5006,9 +5401,7 @@ python3() { fixture_mock python3 "$@"; }
                 "\n  windows-rustup-repair-test:", maxsplit=1
             )[0]
         )
-        regression = windows_job.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1]
+        regression = _step_named(windows_job, "Windows 原子替换状态机回归")
 
         def assert_reader_execution(block):
             loop = block.split("for filter in ", maxsplit=1)[1].split(
@@ -5019,7 +5412,8 @@ python3() { fixture_mock python3 "$@"; }
                 filters.count("'app::commands::remote_control::reader_resume_tests::'"),
                 1,
             )
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('receipt="$(cygpath -w "$ledger/atomic-$index.json")"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5030,21 +5424,23 @@ python3() { fixture_mock python3 "$@"; }
         # cannot satisfy this wiring contract. These are not Wry runtime evidence.
         for old, new in (
             ("'app::commands::remote_control::reader_resume_tests::'", "'features::remote_control::'"),
-            ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compile-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt', "echo bypass-supervisor --receipt"),
+            ('$ledger/atomic-$index.json', '$ledger/atomic-fixed.json'),
         ):
             with self.subTest(mutation=old):
+                mutant = regression.replace(old, new)
+                self.assertNotEqual(mutant, regression, "the negative control must change the real step")
                 with self.assertRaises(AssertionError):
-                    assert_reader_execution(regression.replace(old, new))
+                    assert_reader_execution(mutant)
 
     def test_windows_a_resume_projection_executes_with_nonzero_product_filters(self):
         windows = _without_yaml_comments(
             _extract_job_block(self.pr_workflow, "windows-rust-test")
         )
-        regression = windows.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1].split("\n      - name:", maxsplit=1)[0]
+        regression = _step_named(windows, "Windows 原子替换状态机回归")
         required = (
             "'features::remote_control::controller::controlling_service::resume_projection_tests::'",
             "'features::remote_control::controller::controlling::tests::'",
@@ -5056,7 +5452,8 @@ python3() { fixture_mock python3 "$@"; }
             filters, commands = loop.split("; do", maxsplit=1)
             for prefix in required:
                 self.assertEqual(filters.count(prefix), 1)
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('receipt="$(cygpath -w "$ledger/atomic-$index.json")"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5068,14 +5465,16 @@ python3() { fixture_mock python3 "$@"; }
         mutations = [(prefix, change) for prefix in required
                      for change in ("", "'renamed_no_matching_tests'")]
         mutations += [
-            ('"$test_exe" "$filter" --test-threads=1', "echo compiled-only"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compiled-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
         ]
         for old, new in mutations:
             with self.subTest(mutation=(old, new)):
+                mutant = regression.replace(old, new)
+                self.assertNotEqual(mutant, regression, "the negative control must change the real step")
                 with self.assertRaises(AssertionError):
-                    assert_execution(regression.replace(old, new))
+                    assert_execution(mutant)
 
     def test_windows_controller_inbound_runs_in_the_nonzero_regression_loop(self):
         windows_job = _without_yaml_comments(
@@ -5083,9 +5482,7 @@ python3() { fixture_mock python3 "$@"; }
                 "\n  windows-rustup-repair-test:", maxsplit=1
             )[0]
         )
-        regression = windows_job.split(
-            "- name: Windows 原子替换状态机回归", maxsplit=1
-        )[1]
+        regression = _step_named(windows_job, "Windows 原子替换状态机回归")
         required_filters = (
             "'features::remote_control::controller::controlling_inbound::tests::'",
             "'features::remote_control::controller::controlling_service::inbound_tests::'",
@@ -5098,7 +5495,8 @@ python3() { fixture_mock python3 "$@"; }
             filters, commands = loop.split("; do", maxsplit=1)
             for required in required_filters:
                 self.assertEqual(filters.count(required), 1)
-            self.assertIn('"$test_exe" "$filter" --test-threads=1', commands)
+            self.assertIn('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', commands)
+            self.assertIn('receipt="$(cygpath -w "$ledger/atomic-$index.json")"', commands)
             self.assertIn("running [1-9][0-9]* tests?", commands)
             self.assertRegex(commands, r"grep -qE[^\n]+\|\|\s*\{[^}]*exit 1")
             self.assertIn("set -euo pipefail", block)
@@ -5112,14 +5510,16 @@ python3() { fixture_mock python3 "$@"; }
             for required in required_filters
             for replacement in ("", "'features::remote_control::'")
         ] + [
-            ('"$test_exe" "$filter" --test-threads=1', "echo compile-only"),
+            ('"$python_exe" ../../scripts/ci-fixture-process.py --receipt "$receipt" -- "$test_exe_windows" "$filter" --test-threads=1 2>&1 | tee "$report"', "echo compile-only"),
             ("running [1-9][0-9]* tests?", "running [0-9]+ tests?"),
             ("exit 1", "exit 0"),
         ]
         for old, new in mutations:
             with self.subTest(mutation=(old, new)):
+                mutant = regression.replace(old, new)
+                self.assertNotEqual(mutant, regression, "the negative control must change the real step")
                 with self.assertRaises(AssertionError):
-                    assert_inbound_execution(regression.replace(old, new))
+                    assert_inbound_execution(mutant)
 
     def test_windows_rust_split_matches_the_declared_feature_graph(self):
         with TAURI_MANIFEST.open("rb") as manifest_file:
@@ -5299,6 +5699,7 @@ python3() { fixture_mock python3 "$@"; }
             windows_codex_filter,
         )
         self.assertIn("browser_wrapper_lazy.test.mjs", windows_codex_filter)
+        self.assertIn("browser-wrapper-host-control.test.mjs", windows_codex_filter)
 
         windows_job = self.pr_workflow.split(
             "\n  windows-codex-runtime-test:", maxsplit=1
@@ -5307,7 +5708,9 @@ python3() { fixture_mock python3 "$@"; }
         self.assertIn("runs-on: windows-latest", windows_job)
         self.assertIn("Windows browser wrapper lifecycle regression", windows_job)
         self.assertIn(
-            "node --test pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs",
+            "node --test --test-concurrency=1 "
+            "pinvou3-app/tests/browser-wrapper-host-control.test.mjs "
+            "pinvou3-app/tests/browser_wrapper_windows_lifecycle.test.mjs",
             windows_job,
         )
         self.assertIn(
@@ -6912,7 +7315,7 @@ exit 0
         env = dict(os.environ)
         env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '')}"
         env["REPAIR_TEST_STATE"] = str(self.state)
-        env["PINVOU3_CI_DPKG_UPDATES_DIR"] = str(self.updates)
+        env["PINVOU3_CI_DPKG_UPDATES_DIR"] = self.updates.as_posix()
         env.pop("GITHUB_ACTIONS", None)
         # 行为夹具必须走 hosted 主路径:生产脚本在 RUNNER_ENVIRONMENT=self-hosted
         # 时于 repair/trap 安装前安全早退(保留管理员预置内存),该早退本身
@@ -6991,6 +7394,30 @@ exit 0
         calls = self._configure_calls()
         self.assertEqual(len(calls), 1, calls)
         self.assertIn("dpkg admin state repaired (configure attempt 1)", proc.stdout)
+
+
+class FrontendCacheFixtureOwnershipTests(unittest.TestCase):
+    def test_cache_contracts_are_discovered_once_inside_the_owned_gate_scope(self):
+        job = _extract_job_block(PR_WORKFLOW.read_text(encoding='utf-8'), 'fast-gate')
+        step = _step_named(job, 'Gate policy test suite (scripts/tests)')
+        command = '\n'.join(_step_run_lines(step)).strip()
+        self.assertRegex(command, r'^python3 scripts/ci-fixture-process\.py --receipt "\$PINVOU_CI_RESOURCE_LEDGER/gate-policy\.json" -- python3 -m unittest discover -s scripts/tests -p \'test_\*\.py\' -v$')
+        for name in ['test_ci_frontend_bundle.py', 'test_ci_frontend_cache_server.py',
+                     'test_ci_transfer_deadline.py', 'test_ci_frontend_checkout.py', 'test_ci_npm_audit.py']:
+            self.assertTrue((ROOT / 'scripts/tests' / name).is_file())
+            self.assertTrue(fnmatchcase(name, 'test_*.py'))
+        self.assertNotIn('Verified frontend bundle cache contracts', job, 'avoid a second unowned execution of the same fixtures')
+        initialize = _step_named(job, 'Initialize gate test resource ledger')
+        self.assertEqual('\n'.join(_step_run_lines(initialize)).strip(), 'python3 scripts/ci-resource-ledger.py --init')
+        self.assertLess(job.index(initialize), job.index(step))
+        retirement = _step_named(job, 'Confirm gate test resource retirement')
+        self.assertIn("always() && env.PINVOU_CI_RESOURCE_LEDGER != ''", retirement)
+        self.assertEqual('\n'.join(_step_run_lines(retirement)).strip(), 'python3 scripts/ci-resource-ledger.py --recover')
+        self.assertNotIn('continue-on-error', retirement)
+        upload = _step_named(job, 'Gate test resource lifecycle receipts')
+        self.assertIn('always()', upload)
+        self.assertIn('timeout-minutes: 3', upload)
+        self.assertIn('continue-on-error: true', upload)
 
 
 if __name__ == "__main__":

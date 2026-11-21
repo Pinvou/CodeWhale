@@ -625,9 +625,12 @@ async fn serve_controlling_lane_with_evidence_context(
     };
     // Every keeper, including isolated tests, uses its original registration.
     let operation = evidence.operation.clone().for_lane(registration.clone());
-    if manager.with_lane_owner(&operation, || ()).is_err() {
+    // Acquire the key-slot identity only while this exact registration owns the
+    // manager. Every terminal return/cancellation retires that slot; a delayed
+    // old keeper cannot capture or clear a successor installation.
+    let Ok(_retirement) = manager.with_lane_owner(&operation, || business.retire_on_exit()) else {
         return;
-    }
+    };
     let mut owned_liveness = |frame: Value| {
         if manager.with_lane_owner(&operation, || ()).is_err() {
             return false;
@@ -716,7 +719,17 @@ async fn serve_controlling_lane_with_evidence_context(
                             continue;
                         }
                         if resume.is_active() {
-                            continue;
+                            // A second loss belongs to this candidate only if
+                            // the complete original registration still matches.
+                            // Do not restart or extend the first frozen budget.
+                            if context != registration {
+                                continue;
+                            }
+                            if manager.with_lane_owner(&operation, || business.clear()).is_err() {
+                                return;
+                            }
+                            fail_resume(manager, &operation, sinks);
+                            return;
                         }
                         // A pre-authentication D carries no lease authority.
                         // Its non-reusable original port/intent may still fail
@@ -1110,25 +1123,6 @@ fn handle_resume_frame(
     }
 }
 
-/// 生成下一条心跳帧：只在存在活租约（connected）时产出，序号单调递增；租约
-/// 变更后序号从 1 重新开始（epoch 同步换新，接收侧按新 epoch 接受）。
-fn next_liveness_frame(
-    manager: &ControllingDeviceManager,
-    liveness: &mut LivenessExpectations,
-) -> Option<Value> {
-    let (lease, _) = manager.live_runtime_context().ok()?;
-    let epoch = manager.live_liveness_epoch()?;
-    let next = liveness.next_sequence()?;
-    let frame = crate::features::remote_control::controller::liveness::build_controller_liveness(
-        &lease,
-        SenderRole::ControllerA,
-        &epoch,
-        next,
-    )
-    .ok()?;
-    Some(frame)
-}
-
 /// 把状态投影压成一行排障文本：与 UI 收到的 `status` / `errorCode` 同源，
 /// 不含连接码、租约、指纹或设备标识。
 fn controller_status_log_detail(status: &ControllingStatus) -> String {
@@ -1304,8 +1298,14 @@ pub(crate) async fn connect_controlling_device(
         }
     };
 
+    // Construct before spawning, not on the task's first poll: cancellation of
+    // an unpolled keeper must still retire this exact installed key slot.
+    let retirement = manager
+        .with_lane_owner(&operation, || business.retire_on_exit())
+        .ok();
     let keeper = app.clone();
     tauri::async_runtime::spawn(async move {
+        let _retirement = retirement;
         let manager = keeper.state::<ControllingDeviceManager>();
         let sessions = keeper.state::<ControllingSessionManager>();
         let business = keeper.state::<ControllingLaneState>();
@@ -2261,6 +2261,11 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actual_adapter_second_disconnect_ends_candidate_before_inbox_terminal() {
+        assert_actual_adapter_case("second").await;
+    }
+
+    #[tokio::test]
     async fn actual_adapter_pre_auth_disconnect_fails_only_its_original_attempt() {
         assert_actual_adapter_case("pre_auth").await;
     }
@@ -2347,6 +2352,12 @@ mod tests {
                 &sender,
                 sink.as_ref(),
             );
+            if case == "second" {
+                super::super::relay_transport::disconnect_test_transport_to_sink(
+                    &sender,
+                    sink.as_ref(),
+                );
+            }
         }
         if case == "pre_auth" {
             install_sender();
@@ -2456,6 +2467,25 @@ mod tests {
         )
         .await;
         match case {
+            "second" => {
+                assert_eq!(
+                    seen,
+                    [
+                        ControllingStatusKind::Reconnecting,
+                        ControllingStatusKind::Error
+                    ]
+                );
+                assert!(
+                    matches!(
+                        port.next_lane_event().await,
+                        Some(ControllerLaneEvent::Failed(ControllerLaneFailure::Closed))
+                    ),
+                    "second disconnect was ignored until inbox terminal"
+                );
+                assert!(!business.is_installed());
+                assert!(manager.live_lease().is_err());
+                assert_eq!(receiver.pending_control_for_test(), 1);
+            }
             "current" => {
                 // The accepted disconnect still drives Reconnecting and the
                 // validated resume prepare; the producer teardown's Closed
@@ -3075,6 +3105,19 @@ mod tests {
         lane.authorize_resume_final = reader_authorized;
         let mut statuses: Vec<String> = Vec::new();
         let mut on_status = |status: &ControllingStatus| {
+            if matches!(
+                status.kind(),
+                ControllingStatusKind::Reconnecting | ControllingStatusKind::Connected
+            ) {
+                assert!(
+                    business.is_installed(),
+                    "recoverable transitions retain the actual crypto slot"
+                );
+                assert_eq!(
+                    business.is_suspended(),
+                    status.kind() == ControllingStatusKind::Reconnecting
+                );
+            }
             statuses.push(projection(status)["status"].as_str().unwrap().to_owned());
         };
         let mut on_session = |_: &ControllingSessionProjection| {};
@@ -3133,7 +3176,10 @@ mod tests {
             Some("live-a-2"),
             "恢复必须采用 Relay 下发的 A 端 liveness epoch"
         );
-        assert!(!business.is_suspended(), "恢复后业务通道必须重新打开");
+        assert!(
+            !business.is_installed(),
+            "keeper input ended after successful resume; terminal exit retires the slot"
+        );
         let now_a = lane_monotonic_millis();
         manager.mark_transport_disconnected(now_a, Some(now_a + 30_000));
         let second = manager

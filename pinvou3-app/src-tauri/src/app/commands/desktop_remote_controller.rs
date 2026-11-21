@@ -5,7 +5,7 @@
 //! disconnection.
 
 use super::desktop_remote_state::DesktopRemoteState as State;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager as _};
 
 use crate::features::behavior_telemetry::{RemoteControlEvent, RemoteStage, track_remote_control};
 use crate::features::remote_control::RemoteControlManager;
@@ -17,6 +17,7 @@ use crate::features::remote_control::controller::controlling_service::{
 };
 use crate::features::remote_control::controller::controlling_session::ControllingSessionManager;
 use crate::features::remote_control::controller::relay_runtime::log_controller_event;
+use crate::features::remote_control::controller::transfer::download::ArtifactDownloads;
 use std::sync::Arc;
 
 const STATUS_EVENT: &str = CONTROLLER_STATUS_EVENT;
@@ -107,20 +108,16 @@ pub async fn desktop_remote_controller_disconnect(
     let started = std::time::Instant::now();
     let result = async {
         ensure_supported(&manager)?;
-        // E2E-06：先尽力把显式断开告诉 Relay/B（本地断开始终权威，发送失败不阻塞）。
-        if let Some(receipt) = manager.send_disconnect_with_receipt("user_disconnect") {
-            // Queue admission is not delivery. Let the socket flush the final frame
-            // before local cleanup cancels its transport; offline peers stay bounded.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), receipt).await;
-        }
-        sessions.clear();
-        actions.clear_all();
-        if let Ok((lease, _)) = manager.live_runtime_context() {
-            artifacts.clear_connection(&lease.connection_id);
-        }
-        let status = manager.disconnect();
-        emit_status(&app, &status);
-        Ok(status)
+        let business = app.state::<crate::features::remote_control::controller::encrypted_lane::ControllingLaneState>();
+        Ok(disconnect_controller_state(
+            &manager,
+            &sessions,
+            &business,
+            &actions,
+            artifacts.downloads(),
+            |status| emit_status(&app, status),
+        )
+        .await)
     }
     .await;
     track_remote_control(
@@ -135,6 +132,32 @@ pub async fn desktop_remote_controller_disconnect(
     result
 }
 
+async fn disconnect_controller_state(
+    manager: &ControllingDeviceManager,
+    sessions: &ControllingSessionManager,
+    business: &crate::features::remote_control::controller::encrypted_lane::ControllingLaneState,
+    actions: &super::desktop_remote_action::DesktopRemoteActionState,
+    downloads: &ArtifactDownloads,
+    publish: impl FnOnce(&ControllingStatus),
+) -> ControllingStatus {
+    let disconnect = manager.disconnect_business(sessions, business, |lease| {
+        if let Some(lease) = lease {
+            actions.clear_connection(&lease.connection_id);
+            // A owns this download/index scope. B capture/publication keeps its
+            // existing lifecycle owner.
+            downloads.cleanup_for_connection(&lease.connection_id);
+        }
+    });
+    let projection = disconnect.projection();
+    // Local lease, sessions and keys are already retired. Only the captured
+    // old socket survives this bounded wait, including future cancellation.
+    disconnect.flush().await;
+    if !manager.publish_disconnect_if_current(&projection, || publish(&projection.status)) {
+        return manager.status();
+    }
+    projection.status
+}
+
 #[tauri::command]
 pub fn desktop_remote_controller_status(
     manager: State<'_, ControllingDeviceManager>,
@@ -145,10 +168,353 @@ pub fn desktop_remote_controller_status(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::features::remote_control::controller::controlling::{
+        ControllerLease, ControllingStatusKind,
+    };
+    use crate::features::remote_control::controller::protocol::LeaseContext;
+    use crate::features::remote_control::controller::relay_transport::{
+        AuthenticatedLease, ControllerRole, transport_channels,
+    };
+    use crate::features::remote_control::controller::transfer::TransferRegistry;
+    use crate::features::remote_control::controller::transfer::download::{
+        ArtifactIndex, MemoryArtifactSource,
+    };
+    use crate::features::sessions::remote_proxy::binding::LiveRemoteContext;
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn lease(connection_id: &str) -> ControllerLease {
+        ControllerLease {
+            context: LeaseContext {
+                connection_id: connection_id.into(),
+                controller_lease_id: "lease-0001".into(),
+                lease_epoch: "1".into(),
+                relay_epoch: "relay-epoch-0001".into(),
+                remote_control_generation: "generation-0001".into(),
+            },
+            peer_endpoint_id: "endpoint-0001".into(),
+            reservation_id: "reservation-0001".into(),
+            device_display_name: "Test PC".into(),
+            liveness_epoch_a: "live-a-1".into(),
+            liveness_epoch_b: "live-b-1".into(),
+            resume_deadline_b: 30_000,
+            resume_token: [1; 32],
+            transport_key_fingerprint: [2; 32],
+            negotiated_capabilities: vec![
+                "encrypted_frames_v1".into(),
+                "pairing_v1".into(),
+                "task_v1".into(),
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_disconnect_waits_preserve_all_successor_resources_and_next_connect() {
+        let manager = ControllingDeviceManager::default();
+        let sessions = ControllingSessionManager::default();
+        let business = crate::features::remote_control::controller::encrypted_lane::ControllingLaneState::default();
+        let actions = super::super::desktop_remote_action::DesktopRemoteActionState::default();
+        let index = Arc::new(ArtifactIndex::default());
+        let downloads =
+            ArtifactDownloads::new(Arc::new(TransferRegistry::default()), Arc::clone(&index));
+        let original = lease("connection-original");
+        let successor = lease("connection-successor");
+        let add_resources = |lease: &ControllerLease, artifact: &str| {
+            let (session, _) = sessions
+                .open_with_outcome(
+                    None,
+                    "Test session",
+                    "chat",
+                    &lease.context,
+                    &lease.negotiated_capabilities,
+                )
+                .unwrap();
+            let live = LiveRemoteContext {
+                peer_id: "peer-0001".into(),
+                resume_boundary_id: "resume-0001".into(),
+                connection_id: lease.context.connection_id.clone(),
+                controller_lease_id: lease.context.controller_lease_id.clone(),
+                lease_epoch: lease.context.lease_epoch.clone(),
+                relay_epoch: lease.context.relay_epoch.clone(),
+                generation: lease.context.remote_control_generation.clone(),
+                control_connected: true,
+                encrypted_channel_connected: true,
+            };
+            let (_, reply) = actions
+                .register(
+                    artifact.into(),
+                    "local-0001".into(),
+                    session.session_id.clone(),
+                    live,
+                    "permission_list".into(),
+                    Some("task-0001".into()),
+                    None,
+                )
+                .unwrap();
+            let bytes = b"artifact";
+            let digest: String = Sha256::digest(bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            index
+                .register(
+                    &lease.context,
+                    &session.session_id,
+                    "task-0001",
+                    artifact,
+                    "result.txt",
+                    "text/plain",
+                    &digest,
+                    Arc::new(MemoryArtifactSource::new(bytes.to_vec())),
+                )
+                .unwrap();
+            let handle = downloads
+                .begin(
+                    &lease.context,
+                    &session.session_id,
+                    "task-0001",
+                    artifact,
+                    1_000,
+                )
+                .unwrap();
+            (session, reply, handle)
+        };
+        let old_operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(old_operation.clone()).unwrap();
+        manager
+            .complete_connected(old_operation.clone(), original.clone())
+            .unwrap();
+        let (transport, receiver) = transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0001",
+            4,
+            2,
+            8192,
+            2048,
+        );
+        transport
+            .install_authenticated_lease(AuthenticatedLease {
+                context: original.context.clone(),
+                negotiated_capabilities: original.negotiated_capabilities.clone(),
+            })
+            .unwrap();
+        let old_transport = transport.clone();
+        manager.replace_transport(transport);
+        let (old_session, mut old_reply, old_download) =
+            add_resources(&original, "artifact-original");
+        let published = AtomicUsize::new(0);
+        let publish = |_: &ControllingStatus| {
+            published.fetch_add(1, Ordering::SeqCst);
+        };
+        let mut first = Box::pin(disconnect_controller_state(
+            &manager, &sessions, &business, &actions, &downloads, publish,
+        ));
+        let mut second = Box::pin(disconnect_controller_state(
+            &manager, &sessions, &business, &actions, &downloads, publish,
+        ));
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        // The first command already retired local authority before waiting.
+        // A duplicate owns no socket and therefore completes without a wait.
+        assert_eq!(manager.status().kind(), ControllingStatusKind::Disconnected);
+        assert!(manager.live_lease().is_err());
+        assert!(matches!(
+            futures_util::poll!(second.as_mut()),
+            std::task::Poll::Ready(_)
+        ));
+        assert_eq!(published.load(Ordering::SeqCst), 1);
+        let published_before_successor = published.load(Ordering::SeqCst);
+        let next_operation = manager.connect("3456789").unwrap();
+        manager.complete_reserved(next_operation.clone()).unwrap();
+        manager
+            .complete_connected(next_operation, successor.clone())
+            .unwrap();
+        let (next_transport, _next_receiver) = transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0001",
+            4,
+            2,
+            8192,
+            2048,
+        );
+        next_transport
+            .install_authenticated_lease(AuthenticatedLease {
+                context: successor.context.clone(),
+                negotiated_capabilities: successor.negotiated_capabilities.clone(),
+            })
+            .unwrap();
+        manager.replace_transport(next_transport.clone());
+        let (next_session, mut next_reply, next_download) =
+            add_resources(&successor, "artifact-successor");
+        // Dropping the completed duplicate is another old command teardown;
+        // it must not own any successor resource or transport.
+        drop(second);
+        // Closing the controlled transport releases the captured receipt wait.
+        // Its normal command continuation now resumes after the successor owns
+        // sessions, pending actions, a live download and its artifact index.
+        drop(receiver);
+        assert_eq!(
+            serde_json::to_value(first.await).unwrap()["lease"]["connectionId"],
+            "connection-successor"
+        );
+        assert_eq!(
+            published.load(Ordering::SeqCst) - published_before_successor,
+            0
+        );
+        assert!(old_transport.is_stopped());
+        assert!(!next_transport.is_stopped());
+        assert!(manager.send_disconnect("transport_probe"));
+        assert!(
+            sessions
+                .state(&old_session.session_ref, &original.context)
+                .is_err()
+        );
+        assert!(
+            sessions
+                .state(&next_session.session_ref, &successor.context)
+                .is_ok()
+        );
+        assert_eq!(
+            old_reply.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        );
+        assert_eq!(
+            next_reply.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        );
+        assert!(actions.settle_authenticated(
+            &successor.context,
+            &actions.pending_binding("artifact-successor").unwrap().2,
+            &json!({"request_id":"artifact-successor", "session_id":next_session.session_id,
+                "operation":"permission_list", "ok":true, "body":{"permissions":[]}}),
+        ));
+        assert!(next_reply.await.unwrap().is_ok());
+        assert!(
+            downloads
+                .next_chunk_bound(
+                    &original.context,
+                    &old_session.session_id,
+                    "task-0001",
+                    "artifact-original",
+                    &old_download.handle_id,
+                    0,
+                    1_001,
+                )
+                .is_err()
+        );
+        assert!(
+            downloads
+                .next_chunk_bound(
+                    &successor.context,
+                    &next_session.session_id,
+                    "task-0001",
+                    "artifact-successor",
+                    &next_download.handle_id,
+                    0,
+                    1_001,
+                )
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(index.len(), 1);
+        disconnect_controller_state(
+            &manager, &sessions, &business, &actions, &downloads, publish,
+        )
+        .await;
+        assert!(next_transport.is_stopped());
+        assert_eq!(
+            published.load(Ordering::SeqCst),
+            published_before_successor + 1
+        );
+        assert_eq!(index.len(), 0);
+        let third_operation = manager.connect("456789A").unwrap();
+        manager.complete_reserved(third_operation.clone()).unwrap();
+        manager
+            .complete_connected(third_operation, lease("connection-third"))
+            .unwrap();
+        assert_eq!(
+            manager.live_lease().unwrap().connection_id,
+            "connection-third"
+        );
+    }
 
     #[test]
     fn controller_command_surface_is_stable_and_contains_no_code_storage() {
         assert_eq!(super::STATUS_EVENT, "desktop-remote-controller-status");
         assert_eq!(super::UNSUPPORTED, "desktop_remote_control_unsupported");
+    }
+
+    #[tokio::test]
+    async fn cancelled_disconnect_helper_keeps_local_retirement_and_allows_next_connect() {
+        let manager = ControllingDeviceManager::default();
+        let sessions = ControllingSessionManager::default();
+        let business = crate::features::remote_control::controller::encrypted_lane::ControllingLaneState::default();
+        let actions = super::super::desktop_remote_action::DesktopRemoteActionState::default();
+        let downloads = ArtifactDownloads::new(
+            Arc::new(TransferRegistry::default()),
+            Arc::new(ArtifactIndex::default()),
+        );
+        let original = lease("connection-cancelled");
+        let operation = manager.connect("2345678").unwrap();
+        manager.complete_reserved(operation.clone()).unwrap();
+        manager
+            .complete_connected(operation, original.clone())
+            .unwrap();
+        let (session, _) = sessions
+            .open_with_outcome(
+                None,
+                "Cancelled command",
+                "chat",
+                &original.context,
+                &original.negotiated_capabilities,
+            )
+            .unwrap();
+        let (transport, _receiver) = transport_channels(
+            ControllerRole::ControllerA,
+            "generation-0001",
+            4,
+            2,
+            8192,
+            2048,
+        );
+        transport
+            .install_authenticated_lease(AuthenticatedLease {
+                context: original.context.clone(),
+                negotiated_capabilities: original.negotiated_capabilities.clone(),
+            })
+            .unwrap();
+        manager.replace_transport(transport.clone());
+        let mut disconnect = Box::pin(disconnect_controller_state(
+            &manager,
+            &sessions,
+            &business,
+            &actions,
+            &downloads,
+            |_| panic!("cancelled command must not publish"),
+        ));
+        assert!(futures_util::poll!(disconnect.as_mut()).is_pending());
+        assert_eq!(manager.status().kind(), ControllingStatusKind::Disconnected);
+        assert!(
+            sessions
+                .state(&session.session_ref, &original.context)
+                .is_err()
+        );
+        assert!(
+            !transport.is_stopped(),
+            "only the final frame is still flushing"
+        );
+        drop(disconnect);
+        assert!(transport.is_stopped());
+        assert!(manager.live_lease().is_err());
+        let next = manager.connect("3456789").unwrap();
+        manager.complete_reserved(next.clone()).unwrap();
+        manager
+            .complete_connected(next, lease("connection-after-cancel"))
+            .unwrap();
+        assert_eq!(
+            manager.live_lease().unwrap().connection_id,
+            "connection-after-cancel"
+        );
     }
 }

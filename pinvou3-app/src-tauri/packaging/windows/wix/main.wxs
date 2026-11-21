@@ -36,6 +36,11 @@
         <Property Id="AUTOLAUNCHAPP" Secure="yes" />
         <!-- Property to forward cli args to the launched app to not lose those of the pre-update instance -->
         <Property Id="LAUNCHAPPARGS" Secure="yes" />
+        <!-- Secure="yes" is required: a per-machine uninstall launched from a
+             non-elevated shell runs the execute sequence elevated, and MSI
+             drops every public property not listed as secure, so the opt-in
+             below would silently stay unset. -->
+        <Property Id="PINVOU_REMOVE_USER_DATA" Secure="yes" />
 
         {{#if allow_downgrades}}
             <MajorUpgrade Schedule="afterInstallInitialize" AllowDowngrades="yes" />
@@ -83,6 +88,13 @@
         </Property>
 
         <!-- launch app checkbox -->
+        <!-- Only re-create the desktop shortcut during a major upgrade if the user still has it -->
+        <Property Id="DESKTOPSHORTCUTEXISTS" Secure="yes">
+            <DirectorySearch Id="DesktopShortcutSearch" Path="[DesktopFolder]" Depth="0">
+                <FileSearch Id="DesktopShortcutFile" Name="{{product_name}}.lnk" />
+            </DirectorySearch>
+        </Property>
+
         <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="!(loc.LaunchApp)" />
         <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1"/>
         <CustomAction Id="LaunchApplication" Impersonate="yes" FileKey="Path" ExeCommand="[LAUNCHAPPARGS]" Return="asyncNoWait" />
@@ -113,6 +125,7 @@
         <Directory Id="TARGETDIR" Name="SourceDir">
             <Directory Id="DesktopFolder" Name="Desktop">
                 <Component Id="ApplicationShortcutDesktop" Guid="*">
+                    <Condition>NOT WIX_UPGRADE_DETECTED OR DESKTOPSHORTCUTEXISTS</Condition>
                     <Shortcut Id="ApplicationDesktopShortcut" Name="{{product_name}}" Description="Runs {{product_name}}" Target="[!Path]" WorkingDirectory="INSTALLDIR" />
                     <RemoveFolder Id="DesktopFolder" On="uninstall" />
                     <RegistryValue Root="HKCU" Key="Software\\{{manufacturer}}\\{{product_name}}" Name="Desktop Shortcut" Type="integer" Value="1" KeyPath="yes" />
@@ -385,9 +398,14 @@
             Execute="deferred"
             Impersonate="yes"
             ExeCommand="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command &quot;Remove-Item -LiteralPath (Join-Path $env:USERPROFILE .pinvou3) -Recurse -Force -ErrorAction SilentlyContinue&quot;" />
+        <!-- User data (~USERPROFILE\.pinvou3) is preserved on uninstall by
+             default. Deleting it requires an explicit opt-in, mirroring the
+             NSIS uninstaller's unchecked delete-app-data checkbox (the NSIS
+             checkbox additionally removes the WebView2 cache directories):
+             msiexec /x <msi> PINVOU_REMOVE_USER_DATA=1 -->
         <InstallExecuteSequence>
             <Custom Action="RemovePinvouUserData" Before="InstallFinalize">
-                (REMOVE = "ALL") AND NOT UPGRADINGPRODUCTCODE
+                (REMOVE = "ALL") AND NOT UPGRADINGPRODUCTCODE AND PINVOU_REMOVE_USER_DATA = "1"
             </Custom>
         </InstallExecuteSequence>
 

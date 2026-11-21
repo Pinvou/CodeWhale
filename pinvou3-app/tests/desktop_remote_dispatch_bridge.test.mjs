@@ -55,6 +55,36 @@ function installFeature(onInvoke, withUploadLimit = true, timers = { setTimeout,
   return { feature, calls, state, listeners, logic: root.__PINVOU_REMOTE_CONTROL_STATE__, rebuild: create };
 }
 
+test('artifact downloader uses the real bridge to reconcile a lost final response then retire the receipt', async () => {
+  const { downloadRemoteArtifact } = await import('../src/features/remote-control/remote-file-transfer.mjs');
+  let attempts = 0;
+  let retired = false;
+  const { feature, calls } = installFeature((command, args) => {
+    if (command !== 'desktop_remote_action_a') return undefined;
+    switch (args.intent.operation) {
+      case 'artifact_download_begin': return Promise.resolve({ transfer_id: 'download-1', chunk_bytes: 5, total_bytes: 5 });
+      case 'artifact_download_chunk':
+        // eslint-disable-next-line prefer-promise-reject-errors -- Preserve the native IPC unknown-result string in the lost-reply regression.
+        if (++attempts === 1) return Promise.reject('result_unknown');
+        return Promise.resolve({ chunk_index: 0, chunk_b64: Buffer.from('hello').toString('base64'),
+          chunk_bytes: 5, received_bytes: 5, next_chunk: 1, completed: true });
+      case 'artifact_download_abort': retired = true; return Promise.resolve({ aborted: true });
+      default: assert.fail('unexpected operation');
+    }
+  });
+  const blob = await downloadRemoteArtifact(feature, { localSessionId: 'remote-one', remoteRef: 'ref-one' }, {
+    taskId: 'task-1', artifactId: 'artifact-1', mimeType: 'text/plain',
+    sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
+  });
+  assert.equal(await blob.text(), 'hello');
+  assert.equal(retired, true);
+  const chunks = calls.filter(call => call.args?.intent?.operation === 'artifact_download_chunk');
+  assert.equal(chunks.length, 2);
+  assert.equal(chunks[0].args.requestId, chunks[1].args.requestId);
+  assert.equal(chunks[0].args.intent.transferId, 'download-1');
+  assert.equal(chunks[1].args.intent.chunkIndex, 0);
+});
+
 test('128 unresolved actions fail closed before send and survive bridge stop and rebuild', async () => {
   let succeed = false;
   const { feature, calls, rebuild } = installFeature(command => command === 'desktop_remote_action_a'
@@ -148,7 +178,7 @@ test('attachment bridge uses the shared boundary and fails closed without it', a
   const digest = 'a'.repeat(64);
   await feature.attachmentBegin(...args, 20 * 1024 * 1024, digest);
   assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
-  await assert.rejects(feature.attachmentBegin(...args, 32 * 1024 * 1024, digest), { code: 'remote_attachment_size_invalid' });
+  await assert.rejects(feature.attachmentBegin(...args, 64 * 1024 * 1024, digest), { code: 'remote_attachment_size_invalid' }); // 50 MiB 共享上限（社区 #894）之上
   assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, 1);
   const missing = installFeature(onInvoke, false);
   await assert.rejects(missing.feature.attachmentBegin(...args, 1, digest), { code: 'remote_attachment_size_invalid' });
@@ -1170,7 +1200,7 @@ test('unknown attachment actions are fenced rather than replayed as new uploads'
     assert.equal(calls.filter(call => call.command === 'desktop_remote_action_a').length, before + (index === 2 ? 2 : 1));
   }
   const before = calls.length;
-  await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-2', 'big.bin', 'application/octet-stream', 20 * 1024 * 1024 + 1, digest), { code: 'remote_attachment_size_invalid' });
+  await assert.rejects(feature.attachmentBegin('remote-1', 'ref-1', 'task-2', 'big.bin', 'application/octet-stream', 64 * 1024 * 1024 + 1, digest), { code: 'remote_attachment_size_invalid' }); // 钉 50 MiB 之上拒绝
   assert.equal(calls.length, before);
 });
 

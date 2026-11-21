@@ -134,6 +134,7 @@ import {
   restoreConversationScrollPosition,
 } from '../conversation/conversation-model.js';
 import { QuestionChoiceCard } from '../conversation/QuestionChoiceCard.jsx';
+import { hasRichTextSelection } from '../conversation/rich-text-selection.js';
 import { buildUserInputAnswers, normalizeElicitationQuestions, normalizeUserInputQuestions } from '../../shared/user-input-shared.js';
 import { PlanLayer, ToolCard, cardBoxCls } from '../tools/tool-renderers.jsx';
 import { cardBtnCls } from '../../shared/card-buttons.mjs';
@@ -2430,6 +2431,11 @@ export function CodexAcpView({
           // message (transfer.rs); map to the current-language copy instead
           // of passing the raw error through.
           const uploadErrorText = String(err?.message || '');
+          // The three web_attachment_* size-limit codes are already mapped by
+          // formatAttachmentLimitError above, in both the plain-string and
+          // {message: code} shapes; listing them here again would duplicate
+          // the shared formatter and tip this handler over the complexity
+          // lint (sonarjs/cognitive-complexity, enforced by npm run lint:ui).
           const attachmentLimitError = formatAttachmentLimitError(err, t.uiAttachments);
           const displayError = attachmentLimitError || (err?.code === 'device_upload_empty'
               ? t.uiAttachments.deviceUploadEmpty(file.name)
@@ -2877,6 +2883,7 @@ export function CodexAcpView({
   useEffect(() => {
     const element = scroller.current;
     if (!element) return;
+    if (hasRichTextSelection(element)) return;
     if (autoScrollRef.current) {
       element.scrollTop = element.scrollHeight;
       setShowScrollBottom(false);
@@ -4115,8 +4122,8 @@ export function CodexAcpView({
                 }}
                 placeholder={codexCopy.placeholder}
                 rows={1} className="w-full min-h-[48px] max-h-48 overflow-y-auto resize-none bg-transparent outline-none text-[15px] leading-6 placeholder:text-gray-400" />
-              <div data-testid="codex-composer-footer" className="flex items-center justify-between mt-1">
-                <div className="flex min-w-0 flex-wrap items-center gap-2 text-[10px] text-gray-400">
+              <div data-testid="codex-composer-footer" className="flex items-center justify-between gap-2 mt-1">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 text-[10px] text-gray-400">
                   {!activeId && (
                     <div className="relative min-w-0">
                       <button
@@ -4503,7 +4510,7 @@ export function CodexAcpView({
                 {busy ? (
                   <button type="button" onClick={cancel} aria-label={codexCopy.stop} title={codexCopy.stop} className="w-9 h-9 rounded-full flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500/15"><StopCircle size={18} /></button>
                 ) : (
-                  <>
+                  <div className="flex items-center gap-1">
                     <VoiceComposerButton
                       refProp={voiceAsrPopoverRef}
                       voiceInput={nativeVoiceInput}
@@ -4532,7 +4539,7 @@ export function CodexAcpView({
                       className="w-9 h-9 rounded-full flex items-center justify-center bg-[#007AFF] text-white shadow-sm hover:bg-[#006EE6] disabled:bg-black/[0.06] dark:disabled:bg-white/10 disabled:text-gray-400 disabled:shadow-none">
                       <Send size={16} />
                     </button>
-                  </>
+                  </div>
                 )}
               </div>
             </div>

@@ -34,9 +34,9 @@ use crate::features::remote_control::controller::protocol::LeaseContext;
 )]
 use crate::features::remote_control::controller::task::{
     AdmissionOutcome, ChatTurnExecutor, ControllerTaskEventSink, JsonTaskLedgerStore,
-    PublishedAttachment, RemoteChatTurnPort, RemoteTaskLedger, RemoteTaskService, RemoteTaskState,
-    TASK_CANCELLED_CODE, TASK_MODE_CHAT, TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY,
-    task_input_digest_for_value,
+    PublishedAttachment, RemoteChatTurnPort, RemoteTaskLedger, RemoteTaskLedgerStore,
+    RemoteTaskRecord, RemoteTaskService, RemoteTaskState, TASK_CANCELLED_CODE, TASK_MODE_CHAT,
+    TASK_MODEL_SOURCE_CONTROLLED, TASK_MODEL_SOURCE_TEMPORARY, task_input_digest_for_value,
 };
 // The policy boundary is shared by production validation and the real-store
 // regression's fresh-session setup; initialization is never called by EnginePool.
@@ -48,7 +48,12 @@ use crate::features::remote_control::controller::task::{
     )
 )]
 use crate::features::remote_control::{
-    controller::{runtime_egress::RuntimeEgress, temporary_model::SharedTemporaryModelStore},
+    controller::{
+        runtime_egress::RuntimeEgress,
+        temporary_model::{
+            SharedTemporaryModelStore, TemporaryModelPackageV1, TemporaryModelStore,
+        },
+    },
     task_permissions::{for_session, initialize_new_session},
 };
 use crate::features::sessions::SessionStore;
@@ -1223,6 +1228,7 @@ mod tests {
 
     fn runtime_model(id: &str, wire_name: &str) -> SavedModel {
         SavedModel {
+            auth_mode: None,
             id: id.to_string(),
             name: id.to_string(),
             alias: None,
@@ -1492,6 +1498,8 @@ mod tests {
         private_skills: Mutex<Option<Arc<super::super::skill_materialization::RemoteTurnSkills>>>,
         eviction_started: Option<Arc<tokio::sync::Notify>>,
         eviction_release: Option<Arc<tokio::sync::Notify>>,
+        running_seen: Option<Arc<tokio::sync::Notify>>,
+        copied_model: Mutex<Option<RemoteRuntimeModelBundle>>,
     }
 
     impl FakeEngine {
@@ -1573,6 +1581,11 @@ mod tests {
 
         fn is_turn_active(&self, _session_id: &str, generation: Option<u64>) -> bool {
             self.assert_attachment_lease();
+            if self.active.load(Ordering::SeqCst) {
+                if let Some(seen) = &self.running_seen {
+                    seen.notify_one();
+                }
+            }
             if let Some(lifecycle) = &self.real_lifecycle {
                 self.flips.fetch_add(1, Ordering::SeqCst);
                 return generation.is_some_and(|generation| {
@@ -1615,6 +1628,7 @@ mod tests {
                 release.notified().await;
             }
             self.released.lock().unwrap().push(session_id.to_owned());
+            self.copied_model.lock().unwrap().take();
             self.private_skills.lock().unwrap().take();
         }
 
@@ -1848,6 +1862,132 @@ mod tests {
             assert_eq!(store.durable_mode_entry(&session.metadata.id), Some(Yolo));
             assert_eq!(store.mode_state(&session.metadata.id).mode, Yolo);
         });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_retirement_cancels_the_running_chat_and_releases_its_copied_model() {
+        struct SwitchStore(AtomicBool);
+        impl RemoteTaskLedgerStore for SwitchStore {
+            fn persist(&self, _: &[RemoteTaskRecord]) -> std::result::Result<(), String> {
+                if self.0.load(Ordering::SeqCst) {
+                    Err("fixture-write-failed".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let started = Arc::new(tokio::sync::Notify::new());
+        let mut copied = runtime_model("temporary-fixture", "fixture-model");
+        copied.base_url = "https://api.openai.com/v1".into();
+        copied.api_key = "fixture-runtime-secret".into();
+        // Real credential bundle held behind a controlled engine port. The
+        // actual ChatTurnExecutor/EnginePoolChatTurnPort own cancellation and
+        // release; this seam does not run a provider or prove provider joining.
+        let engine = Arc::new(FakeEngine {
+            running_seen: Some(started.clone()),
+            copied_model: Mutex::new(Some(RemoteRuntimeModelBundle::new(copied, None).unwrap())),
+            ..FakeEngine::default()
+        });
+        let writes = Arc::new(SwitchStore(AtomicBool::new(false)));
+        let ledger = Arc::new(RemoteTaskLedger::new(writes.clone()));
+        let service = RemoteTaskService::new(ledger.clone());
+        service.register_executor(
+            TASK_MODE_CHAT,
+            Arc::new(ChatTurnExecutor::new(Arc::new(
+                EnginePoolChatTurnPort::new(engine.clone()),
+            ))),
+        );
+        let context = lease();
+        let mut body = remote_task_payload("task-retirement-running", "client-retirement-running");
+        body["model_source"] = json!("controller_temporary");
+        body["temporary_model_package"] = json!({
+            "schema":"temporary_model_package/v1", "package_id":"package-retirement-running",
+            "binding":{"connection_id":context.connection_id, "controller_lease_id":context.controller_lease_id,
+                "lease_epoch":context.lease_epoch, "relay_epoch":context.relay_epoch,
+                "remote_control_generation":context.remote_control_generation, "task_id":"task-retirement-running"},
+            "primary":{"display_name":"Runtime fixture", "preset":"openai", "wire_api":"openai_chat_completions",
+                "base_url":"https://api.openai.com/v1", "model":"fixture-model", "image_capability_override":"pinvou"},
+            "primary_credential":{"kind":"api_key", "secret":"fixture-runtime-secret"}
+        });
+        let ticket = match service.submit(&context, &body, 1_000).unwrap() {
+            AdmissionOutcome::Admitted(ticket) => ticket,
+            other => panic!("expected admission, got {other:?}"),
+        };
+        let models = Arc::new(TemporaryModelStore::default());
+        models
+            .install(
+                TemporaryModelPackageV1::from_wire_value(&body["temporary_model_package"]).unwrap(),
+                &context,
+                "task-retirement-running",
+                1_000,
+            )
+            .unwrap();
+        service.hooks().set_model_scope(models.clone());
+        let cancel = CancellationToken::new();
+        let dispatch = service.dispatch(ticket, events(), cancel.clone(), 1_100);
+        tokio::pin!(dispatch);
+        tokio::select! {
+            _ = started.notified() => {},
+            result = &mut dispatch => panic!("chat ended before active-owner barrier: {result:?}"),
+        }
+        let before = ledger.record("task-retirement-running").unwrap();
+        assert_eq!(before.state, RemoteTaskState::Running);
+        assert!(engine.copied_model.lock().unwrap().is_some());
+        writes.0.store(true, Ordering::SeqCst);
+        let report = service.interrupt_generation_and_clear_sessions(
+            &context.remote_control_generation,
+            "remote_control_stopped",
+            1_200,
+        );
+        assert!(report.committed.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].0, "task-retirement-running");
+        assert_eq!(report.failed[0].1.code, "task_ledger_persist_failed");
+        let cancellation_was_requested = cancel.is_cancelled();
+        // Deterministic cleanup even for a deliberate broken-gate control;
+        // capture the business assertion before rescue, never count rescue as
+        // successful product cancellation.
+        if !cancellation_was_requested {
+            cancel.cancel();
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), &mut dispatch)
+            .await
+            .expect("owned chat settlement exceeded fixture bound");
+        assert!(
+            cancellation_was_requested,
+            "retirement failed to cancel the exact running task when persistence failed"
+        );
+        assert_eq!(result.unwrap_err().code, "task_ledger_persist_failed");
+        assert!(!engine.cancelled.lock().unwrap().is_empty());
+        assert_eq!(
+            engine.released.lock().unwrap().as_slice(),
+            &["session-0001".to_owned()]
+        );
+        assert!(engine.copied_model.lock().unwrap().is_none());
+        assert!(models.is_empty());
+        let unchanged = ledger.record("task-retirement-running").unwrap();
+        assert_eq!(unchanged.state, before.state);
+        assert_eq!(unchanged.transition_sequence, before.transition_sequence);
+        service.interrupt_generation_and_clear_sessions(
+            &context.remote_control_generation,
+            "remote_control_stopped",
+            1_300,
+        );
+        assert!(engine.copied_model.lock().unwrap().is_none());
+        writes.0.store(false, Ordering::SeqCst);
+        let report = service.interrupt_generation(
+            &context.remote_control_generation,
+            "remote_control_stopped",
+            1_400,
+        );
+        assert!(report.failed.is_empty());
+        assert_eq!(report.committed.len(), 1);
+        assert_eq!(report.committed[0].task_id, "task-retirement-running");
+        assert_eq!(
+            ledger.record("task-retirement-running").unwrap().state,
+            RemoteTaskState::Interrupted
+        );
+        assert_eq!(engine.released.lock().unwrap().len(), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]

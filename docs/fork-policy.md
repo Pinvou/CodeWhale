@@ -1,18 +1,19 @@
 # Pinvou 对 CodeWhale 底座的 fork 维护策略
 
-> 本评审分支保留 T1 HTTP policy 候选 `55393015d8a4905d47ca1a81ad41aead8c60962f`（基于 `11cba403d`），并同步父仓 main `76b15ce5d782045d0b80672cc9f59a33d58d1a8b`。候选与下述公开维护头分叉，尚未满足集成门禁；当前不能合并或发布。具体保留阻断见 `docs/fork-modifications.md` 的“本评审分支同步状态”。
+> 本评审分支保留 T1 HTTP policy 候选 `55393015d8a4905d47ca1a81ad41aead8c60962f`（基于 `11cba403d`），并同步父仓 main `148904bf2529004339a3563b257bb34e3546974f`。候选与下述公开维护头分叉，尚未满足集成门禁；当前不能合并或发布。具体保留阻断见 `docs/fork-modifications.md` 的“本评审分支同步状态”。
 
-> 最后更新：2026-11-15。公开维护头 687358f7e 在 8e8d52fdb 上包含 #157（session-reader 只读读取面分类修复）；main 父仓按严格公开维护头门禁对齐，本评审分支仍受该门禁阻断。
+> 最后更新：2026-11-15。公开维护头 687358f7e 在 8e8d52fdb 上包含 [Pinvou/CodeWhale#157](https://github.com/Pinvou/CodeWhale/pull/157)（session-reader 只读读取面分类修复）；main 按严格公开维护头门禁对齐，本评审分支仍受该门禁阻断。
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
+> English: [`docs/fork-policy.en.md`](fork-policy.en.md)
 
-已集成的上游回移及历史溯源见[修改清单](fork-modifications.md#web-jsonpath-upstream-backport-integrated-historical-candidate-evidence-756)。公开维护头门禁及第 6 节的明确授权要求继续生效。
+已集成的上游回移及历史溯源见[修改清单](fork-modifications.md#web-jsonpath-upstream-backport-integrated-historical-candidate-evidence-pinjou-agent756)。公开维护头门禁及第 6 节的明确授权要求继续生效。
 
 ## 0. 当前维护基线与验证边界
 
 以下维护头、历史及 drift 数字描述 main 已公开的维护状态，不是本评审分支的实际依赖。此分支实际 gitlink 为上述 `55393015`，在上游 v0.9.12 之上为 94 个提交；main 的七项后续底座提交未纳入本候选。构建与严格公开对齐仍保持阻断。
 
-- main 的公开维护头与其父仓 gitlink：`687358f7efde6abd3592737b8ec48adc74ba5a84`（2026-11-15）。在原 `8e8d52fdb` 之上消费已合入的 #157 `687358f7e`。父仓只消费已公开提交，不推进维护分支、不移动标签。
-- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 100 个提交，r1 `1fafee7e2` 之上 85 个；97 个带 DCO sign-off。未签名的提交为 #107 `f27672935`、#116 `e9a7f48da1` 与 #157 `687358f7e`（CodeWhale 仓 squash 合入未携带签署）。保留已发布历史，不改写维护分支。
+- main 的公开维护头与其父仓 gitlink：`687358f7efde6abd3592737b8ec48adc74ba5a84`（2026-11-15）。在原 `8e8d52fdb` 之上消费已合入的 [Pinvou/CodeWhale#157](https://github.com/Pinvou/CodeWhale/pull/157) `687358f7e`。父仓只消费已公开提交，不推进维护分支、不移动标签。
+- 实测历史：上游 v0.9.12 `dcd4c200f` 之上 100 个提交，r1 `1fafee7e2` 之上 85 个；97 个带 DCO sign-off。未签名的提交为 [Pinvou/CodeWhale#107](https://github.com/Pinvou/CodeWhale/pull/107) `f27672935`、[Pinvou/CodeWhale#116](https://github.com/Pinvou/CodeWhale/pull/116) `e9a7f48da1` 与 [Pinvou/CodeWhale#157](https://github.com/Pinvou/CodeWhale/pull/157) `687358f7e`（CodeWhale 仓 squash 合入未携带签署）。保留已发布历史，不改写维护分支。
 - 不可变 tag `pinjou-v0.9.12-r3` 仍在 `61cb769be5b33abc64f64da4272f5b39a8b6c1fd`；r1 仍在 `1fafee7e26b60a59457a43bce50c63aa2ad9dbaf`。公开门禁仍要求 gitlink 等于维护头并验证 r3 标签，未放宽任何条件。
 - 实测 drift：551 files, +121146/-49817，净增 71329；301 个独立 `forkguard_*` 行为名（登记下限仍为 64）。原生 Windows 证据仅适用于原记录的执行提交，不扩展为本次集成树已执行；当前父仓 CI 和最终集成树审核仍须独立确认。
 
@@ -41,11 +42,11 @@
 
 以下记录保留当时的提交与验证边界，当前维护基线见第 0 节。
 
-> F05 调用幂等登记：原 `8b5a86390` 补丁及其后续修复已经外部维护者通过 CodeWhale #92 合入 `pinvou3-clean`，当时同步的公开维护头 `ea9fdc90f` 仍须保留该能力。父仓普通合并保留原 F05 提交历史，底座仍使用公开维护提交，不把合入前候选 SHA 当成维护头；账户 Gateway 的宿主 opt-in 与逐调用身份见 `docs/fork-modifications.md` 的 T1 登记。当前门禁及实际宿主验证仍须分别完成，不能由源码包含性替代。
+> F05 调用幂等登记：原 `8b5a86390` 补丁及其后续修复已经外部维护者通过 CodeWhale [Pinvou/CodeWhale#92](https://github.com/Pinvou/CodeWhale/pull/92) 合入 `pinvou3-clean`，当时同步的公开维护头 `ea9fdc90f` 仍须保留该能力。父仓普通合并保留原 F05 提交历史，底座仍使用公开维护提交，不把合入前候选 SHA 当成维护头；账户 Gateway 的宿主 opt-in 与逐调用身份见 `docs/fork-modifications.md` 的 T1 登记。当前门禁及实际宿主验证仍须分别完成，不能由源码包含性替代。
 
-> 2026-10-14 后续严格对齐：公开维护分支经外部批准合入 #107；`f27672935` 保留同一 wire model/protocol 的宿主冻结限制，跨模型仍重新解析。新增两条结果式回归随公开提交消费，父仓不修改底座代码、不移动标签、不放宽公开维护头校验；新 head 的宿主适用 CI 另行核验。
+> 2026-10-14 后续严格对齐：公开维护分支经外部批准合入 [Pinvou/CodeWhale#107](https://github.com/Pinvou/CodeWhale/pull/107)；`f27672935` 保留同一 wire model/protocol 的宿主冻结限制，跨模型仍重新解析。新增两条结果式回归随公开提交消费，父仓不修改底座代码、不移动标签、不放宽公开维护头校验；新 head 的宿主适用 CI 另行核验。
 
-> 2026-10-14 后续 #54 对齐：`803e672bb` 直接继承上述 #107 维护提交，消费已外部批准合入的 workspace-roots 底座能力（T1/T2）。父仓保持单 execution-root 输入，不把 session ledger 变成附加执行根；新持久化根字段沿既有 Web 元数据路径逐项脱敏，Native 原值保留。底座同时改变单根 operand cwd、symlink 与缺失路径后 `..` 的判定，不能登记为行为不变的 gitlink 更新；实际宿主验证另行记录。
+> 2026-10-14 后续 [Pinvou/CodeWhale#54](https://github.com/Pinvou/CodeWhale/pull/54) 对齐：`803e672bb` 直接继承上述 [Pinvou/CodeWhale#107](https://github.com/Pinvou/CodeWhale/pull/107) 维护提交，消费已外部批准合入的 workspace-roots 底座能力（T1/T2）。父仓保持单 execution-root 输入，不把 session ledger 变成附加执行根；新持久化根字段沿既有 Web 元数据路径逐项脱敏，Native 原值保留。底座同时改变单根 operand cwd、symlink 与缺失路径后 `..` 的判定，不能登记为行为不变的 gitlink 更新；实际宿主验证另行记录。
 
 ## 1. 核心原则
 
@@ -66,7 +67,7 @@ Pinvou 的产品工具白名单、UI、工作区选择和业务策略留在 app�
 - 总 drift 软上限：净增 1500 行（净增 = 新增 − 删除行数，与下方基线表述同口径）。
 - 单文件 fork-distinct 改动软上限：200 行。
 - 超过不是自动拒绝，但必须记录保留原因和减量顺序。
-- 当前维护头及 drift 以 `docs/fork-modifications.md` 第 0 节为准，main 已消费公开维护分支的 #136/#142/#148/#150/#152；本评审分支未纳入这些后续提交，不修改维护分支或固定标签。历史 #107 维护头 `f27672935` 相对上游 v0.9.12 为 `397 files, +53709/-21547`，净增 32162 行；其相对 `480bebf61` 的 `client.rs` +124/-5 保留同模型宿主 route limits 及两条结果式回归，归入既有 T1，不增加主题。
+- 当前维护头及 drift 以 `docs/fork-modifications.md` 第 0 节为准，main 已消费公开维护分支的 [Pinvou/CodeWhale#136](https://github.com/Pinvou/CodeWhale/pull/136)/[Pinvou/CodeWhale#142](https://github.com/Pinvou/CodeWhale/pull/142)/[Pinvou/CodeWhale#148](https://github.com/Pinvou/CodeWhale/pull/148)/[Pinvou/CodeWhale#150](https://github.com/Pinvou/CodeWhale/pull/150)/[Pinvou/CodeWhale#152](https://github.com/Pinvou/CodeWhale/pull/152)；本评审分支未纳入这些后续提交。历史 [Pinvou/CodeWhale#107](https://github.com/Pinvou/CodeWhale/pull/107) 维护头 `f27672935` 相对上游 v0.9.12 为 `397 files, +53709/-21547`，净增 32162 行；其相对 `480bebf61` 的 `client.rs` +124/-5 保留同模型宿主 route limits 及两条结果式回归，归入既有 T1，不增加主题。
 - v0.9.12 r1 相对上游为 `94 files, +5022/-944`，净增 4078 行；相对 v0.9.5 r13 的 `110 files, +10895/-1195` 已收敛。新增触达文件包含当前 Rust/rustdoc 发布 lint 的等价调整、评审要求的生命周期与评测结果式回归、API 搜索后备链可达性与错误提示修复、无调用上游比较 helper 的删除、精确登记官方 v0.9.12 与 Pinvou r1 模型可见工具契约的预算收口、有界的 macOS 冷启动构建超时和 overdue one-shot 投递，不增加 fork 行为主题。基线仍超总量与个别文件软上限，因为可靠 steer、受限轮最终分发、宿主 prompt/profile/Skills 所有权、Automation 生命周期和对应安全回归必须在 Engine/Task 原子边界内实现。减量顺序是：先上游化通用 steer 与逐轮安全，再上游化 Automation 生命周期，父仓迁移到窄 re-export API 后分批收窄 18 个 `pub mod` 兼容 facade，最后评估 prompt/profile/Skills ownership 是否能由稳定 host API 完全替代。
 
 ### 1.3 主题提交

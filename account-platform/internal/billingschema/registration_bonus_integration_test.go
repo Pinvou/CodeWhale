@@ -31,11 +31,20 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// This fixture exercises the published 900014 rollback boundary, not
+	// whichever forward-only migration is latest in the full delivery below.
+	// Keep the original public SQL and ledger identities for every prerequisite.
+	var accountThroughBackfill []migrations.Migration
+	for _, migration := range account {
+		if migration.Version <= 900014 {
+			accountThroughBackfill = append(accountThroughBackfill, migration)
+		}
+	}
 	ac := f.database(t, ctx, "account", "account_service")
-	if err = accountschema.Up(ctx, ac, account); err != nil {
+	if err = accountschema.Up(ctx, ac, accountThroughBackfill); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = migrations.VerifyApplied(ctx, ac, account); err != nil {
+	if _, err = migrations.VerifyApplied(ctx, ac, accountThroughBackfill); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = ac.Exec(ctx, strings.Split(stageAccountSeed, "INSERT INTO role_assignments")[0]); err != nil {
@@ -80,7 +89,40 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 		})
 	}
 	t.Run("account-public-down-preserves-facts", func(t *testing.T) {
-		assertCurrentAccount900013Down(t, ctx, ac, account)
+		// Published 900014 permits rollback only before readiness/backfill facts
+		// exist. Exercise that exact boundary before the inherited 900013
+		// refusal, then restore the same historical set and compare all facts.
+		if stageValue(t, ctx, ac, `SELECT version::text||':'||name FROM schema_migrations ORDER BY version DESC LIMIT 1`) != "900014:registration_bonus_backfill_progress" ||
+			stageValue(t, ctx, ac, `SELECT (status='PENDING' AND fingerprint_key_id IS NULL AND NOT EXISTS(SELECT 1 FROM registration_bonus_mobile_eligibility))::text FROM registration_bonus_eligibility_state`) != "true" {
+			t.Fatal("explicit empty-readiness rollback boundary changed")
+		}
+		// Reapplying the allowed 900014 rollback legitimately records a new
+		// applied_at for that row. Every retained prefix ledger row stays exact.
+		prefixLedger := func() string {
+			return stageValue(t, ctx, ac, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m WHERE version<>900014`)
+		}
+		ledger, facts, shape := prefixLedger(), accountRollbackFacts(t, ctx, ac), stageShape(t, ctx, ac)
+		readiness := stageValue(t, ctx, ac, `SELECT to_jsonb(state)::text FROM registration_bonus_eligibility_state state`)
+		if err := accountschema.DownOne(ctx, ac, accountThroughBackfill); err != nil {
+			t.Fatal("empty historical backfill migration rollback", err)
+		}
+		var beforeBackfill []migrations.Migration
+		for _, migration := range accountThroughBackfill {
+			if migration.Version <= 900013 {
+				beforeBackfill = append(beforeBackfill, migration)
+			}
+		}
+		assertCurrentAccount900013Down(t, ctx, ac, beforeBackfill)
+		if err := accountschema.Up(ctx, ac, accountThroughBackfill); err != nil {
+			t.Fatal("restore historical account backfill boundary", err)
+		}
+		if _, err := migrations.VerifyApplied(ctx, ac, accountThroughBackfill); err != nil {
+			t.Fatal(err)
+		}
+		if prefixLedger() != ledger || accountRollbackFacts(t, ctx, ac) != facts || stageShape(t, ctx, ac) != shape ||
+			stageValue(t, ctx, ac, `SELECT to_jsonb(state)::text FROM registration_bonus_eligibility_state state`) != readiness {
+			t.Fatal("historical rollback, refusal or restore changed original facts")
+		}
 	})
 	t.Run("historical-900006-down-900005-guard-and-restore", func(t *testing.T) {
 		assertHistoricalAccount900006Down(t, ctx, f, account)
@@ -89,10 +131,14 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 		t.Run("public-prior-delivery-data-upgrade", func(t *testing.T) {
 			prior := make([]migrations.Migration, 0, len(account))
 			for _, item := range account {
-				if item.Version != 87 && item.Version != 900004 {
+				// 900014 extends the eligibility table introduced by original 87;
+				// it cannot belong to a genuine pre-registration-bonus schema.
+				if item.Version != 87 && item.Version != 900004 && item.Version != 900014 {
 					prior = append(prior, item)
 				}
 			}
+			// This separate real upgrade must still install and verify the full
+			// current delivery, including migrations beyond historical 900014.
 			upgrade := f.database(t, ctx, "account", "account_service")
 			if err := accountschema.Up(ctx, upgrade, prior); err != nil {
 				t.Fatal(err)
@@ -185,11 +231,10 @@ func TestRegistrationBonusPublicSchemaAndInputFacts(t *testing.T) {
 'ledger_postings',(SELECT jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)::text) FROM ledger_postings f))::text`)
 		}
 		financialBefore := bonusFinancialFacts()
-		// The inherited 900022 batch guard is now highest. This remains a
-		// full-chain refusal/no-effects check, not execution of the old bonus Down.
-		if err = migrations.DownOne(ctx, bc, ordered); err == nil {
-			t.Fatal("forward-only billing public down unexpectedly succeeded")
-		}
+		// Check the batch refusal in its real historical installation, while
+		// the current business database retains its full replay/facts contract.
+		assertHistoricalBillingRollback(t, ctx, f.database(t, ctx, "billing", "billing_schema_owner"), ordered, 900022, "55000", "member quota batch facts are forward-only; preserve original retry identities")
+		assertBillingCurrentReplay(t, ctx, bc, bill)
 		if stageValue(t, ctx, bc, `SELECT jsonb_agg(to_jsonb(m) ORDER BY version)::text FROM schema_migrations m`) != before {
 			t.Fatal("failed billing Down changed ledger")
 		}

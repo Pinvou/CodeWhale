@@ -9,6 +9,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { promisify } from "node:util";
 import test from "node:test";
 import { WebSocket, WebSocketServer } from "ws";
+import { ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS } from "../enrollment-nginx-config.js";
 import { createEnrollmentGateway } from "../enrollment-gateway.js";
 import { DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_MS } from "../enrollment-gateway-heartbeat.js";
 
@@ -58,8 +59,8 @@ test("real nginx keeps the authenticated public gateway hop idle beyond two prox
   const sample = await readFile(new URL("../nginx-enrollment-gateway.conf", import.meta.url), "utf8");
   const websocketLocation = sample.match(/location = \/pinvou3\/remote\/ws\s*\{([^}]+)\}/u)?.[1];
   assert.ok(websocketLocation, "the deployed sample must use the exact WebSocket route");
-  assert.match(websocketLocation, /proxy_read_timeout\s+75s;/u);
-  assert.match(websocketLocation, /proxy_send_timeout\s+75s;/u);
+  assert.ok(websocketLocation.includes(`proxy_read_timeout ${ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS}s;`));
+  assert.ok(websocketLocation.includes(`proxy_send_timeout ${ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS}s;`));
   assert.match(websocketLocation, /proxy_set_header X-Forwarded-For \$remote_addr;/u);
 
   const parent = await realpath(tmpdir());
@@ -170,7 +171,8 @@ http {
   await execute(binary, ["-p", prefix, "-c", config, "-t"], { windowsHide: true, timeout: 5000 });
   // Preserve the actual sample directives and headers; only scale its two
   // transport budgets for a bounded regression. This is not a 75s live soak.
-  await writeFile(config, wrappedSample.replace(/(proxy_(?:read|send)_timeout\s+)75s;/gu, "$11s;"), "utf8");
+  await writeFile(config, wrappedSample.replaceAll(`proxy_read_timeout ${ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS}s;`, "proxy_read_timeout 1s;")
+    .replaceAll(`proxy_send_timeout ${ENROLLMENT_NGINX_PROXY_TIMEOUT_SECONDS}s;`, "proxy_send_timeout 1s;"), "utf8");
   await execute(binary, ["-p", prefix, "-c", config, "-t"], { windowsHide: true, timeout: 5000 });
   nginx = spawn(binary, ["-p", prefix, "-c", config], {
     windowsHide: true, stdio: ["ignore", "pipe", "pipe"], cwd: root,

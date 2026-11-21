@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcredit"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/resilience"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -78,6 +80,7 @@ type PaymentOrderHistoryItem struct {
 }
 
 type PaymentCoordinator struct {
+	creditAdmission             paymentcredit.Admission
 	repository                  *PostgresRepository
 	ledgerRepairAuthority       ledgerRepairProofAuthority
 	provider                    PaymentProvider
@@ -707,6 +710,13 @@ type paymentNotification struct {
 	ProviderPayload             json.RawMessage `json:"provider_payload,omitempty"`
 }
 
+const nativeCallbackHashPrefix = "native-sha256:"
+
+func paymentNotificationHash(body []byte) string {
+	digest := sha256.Sum256(body)
+	return hex.EncodeToString(digest[:])
+}
+
 func (p *PaymentCoordinator) PersistNotification(ctx context.Context, channel, signature string, body []byte, source string) (uuid.UUID, bool, error) {
 	if !p.Capabilities().NotificationSupported {
 		return uuid.Nil, false, payment.ErrUnsupported
@@ -724,7 +734,7 @@ func (p *PaymentCoordinator) PersistNotification(ctx context.Context, channel, s
 	if err := json.Unmarshal(body, &notification); err != nil || notification.NotificationID == uuid.Nil || time.Unix(notification.Timestamp, 0).Before(p.now().Add(-5*time.Minute)) || time.Unix(notification.Timestamp, 0).After(p.now().Add(5*time.Minute)) {
 		return uuid.Nil, false, ErrForbiddenPayment
 	}
-	return p.persistNotification(ctx, channel, notification, body, source)
+	return p.persistNotification(ctx, channel, notification, body, paymentNotificationHash(body), source)
 }
 
 func (p *PaymentCoordinator) PersistProviderNotification(ctx context.Context, providerID, merchantID string, notificationID uuid.UUID, sentAt time.Time, provider ProviderOrder, payload []byte, source string) (uuid.UUID, bool, error) {
@@ -750,10 +760,10 @@ func (p *PaymentCoordinator) PersistProviderNotification(ctx context.Context, pr
 	if err != nil {
 		return uuid.Nil, false, err
 	}
-	return p.persistNotification(ctx, provider.Channel, notification, body, source)
+	return p.persistNotification(ctx, provider.Channel, notification, body, nativeCallbackHashPrefix+paymentNotificationHash(payload), source)
 }
 
-func (p *PaymentCoordinator) persistNotification(ctx context.Context, channel string, notification paymentNotification, body []byte, source string) (uuid.UUID, bool, error) {
+func (p *PaymentCoordinator) persistNotification(ctx context.Context, channel string, notification paymentNotification, body []byte, requestHash, source string) (uuid.UUID, bool, error) {
 	channel = strings.ToUpper(strings.TrimSpace(channel))
 	if notification.NotificationID == uuid.Nil || notification.MerchantID != p.merchantID || notification.Channel != channel || notification.AmountFen <= 0 || notification.Currency == "" || notification.Status == "" {
 		return uuid.Nil, false, ErrForbiddenPayment
@@ -763,24 +773,25 @@ func (p *PaymentCoordinator) persistNotification(ctx context.Context, channel st
 		return uuid.Nil, false, err
 	}
 	defer tx.Rollback(ctx)
-	digest := sha256.Sum256(body)
-	command, err := tx.Exec(ctx, `INSERT INTO payment_notifications(notification_id,channel,request_hash,payload,received_at,result,provider_id,provider_version) VALUES ($1,$2,$3,$4,$5,'RECEIVED',$6,$7) ON CONFLICT DO NOTHING`, notification.NotificationID, channel, hex.EncodeToString(digest[:]), body, p.now(), p.Capabilities().ProviderID, p.Capabilities().Version)
+	command, err := tx.Exec(ctx, `INSERT INTO payment_notifications(notification_id,channel,request_hash,payload,received_at,result,provider_id,provider_version) VALUES ($1,$2,$3,$4,$5,'RECEIVED',$6,$7) ON CONFLICT DO NOTHING`, notification.NotificationID, channel, requestHash, body, p.now(), p.Capabilities().ProviderID, p.Capabilities().Version)
 	if err != nil {
 		return uuid.Nil, false, err
 	}
 	if command.RowsAffected() == 0 {
 		var existingBody []byte
 		var sourceID, sourceVersion *string
-		var existingResult string
-		if err := tx.QueryRow(ctx, `SELECT payload,provider_id,provider_version,result FROM payment_notifications WHERE notification_id=$1`, notification.NotificationID).Scan(&existingBody, &sourceID, &sourceVersion, &existingResult); err != nil {
+		var existingResult, existingHash string
+		if err := tx.QueryRow(ctx, `SELECT payload,provider_id,provider_version,result,request_hash
+FROM payment_notifications WHERE notification_id=$1`, notification.NotificationID).Scan(&existingBody, &sourceID, &sourceVersion, &existingResult, &existingHash); err != nil {
 			return uuid.Nil, false, err
-		}
-		var previous paymentNotification
-		if json.Unmarshal(existingBody, &previous) != nil || !sameNotificationPaymentFacts(previous, notification) {
-			return uuid.Nil, false, ErrForbiddenPayment
 		}
 		legacyTerminal := sourceID == nil && sourceVersion == nil && (existingResult == "PROCESSED" || existingResult == "REJECTED" || existingResult == "MANUAL_REVIEW")
 		if !legacyTerminal && (sourceID == nil || sourceVersion == nil || *sourceID != p.Capabilities().ProviderID || *sourceVersion != p.Capabilities().Version) {
+			return uuid.Nil, false, ErrForbiddenPayment
+		}
+		var previous paymentNotification
+		if json.Unmarshal(existingBody, &previous) != nil || !matchesNotificationReplay(previous, notification, existingHash, requestHash) {
+			slog.WarnContext(ctx, "application event", "task", "payment-notification-inbox", "error_code", "PAYMENT_CALLBACK_REPLAY_CONFLICT")
 			return uuid.Nil, false, ErrForbiddenPayment
 		}
 		return notification.NotificationID, false, tx.Commit(ctx)
@@ -800,6 +811,26 @@ func (p *PaymentCoordinator) persistNotification(ctx context.Context, channel st
 	return notification.NotificationID, true, tx.Commit(ctx)
 }
 
+func matchesNotificationReplay(previous, incoming paymentNotification, previousHash, incomingHash string) bool {
+	if !strings.HasPrefix(incomingHash, nativeCallbackHashPrefix) {
+		return !strings.HasPrefix(previousHash, nativeCallbackHashPrefix) && sameNotificationPaymentFacts(previous, incoming)
+	}
+	if !strings.HasPrefix(previousHash, nativeCallbackHashPrefix) {
+		// Older native rows stored a digest of the encoded envelope rather
+		// than the exact provider bytes. Restore the original receipt time and
+		// compare against that digest without re-encoding JSONB's object order.
+		incoming.Timestamp = previous.Timestamp
+		originalEnvelope, err := json.Marshal(incoming)
+		if err != nil || paymentNotificationHash(originalEnvelope) != previousHash {
+			return false
+		}
+	} else if previousHash != incomingHash {
+		return false
+	}
+	previous.ProviderPayload, incoming.ProviderPayload = nil, nil
+	return sameNotificationPaymentFacts(previous, incoming)
+}
+
 func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, signature string, body []byte) error {
 	id, _, err := p.PersistNotification(ctx, channel, signature, body, "source:direct")
 	if err != nil {
@@ -809,6 +840,10 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 }
 
 func (p *PaymentCoordinator) ProcessPersistedNotification(ctx context.Context, notificationID uuid.UUID) error {
+	return p.processPersistedNotification(ctx, notificationID, false)
+}
+
+func (p *PaymentCoordinator) processPersistedNotification(ctx context.Context, notificationID uuid.UUID, scheduled bool) error {
 	tx, err := p.repository.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -817,10 +852,12 @@ func (p *PaymentCoordinator) ProcessPersistedNotification(ctx context.Context, n
 	var channel, result string
 	var body []byte
 	var sourceID, sourceVersion *string
-	if err := tx.QueryRow(ctx, `SELECT channel,payload,result,provider_id,provider_version FROM payment_notifications WHERE notification_id=$1 FOR UPDATE`, notificationID).Scan(&channel, &body, &result, &sourceID, &sourceVersion); err != nil {
+	var due bool
+	if err := tx.QueryRow(ctx, `SELECT channel,payload,result,provider_id,provider_version,next_attempt_at IS NULL OR next_attempt_at<=now()
+FROM payment_notifications WHERE notification_id=$1 FOR UPDATE`, notificationID).Scan(&channel, &body, &result, &sourceID, &sourceVersion, &due); err != nil {
 		return err
 	}
-	if result != "RECEIVED" {
+	if result != "RECEIVED" || (scheduled && !due) {
 		return tx.Commit(ctx)
 	}
 	var notification paymentNotification
@@ -829,6 +866,15 @@ func (p *PaymentCoordinator) ProcessPersistedNotification(ctx context.Context, n
 	}
 	order, err := getPaymentOrderForUpdate(ctx, tx, notification.MerchantOrderNo)
 	if err != nil {
+		if scheduled && errors.Is(err, errPaymentMerchantOrderNotFound) && sourceID != nil && *sourceID != "" && sourceVersion != nil && *sourceVersion != "" &&
+			notification.NotificationID == notificationID && notification.Channel == channel && notification.MerchantID != "" {
+			return p.recordUnmatchedPaymentNotification(ctx, tx, unmatchedPaymentNotificationSnapshot{
+				NotificationID: notificationID, Reason: unmatchedPaymentNotificationReason,
+				ProviderID: *sourceID, ProviderVersion: *sourceVersion, Channel: channel,
+				MerchantOrderNo: notification.MerchantOrderNo, ChannelTransactionID: notification.ChannelTransaction,
+				ProviderOrderReference: notification.ProviderOrderReference,
+			})
+		}
 		return err
 	}
 	if sourceID == nil || sourceVersion == nil || *sourceID != order.ProviderID || *sourceVersion != order.ProviderVersion || p.Capabilities().ProviderID != order.ProviderID || p.Capabilities().Version != order.ProviderVersion {
@@ -1047,9 +1093,14 @@ func productComponentAmounts(total, basePoints, bonusPoints int64) (int64, int64
 	return base, bonus, nil
 }
 
+var errPaymentMerchantOrderNotFound = fmt.Errorf("merchant order not found: %w", pgx.ErrNoRows)
+
 func getPaymentOrderForUpdate(ctx context.Context, tx pgx.Tx, merchant string) (PaymentOrder, error) {
 	var id uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT id FROM payment_orders WHERE merchant_order_no=$1`, merchant).Scan(&id); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return PaymentOrder{}, errPaymentMerchantOrderNotFound
+		}
 		return PaymentOrder{}, err
 	}
 	return getPaymentOrderByID(ctx, tx, id, true)

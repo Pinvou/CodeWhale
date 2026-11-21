@@ -6,7 +6,10 @@ export const desktopBridgeApi = {
   chat: ['cancelGeneration', 'cancelShellTask', 'editQueued', 'getComposerDraft', 'interruptAndSend', 'interruptAndSendQueued', 'prefillComposer', 'prioritizeQueued', 'removeQueued', 'restoreTaskDraft', 'retryFirstTurn', 'sendMessage', 'sendMessageToSession', 'setComposerDraft', 'steer'],
   auxChat: ['ensure', 'reset', 'send', 'snapshot'],
   voice: ['abandonVoiceResult', 'appendVoiceText', 'beginVoiceSubmission', 'cancelVoiceAsrSetup', 'cancelVoiceInput', 'clearVoiceInput', 'closeVoiceAsrSetup', 'completeVoiceSubmission', 'dismissVoiceInput', 'getVoiceOperationId', 'hasVoiceSubmissionPending', 'installVoiceAsr', 'setVoiceShortcutEnabled', 'startVoiceInput', 'syncVoiceShortcutRecording'],
-  knowledge: ['downloadKbModel', 'kbModelStatus', 'listCollections', 'loadKnowledgeEmbedderAfterFirstFrame', 'mountCollection', 'mountRemoteCollection', 'removeCollection', 'removeRemoteCollection', 'setCollectionEnabled', 'setRemoteCollectionEnabled', 'unmountCollection'],
+  // cancelKbModel follows the checkDependencies shape: the JS facade exists on
+  // both hosts, but the Rust kb_model_cancel command stays off the web
+  // access-policy (denied-and-caught; see web_access_contract's anti-pin).
+  knowledge: ['cancelKbModel', 'downloadKbModel', 'kbModelStatus', 'listCollections', 'loadKnowledgeEmbedderAfterFirstFrame', 'mountCollection', 'mountRemoteCollection', 'removeCollection', 'removeRemoteCollection', 'setCollectionEnabled', 'setRemoteCollectionEnabled', 'unmountCollection'],
   scheduled: ['clearScheduledTaskSelection', 'createScheduledTask', 'deleteScheduledTask', 'dismissScheduledTaskError', 'exitScheduledRunChat', 'loadScheduledTaskRecentRuns', 'loadScheduledTaskRuns', 'loadScheduledTasks', 'openScheduledRunChat', 'pauseScheduledTask', 'readScheduledTask', 'refreshScheduledTaskData', 'resumeScheduledTask', 'runScheduledTaskNow', 'selectScheduledTask', 'startScheduledTaskChat', 'toggleScheduledTaskPinned', 'updateScheduledTask'],
   sessions: ['archiveSession', 'beginLocalNavigationIntent', 'onLocalNavigation', 'getLocalNavigationEpoch', 'captureControlledNavigationOwner', 'createNewSession', 'deleteSession', 'exitControlledScheduledRunChat', 'exportSessionArchive', 'isControlledNavigationOwnerCurrent', 'getSessionWorkspaceBinding', 'materializeSession', 'onSessionDeleted', 'boundDraftMode', 'pickDraftWorkspace', 'rememberDraftWorkspaceRecent', 'renameSession', 'restoreArchivedSession', 'setDraftWorkspace', 'switchToControlledSession', 'switchToSession', 'toggleSessionPinned'],
   monitor: ['clearMonitorStats', 'startMonitorPolling', 'stopMonitorPolling'],
@@ -17,7 +20,11 @@ export const desktopBridgeApi = {
   feedback: ['submitFeedback', 'listFailureDiagnostics', 'previewFailureDiagnostic', 'submitFailureDiagnostic', 'pickDiagnosticFiles'],
   vllm: ['discoverLocalVllm'],
   multiAgent: ['listSubagentTranscripts', 'readSubagentTranscript'],
-  models: ['deleteModel', 'deleteModelIfStoreLink', 'deleteModelIfMatches', 'getEffectiveModelConfig', 'getImageInputCapability', 'loadModels', 'loadEffectiveModelConfig', 'loadSessionModel', 'probeLocalServerKind', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'switchModelRef', 'testImageInputCapability', 'testModelConnection'],
+  // reloadSavedModels (round-1 review M9): post-batch refresh twin of the
+  // saveModel reload tail — one loader burst after a confirmed add-all batch
+  // whose rows were saved with { deferRefresh: true }. Lane-agnostic: both
+  // bridges reload exactly what their own saveModel chain reloads.
+  models: ['deleteModel', 'deleteModelIfStoreLink', 'deleteModelIfMatches', 'getEffectiveModelConfig', 'getImageInputCapability', 'loadModels', 'loadEffectiveModelConfig', 'loadSessionModel', 'probeEndpointModels', 'probeLocalServerKind', 'reloadSavedModels', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'switchModelRef', 'testImageInputCapability', 'testModelConnection'],
   interaction: ['acceptPlan', 'cancelUserInput', 'compactNow', 'confirmCodeYolo', 'discardPlan', 'dismissPinvouReview', 'editLastTurn', 'exitPlanToYolo', 'getCodePermissionPrefs', 'inspectPinvou', 'planStuckGo', 'planStuckReplan', 'refreshModeDefaults', 'resolvePinvouReview', 'setDraftMode', 'setModeLane', 'setMultiAgentMode', 'setPlanModeNext', 'submitUserInput', 'summonPinvou', 'syncModeState', 'toggleSuperPerm'],
   rendering: ['renderMarkdown'],
   remoteControl: ['getWebRelaySettings', 'refreshRemoteControlQr', 'refreshRemoteControlStatus', 'revokeRemoteHostWorkspace', 'setWebRelayAddress', 'startRemoteControl', 'stopRemoteControl'],
@@ -34,7 +41,8 @@ export const desktopBridgeApi = {
     'isAvailable',
     'listExportableModels',
     'listRemoteProxyHistory', 'readRemoteProxyHistory', 'deleteRemoteProxyHistory', 'openLiveRemoteProxy',
-    'archiveRemoteProxyHistory', 'quarantineRemoteProxyHistory', 'listRemoteProxyArchiveCandidates', 'listRemoteProxyArchives', 'getRemoteProxyLoadStatus',
+    'archiveRemoteProxyHistory', 'quarantineRemoteProxyHistory', 'listRemoteProxyArchiveCandidates', 'listRemoteProxyArchives',
+    'getRemoteProxyLoadStatus', 'recoverRemoteProxyFile',
     'permissionDecide', 'permissionDenyTask', 'permissionList', 'controlledPermissionList', 'setEndpointProfile',
     'reserveRemoteTask', 'commitRemoteTask', 'cancelRemoteTask', 'abandonRemoteTask',
   ],
@@ -50,7 +58,7 @@ export const desktopBridgeApi = {
   // Computer use drives the local machine: the desktop backend exposes it, the
   // web surface carries only rejecting stubs (the RPC allowlist excludes the
   // commands entirely, same policy as browser:*).
-  computerUse: ['confirm', 'deny', 'grant', 'permissionStatus', 'refreshStatus', 'requestPermissions', 'revoke', 'setEnabled', 'stop'],
+  computerUse: ['confirm', 'deny', 'grant', 'permissionStatus', 'refreshStatus', 'requestPermissions', 'revoke', 'setEnabled', 'setVirtualDisplayPreference', 'stop'],
 };
 
 // These methods intentionally depend on desktop lifecycle or local machine

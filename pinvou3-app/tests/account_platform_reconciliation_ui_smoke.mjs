@@ -13,7 +13,8 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-f03-ui-'));
 let vite; let browser; let page; let passed = 0; let currentCase = '';
 const errors = [];
 try {
-  vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], server: { host: '127.0.0.1', port: 0, watch: null } });
+  const producedCase = process.env.PINVOU_ORPHAN_CASE_FIXTURE ? JSON.parse(fs.readFileSync(process.env.PINVOU_ORPHAN_CASE_FIXTURE, 'utf8')).case : null;
+  vite = await createServer({ root, configFile: false, appType: 'mpa', logLevel: 'error', plugins: [react()], define: producedCase ? { __PINVOU_ORPHAN_CASE__: JSON.stringify(producedCase) } : {}, server: { host: '127.0.0.1', port: 0, watch: null } });
   await vite.listen();
   browser = await puppeteer.launch({ executablePath: chrome, headless: 'new', userDataDir: profile, args: ['--disable-gpu', '--no-first-run'] });
   page = await browser.newPage(); page.setDefaultTimeout(10000); page.on('pageerror', error => errors.push(error.message));
@@ -26,7 +27,7 @@ try {
     await page.waitForSelector('.adm-case-scope');
     assert.equal(await page.evaluate(() => window.f03.calls.some(call => call.url.includes('/reconciliation-cases?'))), false, 'the unselected range does not implicitly query all cases');
     await click('caseScopeAll');
-    await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes('controlled-merchant'));
+    await page.waitForFunction(() => document.querySelector('tbody')?.textContent.includes(window.f03.orphanCase?.merchant_order_no || 'controlled-merchant'));
     assert.equal(await page.evaluate(() => new URL(window.f03.calls.find(call => call.url.includes('/reconciliation-cases?')).url, location.origin).searchParams.has('run_id')), false, 'all batches is an explicit unscoped query');
     await page.evaluate(() => document.querySelector('tbody button').click()); await page.waitForSelector('.adm-case-evidence');
   };
@@ -54,6 +55,34 @@ try {
     assert.equal(await page.evaluate(() => window.f03.calls.some(call => call.method === 'POST')), false, 'scope selection only reads facts');
   });
   for (const language of ['zh', 'en', 'ja']) {
+    await caseRun(`${language}: orphan review displays producer evidence and binds the refreshed observation`, async () => {
+      await fresh(language); await page.evaluate(() => window.f03.useOrphanFixture()); await selectCase();
+      await page.click('.adm-case-evidence summary');
+      assert.ok(await page.evaluate(() => {
+        const item = window.f03.orphanCase;
+        const text = document.querySelector('.adm-case-evidence').textContent;
+        return text.includes(window.f03.copy().latestObservation) && text.includes(item.latest_observation.observation_id) &&
+          text.includes(item.internal_snapshot.payment_order.amount_fen) && text.includes(item.latest_observation.internal_snapshot.payment_order.amount_fen) &&
+          item.internal_snapshot.payment_date_verification_required && item.latest_observation.internal_snapshot.payment_order.paid_at === null;
+      }));
+      await page.select('.adm-reconciliation-workspace > .adm-panel select', 'IGNORE');
+      await page.waitForFunction(() => document.querySelectorAll('.adm-reconciliation-workspace > .adm-panel textarea').length === 2);
+      const fields = await page.$$('.adm-reconciliation-workspace > .adm-panel textarea');
+      await fields[0].type('Controlled review of displayed observation'); await fields[1].type('Controlled explicit human review reason');
+      const original = await page.evaluate(() => window.f03.orphanCase.latest_observation.observation_id);
+      await page.evaluate(() => {
+        const latest = structuredClone(window.f03.orphanCase);
+        latest.latest_observation.observation_id = window.f03.other;
+        latest.latest_observation.internal_snapshot.payment_order.amount_fen = (BigInt(latest.latest_observation.internal_snapshot.payment_order.amount_fen) + 1n).toString();
+        window.f03.orphanCase = latest;
+      });
+      await click('submit'); await page.waitForFunction(() => document.querySelector('.adm-reconciliation-workspace > .adm-panel [role=alert]')?.textContent === window.f03.copy().sourceChanged);
+      await click('refresh'); await page.waitForFunction(() => document.querySelector('.adm-case-evidence').textContent.includes(window.f03.other));
+      await click('submit'); await page.waitForFunction(() => document.querySelector('.adm-reconciliation-workspace > .adm-panel [role=status]')?.textContent === window.f03.copy().saved);
+      const commands = await page.evaluate(() => window.f03.calls.filter(value => value.url.endsWith('/commands')).map(value => ({ facts: JSON.parse(value.body), key: value.key })));
+      assert.equal(commands.length, 2); assert.equal(commands[0].facts.observed_observation_id, original);
+      assert.notEqual(commands[0].key, commands[1].key); assert.equal(commands[1].facts.observed_observation_id, await page.evaluate(() => window.f03.other));
+    });
     await caseRun(`${language}: missing supplier occurrence dates remain explicit manual review cases`, async () => {
       await fresh(language); await page.evaluate(() => { window.f03.caseType = 'REFUND_DATE_UNVERIFIED'; }); await selectCase();
       assert.ok(await page.evaluate(() => document.querySelector('tbody').textContent.includes(window.f03.copy().caseTypes.REFUND_DATE_UNVERIFIED) && document.querySelector('.adm-reconciliation-workspace > .adm-panel > h3').textContent.includes(window.f03.copy().caseTypes.REFUND_DATE_UNVERIFIED)));

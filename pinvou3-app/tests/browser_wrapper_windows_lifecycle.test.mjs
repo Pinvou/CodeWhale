@@ -9,10 +9,10 @@ import {
   readdirSync,
   renameSync,
   rmSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { createServer } from './helpers/http-fixture.mjs';
+import { createBrowserWrapperHost } from './helpers/browser-wrapper-host-fixture.mjs';
+import { observeBrowserPreparePhases } from './helpers/browser-prepare-phase-observer.mjs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,7 +20,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 import { spawnNdjsonChild, stopNdjsonChild } from './helpers/ndjson-child-driver.mjs';
 import { cleanupBrowserFixture, confirmedChildStopper, confirmedProcessExited, readPendingHostRequest } from './helpers/browser-wrapper-fixture-cleanup.mjs';
-import { heldRequestResultDiagnostic } from './helpers/browser-wrapper-held-result.mjs';
+import { heldRequestResultDiagnostic, heldRequestAuthorizationDiagnostic } from './helpers/browser-wrapper-held-result.mjs';
 
 const WRAPPER = fileURLToPath(new URL(
   '../src-tauri/resources/common/bundle/mcp-servers/browser-wrapper.mjs',
@@ -96,7 +96,9 @@ function scheduleToolCompletion(id, complete, delayMs, releasePath) {
 }
 
 audit({ kind: 'start' });
+let inputChunks = 0;
 process.stdin.on('data', (chunk) => {
+  if (inputChunks++ < 4) audit({ kind: 'stdin-chunk', bytes: chunk.length });
   input += chunk;
   let newline;
   while ((newline = input.indexOf('\n')) >= 0) {
@@ -105,22 +107,27 @@ process.stdin.on('data', (chunk) => {
     if (!line.trim()) continue;
     const message = JSON.parse(line);
     if (message.method === 'initialize') {
+      audit({ kind: 'protocol-received', name: 'initialize' });
       const currentMode = mode();
       if (currentMode.handshakeError) {
         error(message.id, 'configured startup handshake rejection');
         continue;
       }
-      const finishHandshake = () => result(message.id, {
+      const finishHandshake = () => {
+        audit({ kind: 'protocol-reply', name: 'initialize' });
+        result(message.id, {
           protocolVersion: message.params?.protocolVersion ?? '2024-11-05',
           capabilities: { tools: {} },
           serverInfo: { name: 'fake-windows-mcp', version: '0' },
         });
+      };
       const handshakeDelayMs = Number(currentMode.handshakeDelayMs) || 0;
       if (handshakeDelayMs > 0) setTimeout(finishHandshake, handshakeDelayMs);
       else finishHandshake();
       continue;
     }
     if (message.method === 'tools/list') {
+      audit({ kind: 'protocol-received', name: 'tools/list' });
       if (mode().toolsListError) {
         error(message.id, 'configured runtime catalog rejection');
         continue;
@@ -264,6 +271,14 @@ process.stdin.on('data', (chunk) => {
     }
     if (name === 'click') {
       const currentMode = mode();
+      if (currentMode.crashOnClick) {
+        // Inject the selected fault in the receiver, at dispatch. Waiting for
+        // a controller-side file poll and then scheduling a kill races the
+        // independent, deliberately strict input-authorization heartbeat.
+        audit({ kind: 'crash-injected', name, requestId: message.id });
+        process.kill(process.pid, 'SIGKILL');
+        return;
+      }
       const complete = () => {
         pendingToolTimers.delete(message.id);
         audit({ kind: 'tool-complete', name, requestId: message.id });
@@ -311,6 +326,14 @@ process.stdin.on('data', (chunk) => {
     error(message.id, 'unexpected tool: ' + name);
   }
 });
+audit({ kind: 'stdin-listener-ready' });
+let startupTicks = 0;
+const startupProgress = setInterval(() => {
+  const cpu = process.cpuUsage();
+  audit({ kind: 'startup-tick', cpuMs: (cpu.user + cpu.system) / 1000 });
+  if (++startupTicks >= 5) clearInterval(startupProgress);
+}, 1000);
+startupProgress.unref();
 `;
 
 const CATALOG = {
@@ -403,10 +426,10 @@ function readAudit(path) {
 async function waitUntil(predicate, message, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await sleep(10);
   }
-  assert.fail(typeof message === 'function' ? message() : message);
+  assert.fail(typeof message === 'function' ? await message() : message);
 }
 
 async function makeFixture() {
@@ -435,21 +458,6 @@ async function makeFixture() {
     tabs: [{ token: OTHER_SESSION_TOKEN, target_id: 'target-b-99' }],
   });
 
-  const cdp = createServer((request, response) => {
-    if (request.url === '/json/version') {
-      response.writeHead(200, { 'content-type': 'application/json' });
-      response.end('{"webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/fake"}');
-    } else {
-      response.writeHead(404);
-      response.end();
-    }
-  });
-  await new Promise((resolve, reject) => {
-    cdp.once('error', reject);
-    cdp.listen(0, '127.0.0.1', resolve);
-  });
-  const port = cdp.address().port;
-  atomicWriteJson(portPath, { port, owner: 'app' });
 
   return {
     root,
@@ -459,181 +467,22 @@ async function makeFixture() {
     modePath,
     auditPath,
     portPath,
-    cdp,
+    releaseGates: new Set(),
+    cdp: null,
   };
 }
 
-function createFakeHost(fixture) {
-  const requestDirectory = join(fixture.root, 'host-requests');
-  const handled = new Set();
-  const state = {
-    prepareCalls: 0,
-    generation: 0,
-    preparePublishesWorkspace: true,
-    operationCalls: new Map(),
-    operationLog: [],
-    operationTimeline: [],
-    operationErrors: new Map(),
-    malformedOperationResponses: new Set(),
-    deferredOperations: new Set(),
-    // Barrier-visibility freeze: frozen operations are still handled and
-    // answered normally (the wrapper lease stays healthy), but their
-    // observations are withheld from operationCalls/Log/Timeline until the
-    // freeze lifts, then flushed in arrival order. This deterministically
-    // reproduces the loaded-runner shape behind the 30s barrier: the wrapper's
-    // heartbeat timer starves, so the barrier sees no refreshes for a long
-    // stretch and only then catches up in a burst.
-    deferredObservations: new Set(),
-    pendingObservations: [],
-    failure: null,
-  };
-
-  const publishWorkspace = () => {
-    state.generation += 1;
-    atomicWriteJson(fixture.workspacePath, {
-      version: 2,
-      mapping_authority: 'host',
-      revision: state.generation,
-      session_token: SESSION_TOKEN,
-      active_tab: SESSION_TOKEN,
-      tabs: [{ token: SESSION_TOKEN, target_id: `target-a-${state.generation}` }],
-    });
-  };
-
-  const respond = (request, response) => {
-    atomicWriteJson(
-      join(requestDirectory, `${SESSION_TOKEN}-${request.request_id}.response`),
-      {
-        protocol_version: request.protocol_version,
-        request_id: request.request_id,
-        idempotency_key: request.idempotency_key,
-        ...response,
-      },
-    );
-  };
-
-  const recordOperation = (operation) => {
-    state.operationCalls.set(
-      operation,
-      (state.operationCalls.get(operation) || 0) + 1,
-    );
-    state.operationLog.push(operation);
-    state.operationTimeline.push({ operation, at: Date.now() });
-  };
-
-  const timer = setInterval(() => {
-    if (!existsSync(requestDirectory) || state.failure) return;
-    try {
-      if (
-        state.deferredObservations.size === 0 &&
-        state.pendingObservations.length
-      ) {
-        for (const operation of state.pendingObservations.splice(0)) {
-          recordOperation(operation);
-        }
-      }
-      for (const name of readdirSync(requestDirectory)) {
-        if (!name.endsWith('.json') || handled.has(name)) continue;
-        const raw = readPendingHostRequest(join(requestDirectory, name));
-        if (raw === null) continue;
-        const request = JSON.parse(raw);
-        if (state.deferredOperations.has(request.operation)) continue;
-        handled.add(name);
-        if (state.deferredObservations.has(request.operation)) {
-          state.pendingObservations.push(request.operation);
-        } else {
-          recordOperation(request.operation);
-        }
-
-        if (request.operation === 'prepare') {
-          state.prepareCalls += 1;
-          if (state.preparePublishesWorkspace) publishWorkspace();
-          respond(request, { ok: true, result: { ready: true } });
-          continue;
-        }
-
-        const configuredError = state.operationErrors.get(request.operation);
-        if (configuredError) {
-          respond(request, { ok: false, error: configuredError });
-          continue;
-        }
-
-        if (request.operation === 'activate_tab') {
-          const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
-          const tab = workspace.tabs.find((candidate) => candidate.token === request.tab_token);
-          if (!tab) {
-            respond(request, { ok: false, error: 'browser/page-not-found' });
-            continue;
-          }
-          respond(request, {
-            ok: true,
-            result: {
-              sessionId: SESSION_ID,
-              tabToken: tab.token,
-              targetId: tab.target_id,
-              revision: workspace.revision,
-              owner: 'agent',
-              lease: 'a'.repeat(32),
-            },
-          });
-          continue;
-        }
-
-        if (request.operation === 'close_tab') {
-          const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
-          const tabs = workspace.tabs.filter((tab) => tab.token !== request.tab_token);
-          if (tabs.length === workspace.tabs.length || tabs.length === 0) {
-            respond(request, { ok: false, error: 'browser/page-not-found' });
-            continue;
-          }
-          atomicWriteJson(fixture.workspacePath, {
-            ...workspace,
-            revision: workspace.revision + 1,
-            active_tab: tabs[0].token,
-            tabs,
-          });
-          if (state.malformedOperationResponses.has(request.operation)) {
-            atomicWriteJson(
-              join(requestDirectory, `${SESSION_TOKEN}-${request.request_id}.response`),
-              { malformed: true },
-            );
-          } else {
-            respond(request, { ok: true, result: {} });
-          }
-          continue;
-        }
-
-        if ([
-          'assert_host_lease',
-          'begin_agent_operation',
-          'refresh_agent_input',
-          'refresh_agent_operation',
-          'end_agent_operation',
-        ].includes(request.operation)) {
-          respond(request, { ok: true, result: { accepted: true } });
-          continue;
-        }
-
-        respond(request, { ok: false, error: `unexpected operation: ${request.operation}` });
-      }
-    } catch (error) {
-      state.failure = error;
-    }
-  }, 5);
-
-  return {
-    state,
-    stopSessionA() {
-      try { unlinkSync(fixture.workspacePath); } catch { /* already stopped */ }
-    },
-    close() {
-      clearInterval(timer);
-      if (state.failure) throw state.failure;
-    },
-  };
+function ownedReleaseGate(fixture, filename) {
+  const path = join(fixture.root, filename);
+  fixture.releaseGates.add(path);
+  return path;
 }
 
-function driveWrapper(fixture) {
+async function createFakeHost(fixture, options) {
+  return createBrowserWrapperHost(fixture, { sessionId: SESSION_ID, sessionToken: SESSION_TOKEN }, options);
+}
+
+function driveWrapper(fixture, { collectResponses = false } = {}) {
   const driver = spawnNdjsonChild({
     args: [WRAPPER, fixture.mcpBin, fixture.portPath],
     env: {
@@ -643,8 +492,10 @@ function driveWrapper(fixture) {
       FAKE_BROWSER_WORKSPACE: fixture.workspacePath,
       FAKE_BROWSER_MCP_MODE: fixture.modePath,
       FAKE_BROWSER_MCP_AUDIT: fixture.auditPath,
+      PINVOU3_BROWSER_LIFECYCLE_DIAGNOSTICS: '1',
     },
     timeoutMs: 15_000,
+    collectResponses,
   });
   return {
     ...driver,
@@ -671,14 +522,61 @@ async function initializeWrapper(wrapper, clientName) {
   return initialized;
 }
 
+async function initializeWorkspace(wrapper, clientName) {
+  await initializeWrapper(wrapper, clientName);
+  // The initialize shim can answer before native prepare (25s) and MCP startup.
+  // Observe that setup path explicitly before a case's 15s mutation deadline.
+  const response = await wrapper.request('tools/call', {
+    name: 'list_pages', arguments: {},
+  }, WORKSPACE_RECOVERY_OBSERVATION_MS);
+  assert.equal(response?.error, undefined, JSON.stringify(heldRequestResultDiagnostic(response)));
+  assert.notEqual(response?.result?.isError, true, JSON.stringify(heldRequestResultDiagnostic(response)));
+  assert.ok(response?.result?.structuredContent?.pages, JSON.stringify(heldRequestResultDiagnostic(response)));
+  return response;
+}
+
 async function cleanupFixture(fixture, host, ...wrappers) {
+  if (fixture.primaryErrors?.length) {
+    console.error('[browser-host-fixture-diagnostic]', JSON.stringify(host.diagnostic()));
+    console.error('[browser-wrapper-fixture-diagnostic]', JSON.stringify(
+      wrappers.filter(Boolean).map(wrapper => wrapper.diagnostic()),
+    ));
+    const auditReadStarted = performance.now();
+    try {
+      const audit = readAudit(fixture.auditPath).slice(-40).map(({ kind, name, pid, at, bytes, cpuMs }) =>
+        ({ kind, name, pid, at, bytes, cpuMs }));
+      console.error('[browser-upstream-fixture-events]', JSON.stringify(audit));
+    } catch {
+      console.error('[browser-upstream-fixture-events]', JSON.stringify({ unavailable: true }));
+    }
+    console.error('[browser-fixture-fs-diagnostic]', JSON.stringify({
+      operation: 'audit-read', elapsedMs: performance.now() - auditReadStarted,
+    }));
+    try {
+      const observed = await host.snapshot();
+      console.error('[browser-host-fixture-events]', JSON.stringify({
+        timeline: observed.operationTimeline.slice(-40),
+        pendingObservations: observed.pendingObservations,
+        prepareCalls: observed.prepareCalls,
+      }));
+    } catch {
+      console.error('[browser-host-fixture-events]', JSON.stringify({ unavailable: true,
+        progress: host.diagnostic() }));
+    }
+  }
+  // Release only this fixture's finite barriers, even after an assertion.
+  // The intentional never-release shutdown case is not registered here.
+  for (const path of fixture.releaseGates) {
+    try { writeFileSync(path, 'cleanup release'); }
+    catch (error) { (fixture.primaryErrors ||= []).push(error); }
+  }
   await cleanupBrowserFixture({
     primaryErrors: fixture.primaryErrors,
     closeHost: () => host.close(),
     stopChildren: [
       ...wrappers.filter(Boolean).map(wrapper => () => wrapper.stopConfirmed()),
       () => waitUntil(
-        () => readAudit(fixture.auditPath).filter(entry => entry.kind === 'start')
+        async () => readAudit(fixture.auditPath).filter(entry => entry.kind === 'start')
           .every(entry => confirmedProcessExited(entry.pid)),
         'owned fake MCP children did not exit; preserving fixture files',
       ),
@@ -709,7 +607,7 @@ test('Windows proxy: a deliberately killed failed startup returns to reusable sh
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
@@ -722,7 +620,7 @@ test('Windows proxy: a deliberately killed failed startup returns to reusable sh
     });
     assert.match(failed.error.message, /configured startup handshake rejection/);
     await waitUntil(
-      () => readAudit(fixture.auditPath).filter((entry) => entry.kind === 'start').length === 1,
+      async () => readAudit(fixture.auditPath).filter((entry) => entry.kind === 'start').length === 1,
       'the failed startup attempt did not launch',
     );
     await sleep(100);
@@ -752,7 +650,7 @@ test('Windows proxy: post-handshake setup failure retires child before shim retr
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
@@ -769,7 +667,7 @@ test('Windows proxy: post-handshake setup failure retires child before shim retr
       .at(-1)?.pid;
     assert.ok(Number.isInteger(firstPid));
     await waitUntil(
-      () => !processIsAlive(firstPid),
+      async () => !processIsAlive(firstPid),
       'post-handshake setup child survived after wrapper returned to shim',
     );
     assert.equal(wrapper.child.exitCode, null, 'retiring a setup child must preserve the shim');
@@ -797,7 +695,7 @@ test('Windows proxy: stdin shutdown cannot release a request buffered during sta
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
@@ -810,7 +708,7 @@ test('Windows proxy: stdin shutdown cannot release a request buffered during sta
     });
     wrapper.abandonRequest(buffered.id);
     await waitUntil(
-      () => readAudit(fixture.auditPath).some((entry) => entry.kind === 'start'),
+      async () => readAudit(fixture.auditPath).some((entry) => entry.kind === 'start'),
       'the startup child was never launched',
     );
     wrapper.child.stdin.end();
@@ -834,16 +732,43 @@ test('Windows proxy: stdin shutdown cannot release a request buffered during sta
   }
 });
 
+test('Windows proxy: missing filesystem notifications still service host requests', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const fixture = await makeFixture();
+  const host = await createFakeHost(fixture, { watchRequests: false });
+  const wrapper = driveWrapper(fixture);
+  try {
+    const ready = await initializeWorkspace(wrapper, 'windows-host-poll-fallback-test');
+    assert.equal(ready.result.structuredContent.pages.length, 1);
+    const before = await host.snapshot();
+    const response = await wrapper.request('tools/call', {
+      name: 'click', arguments: { uid: 'fallback-target' },
+    });
+    assert.equal(response.error, undefined, JSON.stringify(heldRequestResultDiagnostic(response)));
+    assert.notEqual(response.result?.isError, true);
+    const after = await host.snapshot();
+    assert.ok((after.operationCalls.get('begin_agent_operation') || 0)
+      > (before.operationCalls.get('begin_agent_operation') || 0));
+    assert.equal(readAudit(fixture.auditPath)
+      .filter(entry => entry.kind === 'tool' && entry.name === 'click').length, 1);
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
+  } finally {
+    await cleanupFixture(fixture, host, wrapper);
+  }
+});
+
 test('Windows proxy: committed close with unusable host acknowledgement is non-retryable', {
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-close-ack-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-close-ack-test');
 
     const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
     atomicWriteJson(fixture.workspacePath, {
@@ -863,8 +788,8 @@ test('Windows proxy: committed close with unusable host acknowledgement is non-r
       [1, 22],
     );
 
-    host.state.malformedOperationResponses.add('close_tab');
-    const beforeClose = host.state.operationCalls.get('close_tab') || 0;
+    await host.malformResponse('close_tab', true);
+    const beforeClose = (await host.snapshot()).operationCalls.get('close_tab') || 0;
     const closed = await wrapper.request('tools/call', {
       name: 'close_page',
       arguments: { pageId: 1 },
@@ -876,7 +801,7 @@ test('Windows proxy: committed close with unusable host acknowledgement is non-r
     assert.equal(closed.result.structuredContent.actionCommitState, 'unknown');
     assert.equal(closed.result.structuredContent.retryable, false);
     assert.equal(
-      (host.state.operationCalls.get('close_tab') || 0) - beforeClose,
+      ((await host.snapshot()).operationCalls.get('close_tab') || 0) - beforeClose,
       1,
       'the logical close must be dispatched exactly once',
     );
@@ -904,12 +829,11 @@ test('Windows proxy: committed close stays non-retryable when post-commit page s
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-close-post-sync-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-close-post-sync-test');
 
     const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
     atomicWriteJson(fixture.workspacePath, {
@@ -923,7 +847,7 @@ test('Windows proxy: committed close stays non-retryable when post-commit page s
     await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
     writeFileSync(fixture.modePath, JSON.stringify({ listPagesErrorWhenSingle: true }));
 
-    const beforeClose = host.state.operationCalls.get('close_tab') || 0;
+    const beforeClose = (await host.snapshot()).operationCalls.get('close_tab') || 0;
     const closed = await wrapper.request('tools/call', {
       name: 'close_page',
       arguments: { pageId: 1 },
@@ -935,7 +859,7 @@ test('Windows proxy: committed close stays non-retryable when post-commit page s
     assert.equal(closed.result.structuredContent.actionCommitState, 'committed');
     assert.equal(closed.result.structuredContent.retryable, false);
     assert.equal(
-      (host.state.operationCalls.get('close_tab') || 0) - beforeClose,
+      ((await host.snapshot()).operationCalls.get('close_tab') || 0) - beforeClose,
       1,
       'post-commit sync failure must not redispatch the logical close',
     );
@@ -956,12 +880,11 @@ test('Windows proxy: native tab-close uncertainty is structured and non-retryabl
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-close-native-unknown-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-close-native-unknown-test');
     const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
     atomicWriteJson(fixture.workspacePath, {
       ...workspace,
@@ -972,12 +895,12 @@ test('Windows proxy: native tab-close uncertainty is structured and non-retryabl
       ],
     });
     await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
-    host.state.operationErrors.set(
+    await host.setOperationError(
       'close_tab',
       'browser/action-commit-unknown-after-tab-close: native close acknowledgement lost',
     );
 
-    const beforeClose = host.state.operationCalls.get('close_tab') || 0;
+    const beforeClose = (await host.snapshot()).operationCalls.get('close_tab') || 0;
     const closed = await wrapper.request('tools/call', {
       name: 'close_page',
       arguments: { pageId: 1 },
@@ -988,7 +911,7 @@ test('Windows proxy: native tab-close uncertainty is structured and non-retryabl
     );
     assert.equal(closed.result.structuredContent.actionCommitState, 'unknown');
     assert.equal(closed.result.structuredContent.retryable, false);
-    assert.equal((host.state.operationCalls.get('close_tab') || 0) - beforeClose, 1);
+    assert.equal(((await host.snapshot()).operationCalls.get('close_tab') || 0) - beforeClose, 1);
   } catch (error) {
     fixture.primaryErrors = [error];
     throw error;
@@ -1001,12 +924,11 @@ test('Windows proxy: settled mutation errors are commit-unknown and never redisp
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-upstream-mutation-error-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-upstream-mutation-error-test');
 
     const assertMutationUnknown = async ({ name, arguments: args, mode, upstreamError }) => {
       const beforeDispatches = readAudit(fixture.auditPath)
@@ -1033,9 +955,10 @@ test('Windows proxy: settled mutation errors are commit-unknown and never redisp
       );
     };
 
+    const beforeLifecycleHostState = await host.snapshot();
     const beforeLifecycle = {
-      begin: host.state.operationCalls.get('begin_agent_operation') || 0,
-      end: host.state.operationCalls.get('end_agent_operation') || 0,
+      begin: beforeLifecycleHostState.operationCalls.get('begin_agent_operation') || 0,
+      end: beforeLifecycleHostState.operationCalls.get('end_agent_operation') || 0,
     };
     await assertMutationUnknown({
       name: 'click',
@@ -1083,11 +1006,11 @@ test('Windows proxy: settled mutation errors are commit-unknown and never redisp
       1,
     );
     assert.equal(
-      (host.state.operationCalls.get('begin_agent_operation') || 0) - beforeLifecycle.begin,
+      ((await host.snapshot()).operationCalls.get('begin_agent_operation') || 0) - beforeLifecycle.begin,
       5,
     );
     assert.equal(
-      (host.state.operationCalls.get('end_agent_operation') || 0) - beforeLifecycle.end,
+      ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) - beforeLifecycle.end,
       5,
     );
   } catch (error) {
@@ -1102,12 +1025,12 @@ test('Windows proxy: host tab-navigation uncertainty is never compensated into a
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-create-navigation-unknown-test');
-    host.state.operationErrors.set(
+    await initializeWorkspace(wrapper, 'windows-create-navigation-unknown-test');
+    await host.setOperationError(
       'create_tab',
       'browser/action-commit-unknown-after-tab-navigation: final CAS acknowledgement lost',
     );
@@ -1122,9 +1045,9 @@ test('Windows proxy: host tab-navigation uncertainty is never compensated into a
     );
     assert.equal(created.result.structuredContent.actionCommitState, 'unknown');
     assert.equal(created.result.structuredContent.retryable, false);
-    assert.equal(host.state.operationCalls.get('create_tab'), 1);
+    assert.equal((await host.snapshot()).operationCalls.get('create_tab'), 1);
     assert.equal(
-      host.state.operationCalls.get('rollback_created_tab') || 0,
+      (await host.snapshot()).operationCalls.get('rollback_created_tab') || 0,
       0,
       'network/script effects cannot be proven undone by closing a staging tab',
     );
@@ -1140,7 +1063,7 @@ test('Windows proxy: bootstrap navigation remains committed when its post-sync f
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
@@ -1160,7 +1083,7 @@ test('Windows proxy: bootstrap navigation remains committed when its post-sync f
     );
     assert.equal(created.result.structuredContent.actionCommitState, 'committed');
     assert.equal(created.result.structuredContent.retryable, false);
-    assert.equal(host.state.operationCalls.get('create_tab') || 0, 0);
+    assert.equal((await host.snapshot()).operationCalls.get('create_tab') || 0, 0);
     assert.equal(
       readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'navigate_page').length,
@@ -1179,12 +1102,11 @@ test('Windows proxy: external close cancellation reaches the host tombstone befo
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-close-cancel-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-close-cancel-test');
 
     const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
     atomicWriteJson(fixture.workspacePath, {
@@ -1197,14 +1119,14 @@ test('Windows proxy: external close cancellation reaches the host tombstone befo
     });
     await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
 
-    host.state.deferredOperations.add('close_tab');
-    const endBefore = host.state.operationCalls.get('end_agent_operation') || 0;
+    await host.deferOperation('close_tab', true);
+    const endBefore = (await host.snapshot()).operationCalls.get('end_agent_operation') || 0;
     const closing = wrapper.startRequest('tools/call', {
       name: 'close_page',
       arguments: { pageId: 1 },
     });
     const requestDirectory = join(fixture.root, 'host-requests');
-    await waitUntil(() => readdirSync(requestDirectory).some((name) => {
+    await waitUntil(async () => readdirSync(requestDirectory).some((name) => {
       if (!name.endsWith('.json')) return false;
       try {
         return JSON.parse(readFileSync(join(requestDirectory, name), 'utf8')).operation ===
@@ -1220,14 +1142,14 @@ test('Windows proxy: external close cancellation reaches the host tombstone befo
       reason: 'cancel close before native commit',
     });
     await waitUntil(
-      () => readdirSync(requestDirectory).some((name) => name.endsWith('.cancelled')),
+      async () => readdirSync(requestDirectory).some((name) => name.endsWith('.cancelled')),
       'external cancellation did not publish a durable host tombstone',
     );
     await waitUntil(
-      () => (host.state.operationCalls.get('end_agent_operation') || 0) === endBefore + 1,
+      async () => ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) === endBefore + 1,
       'cancelled close did not settle end_agent_operation',
     );
-    assert.equal(host.state.operationCalls.get('close_tab') || 0, 0);
+    assert.equal((await host.snapshot()).operationCalls.get('close_tab') || 0, 0);
     assert.equal(
       JSON.parse(readFileSync(fixture.workspacePath, 'utf8')).tabs.length,
       2,
@@ -1245,21 +1167,20 @@ test('Windows proxy: external cancellation tombstones an in-flight tab activatio
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-activation-cancel-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-activation-cancel-test');
 
-    host.state.deferredOperations.add('activate_tab');
-    const operationBeginBefore = host.state.operationCalls.get('begin_agent_operation') || 0;
+    await host.deferOperation('activate_tab', true);
+    const operationBeginBefore = (await host.snapshot()).operationCalls.get('begin_agent_operation') || 0;
     const snapshot = wrapper.startRequest('tools/call', {
       name: 'take_snapshot',
       arguments: {},
     });
     const requestDirectory = join(fixture.root, 'host-requests');
-    await waitUntil(() => readdirSync(requestDirectory).some((name) => {
+    await waitUntil(async () => readdirSync(requestDirectory).some((name) => {
       if (!name.endsWith('.json')) return false;
       try {
         return JSON.parse(readFileSync(join(requestDirectory, name), 'utf8')).operation ===
@@ -1275,11 +1196,11 @@ test('Windows proxy: external cancellation tombstones an in-flight tab activatio
       reason: 'cancel activation before host acknowledgement',
     });
     await waitUntil(
-      () => readdirSync(requestDirectory).some((name) => name.endsWith('.cancelled')),
+      async () => readdirSync(requestDirectory).some((name) => name.endsWith('.cancelled')),
       'external cancellation did not tombstone the in-flight activation',
     );
     assert.equal(
-      host.state.operationCalls.get('begin_agent_operation') || 0,
+      (await host.snapshot()).operationCalls.get('begin_agent_operation') || 0,
       operationBeginBefore,
       'a cancelled activation must not advance into an executable operation',
     );
@@ -1301,12 +1222,11 @@ test('Windows proxy: stdin shutdown tombstones an in-flight close before exit', 
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-close-stdin-shutdown-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-close-stdin-shutdown-test');
     const workspace = JSON.parse(readFileSync(fixture.workspacePath, 'utf8'));
     atomicWriteJson(fixture.workspacePath, {
       ...workspace,
@@ -1318,14 +1238,14 @@ test('Windows proxy: stdin shutdown tombstones an in-flight close before exit', 
     });
     await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
 
-    host.state.deferredOperations.add('close_tab');
-    const endBefore = host.state.operationCalls.get('end_agent_operation') || 0;
+    await host.deferOperation('close_tab', true);
+    const endBefore = (await host.snapshot()).operationCalls.get('end_agent_operation') || 0;
     const closing = wrapper.startRequest('tools/call', {
       name: 'close_page',
       arguments: { pageId: 1 },
     });
     const requestDirectory = join(fixture.root, 'host-requests');
-    await waitUntil(() => readdirSync(requestDirectory).some((name) => {
+    await waitUntil(async () => readdirSync(requestDirectory).some((name) => {
       if (!name.endsWith('.json')) return false;
       try {
         return JSON.parse(readFileSync(join(requestDirectory, name), 'utf8')).operation ===
@@ -1338,11 +1258,11 @@ test('Windows proxy: stdin shutdown tombstones an in-flight close before exit', 
     wrapper.abandonRequest(closing.id);
     wrapper.child.stdin.end();
     await waitUntil(
-      () => readdirSync(requestDirectory).some((name) => name.endsWith('.cancelled')),
+      async () => readdirSync(requestDirectory).some((name) => name.endsWith('.cancelled')),
       'stdin shutdown did not publish a durable close tombstone',
     );
     await waitUntil(
-      () => (host.state.operationCalls.get('end_agent_operation') || 0) === endBefore + 1,
+      async () => ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) === endBefore + 1,
       'stdin shutdown did not settle end_agent_operation',
     );
     if (wrapper.child.exitCode == null && wrapper.child.signalCode == null) {
@@ -1351,7 +1271,7 @@ test('Windows proxy: stdin shutdown tombstones an in-flight close before exit', 
         sleep(10_000).then(() => { throw new Error('Windows wrapper did not exit promptly'); }),
       ]);
     }
-    assert.equal(host.state.operationCalls.get('close_tab') || 0, 0);
+    assert.equal((await host.snapshot()).operationCalls.get('close_tab') || 0, 0);
     assert.equal(JSON.parse(readFileSync(fixture.workspacePath, 'utf8')).tabs.length, 2);
   } catch (error) {
     fixture.primaryErrors = [error];
@@ -1361,19 +1281,90 @@ test('Windows proxy: stdin shutdown tombstones an in-flight close before exit', 
   }
 });
 
+test('Windows proxy: first workspace setup may outlive the mutation observer without dispatching a mutation', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const fixture = await makeFixture();
+  const host = await createFakeHost(fixture);
+  const wrapper = driveWrapper(fixture);
+  let settled = false;
+  let pending;
+  const startedAt = performance.now();
+  const stages = { prepareObservedMs: null, holdReturnedMs: null, releaseAcknowledgedMs: null };
+  const prepareObserver = observeBrowserPreparePhases(host, { enabled: true });
+  try {
+    await host.deferOperation('prepare', true);
+    pending = initializeWorkspace(wrapper, 'windows-first-workspace-setup-test').then(
+      response => { settled = true; return { response }; },
+      error => { settled = true; return { error }; },
+    );
+    const requests = join(fixture.root, 'host-requests');
+    await waitUntil(() => existsSync(requests) && readdirSync(requests).some(name => {
+      if (!name.endsWith('.json')) return false;
+      const raw = readPendingHostRequest(join(requests, name));
+      return raw !== null && JSON.parse(raw).operation === 'prepare';
+    }), 'initial setup did not publish prepare');
+    stages.prepareObservedMs = Math.round(performance.now() - startedAt);
+    const heldAt = performance.now();
+    console.error('[browser-prepare-observer]', JSON.stringify({ phase: 'prepare-seen' }));
+    await sleep(16_000);
+    console.error('[browser-prepare-observer]', JSON.stringify({
+      phase: 'prepare-release', held_ms: Math.round(performance.now() - heldAt),
+    }));
+    stages.holdReturnedMs = Math.round(performance.now() - startedAt);
+    assert.equal(settled, false, 'setup must not inherit the shorter mutation observer');
+    await host.deferOperation('prepare', false);
+    stages.releaseAcknowledgedMs = Math.round(performance.now() - startedAt);
+    const outcome = await pending;
+    assert.ifError(outcome.error);
+    assert.equal(outcome.response.result.structuredContent.pages[0].id, 1);
+    assert.equal((await host.snapshot()).operationCalls.get('create_tab') || 0, 0);
+    const diagnostic = host.diagnostic();
+    assert.deepEqual(Object.keys(diagnostic).sort(), ['ageMs', 'exited', 'inputRefreshReplies', 'phase', 'sequence']);
+    assert.equal(diagnostic.inputRefreshReplies, 0, 'read-only setup must not invent input renewals');
+    assert.ok(Number.isSafeInteger(diagnostic.sequence) && diagnostic.sequence > 0);
+    assert.ok(Number.isSafeInteger(diagnostic.ageMs) && diagnostic.ageMs >= 0);
+  } catch (error) {
+    // Keep failure evidence bounded and synthetic: elapsed times belong to this
+    // observer only; flags report fixed log markers, not a proven host cause.
+    // Never include raw stderr, session IDs, URLs or filesystem paths.
+    const stderr = wrapper.stderrText();
+    console.error('[browser-first-workspace-setup-diagnostic]', JSON.stringify({
+      ...stages,
+      elapsedMs: Math.round(performance.now() - startedAt),
+      prepareFailureReported: stderr.includes('On-demand WebView2 startup request failed:'),
+      prepareDeadlineReported: stderr.includes('On-demand WebView2 startup request failed: browser/host-request-timeout: prepare exceeded 25000ms'),
+      upstreamStartReported: stderr.includes('Starting chrome-devtools-mcp:'),
+      upstreamBoundReported: stderr.includes('Bound conversation browser page:'),
+    }));
+    // Read-only, bounded observations: never replace the original failure.
+    try {
+      prepareObserver.stop();
+      console.error('[browser-prepare-phase-observer]', JSON.stringify(prepareObserver.snapshot()));
+    } catch { /* diagnostic output must not replace the primary failure */ }
+    fixture.primaryErrors = [error];
+    throw error;
+  } finally {
+    prepareObserver.stop();
+    try { await host.deferOperation('prepare', false); }
+    catch (error) { (fixture.primaryErrors ||= []).push(error); }
+    await cleanupFixture(fixture, host, wrapper);
+    await pending;
+  }
+});
+
 test('Windows proxy: workspace recovery observes a prepare response beyond the driver default', {
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
   let settled = false;
   try {
-    await initializeWrapper(wrapper, 'windows-delayed-prepare-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-delayed-prepare-test');
     host.stopSessionA();
-    const before = host.state.prepareCalls;
-    host.state.deferredOperations.add('prepare');
+    const before = (await host.snapshot()).prepareCalls;
+    await host.deferOperation('prepare', true);
     const pending = wrapper.request('tools/call', {
       name: 'list_pages', arguments: {},
     }, WORKSPACE_RECOVERY_OBSERVATION_MS).then(
@@ -1381,7 +1372,7 @@ test('Windows proxy: workspace recovery observes a prepare response beyond the d
       error => { settled = true; return { error }; },
     );
     const requestDirectory = join(fixture.root, 'host-requests');
-    await waitUntil(() => readdirSync(requestDirectory).some(name => {
+    await waitUntil(async () => readdirSync(requestDirectory).some(name => {
       if (!name.endsWith('.json')) return false;
       const raw = readPendingHostRequest(join(requestDirectory, name));
       return raw !== null && JSON.parse(raw).operation === 'prepare';
@@ -1392,12 +1383,15 @@ test('Windows proxy: workspace recovery observes a prepare response beyond the d
       await sleep(16_000);
       assert.equal(settled, false, 'the observer must not terminate a valid in-flight prepare');
     } finally {
-      host.state.deferredOperations.delete('prepare');
+      await host.deferOperation('prepare', false);
     }
     const outcome = await pending;
     assert.ifError(outcome.error);
+    assert.equal(outcome.response?.error, undefined, JSON.stringify(heldRequestResultDiagnostic(outcome.response)));
+    assert.notEqual(outcome.response?.result?.isError, true, JSON.stringify(heldRequestResultDiagnostic(outcome.response)));
+    assert.ok(outcome.response?.result?.structuredContent?.pages, JSON.stringify(heldRequestResultDiagnostic(outcome.response)));
     assert.equal(outcome.response.result.structuredContent.pages[0].id, 2);
-    assert.equal(host.state.prepareCalls - before, 1);
+    assert.equal((await host.snapshot()).prepareCalls - before, 1);
     assert.equal(readAudit(fixture.auditPath).filter(entry => entry.kind === 'start').length, 1);
     assert.equal(existsSync(fixture.otherWorkspacePath), true);
     assert.equal(fixture.cdp.listening, true);
@@ -1405,7 +1399,8 @@ test('Windows proxy: workspace recovery observes a prepare response beyond the d
     fixture.primaryErrors = [error];
     throw error;
   } finally {
-    host.state.deferredOperations.delete('prepare');
+    try { await host.deferOperation('prepare', false); }
+    catch (error) { (fixture.primaryErrors ||= []).push(error); }
     await cleanupFixture(fixture, host, wrapper);
   }
 });
@@ -1414,26 +1409,26 @@ test('Windows proxy: held response observation exceeds fifteen seconds without a
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
   try {
-    await initializeWrapper(wrapper, 'windows-held-observer-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    await initializeWorkspace(wrapper, 'windows-held-observer-test');
     writeFileSync(fixture.modePath, JSON.stringify({ snapshotDelayMs: 15_500 }));
+    const beforeHostState = await host.snapshot();
     const before = {
-      begin: host.state.operationCalls.get('begin_agent_operation') || 0,
-      refresh: host.state.operationCalls.get('refresh_agent_operation') || 0,
-      input: host.state.operationCalls.get('refresh_agent_input') || 0,
-      end: host.state.operationCalls.get('end_agent_operation') || 0,
+      begin: beforeHostState.operationCalls.get('begin_agent_operation') || 0,
+      refresh: beforeHostState.operationCalls.get('refresh_agent_operation') || 0,
+      input: beforeHostState.operationCalls.get('refresh_agent_input') || 0,
+      end: beforeHostState.operationCalls.get('end_agent_operation') || 0,
     };
     const started = Date.now();
     const response = await requestHeldTool(wrapper, 'take_snapshot');
     assert.equal(response.result.content[0].text, 'snapshot');
     assert.ok(Date.now() - started >= 15_500, 'the real tool must outlive the default observer');
-    assert.equal((host.state.operationCalls.get('begin_agent_operation') || 0) - before.begin, 1);
-    assert.ok((host.state.operationCalls.get('refresh_agent_operation') || 0) - before.refresh >= 1);
-    assert.equal(host.state.operationCalls.get('refresh_agent_input') || 0, before.input);
-    assert.equal((host.state.operationCalls.get('end_agent_operation') || 0) - before.end, 1);
+    assert.equal(((await host.snapshot()).operationCalls.get('begin_agent_operation') || 0) - before.begin, 1);
+    assert.ok(((await host.snapshot()).operationCalls.get('refresh_agent_operation') || 0) - before.refresh >= 1);
+    assert.equal((await host.snapshot()).operationCalls.get('refresh_agent_input') || 0, before.input);
+    assert.equal(((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) - before.end, 1);
     const audit = readAudit(fixture.auditPath);
     assert.equal(audit.filter(entry => entry.kind === 'tool' && entry.name === 'take_snapshot').length, 1);
     assert.equal(audit.filter(entry => entry.kind === 'tool-complete' && entry.name === 'take_snapshot').length, 1);
@@ -1448,24 +1443,122 @@ test('Windows proxy: held response observation exceeds fifteen seconds without a
   }
 });
 
+test('Windows proxy: a paused observer cannot starve the independent host input refresh', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const fixture = await makeFixture();
+  const host = await createFakeHost(fixture);
+  const wrapper = driveWrapper(fixture);
+  const releasePath = ownedReleaseGate(fixture, 'paused-observer.release');
+  try {
+    await initializeWorkspace(wrapper, 'windows-paused-observer-test');
+    writeFileSync(fixture.modePath, JSON.stringify({ clickReleasePath: releasePath }));
+    const before = await host.snapshot();
+    const request = requestHeldTool(wrapper, 'click', { uid: 'pause-observer' });
+    // Keep an observer attached even if a barrier assertion fails first.
+    request.catch(() => {});
+    await waitUntil(async () => (await host.snapshot()).operationCalls.get('refresh_agent_input') >
+      (before.operationCalls.get('refresh_agent_input') || 0), 'first real input refresh did not arrive');
+    // A renewal interval includes the actual host-file round trip, not just
+    // the 250ms timer. Keep the >=1.1s stall, but end the synchronous barrier
+    // only after two real accepted replies instead of comparing wall clocks.
+    let observerTicked = false;
+    const pendingTick = setImmediate(() => { observerTicked = true; });
+    try {
+      const replies = host.waitForInputRefreshesWhileBlocked(2, { minBlockedMs: 1_100 });
+      assert.equal(observerTicked, false, 'the coordinator must stay synchronously blocked');
+      assert.ok(replies.blockedMs >= 1_100);
+      assert.ok(replies.after - replies.before >= 2, 'host must really answer renewals while the observer is blocked');
+      console.log('[browser-blocked-observer-witness]', JSON.stringify(replies));
+    } finally { clearImmediate(pendingTick); }
+    assert.equal(readAudit(fixture.auditPath).filter(entry => entry.kind === 'tool' && entry.name === 'click').length, 1);
+    writeFileSync(releasePath, 'release');
+    const response = await request;
+    assert.equal(response.error, undefined);
+    assert.equal(response.result.content[0].text, 'clicked');
+    assert.equal(response.result.isError, undefined);
+    assert.equal(readAudit(fixture.auditPath).filter(entry => entry.kind === 'cancel').length, 0,
+      'committed success must not conceal a failed authorization refresh during the pause');
+    const settled = await host.snapshot();
+    assert.equal((settled.operationCalls.get('begin_agent_operation') || 0) - (before.operationCalls.get('begin_agent_operation') || 0), 1);
+    assert.equal((settled.operationCalls.get('end_agent_operation') || 0) - (before.operationCalls.get('end_agent_operation') || 0), 1);
+    assert.equal(readAudit(fixture.auditPath).filter(entry => entry.kind === 'tool' && entry.name === 'click').length, 1);
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
+  } finally {
+    await cleanupFixture(fixture, host, wrapper);
+  }
+});
+
+test('Windows proxy: a genuinely withheld host refresh still fails closed without redispatch', {
+  skip: process.platform !== 'win32',
+}, async () => {
+  const fixture = await makeFixture();
+  const host = await createFakeHost(fixture);
+  const wrapper = driveWrapper(fixture);
+  const releasePath = ownedReleaseGate(fixture, 'withheld-refresh.release');
+  try {
+    await initializeWorkspace(wrapper, 'windows-withheld-host-refresh-test');
+    // ACK the host configuration before dispatch: this withholds real IPC
+    // responses, unlike freezeObservations, which still answers every request.
+    await host.deferOperation('refresh_agent_input', true);
+    writeFileSync(fixture.modePath, JSON.stringify({ clickReleasePath: releasePath, clickError: 'synthetic failed acknowledgement after authorization loss' }));
+    const before = await host.snapshot();
+    const request = requestHeldTool(wrapper, 'click', { uid: 'withhold-host-refresh' });
+    request.catch(() => {});
+    assert.throws(() => host.waitForInputRefreshesWhileBlocked(1, { timeoutMs: 1_000 }),
+      /blocked observer did not receive real input refresh replies/u,
+      'idle worker progress must not count as a successful authorization reply');
+    await waitUntil(() => readAudit(fixture.auditPath).some(entry => entry.kind === 'cancel'),
+      'withheld refresh must cause real upstream cancellation');
+    // The claimed upstream fails only after cancellation was observed. A
+    // committed upstream success is intentionally authoritative in production.
+    writeFileSync(releasePath, 'release');
+    const response = await request;
+    assert.equal(response.error, undefined);
+    assert.equal(response.result.isError, true);
+    const outcome = response.result.structuredContent;
+    assert.equal(outcome.errorCode, 'browser/action-commit-unknown-after-authorization-loss');
+    assert.equal(outcome.retryable, false);
+    assert.equal(outcome.actionMayHaveCommitted, true);
+    assert.equal(outcome.outcome, 'unknown');
+    assert.equal(outcome.authorizationError, 'browser/host-request-timeout: refresh_agent_input exceeded 400ms');
+    assert.equal(readAudit(fixture.auditPath).filter(entry => entry.kind === 'tool' && entry.name === 'click').length, 1);
+    const settled = await host.snapshot();
+    assert.equal(settled.operationCalls.get('refresh_agent_input') || 0, before.operationCalls.get('refresh_agent_input') || 0);
+    assert.equal((settled.operationCalls.get('end_agent_operation') || 0) - (before.operationCalls.get('end_agent_operation') || 0), 1);
+    await host.deferOperation('refresh_agent_input', false);
+    writeFileSync(fixture.modePath, '{}');
+    const next = await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+    assert.ok(next.result.structuredContent.pages.length > 0, 'a subsequent distinct read must remain usable');
+    assert.equal(readAudit(fixture.auditPath).filter(entry => entry.kind === 'tool' && entry.name === 'click').length, 1);
+  } catch (error) {
+    fixture.primaryErrors = [error];
+    throw error;
+  } finally {
+    await cleanupFixture(fixture, host, wrapper);
+  }
+});
+
 test('Windows proxy: same wrapper recovers A once after stop while B keeps shared CDP alive', {
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   const releaseAfterRefreshes = async ({ request, before, operation, count, releasePath }) => {
     try {
       await Promise.race([
         waitUntil(
-          () => (host.state.operationCalls.get(operation) || 0) - before.refresh >= count,
-          () => 'heartbeat barrier timed out: ' + JSON.stringify({
+          async () => ((await host.snapshot()).operationCalls.get(operation) || 0) - before.refresh >= count,
+          async () => 'heartbeat barrier timed out: ' + JSON.stringify({
             operation,
             expectedRefreshes: count,
-            observedRefreshes: (host.state.operationCalls.get(operation) || 0) - before.refresh,
-            hostError: host.state.failure?.message,
-            operations: host.state.operationTimeline.slice(before.log),
+            observedRefreshes: ((await host.snapshot()).operationCalls.get(operation) || 0) - before.refresh,
+            hostError: (await host.snapshot()).failure?.message,
+            operations: (await host.snapshot()).operationTimeline.slice(before.log),
             audit: readAudit(fixture.auditPath).slice(-20),
           }),
           // The wrapper shares the (often loaded) runner with this test and
@@ -1479,11 +1572,12 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
         ),
         request.then((response) => assert.fail(
           'tool completed before its release barrier: ' +
-          JSON.stringify(heldRequestResultDiagnostic(response)),
+          JSON.stringify({ ...heldRequestResultDiagnostic(response),
+            authorization: heldRequestAuthorizationDiagnostic(response) }),
         )),
       ]);
       assert.equal(
-        (host.state.operationCalls.get('end_agent_operation') || 0) - before.end,
+        ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) - before.end,
         0,
         'the operation must remain active while the tool waits for release',
       );
@@ -1500,9 +1594,9 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     const first = await wrapper.request('tools/call', {
       name: 'list_pages',
       arguments: {},
-    });
+    }, WORKSPACE_RECOVERY_OBSERVATION_MS);
     assert.equal(first.result.structuredContent.pages[0].id, 1);
-    assert.equal(host.state.prepareCalls, 1);
+    assert.equal((await host.snapshot()).prepareCalls, 1);
     assert.equal(readAudit(fixture.auditPath).filter((entry) => entry.kind === 'start').length, 1);
 
     // Closing A does not stop the app-owned CDP endpoint because B is still alive.
@@ -1514,24 +1608,24 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       arguments: {},
     }, WORKSPACE_RECOVERY_OBSERVATION_MS);
     assert.equal(recovered.result.structuredContent.pages[0].id, 2);
-    assert.equal(host.state.prepareCalls, 2, 'A is prepared exactly once after its workspace disappears');
+    assert.equal((await host.snapshot()).prepareCalls, 2, 'A is prepared exactly once after its workspace disappears');
     assert.equal(readAudit(fixture.auditPath).filter((entry) => entry.kind === 'start').length, 1, 'the MCP child remains the same process');
 
     // A failed recovery performs one prepare and one sync attempt, never an unbounded loop.
     host.stopSessionA();
-    host.state.preparePublishesWorkspace = false;
-    const beforeFailedRecovery = host.state.prepareCalls;
+    await host.setPreparePublishesWorkspace(false);
+    const beforeFailedRecovery = (await host.snapshot()).prepareCalls;
     const failedRecovery = await wrapper.request('tools/call', {
       name: 'list_pages',
       arguments: {},
     }, WORKSPACE_RECOVERY_OBSERVATION_MS);
     assert.match(failedRecovery.error.message, /^browser\/workspace-missing/);
-    assert.equal(host.state.prepareCalls - beforeFailedRecovery, 1);
+    assert.equal((await host.snapshot()).prepareCalls - beforeFailedRecovery, 1);
     await sleep(100);
-    assert.equal(host.state.prepareCalls - beforeFailedRecovery, 1);
+    assert.equal((await host.snapshot()).prepareCalls - beforeFailedRecovery, 1);
 
     // Failure keeps proxy routing enabled; the next distinct request may prepare once again.
-    host.state.preparePublishesWorkspace = true;
+    await host.setPreparePublishesWorkspace(true);
     const recoveredAgain = await wrapper.request('tools/call', {
       name: 'list_pages',
       arguments: {},
@@ -1542,13 +1636,14 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     // serial refresh also includes host-file round-trip time, so a fixed 1.6s
     // duration cannot guarantee four refreshes on a loaded Windows runner.
     // The bounded barrier must fail if the wrapper stops refreshing entirely.
-    const clickReleasePath = join(fixture.root, 'long-input.release');
+    const clickReleasePath = ownedReleaseGate(fixture, 'long-input.release');
     writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 1_600, clickReleasePath }));
+    const longInputBeforeHostState = await host.snapshot();
     const longInputBefore = {
-      begin: host.state.operationCalls.get('begin_agent_operation') || 0,
-      refresh: host.state.operationCalls.get('refresh_agent_input') || 0,
-      end: host.state.operationCalls.get('end_agent_operation') || 0,
-      log: host.state.operationLog.length,
+      begin: longInputBeforeHostState.operationCalls.get('begin_agent_operation') || 0,
+      refresh: longInputBeforeHostState.operationCalls.get('refresh_agent_input') || 0,
+      end: longInputBeforeHostState.operationCalls.get('end_agent_operation') || 0,
+      log: longInputBeforeHostState.operationLog.length,
       clicks: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
     };
@@ -1564,15 +1659,15 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     });
     assert.equal(longInput.result.content[0].text, 'clicked');
     assert.equal(
-      (host.state.operationCalls.get('begin_agent_operation') || 0) - longInputBefore.begin,
+      ((await host.snapshot()).operationCalls.get('begin_agent_operation') || 0) - longInputBefore.begin,
       1,
     );
     assert.ok(
-      (host.state.operationCalls.get('refresh_agent_input') || 0) - longInputBefore.refresh >= 4,
+      ((await host.snapshot()).operationCalls.get('refresh_agent_input') || 0) - longInputBefore.refresh >= 4,
       'a held input tool must receive multiple real heartbeat refreshes',
     );
     assert.equal(
-      (host.state.operationCalls.get('end_agent_operation') || 0) - longInputBefore.end,
+      ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) - longInputBefore.end,
       1,
     );
     assert.equal(
@@ -1582,16 +1677,16 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       1,
       'heartbeat must not redispatch the logical tool',
     );
-    const longInputOperations = host.state.operationLog.slice(longInputBefore.log);
+    const longInputOperations = (await host.snapshot()).operationLog.slice(longInputBefore.log);
     assert.ok(
       longInputOperations.lastIndexOf('refresh_agent_input') <
         longInputOperations.lastIndexOf('end_agent_operation'),
       'the in-flight heartbeat must settle before end_agent_operation',
     );
-    const refreshesAfterLongInput = host.state.operationCalls.get('refresh_agent_input') || 0;
+    const refreshesAfterLongInput = (await host.snapshot()).operationCalls.get('refresh_agent_input') || 0;
     await sleep(600);
     assert.equal(
-      host.state.operationCalls.get('refresh_agent_input') || 0,
+      (await host.snapshot()).operationCalls.get('refresh_agent_input') || 0,
       refreshesAfterLongInput,
       'no heartbeat may survive end_agent_operation',
     );
@@ -1599,14 +1694,15 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     // Slow non-input/DOM work uses the generic 5s operation heartbeat. It must
     // neither borrow the trusted-input suppression endpoint nor leave a timer
     // running after the host operation is ended.
-    const snapshotReleasePath = join(fixture.root, 'slow-snapshot.release');
+    const snapshotReleasePath = ownedReleaseGate(fixture, 'slow-snapshot.release');
     writeFileSync(fixture.modePath, JSON.stringify({ snapshotDelayMs: 5_500, snapshotReleasePath }));
+    const slowSnapshotBeforeHostState = await host.snapshot();
     const slowSnapshotBefore = {
-      begin: host.state.operationCalls.get('begin_agent_operation') || 0,
-      refresh: host.state.operationCalls.get('refresh_agent_operation') || 0,
-      inputRefresh: host.state.operationCalls.get('refresh_agent_input') || 0,
-      end: host.state.operationCalls.get('end_agent_operation') || 0,
-      log: host.state.operationLog.length,
+      begin: slowSnapshotBeforeHostState.operationCalls.get('begin_agent_operation') || 0,
+      refresh: slowSnapshotBeforeHostState.operationCalls.get('refresh_agent_operation') || 0,
+      inputRefresh: slowSnapshotBeforeHostState.operationCalls.get('refresh_agent_input') || 0,
+      end: slowSnapshotBeforeHostState.operationCalls.get('end_agent_operation') || 0,
+      log: slowSnapshotBeforeHostState.operationLog.length,
     };
     // 31s per-request ceiling sits just above the 30s heartbeat barrier:
     // the barrier, not the driver's 15s default, bounds a held request.
@@ -1620,34 +1716,34 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     });
     assert.equal(slowSnapshot.result.content[0].text, 'snapshot');
     assert.equal(
-      (host.state.operationCalls.get('begin_agent_operation') || 0) - slowSnapshotBefore.begin,
+      ((await host.snapshot()).operationCalls.get('begin_agent_operation') || 0) - slowSnapshotBefore.begin,
       1,
     );
     assert.ok(
-      (host.state.operationCalls.get('refresh_agent_operation') || 0) -
+      ((await host.snapshot()).operationCalls.get('refresh_agent_operation') || 0) -
         slowSnapshotBefore.refresh >= 1,
       'a slow non-input tool must refresh the generic operation lease',
     );
     assert.equal(
-      host.state.operationCalls.get('refresh_agent_input') || 0,
+      (await host.snapshot()).operationCalls.get('refresh_agent_input') || 0,
       slowSnapshotBefore.inputRefresh,
       'a non-input tool must not extend trusted-input suppression',
     );
     assert.equal(
-      (host.state.operationCalls.get('end_agent_operation') || 0) - slowSnapshotBefore.end,
+      ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) - slowSnapshotBefore.end,
       1,
     );
-    const slowSnapshotOperations = host.state.operationLog.slice(slowSnapshotBefore.log);
+    const slowSnapshotOperations = (await host.snapshot()).operationLog.slice(slowSnapshotBefore.log);
     assert.ok(
       slowSnapshotOperations.lastIndexOf('refresh_agent_operation') <
         slowSnapshotOperations.lastIndexOf('end_agent_operation'),
       'the generic heartbeat must settle before end_agent_operation',
     );
     const genericRefreshesAfterSnapshot =
-      host.state.operationCalls.get('refresh_agent_operation') || 0;
+      (await host.snapshot()).operationCalls.get('refresh_agent_operation') || 0;
     await sleep(5_200);
     assert.equal(
-      host.state.operationCalls.get('refresh_agent_operation') || 0,
+      (await host.snapshot()).operationCalls.get('refresh_agent_operation') || 0,
       genericRefreshesAfterSnapshot,
       'no generic heartbeat may survive end_agent_operation',
     );
@@ -1658,24 +1754,25 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     // authority here couples the observer regression to dozens of unrelated
     // 400ms host round trips. The separate slow-snapshot test above covers
     // the historical 15s ceiling without an active native-input lease.
-    const lateRecoveryReleasePath = join(fixture.root, 'late-recovery.release');
+    const lateRecoveryReleasePath = ownedReleaseGate(fixture, 'late-recovery.release');
     writeFileSync(
       fixture.modePath,
       JSON.stringify({ clickDelayMs: 1_600, clickReleasePath: lateRecoveryReleasePath }),
     );
+    const lateRecoveryBeforeHostState = await host.snapshot();
     const lateRecoveryBefore = {
-      begin: host.state.operationCalls.get('begin_agent_operation') || 0,
-      refresh: host.state.operationCalls.get('refresh_agent_input') || 0,
-      end: host.state.operationCalls.get('end_agent_operation') || 0,
-      log: host.state.operationLog.length,
+      begin: lateRecoveryBeforeHostState.operationCalls.get('begin_agent_operation') || 0,
+      refresh: lateRecoveryBeforeHostState.operationCalls.get('refresh_agent_input') || 0,
+      end: lateRecoveryBeforeHostState.operationCalls.get('end_agent_operation') || 0,
+      log: lateRecoveryBeforeHostState.operationLog.length,
       clicks: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
     };
+    await host.freezeObservations('refresh_agent_input', true);
     const lateRecoveryRequest = requestHeldTool(wrapper, 'click', { uid: 'late-heartbeat-button' });
-    host.state.deferredObservations.add('refresh_agent_input');
     await Promise.race([
       waitUntil(
-        () => host.state.pendingObservations
+        async () => (await host.snapshot()).pendingObservations
           .filter(operation => operation === 'refresh_agent_input').length >= 4,
         'four acknowledged input refreshes did not reach the frozen observation backlog',
         30_000,
@@ -1686,12 +1783,12 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       )),
     ]);
     assert.equal(
-      (host.state.operationCalls.get('refresh_agent_input') || 0) - lateRecoveryBefore.refresh,
+      ((await host.snapshot()).operationCalls.get('refresh_agent_input') || 0) - lateRecoveryBefore.refresh,
       0,
       'the fixture must really withhold every barrier-visible heartbeat during the stall',
     );
     // The real four-refresh backlog must cross the same release barrier.
-    host.state.deferredObservations.delete('refresh_agent_input');
+    await host.freezeObservations('refresh_agent_input', false);
     const lateRecovery = await releaseAfterRefreshes({
       request: lateRecoveryRequest,
       before: lateRecoveryBefore,
@@ -1701,15 +1798,15 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     });
     assert.equal(lateRecovery.result.content[0].text, 'clicked');
     assert.equal(
-      (host.state.operationCalls.get('begin_agent_operation') || 0) - lateRecoveryBefore.begin,
+      ((await host.snapshot()).operationCalls.get('begin_agent_operation') || 0) - lateRecoveryBefore.begin,
       1,
     );
     assert.ok(
-      (host.state.operationCalls.get('refresh_agent_input') || 0) - lateRecoveryBefore.refresh >= 4,
+      ((await host.snapshot()).operationCalls.get('refresh_agent_input') || 0) - lateRecoveryBefore.refresh >= 4,
       'the delayed heartbeat burst must still cross the four-refresh barrier',
     );
     assert.equal(
-      (host.state.operationCalls.get('end_agent_operation') || 0) - lateRecoveryBefore.end,
+      ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) - lateRecoveryBefore.end,
       1,
     );
     assert.equal(
@@ -1719,17 +1816,17 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       1,
       'a late heartbeat burst must not redispatch the logical tool',
     );
-    const lateRecoveryOperations = host.state.operationLog.slice(lateRecoveryBefore.log);
+    const lateRecoveryOperations = (await host.snapshot()).operationLog.slice(lateRecoveryBefore.log);
     assert.ok(
       lateRecoveryOperations.lastIndexOf('refresh_agent_input') <
         lateRecoveryOperations.lastIndexOf('end_agent_operation'),
       'the delayed in-flight heartbeat must settle before end_agent_operation',
     );
     const refreshesAfterLateRecovery =
-      host.state.operationCalls.get('refresh_agent_input') || 0;
+      (await host.snapshot()).operationCalls.get('refresh_agent_input') || 0;
     await sleep(600);
     assert.equal(
-      host.state.operationCalls.get('refresh_agent_input') || 0,
+      (await host.snapshot()).operationCalls.get('refresh_agent_input') || 0,
       refreshesAfterLateRecovery,
       'no delayed heartbeat may survive end_agent_operation',
     );
@@ -1740,42 +1837,53 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     // its authoritative result. This fake upstream deliberately ignores the
     // cancellation and commits, so the committed success must win; the logical
     // click is never invoked a second time.
-    host.state.operationErrors.set(
+    await host.setOperationError(
       'refresh_agent_input',
       'browser/agent-input-refresh-rejected: user takeover',
     );
+    const failedHeartbeatBeforeHostState = await host.snapshot();
     const failedHeartbeatBefore = {
-      begin: host.state.operationCalls.get('begin_agent_operation') || 0,
-      refresh: host.state.operationCalls.get('refresh_agent_input') || 0,
-      end: host.state.operationCalls.get('end_agent_operation') || 0,
+      begin: failedHeartbeatBeforeHostState.operationCalls.get('begin_agent_operation') || 0,
+      refresh: failedHeartbeatBeforeHostState.operationCalls.get('refresh_agent_input') || 0,
+      end: failedHeartbeatBeforeHostState.operationCalls.get('end_agent_operation') || 0,
       clicks: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
       cancellations: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'cancel').length,
       completed: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool-complete' && entry.name === 'click').length,
-      timeline: host.state.operationTimeline.length,
+      timeline: failedHeartbeatBeforeHostState.operationTimeline.length,
     };
-    const failedHeartbeatStartedAt = Date.now();
-    const failedHeartbeat = await wrapper.request('tools/call', {
-      name: 'click',
-      arguments: { uid: 'revoked-button' },
-    });
+    const failedHeartbeatRelease = ownedReleaseGate(fixture, 'rejected-heartbeat.release');
+    writeFileSync(fixture.modePath, JSON.stringify({ clickReleasePath: failedHeartbeatRelease }));
+    const failedHeartbeatRequest = requestHeldTool(wrapper, 'click', { uid: 'revoked-button' });
+    failedHeartbeatRequest.catch(() => {});
+    try {
+      await waitUntil(
+        async () => readAudit(fixture.auditPath).filter(entry => entry.kind === 'cancel').length ===
+          failedHeartbeatBefore.cancellations + 1,
+        'heartbeat failure did not cancel the claimed upstream request',
+      );
+      assert.equal(readAudit(fixture.auditPath)
+        .filter(entry => entry.kind === 'tool-complete' && entry.name === 'click').length,
+      failedHeartbeatBefore.completed, 'the upstream must stay held after cancellation');
+      assert.equal((await host.snapshot()).operationCalls.get('end_agent_operation') || 0,
+        failedHeartbeatBefore.end, 'host end must not precede the held upstream completion');
+    } finally {
+      writeFileSync(failedHeartbeatRelease, 'release');
+    }
+    const failedHeartbeat = await failedHeartbeatRequest;
     assert.equal(failedHeartbeat.result.content[0].text, 'clicked');
-    assert.ok(
-      Date.now() - failedHeartbeatStartedAt >= 1_400,
-      'heartbeat failure must wait for an upstream that ignores cancellation to really settle',
-    );
     assert.equal(
-      (host.state.operationCalls.get('begin_agent_operation') || 0) - failedHeartbeatBefore.begin,
+      ((await host.snapshot()).operationCalls.get('begin_agent_operation') || 0) - failedHeartbeatBefore.begin,
       1,
     );
     assert.equal(
-      (host.state.operationCalls.get('refresh_agent_input') || 0) - failedHeartbeatBefore.refresh,
+      ((await host.snapshot()).operationCalls.get('refresh_agent_input') || 0) - failedHeartbeatBefore.refresh,
       1,
     );
     assert.equal(
-      (host.state.operationCalls.get('end_agent_operation') || 0) - failedHeartbeatBefore.end,
+      ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) - failedHeartbeatBefore.end,
       1,
     );
     assert.equal(
@@ -1785,7 +1893,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       1,
     );
     await waitUntil(
-      () => readAudit(fixture.auditPath).filter((entry) => entry.kind === 'cancel').length ===
+      async () => readAudit(fixture.auditPath).filter((entry) => entry.kind === 'cancel').length ===
         failedHeartbeatBefore.cancellations + 1,
       'heartbeat failure did not cancel the claimed upstream request',
     );
@@ -1793,7 +1901,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     const completion = failedAudit
       .filter((entry) => entry.kind === 'tool-complete' && entry.name === 'click')
       .at(-1);
-    const end = host.state.operationTimeline
+    const end = (await host.snapshot()).operationTimeline
       .slice(failedHeartbeatBefore.timeline)
       .filter((entry) => entry.operation === 'end_agent_operation')
       .at(-1);
@@ -1802,32 +1910,36 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
         failedHeartbeatBefore.completed,
       1,
     );
-    assert.ok(completion && end && end.at >= completion.at, 'end must occur after real upstream completion');
-    const refreshesAfterFailure = host.state.operationCalls.get('refresh_agent_input') || 0;
+    assert.ok(completion && end && end.completedToolCounts.click >= failedHeartbeatBefore.completed + 1,
+      'end must observe real upstream completion: ' + JSON.stringify({ completion, end }));
+    const refreshesAfterFailure = (await host.snapshot()).operationCalls.get('refresh_agent_input') || 0;
     await sleep(600);
-    assert.equal(host.state.operationCalls.get('refresh_agent_input') || 0, refreshesAfterFailure);
-    host.state.operationErrors.delete('refresh_agent_input');
+    assert.equal((await host.snapshot()).operationCalls.get('refresh_agent_input') || 0, refreshesAfterFailure);
+    await host.clearOperationError('refresh_agent_input');
     writeFileSync(fixture.modePath, '{}');
 
     // An external MCP cancellation is also cooperative after begin. The
     // client abandons its response, but the wrapper must retain the internal
     // request until an upstream that ignores cancellation really completes;
     // only then may it end the Rust operation.
-    writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 1_600 }));
+    const externalCancelRelease = ownedReleaseGate(fixture, 'external-cancel.release');
+    writeFileSync(fixture.modePath, JSON.stringify({ clickReleasePath: externalCancelRelease }));
+    const externalCancelBeforeHostState = await host.snapshot();
     const externalCancelBefore = {
       clicks: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
       completed: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool-complete' && entry.name === 'click').length,
-      end: host.state.operationCalls.get('end_agent_operation') || 0,
-      timeline: host.state.operationTimeline.length,
+      end: externalCancelBeforeHostState.operationCalls.get('end_agent_operation') || 0,
+      timeline: externalCancelBeforeHostState.operationTimeline.length,
+      cancellations: readAudit(fixture.auditPath).filter(entry => entry.kind === 'cancel').length,
     };
     const cancelled = wrapper.startRequest('tools/call', {
       name: 'click',
       arguments: { uid: 'externally-cancelled-button' },
     });
     await waitUntil(
-      () => readAudit(fixture.auditPath)
+      async () => readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length ===
         externalCancelBefore.clicks + 1,
       'external cancellation fixture did not dispatch its one click',
@@ -1837,36 +1949,60 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       requestId: cancelled.id,
       reason: 'user cancelled the browser tool',
     });
+    try {
+      await waitUntil(
+        async () => readAudit(fixture.auditPath).filter(entry => entry.kind === 'cancel').length ===
+          externalCancelBefore.cancellations + 1,
+        'external cancellation did not reach the held upstream request',
+      );
+      assert.equal(readAudit(fixture.auditPath)
+        .filter(entry => entry.kind === 'tool-complete' && entry.name === 'click').length,
+      externalCancelBefore.completed, 'the cancelled upstream must remain held');
+      assert.equal((await host.snapshot()).operationCalls.get('end_agent_operation') || 0,
+        externalCancelBefore.end, 'host end must wait for real upstream completion');
+    } finally {
+      writeFileSync(externalCancelRelease, 'release');
+    }
     await waitUntil(
-      () => readAudit(fixture.auditPath)
+      async () => readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool-complete' && entry.name === 'click').length ===
         externalCancelBefore.completed + 1 &&
-        (host.state.operationCalls.get('end_agent_operation') || 0) === externalCancelBefore.end + 1,
-      'cancelled upstream completion and host end did not both settle',
+        ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) === externalCancelBefore.end + 1,
+      async () => JSON.stringify({
+        message: 'cancelled upstream completion and host end did not both settle',
+        expected: externalCancelBefore,
+        audit: readAudit(fixture.auditPath).filter(entry =>
+          ['tool', 'tool-complete', 'cancel'].includes(entry.kind)).slice(-12),
+        host: (await host.snapshot()).operationTimeline.slice(-12),
+        progress: host.diagnostic(),
+      }),
       5_000,
     );
     const externalCancelAudit = readAudit(fixture.auditPath);
     const externalCompletion = externalCancelAudit
       .filter((entry) => entry.kind === 'tool-complete' && entry.name === 'click')
       .at(-1);
-    const externalEnd = host.state.operationTimeline
+    const externalEnd = (await host.snapshot()).operationTimeline
       .slice(externalCancelBefore.timeline)
       .filter((entry) => entry.operation === 'end_agent_operation')
       .at(-1);
     assert.ok(
-      externalCompletion && externalEnd && externalCompletion.at <= externalEnd.at,
-      'external cancellation must not end the host operation before upstream completion',
+      externalCompletion && externalEnd
+        && externalEnd.completedToolCounts.click >= externalCancelBefore.completed + 1,
+      'external cancellation must observe upstream completion before host end: '
+        + JSON.stringify({ completion: externalCompletion, end: externalEnd }),
     );
     writeFileSync(fixture.modePath, '{}');
 
     // The upstream click has committed before host cleanup begins. A failed
     // end transport must therefore keep the successful result and only emit a
     // diagnostic; returning a normal tool error could make the Agent replay it.
-    host.state.operationErrors.set('end_agent_operation', 'browser/end-cleanup-failed');
+    await host.setOperationError('end_agent_operation', 'browser/end-cleanup-failed');
+    const committedBeforeHostState = await host.snapshot();
     const committedBefore = {
-      prepare: host.state.prepareCalls,
-      begin: host.state.operationCalls.get('begin_agent_operation') || 0,
-      end: host.state.operationCalls.get('end_agent_operation') || 0,
+      prepare: committedBeforeHostState.prepareCalls,
+      begin: committedBeforeHostState.operationCalls.get('begin_agent_operation') || 0,
+      end: committedBeforeHostState.operationCalls.get('end_agent_operation') || 0,
       clicks: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
     };
@@ -1875,13 +2011,13 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       arguments: { uid: 'committed-before-end-failure' },
     });
     assert.equal(committedDespiteEndFailure.result.content[0].text, 'clicked');
-    assert.equal(host.state.prepareCalls, committedBefore.prepare);
+    assert.equal((await host.snapshot()).prepareCalls, committedBefore.prepare);
     assert.equal(
-      (host.state.operationCalls.get('begin_agent_operation') || 0) - committedBefore.begin,
+      ((await host.snapshot()).operationCalls.get('begin_agent_operation') || 0) - committedBefore.begin,
       1,
     );
     assert.equal(
-      (host.state.operationCalls.get('end_agent_operation') || 0) - committedBefore.end,
+      ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) - committedBefore.end,
       1,
     );
     assert.equal(
@@ -1895,7 +2031,7 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       wrapper.stderrText(),
       /end_agent_operation cleanup failed after committed tool result: browser\/end-cleanup-failed/,
     );
-    host.state.operationErrors.delete('end_agent_operation');
+    await host.clearOperationError('end_agent_operation');
 
     const assertNoLifecycleRetry = async ({
       operation,
@@ -1904,11 +2040,11 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       expectedClickDelta = 0,
       expectedMutationUnknown = false,
     }) => {
-      const beforePrepare = host.state.prepareCalls;
-      const beforeOperation = host.state.operationCalls.get(operation) || 0;
+      const beforePrepare = (await host.snapshot()).prepareCalls;
+      const beforeOperation = (await host.snapshot()).operationCalls.get(operation) || 0;
       const beforeClicks = readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length;
-      configure();
+      await configure();
       const response = await wrapper.request('tools/call', {
         name: 'click',
         arguments: { uid: 'button-1' },
@@ -1925,8 +2061,8 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
       } else {
         assert.equal(response.error.message, error);
       }
-      assert.equal(host.state.prepareCalls, beforePrepare, `${error} must not trigger prepare`);
-      assert.equal((host.state.operationCalls.get(operation) || 0) - beforeOperation, 1);
+      assert.equal((await host.snapshot()).prepareCalls, beforePrepare, `${error} must not trigger prepare`);
+      assert.equal(((await host.snapshot()).operationCalls.get(operation) || 0) - beforeOperation, 1);
       const afterClicks = readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length;
       assert.equal(afterClicks - beforeClicks, expectedClickDelta);
@@ -1935,16 +2071,16 @@ test('Windows proxy: same wrapper recovers A once after stop while B keeps share
     await assertNoLifecycleRetry({
       operation: 'activate_tab',
       error: 'browser/user-takeover',
-      configure: () => host.state.operationErrors.set('activate_tab', 'browser/user-takeover'),
+      configure: () => host.setOperationError('activate_tab', 'browser/user-takeover'),
     });
-    host.state.operationErrors.delete('activate_tab');
+    await host.clearOperationError('activate_tab');
 
     await assertNoLifecycleRetry({
       operation: 'begin_agent_operation',
       error: 'browser/native-surface-missing',
-      configure: () => host.state.operationErrors.set('begin_agent_operation', 'browser/native-surface-missing'),
+      configure: () => host.setOperationError('begin_agent_operation', 'browser/native-surface-missing'),
     });
-    host.state.operationErrors.delete('begin_agent_operation');
+    await host.clearOperationError('begin_agent_operation');
 
     await assertNoLifecycleRetry({
       operation: 'begin_agent_operation',
@@ -1965,17 +2101,16 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
+  const host = await createFakeHost(fixture);
   const wrapper = driveWrapper(fixture);
 
   try {
-    await initializeWrapper(wrapper, 'windows-upstream-crash-test');
-    await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
-
-    writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 5_000 }));
+    writeFileSync(fixture.modePath, JSON.stringify({ crashOnClick: true }));
+    await initializeWorkspace(wrapper, 'windows-upstream-crash-test');
+    const beforeHostState = await host.snapshot();
     const before = {
-      begin: host.state.operationCalls.get('begin_agent_operation') || 0,
-      end: host.state.operationCalls.get('end_agent_operation') || 0,
+      begin: beforeHostState.operationCalls.get('begin_agent_operation') || 0,
+      end: beforeHostState.operationCalls.get('end_agent_operation') || 0,
       clicks: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
     };
@@ -1983,35 +2118,34 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
       name: 'click',
       arguments: { uid: 'crash-during-dispatch' },
     });
-    await waitUntil(
-      () => readAudit(fixture.auditPath)
-        .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length ===
-        before.clicks + 1,
-      'crash fixture did not dispatch its click',
-    );
-    const upstreamPid = readAudit(fixture.auditPath)
+    const outcome = await inFlight.response;
+    const audit = readAudit(fixture.auditPath);
+    assert.equal(audit.filter((entry) => entry.kind === 'tool' && entry.name === 'click').length, before.clicks + 1);
+    const upstreamPid = audit
       .filter((entry) => entry.kind === 'start')
       .at(-1)?.pid;
     assert.ok(Number.isInteger(upstreamPid), 'fake upstream pid is missing');
-    process.kill(upstreamPid, 'SIGKILL');
-
-    const outcome = await inFlight.response;
+    const crash = audit.filter((entry) => entry.kind === 'crash-injected');
+    assert.equal(crash.length, 1, 'the receiver must inject exactly one real crash');
+    assert.equal(crash[0].pid, upstreamPid);
+    assert.equal(crash[0].name, 'click');
+    assert.equal(audit.filter((entry) => entry.kind === 'tool-complete' && entry.name === 'click').length, 0);
     assert.equal(
       outcome.result.structuredContent.errorCode,
       'browser/action-commit-unknown-after-upstream-interruption',
     );
     assert.equal(outcome.result.structuredContent.retryable, false);
     await waitUntil(
-      () => (host.state.operationCalls.get('end_agent_operation') || 0) === before.end + 1,
+      async () => ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) === before.end + 1,
       'upstream crash did not end the claimed host operation',
       5_000,
     );
     assert.equal(
-      (host.state.operationCalls.get('begin_agent_operation') || 0) - before.begin,
+      ((await host.snapshot()).operationCalls.get('begin_agent_operation') || 0) - before.begin,
       1,
     );
     assert.equal(
-      (host.state.operationCalls.get('end_agent_operation') || 0) - before.end,
+      ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) - before.end,
       1,
     );
     if (wrapper.child.exitCode == null && wrapper.child.signalCode == null) {
@@ -2028,12 +2162,14 @@ test('Windows proxy: upstream crash settles the claimed dispatch before wrapper 
   }
 });
 
-test('Windows proxy: cancelled uncooperative dispatch shuts down on the first deadline and rejects queued work', {
+for (const withholdEndReply of [false, true]) {
+test('Windows proxy: cancelled uncooperative dispatch shuts down on the first deadline and rejects queued work'
+  + (withholdEndReply ? ' while the host end reply is withheld' : ''), {
   skip: process.platform !== 'win32',
 }, async () => {
   const fixture = await makeFixture();
-  const host = createFakeHost(fixture);
-  const wrapper = driveWrapper(fixture);
+  const host = await createFakeHost(fixture);
+  const wrapper = driveWrapper(fixture, { collectResponses: withholdEndReply });
   let replacement = null;
   // In this fixture the first tool call includes lazy startup. Allow for a
   // slow handshake followed by a slow post-bind catalog response. The
@@ -2048,9 +2184,15 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
     });
     assert.equal(initial.result?.structuredContent?.pages?.length, 1);
 
-    writeFileSync(fixture.modePath, JSON.stringify({ clickDelayMs: 30_000 }));
+    // Hold the claimed action until shutdown, even if observing its dispatch
+    // is delayed. A wall-clock delay alone may expire before cancellation.
+    writeFileSync(fixture.modePath, JSON.stringify({
+      clickDelayMs: 30_000,
+      clickReleasePath: join(fixture.root, 'cancel-shutdown-never-release'),
+    }));
+    const beforeHostState = await host.snapshot();
     const before = {
-      end: host.state.operationCalls.get('end_agent_operation') || 0,
+      end: beforeHostState.operationCalls.get('end_agent_operation') || 0,
       clicks: readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length,
     };
@@ -2059,7 +2201,7 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
       arguments: { uid: 'cancel-shutdown-button' },
     });
     await waitUntil(
-      () => readAudit(fixture.auditPath)
+      async () => readAudit(fixture.auditPath)
         .filter((entry) => entry.kind === 'tool' && entry.name === 'click').length ===
         before.clicks + 1,
       'cancel shutdown fixture did not dispatch its click',
@@ -2067,20 +2209,47 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
     const listsBeforeQueued = readAudit(fixture.auditPath)
       .filter((entry) => entry.kind === 'tool' && entry.name === 'list_pages').length;
 
+    if (withholdEndReply) await host.deferOperation('end_agent_operation', true);
     wrapper.abandonRequest(inFlight.id);
     const cancelledAt = Date.now();
     wrapper.notify('notifications/cancelled', {
       requestId: inFlight.id,
       reason: 'cancel uncooperative dispatch',
     });
-    const queuedOutcome = await wrapper.request('tools/call', {
+    const queued = wrapper.startRequest('tools/call', {
       name: 'list_pages',
       arguments: {},
     }, {
       label: 'queued list_pages awaiting shutdown rejection',
     });
+    let cancelledQueued = null;
+    if (withholdEndReply) {
+      cancelledQueued = wrapper.startRequest('tools/call', { name: 'list_pages', arguments: {} });
+      wrapper.abandonRequest(cancelledQueued.id);
+      wrapper.notify('notifications/cancelled', { requestId: cancelledQueued.id });
+    }
+    const queuedOutcome = await queued.response;
     const rejectedAt = Date.now();
-    assert.match(queuedOutcome.error?.message || '', /browser\/wrapper-shutting-down/);
+    assert.match(queuedOutcome.error?.message || '', /browser\/wrapper-shutting-down/,
+      JSON.stringify(heldRequestResultDiagnostic(queuedOutcome)));
+
+    if (withholdEndReply) {
+      // Observe the real End request, keeping its reply withheld. A queued
+      // rejection must not wait for this separate cleanup acknowledgement.
+      const directory = join(fixture.root, 'host-requests');
+      await waitUntil(async () => readdirSync(directory).some(name => {
+        if (!name.endsWith('.json')) return false;
+        const raw = readPendingHostRequest(join(directory, name));
+        return raw != null && JSON.parse(raw).operation === 'end_agent_operation';
+      }), 'cancelled dispatch did not publish its exact host End request');
+      assert.equal((await host.snapshot()).operationCalls.get('end_agent_operation') || 0,
+        before.end, 'withheld End must not be reported as acknowledged');
+      assert.equal(wrapper.child.exitCode, null, 'wrapper must retain its host cleanup barrier');
+      assert.equal(wrapper.child.signalCode, null, 'wrapper must remain live until host cleanup');
+      const late = await wrapper.request('tools/call', { name: 'list_pages', arguments: {} });
+      assert.match(late.error?.message || '', /browser\/wrapper-shutting-down/);
+      await host.deferOperation('end_agent_operation', false);
+    }
 
     if (wrapper.child.exitCode == null && wrapper.child.signalCode == null) {
       await Promise.race([
@@ -2089,6 +2258,12 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
       ]);
     }
     const shutdownElapsedMs = rejectedAt - cancelledAt;
+    if (withholdEndReply) {
+      assert.equal(wrapper.responses.filter(response => response.id === queued.id).length, 1,
+        'queue draining must not respond again after host End');
+      assert.equal(wrapper.responses.filter(response => response.id === cancelledQueued.id).length, 0,
+        'cancelled queued work must remain abandoned');
+    }
     // Reject delivery that takes a full additional 5s grace window even if
     // the response arrives within the driver's 15s observation budget.
     assert.ok(
@@ -2096,7 +2271,7 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
       `cooperative cancel shutdown did not reject queued work on its single first deadline: ${shutdownElapsedMs}ms`,
     );
     assert.equal(
-      (host.state.operationCalls.get('end_agent_operation') || 0) - before.end,
+      ((await host.snapshot()).operationCalls.get('end_agent_operation') || 0) - before.end,
       1,
       'cancelled claimed dispatch must end its exact host operation once',
     );
@@ -2128,6 +2303,11 @@ test('Windows proxy: cancelled uncooperative dispatch shuts down on the first de
     fixture.primaryErrors = [error];
     throw error;
   } finally {
-    await cleanupFixture(fixture, host, wrapper, replacement);
+    try {
+      if (withholdEndReply) await host.deferOperation('end_agent_operation', false);
+    } finally {
+      await cleanupFixture(fixture, host, wrapper, replacement);
+    }
   }
 });
+}

@@ -915,6 +915,7 @@ test('bridge feature gates every desktop call behind the Windows capability', ()
     'desktop_remote_proxy_archive', 'desktop_remote_proxy_archive_candidates', 'desktop_remote_proxy_archive_list',
     'desktop_remote_proxy_history_delete', 'desktop_remote_proxy_history_list',
     'desktop_remote_proxy_history_read', 'desktop_remote_proxy_load_status', 'desktop_remote_proxy_open_live', 'desktop_remote_proxy_quarantine',
+    'desktop_remote_proxy_recover',
     'desktop_remote_set_endpoint_profile',
     'desktop_remote_task_abandon_prepared_a', 'desktop_remote_task_cancel_a',
     'desktop_remote_task_commit_a', 'desktop_remote_task_reserve_a',
@@ -1287,4 +1288,20 @@ test('remote proxy load status accepts only bounded categories', async () => {
     await assert.rejects(bridge.getRemoteProxyLoadStatus(), error =>
       error.code === 'remote_proxy_projection_invalid');
   }
+});
+
+
+test('controlled status metadata cannot install a second workspace authority', () => {
+  let state = logic.createState();
+  assert.equal(Object.hasOwn(state.controlledDevice, 'workspaces'), false);
+  state = logic.applyControlledStatus(state, {
+    ...fixtures.controlledWaiting, workspaces: [{ id: 'untrusted-status-entry' }],
+  });
+  assert.equal(state.controlledDevice.workspaceCount, 1);
+  assert.equal(state.controlledDevice.codeModeAllowed, true);
+  assert.equal(Object.hasOwn(state.controlledDevice, 'workspaces'), false);
+  state = logic.applyControlledStatus(state, fixtures.controlledError);
+  assert.equal(state.controlledDevice.codeModeAllowed, false);
+  assert.equal(state.controlledDevice.workspaceCount, 0);
+  assert.equal(Object.hasOwn(state.controlledDevice, 'workspaces'), false);
 });

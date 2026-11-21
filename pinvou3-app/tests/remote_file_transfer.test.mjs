@@ -18,9 +18,13 @@ function file(name, content, type = 'text/plain') {
 // Validation consumes File metadata before reading or uploading any bytes.
 // These fixtures exercise that public validator boundary, not file transfer.
 const metadataFile = size => ({ name: 'boundary.bin', type: 'application/octet-stream', size });
+// The per-file cap is the mirrored shared ingest cap (community PR #894
+// raised it 20 -> 50 MiB); derive the boundary fixtures from it so a future
+// bump cannot leave these pins testing a stale bound.
+const CAP = globalThis.PinvouChunkedFileUpload.MAX_FILE_BYTES;
 
-test('remote attachment validation accepts exactly 20 MiB in one file', () => {
-  const selected = [metadataFile(20 * 1024 * 1024)];
+test('remote attachment validation accepts exactly the per-file cap in one file', () => {
+  const selected = [metadataFile(CAP)];
   assert.deepEqual(validateRemoteFiles(selected), selected);
 });
 
@@ -38,10 +42,10 @@ test('attachment size limit stays aligned with the Rust receiver and localized m
   }
 });
 
-test('32 MiB and 32 MiB plus one uploads are rejected before file read or remote begin', async () => {
+test('over-cap uploads are rejected before file read or remote begin', async () => {
   let read = false;
   let begun = false;
-  for (const size of [32 * 1024 * 1024, 32 * 1024 * 1024 + 1]) {
+  for (const size of [CAP + 1, CAP + 2]) {
     const oversized = { ...metadataFile(size), arrayBuffer: async () => { read = true; } };
     await assert.rejects(uploadRemoteFiles({ attachmentBegin: async () => { begun = true; } },
       { localSessionId: 'local', remoteRef: 'ref' }, 'task', [oversized]), /remote_attachment_size_invalid/);
@@ -272,8 +276,8 @@ test('unknown batches cannot exhaust capacity after a verified lease change', as
   retireCompletedRemoteUpload('owner-new', binding, 'fresh-task');
 });
 
-test('remote attachment validation rejects 20 MiB plus one byte in one file', () => {
-  assert.throws(() => validateRemoteFiles([metadataFile(20 * 1024 * 1024 + 1)]),
+test('remote attachment validation rejects cap plus one byte in one file', () => {
+  assert.throws(() => validateRemoteFiles([metadataFile(CAP + 1)]),
     /remote_attachment_size_invalid/);
 });
 
@@ -282,7 +286,7 @@ test('oversized file in a batch is rejected before any file is read or uploaded'
   let begins = 0;
   const selected = [
     { ...metadataFile(1), arrayBuffer: async () => { reads += 1; return new ArrayBuffer(1); } },
-    { ...metadataFile(20 * 1024 * 1024 + 1), arrayBuffer: async () => { reads += 1; return new ArrayBuffer(1); } },
+    { ...metadataFile(CAP + 1), arrayBuffer: async () => { reads += 1; return new ArrayBuffer(1); } },
   ];
   await assert.rejects(uploadRemoteFiles({ attachmentBegin: async () => { begins += 1; } },
     { localSessionId: 'local', remoteRef: 'remote' }, 'task', selected), /remote_attachment_size_invalid/);
@@ -344,6 +348,7 @@ test('remote attachment upload hashes bytes and commits only B-confirmed transfe
 });
 
 test('artifact download preserves ordered chunks and aborts malformed progress', async () => {
+  const cleanups = [];
   const api = {
     artifactDownloadBegin: async () => ({ transferId: 'download-1', chunkBytes: 2, totalBytes: 5 }),
     artifactDownloadChunk: async (_local, _remote, _task, _artifact, _transfer, index) => ({
@@ -354,13 +359,14 @@ test('artifact download preserves ordered chunks and aborts malformed progress',
       nextChunk: index + 1,
       completed: index === 2,
     }),
-    artifactDownloadAbort: async () => assert.fail('valid download must not abort'),
+    artifactDownloadAbort: async (...args) => { cleanups.push(args); },
   };
   const blob = await downloadRemoteArtifact(api, { localSessionId: 'remote-one', remoteRef: 'ref-one' }, {
     taskId: 'task-1', artifactId: 'artifact-1', mimeType: 'text/plain', displayName: 'hello.txt',
     sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
   });
   assert.equal(await blob.text(), 'hello');
+  assert.deepEqual(cleanups, [['remote-one', 'ref-one', 'task-1', 'artifact-1', 'download-1']]);
   assert.throws(() => validateRemoteFiles([]), /remote_attachment_count_invalid/);
 });
 
@@ -380,6 +386,25 @@ test('downloads enforce their independent 32 MiB bound and abort on violation', 
     /remote_artifact_size_limit/,
   );
   assert.equal(aborts, 1);
+});
+
+test('verified download survives cleanup response loss and digest failure retires its receipt', async () => {
+  let cleanups = 0;
+  const api = {
+    artifactDownloadBegin: async () => ({ transferId: 'download-1', chunkBytes: 5, totalBytes: 5 }),
+    artifactDownloadChunk: async () => ({ chunkIndex: 0, chunkB64: Buffer.from('hello').toString('base64'),
+      chunkBytes: 5, receivedBytes: 5, nextChunk: 1, completed: true }),
+    artifactDownloadAbort: async () => { cleanups++; throw Object.assign(new Error('result_unknown'), { code: 'result_unknown' }); },
+  };
+  const binding = { localSessionId: 'remote-one', remoteRef: 'ref-one' };
+  const artifact = { taskId: 'task-1', artifactId: 'artifact-1', mimeType: 'text/plain',
+    sha256: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824' };
+  assert.equal(await (await downloadRemoteArtifact(api, binding, artifact)).text(), 'hello');
+  assert.equal(cleanups, 1);
+  await assert.rejects(downloadRemoteArtifact(api, binding, { ...artifact, sha256: 'a'.repeat(64) }), /remote_artifact_checksum_mismatch/);
+  assert.equal(cleanups, 2);
+  assert.equal(await (await downloadRemoteArtifact(api, binding, artifact)).text(), 'hello');
+  assert.equal(cleanups, 3);
 });
 
 test('a download whose chunks exceed the declared total stops before unbounded growth', async () => {

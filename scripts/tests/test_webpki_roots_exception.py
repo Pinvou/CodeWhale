@@ -302,7 +302,8 @@ class WebpkiCiContractTests(unittest.TestCase):
             run = re.search(r'        run: \|\n((?:          [^\n]*\n|\n)*)', scan)
             self.assertIsNotNone(run)
             commands = [line.strip() for line in run[1].splitlines() if line.strip()]
-            self.assertEqual(commands, [guard, deny], "guard must succeed before the locked scan in the same step")
+            chrono_guard = guard.replace('guard-webpki-roots-exception.py', 'guard-chrono-maintenance-exception.py')
+            self.assertEqual(commands, [guard, chrono_guard, deny], "both guards must succeed before the locked scan in the same step")
             self.assertEqual(re.findall(r'^        shell: (.*)$', scan, re.M), ['bash'],
                              'pin the built-in fail-fast shell above job/workflow defaults')
             self.assertEqual(re.findall(r'^        working-directory: (.*)$', scan, re.M),
@@ -329,15 +330,48 @@ class WebpkiCiContractTests(unittest.TestCase):
         # Explicitly review each diagnostic-only entry. More uploads do not add
         # a Rust policy consumer, but neither an unknown entry nor a new action
         # version may silently inherit this review.
+        # Frontend setup is functional transport: only its first upload may
+        # fail provisionally, so the existing retry and strict reducer can run.
+        # The retry and every other setup step remain blocking. The separate
+        # CI policy suite checks the complete transport/outcome truth table.
+        functional = [('frontend-setup', 'Upload frontend setup bundle'),
+                      # One overwrite retry remains functional, not diagnostic.
+                      ('frontend-setup', 'Upload frontend setup bundle (retry)')]
         reviewed = [('required-gate', 'PR test success proof transport'),
+                    ('fast-gate', 'Gate test resource lifecycle receipts'),
                     ('frontend-test', 'Test resource lifecycle receipts'),
                     ('frontend-browser-test', 'Browser shard resource lifecycle receipts'),
                     ('account-financial-test', 'Financial group lifecycle receipts'),
                     ('account-platform-test', 'Account test resource lifecycle receipts'),
                     ('account-closure-test', 'Account closure resource lifecycle receipts'),
                     ('windows-codex-runtime-test', 'Preserve browser fixture exit receipts'),
-                    ('windows-codex-runtime-test', 'Preserve ACP fixture exit receipt')]
-        self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed))
+                    ('windows-codex-runtime-test', 'Preserve ACP fixture exit receipt'),
+                    ('windows-runtime-test', '上传 Windows runtime 资源收据'),
+                    ('windows-rust-test', 'Windows atomic lifecycle receipts'),
+                    ('windows-relay-tools-test', 'Preserve Windows relay tools process receipt'),
+                    ('release-contract-test', 'Preserve Windows release contract process receipts'),
+                    ('relay-test', '保留 Relay 进程作用域原始回执')]
+        self.assertEqual(workflow.count('uses: actions/upload-artifact@v7'), len(reviewed) + len(functional))
+        for job, name in functional:
+            steps = job_block(workflow, job).split('\n      - ')
+            entries = [step for step in steps if step.startswith(f'name: {name}\n')]
+            self.assertEqual(len(entries), 1)
+            self.assertIn('uses: actions/upload-artifact@v7\n', entries[0])
+            self.assertIn('retention-days: 1\n', entries[0])
+            if name == 'Upload frontend setup bundle':
+                self.assertIn('        id: frontend_setup_upload\n', entries[0])
+                self.assertEqual(re.findall(r'^        continue-on-error: (.*)$', entries[0], re.M), ['true'])
+            else:
+                self.assertNotIn('continue-on-error', entries[0])
+        setup = job_block(workflow, 'frontend-setup')
+        self.assertNotRegex(setup, r'(?m)^    continue-on-error:')
+        for step in setup.split('\n      - ')[1:]:
+            if not step.startswith('name: Upload frontend setup bundle\n'):
+                self.assertNotIn('continue-on-error', step)
+        reducers = [step for step in setup.split('\n      - ')
+                    if step.startswith('name: Require frontend setup bundle upload\n')]
+        self.assertEqual(len(reducers), 1)
+        self.assertIn('        if: ${{ always() && !cancelled() }}\n', reducers[0])
         for job, name in reviewed:
             steps = job_block(workflow, job).split('\n      - ')
             entries = [step for step in steps if step.startswith(f'name: {name}\n')]
@@ -346,31 +380,101 @@ class WebpkiCiContractTests(unittest.TestCase):
             self.assertIn(f"retention-days: {2 if job == 'required-gate' else 7}\n", entries[0])
             self.assertIn('        timeout-minutes: 3\n', entries[0])
             self.assertIn('        continue-on-error: true\n', entries[0])
+            if job == 'fast-gate':
+                diagnostic = '\n'.join(line for line in entries[0].splitlines()
+                                       if line.strip() and not line.lstrip().startswith('#'))
+                self.assertEqual(diagnostic, '\n'.join([
+                    'name: Gate test resource lifecycle receipts',
+                    "        if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}",
+                    '        timeout-minutes: 3',
+                    '        continue-on-error: true',
+                    '        uses: actions/upload-artifact@v7',
+                    '        env:',
+                    '          NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}',
+                    '          PATH: ${{ env.PINVOU_CI_NETWORK_PATH }}',
+                    "          PINVOU_CI_ARTIFACT_DIAGNOSTICS: '1'",
+                    '        with:',
+                    '          name: gate-resource-lifecycle-${{ github.run_attempt }}',
+                    '          path: ${{ env.PINVOU_CI_RESOURCE_LEDGER }}/',
+                    '          if-no-files-found: error',
+                    '          retention-days: 7',
+                ]))
         # Only diagnostic transport may be non-blocking. In particular, a
         # failed test or an unconfirmed cleanup must still fail its job even
         # when artifact storage is unavailable.
         for job in {job for job, _ in reviewed}:
             block = job_block(workflow, job)
             self.assertNotRegex(block, r'(?m)^    continue-on-error:')
-            for step in block.split('\n      - ')[1:]:
+            steps = block.split('\n      - ')[1:]
+            for index, step in enumerate(steps):
+                if ('\n        continue-on-error:' in step
+                        and '        run: node scripts/ci-network-node-options.cjs' in step):
+                    # The paired diagnostic upload already permits failure;
+                    # its bounded preparation must preserve that exact policy.
+                    # No business/test/cleanup step inherits this exception.
+                    target = steps[index + 1] if index + 1 < len(steps) else ''
+                    self.assertTrue(any(job == owner and target.startswith(f'name: {name}\n')
+                                        for owner, name in reviewed))
+                    self.assertIn('        uses: actions/upload-artifact@v7\n', target)
+                    self.assertIn('        continue-on-error: true\n', target)
+                    condition = re.findall(r'^        if: (.*)$', target, re.M)
+                    self.assertEqual(len(condition), 1)
+                    lines = [line for line in step.splitlines()
+                             if line.strip() and not line.lstrip().startswith('#')]
+                    self.assertRegex(lines[0], r'^name: Prepare CI transfer runtime \([0-9]+\)$')
+                    self.assertEqual(lines[1:], [
+                        '        if: ' + condition[0],
+                        '        continue-on-error: true',
+                        '        timeout-minutes: 1',
+                        '        working-directory: ${{ github.workspace }}',
+                        '        run: node scripts/ci-network-node-options.cjs',
+                    ])
+                    continue
+                if job == 'windows-rust-test' and step.startswith('name: Windows 测试二进制导入诊断\n'):
+                    diagnostic = '\n'.join(line for line in step.splitlines()
+                                           if line.strip() and not line.lstrip().startswith('#'))
+                    self.assertEqual(diagnostic, '\n'.join([
+                        'name: Windows 测试二进制导入诊断',
+                        "        if: ${{ matrix.phase == 'regression' }}",
+                        '        continue-on-error: true',
+                        '        shell: pwsh',
+                        '        run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"',
+                    ]))
+                    continue
                 if 'uses: actions/upload-artifact@v7\n' not in step:
                     self.assertNotIn('\n        continue-on-error:', step)
 
     def test_diagnostic_transport_never_relaxes_tests_or_resource_retirement(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
-        for name in ['Confirm test resource retirement', 'Confirm Account test resource retirement',
+        for name in ['Require frontend setup bundle upload', 'Upload frontend setup bundle (retry)',
+                     'Confirm test resource retirement', 'Confirm Account test resource retirement',
+                     'Gate policy test suite (scripts/tests)', 'Confirm gate test resource retirement',
                      'Test and vet all Account Platform Go modules',
                      'Install financial contract dependencies', 'Verify financial contract Node consumers',
                      'Run isolated financial group', 'Stop owned temporary PostgreSQL services',
                      'Windows browser wrapper lifecycle regression', 'Windows browser wrapper lazy regression',
-                     'Windows ACP bridge runtime smoke']:
+                     'Windows ACP bridge runtime smoke',
+                     'Windows runtime 缓存与 Release 行为回归（PowerShell 5.1 和 7）',
+                     'Windows 原子替换状态机回归',
+                     'Confirm Windows atomic resource retirement',
+                     'Windows PowerShell 5.1 与实际工具回归（禁止跳过）',
+                     'Relay 与部署脚本回归', 'Windows 远控发布与安全契约',
+                     'Windows 共享进程监督器兼容回归']:
             with self.subTest(step=name), self.assertRaises(AssertionError):
                 self.verify_diagnostic_uploads(workflow.replace(
                     f'      - name: {name}\n', f'      - name: {name}\n        continue-on-error: true\n'))
         with self.assertRaises(AssertionError):
             self.verify_diagnostic_uploads(workflow.replace(
+                '  frontend-setup:\n', '  frontend-setup:\n    continue-on-error: true\n'))
+        with self.assertRaises(AssertionError):
+            self.verify_diagnostic_uploads(workflow.replace(
                 '        timeout-minutes: 3\n        continue-on-error: true\n',
                 '        continue-on-error: true\n', 1))
+        diagnostic_command = 'run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"'
+        mutant = workflow.replace(diagnostic_command, 'run: exit 37')
+        self.assertNotEqual(mutant, workflow)
+        with self.assertRaises(AssertionError):
+            self.verify_diagnostic_uploads(mutant)
 
     def test_diagnostic_upload_actions_are_exactly_reviewed(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
@@ -382,6 +486,30 @@ class WebpkiCiContractTests(unittest.TestCase):
                 self.verify_workflow(workflow.replace('actions/upload-artifact@v7', replacement))
         with self.assertRaises(AssertionError):
             self.verify_diagnostic_uploads(workflow + '\n      - uses: actions/upload-artifact@v7\n')
+
+    def test_gate_diagnostic_exception_is_bound_to_its_exact_job_and_fields(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        fragment = next(step for step in job_block(workflow, 'fast-gate').split('\n      - ')
+                        if step.startswith('name: Gate test resource lifecycle receipts\n'))
+        for old, new in [
+            ("if: ${{ always() && env.PINVOU_CI_RESOURCE_LEDGER != '' }}", 'if: always()'),
+            ('${{ env.PINVOU_CI_RESOURCE_LEDGER }}/', '${{ github.workspace }}/**/*'),
+            ('retention-days: 7', 'retention-days: 30'),
+            ('uses: actions/upload-artifact@v7', 'run: exit 37'),
+            ('NODE_OPTIONS: ${{ env.PINVOU_CI_NETWORK_NODE_OPTIONS }}', 'NODE_OPTIONS: --tls-min-v1.0'),
+            ('        env:\n', '        env:\n          UNREVIEWED: yes\n'),
+            ('name: Gate test resource lifecycle receipts', 'name: Unreviewed upload'),
+        ]:
+            with self.subTest(field=old), self.assertRaises(AssertionError):
+                self.verify_diagnostic_uploads(workflow.replace(fragment, fragment.replace(old, new, 1), 1))
+        with self.assertRaises(AssertionError):
+            self.verify_diagnostic_uploads(workflow.replace(fragment, fragment + '\n      - ' + fragment, 1))
+        frontend = job_block(workflow, 'frontend-test')
+        moved = workflow.replace('      - ' + fragment, '', 1).replace(
+            frontend, frontend.replace('    steps:\n', '    steps:\n      - ' + fragment + '\n', 1), 1)
+        self.assertNotEqual(moved, workflow)
+        with self.assertRaises(AssertionError):
+            self.verify_diagnostic_uploads(moved)
 
     def test_both_shared_policy_consumers_have_mandatory_locked_scan(self):
         self.verify_workflow(WORKFLOW.read_text(encoding='utf-8'))

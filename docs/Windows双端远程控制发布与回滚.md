@@ -2,6 +2,8 @@
 
 > 对应 DEV-25，需求基线为需求文档第 14～20 节。所有发布判断使用稳定旅程 ID，不使用会随文档编辑漂移的自然序号。
 
+本文曾随 A08 提前纳入，用于规划 DEV-25 的发布、灰度和回滚边界；文档存在不等于 A08 已实现或执行发布工作流。DEV-25 的实际发布门禁与证据装配由 A25（PR [#1342](https://github.com/Pinvou/pinvou3/pull/1342)）及其后继维护负责，A18 负责部署预检与回滚边界。A08 仅维护 Relay 发布单元和回滚文件清单，未据此执行 SSH 部署、服务启停或真实双机公网验收。历史与当前验证分层见[交付追溯补遗](remote-control-delivery-provenance.md)。
+
 ## 1. 发布前置门禁
 
 仅构建值为 `1` 的 Windows 客户端允许运行时未设变量时展示桌面远程控制入口；显式设置 `PINVOU_DESKTOP_CONTROLLER_ENABLED=0` 可紧急隐藏入口并拒绝全部远控 Command。构建值为 `0` 的普通发布产物不能在运行时重新开启。启用桌面产物与 Relay 均须取得以下属于待发布 commit 的全部门禁证据，才允许公开发布本功能及在 Relay 环境把 `PINVOU_DESKTOP_CONTROLLER_ENABLED` 设为精确值 `1`：
@@ -18,9 +20,11 @@
 | 最终发布门禁 | `npm --prefix remote-control-relay run release:gate` | 证据属于待发布 commit，任何失败不放行 |
 | 泄露扫描 | 下述三个真实 Rust 用例、`node --test remote-control-relay/test/controller-sensitive-scan.test.js remote-control-relay/test/controller-telemetry.test.js` | 真实错误投影、Debug 脱敏、受控枚举与哨兵扫描；零匹配视为失败 |
 
-远控发布路径以 `scripts/remote-control-release-path-policy.mjs` 为准。主控派发和结果投影、被控任务提交、Chat/ACP 回合授权、持久化会话归属与模式、模型协议判定、受控附件的私有发布与转换、App 装配均登记了具体实现文件。受控附件范围包括实际的私有输出、归档成员准入和嵌入执行的转换脚本。单文件变更会进入 PR 的发布契约检查及发布工作流的路径筛选。新增这些入口时同步更新两处工作流，并运行 `node --test remote-control-relay/test/release-path-policy.test.js` 验证路由。
+远控发布路径声明以 `scripts/remote-control-release-paths.mjs` 为准，`scripts/remote-control-release-path-policy.mjs` 消费同一声明。主控派发和结果投影、被控任务提交、Chat/ACP 回合授权、持久化会话归属与模式、模型协议判定、受控附件的私有发布与转换、App 装配均登记了具体实现文件。受控附件范围包括实际的私有输出、归档成员准入和嵌入执行的转换脚本。单文件变更会进入 PR 的发布契约检查及发布工作流的路径筛选。新增这些入口时更新路径声明，运行 `node scripts/generate-remote-control-release-paths.mjs --write` 同步两处工作流，再运行 `node scripts/generate-remote-control-release-paths.mjs --check` 和 `node --test remote-control-relay/test/release-path-policy.test.js` 验证生成结果与路由。
 
 ### 1.1 泄露扫描的非空执行证据
+
+发布资格须在最长 120 分钟的演练经签名完成标记认证的结束时间起 24 小时内验证；证明签发时序、墙钟偏差和证书有效期按[发布证明时间合同](remote-control-provider-evidence-time.md)执行，陈旧证据不得用于放行。
 
 哨兵扫描必须完整收集四个固定表面，缺面或非法值不得得到 clean 回执；编码检测范围与限制见[敏感证据扫描合同](remote-control-sensitive-evidence-scan.md)。
 
@@ -60,7 +64,7 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 
 ## 2. Enrollment 迁移与灰度
 
-1. 从受保护的旧 endpoint inventory 运行 `enrollment-migrate.js --coverage`；覆盖率未达 100% 不进入灰度。
+1. 从受保护的旧 endpoint inventory 运行 `node remote-control-relay/scripts/enrollment-migrate.js --coverage`（仓库根目录）；覆盖率未达 100% 不进入灰度。
 2. 官方环境由已认证旧 socket 完成 challenge/proof 认领，保留 endpoint ID/token/Web 链接；身份冲突必须重新分享。
 3. 自托管先 `--dry-run`，再用稳定 request ID 执行批量 allowlist/re-enroll；re-enroll 会明确使旧 Web 链接失效。
 4. 生产只允许 `NODE_ENV=production`、独立验证过的 `self_hosted`，且 `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU=false`。当前 `official` live claim 尚未接线，预检及启动明确失败关闭；不得以开发 TOFU 作为生产降级。
@@ -124,7 +128,9 @@ GitHub protected environment/self-hosted runner、runner OS 与同一 SID 进程
 
 构建与运行开关是两层独立约束：构建时 `PINVOU_DESKTOP_CONTROLLER_ENABLED=0`（以及未明确开启的 release/custom profile）将关闭状态固化到产物，运行时设为 `1` 或不设变量都不能重新开启。启用产物必须以构建值 `1` 生成并取得本节之外的全部发布验收证据；受保护的 installer 证据 workflow 固定构建值 `1`。debug 默认开启只用于本地开发，不提供发布资格。
 
-仅构建值为 `1` 的 Windows A/B 产物允许运行时未设变量或精确 `1` 开启；运行时 `0` 或其他值关闭。本节的受保护安装包证据覆盖 Windows。Linux 64 位可启用的桌面源码路径也纳入相关路径筛选，正式 Linux 发布资格另行验收。Relay 不使用桌面构建值，仍要求运行时精确 `1`、`self_hosted` 与 TOFU=false；当前 `official` 认证模式未接线，不能作为已支持的生产验收组合。普通 Windows 发布继续构建关闭远控的产物，不以“免验收”隐式开放功能。
+仅构建值为 `1` 的 Windows A/B 产物允许运行时未设变量或精确 `1` 开启；运行时 `0` 或其他值关闭。64 位 Linux 复用同一开关契约，相关桌面源码路径已纳入发布链路变更筛选，范围与验收边界见 [Linux 双端远程控制](linux-desktop-remote-control.md)；macOS 与其他未适配目标始终 unsupported。Relay 不使用桌面构建值，仍要求运行时精确 `1`、`self_hosted` 与 TOFU=false；当前 `official` 认证模式未接线，不能作为已支持的生产验收组合。
+
+官方发布的平台策略固化在 workflow：Windows 的受保护构建、真实证据门禁与发布任务均为 `1`，Linux 三个架构打包任务为 `1`，macOS 为 `0`，不再读取 `vars.PINVOU_DESKTOP_CONTROLLER_ENABLED`。Windows 发布必须通过属于当前 commit 的证据门禁，并复用该证据绑定的安装包；缺失证据时停止发布，不回退为关闭远控的普通安装包。运行时紧急关闭开关及 Relay 的独立部署门禁保持有效；手工构建的 release/custom 默认仍关闭。通道差异披露：应用内升级设计（`docs/应用内升级-设计.md`）登记的 `scripts/release-deb.sh` OTA 发版通道不在该 workflow 策略管辖内，其 Linux deb 产物仍编译为关（不携带桌面远控能力）；该通道的启用需另行按同等验收边界专项处理。
 
 遥测快照由受信生产聚合服务提供，并非独立的实际会话取证；门禁预期 commit、URL、token-file 和回滚输入来自受保护配置，部署环境文件不得覆盖这些预期值。真实双机与 Provider 验收仍单独必需。
 

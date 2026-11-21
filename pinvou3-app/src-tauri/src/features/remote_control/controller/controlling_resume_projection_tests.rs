@@ -8,6 +8,9 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, mpsc as sync_mpsc};
 
+#[path = "controlling_resume_projection_tests/disconnect_tests.rs"]
+mod disconnect_tests;
+
 type Lifecycle = (
     RemoteStage,
     RemoteOutcome,
@@ -205,8 +208,10 @@ impl ControllingLane for Lane {
             }
             match &event {
                 ControllerLaneEvent::Failed(_) => return Some(event),
-                ControllerLaneEvent::Disconnected(_) => {
-                    super::super::relay_transport::disconnect_test_transport(&self.sender);
+                ControllerLaneEvent::Disconnected(context) => {
+                    if context == &self.sender.disconnect_context() {
+                        super::super::relay_transport::disconnect_test_transport(&self.sender);
+                    }
                     return Some(event);
                 }
                 ControllerLaneEvent::Frame(text) => {
@@ -476,7 +481,10 @@ fn authenticated_resume_publishes_once_with_raw_identity_and_shared_serde_shape(
             shared_fixture(&states[0], "controllerReconnecting");
             shared_fixture(&states[1], "controllerConnected");
             assert!(!f.business.is_suspended());
-            f.business.with_active(&f.lease.context, || Ok(())).unwrap();
+            assert!(
+                !f.business.is_installed(),
+                "keeper input ended after successful resume; terminal exit retires the slot"
+            );
             assert_eq!(
                 *telemetry.lock().unwrap(),
                 [
@@ -644,21 +652,19 @@ fn rejected_snapshot_keeps_previous_status_for_the_real_failure_transition() {
 }
 
 #[test]
-fn first_frozen_deadline_wins_over_final_and_repeated_disconnects() {
+fn first_frozen_deadline_wins_over_final_and_foreign_disconnects() {
     bounded(|| {
         runtime(async {
             tokio::time::pause();
             for final_offset in [30, 50] {
                 let f = Fixture::new();
                 let mut lane = f.lane();
-                lane.events.insert(
-                    1,
-                    ControllerLaneEvent::Disconnected(f.sender.disconnect_context()),
-                );
-                lane.events.insert(
-                    4,
-                    ControllerLaneEvent::Disconnected(f.sender.disconnect_context()),
-                );
+                let mut foreign = f.sender.disconnect_context();
+                foreign.lease.as_mut().unwrap().lease_epoch = "999".into();
+                lane.events
+                    .insert(1, ControllerLaneEvent::Disconnected(foreign.clone()));
+                lane.events
+                    .insert(4, ControllerLaneEvent::Disconnected(foreign));
                 // Anchor after the initial heartbeat tick: the first lane event
                 // follows budget creation in the same paused, synchronous poll.
                 // Final shares this absolute origin, avoiding accumulated sleeps.

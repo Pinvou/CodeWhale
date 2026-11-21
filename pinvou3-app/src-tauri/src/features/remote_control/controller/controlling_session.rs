@@ -234,6 +234,8 @@ impl SessionIntent {
 #[derive(Default)]
 pub(crate) struct ControllingSessionManager {
     intents: Mutex<Vec<SessionIntent>>,
+    #[cfg(test)]
+    before_retirement_lock: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl ControllingSessionManager {
@@ -379,6 +381,34 @@ impl ControllingSessionManager {
     /// 断开/停止所有连接上下文时清空全部会话意图（内存态，无持久化）。
     pub(crate) fn clear(&self) {
         self.intents.lock().clear();
+    }
+
+    pub(crate) fn clear_connection(&self, connection_id: &str) {
+        self.intents
+            .lock()
+            .retain(|intent| intent.lease.connection_id != connection_id);
+    }
+
+    /// Preserve the established intents -> controller owner -> business order.
+    /// Owner commits synchronously and consumes the already-held clear action;
+    /// it must not await or re-enter this session manager.
+    pub(crate) fn clear_with_owner<T>(&self, owner: impl FnOnce(&mut dyn FnMut(&str)) -> T) -> T {
+        #[cfg(test)]
+        {
+            let hook = self.before_retirement_lock.lock().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        let mut intents = self.intents.lock();
+        owner(&mut |connection_id| {
+            intents.retain(|intent| intent.lease.connection_id != connection_id);
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn before_retirement_lock_for_test(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.before_retirement_lock.lock() = Some(Box::new(hook));
     }
 
     #[cfg(test)]

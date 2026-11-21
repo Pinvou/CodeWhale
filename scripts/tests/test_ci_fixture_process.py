@@ -1,5 +1,6 @@
 """Real OS process-tree regressions; every child is created by this test."""
 import ctypes
+from contextlib import contextmanager
 import importlib.util
 import json
 import os
@@ -38,8 +39,129 @@ def alive(pid):
         kernel.CloseHandle(handle)
 
 
+@contextmanager
+def held_process(pid):
+    """Keep the observed identity alive; never re-open a possibly reused PID."""
+    if sys.platform == 'linux':
+        import select
+        descriptor = os.pidfd_open(pid)
+        try:
+            yield lambda: not bool(select.select([descriptor], [], [], 0)[0])
+        finally:
+            os.close(descriptor)
+        return
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.argtypes, kernel.OpenProcess.restype = [w.DWORD, w.BOOL, w.DWORD], w.HANDLE
+    kernel.WaitForSingleObject.argtypes, kernel.WaitForSingleObject.restype = [w.HANDLE, w.DWORD], w.DWORD
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    handle = kernel.OpenProcess(0x100000, False, pid)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        yield lambda: kernel.WaitForSingleObject(handle, 0) == 0x102
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def owned_pid_publication(ready, pid_expression):
+    """The JavaScript fixture's one-writer identity handoff to its observer."""
+    # Both names are inside the same fresh, private fixture directory. Publish
+    # only after the complete PID is written; existence is the reader's gate.
+    staging = json.dumps(str(ready) + '.tmp')
+    return (f"writeFileSync({staging}, String({pid_expression}), {{ flag: 'wx' }});\n"
+            f'renameSync({staging}, {json.dumps(str(ready))});')
+
+
 @unittest.skipUnless(sys.platform in ('win32', 'linux'), 'process scope supports CI operating systems')
 class ProcessScopeTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node publishes the fixture identity')
+    def test_owned_pid_handoff_never_exposes_an_incomplete_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ready = Path(directory) / 'child-ready'
+            entered, release = Path(directory) / 'write-entered', Path(directory) / 'write-release'
+            # Pause the actual fs write after creation but before its contents.
+            # A reader must see no ready file at this exact real IO boundary.
+            script = """
+import fs, { writeFileSync, renameSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const write = fs.writeFileSync;
+fs.writeFileSync = (path, data, options) => {
+  write(path, '', options);
+  write(ENTERED, 'entered');
+  const deadline = Date.now() + 5_000;
+  while (!fs.existsSync(RELEASE)) {
+    if (Date.now() >= deadline) throw new Error('publication barrier was not released');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+  }
+  write(path, data, { flag: 'w' });
+};
+syncBuiltinESMExports();
+""".replace('ENTERED', json.dumps(str(entered))).replace('RELEASE', json.dumps(str(release)))
+            script += owned_pid_publication(ready, 'process.pid')
+            p = subprocess.Popen([shutil.which('node'), '--input-type=module', '--eval', script],
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                deadline = time.monotonic() + 10
+                while not entered.is_file() and p.poll() is None and time.monotonic() < deadline:
+                    time.sleep(.005)
+                self.assertTrue(entered.is_file(), 'writer did not reach the incomplete-write barrier')
+                self.assertFalse(ready.exists(), 'empty PID file was exposed as a ready identity')
+                release.touch()
+                stdout, stderr = p.communicate(timeout=10)
+                self.assertEqual(p.returncode, 0, stderr)
+                self.assertEqual(ready.read_text(), str(p.pid))
+                self.assertFalse(Path(str(ready) + '.tmp').exists())
+                self.assertEqual(stdout, '')
+            finally:
+                release.touch()
+                if p.poll() is None:
+                    p.kill()
+                p.communicate(timeout=10)
+
+    def test_diagnostic_delivery_failure_cannot_replace_execution_or_cleanup(self):
+        with patch.object(WORKSPACE, 'diagnostics', True), patch('builtins.print', side_effect=OSError('closed diagnostics')):
+            WORKSPACE.diagnostic_phase('observe_process_tree')
+
+    @unittest.skipUnless(shutil.which('node'), 'Node creates the detached test descendant')
+    def test_optional_root_evidence_preserves_original_cancellation_verdict(self):
+        # The separate interpreter alone owns the observed command and its
+        # descendants. A metadata barrier triggers cancellation only after the
+        # real root's nonzero exit has been observed through its held identity.
+        source = r'''
+import importlib.util,json,os,signal,sys,threading,time
+spec=importlib.util.spec_from_file_location('owned',sys.argv[1])
+owned=importlib.util.module_from_spec(spec);spec.loader.exec_module(owned)
+evidence={};errors=[]
+def cancel_after_exit():
+    until=time.monotonic()+10
+    while 'exit_code' not in evidence:
+        if time.monotonic()>=until: errors.append('exit evidence missing');owned.cancelled=signal.SIGTERM;return
+        time.sleep(.005)
+    owned.cancelled=signal.SIGTERM
+watcher=threading.Thread(target=cancel_after_exit);watcher.start()
+script="require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'}).unref();process.exitCode=23"
+run=owned.windows_run if sys.platform=='win32' else owned.linux_run
+result=run([sys.argv[2],'-e',script],os.environ.copy(),.2,exit_evidence=evidence)
+watcher.join(11)
+assert not watcher.is_alive() and not errors,(errors,evidence)
+assert result[0]==143 and result[2] is True and isinstance(result[1],bool),result
+assert evidence=={'started':True,'exit_code':23},evidence
+print('original-cancel-verdict-preserved-with-root23')
+'''
+        p = subprocess.run([sys.executable, '-X', 'utf8', '-c', source, str(SUPERVISOR), shutil.which('node')],
+                           capture_output=True, text=True, timeout=20)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.strip(), 'original-cancel-verdict-preserved-with-root23')
+
+    def test_exit_evidence_rejects_callback_mappings_before_start(self):
+        class CallbackMapping(dict):
+            def clear(self):
+                raise AssertionError('a callback mapping must never execute')
+        for run in (WORKSPACE.linux_run, WORKSPACE.windows_run):
+            with self.subTest(run=run.__name__), self.assertRaises(TypeError):
+                run(['never-launch'], {}, .1, exit_evidence=CallbackMapping())
+
     def test_windows_namespace_preserves_drive_unc_and_extended_paths(self):
         for plain, expected in (
             (r'C:\owned\path', '\\\\?\\C:\\owned\\path'),
@@ -66,21 +188,31 @@ class ProcessScopeTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == 'win32', 'actual Windows deep-path retirement')
     def test_supervisor_retires_deep_owned_workspace_after_process_exit(self):
         source = (
-            "import os,pathlib;"
+            "import os,pathlib,sys,faulthandler;"
+            "faulthandler.dump_traceback_later(3,repeat=False);"
             "root=pathlib.Path(os.environ['PINVOU_CI_FIXTURE_ROOT']);"
             "deep=root.joinpath(*(['deep-segment-0123456789']*12));"
             "raw='\\\\\\\\?\\\\'+str(deep);"
+            "print('fixture_child_phase=mkdir',file=sys.stderr,flush=True);"
             "os.makedirs(raw);"
+            "print('fixture_child_phase=write',file=sys.stderr,flush=True);"
             "pathlib.Path(raw,'proof.txt').write_text('owned');"
-            "print(len(str(deep)),flush=True)"
+            "print('fixture_child_phase=written',file=sys.stderr,flush=True);"
+            "print(len(str(deep)),flush=True);"
+            "faulthandler.cancel_dump_traceback_later()"
         )
-        with tempfile.TemporaryDirectory() as directory:
-            p, receipt, _ = self.invoke(source, directory)
-            self.assertEqual(p.returncode, 0, p.stderr)
-            self.assertGreater(int(p.stdout.strip()), 260)
-            self.assertEqual(receipt['state'], 'released')
-            self.assertFalse(receipt['cleanup_failed'])
-            self.assertFalse(Path(receipt['workspace']['path']).exists())
+        # Bounded stress, not retries: every iteration must satisfy the same
+        # 15-second limit and confirmed process/workspace retirement.
+        for iteration in range(100):
+            with tempfile.TemporaryDirectory() as directory:
+                p, receipt, _ = self.invoke(source, directory)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                self.assertGreater(int(p.stdout.strip()), 260)
+                self.assertEqual(receipt['state'], 'released')
+                self.assertFalse(receipt['cleanup_failed'])
+                self.assertFalse(Path(receipt['workspace']['path']).exists())
+            if (iteration + 1) % 20 == 0:
+                print(f'fixture_stress_completed={iteration + 1}/100', file=sys.stderr, flush=True)
 
     @unittest.skipUnless(shutil.which('node'), 'Node is required for the actual JavaScript signal hook')
     def test_failed_fixture_signal_keeps_receipt_and_supervisor_retires_owned_descendant(self):
@@ -89,32 +221,144 @@ class ProcessScopeTests(unittest.TestCase):
         script = """
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { existsSync, writeFileSync, renameSync } from 'node:fs';
 const { fixtureScope } = await import(FIXTURE);
 fixtureScope.register({kind:'probe',id:'signal-owned',close(){throw new Error('primary fixture close failure')},remove(){throw new Error('unconfirmed resource must not be removed')}});
 const child = spawn(process.execPath,['-e',"process.send({pid:process.pid});setInterval(()=>{},1000)"],{detached:true,stdio:['ignore','ignore','ignore','ipc']});
 const [ready] = await once(child,'message');
 console.log('OWNED_CHILD_PID='+ready.pid);
+PUBLISH_OWNED_PID
 child.disconnect(); child.unref();
 setInterval(()=>{},1000);
+while (!existsSync(RELEASE)) await new Promise(resolve => setTimeout(resolve, 5));
 if (process.platform === 'win32') process.emit('SIGTERM');
 else process.kill(process.pid,'SIGTERM');
 """.replace('FIXTURE', json.dumps(fixture))
-        source = 'import subprocess,sys;sys.exit(subprocess.run(' + repr([node, '--input-type=module', '--eval', script]) + ').returncode)'
         with tempfile.TemporaryDirectory() as directory:
-            p, receipt, receipt_path = self.invoke(source, directory)
-            self.assertEqual(p.returncode, 1, p.stderr)
-            self.assertIn('primary fixture close failure', p.stderr)
+            ready, release = Path(directory) / 'child-ready', Path(directory) / 'child-release'
+            script = script.replace('PUBLISH_OWNED_PID', owned_pid_publication(ready, 'ready.pid')).replace('RELEASE', json.dumps(str(release)))
+            source = 'import subprocess,sys;sys.exit(subprocess.run(' + repr([node, '--input-type=module', '--eval', script]) + ').returncode)'
+            receipt_path = Path(directory) / 'receipt.json'
+            p = subprocess.Popen([sys.executable, str(SUPERVISOR), '--receipt', str(receipt_path),
+                '--cleanup-seconds', '0.2', '--', sys.executable, '-c', source],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                deadline = time.monotonic() + 15
+                while not ready.is_file() and p.poll() is None and time.monotonic() < deadline:
+                    time.sleep(.005)
+                self.assertTrue(ready.is_file(), 'the owned descendant never reached the identity barrier')
+                pid = int(ready.read_text())
+                with held_process(pid) as child_alive:
+                    self.assertTrue(child_alive())
+                    release.touch()
+                    stdout, stderr = p.communicate(timeout=max(.01, deadline - time.monotonic()))
+                    self.assertEqual(p.returncode, 1, stderr)
+                    self.assertFalse(child_alive(), 'the exact held descendant survived cleanup')
+            finally:
+                release.touch()
+                if p.poll() is None:
+                    p.terminate()
+                p.communicate(timeout=10)
+            self.assertIn('OWNED_CHILD_PID='+str(pid), stdout)
+            self.assertIn('primary fixture close failure', stderr)
+            receipt = json.loads(receipt_path.read_text())
             self.assertTrue(receipt['cleanup_failed'], 'the surviving descendant must require supervisor intervention')
             self.assertEqual(receipt['state'], 'released')
             ledger = receipt_path.parent / (receipt_path.stem + '-resources') / 'signal-owned.json'
             self.assertEqual(json.loads(ledger.read_text())['state'], 'unconfirmed')
-            pid = int(p.stdout.split('OWNED_CHILD_PID=')[1].splitlines()[0])
-            self.assertFalse(alive(pid))
 
-    def invoke(self, source, directory, name='receipt'):
+    def invoke(self, source, directory, name='receipt', extra=()):
         receipt = Path(directory) / (name + '.json')
-        p = subprocess.run([sys.executable, str(SUPERVISOR), '--receipt', str(receipt), '--cleanup-seconds', '0.2', '--', sys.executable, '-c', source], capture_output=True, text=True, timeout=15)
+        try:
+            p = subprocess.run([sys.executable, str(SUPERVISOR), '--diagnostics', '--receipt', str(receipt), '--cleanup-seconds', '0.2', *extra, '--', sys.executable, '-c', source], capture_output=True, text=True, timeout=15)
+        except subprocess.TimeoutExpired as error:
+            evidence = error.stderr or b''
+            if isinstance(evidence, bytes):
+                evidence = evidence.decode('utf-8', errors='replace')
+            # TimeoutExpired's normal traceback drops the captured diagnostic
+            # stderr. Preserve bounded stage/stack evidence without printing argv.
+            raise AssertionError('supervisor exceeded unchanged 15-second limit; stage/stack evidence:\n' + evidence[-16000:]) from None
         return p, json.loads(receipt.read_text()), receipt
+
+    @unittest.skipUnless(sys.platform == 'win32', 'short Windows staging workspace')
+    def test_short_scope_retires_files_even_when_child_skips_finally(self):
+        parent = next(p for p in SUPERVISOR.parents if p.parent != p and len(str(p))+10 <= 35 and not any(c.isspace() for c in str(p)))
+        source = "import os,pathlib; r=pathlib.Path(os.environ['PINVOU_CI_FIXTURE_ROOT']); assert len(str(r))<=35; (r/'fixture').mkdir(); (r/'fixture'/'proof').write_text('owned'); (r/'w123456.owner.json').write_text('owned clone marker'); os._exit(9)"
+        with tempfile.TemporaryDirectory() as directory:
+            # Keep an external short scope's registration in the enclosing job
+            # ledger if the test process is forcibly cancelled before teardown.
+            directory = os.environ.get('PINVOU_CI_RESOURCE_LEDGER', directory)
+            p, receipt, _ = self.invoke(source, directory, name='short-'+str(time.monotonic_ns()), extra=('--short-workspace-parent', str(parent)))
+            self.assertEqual(p.returncode, 9, p.stderr)
+            self.assertEqual(receipt['exit_code'], 9)
+            self.assertEqual(receipt['state'], 'released')
+            self.assertFalse(receipt['cleanup_failed'])
+            self.assertFalse(Path(receipt['workspace']['path']).exists())
+
+    @unittest.skipUnless(sys.platform == 'win32', 'short Windows staging workspace')
+    def test_short_scope_refuses_drive_root_before_creating_resources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory)/'refused.json'
+            p = subprocess.run([sys.executable, str(SUPERVISOR), '--receipt', str(receipt), '--short-workspace-parent', Path(directory).anchor, '--', sys.executable, '-c', "raise SystemExit('must not run')"], capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn('short workspace parent', p.stderr)
+            self.assertFalse(receipt.exists())
+
+    @unittest.skipUnless(sys.platform == 'win32', 'short Windows staging workspace')
+    def test_short_scope_registration_failure_retires_owned_directory(self):
+        parent = next(p for p in SUPERVISOR.parents if p.parent != p and len(str(p))+10 <= 35 and not any(c.isspace() for c in str(p)))
+        original = WORKSPACE.atomic_receipt
+        def write(path, value):
+            if value['state'] == 'registered':
+                raise OSError('controlled receipt registration failure')
+            original(path, value)
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory)/'registration.json'
+            with patch.object(WORKSPACE, 'atomic_receipt', side_effect=write), patch.object(WORKSPACE, 'windows_run') as run, patch.object(WORKSPACE.signal, 'signal'):
+                with self.assertRaisesRegex(OSError, 'controlled receipt'):
+                    WORKSPACE.main(['--receipt', str(receipt), '--short-workspace-parent', str(parent), '--', sys.executable, '-c', 'pass'])
+            run.assert_not_called()
+            value = json.loads(receipt.read_text())
+            self.assertEqual(value['state'], 'released')
+            self.assertTrue(value['cleanup_failed'], 'setup failure must not become a successful test')
+            self.assertFalse(Path(value['workspace']['path']).exists())
+
+    @unittest.skipUnless(sys.platform == 'win32', 'short Windows staging workspace')
+    def test_short_scope_preserves_identity_when_registration_and_rollback_fail(self):
+        parent = next(p for p in SUPERVISOR.parents if p.parent != p and len(str(p))+10 <= 35 and not any(c.isspace() for c in str(p)))
+        original_write = WORKSPACE.atomic_receipt
+        original_remove = WORKSPACE.remove_owned_workspace
+        owned = None
+
+        def write(path, value):
+            if value['state'] == 'registered':
+                raise OSError('controlled receipt registration failure')
+            original_write(path, value)
+
+        def deny_rollback(root, identity):
+            nonlocal owned
+            owned = (root, identity)
+            raise PermissionError('controlled workspace rollback failure')
+
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory)/'registration.json'
+            try:
+                with patch.object(WORKSPACE, 'atomic_receipt', side_effect=write), patch.object(
+                    WORKSPACE, 'remove_owned_workspace', side_effect=deny_rollback
+                ), patch.object(WORKSPACE, 'windows_run') as run, patch.object(WORKSPACE.signal, 'signal'):
+                    with self.assertRaisesRegex(OSError, 'controlled receipt registration failure'):
+                        WORKSPACE.main(['--receipt', str(receipt), '--short-workspace-parent', str(parent), '--', sys.executable, '-c', 'pass'])
+                run.assert_not_called()
+                value = json.loads(receipt.read_text())
+                self.assertEqual(value['state'], 'unconfirmed')
+                self.assertTrue(value['cleanup_failed'])
+                self.assertEqual(value['error_class'], 'OSError')
+                self.assertEqual(value['cleanup_error_class'], 'PermissionError')
+                root, (dev, ino) = owned
+                self.assertEqual(value['workspace'], {'path': str(root), 'dev': dev, 'ino': ino})
+            finally:
+                if owned is not None:
+                    original_remove(*owned)
 
     def test_success_preserves_output_and_confirms_tree_exit(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -123,6 +367,15 @@ else process.kill(process.pid,'SIGTERM');
             self.assertIn('fixture actually executed', p.stdout)
             self.assertEqual(receipt['state'], 'released')
             self.assertFalse(receipt['cleanup_failed'])
+
+    def test_timeout_keeps_captured_stage_evidence_without_command_arguments(self):
+        error = subprocess.TimeoutExpired(['private-command-argument'], 15, stderr=b'fixture_phase=retire_workspace')
+        with tempfile.TemporaryDirectory() as directory, patch.object(subprocess, 'run', side_effect=error):
+            with self.assertRaises(AssertionError) as caught:
+                self.invoke('never runs', directory)
+        self.assertIn('fixture_phase=retire_workspace', str(caught.exception))
+        self.assertNotIn('private-command-argument', str(caught.exception))
+        self.assertTrue(caught.exception.__suppress_context__)
 
     @unittest.skipUnless(sys.platform == 'linux', 'AF_UNIX Chrome path limit is Linux-specific')
     def test_long_runner_temp_cannot_overflow_chrome_singleton_socket(self):
@@ -156,7 +409,13 @@ else process.kill(process.pid,'SIGTERM');
     def test_two_scopes_do_not_retire_each_others_children(self):
         with tempfile.TemporaryDirectory() as directory:
             receipt = Path(directory) / 'other.json'
-            other = subprocess.Popen([sys.executable, str(SUPERVISOR), '--receipt', str(receipt), '--', sys.executable, '-c', "import os,time;print(os.getpid(),flush=True);time.sleep(2)"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            release = Path(directory) / 'other-release'
+            # Keep the first scope alive until the ownership assertion, rather
+            # than assuming a second Windows process scope starts within 2s.
+            source = ("import os,time,pathlib\nprint(os.getpid(),flush=True)\n"
+                      f"release=pathlib.Path({str(release)!r})\n"
+                      "while not release.exists(): time.sleep(0.025)\n")
+            other = subprocess.Popen([sys.executable, str(SUPERVISOR), '--receipt', str(receipt), '--', sys.executable, '-c', source], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
                 pid = int(other.stdout.readline())
                 self.assertTrue(alive(pid))
@@ -164,8 +423,10 @@ else process.kill(process.pid,'SIGTERM');
                 self.assertEqual(p.returncode, 0, p.stderr)
                 self.assertTrue(alive(pid), 'another scope killed the first scope')
                 self.assertFalse(result['cleanup_failed'])
+                release.touch()
                 self.assertEqual(other.wait(timeout=10), 0)
             finally:
+                release.touch()
                 if other.poll() is None:
                     other.terminate()
                     other.wait(timeout=10)

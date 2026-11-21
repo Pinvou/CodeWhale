@@ -40,6 +40,8 @@
 
 pub(crate) mod application;
 pub(crate) mod diagnostics;
+mod fork;
+mod import;
 mod injections;
 pub(crate) mod mode_state;
 pub(crate) mod remote_proxy;
@@ -134,6 +136,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+pub use self::import::{SessionImportFailure, SessionImportSummary};
 pub use crate::core::mode_state::SerializableMode;
 use crate::platform::paths;
 use crate::platform::prefs::{CodePermissionPrefs, ModeDefaultPrefs, ModelSelectionRef};
@@ -154,6 +157,7 @@ pub use self::mode_state::{
 /// `crate::features::sessions::X` paths stay stable.
 pub use self::scheduled::{
     ChatEngineState, ScheduledEngineState, ScheduledRunMode, ScheduledRunProfile,
+    ScheduledTokenAccounting,
 };
 // Only the benchmark-gated headless runner (agentic_task) mints headless ids
 // and warns about retention eviction, so both re-exports follow its gate.

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -7,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { isDirectCliEntry } from "../cli-entrypoint.js";
 import { parseControllerEnvironment } from "./deploy-controller-preflight.mjs";
 import { validateReleaseEvidenceFile } from "./validate-controller-release-evidence.mjs";
+import { runReleaseProcess } from "./release-process.mjs";
 
 const relayRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const repoRoot = dirname(relayRoot);
@@ -18,15 +18,7 @@ function fail(code) {
 }
 
 function run(command, args, env = process.env) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd: repoRoot, env, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    // Drain stdout so a chatty sub-gate cannot fill the pipe and block forever.
-    child.stdout.resume();
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-    child.once("error", reject);
-    child.once("close", (code) => code === 0 ? resolvePromise() : reject(Object.assign(new Error("release_subgate_failed"), { code: "release_subgate_failed", cause: stderr })));
-  });
+  return runReleaseProcess(command, args, { cwd: repoRoot, env });
 }
 
 export async function validateTrustedGh(env) {
@@ -104,7 +96,7 @@ export async function runControllerReleaseGate(env = process.env) {
   const gatewayConfigBytes = await readFile(resolve(env.PINVOU_REMOTE_GATEWAY_CONFIG_PATH))
     .catch(() => fail("release_gateway_config_unavailable"));
   const gatewayConfigSha256 = crypto.createHash("sha256").update(gatewayConfigBytes).digest("hex");
-  const validated = await validateReleaseEvidenceFile(resolve(evidence), {
+  const evidenceOptions = {
     expectedCommit: commit,
     expectedSignerThumbprint: env.PINVOU_TRUSTED_WINDOWS_SIGNER_THUMBPRINT,
     expectedSignerPublisher: env.PINVOU_TRUSTED_WINDOWS_SIGNER_PUBLISHER,
@@ -133,7 +125,8 @@ export async function runControllerReleaseGate(env = process.env) {
     expectedBuildWorkflow: env.PINVOU_RELEASE_BUILD_WORKFLOW,
     expectedBuildRunId: env.PINVOU_RELEASE_BUILD_RUN_ID,
     allowTestAttestation: false,
-  });
+  };
+  await validateReleaseEvidenceFile(resolve(evidence), evidenceOptions);
   const evidenceRoot = dirname(resolve(evidence));
   await runTrustedGh(env, ["attestation", "verify", join(evidenceRoot, "binaries/pinvou-installer.exe"),
     "--bundle", join(evidenceRoot, "build/installer-attestation.sigstore.jsonl"), "--repo", env.PINVOU_RELEASE_BUILD_REPOSITORY,
@@ -159,6 +152,10 @@ export async function runControllerReleaseGate(env = process.env) {
   // protected gate environment, never from an overlay of a Relay env file.
   await run(process.execPath, [join(relayRoot, "scripts/query-controller-release-telemetry.mjs")], buildReleaseSubprocessEnvironment(env, "telemetry"));
   await run(process.execPath, [join(repoRoot, "scripts/check-enrollment-gated-v2-rollback.mjs")], buildReleaseSubprocessEnvironment(env, "rollback"));
+  // External checks may outlive qualification or the pinned certificates.
+  // Re-read, hash and verify before granting release, without trusting dates
+  // re-read separately from the authenticated evidence.
+  const validated = await validateReleaseEvidenceFile(resolve(evidence), evidenceOptions);
   return { ok: true, enabled: true, evidence_required: true, ...validated };
 }
 
@@ -166,7 +163,8 @@ if (isDirectCliEntry(import.meta.url)) {
   runControllerReleaseGate()
     .then((result) => process.stdout.write(`${JSON.stringify(result)}\n`))
     .catch((error) => {
-      process.stderr.write(`${JSON.stringify({ ok: false, code: error?.code || "controller_release_gate_failed" })}\n`);
+      process.stderr.write(`${JSON.stringify({ ok: false, code: error?.code || "controller_release_gate_failed",
+        ...(typeof error?.cleanupConfirmed === "boolean" ? { cleanup_confirmed: error.cleanupConfirmed } : {}) })}\n`);
       process.exitCode = 1;
     });
 }

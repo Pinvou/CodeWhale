@@ -21,12 +21,13 @@ const oldWaiverEvidenceCRLFChecksum = "e43525148d30007f77fe009bfcc8181c4d33f62d1
 const mainlineWaiverEvidenceChecksum = "6a1985280bad6704730786d142e5224fe53a3c242759e6b4d67914d788d6d2a4"
 const mainlineWaiverEvidenceCRLFChecksum = "d1e48b1e99d52ec1723fdb156d92a4bc7c76a136486b8b3f1d76f1f42230806b"
 
-func knownLegacyWaiverHistory(ctx context.Context, q walletReceiptHistoryQueryer) (bool, error) {
+// ledgerTable comes from migrations.LedgerTable on this workflow's connection.
+func knownLegacyWaiverHistory(ctx context.Context, q walletReceiptHistoryQueryer, ledgerTable string) (bool, error) {
 	if sqlChecksum(oldWaiverEvidenceSQL) != oldWaiverEvidenceChecksum {
 		return false, errors.New("legacy waiver history resource changed")
 	}
 	var ledger, commands bool
-	if err := q.QueryRow(ctx, `SELECT to_regclass('schema_migrations') IS NOT NULL,to_regclass('usage_hold_admin_commands') IS NOT NULL`).Scan(&ledger, &commands); err != nil {
+	if err := q.QueryRow(ctx, `SELECT pg_catalog.to_regclass($1) IS NOT NULL,to_regclass('usage_hold_admin_commands') IS NOT NULL`, ledgerTable).Scan(&ledger, &commands); err != nil {
 		return false, err
 	}
 	if !ledger {
@@ -36,7 +37,7 @@ func knownLegacyWaiverHistory(ctx context.Context, q walletReceiptHistoryQueryer
 		return false, nil
 	}
 	var name, checksum string
-	err := q.QueryRow(ctx, `SELECT name,checksum FROM schema_migrations WHERE version=26`).Scan(&name, &checksum)
+	err := q.QueryRow(ctx, "SELECT name,checksum FROM "+ledgerTable+" WHERE version=26").Scan(&name, &checksum)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if commands {
 			return false, errors.New("legacy waiver table has no 026 identity")
@@ -90,6 +91,9 @@ func knownLegacyWaiverHistory(ctx context.Context, q walletReceiptHistoryQueryer
 // Validate delivered mainline SQL before consulting installed history. The
 // adapter may replace026 only after its original delivery has been verified.
 func validateUsageWaiverHistoryDelivery(input []migrations.Migration) error {
+	if err := migrations.VerifyPublishedRollbackPackage(input); err != nil {
+		return err
+	}
 	found, requires026 := false, false
 	for _, m := range input {
 		if m.Version == usageWaiverVersion {
@@ -111,11 +115,11 @@ func validateUsageWaiverHistoryDelivery(input []migrations.Migration) error {
 
 // expectedUsageWaiverHistory is used before public Up and by the Billing-only
 // verifier. It never edits schema_migrations, table ownership, or historical rows.
-func expectedUsageWaiverHistory(ctx context.Context, q walletReceiptHistoryQueryer, input []migrations.Migration) ([]migrations.Migration, error) {
+func expectedUsageWaiverHistory(ctx context.Context, q walletReceiptHistoryQueryer, input []migrations.Migration, ledgerTable string) ([]migrations.Migration, error) {
 	if err := validateUsageWaiverHistoryDelivery(input); err != nil {
 		return nil, err
 	}
-	old, err := knownLegacyWaiverHistory(ctx, q)
+	old, err := knownLegacyWaiverHistory(ctx, q, ledgerTable)
 	if err != nil {
 		return nil, err
 	}

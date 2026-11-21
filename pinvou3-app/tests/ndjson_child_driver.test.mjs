@@ -24,8 +24,28 @@ for (const [name, options, expectedLabel] of [
     });
     t.after(confirmedChildStopper(driver.child, stopNdjsonChild));
     assert.deepEqual((await driver.request('ready', { ready: true })).result, { ready: true });
-    await assert.rejects(driver.request('hold', {}, options), error => {
-      assert.match(error.message, new RegExp(`^${expectedLabel} timed out after 25ms \\(request \\d+\\); child stderr:`));
+    await assert.rejects(driver.request('hold', { privateFixtureValue: 'not-a-diagnostic-field' }, options), error => {
+      assert.match(error.message, new RegExp(`^${expectedLabel} timed out after 25ms \\(request \\d+\\); observer:`));
+      const observed = error.childDiagnostic;
+      assert.equal(observed.pid, driver.child.pid);
+      assert.equal(observed.deadlineMs, 25);
+      assert.ok(observed.observedMs > 0);
+      assert.equal(observed.spawned, true);
+      assert.equal(observed.exited, false);
+      assert.equal(observed.closed, false);
+      assert.ok(observed.stdoutBytes > 0);
+      assert.equal(observed.stderrBytes, 0);
+      assert.equal(observed.pendingRequests, 0);
+      assert.equal(typeof observed.observerProcessCpuMs, 'number');
+      assert.equal(typeof observed.timerDelayMs, 'number');
+      assert.doesNotMatch(JSON.stringify(observed), /privateFixtureValue|not-a-diagnostic-field/u);
+      assert.match(error.message, /; observation: /u);
+      const diagnostic = JSON.parse(error.message.match(/; observer: (\{[^\n]+?\}); child stderr:/)[1]);
+      assert.deepEqual(Object.keys(diagnostic).sort(),
+        ['child_exit_code', 'observer_elapsed_ms', 'observer_loop_max_delay_ms']);
+      assert.ok(Number.isSafeInteger(diagnostic.observer_elapsed_ms) && diagnostic.observer_elapsed_ms >= 0);
+      assert.ok(Number.isSafeInteger(diagnostic.observer_loop_max_delay_ms) && diagnostic.observer_loop_max_delay_ms >= 0);
+      assert.equal(diagnostic.child_exit_code, null);
       return true;
     });
     assert.deepEqual((await driver.request('echo', { afterTimeout: true })).result, { afterTimeout: true });

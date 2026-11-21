@@ -25,6 +25,7 @@ import (
 )
 
 type Config struct {
+	AdmissionLimits                     AdmissionLimits
 	SystemProbeCAFile                   string
 	SystemProbes                        []SystemProbe
 	TokenAdminProxyHMACKey              []byte
@@ -238,6 +239,9 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 }
 
 func (s *Service) login(w http.ResponseWriter, r *http.Request) {
+	if !s.admitPortalOperation(w, r, LoginStartOperation, "LOGIN_UNAVAILABLE") {
+		return
+	}
 	reauthenticate := r.URL.Query().Get("reauthenticate") == "1"
 	forceLoginRequested := r.URL.Query().Get("force_login") == "1"
 	loggedOutCookie, loggedOutErr := r.Cookie(s.loggedOutCookieName())
@@ -293,6 +297,9 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	returnTo := safeReturnTo(r.URL.Query().Get("return_to"))
 	flow := LoginFlow{Verifier: verifier, Nonce: nonce, ReturnTo: returnTo, PreviousSession: previousSession, LineageRoot: lineageRoot, ExpiresAt: s.now().Add(loginFlowLifetime)}
 	if err := s.store.SaveFlow(r.Context(), state, flow); err != nil {
+		if writePortalQuotaError(w, r, err) {
+			return
+		}
 		api.WriteError(w, http.StatusServiceUnavailable, "LOGIN_UNAVAILABLE", "login could not be started", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -327,6 +334,9 @@ func (s *Service) callback(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(s.flowCookieName())
 	if err != nil || state == "" || code == "" || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(state)) != 1 {
 		api.WriteError(w, http.StatusBadRequest, "LOGIN_STATE_INVALID", "login state is invalid or expired", httpserver.RequestID(r.Context()))
+		return
+	}
+	if !s.admitPortalOperation(w, r, LoginCallbackOperation, "LOGIN_UNAVAILABLE") {
 		return
 	}
 	flow, err := s.store.TakeFlow(r.Context(), state)
@@ -808,6 +818,9 @@ func tokenPathAllowed(method, resource string) bool {
 	return method == http.MethodGet && len(parts) == 4 || method == http.MethodPost && len(parts) == 5 && (parts[4] == "close" || parts[4] == "payment-claims")
 }
 func accountAdminPathAllowed(method, resource string) bool {
+	if grantRecoveryPathAllowed(method, resource) {
+		return true
+	}
 	if platformRoleAdminPathAllowed(method, resource) {
 		return true
 	}

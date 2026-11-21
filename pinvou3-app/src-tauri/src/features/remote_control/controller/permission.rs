@@ -347,6 +347,20 @@ struct PendingPermission {
 }
 
 impl PendingPermission {
+    fn matches_task_instance(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        session_id: &str,
+        task_sequence: u64,
+        request_id: &str,
+    ) -> bool {
+        self.binding.matches(lease, task_id, request_id)
+            && self.request_owner.as_ref().is_some_and(|owner| {
+                owner.session_id == session_id && owner.task_sequence == task_sequence
+            })
+    }
+
     fn retain_decision_receipt(
         &mut self,
         owner: Option<&PermissionDecisionOwner>,
@@ -373,6 +387,17 @@ impl PendingPermission {
         self.resolved_at_ms = Some(self.request.expires_at_ms);
         self.resolved_reason = Some("expired".into());
         true
+    }
+
+    fn deny(&mut self, reason: &str, now_b: u64) -> Option<u64> {
+        if !self.active() {
+            return None;
+        }
+        self.state = PermissionState::Denied;
+        self.decision = Some(PermissionDecision::Deny);
+        self.resolved_at_ms = Some(now_b);
+        self.resolved_reason = Some(bounded_reason(reason));
+        Some(now_b.saturating_sub(self.created_at_ms))
     }
 }
 
@@ -519,6 +544,68 @@ impl PermissionAuthority {
         drop(pending);
         self.emit_telemetry(PermissionTelemetryTransition::Requested, 0);
         Ok(view)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_for_task_instance(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        session_id: &str,
+        task_sequence: u64,
+        request: PermissionRequest,
+        now_b: u64,
+    ) -> Result<PermissionView> {
+        self.request_for_owner(
+            lease,
+            task_id,
+            request,
+            now_b,
+            &PermissionDecisionOwner {
+                session_id: session_id.to_owned(),
+                task_sequence,
+            },
+        )
+    }
+
+    pub(crate) fn request_matches_task_instance(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        session_id: &str,
+        task_sequence: u64,
+        request_id: &str,
+    ) -> bool {
+        self.pending.lock().get(request_id).is_some_and(|entry| {
+            entry.matches_task_instance(lease, task_id, session_id, task_sequence, request_id)
+        })
+    }
+
+    pub(crate) fn allow_delivery_for_task_instance(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        session_id: &str,
+        task_sequence: u64,
+        request_id: &str,
+    ) -> bool {
+        self.pending.lock().get(request_id).is_some_and(|entry| {
+            entry.matches_task_instance(lease, task_id, session_id, task_sequence, request_id)
+                && entry.dispatch_state.committed()
+        })
+    }
+
+    pub(crate) fn callback_was_cancelled(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        request_id: &str,
+    ) -> bool {
+        self.pending.lock().get(request_id).is_some_and(|entry| {
+            entry.binding.matches(lease, task_id, request_id)
+                && entry.state == PermissionState::Denied
+                && entry.resolved_reason.as_deref() == Some("permission_callback_cancelled")
+        })
     }
 
     /// First effective A decision wins. B and local callers are rejected, and a
@@ -704,46 +791,125 @@ impl PermissionAuthority {
 
     /// Atomic dispatch boundary. `Committed` means the operation may run and
     /// any later B stop must report executed/result-unknown.
+    /// The owner fences are held by the caller. `send` must synchronously
+    /// hand the exact response to ACP and must not re-enter the authority.
+    /// Return telemetry to publish after the caller releases those fences.
+    pub(crate) fn dispatch_bound_allow(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        request_id: &str,
+        send: impl FnOnce() -> bool,
+    ) -> Result<(DispatchCommit, Option<PermissionTelemetryEvent>)> {
+        self.dispatch_allow(
+            request_id,
+            || self.now_ms(),
+            |entry| entry.binding.matches(lease, task_id, request_id),
+            send,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn commit_dispatch(&self, request_id: &str, now_b: u64) -> Result<DispatchCommit> {
+        let (outcome, telemetry) = self.dispatch_allow(request_id, || now_b, |_| true, || true)?;
+        self.publish_dispatch_telemetry(telemetry);
+        Ok(outcome)
+    }
+
+    pub(crate) fn publish_dispatch_telemetry(&self, telemetry: Option<PermissionTelemetryEvent>) {
+        if let Some(event) = telemetry {
+            self.emit_telemetry(event.transition, event.latency_ms);
+        }
+    }
+
+    pub(crate) fn allow_delivery_observed(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        request_id: &str,
+    ) -> bool {
+        self.pending.lock().get(request_id).is_some_and(|entry| {
+            entry.binding.matches(lease, task_id, request_id) && entry.dispatch_state.committed()
+        })
+    }
+
+    pub(crate) fn cancel_bound_callback(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        request_id: &str,
+    ) -> Option<PermissionTelemetryEvent> {
+        let mut pending = self.pending.lock();
+        let entry = pending.get_mut(request_id)?;
+        if !entry.binding.matches(lease, task_id, request_id) {
+            return None;
+        }
+        let latency_ms = entry.deny("permission_callback_cancelled", self.now_ms())?;
+        Some(PermissionTelemetryEvent {
+            transition: PermissionTelemetryTransition::Denied,
+            latency_ms,
+        })
+    }
+
+    fn dispatch_allow(
+        &self,
+        request_id: &str,
+        now: impl FnOnce() -> u64,
+        bound: impl FnOnce(&PendingPermission) -> bool,
+        send: impl FnOnce() -> bool,
+    ) -> Result<(DispatchCommit, Option<PermissionTelemetryEvent>)> {
         let mut pending = self.pending.lock();
         let entry = pending
             .get_mut(request_id)
             .ok_or_else(|| error("permission_unknown"))?;
-        if entry.dispatch_state.committed() {
-            return Ok(DispatchCommit::Rejected {
-                code: "permission_already_dispatched",
-            });
+        if !bound(entry) {
+            return Err(error("permission_binding_stale"));
         }
+        if entry.dispatch_state.committed() {
+            return Ok((
+                DispatchCommit::Rejected {
+                    code: "permission_already_dispatched",
+                },
+                None,
+            ));
+        }
+        let now_b = now();
         if entry.expire(now_b) {
             let latency = entry
                 .request
                 .expires_at_ms
                 .saturating_sub(entry.created_at_ms);
-            drop(pending);
-            self.emit_telemetry(PermissionTelemetryTransition::Expired, latency);
-            return Ok(DispatchCommit::Rejected {
-                code: "permission_expired",
-            });
+            return Ok((
+                DispatchCommit::Rejected {
+                    code: "permission_expired",
+                },
+                Some(PermissionTelemetryEvent {
+                    transition: PermissionTelemetryTransition::Expired,
+                    latency_ms: latency,
+                }),
+            ));
         }
-        match entry.state {
+        let result = match entry.state {
             PermissionState::AllowedAwaitingDispatch => {
+                if !send() {
+                    return Err(error("permission_dispatch_failed"));
+                }
                 let latency = now_b.saturating_sub(entry.created_at_ms);
                 entry.dispatch_state = DispatchState::Dispatched;
                 entry.resolved_at_ms = Some(now_b);
-                drop(pending);
-                self.emit_telemetry(PermissionTelemetryTransition::Allowed, latency);
-                Ok(DispatchCommit::Committed)
+                return Ok((
+                    DispatchCommit::Committed,
+                    Some(PermissionTelemetryEvent {
+                        transition: PermissionTelemetryTransition::Allowed,
+                        latency_ms: latency,
+                    }),
+                ));
             }
-            PermissionState::Denied => Ok(DispatchCommit::Rejected {
-                code: "permission_denied",
-            }),
-            PermissionState::Expired => Ok(DispatchCommit::Rejected {
-                code: "permission_expired",
-            }),
-            PermissionState::Pending => Ok(DispatchCommit::Rejected {
-                code: "permission_not_decided",
-            }),
-        }
+            PermissionState::Denied => "permission_denied",
+            PermissionState::Expired => "permission_expired",
+            PermissionState::Pending => "permission_not_decided",
+        };
+        Ok((DispatchCommit::Rejected { code: result }, None))
     }
 
     /// Reports the real outcome after B stopped the task. Never claims "not
@@ -830,6 +996,24 @@ impl PermissionAuthority {
             .ok_or_else(|| error("permission_unknown"))
     }
 
+    /// Read a retained fact for the exact original lease and task. This does
+    /// not expire, renew, decide, or adopt an approval for another turn.
+    pub(crate) fn view_for_binding(
+        &self,
+        lease: &LeaseContext,
+        task_id: &str,
+        request_id: &str,
+    ) -> Result<PermissionView> {
+        let pending = self.pending.lock();
+        let entry = pending
+            .get(request_id)
+            .ok_or_else(|| error("permission_unknown"))?;
+        if !entry.binding.matches(lease, task_id, request_id) {
+            return Err(error("permission_binding_stale"));
+        }
+        Ok(Self::view_locked(entry))
+    }
+
     pub(crate) fn pending_for_task(&self, task_id: &str) -> Vec<PermissionView> {
         self.sweep_expired(self.now_ms());
         let pending = self.pending.lock();
@@ -862,25 +1046,14 @@ impl PermissionAuthority {
         let mut changed = 0;
         let mut latencies = Vec::new();
         for entry in pending.values_mut() {
-            if !predicate(entry) {
-                continue;
-            }
             // Once the dispatch boundary was committed the operation already
             // ran (or its outcome is unknown); a B stop must not rewrite that
             // history into "not executed".
-            if entry.dispatch_state == DispatchState::Dispatched {
-                continue;
-            }
-            match entry.state {
-                PermissionState::Pending | PermissionState::AllowedAwaitingDispatch => {
-                    entry.state = PermissionState::Denied;
-                    entry.decision = Some(PermissionDecision::Deny);
-                    entry.resolved_at_ms = Some(now_b);
-                    entry.resolved_reason = Some(bounded_reason(reason));
-                    changed += 1;
-                    latencies.push(now_b.saturating_sub(entry.created_at_ms));
-                }
-                PermissionState::Denied | PermissionState::Expired => {}
+            if predicate(entry)
+                && let Some(latency) = entry.deny(reason, now_b)
+            {
+                changed += 1;
+                latencies.push(latency);
             }
         }
         drop(pending);
@@ -996,6 +1169,57 @@ fn bounded_reason(reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_projection_view_requires_all_binding_fields_without_expiring_or_reading_clock() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = calls.clone();
+        let authority = PermissionAuthority::with_clock(std::sync::Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            100_000
+        }));
+        let live = lease();
+        let view = authority
+            .request(&live, "task-0001", request(60_000), 1_000)
+            .unwrap();
+        assert_eq!(
+            authority
+                .view_for_binding(&live, "task-0001", &view.permission_request_id)
+                .unwrap(),
+            view
+        );
+        for field in 0..5 {
+            let mut foreign = live.clone();
+            match field {
+                0 => foreign.connection_id.push_str("-old"),
+                1 => foreign.controller_lease_id.push_str("-old"),
+                2 => foreign.lease_epoch = "2".into(),
+                3 => foreign.relay_epoch.push_str("-old"),
+                _ => foreign.remote_control_generation.push_str("-old"),
+            }
+            assert_eq!(
+                authority
+                    .view_for_binding(&foreign, "task-0001", &view.permission_request_id)
+                    .unwrap_err()
+                    .code,
+                "permission_binding_stale"
+            );
+        }
+        assert_eq!(
+            authority
+                .view_for_binding(&live, "other-task", &view.permission_request_id)
+                .unwrap_err()
+                .code,
+            "permission_binding_stale"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(authority.view(&view.permission_request_id).unwrap(), view);
+        authority.sweep_expired(100_000);
+        assert_eq!(
+            authority.view(&view.permission_request_id).unwrap().state,
+            "expired"
+        );
+    }
 
     #[test]
     fn production_permission_clock_uses_the_shared_domain() {
@@ -1268,6 +1492,255 @@ mod tests {
             .request(&lease(), "task-0001", request(now_b + 60_000), now_b)
             .unwrap()
             .permission_request_id
+    }
+
+    #[test]
+    fn dispatched_receipt_retains_the_original_session_and_task_sequence() {
+        let (authority, _) = clocked(1_000);
+        let lease = lease();
+        let approval = authority
+            .request_for_task_instance(
+                &lease,
+                "task-0001",
+                "session-0001",
+                7,
+                request(61_000),
+                1_000,
+            )
+            .unwrap()
+            .permission_request_id;
+        assert!(authority.request_matches_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            7,
+            &approval,
+        ));
+        assert!(!authority.request_matches_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            8,
+            &approval,
+        ));
+        assert!(!authority.request_matches_task_instance(
+            &lease,
+            "task-0001",
+            "session-0002",
+            7,
+            &approval,
+        ));
+        authority
+            .decide_for_owner(
+                DecisionAuthority::ControllerA,
+                &lease,
+                "task-0001",
+                &approval,
+                PermissionDecision::Allow,
+                &PermissionDecisionOwner {
+                    session_id: "session-0001".into(),
+                    task_sequence: 7,
+                },
+            )
+            .unwrap();
+        assert!(!authority.allow_delivery_for_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            7,
+            &approval
+        ));
+        assert_eq!(
+            authority
+                .dispatch_bound_allow(&lease, "task-0001", &approval, || true)
+                .unwrap()
+                .0,
+            DispatchCommit::Committed
+        );
+        assert!(authority.allow_delivery_for_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            7,
+            &approval
+        ));
+        assert!(!authority.allow_delivery_for_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            8,
+            &approval
+        ));
+        assert!(!authority.allow_delivery_for_task_instance(
+            &lease,
+            "task-0001",
+            "session-0002",
+            7,
+            &approval
+        ));
+        let mut foreign = lease.clone();
+        foreign.lease_epoch = "2".into();
+        assert!(!authority.allow_delivery_for_task_instance(
+            &foreign,
+            "task-0001",
+            "session-0001",
+            7,
+            &approval
+        ));
+        assert!(
+            authority
+                .cancel_bound_callback(&lease, "task-0001", &approval)
+                .is_none()
+        );
+        assert!(authority.allow_delivery_for_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            7,
+            &approval
+        ));
+    }
+
+    #[test]
+    fn task_instance_binding_is_complete_when_a_pending_request_becomes_visible() {
+        let authority = Arc::new(PermissionAuthority::with_clock(Arc::new(|| 1_100)));
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observer = Arc::clone(&observed);
+        let weak = Arc::downgrade(&authority);
+        authority.set_telemetry_sink(Arc::new(move |event| {
+            if matches!(event.transition, PermissionTelemetryTransition::Requested) {
+                let authority = weak.upgrade().unwrap();
+                let pending = authority.pending_for_task("task-0001");
+                assert_eq!(pending.len(), 1);
+                assert!(authority.request_matches_task_instance(
+                    &lease(),
+                    "task-0001",
+                    "session-0001",
+                    7,
+                    &pending[0].permission_request_id,
+                ));
+                observer.store(true, Ordering::SeqCst);
+            }
+        }));
+        authority
+            .request_for_task_instance(
+                &lease(),
+                "task-0001",
+                "session-0001",
+                7,
+                request(61_000),
+                1_000,
+            )
+            .unwrap();
+        assert!(observed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn callback_cancellation_is_exact_and_releases_the_next_approval_slot() {
+        let (authority, _) = clocked(1_000);
+        let lease = lease();
+        let approval = authority
+            .request_for_task_instance(
+                &lease,
+                "task-0001",
+                "session-0001",
+                7,
+                request(61_000),
+                1_000,
+            )
+            .unwrap()
+            .permission_request_id;
+        assert!(!authority.callback_was_cancelled(&lease, "task-0001", &approval));
+        assert!(
+            authority
+                .cancel_bound_callback(&lease, "task-0001", &approval)
+                .is_some()
+        );
+        assert!(authority.callback_was_cancelled(&lease, "task-0001", &approval));
+        assert!(!authority.callback_was_cancelled(&lease, "another-task", &approval));
+        let mut foreign = lease.clone();
+        foreign.remote_control_generation = "another-generation".into();
+        assert!(!authority.callback_was_cancelled(&foreign, "task-0001", &approval));
+        assert!(!authority.allow_delivery_for_task_instance(
+            &lease,
+            "task-0001",
+            "session-0001",
+            7,
+            &approval
+        ));
+        let next = authority
+            .request_for_task_instance(
+                &lease,
+                "task-0001",
+                "session-0001",
+                7,
+                request(61_000),
+                1_100,
+            )
+            .unwrap();
+        assert_ne!(next.permission_request_id, approval);
+        assert_eq!(next.state, "pending");
+    }
+
+    #[test]
+    fn bound_dispatch_rejects_stale_expired_and_failed_deliveries() {
+        let (authority, now) = clocked(1_000);
+        let lease = lease();
+        let approval = register(&authority, 1_000);
+        authority
+            .decide(
+                DecisionAuthority::ControllerA,
+                &lease,
+                "task-0001",
+                &approval,
+                PermissionDecision::Allow,
+                1_000,
+            )
+            .unwrap();
+        for (stale, task) in [
+            (
+                LeaseContext {
+                    relay_epoch: "other-relay".into(),
+                    ..lease.clone()
+                },
+                "task-0001",
+            ),
+            (
+                LeaseContext {
+                    remote_control_generation: "other-generation".into(),
+                    ..lease.clone()
+                },
+                "task-0001",
+            ),
+            (lease.clone(), "other-task"),
+        ] {
+            assert_eq!(
+                authority
+                    .dispatch_bound_allow(&stale, task, &approval, || panic!("stale send"))
+                    .unwrap_err()
+                    .code,
+                "permission_binding_stale"
+            );
+        }
+        assert_eq!(
+            authority
+                .dispatch_bound_allow(&lease, "task-0001", &approval, || false)
+                .unwrap_err()
+                .code,
+            "permission_dispatch_failed"
+        );
+        assert!(!authority.allow_delivery_observed(&lease, "task-0001", &approval));
+        now.store(61_000, Ordering::SeqCst);
+        assert_eq!(
+            authority
+                .dispatch_bound_allow(&lease, "task-0001", &approval, || panic!("expired send"))
+                .unwrap()
+                .0,
+            DispatchCommit::Rejected {
+                code: "permission_expired"
+            }
+        );
+        assert!(!authority.allow_delivery_observed(&lease, "task-0001", &approval));
     }
 
     fn clocked(now: u64) -> (PermissionAuthority, Arc<AtomicU64>) {

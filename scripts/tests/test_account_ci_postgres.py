@@ -218,6 +218,58 @@ class AccountCIAdmissionTests(unittest.TestCase):
                     with self.assertRaises(ValueError):PG.main()
                     self.assertFalse((Path(directory)/'output').exists())
 
+    def test_core_companion_projection_preserves_exact_ownership_and_rejects_unknowns(self):
+        metadata = {'audit-export-postgres': {'id': 'a'*64, 'ports': {'5432': '49173'}},
+                    'existing-broker-postgres': {'id': 'b'*64, 'ports': {'5432': '49174'}},
+                    'portal-redis': {'id': 'c'*64, 'ports': {'6379': '49175'}}}
+        selected = PG.profile_metadata(metadata, PG.CORE_SERVICES, portal_redis=True)
+        self.assertEqual(selected, {key: metadata[key] for key in ('audit-export-postgres', 'existing-broker-postgres')})
+        for profile in ('full', 'closure', 'financial'):
+            with self.subTest(profile=profile), self.assertRaises(ValueError):
+                PG.profile_metadata(metadata, PG.SERVICE_PROFILES[profile], portal_redis=True)
+        variants = [dict(metadata, foreign={}), {key: value for key, value in metadata.items() if key != 'portal-redis'}]
+        for key, value in [('id','a'*64), ('id','not-canonical'), ('ports',{'6379':'49173'}), ('ports',{'6379':'049175'}), ('ports',{'6380':'49175'})]:
+            wrong=copy.deepcopy(metadata);wrong['portal-redis'][key]=value;variants.append(wrong)
+        for wrong in variants:
+            with self.subTest(metadata=wrong), patch.dict(os.environ, {'ACCOUNT_CI_SERVICES': json.dumps(wrong)}), patch.object(PG,'run') as command:
+                with self.assertRaises(ValueError): PG.main(services=PG.CORE_SERVICES,portal_redis=True)
+                command.assert_not_called()
+        with self.assertRaises(ValueError): PG.profile_metadata(metadata, PG.CORE_SERVICES)
+        # Exercise the actual CLI dispatch for admission and retirement. Only
+        # Docker/psql acknowledgements are synthetic; Redis is never inspected
+        # or stopped by the PG owner, and its receipt contains only two PG IDs.
+        for stop,companion in [(False,'valid'),(True,'valid'),(True,'missing'),(True,'invalid'),(True,'unknown')]:
+            current=copy.deepcopy(metadata)
+            if companion=='missing': current.pop('portal-redis')
+            if companion=='invalid': current['portal-redis']={}
+            if companion=='unknown': current['unregistered-companion']={}
+            actual={};identities={};stopped=[];calls=[]
+            for index,(name,image,directory,major) in enumerate(PG.CORE_SERVICES.values()):
+                meta,item=self.fixture();meta=metadata[name];item['Id']=meta['id'];item['Config']['Image']=image;item['NetworkSettings']['Ports']['5432/tcp'][0]['HostPort']=meta['ports']['5432'];item['Mounts'][0].update(Name=str(index+4)*64,Destination='/var/lib/postgresql' if major=='18' else '/var/lib/postgresql/data');actual[meta['id']]=item
+                identities[meta['id']]=f'{100+index}|{directory}|5432|postgres|postgres|postgres|t|{int(major)*10000}'
+            def command(argv,**kwargs):
+                calls.append(argv)
+                if argv[:2]==['docker','inspect']: value=json.dumps([actual[argv[2]]])
+                elif argv[:2]==['docker','exec']: value=identities[argv[2]]
+                elif argv[0]=='psql': value=identities[next(meta['id'] for name,meta in metadata.items() if name!='portal-redis' and ':'+meta['ports']['5432']+'/' in argv[1])]
+                elif argv[:2]==['docker','ps']: value='' if stopped else '\n'.join(actual)
+                elif argv[:3]==['docker','volume','ls']: value='' if stopped else '\n'.join(item['Mounts'][0]['Name'] for item in actual.values())
+                elif argv[:2]==['docker','logs']: value='owned PG synthetic log'
+                elif argv[:2]==['docker','stop']: stopped.extend(argv[4:]);value=''
+                else: raise AssertionError('unexpected PG companion command')
+                return subprocess.CompletedProcess(argv,0,stdout=value,stderr='')
+            with tempfile.TemporaryDirectory() as directory:
+                env={'GITHUB_ACTIONS':'true','ACCOUNT_CI_SERVICES':json.dumps(current),'GITHUB_OUTPUT':str(Path(directory)/'outputs'),'PINVOU_CI_RESOURCE_LEDGER':directory}
+                argv=['account-ci-postgres.py','--profile','core','--with-portal-redis']+(['--stop-owned-services'] if stop else [])
+                with patch.dict(os.environ,env),patch.object(sys,'argv',argv),patch.object(subprocess,'run',side_effect=command),contextlib.redirect_stdout(io.StringIO()):
+                    runpy.run_path(str(ROOT/'scripts/account-ci-postgres.py'),run_name='__main__')
+                self.assertTrue(calls);self.assertNotIn('c'*64,str(calls))
+                if stop:
+                    receipt=json.loads((Path(directory)/'postgres-services.json').read_text());self.assertEqual(receipt['state'],'released');self.assertEqual(set(receipt['ids']),{'a'*64,'b'*64});self.assertEqual(set(stopped),{'a'*64,'b'*64})
+                else:
+                    output=(Path(directory)/'outputs').read_text();self.assertIn('audit_system=100',output);self.assertIn('broker_system=101',output);self.assertNotIn('redis',output)
+
+
     def test_each_psql_operation_fences_same_backend(self):
         env={'GITHUB_ACTIONS':'true','PINVOU_ACCOUNT_CI_PG_PORT':'49173','PINVOU_ACCOUNT_CI_PG_SYSTEM_ID':'12345','PINVOU_ACCOUNT_CI_PG_DIRECTORY':'/var/lib/postgresql/data'}
         raw='postgres://postgres@127.0.0.1:49173/postgres?sslmode=disable'
@@ -236,7 +288,7 @@ class AccountCIAdmissionTests(unittest.TestCase):
         job=source.split('\n  account-platform-test:',1)[1].split('\n  account-closure-test:',1)[0]
         routes=[line.strip() for line in job.splitlines() if line.lstrip().startswith('runs-on:')]
         self.assertEqual(routes, ["""runs-on: ${{ fromJSON(vars.PINVOU_LINUX_HEAVY_RUNNER || vars.PINVOU_LINUX_RUNNER || '["ubuntu-22.04"]') }}"""])
-        self.assertEqual(job.count('"127.0.0.1::5432"'),2);self.assertEqual(job.count('          --rm\n'),2)
+        self.assertEqual(job.count('"127.0.0.1::5432"'),2);self.assertEqual(job.count('          --rm\n'),3)
         for variable,key in [('PINVOU_TEST_SCHEMA_DATABASE_URL','broker'),('F17_TEST_DATABASE_URL','audit')]:
             self.assertIn(variable+': ${{ steps.account-pg.outputs.'+key+'_url }}',job)
         self.assertNotIn('ACCOUNT_FINANCIAL_SERVICES:',job)
@@ -260,9 +312,14 @@ class AccountCIAdmissionTests(unittest.TestCase):
         for root in roots:self.assertIsNotNone(re.fullmatch(pattern,root))
         self.assertIsNone(re.fullmatch(pattern,"TestUnrelatedOptionalFixture"))
         invitation="TestMembershipInvitationLegacyRollbackPublicPostgres"
+        history="TestAuditExportPublicDownRetainsOriginalHistory"
         children={
             "TestAccount039RollbackInventoryPostgres": {"empty-ledger", "before-approval-schema", "installed-039", "higher-version", "retained-v2-reference", "wrong-database", "missing-approval-column-grant"},
             invitation: {"retained-link-refuses-down-without-fact-or-schema-loss", "forward-upgrade-replays-original-and-accepts-next-command"},
+            history: {"three_scope_public_down", "three_scope_public_down/LF", "three_scope_public_down/CRLF",
+                      "unbound_public_down_forbids_incomplete_inverse", "expired_binding_public_down_retains_evidence",
+                      "public_governance_down_preserves_audit_history",
+                      "public_governance_down_preserves_audit_history/pinned_ledger_ignores_temp_shadow"},
         }
         events=[]
         for root in roots:
@@ -277,6 +334,16 @@ class AccountCIAdmissionTests(unittest.TestCase):
             "transient_database_errors_stop_at_three", "expired_third_attempt_is_terminal",
             "permanent_generation_error_is_not_retried", "pending_without_worker_retains_quota")}
         account.extend({"Test":case,"Action":"pass"} for case in retry_cases)
+        commerce = "TestCommerceSyncLifecycleFence"
+        commerce_cases = {commerce + "/" + case for case in (
+            "current_generation_completes", "stale_pending_not_claimed",
+            "late_completion_rejects_old_lifecycle_without_effects",
+            "late_retry_cannot_write_new_lifecycle_mapping",
+            "mapping_version_drift_records_stale_in_same_lifecycle",
+            "temporary_disable_preserves_same_generation_retry",
+        )}
+        account.append({"Test": commerce, "Action": "pass"})
+        account.extend({"Test":case,"Action":"pass"} for case in commerce_cases)
         with tempfile.TemporaryDirectory(prefix='audit-result-contract-') as directory:
             schema_path, account_path=Path(directory)/'schema.jsonl',Path(directory)/'account.jsonl'
             account_path.write_text('\n'.join(map(json.dumps,account)),encoding='utf-8')
@@ -285,12 +352,13 @@ class AccountCIAdmissionTests(unittest.TestCase):
                 with patch.object(sys,'argv',['audit-validator',str(schema_path),str(account_path)]):
                     exec(compile(code,'<actual-audit-workflow-validator>','exec'),{})
             verify(events)
-            for child in children[invitation]:
-                for invalid in ([e for e in events if e['Test']!=invitation+'/'+child],
-                                [dict(e,Action='skip') if e['Test']==invitation+'/'+child else e for e in events]):
-                    with self.subTest(child=child),self.assertRaises(AssertionError):verify(invalid)
-            with self.assertRaises(AssertionError):verify([e for e in events if not e['Test'].startswith(invitation)])
-            for case in lease_cases | retry_cases:
+            for root in (invitation,history):
+                for child in children[root]:
+                    for invalid in ([e for e in events if e['Test']!=root+'/'+child],
+                                    [dict(e,Action='skip') if e['Test']==root+'/'+child else e for e in events]):
+                        with self.subTest(root=root,child=child),self.assertRaises(AssertionError):verify(invalid)
+                with self.assertRaises(AssertionError):verify([e for e in events if not e['Test'].startswith(root)])
+            for case in lease_cases | retry_cases | commerce_cases:
                 for invalid in ([e for e in account if e['Test']!=case],
                                 [dict(e,Action='skip') if e['Test']==case else e for e in account]):
                     account_path.write_text('\n'.join(map(json.dumps,invalid)),encoding='utf-8')

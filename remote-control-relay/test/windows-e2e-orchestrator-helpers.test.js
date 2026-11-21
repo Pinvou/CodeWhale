@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, lstatSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test as nodeTest } from "node:test";
 
 const helper = fileURLToPath(new URL("../../scripts/windows-e2e-orchestrator-helpers.ps1", import.meta.url));
 const orchestrator = fileURLToPath(new URL("../../scripts/run-windows-remote-control-e2e.ps1", import.meta.url));
+const ownedSource = fileURLToPath(new URL("../../scripts/windows-owned-process.cs", import.meta.url));
 const guard = fileURLToPath(new URL("../../scripts/windows-e2e-process-guard.ps1", import.meta.url));
 const uiSmoke = fileURLToPath(new URL("../../pinvou3-app/scripts/remote-control-ui-smoke.mjs", import.meta.url));
 const pwsh = process.platform === "win32" ? "powershell.exe" : "pwsh";
@@ -19,8 +23,19 @@ if (process.platform === "win32") {
 }
 const quote = (value) => `'${value.replaceAll("'", "''")}'`;
 const psProbe = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { env: shellEnv });
-const test = (name, run) => nodeTest(name, {
-  skip: process.platform !== 'win32' && psProbe.error ? 'PowerShell unavailable; no production AST execution evidence' : false,
+// The staged-file hash contract executes Get-FileHash through both the test
+// fixture and the production helper. On runners whose PowerShell module path
+// is broken the cmdlet is genuinely absent; skip those two tests explicitly
+// instead of failing them on an environment precondition. Probe with the same
+// sanitized environment the contract tests themselves run under.
+const fileHashProbe = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command', "if (-not (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) { exit 1 }"], { env: shellEnv });
+const fileHashSkip = fileHashProbe.status === 0 ? false
+  : `Get-FileHash unavailable in ${pwsh}; the staged-file hash contract did not execute against the production helper`;
+const test = (name, run, skip = false) => nodeTest(name, {
+  skip: [
+    process.platform !== 'win32' && psProbe.error ? 'PowerShell unavailable; no production AST execution evidence' : false,
+    skip,
+  ].filter(Boolean).join('; ') || false,
 }, run);
 // Load definitions from the production script without running its deployment.
 const productionAst = `$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile(${quote(orchestrator)},[ref]$tokens,[ref]$errors);if($errors.Count){throw 'production-parse-failed'}; `;
@@ -32,11 +47,103 @@ const productionStaging = productionAst
 // actual cleanup branches, ordering and ownership checks are not duplicated.
 const productionCleanup = `$cleanupNode=@($ast.FindAll({param($n)$n -is [Management.Automation.Language.ScriptBlockExpressionAst] -and $n.Extent.Text.Contains('$remoteCleanupErrors =')},$true)|Sort-Object {$_.Extent.Text.Length})[0];if(-not $cleanupNode){throw 'production-cleanup-missing'};$cleanupText=$cleanupNode.Extent.Text;$cleanup=[scriptblock]::Create($cleanupText.Substring(1,$cleanupText.Length-2).Replace('$using:','$')); `;
 
+for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : ['pwsh']) {
+  test(`production completion marker serializes the authenticated interval [${shell}]`, () => {
+    const evidenceRoot = mkdtempSync(join(tmpdir(), "pinvou-completion-"));
+    const evidenceIdentity = lstatSync(evidenceRoot);
+    // Delete only this parent-owned fixture after the producer shell exits.
+    let primaryError;
+    let bodyFailed = false;
+    try {
+    // Execute the actual producer block and artifact registration, without SSH,
+    // a signer or deployment. The validator suite separately checks signatures.
+      const script = `$ErrorActionPreference='Stop';
+      if($env:PINVOU_TEST_FOREIGN_MODULE_PATH -and (@($env:PSModulePath -split [IO.Path]::PathSeparator) -contains $env:PINVOU_TEST_FOREIGN_MODULE_PATH)){throw 'foreign-module-path-inherited'};
+      if($env:OS -eq 'Windows_NT'){Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force};
+      ${productionAst}
+      foreach($name in @('Get-PinvouSha256Hex','Get-PinvouFileSha256','Assert-PinvouPathInside','Add-LocalArtifact')){
+        $definition=$ast.Find({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true);
+        if(-not $definition){throw 'production-function-missing'};Invoke-Expression $definition.Extent.Text
+      };
+      $source=$ast.Extent.Text;$start=$source.IndexOf('$runClock.Stop()');
+      $end=$source.IndexOf('foreach ($artifact in $artifacts)', $start);
+      if($start -lt 0 -or $end -lt 0){throw 'completion-block-missing'};
+      $emit=[scriptblock]::Create($source.Substring($start,$end-$start));
+      $evidenceRoot=${quote(evidenceRoot)};
+        New-Item -ItemType Directory -Path (Join-Path $evidenceRoot 'gates') -Force | Out-Null;
+        $artifacts=[Collections.Generic.List[object]]::new();$actualHead='${'b'.repeat(40)}';$runNonce='${'d'.repeat(64)}';
+        $TimestampFormat='yyyy-MM-ddTHH:mm:ss.fffZ';$runStartedAt=[DateTime]::UtcNow.ToString($TimestampFormat);
+        $runClock=[Diagnostics.Stopwatch]::StartNew();. $emit;
+        if($runClock.IsRunning -or $artifacts.Count -ne 1){throw 'completion-freeze-failed'};
+        $artifact=$artifacts[0];$bytes=[IO.File]::ReadAllBytes((Join-Path $evidenceRoot $artifact.path));
+        $marker=[Text.Encoding]::UTF8.GetString($bytes)|ConvertFrom-Json;
+        if($marker.schema -cne 'pinvou-remote-control-run-completion' -or $marker.version -ne 1 -or $marker.source_commit_sha -cne $actualHead -or $marker.run_nonce -cne $runNonce){throw 'completion-fields-invalid'};
+        if($artifact.path -cne 'gates/run-completion.json' -or $artifact.kind -cne 'check' -or $artifact.machine_role -cne 'orchestrator' -or $artifact.signature -cne '' -or $artifact.sha256 -cne $completionSha -or $completionSha -cne (Get-PinvouSha256Hex $bytes)){throw 'completion-artifact-invalid'};
+        [ordered]@{interval=@([long]0,[long]$runClock.ElapsedMilliseconds);interval_sha256=$marker.monotonic_interval_sha256;marker_base64=[Convert]::ToBase64String($bytes);started_at=$runStartedAt;finished_at=$runFinishedAt}|ConvertTo-Json -Compress;
+        # The same production block rejects overlong runs before publishing a marker.
+        $runClock=[pscustomobject]@{ElapsedMilliseconds=[long]7200001};$runClock|Add-Member ScriptMethod Stop {};
+        $count=$artifacts.Count;try{. $emit;throw 'overlong-run-accepted'}catch{if($_.Exception.Message -cne 'e2e_run_duration_invalid'){throw}};
+        if($artifacts.Count -ne $count){throw 'overlong-run-published'}
+        # A deliberately caught rejection must not become the shell exit status.
+        exit 0;
+        `;
+      const result = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {env: shellEnv, encoding: 'utf8', timeout: 30000});
+      assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+      const actual = JSON.parse(result.stdout);
+      const marker = JSON.parse(Buffer.from(actual.marker_base64, 'base64').toString('utf8'));
+      assert.equal(marker.started_at, actual.started_at);
+      assert.equal(marker.finished_at, actual.finished_at);
+      assert.equal(actual.interval_sha256, crypto.createHash('sha256').update(JSON.stringify(actual.interval)).digest('hex'));
+    } catch (error) {
+      bodyFailed = true;
+      primaryError = error;
+      throw error;
+    } finally {
+      // The parent owns this exact root and retires it after spawnSync has
+      // returned. Keep both failures if producer verification and cleanup fail.
+      try {
+        const current = lstatSync(evidenceRoot);
+        assert.ok(current.isDirectory() && !current.isSymbolicLink(), "completion root must remain an owned directory");
+        assert.equal(current.dev, evidenceIdentity.dev, "completion root device changed");
+        assert.equal(current.ino, evidenceIdentity.ino, "completion root identity changed");
+        rmSync(evidenceRoot, { recursive: true });
+        assert.equal(existsSync(evidenceRoot), false, "completion root must be retired");
+      } catch (cleanupError) {
+        if (bodyFailed) {
+          throw new AggregateError([primaryError, cleanupError], "completion verification and cleanup failed", { cause: primaryError });
+        }
+        throw cleanupError;
+      }
+    }
+  });
+}
+
+nodeTest("completion producer shells discard a foreign inherited Windows module path", {
+  skip: process.platform !== "win32",
+}, () => {
+  const foreignPath = mkdtempSync(join(tmpdir(), "pinvou-foreign-modules-"));
+  try {
+    const env = { ...process.env };
+    // This child starts an independent CLI runner. Inheriting the worker
+    // context makes node:test skip its files as a recursive runner invocation.
+    delete env.NODE_TEST_CONTEXT;
+    for (const name of Object.keys(env)) if (name.toUpperCase() === "PSMODULEPATH") delete env[name];
+    env.PSModulePath = foreignPath;
+    env.PINVOU_TEST_FOREIGN_MODULE_PATH = foreignPath;
+    const result = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--test-name-pattern=^production completion marker serializes", fileURLToPath(import.meta.url)], {
+      env, encoding: "utf8", timeout: 90000,
+    });
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr + result.stdout);
+    assert.match(result.stdout, /# pass 2\b/u, "both Windows PowerShell and PowerShell 7 must execute");
+    assert.match(result.stdout, /# skipped 0\b/u);
+  } finally { rmSync(foreignPath, { recursive: true, force: true }); }
+});
+
 // Execute the real legacy-flow parameter binder and try/finally without running
 // the top-level orchestrator. Only the external trusted-driver boundary is fake.
 for (const shell of process.platform === 'win32' ? ['powershell.exe', 'pwsh'] : ['pwsh']) {
   test(`production legacy flow binds and forwards the owned process ID [${shell}]`, () => {
-    const script = `$ErrorActionPreference='Stop'; ${productionAst}
+    const script = `$ErrorActionPreference='Stop'; . ${quote(guard)}; ${productionAst}
       $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.ScriptBlockExpressionAst] -and $n.Extent.Text.Contains('legacy-configure-gateway') -and $n.Extent.Text.Contains('legacy-deconfigure-gateway') -and $n.Extent.Text.Contains('$configureExitCode')},$true));
       if($nodes.Count -ne 1){throw 'legacy-flow-not-unique'};
       $text=$nodes[0].Extent.Text;$flow=[scriptblock]::Create($text.Substring(1,$text.Length-2));
@@ -87,7 +194,7 @@ test("production orchestrator functions enforce measured elapsed time and route 
 
 test("per-run staging is hash checked, collision-safe and ownership-bound on cleanup", () => {
   const nonce = "d".repeat(64);
-  const script = `$ErrorActionPreference='Stop'; . ${quote(helper)}; ${productionStaging} ${productionCleanup} $base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-stage-'+[Guid]::NewGuid().ToString('N')); `
+  const script = `$ErrorActionPreference='Stop'; . ${quote(helper)}; . ${quote(guard)}; ${productionStaging} ${productionCleanup} $base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-stage-'+[Guid]::NewGuid().ToString('N')); `
     + `try { $s=& $create $base '${nonce}' ([DateTime]::UtcNow); if(-not [IO.Path]::IsPathRooted($s.root)){throw 'staging-contract'}; `
     + `$file=Join-Path $s.root 'probe.bin'; [IO.File]::WriteAllBytes($file,[byte[]](1,2,3)); $sha=(Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant(); `
     + `[void](Assert-PinvouTrustedStagedFile 'probe.bin' $sha); `
@@ -98,11 +205,11 @@ test("per-run staging is hash checked, collision-safe and ownership-bound on cle
     + `try{& $cleanup;throw 'owner-mismatch-accepted'}catch{if($_.Exception.Message -notmatch 'e2e_staging_cleanup_owner_mismatch'){throw}};if(-not(Test-Path $s.root)){throw 'foreign-owner-deleted'};[IO.File]::WriteAllText($markerPath,$marker); `
     + `& $cleanup; if(Test-Path $s.root){throw 'cleanup-incomplete'} } finally { if(Test-Path $base){Remove-Item -LiteralPath $base -Recurse -Force} }`;
   assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", script], { env: shellEnv, stdio: "pipe" }));
-});
+}, fileHashSkip);
 
 test("production cleanup continues after route and role faults and reports their aggregate", () => {
   const result = spawnSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command",
-    `$ErrorActionPreference='Stop'; . ${quote(helper)}; ${productionStaging} ${productionCleanup} `
+    `$ErrorActionPreference='Stop'; . ${quote(helper)}; . ${quote(guard)}; ${productionStaging} ${productionCleanup} `
     + `$base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-fault-'+[Guid]::NewGuid().ToString('N'));try{ `
     + `$runNonce='${'d'.repeat(64)}';$s=& $create $base $runNonce ([DateTime]::UtcNow);$RemoteRoot=$s.root;$RemoteBase=$base;$cleanupLegacyOwned=$true;$cleanupLegacyPid=$null; `
     + `$LegacyGatewayUrl='fixture';$cleanupRouteId='fixture';$cleanupOriginalStateDigest='fixture';$cleanupCanonicalInputDigest='fixture';$cleanupControlPlaneDigest='fixture';$actualHead='fixture'; `
@@ -116,8 +223,10 @@ test("production cleanup continues after route and role faults and reports their
 
 test("legacy ownership registry is strict and recovers a lost response PID", () => {
   const nonce = "e".repeat(64);
-  const command = `. ${quote(helper)}; $registry=[pscustomobject]@{schema='pinvou-legacy-owned-processes';version=[int]1;run_nonce='${nonce}';mock=$false;active=[object[]]@([int]43210);terminated=[object[]]@()}; `
+  const command = `. ${quote(helper)}; . ${quote(guard)}; $registry=[pscustomobject]@{schema='pinvou-legacy-owned-processes';version=[int]1;run_nonce='${nonce}';mock=$false;active=[object[]]@([int]43210);terminated=[object[]]@()}; `
     + `$resolved=Assert-PinvouLegacyOwnershipRegistry -RunNonce '${nonce}' -Registry $registry -CallerObservedPid $null; if($resolved.active.Count -ne 1 -or $resolved.active[0] -ne 43210){throw 'failure_window_pid_not_recovered'}; `
+    + `$confirmed=Assert-PinvouLegacyOwnershipRegistry -RunNonce '${nonce}' -Registry $registry -CallerObservedPid ([Nullable[int]]43210);if($confirmed.active[0] -ne 43210){throw 'observed_pid_not_confirmed'}; `
+    + `try{Assert-PinvouLegacyOwnershipRegistry -RunNonce '${nonce}' -Registry $registry -CallerObservedPid ([Nullable[int]]43211);throw 'mismatched_pid_accepted'}catch{if($_.Exception.Message -ne 'e2e_legacy_ownership_caller_pid_missing'){throw}}; `
     + `function Expect-Rejected([scriptblock]$Action){try{& $Action;throw 'invalid-registry-accepted'}catch{if($_.Exception.Message -eq 'invalid-registry-accepted'){throw}}}; `
     + `$registry.mock='false';Expect-Rejected {Assert-PinvouLegacyOwnershipRegistry -RunNonce '${nonce}' -Registry $registry};$registry.mock=$false; `
     + `$registry.active=[object[]]@([int]43210,[int]43210);Expect-Rejected {Assert-PinvouLegacyOwnershipRegistry -RunNonce '${nonce}' -Registry $registry}`;
@@ -128,17 +237,18 @@ test("legacy ownership registry is strict and recovers a lost response PID", () 
   assert.match(`${invalid.stdout}${invalid.stderr}`, /e2e_legacy_ownership_query_failed/u);
 });
 
-test("production bootstrap retains the complete helper call chain across runspace invocations", () => {
+nodeTest("production bootstrap retains the complete helper call chain across runspace invocations",
+  { skip: process.platform !== "win32" }, () => {
   const script = `$ErrorActionPreference='Stop'; $base=Join-Path ([IO.Path]::GetTempPath()) ('pinvou-e2e-scope-'+[Guid]::NewGuid().ToString('N')); `
     + `$runspace=[RunspaceFactory]::CreateRunspace(); $runspace.Open(); $ps=[PowerShell]::Create(); $ps.Runspace=$runspace; `
     + `try { New-Item -ItemType Directory -Path $base | Out-Null; `
-    + `$inputs=@{ 'windows-e2e-orchestrator-helpers.ps1'=${quote(helper)}; 'windows-e2e-process-guard.ps1'=${quote(guard)}; 'remote-control-ui-smoke.mjs'=${quote(uiSmoke)}; 'pinvou-node.exe'=${quote(process.execPath)} }; `
+    + `$inputs=@{ 'windows-e2e-orchestrator-helpers.ps1'=${quote(helper)}; 'windows-e2e-process-guard.ps1'=${quote(guard)}; 'windows-owned-process.cs'=${quote(ownedSource)}; 'remote-control-ui-smoke.mjs'=${quote(uiSmoke)}; 'pinvou-node.exe'=${quote(process.execPath)} }; `
     + `$files=@(foreach($name in $inputs.Keys){$path=Join-Path $base $name; Copy-Item -LiteralPath $inputs[$name] -Destination $path; [pscustomobject]@{RelativePath=$name;Sha256=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant();SignaturePolicy='none'}}); `
     + `$tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile(${quote(orchestrator)},[ref]$tokens,[ref]$errors);if($errors.Count){throw 'bootstrap-parse-failed'}; `
     + `$assignment=$ast.Find({param($n)$n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$RemoteBootstrap'},$true);if(-not $assignment){throw 'bootstrap-missing'}; `
     + `$literal=$assignment.Right.Extent.Text;$bootstrap=$literal.Substring(1,$literal.Length-2); `
     + `[void]$ps.AddScript('param($root,$bootstrap,$files); & { param($root,$bootstrap,$files); $global:PinvouE2ERunRoot=$root; & ([scriptblock]::Create($bootstrap)) $root $files fixture fixture fixture fixture } $root $bootstrap $files').AddArgument($base).AddArgument($bootstrap).AddArgument(($files|ConvertTo-Json -Compress)); `
-    + `$first=@($ps.Invoke());if($ps.HadErrors){throw ($ps.Streams.Error|Out-String)};if($first[0].verified_file_count -ne 4){throw 'bootstrap-did-not-run'};$ps.Commands.Clear(); `
+    + `$first=@($ps.Invoke());if($ps.HadErrors){throw ($ps.Streams.Error|Out-String)};if($first[0].verified_file_count -ne 5){throw 'bootstrap-did-not-run'};$ps.Commands.Clear(); `
     // Only Authenticode is a local test stub. Bootstrap and every transitive
     // production helper run unmodified, after the first local scope has ended.
     + `$call={ param($root,$files); $ErrorActionPreference='Stop'; function global:Get-AuthenticodeSignature { [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Thumbprint='fixture';Subject='fixture'}} }; `
@@ -153,4 +263,4 @@ test("production bootstrap retains the complete helper call chain across runspac
     + `[void]$ps.AddScript($call.ToString()).AddArgument($base).AddArgument(($files|ConvertTo-Json -Compress));$second=@($ps.Invoke());if($ps.Streams.Error.Count){throw ($ps.Streams.Error|Out-String)};if($second[-1] -ne 'scope-contract-pass'){throw 'second-invocation-did-not-run'} `
     + `} finally { $ps.Dispose();$runspace.Dispose();if(Test-Path -LiteralPath $base){Remove-Item -LiteralPath $base -Recurse -Force} }`;
   assert.doesNotThrow(() => execFileSync(pwsh, ["-NoProfile", "-NonInteractive", "-Command", script], { env: shellEnv, stdio: "pipe", timeout: 30_000 }));
-});
+}, fileHashSkip);

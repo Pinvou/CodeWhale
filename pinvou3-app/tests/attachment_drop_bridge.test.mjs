@@ -112,11 +112,18 @@ await api.uploadDeviceFiles([fakeFile()]);
 assert.equal(state.activeSessionId, null, 'dropping a file must not create a session');
 assert.equal(state.attachments.length, 1);
 assert.equal(state.attachments[0].status, 'ready');
-const firstIngest = invokedCommands.find(item => item.command === 'ingest_draft_file_chunk');
-assert.ok(firstIngest);
-assert.equal('sessionId' in firstIngest.args, false);
-assert.equal(firstIngest.args.commit, true);
-assert.equal(firstIngest.args.dataBase64, 'AQID');
+// Closed wiring keeps behavior telemetry on the send paths, so the ingest
+// invoke is no longer necessarily invokedCommands[0] — locate it by name.
+const ingestCommand = invokedCommands.find(c => c.command === 'ingest_draft_file_chunk');
+assert.ok(ingestCommand, 'the upload must issue ingest_draft_file_chunk');
+assert.equal('sessionId' in ingestCommand.args, false);
+assert.equal(ingestCommand.args.commit, true);
+assert.equal(ingestCommand.args.dataBase64, 'AQID');
+assert.equal(
+  invokedCommands.filter(c => c.command === 'ingest_draft_file_chunk').length,
+  1,
+  'exactly one ingest invoke — a duplicate would re-upload the draft payload',
+);
 assert.equal(
   Object.prototype.propertyIsEnumerable.call(
     state.attachments[0].result,
@@ -128,8 +135,11 @@ assert.equal(
 
 const firstId = state.attachments[0].id;
 api.removeAttachment(firstId);
-await new Promise(resolve => setTimeout(resolve, 0));
-assert.ok(invokedCommands.some(item => item.command === 'cancel_draft_file_upload'));
+await new Promise(resolve => { setTimeout(resolve, 0); });
+assert.equal(
+  invokedCommands.filter(c => c.command !== 'track_behavior_event' && c.command !== 'web_access_track_behavior_event').at(-1).command,
+  'cancel_draft_file_upload',
+);
 
 await api.uploadDeviceFiles([fakeFile()]);
 const attachment = state.attachments[0];
@@ -144,12 +154,12 @@ assert.equal(attachment.result.__pinvouManagedDraftAttachmentId, undefined);
 assert.equal(attachment.result.__pinvouManagedAttachmentSessionId, 'session_test_123');
 
 api.removeAttachment(attachment.id);
-await new Promise(resolve => setTimeout(resolve, 0));
+await new Promise(resolve => { setTimeout(resolve, 0); });
 assert.equal(invokedCommands.at(-1).command, 'discard_dropped_attachment');
 assert.equal(invokedCommands.at(-1).args.sessionId, 'session_test_123');
 
 const oversized = fakeFile('oversized.zip');
-oversized.size = 20 * 1024 * 1024 + 1;
+oversized.size = 50 * 1024 * 1024 + 1;
 await api.uploadDeviceFiles([oversized]);
 assert.equal(state.attachments.at(-1).status, 'error');
 assert.equal(

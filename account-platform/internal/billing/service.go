@@ -110,6 +110,8 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected := router.Group("")
 	protected.Use(serviceauth.GinMiddleware(serviceToken))
 	protected.GET("/internal/v1/users/:user_id/account-closure-assessment", serviceauth.Require("internal.billing.account-closure.assess"), httpserver.AdaptFunc(s.accountClosureAssessment))
+	protected.POST("/internal/v1/payment-credit-attempts/resolve", serviceauth.Require("internal.billing.payment-credit.resolve"), httpserver.AdaptFunc(s.resolvePaymentCredit))
+	protected.POST("/internal/v1/payment-credit-attempts/acknowledge", serviceauth.Require("internal.billing.payment-credit.resolve"), httpserver.AdaptFunc(s.acknowledgePaymentCredit))
 	protected.POST("/internal/v1/users/:user_id/account-closure-grants/isolate", serviceauth.Require("internal.billing.account-closure.isolate"), httpserver.AdaptFunc(s.isolateAccountClosedGrants))
 	if s.payments != nil {
 		protected.POST("/internal/v1/reconciliation/runs", serviceauth.Require("internal.billing.reconciliation.run"), httpserver.AdaptFunc(s.runReconciliation))
@@ -288,6 +290,8 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.GET("/payment-anomalies/:case_id", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentAnomalyDetail))
 		admin.POST("/payment-anomalies/:case_id/claim", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_PAYMENT_ANOMALY_CLAIM", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminClaimPaymentAnomaly))
 		admin.POST("/payment-anomalies/:case_id/resolve", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_PAYMENT_ANOMALY_RESOLVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminResolvePaymentAnomaly))
+		admin.POST("/payment-anomalies/:case_id/financial-completion-proposals", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_PAYMENT_ANOMALY_RESOLVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminProposeFinancialCompletion))
+		admin.POST("/payment-anomalies/:case_id/financial-completion-proposals/:proposal_id/confirm", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_PAYMENT_ANOMALY_RESOLVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminConfirmFinancialCompletion))
 		admin.GET("/adjustments", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminAdjustments))
 		admin.POST("/adjustments", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_ADJUSTMENT_REQUEST", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRequestAdjustment))
 		admin.POST("/adjustments/:adjustment_id/approve", s.authorizer.Require("platform.billing.adjustments.approve"), approvalpolicy.Require("WALLET_ADJUSTMENT", approvalpolicy.ApprovalRequired), httpserver.AdaptFunc(s.adminApproveAdjustment))

@@ -75,6 +75,8 @@ function pinvouSharedtauriSessions() {
     // readers so a durable-data defect cannot pose as "no data".
     function loadPersonaEventsForSession(sid) { return pinvouSharedtauriSessions().loadPersonaEventsForSession(sid); }
     function loadPinvouReviewsForSession(sid) { return pinvouSharedtauriSessions().loadPinvouReviewsForSession(sid); }
+    /** @param {any[]} reviews */
+    function raisePinvouSummonHighwater(reviews) { return pinvouSharedtauriSessions().raisePinvouSummonHighwater(reviews); }
     var MAX_SCHEDULED_SESSION_BUFFERS = 64;
     var MAX_SCHEDULED_RUN_SESSION_OWNERS = 64;
     // All-session buffer cap: each sessionStates entry holds the full
@@ -140,6 +142,8 @@ function isProtectedScheduledBuffer(id, buf) { return pinvouSharedtauriSessions(
       if (!stashEvictedSessionDraft(id, buf)) continue; // draft cannot be safely retained; keep the buffer
       delete sessionStates[id];
       delete turnUsageDirty[id];
+      delete state.compactingSessions[id];
+      delete state.compactionStarts[id];
       // personaPlaceholderTitles is lightweight session metadata (the marker
       // for placeholder titles that auto-rename may override); rehydration
       // never restores it, so capacity eviction must keep it and only real
@@ -172,6 +176,8 @@ function touchSessionBuffer(id, buf, scheduled) { return pinvouSharedtauriSessio
       if (!stashEvictedSessionDraft(id, buf)) continue; // draft cannot be safely retained; keep the buffer
       delete sessionStates[id];
       delete turnUsageDirty[id];
+      delete state.compactingSessions[id];
+      delete state.compactionStarts[id];
       // personaPlaceholderTitles survives capacity eviction (see the comment
       // at the scheduled eviction site); only purgeSessionBuffer (real
       // deletion) cleans it.
@@ -186,6 +192,8 @@ function touchSessionBuffer(id, buf, scheduled) { return pinvouSharedtauriSessio
     delete evictedSessionDrafts[id];
     if (onSessionBufferPurged) onSessionBufferPurged(id, "delete");
     delete turnUsageDirty[id];
+    delete state.compactingSessions[id];
+    delete state.compactionStarts[id];
     delete personaPlaceholderTitles[id];
     delete scheduledRunSessionOwners[id];
     if (state.scheduledRunContext && state.scheduledRunContext.sessionId === id) {
@@ -279,6 +287,7 @@ function rollbackScheduledOpenActivation(snapshot) { return pinvouSharedtauriSes
     hydrateWorkingSetFromSaved(buf, saved);
     buf.personaEvents = await loadPersonaEventsForSession(sid);
     buf.pinvouReviews = await loadPinvouReviewsForSession(sid);
+    raisePinvouSummonHighwater(buf.pinvouReviews); // 后台缓冲提交即验收抬底(r5 审 M1)
     buf.pinvouSceneEvents = await syncPinvouSceneEventsForSession(sid);
     buf.steeredMessages = await syncSteeredMessagesForSession(sid);
     try { buf.turnTimeline = await invoke("get_session_timeline", { sessionId: sid }) || []; } catch (e) { buf.turnTimeline = []; }
@@ -1104,6 +1113,7 @@ function interruptedDisplayRange(item) { return pinvouSharedtauriSessionsN47342(
     var turnTimeline = [];
     try { turnTimeline = await invoke("get_session_timeline", { sessionId: id }) || []; } catch (_) {}
     if (!switchStillCurrent()) return false;
+    raisePinvouSummonHighwater(pinvouReviews); // 验收后才抬底:被拒导航不得抬账目底(JensenChen28 审 P2)
 
     // load_session 与必要的直接会话数据均成功后，才一次性提交 active/context。
     if (state.activeSessionId && !isRemoteProxyView(state.activeSessionId)) {
@@ -1601,8 +1611,6 @@ function recentScheduledRunForSession(id) { return pinvouSharedtauriSessions().r
 
 
   async function restoreArchivedSession(id) { return pinvouSharedtauriSessions().restoreArchivedSession(id); }
-
-  // 实时态有专属气泡的工具（方案卡），重建时要还原成原卡而非普通工具卡。
 
     return {
       freshBuffer: freshBuffer,

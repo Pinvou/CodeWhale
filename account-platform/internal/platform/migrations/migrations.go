@@ -24,6 +24,9 @@ type Migration struct {
 	UpSQL    string
 	DownSQL  string
 	Checksum string
+	// HasDownScript distinguishes an absent, forward-only rollback descriptor
+	// from a supplied empty script. Nonempty DownSQL is checked either way.
+	HasDownScript bool
 }
 
 // UpHooks let a trusted domain wrapper lend and revoke narrowly scoped DDL
@@ -77,10 +80,11 @@ func Load(directory string) ([]Migration, error) {
 			}
 			migration.UpSQL = string(body)
 		} else {
-			if migration.DownSQL != "" {
+			if migration.HasDownScript {
 				return nil, fmt.Errorf("migration version %d has duplicate down script", version)
 			}
 			migration.DownSQL = string(body)
+			migration.HasDownScript = true
 		}
 	}
 
@@ -93,6 +97,9 @@ func Load(directory string) ([]Migration, error) {
 		migrations = append(migrations, *migration)
 	}
 	sort.Slice(migrations, func(i, j int) bool { return migrations[i].Version < migrations[j].Version })
+	if err := verifyPublishedRollbacks(migrations); err != nil {
+		return nil, err
+	}
 	return migrations, nil
 }
 
@@ -101,6 +108,17 @@ func Up(ctx context.Context, connection *pgx.Conn, migrations []Migration) error
 }
 
 func UpWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migration, hooks UpHooks) error {
+	if err := verifyPublishedRollbacks(migrations); err != nil {
+		return err
+	}
+	ctx, err := PinLedger(ctx, connection)
+	if err != nil {
+		return err
+	}
+	ledger, err := LedgerTable(ctx, connection)
+	if err != nil {
+		return err
+	}
 	if err := prepare(ctx, connection); err != nil {
 		return err
 	}
@@ -111,7 +129,7 @@ func UpWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migrati
 	for _, migration := range migrations {
 		var existingChecksum string
 		err = connection.QueryRow(ctx,
-			`SELECT checksum FROM schema_migrations WHERE version = $1`, migration.Version,
+			`SELECT checksum FROM `+ledger+` WHERE version = $1`, migration.Version,
 		).Scan(&existingChecksum)
 		switch {
 		case err == nil:
@@ -158,7 +176,7 @@ func UpWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migrati
 		}
 		if err == nil {
 			_, err = tx.Exec(ctx,
-				`INSERT INTO schema_migrations(version, name, checksum) VALUES ($1, $2, $3)`,
+				`INSERT INTO `+ledger+`(version, name, checksum) VALUES ($1, $2, $3)`,
 				migration.Version, migration.Name, migration.Checksum,
 			)
 		}
@@ -252,6 +270,17 @@ func DownOneWithGuard(ctx context.Context, connection *pgx.Conn, migrations []Mi
 }
 
 func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Migration, hooks DownHooks) error {
+	if err := verifyPublishedRollbacks(migrations); err != nil {
+		return err
+	}
+	ctx, err := PinLedger(ctx, connection)
+	if err != nil {
+		return err
+	}
+	ledger, err := LedgerTable(ctx, connection)
+	if err != nil {
+		return err
+	}
 	if err := prepare(ctx, connection); err != nil {
 		return err
 	}
@@ -260,7 +289,8 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 		return err
 	}
 	var version int64
-	err = connection.QueryRow(ctx, `SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version)
+	var appliedChecksum string
+	err = connection.QueryRow(ctx, `SELECT version,checksum FROM `+ledger+` ORDER BY version DESC LIMIT 1`).Scan(&version, &appliedChecksum)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -270,6 +300,13 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 	for _, migration := range migrations {
 		if migration.Version != version {
 			continue
+		}
+		// Recorded forward history is authoritative even if editing supplied Up
+		// bytes makes the candidate fall outside the published inventory. Genuine
+		// old custom ledgers with no checksum retain their original contract.
+		_, published := publishedRollbackChecksums[rollbackIdentity{version: migration.Version, up: normalizedChecksum(migration.UpSQL)}]
+		if (published || appliedChecksum != "") && !checksumMatches(appliedChecksum, migration.UpSQL) {
+			return fmt.Errorf("migration %d checksum changed before rollback", version)
 		}
 		if strings.TrimSpace(migration.DownSQL) == "" {
 			return fmt.Errorf("migration %d is irreversible", version)
@@ -294,7 +331,7 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 		}
 		if err == nil {
 			if err = setMigrationRole(ctx, tx, role); err == nil {
-				_, err = tx.Exec(ctx, `DELETE FROM schema_migrations WHERE version = $1`, version)
+				_, err = tx.Exec(ctx, `DELETE FROM `+ledger+` WHERE version = $1`, version)
 			}
 		}
 		if err != nil {
@@ -310,7 +347,14 @@ func DownOneWithHooks(ctx context.Context, connection *pgx.Conn, migrations []Mi
 // forward migration history. It is intentionally run after Up so release
 // evidence cannot be produced from a partially migrated database.
 func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []Migration) (Verification, error) {
-	rows, err := connection.Query(ctx, `SELECT version, checksum FROM schema_migrations ORDER BY version`)
+	if err := verifyPublishedRollbacks(loaded); err != nil {
+		return Verification{}, err
+	}
+	ledger, err := LedgerTable(ctx, connection)
+	if err != nil {
+		return Verification{}, err
+	}
+	rows, err := connection.Query(ctx, `SELECT version, checksum FROM `+ledger+` ORDER BY version`)
 	if err != nil {
 		return Verification{}, fmt.Errorf("query applied migration inventory: %w", err)
 	}
@@ -348,21 +392,25 @@ func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []Migration
 }
 
 func prepare(ctx context.Context, connection *pgx.Conn) error {
+	ledger, err := LedgerTable(ctx, connection)
+	if err != nil {
+		return err
+	}
 	if _, err := connection.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou_account_platform_migrations'))`); err != nil {
 		return fmt.Errorf("acquire migration lock: %w", err)
 	}
 	// PostgreSQL checks schema CREATE even for CREATE TABLE IF NOT EXISTS.
 	// Upgrades retain only ledger DML after schema creation is deliberately
-	// revoked; keep the same search_path and lock without requesting new DDL.
+	// revoked; retain the captured namespace without requesting new DDL.
 	var exists bool
-	if err := connection.QueryRow(ctx, `SELECT pg_catalog.to_regclass('schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {
+	if err := connection.QueryRow(ctx, `SELECT pg_catalog.to_regclass($1) IS NOT NULL`, ledger).Scan(&exists); err != nil {
 		return fmt.Errorf("locate schema migrations: %w", err)
 	}
 	if exists {
 		return nil
 	}
 	if _, err := connection.Exec(ctx, `
-CREATE TABLE IF NOT EXISTS schema_migrations (
+CREATE TABLE IF NOT EXISTS `+ledger+` (
     version BIGINT PRIMARY KEY,
     name TEXT NOT NULL,
     checksum TEXT NOT NULL,
