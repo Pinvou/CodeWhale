@@ -1,0 +1,24 @@
+fix(model-store): r47 脱敏四形态——等号臂首对裸落/finish 绕过脱敏/-u 短黏连/带引号黏连 scheme
+
+P1-1（等号臂特判首对裸落）：删除 is_cookie_eq 特判——它把含首对
+NAME=VALUE 的整词原样落盘再补 [REDACTED]，且拦截了
+push_header_equals_spec 本可正确产出的 名=[REDACTED]。测试补首对值
+断言（SID=x 不存活）。
+
+P1-2（finish 绕过脱敏）：RunLogFile::finish 结局文本逐行过
+sanitize_line_with + clamp_line——失败链 outcome 嵌着脚本最后 20 行
+原始输出（set -x 回显的 token 高概率在其中），此前本写点是全文件唯一
+不经脱敏管线的。内嵌换行按行拆开（一行一条结构是导出/轮转/截断的
+公共前提）；行间 carry 延续（跨行 pending 链不悬空）。测试
+finish_outcome_lines_are_sanitized_and_split 钉住（token 不落盘+拆行
++时间戳）。
+
+P1-3（-uadmin:pass 短黏连）：URL 兜底臂前加无等号短黏连判定——
+word 以 -u/--user 开头且剩余段带冒号（同形状门：sudo -u root 无冒号
+不收；:// 排除 URL）。测试含正负双断言。
+
+P1-4（带引号黏连 scheme 词）：auth_glued_prefix 前缀比对前先剥引号
+（与上方 probe 探测块同口径）——'Authorization:Basic <b64>' 的 set -x
+回显形态此前臂不启动，b64 双漏。测试含跨行 scheme 链断言。
+
+模块 41/41 绿（容器实跑，含 r45 四形态升级版+两个新测试）。

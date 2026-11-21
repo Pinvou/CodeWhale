@@ -738,19 +738,12 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
                 }
                 None => {
                     // r30 P1-1/P1-3：`= `形态统一走 helper（三表并集 + 引号 trim）。
-                    // r43 P1-2 + r45 P1-2：Cookie/Set-Cookie 的 `= ` 形态——值是
-                    // 分号多对，整段进 cookie_rest。谓词同源。
-                    let is_cookie_eq = trimmed
-                        .trim_matches(['"', '\''])
-                        .split_once('=')
-                        .is_some_and(|(n, _)| {
-                            header_name_is_cookie_family(n.trim_matches(['"', '\'']))
-                        });
-                    if is_cookie_eq {
-                        out.push_str(trimmed);
-                        out.push_str(REDACTED);
-                        cookie_rest = true;
-                    } else if !push_header_equals_spec(trimmed, &mut out, &mut cookie_rest) {
+                    // r47 P1-1：删除 r45 的 is_cookie_eq 特判——它把含首对
+                    // `NAME=VALUE` 的整词原样落盘再补 [REDACTED]，首对值逐字泄漏，
+                    // 且拦截了 helper 本可正确产出的 `名=[REDACTED]`。cookie 族
+                    // 现由 push_header_equals_spec 统一处理（命中即置
+                    // cookie_rest，见其内部）。
+                    if !push_header_equals_spec(trimmed, &mut out, &mut cookie_rest) {
                         out.push_str(trimmed);
                         header_expect = Some(HeaderExpect::Value);
                     }
@@ -791,18 +784,23 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
         // out（word_is_secret / colon_glued / `=` / URL 兜底四路必推其一），
         // 臂内再 push 等于原值照落 + 追加垃圾。重构为替换式：以 continue
         // 收口，整词不经其它任何臂。scheme 词两侧引号/尾随标点剥掉再比。
-        let auth_glued_prefix = if word.len() > 20
-            && word
+        // r47 P1-4：前缀比对前先剥引号——`'Authorization:Basic <b64>'`（set -x
+        // 回显形态）带前导引号时 get(..14) 不命中、臂不启动，b64 词双漏。与
+        // 上方 probe 探测块同口径（那边一直剥着）。剥出的纯词参与比对，输出
+        // 仍写原词（排查需要看到原文骨架）。
+        let glue_trimmed = word.trim_start_matches(|c: char| matches!(c, '"' | '\'' | '`'));
+        let auth_glued_prefix = if glue_trimmed.len() > 20
+            && glue_trimmed
                 .get(..20)
                 .is_some_and(|p| p.eq_ignore_ascii_case("proxy-authorization:"))
         {
-            20
-        } else if word.len() > 14
-            && word
+            word.len() - glue_trimmed.len() + 20
+        } else if glue_trimmed.len() > 14
+            && glue_trimmed
                 .get(..14)
                 .is_some_and(|p| p.eq_ignore_ascii_case("authorization:"))
         {
-            14
+            word.len() - glue_trimmed.len() + 14
         } else {
             0
         };
@@ -836,9 +834,11 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
                 // 吃掉、真凭据漏网（P2-09 陷阱）。转 auth_pending（scheme 感知）。
                 if is_authorization_glued_name(name) {
                     auth_pending = true;
-                } else if header_name_is_cookie_family(name.trim_matches(|c: char| {
-                    matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | ',')
-                })) {
+                } else if header_name_is_cookie_family(
+                    name.trim_matches(|c: char| {
+                        matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | ',')
+                    }),
+                ) {
                     // r45 P1-2：`> Set-Cookie: SID=x; session=y`（curl -v 回显等
                     // 非 -H 语境的空值冒号形态）——值在下一词且是分号多对，单发
                     // redact_next 只抹第一段，第二对起原样落盘（含导出侧）。
@@ -913,6 +913,18 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
             } else {
                 out.push_str(&redact_url_secrets(word));
             }
+        } else if (word.starts_with("-u") || word.starts_with("--user"))
+            && word.len() > if word.starts_with("--user") { 6 } else { 2 }
+            && word[if word.starts_with("--user") { 6 } else { 2 }..].contains(':')
+            && !word.contains("://")
+        {
+            // r47 P1-3：`-uadmin:s3cr3t` / `--useradmin:pass` 的**非等号**短
+            // 黏连（无空格无 `=`）——split_once('=') 臂够不着、bare 相等也够
+            // 不着，此前整词经 URL 兜底原样落盘。同一道形状门：剩余段带冒号
+            // 才算 user:password 凭证（`sudo -u root` 无冒号不收）。
+            let flag_len = if word.starts_with("--user") { 6 } else { 2 };
+            out.push_str(&word[..flag_len]);
+            out.push_str(REDACTED);
         } else {
             out.push_str(&redact_url_secrets(word));
         }
@@ -1321,16 +1333,46 @@ impl RunLogFile {
     /// 是整份日志里最有价值的一行，绝不能因为前面的进度刷屏把它挤没了。
     /// 代价是预算越界一个 clamp_line 的行宽，有界且值得。
     pub fn finish(&self, outcome: &str) {
-        let line = format!(
-            "{} ==== 结束：{outcome} ====\n",
-            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-        );
+        // r47 P1-2：结局文本**必须过脱敏器**——失败链的 outcome 里嵌着脚本最后
+        // 20 行原始输出（script_runner 的 ERROR_TAIL_LINES 摘要），set -x 回显
+        // 的 token 恰好高概率在其中；此前本写点是全文件唯一不经脱敏管线的，
+        // 「落盘定向脱敏」的核心声称被失败路径整体击穿。内嵌换行也在此按行
+        // 拆开——一行一条的文件结构是导出/轮转/截断的公共前提。多行合并过
+        // 单次 sanitize_for_disk 会丢跨行 pending，这里逐行 fresh carry 与
+        // append 主链同构（首行沿用磁盘 carry：与上一行衔接的 pending 链不悬空）。
+        let stamped: Vec<String> = outcome
+            .lines()
+            .map(|l| {
+                format!(
+                    "{} {}",
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    l
+                )
+            })
+            .chain(std::iter::once(format!(
+                "{} ==== 结束（脱敏后落盘）====",
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            )))
+            .collect();
+        let mut carry;
         {
             let mut state = self.state.lock();
+            carry = std::mem::take(&mut state.carry);
+        }
+        for raw in stamped {
+            let line = sanitize_line_with(&raw, &mut carry);
+            let clamped = clamp_line(&line);
+            let mut state = self.state.lock();
             if let Some(file) = state.file.as_mut() {
-                let _ = file.write_all(line.as_bytes());
+                let _ = file.write_all(format!("{clamped}\n").as_bytes());
                 let _ = file.flush();
+                state.written = state.written.saturating_add(clamped.len() as u64 + 1);
             }
+            drop(state);
+        }
+        {
+            let mut state = self.state.lock();
+            state.carry = carry;
         }
         let mut state = self.state.lock();
         if let Some(mut file) = state.file.take() {
@@ -1449,6 +1491,31 @@ mod tests {
 
     /// r43 P1-2：三种泄漏形态的对抗用例——断言**原值不落盘**（对齐本模块既有
     /// 风格），外加跨行悬置态的接续与 Cookie 行末终止语义。
+    /// r47 P1-2：finish 结局行必须过脱敏——失败链 outcome 嵌着脚本最后 20 行
+    /// 原始输出（set -x 回显的 token 高概率在其中），此前 finish 是全文件唯一
+    /// 不经脱敏管线的写点。同时验内嵌换行按行拆开（一行一条结构）。
+    #[test]
+    fn finish_outcome_lines_are_sanitized_and_split() {
+        let _ctx = config::TempHome::new();
+        let file = RunLogFile::open("finish-sanitize-test", "脱敏测试", &[]).unwrap();
+        file.finish(
+            "脚本失败：curl -H 'Authorization: Bearer hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345' 失败\nset -x 回显 token=hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+        );
+        let content = std::fs::read_to_string(file.path()).unwrap();
+        assert!(
+            !content.contains("hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345"),
+            "finish 结局行绕过脱敏（r47 P1-2）: {content}"
+        );
+        // 内嵌换行拆行后每行都应有时间戳前缀（一行一条结构）；头行是 open
+        // 写的 ==== 横幅，跳过。
+        for line in content.lines().skip(1) {
+            assert!(
+                line.starts_with("20") || line.trim().is_empty(),
+                "结局行未按行拆开/无时间戳: {line}"
+            );
+        }
+    }
+
     /// r45 P1-2：Cookie/Set-Cookie 四形态对抗——评审实证 r44 修复只覆盖了最罕见
     /// 的紧凑黏连形态。session=y 是不在任何名单、无前缀、15 字符的裸键负控
     /// （证明泄漏真实性的口径），四形态下它都不得存活；普通头不受影响。
@@ -1470,7 +1537,26 @@ mod tests {
                 !cleaned.contains("session=y"),
                 "Cookie 多对泄漏（r45 四形态之一）: {line} -> {cleaned}"
             );
+            // r47 P1-1：**首对值也不得存活**——r45 测试只断言第二对，首对
+            // SID=x 在等号形态经特判整词落盘（评审实证）。
+            assert!(
+                !cleaned.contains("SID=x"),
+                "Cookie 首对值泄漏（r47）: {line} -> {cleaned}"
+            );
         }
+        // r47 P1-3：-uadmin:pass 短黏连。sudo -u root（无冒号）不受牵连。
+        let u_glued = sanitize_for_disk("curl -uadmin:s3cr3tp4ss https://x.example/api");
+        assert!(!u_glued.contains("s3cr3tp4ss"), "-u 短黏连泄漏: {u_glued}");
+        let sudo_u = sanitize_for_disk("sudo -u root whoami");
+        assert!(sudo_u.contains("root"), "sudo -u 误抹: {sudo_u}");
+        // r47 P1-4：带引号黏连 scheme 词——scheme 链启动，凭据词被抹。
+        let mut carry0 = DiskCarry::default();
+        let l1 = sanitize_line_with("+ echo 'Authorization:Basic'", &mut carry0);
+        let l2 = sanitize_line_with("YWRtaW46cGFzc3dvcmQxMjM='", &mut carry0);
+        assert!(
+            !l2.contains("YWRtaW46cGFzc3dvcmQxMjM"),
+            "带引号黏连 scheme 凭据词泄漏: {l1} / {l2}"
+        );
         // 负控的边界：非 cookie 头的多对参数不受整段抹牵连。
         let plain = sanitize_for_disk("curl -H 'Accept: text/html; q=0.9' https://x.example/api");
         assert!(plain.contains("https://x.example/api"), "过抹越界: {plain}");
