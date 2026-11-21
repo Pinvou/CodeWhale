@@ -83,6 +83,8 @@ type PaymentCoordinator struct {
 	creditAdmission             paymentcredit.Admission
 	repository                  *PostgresRepository
 	ledgerRepairAuthority       ledgerRepairProofAuthority
+	reconciliationFacts         reconciliationFactsLoader
+	paymentOrderProjection      paymentOrderProjection
 	provider                    PaymentProvider
 	secrets                     map[string][]byte
 	merchantID                  string

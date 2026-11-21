@@ -16,12 +16,13 @@ SPEC.loader.exec_module(RUNNER)
 
 
 # Explicit, reviewed cardinality; do not derive the expectation from the runner.
-EXPECTED_RETAINED_ROOT_COUNT = 93
-EXPECTED_SCHEMA_ROOT_COUNT = 30
+EXPECTED_RETAINED_ROOT_COUNT = 95
+EXPECTED_SCHEMA_ROOT_COUNT = 31
 
 # Fixed identities independently checked against each actual -run selector.
 EXPECTED_SCHEMA_ROOTS = {"TestLatePaymentQueryGenerationsMigrationIdentity", "TestOrphanPaidOrderIndexPublicMigration", "TestLatePaymentQueryRegisteredIdentity", "TestReconciliationFairRetryRegisteredIdentity", "TestF09EntitlementPackageIndexPublicMigration", "TestTokenWalletReceiptSchemaPostgres", "TestLegacyEntitlementUpgradeAdmissionPostgres", "TestUsageWaiverHistoricalSchemaPostgres", "TestBillingOrdinaryReplayOriginalMigrationPostgres", "TestUnknownProviderEntryPublicMigrationPostgres", "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres", "TestF04PublicTokenUserOwnerAuthorityAndDirectory", "TestManualRetentionHistoricalHardeningPostgres", "TestBillingHistoricalCatalogRollbackPostgres", "TestBillingHistoricalStateRollbackPostgres", "TestPublishedRollbackPackageIntegrityPostgres", "TestBillingManualAdjustmentProofRollbackPostgres", "TestPaymentCreditClosureBoundaryPostgres", "TestPaymentCreditF12DeployedCarriersUpgradePostgres", "TestPaymentCreditRetentionPublicPostgres", "TestLatePaymentArchiveQueryAdmissionPublicMigration"}
 EXPECTED_SCHEMA_ROOTS |= {'TestF02CommerceClaimWaitStartsFreshLease', 'TestCommerceClosureCallbacksRespectSubjectFence', 'TestF02CommerceOriginal15LateUpgradePreservesFacts', 'TestCommerceClaimSubjectLockKeepsLeaseLive', 'TestCommerceClaimMappingLockKeepsLeaseLive', 'TestF02PublicCommerceCustomerLifecycle', 'TestF02CommerceSupersededGenerationCannotDispatch', 'TestF02CommerceLeaseExpiresWhileWaitingForMappingLock', 'TestF02CommerceConfirmedProducersPreserveStatuses'}
+EXPECTED_SCHEMA_ROOTS |= {"TestChargebackPrincipalRegisteredIdentity"}
 EXPECTED_SCHEMA_EXPIRY_ROOT = "TestLegacyExpiry025UpgradePreservesOriginalLedgerPostgres"
 
 
@@ -2796,7 +2797,7 @@ class FinancialPostgresRunnerTests(unittest.TestCase):
                     self.assertEqual(command[-1], "./internal/billingschema")
                     self.assertEqual([arg for arg in command if arg.startswith("-timeout=")], ["-timeout=20m"])
                     selected.append(actual)
-                self.assertEqual([len(roots) for roots in selected], [1, 29])
+                self.assertEqual([len(roots) for roots in selected], [1, EXPECTED_SCHEMA_ROOT_COUNT - 1])
                 self.assertFalse(selected[0] & selected[1])
                 self.assertEqual(selected[0] | selected[1], EXPECTED_SCHEMA_ROOTS)
                 self.assertEqual(sum(map(len, selected)), len(EXPECTED_SCHEMA_ROOTS))

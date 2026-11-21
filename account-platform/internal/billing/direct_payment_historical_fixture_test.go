@@ -13,6 +13,9 @@ import (
 // works on an old schema. Normal current fixtures keep the public entry point.
 func directRepairHistoricalFixtureBefore900047(t *testing.T, r *PostgresRepository, ctx context.Context) (*PaymentCoordinator, PaymentOrder, *directRepairProvider) {
 	t.Helper()
+	if err := requirePreAdmissionFixtureSchema(ctx, r.pool); err != nil {
+		t.Fatal(err)
+	}
 	var exact bool
 	if err := r.pool.QueryRow(ctx, `SELECT (SELECT max(version)=900031 FROM schema_migrations) AND NOT EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='public.payment_orders'::regclass AND attname IN ('archive_query_generation','archive_query_authoritative_unpaid') AND NOT attisdropped)`).Scan(&exact); err != nil || !exact {
 		t.Fatal("historical direct producer requires its real pre-generation prefix", err)
@@ -25,6 +28,7 @@ func directRepairHistoricalFixtureBefore900047(t *testing.T, r *PostgresReposito
 	paid := current()
 	provider.result.PaidAt = &paid
 	c.provider = provider
+	c.paymentOrderProjection = projectPrePrincipalFixtureOrder
 	// These are the original pre-I/O public-wrapper guards, frozen from main67c
 	// payment_sync.go. The extracted production observation body retains the
 	// original providerCall, identity checks and financial transaction writers.

@@ -160,3 +160,42 @@
 
 - 2026-09-18 代理：登记事实与决策门禁首切片；范围未定。
 - 2026-09-19 代理：按用户确认的首版范围冻结 closed command/snapshot/proof、BASE 短缺补偿模型、异常推进、幂等与未知结果、失败分类、迁移回滚与验收映射。
+
+## 15. 独立现金本金事实（#1570）
+
+2026-11-10 用户确认：现金事实采用供应商独立确认的拒付本金分额，绑定原支付交易、拒付编号和币种；积分独立记录。历史缺证据或证据冲突继续人工复核，不从积分反推现金，不增加自动资金处置。
+
+供应商桥接方在原系统核实本金收据后，使用既有 `internal.billing.chargeback.record` 权限调用 `POST /internal/v1/chargebacks/confirmed`，新增可选 `principal_evidence`：
+
+```json
+{
+  "payment_transaction_id": "11111111-1111-4111-8111-111111111111",
+  "provider_chargeback_id": "controlled-chargeback",
+  "payload_snapshot": {"receipt_reference": "controlled-supplier-receipt"},
+  "principal_evidence": {
+    "amount_fen": "40",
+    "currency": "CNY",
+    "provider_transaction_id": "controlled-original-payment",
+    "supplier_evidence_reference": "controlled-supplier-receipt"
+  }
+}
+```
+
+- `amount_fen` 是不含手续费的正整数本金分额，使用十进制字符串，范围为正 int64。币种和供应商原交易号必须精确匹配原付款；引用不带首尾空白，两个引用各限 256 UTF-8 字节。提供本金时 `payload_snapshot` 必须为 JSON 对象。服务端记录真实工作负载的 service/subject，忽略任何自报供应商身份；这项接口信任获授权桥接方的核实，不能把任意 payload 当成供应商签名验证。
+- 原交易、本金、币种、供应商收据引用和原 payload 摘要组成幂等证据；相同重投不新增记录、不推进版本。新的不同证据追加保存，不能覆盖、删除或截断。相同拒付编号出现不同本金、单笔超原付款或多个拒付编号累计本金超原付款，返回 `CONFLICT`，保留全部证据，不取最后一条作为权威。
+- 返回 `cash_principal` 的状态为 `MISSING/CONFIRMED/CONFLICT`；缺失、冲突的金额为 `null`，不使用零表示已证明金额。`CONFIRMED` 表示绑定有效且金额一致的独立现金声明；部分本金仍有 `manual_review_required=true`。HTTP 200 只确认保存证据。事务或网络结果未知时，重投同一收据，不补做资金操作。
+- `GET /internal/v1/chargebacks/{case_id}/principal-evidence` 沿用同一权限，返回本金状态及不可变证据元数据、来源、摘要。默认每页 20 条，`limit` 为 1–100；使用 `next_after` 作为下一页的 `after`。每页有一致读取快照，跨页不是冻结导出，后来到达的收据从首页重新观察。原 payload 留在 Billing，不混入列表或日志。
+- 四方对账使用独立本金，与供应商账单比较。现金缺失／冲突分别产生 `CHARGEBACK_PRINCIPAL_MISSING/CHARGEBACK_PRINCIPAL_CONFLICT` 人工案件；已记录但尚未处置的拒付也参与核验。积分 journal、BASE/BONUS、应收的既有独立审计保留，现金核验通过不会掩盖积分账本缺失或错误。观察摘要含本金证据摘要，变化的本金事实不会继承旧 IGNORE 的接受结论。
+- 订单 `chargeback_summary` 的 `lost_amount_fen`、`verified_lost_amount_fen` 为现金字符串；有未核实的活动拒付时，总额为 `null`，另列已核实小计及 `unverified_count`。该汇总包含 `REVIEW_REQUIRED/CONFIRMED` 活动案件的供应商现金事实，和积分处置是否完成分别表达。迟到部分或冲突本金对已处置案件另建 `PAYMENT_FACT_CONFLICT` 人工队列，保留原异常案与原资金回执。
+- 迟到本金复核处于 `OPEN`，或已升级为财务修复且仍处于 `PENDING` 时，精确关联的拒付案件通过 `UNRESOLVED_CHARGEBACK` 阻断组织及组织单元删除，即使原案已确认结清或驳回。人工复核直接结案或升级后的财务处置完成后，删除重新按原处置回执、权益、应收等条件判断。现有支付财务结案入口不能用 `CHARGEBACK_CONFIRMED` 证据结案；已升级的此类案件须保留阻断，直到有受支持的处置流程。结案不改变已保存的现金证据，也不解除其他资金操作的独立门禁。
+- 现有整笔确认和 F14 整笔 BASE 短缺补偿不能接收已知部分／冲突现金，也不能绕过同原交易的其他现金声明。历史无独立现金证据仍保留原有人工授权处理入口，但不据此认证现金金额；本改动没有新增自动退款、整笔扣回、部分积分执行器或现金到积分换算。已完成的不可变执行回执优先重放，不因迟到本金再执行或逆转资金。
+
+新增无本金案件、补充证据、人工确认和驳回均在原事务内刷新现金摘要。历史人工资金处理可以完成，原执行回执保持完成；现金仍未核实时，订单保留 `REVIEW_REQUIRED` 关注标记，供人工定位本金缺口，应收未结仍优先显示 `RECEIVABLE_OPEN`。应收通过后续充值清偿或既有受控核销发生变化时也采用同一关注状态计算；核销范围仍限原有用量应收。补齐独立全额本金且无其他实际待处理事项后可恢复 `NORMAL`，其他真实异常、退款、交易复核及处理中状态继续保留。该标记不重新执行或重开已完成资金命令。
+
+现有接口没有撤销冲突观察、覆盖现金事实或直接清除关注标记的操作。已完成积分资金处置的 `CONFIRMED` 案件，若之后出现部分或冲突本金，会持续保持人工关注；该状态也会继续阻断相应退款异常门禁和闭户。人工案件结案、充值清偿或重放原资金回执本身不能认证现金。没有既存冲突的缺证据案件可补足独立全额声明，并在其他待处理事项消除后恢复；已有不同金额的不可变观察不会靠再发一份全额收据自动变为一致。运维应保留冲突与原回执，继续受控核对供应商原始资料，不改表、不删证据、不重做资金动作。受控纠错或部分本金处置需要独立协议与授权，本 PR 没有交付该自动退出或 override 能力。
+
+证据页保留原 `chargeback_case_id` 作用域、UUID `after` 严格前进和 `limit+1` 游标合同，新增 `(chargeback_case_id,id)` 索引支撑有界键集读取；原交易索引和全部证据继续保留。回归直接读取生产 SQL，比对受控交错历史的自然 EXPLAIN/BUFFERS、真实逐页结果及不变的金融快照，不强制 planner，也不把合成的规模行宣称为真实供应商收据或生产 SLA。Go 的实际 wire 回归使用 Node 和已锁定的 `account-platform` npm 依赖，应先完成该依赖准备；纯 Go 镜像不是这组 wire 验收的完整环境。
+
+安装完整前向 Billing `900044_chargeback_cash_principal` 后再启用新服务版本；旧 SQL 和旧执行回执不重写、不回填本金。迁移将旧缓存的原付款总额标记为现金未核实，并为活动的历史缺证据案件保留人工关注标记，保留所有账本与余额；Down 明确拒绝。统一切换 Billing 版本，避免旧服务重写旧口径摘要；本地验证不等于生产滚动升级或真实供应商验收。完整接口见 [本金证据合同](../contracts/openapi/chargeback-principal.json)。
+
+Billing 在注册消费者、启动后台任务和提供 HTTP 服务前，以运行账号检查 900044 的迁移记录、视图读取权限以及证据表的读取和插入权限。缺少所需迁移记录、对象或对象权限时，启动日志记录 `BILLING_MIGRATION_900044_REQUIRED`。检查查询失败时（例如无权读取迁移记录表），日志记录 `BILLING_CHARGEBACK_PRINCIPAL_SCHEMA_CHECK_FAILED`。就绪探针持续核对相同条件。首次生产升级和历史备份恢复按 [Billing 维护窗口](../deploy/runbooks/high-availability-failover.md#billing-900044-的维护窗口) 执行。

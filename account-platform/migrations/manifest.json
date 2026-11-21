@@ -2396,6 +2396,16 @@
         "sha256": "010fb10ad9c02c80f86fece213a603b602dca7b3e19a263d5a498a51270dd205"
       },
       {
+        "file": "900044_chargeback_cash_principal.down.sql",
+        "version": 900044,
+        "sha256": "8d05baf139540fc3b3b7253103f88b6d3b6aae083b51c2b4c0759a110d4fda36"
+      },
+      {
+        "file": "900044_chargeback_cash_principal.up.sql",
+        "version": 900044,
+        "sha256": "baf6031690dc3598224b4298cd2b11c3c4b4f693b7ee0acbd0fc63f111c5bf62"
+      },
+      {
         "file": "900045_provider_health_recent.down.sql",
         "version": 900045,
         "sha256": "07fe0346755f15f629f927ca3ac040e1b07e59b9fa248c3e932ce8197dd1d3ef"

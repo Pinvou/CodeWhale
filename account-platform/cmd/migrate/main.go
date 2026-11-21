@@ -247,6 +247,9 @@ func protectedMigrationDomain(version int64, name, checksum string) string {
 		checksum == "26c694e7b99c7d070654a2bd26d3b2af693d4a15e400c5c677fb93f5f3a88eee" {
 		return "billing"
 	}
+	if name == "chargeback_cash_principal" || checksum == "baf6031690dc3598224b4298cd2b11c3c4b4f693b7ee0acbd0fc63f111c5bf62" {
+		return "billing"
+	}
 	for _, identity := range []struct {
 		domain         string
 		version        int64

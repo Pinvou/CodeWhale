@@ -124,14 +124,9 @@ func (r *PostgresRepository) CompleteEscalatedForcedRefund(ctx context.Context, 
 	}
 	if item.PaymentOrderID != nil {
 		if _, err := tx.Exec(ctx, `UPDATE payment_orders payment SET
-chargeback_summary=chargeback_summary||jsonb_build_object('review_count',(SELECT count(*) FROM chargeback_cases WHERE payment_order_id=$1 AND status='REVIEW_REQUIRED')),
+chargeback_summary=(SELECT `+chargebackCashSummaryJSON+` FROM (`+chargebackCashSummarySelect+`) chargebacks),
 refund_summary=refund_summary||jsonb_build_object('forced_review_count',(SELECT count(*) FROM forced_refund_cases WHERE payment_order_id=$1 AND status='REVIEW_REQUIRED')),
-attention_summary=CASE
- WHEN EXISTS(SELECT 1 FROM receivables WHERE payment_order_id=$1 AND outstanding_microcredits>0) THEN 'RECEIVABLE_OPEN'
- WHEN EXISTS(SELECT 1 FROM payment_anomaly_cases WHERE payment_order_id=$1 AND status='OPEN')
-   OR EXISTS(SELECT 1 FROM payment_transactions WHERE payment_order_id=$1 AND (status='REVIEW_REQUIRED' OR fulfillment_status='REVIEW_REQUIRED'))
-   OR EXISTS(SELECT 1 FROM refunds WHERE payment_order_id=$1 AND status='MANUAL_REVIEW') THEN 'REVIEW_REQUIRED'
- ELSE 'NORMAL' END,
+attention_summary=`+paymentOrderAttentionSQL+`,
 summary_version=summary_version+1,updated_at=clock_timestamp() WHERE payment.id=$1`, *item.PaymentOrderID); err != nil {
 			return PaymentAnomalyCase{}, err
 		}

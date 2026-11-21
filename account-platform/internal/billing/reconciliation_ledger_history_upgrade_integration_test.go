@@ -27,6 +27,7 @@ func TestLedgerRepairProofHistoricalUpgradePostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	coordinator.reconciliationFacts = listPrePrincipalReconciliationFacts
 	run, err := coordinator.RunAdminReconciliation(ctx, uuid.New(), order.Channel, reconciliationFixtureDateForPaidAt(*source.PaidAt))
 	if err != nil {
 		t.Fatal("create real pre-upgrade reconciliation", err)

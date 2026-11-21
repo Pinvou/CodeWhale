@@ -15,6 +15,39 @@ SPEC.loader.exec_module(DIST)
 
 
 class RustDistributionTests(unittest.TestCase):
+    def test_mirror_bytes_are_verified_against_an_independent_official_checksum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            distribution, name, bodies, calls = self.fixture(directory)
+            distribution.mirror = 'rsproxy'
+            fetch = distribution.fetch
+            def mirrored(url, target, expected=None, **options):
+                if url.startswith('https://rsproxy.cn'):
+                    self.assertEqual(expected, hashlib.sha256(bodies[name]).hexdigest())
+                    self.assertEqual(options['attempts'], 1)
+                    self.assertLessEqual(options['seconds'], 30)
+                    calls.append(url)
+                    url = DIST.ORIGIN + url.removeprefix('https://rsproxy.cn')
+                return fetch(url, target, expected, **options)
+            distribution.fetch = mirrored
+            self.assertEqual(distribution.artifact(name).read_bytes(), bodies[name])
+            self.assertEqual(calls[0], DIST.ORIGIN + name + '.sha256')
+            self.assertIn('https://rsproxy.cn' + name, calls)
+
+    def test_mirror_failure_falls_back_within_the_original_total_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            distribution, name, bodies, calls = self.fixture(directory)
+            distribution.mirror = 'rsproxy'
+            fetch = distribution.fetch
+            def unavailable(url, target, expected=None, **options):
+                if url.startswith('https://rsproxy.cn'):
+                    raise DIST.DOWNLOAD.DownloadError('fixture mirror unavailable')
+                self.assertGreater(options['seconds'], 0)
+                self.assertLessEqual(options['seconds'], 180)
+                return fetch(url, target, expected, **options)
+            distribution.fetch = unavailable
+            self.assertEqual(distribution.artifact(name).read_bytes(), bodies[name])
+            self.assertEqual(calls[-1], DIST.ORIGIN + name)
+
     def fixture(self, root):
         root = Path(root)
         (root / 'snapshot').mkdir()

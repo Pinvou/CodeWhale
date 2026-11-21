@@ -664,7 +664,7 @@ func reconciliationIntegrityDigest(payload reconciliationAuditRecord) string {
 	if len(auditRecords(payload["forced_history"])) > 0 {
 		selected = append(selected, "forced-mixed:"+string(payload["forced_mixed"]))
 	}
-	for section, keys := range map[string][]string{"order": {"id", "wallet_id", "requester_id", "beneficiary_organization_id", "amount_fen", "currency", "credit_microcredits", "product_snapshot"}, "transaction": {"id", "payment_order_id", "amount_fen", "currency"}, "source": {"id", "payment_order_id", "payment_transaction_id", "entitlement_package_id", "wallet_id", "amount_fen", "credit_microcredits", "base_microcredits", "bonus_microcredits", "revoked_base_microcredits", "revoked_bonus_microcredits", "provider_refund_id", "provider_chargeback_id", "merchant_refund_no", "channel_refund_id", "receivable_id"}} {
+	for section, keys := range map[string][]string{"order": {"id", "wallet_id", "requester_id", "beneficiary_organization_id", "amount_fen", "currency", "credit_microcredits", "product_snapshot"}, "transaction": {"id", "payment_order_id", "amount_fen", "currency"}, "source": {"id", "payment_order_id", "payment_transaction_id", "entitlement_package_id", "wallet_id", "amount_fen", "credit_microcredits", "base_microcredits", "bonus_microcredits", "revoked_base_microcredits", "revoked_bonus_microcredits", "provider_refund_id", "provider_chargeback_id", "cash_principal", "merchant_refund_no", "channel_refund_id", "receivable_id"}} {
 		var record reconciliationAuditRecord
 		_ = json.Unmarshal(payload[section], &record)
 		entry := map[string]json.RawMessage{}
