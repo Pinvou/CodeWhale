@@ -1074,8 +1074,20 @@ pub fn url_is_official_deepseek_host(base_url: &str) -> bool {
         // and dot segments (`/beta/../v1` lands on the canonical non-beta
         // path after URL normalization — the one endpoint class where the
         // flag must be stripped) all degrade to out of scope, the same line
-        // the whitespace and query/fragment rejections draw.
+        // the whitespace and query/fragment rejections draw. The literal
+        // segment compare misses the ENCODED spellings of exactly that
+        // class: WHATWG URL normalization (the parser under reqwest)
+        // percent-decodes `%2e` for dot-segment detection, so
+        // `/beta/%2e%2e/v1` lands on `/v1/...` with the flag kept, and it
+        // folds backslashes into path separators for special schemes, so
+        // `/beta\..\v1` normalizes the same way. Every official endpoint
+        // path is plain letters and slashes, so any `%` escape or `\` in
+        // the path degrades to out of scope outright — the conservative
+        // direction: the flag is withheld, never leaked.
         if !rest.bytes().all(|byte| (0x21..=0x7E).contains(&byte)) {
+            return false;
+        }
+        if rest.contains('%') || rest.contains('\\') {
             return false;
         }
         !rest

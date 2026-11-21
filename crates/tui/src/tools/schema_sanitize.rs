@@ -117,12 +117,15 @@ const STRICT_UNUSABLE_TOOLS: &[&str] = &[
 ];
 
 /// Tools that stay strict but lose specific capabilities to the
-/// optional-removal pass: some actions runtime-require parameters the
-/// strict schema no longer accepts, so those calls are rejected by the
-/// runtime no matter what the model sends. The generic removal note only
-/// says the parameters "must not be sent" — for these tools that sentence
-/// points away from values the model actually needs, so an honest
-/// per-tool sentence is appended naming what stopped working. Keys are
+/// optional-removal pass: for some actions the runtime demands parameters
+/// the strict schema no longer accepts, so those calls are rejected by
+/// the runtime no matter what the model sends, while for others the call
+/// still completes but with a capability degraded to a default (a
+/// verifier runs in-band, a wait skips gate recording, a status lands
+/// pending). The generic removal note only says the parameters "must not
+/// be sent" — for these tools that sentence points away from values the
+/// model actually needs, so an honest per-tool sentence is appended
+/// naming what stopped working, rejection and degradation alike. Keys are
 /// the model-visible tool names the catalog ships (`to_api_tools` filters
 /// `model_visible`, so the hidden capital-B `Bash` never appears here);
 /// the full-catalog census iterates this constant against the real
@@ -174,10 +177,12 @@ pub(crate) const STRICT_REMOVAL_CONTEXT_NOTES: &[(&str, &str)] = &[
     ),
     (
         "task_shell_wait",
-        "In strict mode gate-evidence recording is unavailable from this \
-         tool: `gate` is no longer accepted, so a completed task cannot \
-         be recorded as gate evidence here (the `tasks` tool's \
-         `gate_run` action still records evidence).",
+        "In strict mode explicit waits and gate-evidence recording are \
+         unavailable from this tool: `wait`, `timeout_ms`, and `gate` are \
+         no longer accepted, so a wait returns as soon as the task \
+         finishes on its own and a completed task cannot be recorded as \
+         gate evidence here (the `tasks` tool's `gate_run` action still \
+         records evidence).",
     ),
     (
         "read_media",
@@ -1025,29 +1030,17 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
         // are judged — bounds constrain numbers only, so a string-typed
         // node carrying contradictory bounds is still satisfied by every
         // string, and the array/junk `type` forms already failed above.
-        // The finer integer-vs-fractional intersections (`minimum: 10`
-        // beside `maximum: 10.5` under `integer`) are not chased here.
+        // (The typeless-composition encoding of the same contradiction —
+        // every `anyOf` branch forcing a numeric instance beside these
+        // bounds — is judged by the composition arm below, which shares
+        // this helper.) The finer integer-vs-fractional intersections
+        // (`minimum: 10` beside `maximum: 10.5` under `integer`) are not
+        // chased here.
         if let Some(schema_type) = obj.get("type").and_then(Value::as_str)
             && matches!(schema_type, "number" | "integer")
+            && numeric_bounds_contradiction(obj)
         {
-            let minimum = obj.get("minimum").and_then(Value::as_f64);
-            let exclusive_minimum = obj.get("exclusiveMinimum").and_then(Value::as_f64);
-            let maximum = obj.get("maximum").and_then(Value::as_f64);
-            let exclusive_maximum = obj.get("exclusiveMaximum").and_then(Value::as_f64);
-            let crossed = match (minimum, exclusive_minimum, maximum, exclusive_maximum) {
-                (Some(min), _, Some(max), _) if min > max => true,
-                (Some(min), _, _, Some(max)) if min >= max => true,
-                (_, Some(excl_min), Some(max), _) if excl_min >= max => true,
-                (_, Some(excl_min), _, Some(excl_max)) if excl_min >= excl_max => true,
-                _ => false,
-            };
-            let zero_multiple = obj
-                .get("multipleOf")
-                .and_then(Value::as_f64)
-                .is_some_and(|multiple| multiple == 0.0);
-            if crossed || zero_multiple {
-                return true;
-            }
+            return true;
         }
         // An `enum` member must satisfy the declared type AND every
         // documented bound, so a member set none of whose members clears
@@ -1064,10 +1057,15 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
         // node. The single-compatible-member leniency of the enum-vs-type
         // arm carries over: a partially satisfiable enum is the author's
         // sloppiness, not a wire the model cannot use.
-        // One compile per node, shared by the enum and const arms: the
-        // pattern is a node-level constraint, so both judgments read the
-        // same compiled form instead of each paying its own compile.
-        let node_pattern = compiled_documented_pattern(obj);
+        // The pattern compiles LAZILY — inside the enum and const arms
+        // only, never for a pattern-only node: the compile (not the
+        // linear-time match) is the hostile cost, and an unconditional
+        // per-node compile let a schema of pattern-only required leaves
+        // park seconds of compiles on the per-request path for judgments
+        // those arms never make (measured 5.3 s per tool per request for
+        // 100 nested-quantifier properties before the laziness). Each arm
+        // pays at most one compile per node — the memo below makes even
+        // that a cache hit when the pattern repeats across nodes.
         if obj
             .get("enum")
             .and_then(Value::as_array)
@@ -1091,6 +1089,7 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
                 if !enum_members_within_judge_cap(members) {
                     return false;
                 }
+                let node_pattern = compiled_documented_pattern(obj);
                 let property_patterns = compiled_property_patterns(obj);
                 !members.iter().any(|member| {
                     value_clears_bounds_with(member, obj, node_pattern.as_ref())
@@ -1111,11 +1110,68 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
         // string const that matches no judgeable `pattern` of its own
         // node accepts nothing either, so the same helper judges both
         // domains and the numeric-only gate on the const value drops.
-        if let Some(const_value) = obj.get("const")
-            && (!value_clears_bounds_with(const_value, obj, node_pattern.as_ref())
-                || !pinned_object_value_compatible(const_value, obj))
+        if let Some(const_value) = obj.get("const") {
+            let node_pattern = compiled_documented_pattern(obj);
+            if !value_clears_bounds_with(const_value, obj, node_pattern.as_ref())
+                || !pinned_object_value_compatible(const_value, obj)
+            {
+                return true;
+            }
+        }
+        // Node-level pins beside the node's own composition branches —
+        // the composition-level twins family: an instance satisfies the
+        // node only through SOME branch, and while it does it must still
+        // clear the node's own `type`/`enum`/`const`/bounds/`items`
+        // keywords. The arms above judge those pins against a declared
+        // single-string `type`, so a TYPELESS composition node — the
+        // encoding hostile or sloppy MCP schemas deliver verbatim —
+        // carried its contradictions past every one of them and shipped
+        // `strict: true` callable by nothing (`anyOf:[number, integer]`
+        // beside `multipleOf: 0` or `minimum: 10, maximum: 5`; a `const`
+        // beside branches that cannot hold it; `items: string` beside an
+        // array branch whose items are numbers; the node-level `enum`
+        // twin beside branches disjoining its members). Two judgments,
+        // both bounded: the pair judge — the exact machinery the
+        // coverage arm and the wrapper chase already trust — conjuncts
+        // each branch with the node sans `anyOf` and returns false only
+        // on provable contradictions, so "every branch provably
+        // unsatisfiable against the node's own pins" cannot fail a
+        // satisfiable union; and the crossing/zero-multiple test the
+        // typed arm applies under a declared number/integer type applies
+        // here when every branch forces a numeric instance, because the
+        // windows judge inside the pair judge only fires ACROSS sides
+        // and a within-node crossing has no opposing edge to cross.
+        // Union nodes that carry their own `properties` map are the
+        // coverage arm's domain — its key-set + value-level closure
+        // judgment is strictly stronger for them — and are not re-judged
+        // here. One call budget per node, the same envelope the coverage
+        // arm draws; past the budget the pair judge abstains compatible
+        // and a witness is assumed.
+        if !obj.contains_key("properties")
+            && obj.len() > 1
+            && let Some(branches) = obj.get("anyOf").and_then(Value::as_array)
         {
-            return true;
+            let mut node_sans_any_of = obj.clone();
+            node_sans_any_of.remove("anyOf");
+            let node_sans_any_of = Value::Object(node_sans_any_of);
+            let mut budget = STRICT_PAIR_JUDGE_CALL_BUDGET;
+            let witness = branches.iter().any(|branch| {
+                schema_pair_satisfiable(branch, &node_sans_any_of, root, 0, &mut budget)
+            });
+            let all_branches_force_numeric = branches.iter().all(|branch| {
+                resolved_branch_definition(branch, root)
+                    .and_then(|definition| definition.as_object())
+                    .and_then(|definition_obj| definition_obj.get("type").and_then(Value::as_str))
+                    .is_some_and(|schema_type| matches!(schema_type, "number" | "integer"))
+            });
+            if !witness
+                || (all_branches_force_numeric
+                    && node_sans_any_of
+                        .as_object()
+                        .is_some_and(numeric_bounds_contradiction))
+            {
+                return true;
+            }
         }
         // A bound ships only in the numeric form the documents describe:
         // a string, boolean, object, or array value is a malformed keyword
@@ -1134,6 +1190,16 @@ fn has_strict_incompatible_composition(schema: &Value, root: &Value, is_root: bo
         if let Some(multiple) = obj.get("multipleOf")
             && (!multiple.is_number() || multiple.as_f64().is_some_and(|f| f < 0.0))
         {
+            return true;
+        }
+        // A `pattern` ships verbatim and every judge of it reads the value
+        // through `as_str`, so a non-string junk value — a number, boolean,
+        // object — neither binds nor fails anywhere: the same junk family
+        // the bounds arms fail closed (a malformed keyword value the
+        // endpoint may reject the whole schema for), and the judge-side
+        // `as_str` skip is exactly how round 21's `pattern: 42` witness
+        // slipped every stage.
+        if obj.get("pattern").is_some_and(|value| !value.is_string()) {
             return true;
         }
         // A malformed `anyOf` — a map or scalar instead of the branch
@@ -1428,8 +1494,44 @@ fn value_satisfies_declared_type(value: &Value, schema_type: &str) -> bool {
 /// pays one compile per node, not one per member.
 fn compiled_documented_pattern(obj: &Map<String, Value>) -> Option<regex::Regex> {
     let pattern = obj.get("pattern").and_then(Value::as_str)?;
-    // The compile — not the linear-time match — is the hostile cost:
-    // compile work scales with the pattern source, and a judge site pays
+    // The compile — not the linear-time match — is the hostile cost, and
+    // the same pattern source repeats across the nodes and pair calls of
+    // one request (a hostile schema parks it on a hundred leaves; the
+    // pair judge pays it per budgeted call). The judge is a pure function
+    // of the source string, so the compiles memoize per thread with a
+    // bounded table — 512 sources, cleared wholesale past the bound, so a
+    // hostile catalog cannot grow it without limit. A nested-quantifier
+    // source that costs 50 ms per compile is paid once per process life
+    // of that string instead of once per node per request (measured
+    // 5.3-27 s per tool per request before the memo, per the round-21
+    // review).
+    thread_local! {
+        static COMPILED_PATTERNS: std::cell::RefCell<
+            std::collections::HashMap<&'static str, Option<regex::Regex>>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    // Leak the source to get a 'static key: the same string literal is
+    // re-leaked per call site but `HashMap` dedupes by content, and the
+    // table's bound caps the total leak. (A `String` key would copy per
+    // lookup; the leaked &'static str keeps the hit path clone-free.)
+    let key: &'static str = String::leak(pattern.to_string());
+    COMPILED_PATTERNS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() > 512 {
+            cache.clear();
+        }
+        if let Some(compiled) = cache.get(key) {
+            return compiled.clone();
+        }
+        let compiled = compile_documented_pattern(pattern);
+        cache.insert(key, compiled.clone());
+        compiled
+    })
+}
+
+/// The uncached compile body of [`compiled_documented_pattern`].
+fn compile_documented_pattern(pattern: &str) -> Option<regex::Regex> {
+    // Compile work scales with the pattern source, and a judge site pays
     // it per node (or per pair call) on the per-request path. Past this
     // bound the judge abstains compatible-by-default; the pattern still
     // ships and binds on the wire, the judge does not guess — the same
@@ -1560,10 +1662,42 @@ fn value_satisfies_documented_format(value: &str, format: &str) -> bool {
 /// string never equals a number — the derived comparison still decides
 /// those.
 fn pinned_values_equal(a: &Value, b: &Value) -> bool {
+    pinned_values_equal_depth(a, b, 8)
+}
+
+/// The recursive body of [`pinned_values_equal`]: the JSON-Schema number
+/// equality at the leaves (`2` and `2.0` are one value), carried through
+/// arrays and objects so a nested pinned value (`{"k": 2}` beside
+/// `enum: [{"k": 2.0}]`, `[[2]]` beside `[[2.0]]`) reads as contained the
+/// way the top-level spellings have since the round-19/20 fixes. The depth
+/// bound falls back to the derived `Value` equality past eight levels —
+/// the containment checks this feeds only miss a containment (a needless
+/// yield or an overclosure) at that depth, never invent one, and it keeps
+/// a hostile 4 MB pinned value from paying a full structural walk per
+/// comparison.
+fn pinned_values_equal_depth(a: &Value, b: &Value, depth: usize) -> bool {
     if let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) {
         return x == y;
     }
-    a == b
+    match (a, b) {
+        (Value::Array(xs), Value::Array(ys)) => {
+            depth > 0
+                && xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .zip(ys)
+                    .all(|(x, y)| pinned_values_equal_depth(x, y, depth - 1))
+        }
+        (Value::Object(xs), Value::Object(ys)) => {
+            depth > 0
+                && xs.len() == ys.len()
+                && xs.iter().all(|(key, x)| {
+                    ys.get(key)
+                        .is_some_and(|y| pinned_values_equal_depth(x, y, depth - 1))
+                })
+        }
+        _ => a == b,
+    }
 }
 
 fn value_clears_bounds_with(
@@ -1722,9 +1856,26 @@ fn enum_members_within_judge_cap(members: &[Value]) -> bool {
     if members.len() > ENUM_PAIR_MEMBER_CAP {
         return false;
     }
-    serde_json::to_vec(members)
-        .map(|bytes| bytes.len() <= ENUM_PAIR_MEMBER_BYTES_CAP)
-        .unwrap_or(false)
+    // Incremental with early exit, exact to the serialized ARRAY size the
+    // whole-array `to_vec` measured (members + separators + brackets): a
+    // hostile 256 × 16 KB enum paid the full 4 MB serialization per call
+    // per request (measured 19.8 s per node on the property-pin scan,
+    // which re-runs this check per member), while the first oversized
+    // member already decides the verdict here.
+    let separators = members.len().saturating_sub(1) + 2;
+    let mut member_bytes = 0usize;
+    for member in members {
+        match serde_json::to_vec(member) {
+            Ok(bytes) => member_bytes += bytes.len(),
+            // A value that cannot serialize cannot be judged; abstain on
+            // the safe side like a cap overshoot.
+            Err(_) => return false,
+        }
+        if member_bytes + separators > ENUM_PAIR_MEMBER_BYTES_CAP {
+            return false;
+        }
+    }
+    true
 }
 
 /// Serialized-size cap for one side's `enum` value in the pair judge's
@@ -2118,6 +2269,32 @@ fn declared_types_disjoint(a: &str, b: &str) -> bool {
 /// (inclusive/exclusive forms compare exactly at the boundary).
 /// Fractional/integer intersections are not chased here — the same
 /// disclosed line the per-node crossing arm draws.
+/// Whether one node's own documented numeric bounds mutually admit no
+/// value: `minimum: 10` beside `maximum: 5`, either exclusive spelling
+/// crossing the opposing bound, and `multipleOf: 0` (no number is a
+/// multiple of zero). The typed-bounds gate arm shares this with the
+/// typeless-composition arm, which applies it when every branch of the
+/// node's own `anyOf` forces a numeric instance — the domain qualification
+/// the typed arm gets from its declared type.
+fn numeric_bounds_contradiction(obj: &Map<String, Value>) -> bool {
+    let minimum = obj.get("minimum").and_then(Value::as_f64);
+    let exclusive_minimum = obj.get("exclusiveMinimum").and_then(Value::as_f64);
+    let maximum = obj.get("maximum").and_then(Value::as_f64);
+    let exclusive_maximum = obj.get("exclusiveMaximum").and_then(Value::as_f64);
+    let crossed = match (minimum, exclusive_minimum, maximum, exclusive_maximum) {
+        (Some(min), _, Some(max), _) if min > max => true,
+        (Some(min), _, _, Some(max)) if min >= max => true,
+        (_, Some(excl_min), Some(max), _) if excl_min >= max => true,
+        (_, Some(excl_min), _, Some(excl_max)) if excl_min >= excl_max => true,
+        _ => false,
+    };
+    let zero_multiple = obj
+        .get("multipleOf")
+        .and_then(Value::as_f64)
+        .is_some_and(|multiple| multiple == 0.0);
+    crossed || zero_multiple
+}
+
 fn numeric_windows_cross(a: &Map<String, Value>, b: &Map<String, Value>) -> bool {
     // One edge per side, combined from both documented spellings: the
     // window's true boundary is the stricter of `minimum`/`exclusiveMinimum`
@@ -2431,33 +2608,54 @@ fn has_structural_ref_cycle(edges: &[(String, String)]) -> bool {
                 .push(terminal.clone());
         }
     }
-    fn visits_cycle(
-        node: &str,
-        graph: &HashMap<String, Vec<String>>,
-        visiting: &mut HashSet<String>,
-        settled: &mut HashSet<String>,
-    ) -> bool {
-        if settled.contains(node) {
-            return false;
+    // Iterative three-color DFS with ONE shared settled set. The original
+    // walk started a fresh recursive DFS — fresh `visiting`/`settled`
+    // sets — from every root: total work was quadratic in the graph size
+    // (measured 41.7 s for a 4,000-def chain on the per-request path,
+    // which ships strict and pays forever), and the recursion carried one
+    // stack frame per graph node, so a flat 400k-def chain aborted the
+    // process on stack overflow — the uncatchable SIGABRT class the pair
+    // judge's depth bound exists for, reintroduced one function over by
+    // this check itself. Sharing the settled set is what makes the single
+    // pass sound: a node whose reachable closure was fully explored once
+    // without finding a cycle cannot start or continue one from another
+    // root, so the whole check is linear in (nodes + edges).
+    let mut settled: HashSet<String> = HashSet::new();
+    let roots: Vec<String> = graph.keys().cloned().collect();
+    for root in roots {
+        if settled.contains(&root) {
+            continue;
         }
-        if !visiting.insert(node.to_string()) {
-            return true;
-        }
-        if let Some(targets) = graph.get(node) {
-            for target in targets {
-                if visits_cycle(target, graph, visiting, settled) {
+        // Explicit (node, targets, next-target-index) stack: same
+        // depth-first order as the recursion it replaces, no
+        // stack-frame-per-node, and the target list is cloned once per
+        // push — not once per consumed target — so a star-shaped graph
+        // stays linear in its edges.
+        let root_targets = graph.get(root.as_str()).cloned().unwrap_or_default();
+        let mut stack: Vec<(String, Vec<String>, usize)> = vec![(root, root_targets, 0)];
+        let mut on_path: HashSet<String> = HashSet::new();
+        on_path.insert(stack[0].0.clone());
+        while let Some((_node, targets, next_target)) = stack.last_mut() {
+            if *next_target < targets.len() {
+                let target = targets[*next_target].clone();
+                *next_target += 1;
+                if on_path.contains(&target) {
                     return true;
                 }
+                if settled.contains(&target) {
+                    continue;
+                }
+                on_path.insert(target.clone());
+                let target_targets = graph.get(&target).cloned().unwrap_or_default();
+                stack.push((target, target_targets, 0));
+            } else {
+                let (finished, _, _) = stack.pop().expect("stack is non-empty here");
+                on_path.remove(&finished);
+                settled.insert(finished);
             }
         }
-        visiting.remove(node);
-        settled.insert(node.to_string());
-        false
     }
-    let roots: Vec<String> = graph.keys().cloned().collect();
-    roots
-        .iter()
-        .any(|node| visits_cycle(node, &graph, &mut HashSet::new(), &mut HashSet::new()))
+    false
 }
 
 fn ref_chain_target<'a>(root: &'a Value, start: &str) -> Option<&'a Value> {
@@ -2544,7 +2742,15 @@ fn prune_dangling_required(schema: &mut Value) {
 /// non-object single branch. Consumers that cannot represent the keyword
 /// fail it closed downstream (the strict gate rejects `oneOf`/`allOf` on
 /// presence and shape-checks `anyOf` branches); consumers that can — the
-/// general JSON Schema endpoints — keep the authored constraint. A branch
+/// general JSON Schema endpoints — keep the authored constraint, with one
+/// shared-walk caveat: the same walk's dangling-required prune empties a
+/// required-only kept branch (`allOf:[{"required":["b"]}]` beside
+/// `required:["a"]` reaches them as `allOf:[{}]`), so the constraint the
+/// keyword preserves for THEM is the keyword itself (still truthy input
+/// to their own composition rules), not the branch body. That prune is
+/// pre-existing base behavior whose non-strict outcome equals the old
+/// first-wins merge; the strict path is unaffected (the gate fails the
+/// keyword closed on presence and the authored schema ships). A branch
 /// that only introduces keys the parent lacks (or repeats them with equal
 /// values) merges losslessly exactly as before.
 fn collapse_single_element_unions(schema: &mut Value) {
@@ -2755,6 +2961,20 @@ fn strip_unsupported_strict_keywords(obj: &mut Map<String, Value>) -> usize {
             }
         } else if !obj.contains_key("enum") {
             obj.insert("enum".into(), Value::Array(vec![const_value]));
+        } else if obj
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|member| pinned_values_equal(member, &const_value))
+            })
+        {
+            // The enum CONTAINS the const: dropping it widens nothing, so
+            // this is not a disagreement and must not be counted as one —
+            // counting it rendered a "A `const` pin disagreed with its
+            // `enum`" sentence for a pin that agreed (the note's
+            // actionable half was right, its reason was not).
         } else {
             widened_consts += 1;
         }
@@ -11752,5 +11972,305 @@ mod kimi_tests {
         assert_eq!(error, KimiParameterSchemaError::ReferencedRootMustBeObject);
         assert!(!error.to_string().contains("private-scalar-name-4831"));
         assert_eq!(schema, original, "a rejected schema must never be emitted");
+    }
+}
+
+/// Round-21 fixwave pins: the typeless-composition contradiction arm, the
+/// junk `pattern` value, the recursive pinned-value equality, the
+/// contained-const note honesty, and the cycle check's depth/linearity.
+#[cfg(test)]
+mod strict_fixwave_r21 {
+    use super::*;
+    use serde_json::json;
+
+    fn probe_tool(name: &str, input_schema: Value) -> Tool {
+        Tool {
+            tool_type: None,
+            name: name.to_string(),
+            description: name.to_string(),
+            input_schema,
+            allowed_callers: None,
+            defer_loading: None,
+            input_examples: None,
+            strict: None,
+            cache_control: None,
+        }
+    }
+
+    fn verdict(schema: Value) -> (bool, Option<bool>) {
+        let mut tools = vec![probe_tool("probe", schema)];
+        let all = prepare_tools_for_strict_mode(&mut tools);
+        (all, tools[0].strict)
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_typeless_composition_beside_a_zero_multiple() {
+        // The typed arms key on a declared single-string `type`; a TYPELESS
+        // node whose every branch forces a numeric instance carried
+        // `multipleOf: 0` past all of them and shipped `strict: true`
+        // callable by nothing. Every branch that cannot hold a value
+        // outside the bounds' domain kills the node: the composition arm
+        // judges the pair via the pair judge and applies the typed arm's
+        // own crossing/zero-multiple test when every branch forces
+        // numeric.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {"anyOf": [{"type": "number"}, {"type": "integer"}], "multipleOf": 0}
+            },
+            "required": ["u"]
+        }));
+        assert!(!all);
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_typeless_composition_beside_crossed_bounds() {
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {"anyOf": [{"type": "number"}, {"type": "integer"}],
+                      "minimum": 10, "maximum": 5}
+            },
+            "required": ["u"]
+        }));
+        assert!(!all);
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_typeless_const_beside_disjoining_branches() {
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {"const": 5, "anyOf": [{"type": "boolean"}, {"type": "string"}]}
+            },
+            "required": ["u"]
+        }));
+        assert!(!all);
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_items_beside_an_items_disjoining_branch() {
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {"items": {"type": "string"},
+                      "anyOf": [{"type": "array", "items": {"type": "number"}}]}
+            },
+            "required": ["u"]
+        }));
+        assert!(!all);
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn strict_mode_keeps_strict_on_a_typeless_composition_with_a_usable_branch() {
+        // The keep side: one branch the node's own pins cannot kill — a
+        // string branch beside bounds the string is outside the domain
+        // of — witnesses the union, whatever its numeric sibling does.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {"anyOf": [{"type": "number"}, {"type": "string"}], "minimum": 1}
+            },
+            "required": ["u"]
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_keeps_strict_on_a_typeless_enum_beside_a_branch_sharing_a_member() {
+        // The node-level enum twin the residual-gaps list carried open: a
+        // node `enum` beside its own branches. One branch sharing a member
+        // witnesses; the pair judge's enum-intersection scan decides.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {"enum": ["a"],
+                      "anyOf": [{"enum": ["a", "b"]}, {"enum": ["c"]}]}
+            },
+            "required": ["u"]
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_typeless_enum_beside_fully_disjoining_branches() {
+        // The fail side of the same twin: no branch shares a member, so
+        // every instance the branches admit violates the node's enum.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {
+                "u": {"enum": ["a"],
+                      "anyOf": [{"enum": ["b"]}, {"enum": ["c"]}]}
+            },
+            "required": ["u"]
+        }));
+        assert!(!all);
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn strict_mode_fails_closed_on_a_junk_pattern_value() {
+        // `pattern` ships verbatim and every judge reads it through
+        // `as_str`, so a non-string value neither bound nor failed
+        // anywhere — the same junk family the bounds arms fail closed.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"p": {"type": "string", "pattern": 42}},
+            "required": ["p"]
+        }));
+        assert!(!all);
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn strict_mode_keeps_strict_on_a_string_pattern_required_leaf() {
+        // Keep side of the junk arm: a well-formed pattern keeps shipping.
+        let (all, strict) = verdict(json!({
+            "type": "object",
+            "properties": {"p": {"type": "string", "pattern": "^a"}},
+            "required": ["p"]
+        }));
+        assert!(all);
+        assert_eq!(strict, Some(true));
+    }
+
+    #[test]
+    fn pair_judge_reads_nested_number_equality_through_containers() {
+        // The pinned-value equality is recursive with the JSON-Schema
+        // number rule at the leaves: `[[2]]` and `[[2.0]]` are one value
+        // through the array, so two enums pinning the same value in
+        // different spellings no longer read as disjoint (the derived
+        // equality overclosed a satisfiable schema).
+        let a = json!({"enum": [[2]]});
+        let b = json!({"enum": [[2.0]]});
+        let mut budget = STRICT_PAIR_JUDGE_CALL_BUDGET;
+        assert!(schema_pair_satisfiable(
+            &a,
+            &b,
+            &Value::Null,
+            0,
+            &mut budget
+        ));
+        let a = json!({"const": {"k": 2}});
+        let b = json!({"enum": [{"k": 2.0}]});
+        let mut budget = STRICT_PAIR_JUDGE_CALL_BUDGET;
+        assert!(schema_pair_satisfiable(
+            &a,
+            &b,
+            &Value::Null,
+            0,
+            &mut budget
+        ));
+        // Disjoint nested values still disjoin.
+        let a = json!({"enum": [[2]]});
+        let b = json!({"enum": [[3.0]]});
+        let mut budget = STRICT_PAIR_JUDGE_CALL_BUDGET;
+        assert!(!schema_pair_satisfiable(
+            &a,
+            &b,
+            &Value::Null,
+            0,
+            &mut budget
+        ));
+    }
+
+    #[test]
+    fn strict_sanitize_drops_a_contained_const_without_claiming_a_disagreement() {
+        // A const its enum contains yields nothing: dropping it widens
+        // nothing, so no "pin disagreed" sentence may render — the old
+        // unconditional yield counted it as a disagreement the pin never
+        // made.
+        let mut schema = json!({"enum": ["a", "b"], "const": "a"});
+        let mut removed = Vec::new();
+        let mut widened = 0usize;
+        enforce_strict_subset(&mut schema, &mut removed, &mut widened);
+        assert_eq!(widened, 0, "a contained const is not a disagreement");
+        assert_eq!(schema, json!({"enum": ["a", "b"]}));
+        // A genuinely disagreeing const still counts (the round-19 pin's
+        // direction).
+        let mut schema = json!({"enum": ["a", "b"], "const": "z"});
+        let mut removed = Vec::new();
+        let mut widened = 0usize;
+        enforce_strict_subset(&mut schema, &mut removed, &mut widened);
+        assert_eq!(widened, 1);
+    }
+
+    #[test]
+    fn strict_mode_cycle_check_survives_a_wide_def_chain_with_a_trailing_cycle() {
+        // The structural cycle check must not carry one stack frame per
+        // graph node: a flat chain whose last link loops back aborted the
+        // process on stack overflow when the recursion walked it (the
+        // 400k-def witness). The chain itself is legal — every link
+        // resolves — so only the trailing cycle may fail it closed, and
+        // the failure must arrive by returning, not by aborting.
+        // The cycle lives in the document GRAPH, not in any one chain:
+        // every `$ref` resolves in one hop to an object (so the chain
+        // walk's hop cap passes and every chain is loop-free), while the
+        // site-path graph the cycle check builds — site prefixes to
+        // chain-terminal pointers — forms a deep loop it must detect
+        // without recursing one frame per node. The property pins to the
+        // concrete def directly; the loop lives across the (judged-live)
+        // unreferenced definitions, the same mutual-recursion class the
+        // two-node pin above covers, at a width the recursion could not
+        // survive.
+        let mut defs = serde_json::Map::new();
+        let links = 100_000usize;
+        for i in 0..links {
+            let target = if i + 1 < links {
+                format!("#/$defs/d{}", i + 1)
+            } else {
+                "#/$defs/d0".to_string()
+            };
+            defs.insert(
+                format!("d{}", i),
+                json!({"type": "object", "properties": {"p": {"$ref": target}}, "required": ["p"]}),
+            );
+        }
+        defs.insert("concrete".to_string(), json!({"type": "string"}));
+        let authored = json!({
+            "type": "object",
+            "properties": {"x": {"$ref": "#/$defs/concrete"}},
+            "required": ["x"],
+            "$defs": Value::Object(defs)
+        });
+        let (all, strict) = verdict(authored);
+        assert!(!all);
+        assert_eq!(strict, None);
+    }
+
+    #[test]
+    fn strict_mode_cycle_check_stays_quiet_on_a_wide_acyclic_def_chain() {
+        // The same width without the cycle keeps shipping: the shared
+        // settled set must not read shared exploration as a cycle, and
+        // the walk must terminate in linear time.
+        let mut defs = serde_json::Map::new();
+        let links = 50_000usize;
+        for i in 0..links {
+            let target = if i + 1 < links {
+                format!("#/$defs/d{}", i + 1)
+            } else {
+                "#/$defs/concrete".to_string()
+            };
+            defs.insert(
+                format!("d{}", i),
+                json!({"type": "object", "properties": {"p": {"$ref": target}}, "required": ["p"]}),
+            );
+        }
+        defs.insert("concrete".to_string(), json!({"type": "string"}));
+        let authored = json!({
+            "type": "object",
+            "properties": {"x": {"$ref": "#/$defs/concrete"}},
+            "required": ["x"],
+            "$defs": Value::Object(defs)
+        });
+        let (all, strict) = verdict(authored);
+        assert!(all);
+        assert_eq!(strict, Some(true));
     }
 }

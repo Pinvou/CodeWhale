@@ -7492,15 +7492,25 @@ struct DoctorStrictToolModeStatus {
 /// verdict: answering from the config document alone reported a chat-model
 /// verdict for a launch that actually serves a `responses`-dialect model,
 /// the drift the round-18 selector fix closed for config.toml and this
-/// chain closes for the settings channel. Returns the launch provider, its
-/// identity key (what the `/model` memory is keyed by), and the launch
-/// model.
-fn doctor_launch_surface(config: &Config) -> (crate::config::ApiProvider, String, String) {
+/// chain closes for the settings channel. Returns the launch provider, the
+/// full launch identity record (the route resolvers key on it — see
+/// `doctor_api_target`), and the launch model.
+fn doctor_launch_surface(
+    config: &Config,
+) -> (
+    crate::config::ApiProvider,
+    crate::config::ProviderIdentity,
+    String,
+) {
     // The persisted document the launch path normalizes (`init.rs` reads
     // the same candidates with the same parser), loaded read-only: the
     // doctor is a diagnostic and must not create or migrate a settings
-    // file, and the launch read applies no environment overlays of its
-    // own.
+    // file. The launch read runs `apply_env_overrides` on its copy
+    // (`init.rs`); every field that function touches is UI state
+    // (motion, theme, frame rate), so the route-relevant settings here —
+    // `default_provider`, `default_model`, `provider_models` — are
+    // identical with or without it, and the read-only load skips it on
+    // purpose: a diagnostic must not mutate anything, even in memory.
     let launch_settings = crate::settings::Settings::load_persisted_read_only()
         .unwrap_or_else(|_| crate::settings::Settings::default());
     let configured_model = config.default_model();
@@ -7557,7 +7567,7 @@ fn doctor_launch_surface(config: &Config) -> (crate::config::ApiProvider, String
             })
             .unwrap_or(configured_model)
     };
-    (identity.provider, identity.key, model)
+    (identity.provider, identity, model)
 }
 
 fn doctor_api_target(config: &Config) -> DoctorApiTarget {
@@ -7570,11 +7580,20 @@ fn doctor_api_target(config: &Config) -> DoctorApiTarget {
     // endpoint key exactly when the launch model maps to a different
     // dialect — a settings-remembered `responses`-dialect model answered
     // `ready` off the config default's chat descriptor.
-    let (launch_provider, launch_identity, launch_model) = doctor_launch_surface(config);
+    let (_launch_provider, launch_identity, launch_model) = doctor_launch_surface(config);
+    // Resolve through the LAUNCH IDENTITY, not the provider typing: the
+    // provider-keyed resolver (`resolve_runtime_route`) re-derives the
+    // identity from the raw config root whenever the typing is `Custom`,
+    // discarding the re-point above — a settings `default_provider` that
+    // names a custom route would resolve this route from the raw root's
+    // table and name an endpoint no session can serve (the launch path
+    // scopes the config to the identity instead, `init.rs`
+    // `scope_to_provider_identity`). The identity-keyed resolver is what
+    // the launch path and the UI's own validation use.
     let (model, resolution, endpoint_key, base_url) =
-        match crate::route_runtime::resolve_runtime_route(
+        match crate::route_runtime::resolve_runtime_route_for_identity(
             config,
-            launch_provider,
+            &launch_identity,
             Some(&launch_model),
         ) {
             Ok(route) => (
@@ -7598,7 +7617,7 @@ fn doctor_api_target(config: &Config) -> DoctorApiTarget {
             ),
         };
     DoctorApiTarget {
-        provider: launch_identity,
+        provider: launch_identity.key,
         base_url,
         model,
         resolution,
@@ -7674,7 +7693,7 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
         let chat_shape_family = matches!(
             crate::client::chat_shape_provider_for(
                 launch_provider,
-                &launch_identity,
+                &launch_identity.key,
                 &target.base_url,
                 &target.model,
             ),
@@ -20816,5 +20835,86 @@ mod fork_session_tests {
             codewhale_core::MAX_WORKSPACE_ROOTS + 1,
             "the full-load form round-trips through the CLI fork"
         );
+    }
+}
+
+/// Round-21 fixwave pin: the doctor resolves the route through the launch
+/// identity, not the raw config root.
+#[cfg(test)]
+mod strict_doctor_fixwave_r21 {
+    use super::*;
+
+    #[test]
+    fn strict_tool_mode_doctor_resolves_the_route_from_the_settings_repointed_identity() {
+        // A settings `default_provider` that names a custom route is
+        // exactly what `/model` → "Remember as my default" writes on a
+        // named route. The launch path scopes the config to that identity
+        // (`init.rs` `scope_to_provider_identity`), so the session serves
+        // the DS4-local table; the provider-KEYED resolver re-derives the
+        // identity from the raw config root (`beta-route`) and named the
+        // official beta endpoint with a `provider_mismatch` verdict — a
+        // route no session can serve, and an internally contradictory
+        // report (provider line: ds4). The doctor must resolve through
+        // the launch identity.
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let codewhale_home = tmp.path().join(".codewhale");
+        std::fs::create_dir_all(&codewhale_home).expect("codewhale home");
+        let _home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
+        std::fs::write(
+            codewhale_home.join("settings.toml"),
+            "default_provider = \"ds4\"\n",
+        )
+        .expect("plant remembered provider");
+
+        let config = Config {
+            provider: Some("beta-route".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom: std::collections::HashMap::from([
+                    (
+                        "ds4".to_string(),
+                        crate::config::ProviderConfig {
+                            kind: Some("openai-compatible".to_string()),
+                            base_url: Some("http://127.0.0.1:8000/v1".to_string()),
+                            model: Some("deepseek-v4-flash".to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        "beta-route".to_string(),
+                        crate::config::ProviderConfig {
+                            kind: Some("openai-compatible".to_string()),
+                            base_url: Some("https://api.deepseek.com/beta".to_string()),
+                            model: Some("deepseek-chat".to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                ]),
+                ..Default::default()
+            }),
+            strict_tool_mode: Some(true),
+            ..Default::default()
+        };
+
+        let target = doctor_api_target(&config);
+        assert_eq!(
+            target.provider, "ds4",
+            "the report's provider line is the launch identity: {:?}",
+            target
+        );
+        assert_eq!(
+            target.base_url, "http://127.0.0.1:8000/v1",
+            "the resolved URL is the launch identity's table, not the raw root's: {:?}",
+            target
+        );
+
+        let status = doctor_strict_tool_mode_status(&config);
+        assert_eq!(
+            status.status, "custom_endpoint",
+            "the DS4-local launch route is out of scope on its host, not a provider mismatch: {}",
+            status.message
+        );
+        assert!(!status.function_strict_sent);
     }
 }

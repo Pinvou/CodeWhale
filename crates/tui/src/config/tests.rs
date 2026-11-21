@@ -13856,6 +13856,31 @@ fn official_host_gate_rejects_invisible_characters_and_dot_segments() {
     assert!(!url_is_official_deepseek_host(
         "https://api.deepseek.com/v1/.."
     ));
+    // The ENCODED spellings of the same dot segments: WHATWG URL
+    // normalization percent-decodes `%2e` for dot-segment detection
+    // (`/beta/%2e%2e/v1` lands on the canonical non-beta path with the
+    // flag kept) and folds backslashes into path separators for special
+    // schemes (`/beta\..\v1` normalizes identically). Any `%` escape or
+    // `\` in the path degrades to out of scope — every official endpoint
+    // path is plain letters and slashes.
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta/%2e%2e/v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/%2E%2E/v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/.%2e/v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/%2e./v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta\\..\\v1"
+    ));
+    assert!(!url_is_official_deepseek_host(
+        "https://api.deepseek.com/beta/x\\..\\v1"
+    ));
     // Plain paths the wire serves verbatim stay admitted.
     assert!(url_is_official_deepseek_host("https://api.deepseek.com/v2"));
     assert!(url_is_official_deepseek_host(
