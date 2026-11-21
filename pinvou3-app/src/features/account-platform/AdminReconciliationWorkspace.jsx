@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { reconciliationCopy, ledgerRepairCopy, financeCopy } from '../../shared/i18n.js';
 import { AdminReconciliationFinancialRepairForm } from './AdminReconciliationFinancialRepairForm.jsx';
@@ -16,7 +17,7 @@ function today() {
   return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
-function CaseActions({ client, item, owner, copy, canWrite, onChanged, canRequestRepair, canReadCase, repairCopy, operationCopy, onViewApproval }) {
+function CaseActions({ client, item, owner, copy, canWrite, onChanged, canRequestRepair, canReadCase, repairCopy, operationCopy, onViewApproval, language }) {
   const [repairOpen, setRepairOpen] = useState(false);
   const op = useFinanceOperation(owner, { ...copy, permissions: copy.permission, inputInvalid: copy.invalid }, client, `reconciliation-case:${item.case_id}`);
   const [action, setAction] = useState('CLAIM');
@@ -41,7 +42,7 @@ function CaseActions({ client, item, owner, copy, canWrite, onChanged, canReques
   const disabled = !canWrite || op.busy || op.unknown;
   const labels = ['claim', 'assign', 'setRepair', 'resolve', 'ignore', 'reopen'];
   return <section className="adm-panel">
-    <h3>{item.merchant_order_no} · {reconciliationCaseLabel(item.case_type, copy)}</h3><p>{copy.status}: {item.status}</p>
+    <h3>{item.merchant_order_no} · {reconciliationCaseLabel(item.case_type, copy)}</h3><p>{copy.status}: {statusLabel(item.status, language)}</p>
     <p>{copy.caseOwner}: <ReconciliationCaseOwner id={item.owner_id} copy={copy} /></p>
     <ReconciliationCaseEvidence item={item} copy={copy} />
     {canWrite && <><label>{copy.action}<select disabled={disabled} value={action} onChange={event => setAction(event.target.value)}>{RECONCILIATION_ACTIONS.map((value, index) => <option key={value} value={value} disabled={item.case_type === 'LEDGER_REPAIR_PROOF_UNAVAILABLE' && value === 'IGNORE'}>{copy[labels[index]]}</option>)}</select></label>
@@ -58,7 +59,7 @@ function CaseActions({ client, item, owner, copy, canWrite, onChanged, canReques
   </section>;
 }
 
-function Workspace({ client, me, copy, repairCopy, operationCopy, onViewApproval }) {
+function Workspace({ client, me, language, copy, repairCopy, operationCopy, onViewApproval }) {
   const owner = `${me.user_id}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`;
   const permissions = me.platform_permissions || [];
   const canRun = permissions.includes('platform.billing.reconciliation.run');
@@ -177,12 +178,12 @@ function Workspace({ client, me, copy, repairCopy, operationCopy, onViewApproval
         <button type="button" disabled={writing} aria-pressed={caseScope === 'all'} onClick={() => clearRun('all')}>{copy.caseScopeAll}</button>
         {caseScope !== 'none' && <button type="button" disabled={writing} onClick={() => clearRun('none')}>{copy.caseScopeClear}</button>}
       </div>
-      {caseScope === 'batch' ? <ReconciliationBatchSummary id={runID} item={runContext} copy={copy} /> : caseScope === 'all' ? <p>{copy.caseScopeAllActive}</p> : null}
-      <AdminReconciliationBatchPicker {...{client,copy}} initialChannel={runContext?.reconciliation_run_id === runID ? runContext.channel : channel} initialDate={runContext?.reconciliation_run_id === runID ? runContext.business_date : date} selectedID={runID} onChoose={chooseRun} disabled={writing} />
+      {caseScope === 'batch' ? <ReconciliationBatchSummary id={runID} item={runContext} copy={copy} language={language} /> : caseScope === 'all' ? <p>{copy.caseScopeAllActive}</p> : null}
+      <AdminReconciliationBatchPicker {...{client,copy,language}} initialChannel={runContext?.reconciliation_run_id === runID ? runContext.channel : channel} initialDate={runContext?.reconciliation_run_id === runID ? runContext.business_date : date} selectedID={runID} onChoose={chooseRun} disabled={writing} />
     </>}
     <div className="adm-reconciliation-toolbar" role="group" aria-label={copy.reconciliationFilters}>
       {tab === 'runs' ? <><label>{copy.channel}<select disabled={busy} value={channel} onChange={event => setChannel(event.target.value)}>{['WECHAT', 'ALIPAY', 'UNIONPAY'].map(value => <option key={value}>{value}</option>)}</select></label><label>{copy.businessDate}<input type="date" disabled={busy} value={date} onChange={event => setDate(event.target.value)} /></label></> :
-      <><label>{copy.status}<select disabled={writing || !canQuery} value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.all}</option>{['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED'].map(value => <option key={value}>{value}</option>)}</select></label></>}
+      <><label>{copy.status}<select disabled={writing || !canQuery} value={status} onChange={event => setStatus(event.target.value)}><option value="">{copy.all}</option>{['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED'].map(value => <option key={value} value={value}>{statusLabel(value, language)}</option>)}</select></label></>}
       <button type="button" disabled={busy || !canQuery} onClick={refresh}>{copy.refresh}</button>
     </div>
     {tab === 'runs' && canRun && <>
@@ -200,9 +201,9 @@ function Workspace({ client, me, copy, repairCopy, operationCopy, onViewApproval
     </div>
     {visiblePage && (
       // biome-ignore lint/a11y/noNoninteractiveTabindex: The named overflow region must remain keyboard-scrollable.
-      <div className={tab === 'cases' ? "adm-reconciliation-table adm-reconciliation-cases" : "adm-reconciliation-table"} role="region" aria-label={copy[tab]} tabIndex={0}><table><thead><tr><th>{tab === 'runs' ? copy.businessDate : copy.merchant}</th>{tab === 'runs' && <><th>{copy.channel}</th><th>{copy.batchID}</th></>}<th>{copy.status}</th><th>{tab === 'runs' ? copy.count : copy.caseType}</th>{tab === 'runs' && <><th>{copy.rows}</th><th>{copy.source}</th></>}{tab === 'cases' && <><th>{copy.caseMoney}</th><th>{copy.caseOwner}</th></>}<th>{copy.action}</th></tr></thead><tbody>{visiblePage.items.map(item => <tr key={tab === 'runs' ? item.reconciliation_run_id : item.case_id}><td>{tab === 'runs' ? item.business_date : item.merchant_order_no}</td>{tab === 'runs' && <><td>{item.channel}</td><td><code>{item.reconciliation_run_id}</code></td></>}<td>{tab === 'runs' ? copy.batchStatuses[item.status] || item.status : item.status}</td><td>{tab === 'runs' ? item.case_count : reconciliationCaseLabel(item.case_type, copy)}</td>{tab === 'runs' && <><td>{item.provider_row_count}</td><td>{item.source_mode}</td></>}{tab === 'cases' && <><td><ReconciliationCaseAmounts item={item} copy={copy} /></td><td><ReconciliationCaseOwner id={item.owner_id} copy={copy} /></td></>}<td><button type="button" disabled={busy} onClick={() => { if (tab === 'runs') { chooseRun(item.reconciliation_run_id, item); setTab('cases'); } else setSelected({ item, readScope }); }}>{tab === 'runs' ? copy.cases : copy.caseDetails}</button></td></tr>)}</tbody></table></div>)}
+      <div className={tab === 'cases' ? "adm-reconciliation-table adm-reconciliation-cases" : "adm-reconciliation-table"} role="region" aria-label={copy[tab]} tabIndex={0}><table><thead><tr><th>{tab === 'runs' ? copy.businessDate : copy.merchant}</th>{tab === 'runs' && <><th>{copy.channel}</th><th>{copy.batchID}</th></>}<th>{copy.status}</th><th>{tab === 'runs' ? copy.count : copy.caseType}</th>{tab === 'runs' && <><th>{copy.rows}</th><th>{copy.source}</th></>}{tab === 'cases' && <><th>{copy.caseMoney}</th><th>{copy.caseOwner}</th></>}<th>{copy.action}</th></tr></thead><tbody>{visiblePage.items.map(item => <tr key={tab === 'runs' ? item.reconciliation_run_id : item.case_id}><td>{tab === 'runs' ? item.business_date : item.merchant_order_no}</td>{tab === 'runs' && <><td>{item.channel}</td><td><code>{item.reconciliation_run_id}</code></td></>}<td>{statusLabel(item.status, language, tab === 'runs' ? copy.batchStatuses : undefined)}</td><td>{tab === 'runs' ? item.case_count : reconciliationCaseLabel(item.case_type, copy)}</td>{tab === 'runs' && <><td>{item.provider_row_count}</td><td>{item.source_mode}</td></>}{tab === 'cases' && <><td><ReconciliationCaseAmounts item={item} copy={copy} /></td><td><ReconciliationCaseOwner id={item.owner_id} copy={copy} /></td></>}<td><button type="button" disabled={busy} onClick={() => { if (tab === 'runs') { chooseRun(item.reconciliation_run_id, item); setTab('cases'); } else setSelected({ item, readScope }); }}>{tab === 'runs' ? copy.cases : copy.caseDetails}</button></td></tr>)}</tbody></table></div>)}
     <nav className="adm-reconciliation-pagination" aria-label={copy.reconciliationPages}><button type="button" disabled={busy || !history.length} onClick={() => { const values = [...history]; const next = values.pop(); setHistory(values); void load(next); }}>{copy.previous}</button><button type="button" disabled={busy || !visiblePage?.next_cursor} onClick={() => { setHistory(values => [...values, cursor]); void load(visiblePage.next_cursor); }}>{copy.next}</button></nav>
-    {selectedHere && <CaseActions key={selectedHere.item.case_id} client={client} item={selectedHere.item} owner={owner} copy={copy} canWrite={canWrite} canRequestRepair={canRequestRepair} canReadCase={canReadCase} repairCopy={repairCopy} operationCopy={operationCopy} onViewApproval={onViewApproval} onChanged={item => {
+    {selectedHere && <CaseActions language={language} key={selectedHere.item.case_id} client={client} item={selectedHere.item} owner={owner} copy={copy} canWrite={canWrite} canRequestRepair={canRequestRepair} canReadCase={canReadCase} repairCopy={repairCopy} operationCopy={operationCopy} onViewApproval={onViewApproval} onChanged={item => {
       if (currentFilter.current !== selectedHere.readScope) return;
       setSelected(current => current === selectedHere ? { ...current, item } : current);
       setPage(current => current?.readScope === selectedHere.readScope ? { ...current, items: current.items.map(value => value.case_id === item.case_id ? item : value) } : current);
@@ -211,5 +212,5 @@ function Workspace({ client, me, copy, repairCopy, operationCopy, onViewApproval
 }
 
 export function AdminReconciliationWorkspace({ client, me, language, onViewApproval }) {
-  return <Workspace key={`${me.user_id}:${client.financeSessionEpoch || 0}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`} client={client} me={me} copy={reconciliationCopy[language]} repairCopy={ledgerRepairCopy[language]} operationCopy={financeCopy[language]} onViewApproval={onViewApproval} />;
+  return <Workspace key={`${me.user_id}:${client.financeSessionEpoch || 0}:${me.platform_authorization_version || me.active_context?.platform_authorization_version || 0}`} client={client} me={me} language={language} copy={reconciliationCopy[language]} repairCopy={ledgerRepairCopy[language]} operationCopy={financeCopy[language]} onViewApproval={onViewApproval} />;
 }

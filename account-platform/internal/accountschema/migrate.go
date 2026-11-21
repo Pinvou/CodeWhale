@@ -51,6 +51,9 @@ func Ordered(input []migrations.Migration) ([]migrations.Migration, error) {
 	if err := validateCommerceManualCompletion(input); err != nil {
 		return nil, err
 	}
+	if err := validateOutboxStatisticsIndex(input); err != nil {
+		return nil, err
+	}
 	if err := validatePaymentCreditAdmissions(input); err != nil {
 		return nil, err
 	}

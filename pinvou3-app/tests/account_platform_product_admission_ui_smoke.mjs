@@ -39,7 +39,10 @@ try {
     assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === window.admissionFixture.labels.approve).disabled), true);
     await page.evaluate(() => window.admissionFixture.switchActor()); await click('review'); await page.waitForSelector('pre');
     await page.type('textarea', 'Second independent review'); await click('approve');
-    await page.waitForFunction(() => document.querySelector('article p')?.textContent.includes('VERIFIED'));
+    const verified = { zh: '已验证', en: 'Verified', ja: '検証済み' }[language];
+    await page.waitForFunction(label => document.querySelector('article p')?.textContent.endsWith(` / ${label}`), {}, verified);
+    assert.equal(await page.evaluate(() => window.admissionFixture.review.status), 'VERIFIED');
+    assert.deepEqual(await page.evaluate(() => window.admissionFixture.review.decisions.map(value => value.reviewer_id)), ['44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555']);
     const votes = await page.evaluate(() => window.admissionFixture.calls.filter(value => value.url.endsWith('/decisions')));
     assert.equal(JSON.parse(votes[0].body).submission_sha, JSON.parse(votes[2].body).submission_sha);
     assert.notEqual(votes[0].key, votes[2].key); assert.deepEqual(errors, []);

@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useId, useState } from 'react';
 import { accountCenterCopy, accountLayoutCopy } from '../../shared/i18n.js';
 import { summarizeUsageRecords } from './usage-summary.js';
@@ -39,7 +40,7 @@ export function PortalUsage({ client, owner, versions, copy, language, records, 
       if (record.execution_status === 'FAILED' && record.settlement_status === 'RELEASED' && record.charged_microcredits != null && BigInt(record.charged_microcredits) === 0n) return words.callFailedNoCharge;
       if (record.execution_status === 'SUCCEEDED' && record.settlement_status === 'SETTLED' && record.charged_microcredits != null) return words.callCharged(formatBalance(record.charged_microcredits, language));
     }
-    return copy.usageStatuses[record.display_status] || record.display_status;
+    return statusLabel(record.display_status, language, copy.usageStatuses);
   };
   return <section className="ap-usage-workspace">
     <div className="ap-section-heading"><h3>{copy.usageTitle}</h3><PortalSectionAction busy={busy} loadingLabel={copy.loading} onClick={onRefresh}>{words.refreshUsage}</PortalSectionAction></div>
@@ -48,7 +49,7 @@ export function PortalUsage({ client, owner, versions, copy, language, records, 
         <label>{words.usageFrom}<input type="date" value={filters.from} onChange={change('from')} /></label>
         <label>{words.usageTo}<input type="date" value={filters.to} onChange={change('to')} /></label>
         <label>{words.usageModel}<input list={modelOptionsID} placeholder={words.all} value={filters.model} onChange={change('model')} /><datalist id={modelOptionsID}>{options('model').map(value => <option key={value} value={value} />)}</datalist></label>
-        <label>{words.usageStatus}<select value={filters.status} onChange={change('status')}><option value="">{words.all}</option>{[...new Set([...Object.keys(copy.usageStatuses), ...options('display_status')])].map(value => <option key={value} value={value}>{copy.usageStatuses[value] || value}</option>)}</select></label>
+        <label>{words.usageStatus}<select value={filters.status} onChange={change('status')}><option value="">{words.all}</option>{[...new Set([...Object.keys(copy.usageStatuses), ...options('display_status')])].map(value => <option key={value} value={value}>{statusLabel(value, language, copy.usageStatuses)}</option>)}</select></label>
       </div>
       <p className="ap-muted">{words.usageScope}</p>
       {invalidDates && <p role="alert">{words.invalidDates}</p>}

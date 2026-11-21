@@ -1,3 +1,4 @@
+import { statusLabel } from './status-label.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { accountClosureCopy, financeCopy } from '../../shared/i18n.js';
 import { closureQueueCopy } from '../../shared/admin-closure-queue-i18n.js';
@@ -39,8 +40,8 @@ function ClosureRepair({ client, owner, item, isLocal, pending, active, copy, cl
   const locale = { zh: 'zh-CN', ja: 'ja-JP', en: 'en-US' }[language];
   return <tr data-closure-id={id} data-closure-source={isLocal ? 'local' : 'server'}>
     <th scope="row"><code>{id}</code></th>
-    <td>{isLocal ? (pending ? queue.pending : queue.sending) : closureCopy.statuses[item.status]}</td>
-    <td>{isLocal ? '—' : closureCopy.stages[item.stage]}</td>
+    <td>{isLocal ? (pending ? queue.pending : queue.sending) : statusLabel(item.status, language, closureCopy.statuses)}</td>
+    <td>{isLocal ? '—' : statusLabel(item.stage, language, closureCopy.stages)}</td>
     <td>{!isLocal && validTime ? <time dateTime={item.updated_at}>{new Date(item.updated_at).toLocaleString(locale)}</time> : '—'}</td>
     <td className="adm-closure-action-cell">
       {pending && <p>{closureCopy.recoveryPending}</p>}

@@ -35,6 +35,26 @@ spec:
           for: 1m
           labels: { severity: p1 }
           annotations: { summary: "Account Platform has dead-lettered domain events" }
+        - alert: PinvouOutboxStatisticsUnavailable
+          expr: (min by(source) (pinvou_outbox_statistics_available) == 0) or (time() - min by(source) (pinvou_outbox_statistics_last_success_timestamp_seconds) > 120) or absent(pinvou_outbox_statistics_available{source="account"}) or absent(pinvou_outbox_statistics_available{source="billing"})
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Outbox statistics failed or have not refreshed for two minutes" }
+        - alert: PinvouOutboxRetainedStorageWarning
+          expr: max by(source) (pinvou_outbox_retained_storage_bytes) > {{ .Values.observability.retainedOutboxWarningBytes | default 1073741824 | int64 }}
+          for: 10m
+          labels: { severity: p2 }
+          annotations: { summary: "Retained outbox storage exceeds the configured warning threshold; preserve evidence" }
+        - alert: PinvouPaymentHealthStorageUnavailable
+          expr: min(pinvou_payment_health_storage_available) == 0 or absent(pinvou_payment_health_storage_available)
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Payment health observation storage cannot be measured" }
+        - alert: PinvouPaymentHealthRetainedStorageWarning
+          expr: max(pinvou_payment_health_retained_storage_bytes) > {{ .Values.observability.retainedHealthWarningBytes | default 1073741824 | int64 }}
+          for: 10m
+          labels: { severity: p2 }
+          annotations: { summary: "Retained payment health storage exceeds the configured warning threshold; preserve evidence" }
     {{- if .Values.approvalRelay.requireReady }}
     {{- $scope := printf "%s/%s" .Release.Namespace .Release.Name | quote }}
     {{- $ready := printf "pinvou_authorization_relay_ready{source=\"account\",approval_scope=%s}" $scope }}
