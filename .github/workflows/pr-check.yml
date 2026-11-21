@@ -2341,13 +2341,14 @@ jobs:
           printf '%s  %s\n' fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179 "$tools/helm.tar.gz" | sha256sum --check --strict
           tar -xzf "$tools/helm.tar.gz" -C "$tools" linux-amd64/helm
           python3 scripts/ci-download.py https://github.com/docker/compose/releases/download/v5.4.0/docker-compose-linux-x86_64 \
-            --output "$tools/docker-compose" --sha256 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be
+            --output "$tools/docker-compose" --sha256 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be --seconds 360
           printf '%s  %s\n' 837fd1d35bf6a494f41b5b5988269a7be79de337cf1a1a6ff0e45ab51bb4e9be "$tools/docker-compose" | sha256sum --check --strict
           chmod 0755 "$tools/docker-compose"
           # Test-only promtool; does not start or upgrade a Prometheus server.
           # SHA256 published at https://prometheus.io/download/ (3.13.5 LTS).
+          # Allow a cold runner to fetch the verified 100 MiB archive over a slow link.
           python3 scripts/ci-download.py https://github.com/prometheus/prometheus/releases/download/v3.13.5/prometheus-3.13.5.linux-amd64.tar.gz \
-            --output "$tools/prometheus.tar.gz" --sha256 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699
+            --output "$tools/prometheus.tar.gz" --sha256 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699 --seconds 360
           printf '%s  %s\n' 0388822ace519c5a3a8ef556a541ce1b536e21d872f82deded465bd27a5a0699 "$tools/prometheus.tar.gz" | sha256sum --check --strict
           tar -xzf "$tools/prometheus.tar.gz" -C "$tools" prometheus-3.13.5.linux-amd64/promtool
           printf 'PINVOU_TEST_PROMTOOL_BINARY=%s\n' "$tools/prometheus-3.13.5.linux-amd64/promtool" >> "$GITHUB_ENV"
