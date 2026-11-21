@@ -224,6 +224,8 @@ impl HelperHandle {
         use windows_sys::Win32::System::Threading::{
             OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
         };
+        // SAFETY: OpenProcess receives scalar flags and a PID, with no pointer arguments.
+        // A successful owned handle is checked for null and immediately wrapped for Drop.
         let handle = unsafe {
             OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
@@ -246,6 +248,8 @@ impl HelperHandle {
 
     fn is_running(&self) -> bool {
         use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        // SAFETY: self owns a live process handle opened with SYNCHRONIZE; borrowing
+        // self keeps it open for this zero-timeout wait.
         unsafe {
             WaitForSingleObject(self.0 as _, 0) == windows_sys::Win32::Foundation::WAIT_TIMEOUT
         }
@@ -254,6 +258,8 @@ impl HelperHandle {
 
 impl Drop for HelperHandle {
     fn drop(&mut self) {
+        // SAFETY: HelperHandle uniquely owns the non-null OpenProcess handle.
+        // It is not Clone/Copy and this Drop closes the handle exactly once.
         unsafe {
             windows_sys::Win32::Foundation::CloseHandle(self.0 as _);
         }
@@ -1193,6 +1199,8 @@ fn process_creation_time(handle: windows_sys::Win32::Foundation::HANDLE) -> Resu
     let mut exited = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
+    // SAFETY: Callers retain a query-capable process handle (owned, borrowed Child, or current pseudo).
+    // The four output pointers are distinct writable FILETIME stack values valid for this call.
     let ok = unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) };
     if ok == 0 {
         return Err(format!(
@@ -1204,6 +1212,8 @@ fn process_creation_time(handle: windows_sys::Win32::Foundation::HANDLE) -> Resu
 }
 
 fn current_process_identity() -> Result<(u32, i64), String> {
+    // SAFETY: GetCurrentProcess takes no arguments and returns the non-owning current-process
+    // pseudo-handle, valid for this query; no CloseHandle ownership is acquired.
     let current = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() };
     Ok((std::process::id(), process_creation_time(current)?))
 }

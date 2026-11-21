@@ -1548,19 +1548,20 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
 
             canonical = module.read_text(encoding="utf-8")
             with_attributes = canonical.replace(
-                "pub(crate) mod admission;",
+                "pub(crate) mod submit_controlled;",
                 "// pub(crate) mod fake;\n"
-                "pub /* scoped */ (crate)\nmod admission;",
+                "pub /* scoped */ (crate)\nmod submit_controlled;",
             )
             module.write_text(with_attributes + 'const NOTE: &str = r#"pub mod fake;"#;\n', encoding="utf-8")
             rules, _ = self.guard.scan_rust(root)
             self.assertNotIn(relative, rules["rust_session_application_export_drift"])
 
             for addition in [
+                "pub(crate) mod admission;\n",
                 "pub\n(crate)\nmod extra;\n",
                 "pub(crate) mod sync_remote_journal;\n",
                 "#[cfg(test)]\n// comment before export\n"
-                "pub(crate)\nuse admission::{AdmissionUseCase};\n",
+                "pub(crate)\nuse submit_controlled::{SubmitControlledUseCase};\n",
             ]:
                 module.write_text(with_attributes + addition, encoding="utf-8")
                 rules, cycles = self.guard.scan_rust(root)
@@ -1576,7 +1577,7 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
                 )
 
             module.write_text(
-                canonical + "pub(crate) use admission::*;\n",
+                canonical + "pub(crate) use submit_controlled::*;\n",
                 encoding="utf-8",
             )
             rules, _ = self.guard.scan_rust(root)
@@ -1585,13 +1586,13 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
             )
 
             for addition in [
-                '#[cfg(any())]\npub(crate) mod admission;',
-                '#[cfg(test)]\npub(crate) mod admission;',
-                '#[cfg_attr(test, path = "other.rs")]\npub(crate) mod admission;',
+                '#[cfg(any())]\npub(crate) mod submit_controlled;',
+                '#[cfg(test)]\npub(crate) mod submit_controlled;',
+                '#[cfg_attr(test, path = "other.rs")]\npub(crate) mod submit_controlled;',
             ]:
                 with self.subTest(attribute=addition):
                     module.write_text(
-                        canonical.replace("pub(crate) mod admission;", addition),
+                        canonical.replace("pub(crate) mod submit_controlled;", addition),
                         encoding="utf-8",
                     )
                     rules, _ = self.guard.scan_rust(root)
@@ -1618,7 +1619,7 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
             rules, _ = self.guard.scan_rust(root)
             self.assertNotIn(relative, rules["rust_session_application_export_drift"])
 
-            module.write_text("pub(crate) mod admission;\n", encoding="utf-8")
+            module.write_text("pub(crate) mod submit_controlled;\n", encoding="utf-8")
             rules, _ = self.guard.scan_rust(root)
             self.assertEqual(
                 1, rules["rust_session_application_export_drift"][relative]

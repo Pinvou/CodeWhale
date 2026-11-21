@@ -83,7 +83,7 @@ func TestInstalledPersonalAccountSchemaPostgres(t *testing.T) {
 		}
 	})
 	t.Run("forward-only-rollback-is-atomic", func(t *testing.T) {
-		assertCurrentAccount900013Down(t, ctx, connection, installed)
+		assertHistoricalAccount900013Down(t, ctx, f, connection, installed)
 	})
 	t.Run("historical-900006-down-900005-guard-and-restore", func(t *testing.T) {
 		assertHistoricalAccount900006Down(t, ctx, f, installed)
@@ -135,15 +135,111 @@ func assertCurrentAccount900013Down(t *testing.T, ctx context.Context, c *pgx.Co
 		t.Fatal(err)
 	}
 }
+
+// Freeze the original published rollback prerequisites. A newly appended ordinary
+// migration can sort below 900006 without belonging to this historical contract.
+// The original canonical identity hash remains checked by the caller below.
+func historicalAccount900006Prerequisites(t *testing.T, all []migrations.Migration) []migrations.Migration {
+	t.Helper()
+	versions := [100]int64{
+		1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+		11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+		21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+		31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+		41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
+		51, 52, 53, 54, 55, 56, 57, 58, 59, 60,
+		61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
+		71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
+		81, 82, 83, 84, 85, 86, 87, 88, 89, 90,
+		91, 92, 93, 94, 900001, 900002, 900003, 900004, 900005, 900006,
+	}
+	wanted := make(map[int64]bool, len(versions))
+	for _, version := range versions {
+		if version <= 0 || wanted[version] {
+			t.Fatal("invalid pinned historical rollback prerequisite inventory")
+		}
+		wanted[version] = true
+	}
+	seen := make(map[int64]bool, len(versions))
+	historical := make([]migrations.Migration, 0, len(versions))
+	for _, migration := range all {
+		if !wanted[migration.Version] {
+			continue
+		}
+		if seen[migration.Version] {
+			t.Fatal("duplicate historical rollback prerequisite")
+		}
+		seen[migration.Version] = true
+		historical = append(historical, migration)
+	}
+	if len(historical) != len(versions) {
+		t.Fatal("missing historical rollback prerequisite")
+	}
+	return historical
+}
+
+// Keep the original 900013 refusal contract in an independently owned historical
+// database while the caller continues to install and verify the complete current
+// delivery. The current database's ledger, data and shape must remain exact.
+func assertHistoricalAccount900013Down(t *testing.T, ctx context.Context, f *stageFixture, current *pgx.Conn, all []migrations.Migration) {
+	t.Helper()
+	ledger, facts, shape := accountRollbackLedger(t, ctx, current, false), accountRollbackFacts(t, ctx, current), stageShape(t, ctx, current)
+	if _, err := migrations.VerifyApplied(ctx, current, all); err != nil {
+		t.Fatal(err)
+	}
+	historical := historicalAccount900006Prerequisites(t, all)
+	for _, version := range [7]int64{900007, 900008, 900009, 900010, 900011, 900012, 900013} {
+		found := false
+		for _, migration := range all {
+			if migration.Version != version {
+				continue
+			}
+			if found {
+				t.Fatal("duplicate historical lifecycle prerequisite")
+			}
+			found = true
+			historical = append(historical, migration)
+		}
+		if !found {
+			t.Fatal("missing historical lifecycle prerequisite")
+		}
+	}
+	h := sha256.New()
+	for _, migration := range historical {
+		fmt.Fprintf(h, "%d:%s:%s\n", migration.Version, migration.Name, sqlChecksum(migration.UpSQL))
+	}
+	if fmt.Sprintf("%x", h.Sum(nil)) != "632212872fdd329ab1da199f3de2692311f7f66af46f4a44d5271aeb4e6c0f0a" {
+		t.Fatal("historical lifecycle prerequisite identities changed")
+	}
+	c := f.database(t, ctx, "account", "account_service")
+	if err := migrations.Up(ctx, c, selectVersions(historical, []int64{1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Exec(ctx, stageAccountSeed); err != nil {
+		t.Fatal(err)
+	}
+	if err := accountschema.Up(ctx, c, historical); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := migrations.VerifyApplied(ctx, c, historical); err != nil {
+		t.Fatal(err)
+	}
+	assertCurrentAccount900013Down(t, ctx, c, historical)
+	migrations.Unlock(ctx, c)
+	if _, err := migrations.VerifyApplied(ctx, current, all); err != nil {
+		t.Fatal(err)
+	}
+	if accountRollbackLedger(t, ctx, current, false) != ledger || accountRollbackFacts(t, ctx, current) != facts || stageShape(t, ctx, current) != shape {
+		t.Fatal("isolated historical lifecycle rollback changed current delivery")
+	}
+}
+
 func assertHistoricalAccount900006Down(t *testing.T, ctx context.Context, f *stageFixture, all []migrations.Migration) {
 	t.Helper()
-	var historical []migrations.Migration
+	historical := historicalAccount900006Prerequisites(t, all)
 	h := sha256.New()
-	for _, m := range all {
-		if m.Version <= 900006 {
-			historical = append(historical, m)
-			fmt.Fprintf(h, "%d:%s:%s\n", m.Version, m.Name, sqlChecksum(m.UpSQL))
-		}
+	for _, m := range historical {
+		fmt.Fprintf(h, "%d:%s:%s\n", m.Version, m.Name, sqlChecksum(m.UpSQL))
 	}
 	// Pin version/name/canonical SQL identity of this contract prerequisite set,
 	// not an assertion that all lower-numbered SQL shipped on the same date.

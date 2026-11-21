@@ -32,6 +32,7 @@ const installerTemplate = read(
   "nsis",
   "installer-template.nsi",
 );
+const mainWxs = read("src-tauri", "packaging", "windows", "wix", "main.wxs");
 const baseInstallerHooks = read(
   "src-tauri",
   "packaging",
@@ -603,6 +604,21 @@ assert.ok(
   (installerTemplate.match(/!if "\{\{this\}\}" != "dump_system_prompt\.exe"/gu) || [])
     .length >= 2,
   "dump_system_prompt.exe must be excluded in both binary loops (install and uninstall)",
+);
+
+// ---- 社区 #906 回流:MSI 桌面快捷方式升级复活的端口修复 ----
+// Ported from the tauri-v2.12.6 bundler template: a major upgrade must only
+// re-create the desktop shortcut when the user still has it, otherwise the
+// upgrade resurrects a shortcut the user deliberately removed.
+assert.match(
+  mainWxs,
+  /<Property Id="DESKTOPSHORTCUTEXISTS" Secure="yes">[\s\S]*?<FileSearch Id="DesktopShortcutFile" Name="\{\{product_name\}\}\.lnk" \/>/u,
+  "the desktop-shortcut existence probe must ship with the tauri-v2.12.6 fix port",
+);
+assert.match(
+  mainWxs,
+  /<Condition>NOT WIX_UPGRADE_DETECTED OR DESKTOPSHORTCUTEXISTS<\/Condition>/u,
+  "the desktop shortcut must only be re-created during a major upgrade when the user still has it",
 );
 
 console.log("NSIS pre-signed resource staging contract: ok");

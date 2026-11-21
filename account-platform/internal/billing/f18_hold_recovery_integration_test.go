@@ -26,13 +26,14 @@ func TestF18HoldRecoveryUsesTrustedFence(t *testing.T) {
 	defer cancel()
 	// Preserve the original dedicated-instance branch unless a profile is set.
 	expectedUser, expectedDirectory, expectedPort := "pinvou_wave_test", "D:/Projects/pinvou3-account-functional/.cache/parallel-runtimes/f04/data", 55504
-	localOwned := os.Getenv("F18_TEST_DATABASE_PROFILE") != ""
+	ownedProfile := os.Getenv("F18_TEST_DATABASE_PROFILE") != ""
+	localOwned := os.Getenv("F18_TEST_DATABASE_PROFILE") == "local-owned"
 	var admin *pgx.Conn
 	var e error
-	if localOwned {
+	if ownedProfile {
 		config, directory, port := f18OwnedConnectionConfig(t, raw)
 		expectedUser, expectedDirectory, expectedPort = config.User, directory, port
-		admin, e = pgx.ConnectConfig(ctx, config)
+		admin, e = f18ConnectOwned(ctx, config)
 	} else {
 		admin, e = pgx.Connect(ctx, raw)
 	}
@@ -52,7 +53,7 @@ func TestF18HoldRecoveryUsesTrustedFence(t *testing.T) {
 	}
 	roles := []string{"billing_schema_owner", "billing_service", "billing_migrator"}
 	var created []f18RoleLease
-	coordinator := f18Coordinator{user: expectedUser, directory: expectedDirectory, port: expectedPort, localOwned: localOwned}
+	coordinator := f18Coordinator{user: expectedUser, directory: expectedDirectory, port: expectedPort, localOwned: localOwned, ciOwned: os.Getenv("F18_TEST_DATABASE_PROFILE") == "ci-owned"}
 	t.Cleanup(func() {
 		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
 		defer done()
