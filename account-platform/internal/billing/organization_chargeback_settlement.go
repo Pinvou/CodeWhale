@@ -9,12 +9,23 @@ package billing
 // recorded principal observation increments the case version once. Legacy
 // settlement survives those increments only while the current cash fact
 // confirms the whole payment and every increment is accounted for.
+// Late cash reviews use the original payment references and a case-scoped
+// receipt key. They cannot reuse chargeback_case_id, which uniquely identifies
+// the original disposition's review.
 // The query aliases c (chargeback) and w (its wallet) are supplied by the caller.
 const organizationChargebackSettledSQL = `EXISTS(SELECT 1 FROM entitlement_packages p JOIN payment_transactions t ON t.id=p.source_payment_transaction_id
    JOIN payment_orders o ON o.id=t.payment_order_id JOIN payment_evidence e ON e.id=c.payment_evidence_id
    WHERE p.id=c.entitlement_package_id AND p.wallet_id=w.id AND p.payment_order_id=c.payment_order_id
      AND t.id=c.payment_transaction_id AND o.id=c.payment_order_id AND o.wallet_id=w.id
      AND e.payment_order_id=o.id AND e.payment_transaction_id=t.id AND e.evidence_type='CHARGEBACK')
+ AND NOT EXISTS(SELECT 1 FROM payment_anomaly_cases late
+   WHERE late.payment_order_id=c.payment_order_id AND late.payment_transaction_id=c.payment_transaction_id
+     AND late.payment_evidence_id=c.payment_evidence_id
+     AND late.anomaly_type='PAYMENT_FACT_CONFLICT'
+     AND late.dedupe_key LIKE 'chargeback-principal:'||c.id::text||':%'
+     AND late.resource_snapshot->>'chargeback_case_id'=c.id::text
+     AND (late.status='OPEN' OR (late.status='RESOLVED' AND late.resolution_code='ESCALATE_FINANCIAL_REPAIR'
+       AND late.financial_action_status='PENDING')))
  AND (
  (c.status='CONFIRMED' AND (
    (c.manual_review_case_id IS NULL AND c.resolution_code IS NULL

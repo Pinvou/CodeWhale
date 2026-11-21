@@ -12,7 +12,7 @@ import (
 )
 
 func TestOrganizationChargebackDeletionEvidencePostgres(t *testing.T) {
-	for _, scenario := range []string{"dismissed", "open", "claimed", "confirmed", "confirmed-without-ledger", "confirmed-legacy-version-one", "confirmed-legacy-no-ledger", "confirmed-legacy-late-full-principal", "confirmed-legacy-late-partial-principal", "confirmed-legacy-version-one-modern-anomaly", "confirmed-contradictory-disposition", "confirmed-review-open", "confirmed-review-financial-pending", "confirmed-without-receipt", "confirmed-corrupt-receipt", "confirmed-misbound-anomaly", "confirmed-manual-review-open", "confirmed-receipt-owner-mismatch", "dismissed-without-receipt", "dismissed-corrupt-receipt", "dismissed-with-revocation", "dismissed-with-pending-financial-action", "legacy-resolved", "balance-remains", "hold-remains", "receivable-remains", "dismissed-with-journal", "confirmed-open-receivable"} {
+	for _, scenario := range []string{"dismissed", "open", "claimed", "confirmed", "confirmed-without-ledger", "confirmed-legacy-version-one", "confirmed-legacy-no-ledger", "confirmed-legacy-late-full-principal", "confirmed-legacy-late-partial-principal", "confirmed-legacy-version-one-modern-anomaly", "confirmed-contradictory-disposition", "confirmed-review-open", "confirmed-review-financial-pending", "confirmed-without-receipt", "confirmed-corrupt-receipt", "confirmed-misbound-anomaly", "confirmed-manual-review-open", "confirmed-receipt-owner-mismatch", "dismissed-without-receipt", "dismissed-corrupt-receipt", "dismissed-with-revocation", "dismissed-with-pending-financial-action", "legacy-resolved", "balance-remains", "hold-remains", "receivable-remains", "dismissed-with-journal", "confirmed-open-receivable", "confirmed-late-cash-review", "dismissed-late-cash-review", "confirmed-late-cash-escalation"} {
 		t.Run(scenario, func(t *testing.T) {
 			r, ctx := retainedFinanceRepository(t)
 			_, order, transaction, pack := retainedOrganizationFinanceOrder(t, r, ctx, 1000000, true)
@@ -193,6 +193,71 @@ ALTER TABLE manual_review_case_events ENABLE TRIGGER manual_review_case_events_i
 			if a, err := r.ApplyOrganizationLifecycle(ctx, wallet.OwnerID, "DISABLED", 2, false); err != nil || !a.Ready {
 				t.Fatal(a, err)
 			}
+			lateCashEscalation := scenario == "confirmed-late-cash-escalation"
+			lateCashReview := strings.HasSuffix(scenario, "-late-cash-review") || lateCashEscalation
+			if lateCashReview {
+				if assessment, err := r.ApplyOrganizationLifecycle(ctx, wallet.OwnerID, "DELETED", 3, true); err != nil || !assessment.Ready {
+					t.Fatal("terminal case was blocked before the late review", assessment, err)
+				}
+				var reference string
+				if err := r.pool.QueryRow(ctx, `SELECT provider_transaction_id FROM payment_transactions WHERE id=$1`, transaction).Scan(&reference); err != nil {
+					t.Fatal(err)
+				}
+				moneyBefore := principalMoneySnapshot(t, r, ctx)
+				late := principalSupplierHTTPFixture(t, ctx, r, transaction, item.ProviderChargebackID, "40", reference, "CNY")
+				if late.ID != item.ID || late.Status != strings.ToUpper(strings.SplitN(scenario, "-", 2)[0]) || !late.CashPrincipal.ManualReviewRequired {
+					t.Fatal("late supplier evidence failed to preserve the reviewed disposition", late)
+				}
+				var lateReviewID uuid.UUID
+				if err := r.pool.QueryRow(ctx, `SELECT id FROM payment_anomaly_cases WHERE payment_order_id=$1 AND anomaly_type='PAYMENT_FACT_CONFLICT' AND status='OPEN'`, order.ID).Scan(&lateReviewID); err != nil {
+					t.Fatal("supplier evidence failed to open a cash review", err)
+				}
+				assertBlocked := func() {
+					t.Helper()
+					facts := organizationChargebackRetainedFacts(t, r, ctx)
+					state := organizationChargebackDeletionState(t, r, ctx)
+					for _, preflight := range []bool{true, false} {
+						assessment, err := r.ApplyOrganizationLifecycle(ctx, wallet.OwnerID, "DELETED", 3, preflight)
+						want := OrganizationLifecycleBlocker{Code: "UNRESOLVED_CHARGEBACK", ResourceType: "chargeback_case", ResourceID: item.ID.String()}
+						if err != nil || assessment.Ready || len(assessment.Blockers) != 1 || assessment.Blockers[0] != want {
+							t.Fatal("uncompleted late cash review did not fence deletion", preflight, assessment, err)
+						}
+					}
+					if facts != organizationChargebackRetainedFacts(t, r, ctx) || state != organizationChargebackDeletionState(t, r, ctx) {
+						t.Fatal("blocked deletion changed the original disposition, reviews or lifecycle")
+					}
+				}
+				assertBlocked()
+				retainedClaimAnomaly(t, r, ctx, lateReviewID, actor)
+				if lateCashEscalation {
+					escalated, err := retainedResolveClaimedAnomaly(t, r, ctx, lateReviewID, actor, uuid.NewString(), "ESCALATE_FINANCIAL_REPAIR", "controlled late cash escalation", "PENDING")
+					if err != nil || escalated.Status != "RESOLVED" || escalated.FinancialActionStatus != "PENDING" || moneyBefore != principalMoneySnapshot(t, r, ctx) {
+						t.Fatal("escalation failed or moved money", err)
+					}
+					var manualStatus string
+					if err := r.pool.QueryRow(ctx, `SELECT status FROM manual_review_cases WHERE id=$1`, lateReviewID).Scan(&manualStatus); err != nil || manualStatus != "LONG_TERM_PLAN" {
+						t.Fatal("financial review should still be pending", manualStatus, err)
+					}
+					assertBlocked()
+					// Unit purchases are unsupported. Use an isolated retained-wallet
+					// fixture with the same order, package, receipt and wallet IDs.
+					unitID := uuid.New()
+					fault(`UPDATE wallets SET owner_type='ORG_UNIT',owner_id=$2 WHERE id=$1`, wallet.ID, unitID)
+					if a, err := r.ApplyOrganizationUnitLifecycle(ctx, wallet.OwnerID, unitID, "DELETION_PENDING", 1); err != nil || a.Ready {
+						t.Fatal("unit preflight lost the pending review", a, err)
+					}
+					want := OrganizationUnitBlocker{Code: "UNRESOLVED_CHARGEBACK", ResourceType: "chargeback_case", ResourceID: item.ID.String()}
+					a, err := r.ApplyOrganizationUnitLifecycle(ctx, wallet.OwnerID, unitID, "DELETED", 2)
+					if err != nil || a.Ready || len(a.Blockers) != 1 || a.Blockers[0] != want {
+						t.Fatal("unit committed deletion with a pending financial review", a, err)
+					}
+					return
+				}
+				resolved, err := retainedResolveClaimedAnomaly(t, r, ctx, lateReviewID, actor, uuid.NewString(), "DISMISS", "controlled late cash review", "NONE")
+				if err != nil || resolved.Status != "RESOLVED" || moneyBefore != principalMoneySnapshot(t, r, ctx) {
+					t.Fatal("closing the late review failed or moved money", err)
+				}
+			}
 			before := organizationChargebackRetainedFacts(t, r, ctx)
 			beforeDeleteState := organizationChargebackDeletionState(t, r, ctx)
 			a, err := r.ApplyOrganizationLifecycle(ctx, wallet.OwnerID, "DELETED", 3, true)
@@ -203,7 +268,7 @@ ALTER TABLE manual_review_case_events ENABLE TRIGGER manual_review_case_events_i
 				t.Fatal("assessment changed financial or review evidence")
 			}
 			settled := scenario == "dismissed" || scenario == "confirmed" || scenario == "confirmed-legacy-version-one" ||
-				scenario == "confirmed-legacy-late-full-principal"
+				scenario == "confirmed-legacy-late-full-principal" || lateCashReview
 			if settled {
 				if !a.Ready || len(a.Blockers) != 0 {
 					t.Fatalf("fully settled history blocked deletion: %+v", a)
