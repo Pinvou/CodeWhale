@@ -1,0 +1,141 @@
+$ErrorActionPreference = 'Stop'
+# A Windows PowerShell 5.1 process spawned under a pwsh 7 parent (a CI step
+# shell or a pwsh terminal) inherits pwsh's PSModulePath and then cannot load
+# its own built-in modules (Get-FileHash). Rebuild the host default module
+# path before the fixture needs built-in commands; plain 5.1 consoles match and are
+# left untouched.
+if ($PSVersionTable.PSVersion.Major -lt 6) {
+  $systemModulePath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\Modules"
+  $modulePathEntries = @(
+    [System.Environment]::GetEnvironmentVariable("PSModulePath", "Process") -split ";"
+  ) | Where-Object { $_ }
+  $pwshModuleEntries = $modulePathEntries | Where-Object {
+    $_ -like "*\PowerShell\7\Modules" -or $_ -like "*\PowerShell\Modules"
+  }
+  if (($modulePathEntries -notcontains $systemModulePath) -or $pwshModuleEntries) {
+    $env:PSModulePath = @(
+      (Join-Path $HOME "Documents\WindowsPowerShell\Modules"),
+      (Join-Path $env:ProgramFiles "WindowsPowerShell\Modules"),
+      $systemModulePath
+    ) -join ";"
+  }
+}
+
+. (Join-Path $PSScriptRoot '..\src-tauri\packaging\windows\runtime\scripts\release-assets.ps1')
+function Assert-True { param([bool]$Condition, [string]$Message) if (-not $Condition) { throw $Message } }
+function Assert-Rejected {
+  param([scriptblock]$Action, [string]$Message)
+  $rejected = $false
+  try { & $Action } catch { $rejected = $true }
+  Assert-True $rejected $Message
+}
+function Write-FixtureManifest {
+  [IO.File]::WriteAllText($manifestPath, ($fixture | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
+  $lock.manifest.sha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+$testRoot = Join-Path ([IO.Path]::GetTempPath()) ('pinvou-runtime-release-test-' + [Guid]::NewGuid().ToString('N'))
+$runtime = Join-Path $testRoot 'runtime'
+$cache = Join-Path $testRoot 'cache'
+$sources = Join-Path $testRoot 'sources'
+$manifestPath = Join-Path $runtime 'windows-runtime.manifest.json'
+$commit = 'c' * 40
+$script:downloadCount = 0
+try {
+  New-Item -ItemType Directory -Path $runtime, $sources -Force | Out-Null
+  $fixture = [pscustomobject]@{ schemaVersion = 2; target = 'windows-x86_64'; files = @() }
+  foreach ($name in @('a.zip', 'onnx-runtime.zip')) {
+    $source = Join-Path $sources $name
+    [IO.File]::WriteAllText($source, ('runtime bytes for ' + $name), [Text.Encoding]::ASCII)
+    $fixture.files += [pscustomobject]@{
+      path = 'payload/' + $name
+      component = $(if ($name -eq 'a.zip') { 'demo' } else { 'onnxruntime' })
+      bytes = (Get-Item -LiteralPath $source).Length
+      sha256 = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+  }
+  $lock = [pscustomobject]@{
+    source = [pscustomobject]@{ url = 'https://github.com/example/runtime.git'; commit = $commit }
+    manifest = [pscustomobject]@{ path = 'windows-runtime.manifest.json'; sha256 = '' }
+  }
+  Write-FixtureManifest
+  $download = {
+    param($Uri, $Destination)
+    Assert-True ($Uri.AbsoluteUri.StartsWith("https://github.com/example/runtime/releases/download/runtime-$commit/")) 'download must use the commit-bound repository Release'
+    $script:downloadCount++
+    [IO.File]::Copy((Join-Path $sources ([IO.Path]::GetFileName($Uri.AbsolutePath))), $Destination)
+  }
+  $argsForSync = @{ RuntimeRoot = $runtime; CacheRoot = $cache; Lock = $lock; Commit = $commit; Download = $download }
+  Sync-RuntimeReleaseAssets @argsForSync
+  Assert-True ($script:downloadCount -eq 2) 'fresh initialization must download exactly the two locked files'
+  foreach ($entry in $fixture.files) { Assert-True (Test-RuntimeReleaseFile (Join-Path $runtime $entry.path) $entry) 'downloaded payload must match the lock' }
+  Sync-RuntimeReleaseAssets @argsForSync
+  Assert-True ($script:downloadCount -eq 2) 'valid workspace must initialize offline'
+
+  $first = $fixture.files[0]; $target = Join-Path $runtime $first.path
+  [IO.File]::WriteAllText($target, ('x' * $first.bytes), [Text.Encoding]::ASCII)
+  Sync-RuntimeReleaseAssets @argsForSync
+  Assert-True ((Test-RuntimeReleaseFile $target $first) -and $script:downloadCount -eq 2) 'same-size workspace corruption must be repaired from verified cache'
+  $cached = Join-Path $cache $first.sha256
+  [IO.File]::WriteAllText($cached, ('x' * $first.bytes), [Text.Encoding]::ASCII)
+  Remove-Item -LiteralPath $target
+  Sync-RuntimeReleaseAssets @argsForSync
+  Assert-True ((Test-RuntimeReleaseFile $target $first) -and $script:downloadCount -eq 3) 'corrupt cache must trigger a hash-checked download'
+
+  $badDownload = { param($Uri, $Destination) [IO.File]::WriteAllText($Destination, ('x' * $first.bytes), [Text.Encoding]::ASCII) }
+  $badArgs = $argsForSync.Clone(); $badArgs.Download = $badDownload
+  Assert-Rejected { Sync-RuntimeReleaseAssets @badArgs -ForceDownload } 'wrong downloaded hash must fail closed'
+  Assert-True (Test-RuntimeReleaseFile $target $first) 'failed replacement must preserve the verified workspace file'
+  Assert-True (@(Get-ChildItem -LiteralPath $cache -Filter '*.download-*').Count -eq 0) 'failed downloads must leave no temporary payloads'
+  $unavailableArgs = $argsForSync.Clone(); $unavailableArgs.Download = { throw 'HTTP 404' }
+  Assert-Rejected { Sync-RuntimeReleaseAssets @unavailableArgs -ForceDownload } 'missing Release assets must fail without falling back to LFS'
+
+  foreach ($entry in $fixture.files) { Remove-Item -LiteralPath (Join-Path $runtime $entry.path) }
+  $onnx = $fixture.files[1]; Remove-Item -LiteralPath (Join-Path $cache $onnx.sha256)
+  Sync-RuntimeReleaseAssets @argsForSync -OnnxOnly
+  Assert-True ((Test-RuntimeReleaseFile (Join-Path $runtime $onnx.path) $onnx) -and -not (Test-Path -LiteralPath $target) -and $script:downloadCount -eq 4) 'ONNX-only initialization must not materialize unrelated payloads'
+
+  $before = $script:downloadCount
+  $fixture.files[0].path = 'payload/../../escape.zip'; Write-FixtureManifest
+  Assert-Rejected { Sync-RuntimeReleaseAssets @argsForSync } 'manifest traversal must fail before downloading'
+  Assert-True ($script:downloadCount -eq $before) 'invalid manifest must not cause network requests'
+  $fixture.files[0].path = 'payload/a.zip'; Write-FixtureManifest
+  $fixture.files[1].path = 'payload/subdir/a.zip'; Write-FixtureManifest
+  Assert-Rejected { Sync-RuntimeReleaseAssets @argsForSync } 'ambiguous Release basenames must be rejected'
+  $fixture.files[1].path = 'payload/onnx-runtime.zip'; Write-FixtureManifest
+  $lock.manifest.sha256 = '0' * 64
+  Assert-Rejected { Sync-RuntimeReleaseAssets @argsForSync } 'modified manifest must fail against the parent lock'
+  Write-FixtureManifest
+  $lock.source.commit = 'd' * 40
+  Assert-Rejected { Sync-RuntimeReleaseAssets @argsForSync } 'gitlink and lock commit mismatch must fail'
+  $lock.source.commit = $commit
+  $junctionTarget = Join-Path $testRoot 'junction-target'
+  $junctionCache = Join-Path $testRoot 'linked-cache'
+  New-Item -ItemType Directory -Path $junctionTarget -Force | Out-Null
+  New-Item -ItemType Junction -Path $junctionCache -Target $junctionTarget | Out-Null
+  try {
+    $junctionArgs = $argsForSync.Clone(); $junctionArgs.CacheRoot = $junctionCache
+    Assert-Rejected { Sync-RuntimeReleaseAssets @junctionArgs } 'cache junction must not redirect runtime writes'
+  } finally { [IO.Directory]::Delete($junctionCache) }
+  foreach ($uri in @('http://github.com/example/a', 'https://example.invalid/a', 'https://user:secret@github.com/a', 'https://github.com:8443/a')) {
+    Assert-Rejected { Assert-RuntimeReleaseUri ([Uri]$uri) } 'untrusted or downgraded download endpoint must fail'
+  }
+  Assert-RuntimeReleaseUri ([Uri]'https://release-assets.githubusercontent.com/example')
+  Assert-True ($null -eq (Get-RuntimeReleaseProxy -Environment @{})) 'absent proxy settings must preserve the system default'
+  $proxy = Get-RuntimeReleaseProxy -Environment @{ HTTPS_PROXY = 'http://proxy.example.invalid:8080'; no_proxy = 'localhost,.internal.invalid,github.com' }
+  Assert-True ($proxy.GetProxy([Uri]'https://release-assets.githubusercontent.com/a').Host -eq 'proxy.example.invalid') 'HTTPS assets must use the configured proxy'
+  Assert-True ($proxy.IsBypassed([Uri]'https://github.com/a')) 'NO_PROXY must preserve exact host bypass'
+  Assert-True ($proxy.IsBypassed([Uri]'https://api.github.com/a')) 'NO_PROXY must preserve subdomain bypass'
+  $proxy = Get-RuntimeReleaseProxy -Environment @{ HTTPS_PROXY = 'http://proxy.example.invalid:8080'; NO_PROXY = 'github.com:443' }
+  Assert-True ($proxy.IsBypassed([Uri]'https://github.com/a')) 'explicit default ports in NO_PROXY must bypass their matching origin'
+  Assert-True (-not $proxy.IsBypassed([Uri]'https://github.com:8443/a')) 'port-specific bypass must not apply to a different port'
+  $proxy = Get-RuntimeReleaseProxy -Environment @{ https_proxy = 'http://a:b@proxy.example.invalid:8080'; NO_PROXY = '*' }
+  Assert-True ($proxy.IsBypassed([Uri]'https://github.com/a')) 'wildcard NO_PROXY must preserve direct routing'
+  Assert-True ($proxy.Credentials.UserName -eq 'a' -and $proxy.Credentials.Password -eq 'b' -and -not $proxy.Address.UserInfo) 'proxy credentials must be separated from the address'
+  Assert-Rejected { Get-RuntimeReleaseProxy -Environment @{ HTTPS_PROXY = 'file:///tmp/proxy' } } 'unsupported proxy schemes must fail closed'
+  . (Join-Path $PSScriptRoot 'windows_runtime_transport_behavior.ps1')
+  Write-Host 'Windows runtime Release download, integrity, offline reuse, corruption repair and failure boundaries passed.'
+} finally {
+  $resolved = [IO.Path]::GetFullPath($testRoot)
+  if ([IO.Path]::GetDirectoryName($resolved) -ne [IO.Path]::GetTempPath().TrimEnd('\', '/') -or [IO.Path]::GetFileName($resolved) -notlike 'pinvou-runtime-release-test-*') { throw 'Unexpected fixture cleanup path.' }
+  if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+}

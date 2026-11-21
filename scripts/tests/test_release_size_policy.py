@@ -117,7 +117,7 @@ class ReleaseSizePolicyTests(unittest.TestCase):
         # commented out (with the literal kept in the comment) must red
         # this pin, so the asserts judge comment-stripped text.
         live = _without_inline_comments(windows)
-        self.assertIn('ws="${GITHUB_WORKSPACE}"', live)
+        self.assertIn('ws="${PINVOU_WINDOWS_BUILD_ROOT}"', live)
         self.assertIn('ws_fwd="${ws//\\\\//}"', live)
         self.assertIn(
             'flags="$flags --remap-path-prefix=$ws=/ --remap-path-prefix=$ws_fwd=/"',

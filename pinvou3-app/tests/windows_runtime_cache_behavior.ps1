@@ -1,5 +1,27 @@
 $ErrorActionPreference = "Stop"
 
+# A Windows PowerShell 5.1 process spawned under a pwsh 7 parent (a CI step
+# shell or a pwsh terminal) inherits pwsh's PSModulePath and then cannot load
+# its own built-in modules (Get-FileHash). Rebuild the host default module
+# path before the fixture needs built-in commands; plain 5.1 consoles match and are
+# left untouched.
+if ($PSVersionTable.PSVersion.Major -lt 6) {
+  $systemModulePath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\Modules"
+  $modulePathEntries = @(
+    [System.Environment]::GetEnvironmentVariable("PSModulePath", "Process") -split ";"
+  ) | Where-Object { $_ }
+  $pwshModuleEntries = $modulePathEntries | Where-Object {
+    $_ -like "*\PowerShell\7\Modules" -or $_ -like "*\PowerShell\Modules"
+  }
+  if (($modulePathEntries -notcontains $systemModulePath) -or $pwshModuleEntries) {
+    $env:PSModulePath = @(
+      (Join-Path $HOME "Documents\WindowsPowerShell\Modules"),
+      (Join-Path $env:ProgramFiles "WindowsPowerShell\Modules"),
+      $systemModulePath
+    ) -join ";"
+  }
+}
+
 $appRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $resolverPath = Join-Path $appRoot "src-tauri\packaging\windows\runtime\scripts\resolve-runtime.ps1"
 $runtimeInitPath = Join-Path $appRoot "src-tauri\packaging\windows\runtime\scripts\init-submodule.ps1"
@@ -144,6 +166,33 @@ try {
   } finally {
     $env:PATH = $previousPath
   }
+
+  $gitFixture = Join-Path $testRoot "tracked-identity"
+  New-Item -ItemType Directory -Path $gitFixture -Force | Out-Null
+  foreach ($arguments in @(
+    @("init", "--quiet"),
+    @("config", "user.name", "Runtime Fixture"),
+    @("config", "user.email", "runtime-fixture@example.invalid")
+  )) { Invoke-Git -WorkingDirectory $gitFixture -Arguments $arguments -FailureMessage "Unable to initialize identity fixture" | Out-Null }
+  $identityFile = Join-Path $gitFixture "tracked.txt"
+  Write-TestFile -Path $identityFile -Content "original content"
+  Invoke-Git -WorkingDirectory $gitFixture -Arguments @("add", "--", "tracked.txt") -FailureMessage "Unable to stage identity fixture" | Out-Null
+  Invoke-Git -WorkingDirectory $gitFixture -Arguments @("-c", "commit.gpgsign=false", "-c", "core.hooksPath=.no-hooks", "commit", "--quiet", "-m", "identity fixture") -FailureMessage "Unable to commit identity fixture" | Out-Null
+  Assert-RuntimeTrackedFilesClean -Root $gitFixture
+  Write-TestFile -Path $identityFile -Content "modified content"
+  $dirtyRejected = $false
+  try { Assert-RuntimeTrackedFilesClean -Root $gitFixture } catch { $dirtyRejected = $true }
+  Assert-True $dirtyRejected "runtime identity must reject unstaged tracked edits"
+  Invoke-Git -WorkingDirectory $gitFixture -Arguments @("add", "--", "tracked.txt") -FailureMessage "Unable to stage modified identity fixture" | Out-Null
+  $stagedRejected = $false
+  try { Assert-RuntimeTrackedFilesClean -Root $gitFixture } catch { $stagedRejected = $true }
+  Assert-True $stagedRejected "runtime identity must reject staged edits"
+  Write-TestFile -Path $identityFile -Content "original content"
+  $concealedIndexRejected = $false
+  try { Assert-RuntimeTrackedFilesClean -Root $gitFixture } catch { $concealedIndexRejected = $true }
+  Assert-True $concealedIndexRejected "a HEAD-equivalent worktree must not conceal staged edits"
+
+  . (Join-Path $PSScriptRoot 'windows_runtime_lfs_behavior.ps1')
 
   # Behavioral coverage for the LFS relocation contract: the submodule update
   # must run with GIT_LFS_SKIP_SMUDGE=1 in effect (pointers only), so the
