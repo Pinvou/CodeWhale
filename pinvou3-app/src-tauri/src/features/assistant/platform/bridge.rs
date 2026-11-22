@@ -1023,6 +1023,23 @@ impl Pinvou3Bridge {
             && self.session_policy(session_id).exposes_browser_mcp()
     }
 
+    fn uses_work_mode_mcp_config(&self, session_id: &str) -> bool {
+        !crate::features::sessions::is_aux_session_id(session_id)
+            && self.exposes_browser_mcp(session_id)
+    }
+
+    pub(crate) fn resolve_work_mode_mcp_fallback(
+        &self,
+        session_id: &str,
+        config_path: &std::path::Path,
+    ) -> Result<Option<PathBuf>, &'static str> {
+        if !self.uses_work_mode_mcp_config(session_id) {
+            return Ok(None);
+        }
+        self.bundle
+            .resolve_work_mode_mcp_fallback(session_id, config_path)
+    }
+
     /// The session mode policy for this session: shared pipelines (send-op
     /// construction, tool shaping, session instructions) read from it instead
     /// of scattering `is_code_session` ifs (the unified D-2/D-3 entry point).
@@ -3286,7 +3303,7 @@ impl Pinvou3Bridge {
         // even written for it.
         if let Some(path) = scoped_aux_mcp_path {
             cfg.mcp_config_path = path;
-        } else if is_aux || !self.exposes_browser_mcp(session_id) {
+        } else if !self.uses_work_mode_mcp_config(session_id) {
             cfg.mcp_config_path = crate::platform::paths::mcp_config_path();
         } else {
             // A Work-mode session uses its own browser-wrapper configuration, pinning the

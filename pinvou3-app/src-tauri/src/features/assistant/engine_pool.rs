@@ -3557,6 +3557,21 @@ impl EnginePool {
             .map(|e| e.engine.clone())
     }
 
+    /// Capture only the engine belonging to the executor that minted a question.
+    /// A replacement cannot be selected by reusing its session ID/generation.
+    pub(crate) async fn remote_input_handle(
+        &self,
+        session_id: &str,
+        owner: &Arc<super::skill_materialization::RemoteTurnOwner>,
+    ) -> Option<AppEngine> {
+        self.entries
+            .lock()
+            .await
+            .get(session_id)
+            .filter(|entry| remote_owner_matches(entry.remote_owner.as_ref(), Some(owner)))
+            .map(|entry| entry.engine.clone())
+    }
+
     /// Reclaim a session's engine: cancel the running turn → Shutdown the
     /// engine → abort the forwarder. Called when a session is deleted.
     pub async fn evict(&self, session_id: &str) {
@@ -6061,16 +6076,50 @@ impl EnginePool {
         tool_call_id: String,
         response: UserInputResponse,
     ) -> Result<()> {
-        if let Some(engine) = self.handle_for(session_id).await {
-            engine.submit_user_input(tool_call_id, response).await?;
+        let captured = self
+            .entries
+            .lock()
+            .await
+            .get(session_id)
+            .map(|entry| (entry.engine.clone(), entry.remote_owner.clone()));
+        if let Some((engine, owner)) = captured {
+            if let Some(owner) = owner {
+                let turn = super::remote_user_input::RemoteInputTurn::for_owner(session_id, &owner)
+                    .map_err(anyhow::Error::msg)?;
+                turn.respond_local(&tool_call_id, Some(response), |id, response| {
+                    engine.try_remote_user_input(turn.generation, id, response, || {
+                        turn.check_budget()
+                    })
+                })
+                .map_err(anyhow::Error::msg)?;
+            } else {
+                engine.submit_user_input(tool_call_id, response).await?;
+            }
         }
         Ok(())
     }
 
     /// Cancel the specified session's request_user_input.
     pub async fn cancel_user_input(&self, session_id: &str, tool_call_id: String) -> Result<()> {
-        if let Some(engine) = self.handle_for(session_id).await {
-            engine.cancel_user_input(tool_call_id).await?;
+        let captured = self
+            .entries
+            .lock()
+            .await
+            .get(session_id)
+            .map(|entry| (entry.engine.clone(), entry.remote_owner.clone()));
+        if let Some((engine, owner)) = captured {
+            if let Some(owner) = owner {
+                let turn = super::remote_user_input::RemoteInputTurn::for_owner(session_id, &owner)
+                    .map_err(anyhow::Error::msg)?;
+                turn.respond_local(&tool_call_id, None, |id, response| {
+                    engine.try_remote_user_input(turn.generation, id, response, || {
+                        turn.check_budget()
+                    })
+                })
+                .map_err(anyhow::Error::msg)?;
+            } else {
+                engine.cancel_user_input(tool_call_id).await?;
+            }
         }
         Ok(())
     }

@@ -218,7 +218,7 @@ pub fn canonical_catalog_id(id: &str) -> Option<&'static str> {
 
 /// 包的 mcp/ 目录（`bundles/<id>/mcp/`）。
 pub fn package_mcp_dir(id: &str) -> PathBuf {
-    paths::bundles_root().join(id).join("mcp")
+    paths::bundle_mcp_package_dir(id)
 }
 
 /// Resolve a local manifest's launch args against a released package dir:

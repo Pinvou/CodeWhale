@@ -14,7 +14,9 @@ pinvou_pptx —— spec 驱动的本地 PPT 渲染器（Phase A：10 版式 + 3 
 import copy
 import json
 import os
+import stat
 import sys
+import tempfile
 
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -540,7 +542,6 @@ def _inject_thumbnail(pptx_path, jpeg_bytes):
     剥离时连 .rels 里的 thumbnail 关系一起删(悬空关系会让严格解析器报错),
     前端读不到缩略图即回退紧凑图标态。两种模式共用同一次包重写。"""
     import zipfile
-    import shutil
     import re
     tmp = pptx_path + ".tmp"
     with zipfile.ZipFile(pptx_path, "r") as zin:
@@ -567,7 +568,7 @@ def _inject_thumbnail(pptx_path, jpeg_bytes):
             zout.writestr("_rels/.rels", rels)
             if jpeg_bytes:
                 zout.writestr("docProps/thumbnail.jpeg", jpeg_bytes)
-    shutil.move(tmp, pptx_path)
+    os.replace(tmp, pptx_path)
 
 
 def render(spec, out_path):
@@ -622,7 +623,7 @@ def _safe_join(base, name):
         full = os.path.join(base_abs, "演示文稿.pptx")
     stem, ext = os.path.splitext(full)
     i = 1
-    while os.path.exists(full):                          # 重名加序号
+    while os.path.lexists(full):                         # 重名加序号
         full = "%s(%d)%s" % (stem, i, ext)
         i += 1
     return full
@@ -678,6 +679,24 @@ def _coerce_slides(slides):
     return out
 
 
+_session_artifacts_dir = None
+
+
+def _prepare_session_artifacts_dir(directory):
+    if not os.path.isabs(directory):
+        raise OSError("Invalid session output directory")
+    session = os.path.dirname(directory)
+    # The application can relocate its sessions root. Reject redirects below
+    # that trust anchor, where each session and its artifacts have one owner.
+    for path in (session, directory):
+        os.makedirs(path, exist_ok=True)
+        metadata = os.lstat(path)
+        if not stat.S_ISDIR(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        ):
+            raise OSError("Redirected session output directory")
+
+
 def make_pptx(theme="business-blue", slides=None, filename="演示文稿"):
     # 模型常把 slides 序列化成 JSON 字符串传入,且大纲一长就容易生成非法 JSON。
     # _coerce_slides 严格失败时逐个抢救顶层 {...}(坏页跳过);彻底空则下面 loud error,
@@ -693,15 +712,33 @@ def make_pptx(theme="business-blue", slides=None, filename="演示文稿"):
     # 绝不用 os.getcwd() —— MCP server 的 cwd 是 app 安装目录(release 下是 Program Files,
     # 写入会因无权限直接失败,且文件也不该落进程序目录)。
     _default_art = os.path.join(os.path.expanduser("~"), ".pinvou3", "sessions", "default", "artifacts")
-    art = os.environ.get("PINVOU3_SESSION_ARTIFACTS") or _default_art
+    if _session_artifacts_dir is not None:
+        art = _session_artifacts_dir
+        try:
+            _prepare_session_artifacts_dir(art)
+        except OSError:
+            return {"ok": False, "error": "无法创建已配置的 PPT 产物目录。"}
+    else:
+        art = os.environ.get("PINVOU3_SESSION_ARTIFACTS") or _default_art
+        try:
+            os.makedirs(art, exist_ok=True)
+        except OSError:
+            art = os.path.join(os.path.expanduser("~"), ".pinvou3")
+            os.makedirs(art, exist_ok=True)
+    name = _sanitize_filename(filename) + ".pptx"
+    spec = {"theme": theme, "slides": slides}
     try:
-        os.makedirs(art, exist_ok=True)
-    except Exception:
-        art = os.path.join(os.path.expanduser("~"), ".pinvou3")
-        os.makedirs(art, exist_ok=True)
-    out = _safe_join(art, _sanitize_filename(filename) + ".pptx")
-    try:
-        n = render({"theme": theme, "slides": slides}, out)
+        if _session_artifacts_dir is None:
+            out = _safe_join(art, name)
+            n = render(spec, out)
+        else:
+            # The remote inventory scans this directory as soon as the turn
+            # succeeds. Publish only a completed deck, on the same filesystem.
+            with tempfile.TemporaryDirectory(prefix=".pptx-", dir=art) as stage:
+                pending = os.path.join(stage, "deck.tmp")
+                n = render(spec, pending)
+                out = _safe_join(art, name)
+                os.replace(pending, out)
         return {"ok": True, "path": out, "slides": n, "theme": theme}
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -1023,6 +1060,11 @@ def _handle(msg):
 
 
 def main():
+    global _session_artifacts_dir
+    prefix = "--session-artifacts-dir="
+    _session_artifacts_dir = next(
+        (arg[len(prefix):] for arg in sys.argv[1:] if arg.startswith(prefix)), None
+    )
     for line in sys.stdin:
         line = line.lstrip("﻿").strip()
         if not line:

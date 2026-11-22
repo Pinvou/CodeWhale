@@ -35,3 +35,4 @@ pub(crate) mod temporary_model;
 pub(crate) mod test_support;
 pub(crate) mod transfer;
 pub(crate) mod turn_budget;
+pub(crate) mod user_input;
