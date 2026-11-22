@@ -4285,7 +4285,10 @@ impl ModelManager {
                 )));
             }
         }
-        remove_materialized_card_dir(&config::data_dir().join("cards"), card_id, log);
+        // 合并修正（r23）：main 侧 r23-P1-1 新序下，卡目录只在 uninstall_inner
+        // 的成功分支按 own_card_dir 删除；失败路径必须保留 vendor/.deploy-env
+        // 消歧提示给重试轮（failed_purge_keeps_disambiguation_hint 钉住）。
+        // 这里不再提前删除物化目录。
         Ok(())
     }
 

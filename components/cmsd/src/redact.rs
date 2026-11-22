@@ -133,7 +133,6 @@ pub fn redact_line(line: &str) -> String {
         };
         // 折叠域命中点经映射回到原串域（Kelvin/İ 折成单字节后偏移会前移）；
         // from 仍留在折叠域，供下一轮 next_secret 继续使用
-        let kw_pos = map[kw_pos_folded];
         let val_start = map[val_start_folded];
         // 掩码：普通情形掩连续值字符；贪婪情形连空格一起掩到引号/逗号/括号
         let mut end = val_start;

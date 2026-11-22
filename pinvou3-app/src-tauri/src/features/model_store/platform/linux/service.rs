@@ -1040,6 +1040,11 @@ impl Drop for OpCleanup {
         // 下载之外的操作没进过队列，release 对它们是空操作
         self.registry_owner.queue.release(&self.run_id);
         self.operation_lock.take();
+        // 合并修正（r23）：main 侧新增的 card-<sha> StartupGuard 也要在同一时刻
+        // 放开——它此前靠结构体字段收尾隐式释放，落在 finish 置位之后，长轮询
+        // 的调用方会在 outcome 一出现就立刻重试同卡，撞上还没放开的操作保护
+        // （card_operation_lock_is_shared_by_independent_service_instances 钉住此序）。
+        self._card_guard.take();
         // finish 必须是最后一步：它一置位，长轮询就会立刻带着结局返回，调用方
         // 可能下一毫秒就来重试同一张卡——那时互斥必须已经放开了。
         let outcome = self
@@ -4104,16 +4109,18 @@ mod tests {
     #[test]
     fn the_long_poll_registers_its_waiter_before_taking_the_snapshot() {
         const SERVICE_SOURCE: &str = include_str!("service.rs");
+        // 合并修正（r23）：main 侧把实现拆进 run_log_page（pub async fn run_log
+        // 只是薄委托），等待/快照逻辑的真身在这里——契约跟着实现走。
         let body = SERVICE_SOURCE
-            .split("pub async fn run_log(")
+            .split("async fn run_log_page(")
             .nth(1)
-            .expect("run_log 没了？这条测试要跟着改");
+            .expect("run_log_page 没了？这条测试要跟着改");
         let registered = body
             .find("notified.as_mut().enable()")
-            .expect("run_log 里找不到 enable()：等待者没有被提前登记，会丢唤醒");
+            .expect("run_log_page 里找不到 enable()：等待者没有被提前登记，会丢唤醒");
         let snapshot = body
-            .find("log.snapshot(from)")
-            .expect("run_log 里找不到 snapshot 调用");
+            .find("log.snapshot(from")
+            .expect("run_log_page 里找不到 snapshot 调用");
         assert!(
             registered < snapshot,
             "登记等待者必须在取快照之前。现在反了——worker 在这两步之间 push 的行             会丢唤醒，本次长轮询要挂满 25 秒，而这条路径上跑的是交互提示。"
