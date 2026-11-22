@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { CHAT_RECOVERY_COPY } from '../src/shared/i18n.js';
+import { CHAT_RECOVERY_COPY, PPTX_PROFILE_UNAVAILABLE_COPY } from '../src/shared/i18n.js';
 
 // Regression for the turn-error display chain: stable backend error codes
 // (session_model_binding_stale:<id>, image_input_unsupported) must reach the
@@ -68,6 +68,7 @@ const documentObject = {
 let invokeResponse = async () => null;
 const windowObject = {
   PinvouChatRecoveryCopy: CHAT_RECOVERY_COPY,
+  PinvouPptxProfileUnavailableCopy: PPTX_PROFILE_UNAVAILABLE_COPY,
   PinvouPlatform: {
     kind: 'web',
     isWeb: true,
@@ -206,6 +207,11 @@ const migrationCases = {
 };
 for (const [language, copy] of Object.entries(CHAT_RECOVERY_COPY)) {
   await withLanguage(language === 'zh' ? 'zh-Hans' : language, () => {
+    const pptError = 'send_user_message failed: pptx_session_profile_unavailable';
+    const pptCopy = PPTX_PROFILE_UNAVAILABLE_COPY[language].message;
+    assert.equal(displayTurnError(new Error(pptError)), pptCopy);
+    assert.equal(displayTurnError(pptError), pptCopy);
+    assert.equal(displayTurnError('pptx_session_profile_unavailable'), pptCopy);
     for (const message of ['account_platform_runtime_protocol_unavailable: internal detail', 'account platform model runtime protocol is missing or unsupported; publish its capability before invoking']) {
       for (const prefix of ['', 'send_user_message failed: ']) {
         assert.equal(displayTurnError(new Error(prefix + message)), copy.modelRuntimeProtocolUnavailable);
@@ -228,6 +234,7 @@ for (const [language, [restart, restoreRead]] of Object.entries(migrationCases))
   });
 }
 assert.match(read('src', 'app', 'main.jsx'), /window.PinvouChatRecoveryCopy = CHAT_RECOVERY_COPY/);
+assert.match(read('src', 'app', 'main.jsx'), /window.PinvouPptxProfileUnavailableCopy = PPTX_PROFILE_UNAVAILABLE_COPY/);
 const firstTurnStart = rawBridgeSource.indexOf('  async function runFirstTurnSubmission(');
 const firstTurnEnd = rawBridgeSource.indexOf('  function submitFirstWebTurn(', firstTurnStart);
 assert.ok(firstTurnStart >= 0 && firstTurnEnd > firstTurnStart);

@@ -483,9 +483,7 @@ fn environment_key(target: &PythonDependencyTarget) -> Result<String, String> {
 }
 
 fn environments_root() -> PathBuf {
-    crate::platform::paths::pinvou3_home()
-        .join("marketplace")
-        .join("python-envs")
+    crate::platform::paths::marketplace_python_envs_dir()
 }
 
 fn wheel_cache_root() -> PathBuf {

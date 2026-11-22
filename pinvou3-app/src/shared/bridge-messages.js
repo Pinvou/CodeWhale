@@ -272,6 +272,12 @@
     redactRawError: function (error, state) {
       var text = String(error == null ? "" : error);
       if (!text) return text;
+      if (/(?:^|: )pptx_session_profile_unavailable$/.test(text)) {
+        var language = state && state.settings && state.settings.language;
+        var dictionary = window.PinvouPptxProfileUnavailableCopy;
+        var copy = dictionary && dictionary[language === "en" ? "en" : language === "ja" ? "ja" : "zh"];
+        if (copy && copy.message) return copy.message;
+      }
       var recovery = migrationRecoveryText(text, state);
       if (recovery != null) return recovery;
       var helper = window.PinvouModelServiceErrors;
