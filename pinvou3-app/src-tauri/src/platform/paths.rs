@@ -129,6 +129,13 @@ pub fn bundle_skills_dir() -> PathBuf {
 pub fn bundles_root() -> PathBuf {
     pinvou3_home().join("bundles")
 }
+/// Released executable files for one marketplace MCP package.
+pub(crate) fn bundle_mcp_package_dir(id: &str) -> PathBuf {
+    bundles_root().join(id).join("mcp")
+}
+pub(crate) fn marketplace_python_envs_dir() -> PathBuf {
+    pinvou3_home().join("marketplace").join("python-envs")
+}
 pub fn bundle_mcp_json() -> PathBuf {
     bundle_root().join("mcp.json")
 }

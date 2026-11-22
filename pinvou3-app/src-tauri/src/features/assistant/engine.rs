@@ -2036,6 +2036,15 @@ impl AppEngine {
             }
             None => bridge.build_engine_config_for_session_roots(session_id, roots),
         };
+        if engine_config
+            .features
+            .enabled(deepseek_tui::features::Feature::Mcp)
+            && let Some(profile) = bridge
+                .resolve_work_mode_mcp_fallback(session_id, &engine_config.mcp_config_path)
+                .map_err(anyhow::Error::msg)?
+        {
+            engine_config.mcp_config_path = profile;
+        }
         if scheduled_unattended_spawn {
             engine_config.subagents_enabled = false;
         }
