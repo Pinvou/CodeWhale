@@ -168,7 +168,7 @@ fn wait_task(
     let mut seen_events = 0usize;
     loop {
         if cancelled() {
-            return Err("已取消等待；设备任务状态仍待核实，未撤销设备侧操作".into());
+            return Err("delegate_cancel_state_unverified: 已取消等待；设备任务状态仍待核实，未撤销设备侧操作".into());
         }
         let task = client.task(task_id)?;
         let status = observed_task_status(&task)?;
@@ -185,18 +185,18 @@ fn wait_task(
         seen_events = events.len();
         match status {
             "succeeded" => return Ok(()),
-            "cancelled" => return Err("设备任务已取消".to_string()),
+            "cancelled" => return Err("delegate_task_cancelled: 设备任务已取消".to_string()),
             "failed" => {
                 let error = task
                     .get("error")
                     .and_then(|e| e.as_str())
-                    .unwrap_or("管理面任务失败（无详情）");
+                    .unwrap_or("delegate_task_failed_no_detail: 管理面任务失败（无详情）");
                 return Err(error.to_string());
             }
             _ => {
                 if cancelled() {
                     return Err(
-                        "已取消等待（Cube Manage Software 侧任务仍在继续推进，可稍后在侧栏设备管理（普通设备为运行状态）→MegaCube→Cube Manage Software 查看结果）"
+                        "delegate_cancel_pending_progress: 已取消等待（Cube Manage Software 侧任务仍在继续推进，可稍后在侧栏设备管理（普通设备为运行状态）→MegaCube→Cube Manage Software 查看结果）"
                             .to_string(),
                     );
                 }
@@ -336,7 +336,7 @@ pub fn enable(
     let task_id = task
         .get("task_id")
         .and_then(|t| t.as_str())
-        .ok_or_else(|| "管理面应答缺 task_id".to_string())?;
+        .ok_or_else(|| "delegate_missing_task_id: 管理面应答缺 task_id".to_string())?;
     log(&format!("[cmsd] 任务 {task_id} 已创建，等待就绪…"));
     wait_task(&client, task_id, log, cancelled)?;
     let connection_unconfirmed = |error: String| {
@@ -379,7 +379,7 @@ pub fn stop(
     let task_id = task
         .get("task_id")
         .and_then(|t| t.as_str())
-        .ok_or_else(|| "管理面应答缺 task_id".to_string())?;
+        .ok_or_else(|| "delegate_missing_task_id: 管理面应答缺 task_id".to_string())?;
     wait_task(&client, task_id, log, cancelled)?;
     Ok(DelegateOutcome::Stopped)
 }
@@ -411,7 +411,7 @@ pub fn purge(
     let task_id = task
         .get("task_id")
         .and_then(|t| t.as_str())
-        .ok_or_else(|| "管理面应答缺 task_id".to_string())?;
+        .ok_or_else(|| "delegate_missing_task_id: 管理面应答缺 task_id".to_string())?;
     wait_task(&client, task_id, log, cancelled)?;
     // r5 台账 #2：归属记录 unlink 失败不能吞——管理面已注销而本地记录残留，
     // 同卡 id 的后续操作会永久 ownership_conflict，而提示的补救（恢复设备
@@ -421,7 +421,7 @@ pub fn purge(
     if let Err(error) = std::fs::remove_file(&ownership) {
         if error.kind() != std::io::ErrorKind::NotFound {
             return Err(format!(
-                "管理面已注销，但本机归属记录清理失败（{error}）。请删除 {} 后重试删除。",
+                "ownership_cleanup_failed: 管理面已注销，但本机归属记录清理失败（{error}）。请删除 {} 后重试删除。",
                 ownership.display()
             ));
         }

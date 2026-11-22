@@ -274,6 +274,17 @@ export function CmsSettingsPanel({ copy, onOpenModelStore }) {
     };
   }, [loadAll, resetNotices]);
 
+  // r23 R5：操作失败文案经 cmsd-service errors 表映射（`code:` 前缀
+  // 子串匹配，同 CmsDaemonPanel.textError 口径），未命中保持原文。
+  const textError = useCallback(
+    (value) => {
+      const detail = String(value);
+      const key = Object.keys(copy.service?.errors || {}).find((key) => detail.includes(key));
+      return key ? `${copy.service.errors[key]} (${detail})` : detail;
+    },
+    [copy],
+  );
+
   const act = async (key, job) => {
     setBusy(key);
     setOperationError('');
@@ -283,7 +294,7 @@ export function CmsSettingsPanel({ copy, onOpenModelStore }) {
       setConfirmStop('');
       await loadAll({ fresh: true });
     } catch (error) {
-      setOperationError(String(error));
+      setOperationError(textError(error));
     } finally {
       setBusy('');
     }

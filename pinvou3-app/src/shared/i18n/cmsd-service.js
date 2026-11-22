@@ -150,7 +150,22 @@ export const CMSD_SERVICE_COPY = {
       bootstrap_changed_since_preview: '安装制品与刚才核实的摘要不同，请刷新后重新确认。',
       external_installation: '外部安装不支持此操作，原文件已保留。',
       service_socket_mismatch: '服务与当前 socket 不匹配，已阻止操作。',
-      unsupported_platform: '此平台不支持本机 Cube Manage Software 服务管理。'
+      unsupported_platform: '此平台不支持本机 Cube Manage Software 服务管理。',
+      delegate_cancel_state_unverified: '已取消等待，但设备任务状态尚未核实；设备侧操作未撤销。',
+      delegate_task_cancelled: '设备任务已取消。',
+      delegate_task_failed_no_detail: '设备任务失败，但设备侧未返回详情。',
+      delegate_cancel_pending_progress: '已取消等待；Cube Manage Software 侧任务仍在继续推进，可稍后在设备管理中查看结果。',
+      delegate_missing_task_id: '设备侧应答缺少任务 ID，无法继续跟踪该任务。',
+      ownership_cleanup_failed: 'Cube Manage Software 已注销，但本机归属记录清理失败；请按提示删除该记录文件后重试。',
+      component_worker_failed: '组件后台任务执行失败。请重试；若持续失败请查看服务日志。',
+      package_probe_failed: '无法读取组件包的探测信息，请重新选择可信组件包。',
+      package_preview_required: '请先刷新并核实组件包预览，再继续。',
+      component_preview_required: '请先预览并确认组件安装来源。',
+      cached_package_changed: '已核实的组件包内容已变化，请刷新后重新确认。',
+      package_size_mismatch: '组件包大小与清单不符，请重新获取可信组件包。',
+      package_binary_architecture_mismatch: '组件包二进制与当前系统架构不符。',
+      service_registration_exists: '同名单机服务已存在登记，请先核查现有服务再继续。',
+      socket_identity_unavailable: '无法确认服务 socket 的对端身份，已阻止操作。'
     }
   },
   en: {
@@ -303,7 +318,22 @@ export const CMSD_SERVICE_COPY = {
       bootstrap_changed_since_preview: 'The installed artifact differs from the verified checksum. Refresh and confirm again.',
       external_installation: 'This operation is unsupported for an external installation. Original files are retained.',
       service_socket_mismatch: 'Service and socket do not match; operation blocked.',
-      unsupported_platform: 'Local Cube Manage Software service management is unsupported.'
+      unsupported_platform: 'Local Cube Manage Software service management is unsupported.',
+      delegate_cancel_state_unverified: 'The wait was cancelled, but the device task state is unverified; the device-side action was not undone.',
+      delegate_task_cancelled: 'The device task was cancelled.',
+      delegate_task_failed_no_detail: 'The device task failed, but the device returned no details.',
+      delegate_cancel_pending_progress: 'The wait was cancelled; the Cube Manage Software task is still progressing. Check results later in device management.',
+      delegate_missing_task_id: 'The device response is missing a task ID; the task cannot be tracked.',
+      ownership_cleanup_failed: 'Cube Manage Software was unregistered, but cleaning up the local ownership record failed; delete the record file as prompted and retry.',
+      component_worker_failed: 'The component background task failed. Retry; if it persists, check the service logs.',
+      package_probe_failed: 'The component package could not be probed. Choose a trusted package again.',
+      package_preview_required: 'Refresh and verify the component package preview before continuing.',
+      component_preview_required: 'Preview and confirm the component installation source first.',
+      cached_package_changed: 'The verified component package changed. Refresh and confirm again.',
+      package_size_mismatch: 'The component package size does not match its manifest. Obtain a trusted package again.',
+      package_binary_architecture_mismatch: 'The component package binary does not match this system architecture.',
+      service_registration_exists: 'A service with this name is already registered. Inspect the existing service before continuing.',
+      socket_identity_unavailable: 'The service socket peer identity could not be verified; the operation was blocked.'
     }
   },
   ja: {
@@ -456,7 +486,22 @@ export const CMSD_SERVICE_COPY = {
       bootstrap_changed_since_preview: '確認時と実行ファイルのチェックサムが異なります。更新して再確認してください。',
       external_installation: '外部インストールではこの操作を利用できません。元のファイルは保持されています。',
       service_socket_mismatch: 'サービスとソケットが一致しないため拒否しました。',
-      unsupported_platform: 'ローカル Cube Manage Software サービス管理は未対応です。'
+      unsupported_platform: 'ローカル Cube Manage Software サービス管理は未対応です。',
+      delegate_cancel_state_unverified: '待機を取り消しましたが、デバイス側タスクの状態は未確認です。デバイス側の操作は取り消されていません。',
+      delegate_task_cancelled: 'デバイス側タスクはキャンセルされました。',
+      delegate_task_failed_no_detail: 'デバイス側タスクが失敗しましたが、詳細は返されていません。',
+      delegate_cancel_pending_progress: '待機を取り消しました。Cube Manage Software 側のタスクは継続中です。結果は後ほどデバイス管理で確認できます。',
+      delegate_missing_task_id: 'デバイスの応答にタスク ID がなく、タスクを追跡できません。',
+      ownership_cleanup_failed: 'Cube Manage Software を登録解除しましたが、ローカルの所有権レコードの削除に失敗しました。案内に従ってレコードファイルを削除してから再試行してください。',
+      component_worker_failed: 'コンポーネントのバックグラウンドタスクが失敗しました。再試行し、繰り返す場合はサービスログを確認してください。',
+      package_probe_failed: 'コンポーネントパッケージの情報を取得できませんでした。信頼できるパッケージを再度選択してください。',
+      package_preview_required: '続行する前に、コンポーネントパッケージのプレビューを更新して確認してください。',
+      component_preview_required: '先にコンポーネントの導入元をプレビューして確認してください。',
+      cached_package_changed: '確認済みのコンポーネントパッケージが変更されています。更新して再確認してください。',
+      package_size_mismatch: 'コンポーネントパッケージのサイズがマニフェストと一致しません。信頼できるパッケージを再取得してください。',
+      package_binary_architecture_mismatch: 'コンポーネントパッケージのバイナリがこのシステムのアーキテクチャと一致しません。',
+      service_registration_exists: '同名のサービスが既に登録されています。続行する前に既存サービスを確認してください。',
+      socket_identity_unavailable: 'サービス socket の相手 ID を確認できず、操作をブロックしました。'
     }
   }
 };

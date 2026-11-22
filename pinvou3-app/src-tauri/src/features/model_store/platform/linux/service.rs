@@ -491,10 +491,9 @@ impl ModelStoreService {
             .filter(|boot| *boot > 0)
             .ok_or("installation_boot_evidence_unavailable")?;
         if original_created_at == 0 || original_created_at >= boot {
-            return Err(
-                "lost_task_reboot_required: 原执行回执已丢失，请在设备重启后确认放弃；现有文件保留"
-                    .into(),
-            );
+            // r23 R5：原文案内嵌中文句子，en/ja 界面渲染中文原文；
+            // 改纯 code，文案由 cmsd-service/incompleteErrors 三语表承接。
+            return Err("lost_task_reboot_required".into());
         }
         let log = self.new_run(run_id, card_id, kind)?;
         log.finish(

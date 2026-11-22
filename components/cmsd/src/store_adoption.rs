@@ -209,22 +209,30 @@ pub fn reconcile(app: &Arc<App>) {
             let file = app.config.state_dir.join("store-bindings.json");
             let raw = serde_json::to_vec(&bindings).unwrap();
             if !bindings.is_empty() {
-                if let Err(error) = crate::private_storage::secure_state(&app.config.state_dir)
-                    .and_then(|_| {
-                        crate::private_storage::publish(
-                            &app.config.state_dir.join("store-adoption-v1"),
-                            b"cmsd-store-adoption-v1\n",
-                            true,
-                        )
-                    })
+                // r23 R6：标记 22 字节恒定，30s reconcile 无条件重写为
+                // 2,880 writes/日 + 5,760 fsync/日；与下方 store-bindings.json
+                // 同款 diff-before-mark 守卫，内容未变化时不落盘。
+                let marker = app.config.state_dir.join("store-adoption-v1");
+                if trusted_file(&marker, 1024).ok().as_deref()
+                    != Some(&b"cmsd-store-adoption-v1\n"[..])
                 {
-                    status["phase"] = "unavailable".into();
-                    status["error"] = error.into();
-                    *app.store_adoption_status
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) =
-                        Value::parse(&status.to_string()).unwrap();
-                    return;
+                    if let Err(error) = crate::private_storage::secure_state(&app.config.state_dir)
+                        .and_then(|_| {
+                            crate::private_storage::publish(
+                                &marker,
+                                b"cmsd-store-adoption-v1\n",
+                                true,
+                            )
+                        })
+                    {
+                        status["phase"] = "unavailable".into();
+                        status["error"] = error.into();
+                        *app.store_adoption_status
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) =
+                            Value::parse(&status.to_string()).unwrap();
+                        return;
+                    }
                 }
             }
             // r18 #9：与 selection.rs 的孪生写方同款字节比较守卫——30s

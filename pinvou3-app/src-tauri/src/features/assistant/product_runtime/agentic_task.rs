@@ -1970,7 +1970,10 @@ async fn prompt_with_attachments(
     // drops only the borrow (and with it the setup future) — the blocking
     // task stays joinable for the failure arms instead of detaching
     // mid-write.
-    let join = staging_in_flight.insert(join);
+    *staging_in_flight = Some(join);
+    let join = staging_in_flight
+        .as_mut()
+        .expect("the staging handle was parked above");
     let staged = (&mut *join).await;
     // The await above consumed the parked handle's output: tokio retires the
     // task on that first poll, and any further poll of the handle panics. The
@@ -3254,12 +3257,7 @@ mod tests {
             .unwrap();
         let swept = tmp.join("staged-swept.bin");
         std::fs::write(&swept, b"x").unwrap();
-        sweep_unreferenced_staged_copies(
-            &store,
-            "agentic_sweep_empty",
-            true,
-            std::slice::from_ref(&swept),
-        );
+        sweep_unreferenced_staged_copies(&store, "agentic_sweep_empty", true, &[swept.clone()]);
         assert!(
             !swept.exists(),
             "an untouched transcript's staged copies must be reclaimed"
@@ -3289,12 +3287,7 @@ mod tests {
             .unwrap();
         let kept = tmp.join("staged-kept.bin");
         std::fs::write(&kept, b"x").unwrap();
-        sweep_unreferenced_staged_copies(
-            &store,
-            "agentic_sweep_talking",
-            true,
-            std::slice::from_ref(&kept),
-        );
+        sweep_unreferenced_staged_copies(&store, "agentic_sweep_talking", true, &[kept.clone()]);
         assert!(
             kept.exists(),
             "a transcript with messages may reference the staged copies"
@@ -3304,12 +3297,7 @@ mod tests {
         // the whole record directory.
         let fresh = tmp.join("staged-fresh.bin");
         std::fs::write(&fresh, b"x").unwrap();
-        sweep_unreferenced_staged_copies(
-            &store,
-            "agentic_never_created",
-            false,
-            std::slice::from_ref(&fresh),
-        );
+        sweep_unreferenced_staged_copies(&store, "agentic_never_created", false, &[fresh.clone()]);
         assert!(fresh.exists(), "fresh sessions are the stub cleanup's job");
 
         let _ = std::fs::remove_dir_all(&tmp);

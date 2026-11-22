@@ -42,6 +42,16 @@ fn hex(bytes: impl AsRef<[u8]>) -> String {
         .collect()
 }
 
+/// r23 R4：按 (dev,ino,len,mtime,ctime,limit) 戳缓存文件摘要。status 路径
+/// 高频重读 512MiB 上限的整本组件二进制（怠速 ~230GiB/日哈希读 + 数万
+/// fork/exec/日）；信任检查（is_file/上限/组写位）每次调用仍全部执行，
+/// 戳未变才跳过重读，缓存本身不授予任何权限（同 incomplete.rs
+/// ReceiptCache 先例；4096 上限防无界增长）。
+type HashStamp = (u64, u64, u64, i64, i64, i64, i64, u64);
+type HashCache = BTreeMap<PathBuf, (HashStamp, String)>;
+static HASH_CACHE: std::sync::LazyLock<parking_lot::Mutex<HashCache>> =
+    std::sync::LazyLock::new(Default::default);
+
 pub(super) fn hash(path: &Path, limit: u64) -> Result<String, String> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -51,6 +61,21 @@ pub(super) fn hash(path: &Path, limit: u64) -> Result<String, String> {
     let metadata = file.metadata().map_err(|_| drift())?;
     if !metadata.is_file() || metadata.len() > limit || metadata.mode() & 0o022 != 0 {
         return Err(drift());
+    }
+    let stamp: HashStamp = (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+        limit,
+    );
+    if let Some((saved, digest)) = HASH_CACHE.lock().get(path) {
+        if *saved == stamp {
+            return Ok(digest.clone());
+        }
     }
     let mut digest = Sha256::new();
     let mut bytes = [0; 65536];
@@ -66,7 +91,15 @@ pub(super) fn hash(path: &Path, limit: u64) -> Result<String, String> {
         }
         digest.update(&bytes[..size]);
     }
-    Ok(hex(digest.finalize()))
+    let digest = hex(digest.finalize());
+    {
+        let mut cache = HASH_CACHE.lock();
+        if cache.len() >= 4096 {
+            cache.clear();
+        }
+        cache.insert(path.to_path_buf(), (stamp, digest.clone()));
+    }
+    Ok(digest)
 }
 
 pub(super) fn override_path(record: &Record) -> PathBuf {

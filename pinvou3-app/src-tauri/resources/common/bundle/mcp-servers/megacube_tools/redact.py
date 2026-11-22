@@ -20,6 +20,19 @@ KEYWORDS = (
     "passwd",
 )
 
+# r23 R1/R2：完整 Unicode lower 会变长（U+0130 İ → i+U+0307 两个码点），
+# 使搜索域与原串域下标错位，掩码落点漂移直至整段泄漏（İ 前缀可复现）。
+# 这里改为长度保持的逐码点折叠：ASCII 逐字符小写，另加两个单码点特例
+# （U+212A KELVIN SIGN → k、U+0130 → i），与 Rust 版 fold 对齐——两侧
+# 关键字命中域一致且下标恒等，可安全回切原串。
+_FOLD_TABLE = {code: chr(code).lower() for code in range(0x41, 0x5B)}
+_FOLD_TABLE[0x212A] = "k"  # KELVIN SIGN
+_FOLD_TABLE[0x0130] = "i"  # LATIN CAPITAL LETTER I WITH DOT ABOVE
+
+
+def _fold(text):
+    return text.translate(_FOLD_TABLE)
+
 
 def _is_value_char(char):
     return char.isascii() and (char.isalnum() or char in "-_.=/+")
@@ -67,7 +80,7 @@ def redact_line(line):
     out = list(line)
     start = 0
     for _ in range(64):  # 每行敏感串数量的 sanity 上限
-        found = _next_secret("".join(out).lower(), start)
+        found = _next_secret(_fold("".join(out)), start)
         if found is None:
             break
         kw_pos, val_start, greedy = found
