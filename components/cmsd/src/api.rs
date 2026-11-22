@@ -2067,6 +2067,55 @@ mod store_merge_tests {
 
     /// r15 #3 / P3-4：商店直通回退（task_view 未命中本地任务时走商店
     /// socket）的 detail.lines 与 error 出站前脱敏。
+    /// r19 P1：商店应答含 error.message 时经 map_store_err 收口脱敏——
+    /// 真实 socket 回退路径（GET /v1/tasks/{未知 id} 收到错误应答）与
+    /// map_store_err 两臂（Http/Protocol）均不得逐字直出到模型上下文。
+    #[test]
+    fn store_error_message_is_redacted_through_real_socket_and_mapper() {
+        let root = sfx::tmpdir("store-error-redact");
+        let app = make_app(&root);
+        let listener = std::os::unix::net::UnixListener::bind(root.join("store.sock")).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let request = http::read_request(&mut reader).unwrap().unwrap();
+            assert_eq!(request.path, "/v1/tasks/run-secret");
+            let body = r#"{"error":{"code":"store_error","message":"pull failed: hf_token=hf_xxx-abc123 rejected"}}"#;
+            http::write_response(
+                &mut stream,
+                "500 Internal Server Error",
+                "application/json",
+                body.as_bytes(),
+                &[],
+            )
+            .unwrap();
+        });
+        let error = task_view(&app, "run-secret").unwrap_err();
+        server.join().unwrap();
+        let message = error.2;
+        assert!(!message.contains("hf_xxx-abc123"), "{message}");
+        assert!(message.contains("***"), "{message}");
+
+        let (_, code, message) = install::map_store_err(
+            crate::shop::StoreErr::Http(
+                500,
+                "store_error".into(),
+                "auth failed for token sk-ANTHROPUS-abc123".into(),
+            ),
+            false,
+        );
+        assert_eq!(code, "store_error");
+        assert!(!message.contains("sk-ANTHROPUS-abc123"), "{message}");
+        assert!(message.contains("***"), "{message}");
+        let (_, pcode, pmessage) = install::map_store_err(
+            crate::shop::StoreErr::Protocol("bad payload: api_key=sk-ANTHROPUS-abc123".into()),
+            false,
+        );
+        assert_eq!(pcode, "store_protocol");
+        assert!(!pmessage.contains("sk-ANTHROPUS-abc123"), "{pmessage}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn store_task_detail_lines_are_redacted_before_leaving_cmsd() {
         let root = sfx::tmpdir("store-detail-redact");

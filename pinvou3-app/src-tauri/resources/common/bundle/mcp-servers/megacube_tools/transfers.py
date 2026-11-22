@@ -68,7 +68,8 @@ def list_tasks():
                 tasks.append({k: v for k, v in data.items() if k not in ("artifacts", "events")})
             except (ToolError, OSError, ValueError):
                 continue
-    return sorted(tasks, key=lambda t: -t["created_at"])
+    # r19 P2：降级记录可能缺 created_at，排序容错不令整个列表失败。
+    return sorted(tasks, key=lambda t: -t.get("created_at", 0))
 
 
 def spawn(directory):
@@ -175,6 +176,11 @@ def resume_task(args):
         if current["status"] not in ("failed", "cancelled", "interrupted"):
             raise ToolError("TASK_BUSY", "任务已被恢复。")
         data = current
+        # r19 P2：对既有损坏/降级记录补齐结构键，避免重启 worker 在
+        # events 键上 KeyError 进入永久 crash-loop。
+        data.setdefault("events", [])
+        data.setdefault("kind", "fetch")
+        data.setdefault("file_count", 0)
         read_json(directory / "request.json")
         (directory / "cancel").unlink(missing_ok=True)
         data.update(status="queued", pid=None, created_at=time.time(), error=None)
@@ -448,9 +454,15 @@ def _terminal_save(transfer, state):
         return
     except OSError:
         pass
+    # r19 P2：最小键集必须携带消费者依赖的结构键（list_tasks 排序用
+    # created_at、cube_get_task 用 kind、resume worker 用 events/directory），
+    # 否则一条降级记录会令任务列表、单查与恢复三路全部失效。
     minimal = {key: state[key] for key in (
-        "id", "status", "phase", "error", "error_code", "pid", "process_identity")
+        "id", "task_id", "kind", "created_at", "directory", "status", "phase",
+        "error", "error_code", "pid", "process_identity", "file_count")
         if key in state}
+    minimal.setdefault("file_count", 0)
+    minimal.setdefault("events", state.get("events") or [])
     try:
         write_json(transfer.directory / "state.json", minimal)
     except OSError:

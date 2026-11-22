@@ -166,11 +166,17 @@ pub(crate) fn map_store_err(e: StoreErr, _local: bool) -> ApiErr {
         StoreErr::NotSent(_) | StoreErr::Offline(_) => {
             api_err(409, "store_offline", STORE_OFFLINE_MSG)
         }
-        StoreErr::Http(status, code, message) => api_err(status, &code, &message),
+        // r19 P1：一处收口——商店 error.message 可回显脚本 env 注入的凭据，
+        // 经 write_result/MCP 直达模型上下文；Http 与 Protocol 两臂统一过
+        // redact_text（已脱敏汇点幂等：掩码值不含 value-chars 不会二次命中）。
+        StoreErr::Http(status, code, message) => api_err(status, &code, &redact_text(&message)),
         StoreErr::Protocol(m) => api_err(
             500,
             "store_protocol",
-            &format!("商店服务应答无法解析（对端可能不是品悟商店服务）：{m}"),
+            &format!(
+                "商店服务应答无法解析（对端可能不是品悟商店服务）：{}",
+                redact_text(&m)
+            ),
         ),
     }
 }

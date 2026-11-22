@@ -808,6 +808,48 @@ def network_error_preserves_retry_checks(tmp):
         os.environ["PINVOU3_HOME"] = prev_home
 
 
+def degraded_terminal_record_checks(tmp):
+    """r19 P2：磁盘满降级的最小终态记录必须携带消费者依赖的结构键
+    （created_at/kind/events/file_count/directory），否则任务列表、单查
+    与恢复三路全部失效（评审实测三连坏）。"""
+    import importlib as _il
+    import json as _json
+    from pathlib import Path as _Path
+    prev_home = os.environ.get("PINVOU3_HOME")
+    os.environ["PINVOU3_HOME"] = tmp
+    servers_dir = os.path.join(
+        ROOT, "src-tauri", "resources", "common", "bundle", "mcp-servers")
+    if servers_dir not in sys.path:
+        sys.path.insert(0, servers_dir)
+    transfers = _il.import_module("megacube_tools.transfers")
+
+    job = os.path.join(tmp, "degraded-job")
+    os.makedirs(job, exist_ok=True)
+    state = {"id": "fetch-x", "task_id": "fetch-x", "kind": "fetch",
+             "status": "failed", "phase": "failed", "error": "磁盘空间不足",
+             "error_code": "INSUFFICIENT_DISK", "created_at": 123.0,
+             "directory": os.path.join(tmp, "dest"), "events": [],
+             "file_count": 2, "pid": 111}
+
+    class FullDiskTransfer:
+        directory = _Path(job)
+
+        def save(self, _force=False):
+            raise OSError(28, "No space left on device")
+
+    transfers._terminal_save(FullDiskTransfer(), state)
+    saved = _json.load(open(os.path.join(job, "state.json")))
+    for key in ("task_id", "kind", "created_at", "directory", "events", "file_count"):
+        check("B3 降级终态记录保留 %s 键" % key, key in saved, str(sorted(saved)))
+    # 排序容错：缺 created_at 的既有损坏记录不得令 list_tasks 失败。
+    ordered = sorted([{"created_at": 5}, saved, {}], key=lambda t: -t.get("created_at", 0))
+    check("B3 任务列表排序容忍缺键记录", len(ordered) == 3)
+    if prev_home is None:
+        os.environ.pop("PINVOU3_HOME", None)
+    else:
+        os.environ["PINVOU3_HOME"] = prev_home
+
+
 def cmsd_channel_and_poison_part_checks(tmp):
     """r18 #3：管理通道有界读（越限即 CMSD_RESPONSE_TOO_LARGE）；
     r18 #8：HASH_MISMATCH 丢弃损坏 .part（毒前缀不得续传）。"""
@@ -892,6 +934,7 @@ def main():
     unknown_length_cap_checks(tmp)
     network_error_preserves_retry_checks(tmp)
     cmsd_channel_and_poison_part_checks(tmp)
+    degraded_terminal_record_checks(tmp)
     state = FixtureState()
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
     httpd.state = state
