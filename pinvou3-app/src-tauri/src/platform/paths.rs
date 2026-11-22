@@ -255,6 +255,12 @@ fn bundled_connector_runtime_paths_for(
 pub fn bundle_present_artifact_server() -> PathBuf {
     bundle_mcp_servers_dir().join("present_artifact_server.py")
 }
+
+/// `~/.pinvou3/bundle/mcp-servers/megacube_admin_server.py`
+/// MegaCube 管理面只读工具集（engine-owned，socket 存在才注册进 mcp.json）。
+pub fn bundle_megacube_admin_server() -> PathBuf {
+    bundle_mcp_servers_dir().join("megacube_admin_server.py")
+}
 /// Local Python MCP bootstrap that adds the tool's isolated dependency directory before running
 /// its server script.
 pub fn bundle_mcp_python_runner() -> PathBuf {

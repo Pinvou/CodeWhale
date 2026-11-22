@@ -52,6 +52,8 @@ fn weight_digest_rejects_open_races_without_blocking() {
                 true,
             ))),
             prompt: None,
+            run_id: None,
+            execution_fence: None,
         };
         assert!(
             file_digest(&path, &cancelled, &mut |_| {})

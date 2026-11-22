@@ -1,0 +1,16 @@
+[package]
+name = "cmsd"
+version = "0.1.0"
+edition = "2021"
+description = "Cube Manage Software daemon: MegaCube model service manager"
+license = "Proprietary"
+# 随包分发的私有组件，永不发布到 crates.io；cargo-deny 据此识别为私有 crate。
+publish = false
+
+[dependencies]
+# OS peer credentials are checked before accepting private maintenance owners.
+libc = "0.2"
+ring = "0.17.14"
+serde_jcs = "0.2.0"
+serde_json = "1.0.151"
+toml = { version = "=1.1.5", default-features = false, features = ["std", "parse", "serde"] }

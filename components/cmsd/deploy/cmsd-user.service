@@ -1,0 +1,19 @@
+[Unit]
+Description=Cube Manage Software daemon (MegaCube model service manager, user mode)
+
+[Service]
+Type=simple
+# 路径按实际安装位置调整；开发验证用工作区构建产物亦可
+ExecStart=/usr/local/bin/cmsd
+Environment=CMSD_SYSTEMD_MODE=user
+Environment=CMSD_SOCKET=%t/megacube/cmsd.sock
+RuntimeDirectory=megacube
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=2
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=default.target

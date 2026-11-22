@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:megacube:local-inventory:v1",
+  "title": "Implemented local GET /v1/device inventory",
+  "description": "Local observations and capabilities. Device discovery does not grant remote authentication, pairing or group coordination.",
+  "type": "object",
+  "required": [
+    "device_id",
+    "identity_scope",
+    "identity_key_id",
+    "boot_id",
+    "observed_at",
+    "source",
+    "protocol_versions",
+    "capabilities",
+    "remote_pairing",
+    "group_coordination"
+  ],
+  "properties": {
+    "device_id": {
+      "type": "string",
+      "pattern": "^dev-.+",
+      "maxLength": 200
+    },
+    "identity_scope": {
+      "const": "local-state-only"
+    },
+    "identity_key_id": {
+      "type": "null"
+    },
+    "boot_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "const": "cmsd"
+    },
+    "protocol_versions": {
+      "const": [
+        "v1"
+      ]
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true,
+      "contains": {
+        "const": "local.inventory"
+      }
+    },
+    "remote_pairing": {
+      "const": false
+    },
+    "group_coordination": {
+      "const": false
+    }
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "identity_scope": {
+            "const": "local-state-only"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "identity_key_id": {
+            "type": "null"
+          },
+          "remote_pairing": {
+            "const": false
+          },
+          "protocol_versions": {
+            "const": [
+              "v1"
+            ]
+          },
+          "capabilities": {
+            "not": {
+              "anyOf": [
+                {
+                  "contains": {
+                    "const": "remote.inventory.mtls"
+                  }
+                },
+                {
+                  "contains": {
+                    "const": "remote.pairing.readonly"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

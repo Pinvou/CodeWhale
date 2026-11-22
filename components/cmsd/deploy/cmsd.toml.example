@@ -1,0 +1,9 @@
+# New installations only. Do not overwrite a running installation's configuration.
+# Install at ~/.config/megacube/cmsd.toml for user mode; defaults follow this user.
+# System mode: explicitly set CMSD_CONFIG, CMSD_RUN_USER and all desktop resource
+# paths in /etc/megacube/cmsd.env before starting the system unit.
+# System mode is retained for standalone management; the Pinvou store integration
+# in this batch requires the same non-root account and a user service.
+native_unit_namespace = "state"
+require_native_profile_budget = "v1"
+require_store_selection = "v1"

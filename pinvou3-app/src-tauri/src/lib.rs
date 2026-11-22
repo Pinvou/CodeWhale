@@ -22,6 +22,9 @@ use tauri::Manager;
 
 pub use features::assistant::attachments::stage_file_in_workspace;
 
+#[cfg(feature = "megacube-handoff-acceptance")]
+pub use app::commands::megacube_handoff_acceptance::run as run_megacube_handoff_acceptance;
+
 #[cfg(feature = "benchmark-hooks")]
 pub use features::assistant::product_runtime::{agentic_task, headless_bridge};
 
@@ -927,7 +930,72 @@ pub(crate) fn remove_agents_index_entry(
     }
 }
 
+/// Headless modes are separate CLI processes selected before desktop startup.
+/// Their error status must reach the caller; no GUI/runtime state exists here.
+#[allow(clippy::exit)]
+fn fail_headless_cli(message: impl std::fmt::Display, code: i32) -> ! {
+    eprintln!("{message}");
+    std::process::exit(code);
+}
+
 pub fn run() {
+    let component_args: Vec<String> = std::env::args().skip(1).collect();
+    if component_args == ["--cmsd-store-inventory"] {
+        match features::model_store::cmsd_inventory() {
+            Ok(value) => println!("{value}"),
+            Err(error) => {
+                fail_headless_cli(error, 1);
+            }
+        }
+        return;
+    }
+    if component_args
+        .first()
+        .is_some_and(|arg| arg == "--cmsd-component-cli")
+    {
+        let result = match component_args.get(1).map(String::as_str) {
+            Some("status") if component_args.len() == 2 => features::megacube::service::status(),
+            Some("device-status") if component_args.len() == 2 => features::megacube::device::status(false),
+            Some("device-inspect") if component_args.len() == 2 => features::megacube::device::status(true),
+            Some("logs") if component_args.len() == 2 => features::megacube::service::logs(),
+            Some("inspect") if component_args.len() == 3 => {
+                features::megacube::service::inspect_package(&component_args[2])
+            }
+            Some("bundled") if component_args.len() == 2 => features::megacube::service::bundled_package(),
+            Some("action") if (3..=5).contains(&component_args.len()) => {
+                features::megacube::service::submit(
+                    &component_args[2], component_args.get(3).cloned(), component_args.get(4).cloned(),
+                )
+            }
+            _ => Err("usage: --cmsd-component-cli status|device-status|device-inspect|logs|bundled|inspect PACKAGE|action ACTION [PACKAGE SHA256]".into()),
+        };
+        match result {
+            Ok(value) => println!("{value}"),
+            Err(error) => {
+                fail_headless_cli(error, 1);
+            }
+        }
+        return;
+    }
+    if component_args
+        .first()
+        .is_some_and(|arg| arg == "--cmsd-component-worker")
+    {
+        if component_args.len() != 2 {
+            fail_headless_cli("invalid cmsd component worker arguments", 2);
+        }
+        if let Err(error) = features::megacube::service::run_worker(&component_args[1]) {
+            fail_headless_cli(format!("[cmsd-component] {error}"), 1);
+        }
+        return;
+    }
+    if std::env::args().any(|arg| arg == "--model-store-host") {
+        install_rustls_provider();
+        if let Err(error) = features::model_store::run_background() {
+            fail_headless_cli(format!("[model-store] {error}"), 1);
+        }
+        return;
+    }
     // WebKitGTK reads its RemoteInspector endpoint while constructing the first
     // WebContext, so the browser feature must reserve it before Tauri starts.
     features::browser::prepare_process_environment();
@@ -1294,7 +1362,7 @@ pub fn run() {
             // 模型商店：全进程唯一的一份。它持有卡片级互斥表和下载队列，那是
             // 「同一张卡不许被两处同时操作」的唯一依据，各持一份等于没有约束。
             let model_store =
-                std::sync::Arc::new(features::model_store::ModelStoreService::default());
+                std::sync::Arc::new(features::model_store::ModelStoreService::for_desktop());
             model_store.set_models_changed_handler(
                 app::model_store_events::live_models_changed_handler(app.handle().clone()),
             );
@@ -1304,23 +1372,15 @@ pub fn run() {
             // 报告攒在服务里，等界面起来后由 model_store_take_startup_cleanup 取走。
             features::model_store::run_startup_cleanup(&model_store);
             // 这里原来还有一句 `run_startup_refresh()`：把已下载的**内置测试卡片**
-            // 的固化脚本刷到当前应用版本（它们的正文编译在二进制里，应用升级就等于
-            // 脚本升级）。内置测试商店 2026-09-30 整体拿掉，这一步也就没有对象了。
-            // r36 P2-1：原函数还顺带做了一次 linked-models 后台对账
-            // （sync_linked_models），随函数整体删除而丢失。这里补一句
-            // fire-and-forget 启动同步——启动后不依赖用户打开商店视图就能完成
-            // 路由/上下文修复对账；失败只记 stderr 不弹（打开视图时会重试）。
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = tokio::task::spawn_blocking(
-                    features::model_store::platform::linked_models_startup_sync,
-                )
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r)
-                {
-                    eprintln!("[startup] linked-models 同步失败（下次打开商店视图会重试）：{error}");
-                }
-            });
+            // 的固化脚本刷到当前应用版本。内置测试商店 2026-09-30 整体拿掉，刷新
+            // 没有了对象（老内置卡的一次性迁移见
+            // `migrate_legacy_builtin_scripts`）。r36 P2-1：原函数还顺带做了一次
+            // linked-models 后台对账（sync_linked_models），随函数整体删除而丢失。
+            // 这里补一句 fire-and-forget 启动同步——启动后不依赖用户打开商店视图
+            // 就能完成路由/上下文修复对账；失败只记日志不弹（打开视图时会重试）。
+            // 经服务入口而不是裸函数：这笔启动偏好事务要持有宿主受控的请求
+            // 守卫，cmsd 请求宿主退出时必须等它做完（见 run_startup_linked_sync）。
+            features::model_store::run_startup_linked_sync(&model_store);
             app.handle().manage(model_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();
@@ -2176,9 +2236,25 @@ pub fn run() {
             commands::device::device_remove_external_model,
             commands::device::device_doctor_prompt,
             commands::monitor::discover_local_vllm,
+            commands::cms::cms_status,
+            commands::cms::cms_service_status,
+            commands::cms::cms_device_status,
+            commands::cms::cms_service_action,
+            commands::cms::cms_service_inspect_package,
+            commands::cms::cms_service_bundled_package,
+            commands::cms::cms_service_logs,
+            commands::cms::cms_model_action,
+            commands::cms::cms_cancel_task,
+            commands::cms::cms_models,
+            commands::cms::cms_engines,
+            commands::cms::cms_capacity,
+            commands::cms::cms_tasks,
+            commands::cms::cms_task,
             commands::model_store::model_store_availability,
             commands::model_store::model_store_cards,
             commands::model_store::model_store_library,
+            commands::model_store::model_store_preview_incomplete,
+            commands::model_store::model_store_retry_incomplete,
             commands::model_store::model_store_model_detail,
             commands::model_store::model_store_installed_engines,
             commands::model_store::model_store_local_resources,

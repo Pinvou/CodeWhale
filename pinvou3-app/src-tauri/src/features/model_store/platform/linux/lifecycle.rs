@@ -12,6 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use super::card_assets::is_card_state_file;
 use super::config::{self, Settings};
 use super::db;
 use super::disk;
@@ -274,16 +275,26 @@ pub fn suggest_model_name(card: &StoreCardDetail) -> String {
     "model".to_string()
 }
 
-/// 脚本来源。两种形态：
+/// 脚本来源。三种形态：
 /// - `Local`：本地固化的脚本正文（下载模型时抓下来存进数据库的）。**执行时
 ///   完全不联网**——商店重启、上架新卡片、改脚本都打断不了用户正在做的事。
 ///   这是日常操作（部署/启用/停用/卸载）唯一使用的形态。
+/// - `LocalDir`：已经物化在 `<store_root>/cards/<card_id>/` 的本地卡片
+///   （install_local 专用）。脚本**就地**执行——卡片目录同时是它的工作目录，
+///   部署产物（.deploy-env、.runtime/）和 cmsd 的卡片扫描都指着同一个地方，
+///   所以不能像 `Local` 那样落成临时文件或重新展开。信任级别与商店固化脚本
+///   同级（用户自己目录里的卡，见 install_local_from_cards_dir 的校验段）。
 /// - `Remote`：商店给的 URL + 哈希，只在"下载模型"和"手动检查卡片更新"这两
 ///   个明确需要联网的时刻使用。
 enum ScriptsSource {
     Local {
         blobs: BTreeMap<String, db::ScriptBlob>,
         assets: BTreeMap<String, db::ScriptBlob>,
+        profiles: Vec<DeployProfile>,
+    },
+    LocalDir {
+        dir: PathBuf,
+        blobs: BTreeMap<String, db::ScriptBlob>,
         profiles: Vec<DeployProfile>,
     },
     Remote {
@@ -426,14 +437,18 @@ impl ScriptsSource {
 
     fn profiles(&self) -> &[DeployProfile] {
         match self {
-            Self::Local { profiles, .. } | Self::Remote { profiles, .. } => profiles,
+            Self::Local { profiles, .. }
+            | Self::LocalDir { profiles, .. }
+            | Self::Remote { profiles, .. } => profiles,
         }
     }
 
     /// 某类脚本当前内容的 sha256（用于判断"跟上次跑的那份是不是同一个版本"）。
     fn script_hash(&self, script_type: &str) -> Option<String> {
         match self {
-            Self::Local { blobs, .. } => blobs.get(script_type).map(|b| b.sha256.clone()),
+            Self::Local { blobs, .. } | Self::LocalDir { blobs, .. } => {
+                blobs.get(script_type).map(|b| b.sha256.clone())
+            }
             Self::Remote { script_sha256, .. } => script_sha256
                 .as_ref()
                 .and_then(|h| h.get(script_type))
@@ -450,7 +465,9 @@ impl ScriptsSource {
         script_type: &str,
     ) -> Result<Option<db::ScriptBlob>, ModelManagerError> {
         match self {
-            Self::Local { blobs, .. } => Ok(blobs.get(script_type).cloned()),
+            Self::Local { blobs, .. } | Self::LocalDir { blobs, .. } => {
+                Ok(blobs.get(script_type).cloned())
+            }
             Self::Remote { scripts, .. } if !scripts.contains_key(script_type) => Ok(None),
             Self::Remote { .. } => {
                 let content = self.entry_content(script_type, self.fetch_policy(script_type))?;
@@ -466,6 +483,9 @@ impl ScriptsSource {
     fn has_assets(&self) -> bool {
         match self {
             Self::Local { assets, .. } => !assets.is_empty(),
+            // 本地卡片永远在卡片目录里就地执行（目录就是它的工作目录），
+            // 不按单文件临时脚本处理——哪怕它实际上一个附属文件都没有。
+            Self::LocalDir { .. } => true,
             Self::Remote { assets, .. } => !assets.is_empty(),
         }
     }
@@ -477,12 +497,36 @@ impl ScriptsSource {
     ///   写进去，并把这个目录作为工作目录返回。持久是必须的——包会在自己目录里
     ///   生成运行期状态（config.json、node.json、state/），放临时目录的话每次执行
     ///   都是一个全新的空包，部署状态一次都留不住。
+    /// - 本地卡片（LocalDir）：**什么都不落地**，直接指着卡片目录里那份脚本，
+    ///   工作目录就是卡片目录。部署产物和 cmsd 的卡片扫描指着同一个地方，
+    ///   重新展开一遍反而可能把运行期状态冲掉。
     fn prepare(
         &self,
         card_id: &str,
         script_type: &str,
     ) -> Result<PreparedScript, ModelManagerError> {
         let entry_name = format!("{script_type}.sh");
+        if let Self::LocalDir { dir, .. } = self {
+            let entry = dir.join(&entry_name);
+            if !entry.is_file() {
+                return Err(ModelManagerError::new(format!(
+                    "本地卡片缺少 {entry_name}（{}）",
+                    entry.display()
+                )));
+            }
+            // MCP 物化的卡是 0755；用户手工放好的卡可能没有执行位，顺手补上
+            // （跟自己写的临时脚本一个待遇），补不上也不拦——run_script 会给出
+            // 它自己的那句错误。
+            if let Ok(meta) = std::fs::metadata(&entry) {
+                let mut perms = meta.permissions();
+                perms.set_mode(perms.mode() | 0o111);
+                let _ = std::fs::set_permissions(&entry, perms);
+            }
+            return Ok(PreparedScript {
+                entry,
+                cwd: Some(dir.clone()),
+            });
+        }
         let policy = self.fetch_policy(script_type);
         if !self.has_assets() {
             return Ok(PreparedScript {
@@ -561,15 +605,15 @@ impl ScriptsSource {
             .map_err(ModelManagerError::from)
     }
 
-    /// 取入口脚本正文。Local 用本地副本（不联网），Remote 才下载并按 `policy`
-    /// 校验来源和哈希。
+    /// 取入口脚本正文。Local / LocalDir 用本地副本（不联网），Remote 才下载并
+    /// 按 `policy` 校验来源和哈希。
     fn entry_content(
         &self,
         script_type: &str,
         policy: script_runner::FetchPolicy,
     ) -> Result<String, ModelManagerError> {
         match self {
-            Self::Local { blobs, .. } => blobs
+            Self::Local { blobs, .. } | Self::LocalDir { blobs, .. } => blobs
                 .get(script_type)
                 .map(|b| b.content.clone())
                 .ok_or_else(|| {
@@ -604,6 +648,8 @@ impl ScriptsSource {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.content.clone()))
                 .collect()),
+            // 本地卡片的附属文件本来就在卡片目录里，prepare 不会走到这里
+            Self::LocalDir { .. } => Ok(BTreeMap::new()),
             Self::Remote {
                 assets,
                 asset_sha256,
@@ -741,6 +787,80 @@ const DOCKER_RMI_TIMEOUT: Duration = Duration::from_secs(600);
 /// 每次续传前先看取消信号（用户随时能停），次数用尽仍失败才抛给用户。
 const DOWNLOAD_RESUME_LIMIT: u32 = 30;
 
+impl ModelManager {
+    pub(super) fn install_context(&self, kind: &str) -> super::incomplete::Context {
+        let source = if kind == "install_local" {
+            "local"
+        } else {
+            "store"
+        };
+        super::incomplete::Context::capture(&self.settings, source)
+    }
+
+    pub(super) fn preview_store_install(
+        &self,
+        card_id: &str,
+    ) -> Result<(String, String), ModelManagerError> {
+        let card = self.store.get_card(card_id)?;
+        let package = self.fetch_and_store_scripts(&card, None)?;
+        let digest = serde_json::to_string(
+            &serde_json::json!({"card":card,"scripts":package.scripts,"assets":package.assets}),
+        )
+        .map_err(|error| ModelManagerError::new(error.to_string()))?;
+        Ok((
+            card.summary.name.clone(),
+            script_runner::sha256_hex(&digest),
+        ))
+    }
+
+    /// A local directory is only an installation source before registration.
+    /// Existing logical/runtime identities must use pinned lifecycle/update paths.
+    pub(super) fn check_fresh_local_install(card_id: &str) -> Result<(), ModelManagerError> {
+        config::safe_path_component(card_id).map_err(ModelManagerError::new)?;
+        db::init_db().map_err(|e| ModelManagerError::new(e.to_string()))?;
+        let records = db::list_store_models().map_err(|e| ModelManagerError::new(e.to_string()))?;
+        if records.iter().any(|record| {
+            record.card_id == card_id || record.runtime_card_id.as_deref() == Some(card_id)
+        }) {
+            return Err(ModelManagerError::new(
+                "registered_model_requires_store_workflow: 该模型已登记，请使用模型商店的当前部署或检查更新入口，不能重新执行本地目录配方。",
+            ));
+        }
+        if super::version_store::list(None)
+            .map_err(ModelManagerError::new)?
+            .iter()
+            .any(|version| version.card_id == card_id || version.runtime_card_id == card_id)
+        {
+            return Err(ModelManagerError::new(
+                "archived_model_version: 该目录属于已准备或归档的模型版本，不能作为新模型重新安装。",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn preview_local_install(
+        card_id: &str,
+    ) -> Result<(String, String), ModelManagerError> {
+        Self::check_fresh_local_install(card_id)?;
+        let safe = config::safe_path_component(card_id).map_err(ModelManagerError::new)?;
+        let dir = config::data_dir().join("cards").join(safe);
+        if !std::fs::symlink_metadata(&dir)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        {
+            return Err(ModelManagerError::new("installation_package_unavailable"));
+        }
+        let card = load_local_card(&dir, card_id, &mut |_| {})?;
+        let digest = serde_json::to_string(
+            &serde_json::json!({"card":card.detail,"scripts":card.blobs,"assets":card.assets}),
+        )
+        .map_err(|error| ModelManagerError::new(error.to_string()))?;
+        Ok((
+            card.detail.summary.name.clone(),
+            script_runner::sha256_hex(&digest),
+        ))
+    }
+}
+
 /// 引擎清理契约补取的会话级负缓存（见 `refresh_native_engine_cleanup_contracts`）。
 /// ModelManager 每次调用都是新实例，进程级 static 是唯一能跨调用记住失败的层。
 static CONTRACT_SYNC_FAILED_CARDS: std::sync::OnceLock<
@@ -867,8 +987,11 @@ impl ModelManager {
         self.store.list_cards()
     }
 
-    /// **目前零调用点**：详情页走的是 `get_model_detail`（读本地库记录），
-    /// 只有"看一张还没下载的卡片的完整详情"才需要它，那个界面还没有。
+    /// 连商店取一张卡片的完整详情。
+    ///
+    /// 调用点：本地下载服务（local_service）的 /v1/install 在下发前用它确认
+    /// 卡片真实存在——卡片不存在要在请求当时就回 404，而不是等任务线程跑起来
+    /// 再失败。详情页那条「看一张还没下载的卡片的完整详情」的界面仍没有，
     /// 留待后续分期接线。
     pub fn get_store_card(&self, card_id: &str) -> Result<StoreCardDetail, ModelManagerError> {
         self.store.get_card(card_id)
@@ -1360,15 +1483,28 @@ impl ModelManager {
     /// `wait_for_slot` 是「下模型权重」前的闸门，用于排队限流：并发已满时在这里
     /// 阻塞等待，轮到了返回 Ok，用户在排队期间取消则返回 Err。
     ///
-    /// 闸门的位置是这个设计的关键——它在装引擎**之后**。装引擎要 pkexec 弹管理员
-    /// 密码框，必须趁用户还在电脑前做掉；等真排到队时用户可能早走开了，那时候弹
-    /// 密码框只会干等到超时。下权重不需要 root，正好适合排队慢慢跑。
+    /// 闸门的位置是这个设计的关键（实现在 install_engine_and_download_weights 里，
+    /// 本地卡片安装走的也是那一段）：需要提权装引擎时它在装引擎**之后**——装引擎
+    /// 要 pkexec 弹管理员密码框，必须趁用户还在电脑前做掉；等真排到队时用户可能
+    /// 早走开了，那时候弹密码框只会干等到超时。不需要提权时装引擎一起进队列，
+    /// 全程零密码框。下权重本身不需要 root，正好适合排队慢慢跑。
     pub fn download_from_store(
         &self,
         card_id: &str,
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
-        mut wait_for_slot: Option<&mut dyn FnMut() -> Result<(), ModelManagerError>>,
+        wait_for_slot: Option<&mut dyn FnMut() -> Result<(), ModelManagerError>>,
+    ) -> Result<DownloadResult, ModelManagerError> {
+        self.download_from_store_checked(card_id, on_progress, control, wait_for_slot, None)
+    }
+
+    pub(super) fn download_from_store_checked(
+        &self,
+        card_id: &str,
+        on_progress: &mut ProgressFn<'_>,
+        control: script_runner::RunControl,
+        wait_for_slot: Option<&mut dyn FnMut() -> Result<(), ModelManagerError>>,
+        expected_package: Option<&str>,
     ) -> Result<DownloadResult, ModelManagerError> {
         let _resources = super::version_store::wait_resource_operation_lock(
             false,
@@ -1387,7 +1523,7 @@ impl ModelManager {
                     || existing.active_version_id.is_some())
             {
                 return Err(ModelManagerError::new(
-                    "该模型已有部署，请通过检查更新或历史版本升级，避免覆盖当前配置。",
+                    "该模型已有部署，请通过检查更新或版本与存储升级，避免覆盖当前配置。",
                 ));
             }
             if !self.local_script_paths {
@@ -1396,7 +1532,7 @@ impl ModelManager {
                     .can_update
                 {
                     return Err(ModelManagerError::new(
-                        "已下载版本与新版不同，请先完成旧版部署，再通过历史版本升级；旧权重未被覆盖。",
+                        "已下载版本与新版不同，请先完成旧版部署，再通过版本与存储升级；旧权重未被覆盖。",
                     ));
                 }
             }
@@ -1447,15 +1583,29 @@ impl ModelManager {
         // 「下载脚本失败：error decoding response body」，前面下的 20GB 白跑。
         on_progress("获取该模型的部署脚本…");
         let (source, pinned_pkg) = match self.fetch_and_store_scripts(&card, None) {
-            Ok(pkg) => (
-                ScriptsSource::Local {
-                    blobs: pkg.scripts.clone(),
-                    assets: pkg.assets.clone(),
-                    profiles: card.profiles.clone(),
-                },
-                Some(pkg),
-            ),
+            Ok(pkg) => {
+                if let Some(expected) = expected_package {
+                    let snapshot = serde_json::to_string(
+                        &serde_json::json!({"card":card,"scripts":pkg.scripts,"assets":pkg.assets}),
+                    )
+                    .map_err(|error| ModelManagerError::new(error.to_string()))?;
+                    if script_runner::sha256_hex(&snapshot) != expected {
+                        return Err(ModelManagerError::new("installation_package_changed"));
+                    }
+                }
+                (
+                    ScriptsSource::Local {
+                        blobs: pkg.scripts.clone(),
+                        assets: pkg.assets.clone(),
+                        profiles: card.profiles.clone(),
+                    },
+                    Some(pkg),
+                )
+            }
             Err(e) => {
+                if expected_package.is_some() {
+                    return Err(e);
+                }
                 // 整套取不下来就退回老的「按需取」路径。不比改动前更差，至少让
                 // 老后台和弱网环境还有机会跑下去。
                 eprintln!("[download] 整套脚本抓取失败，退回按需获取：{e}");
@@ -1509,12 +1659,125 @@ impl ModelManager {
         reservation
             .start_scripts()
             .map_err(ModelManagerError::new)?;
-        // install_engine 需要 root（pkexec，每次都要输管理员密码）。所以先以普通
-        // 用户身份跑一个只读探针（install_engine 读到 LMM_PROBE_ONLY=1 时只做
-        // "装没装"检查、不发任何安装动作）：命中就跳过 root 步，避免每次下载都为
-        // 已装好的引擎重复输密码；只有探针说"没装/脚本不支持探针"才真正走 root 安装。
+        self.install_engine_and_download_weights(
+            &source,
+            card_id,
+            &card.summary.engine_name,
+            card.summary.engine_version.as_deref(),
+            env,
+            on_progress,
+            control.clone(),
+            wait_for_slot,
+            reservation.script_lease(),
+        )?;
+        reservation
+            .confirm_stopped()
+            .map_err(ModelManagerError::new)?;
+
+        // 重新下载时只保留真实的“已部署”状态（重新安装不退回「已下载」）；
+        // “权重不完整”必须在本次成功后恢复成已下载。若原样保留 incomplete，
+        // 用户即使补齐了文件，界面仍只能看见“继续下载”，又会造出另一种假状态。
+        // 只有全新记录才用 "downloaded" 起步。
+        let status = match existing_status.as_deref() {
+            Some("deployed") => "deployed".to_string(),
+            _ => "downloaded".to_string(),
+        };
+        let quota_lock = super::version_store::wait_quota_reservation_lock(
+            || control.cancelled(),
+            || on_progress("等待提交模型下载记录，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
+        db::add_store_model_with_root(
+            db::AddStoreModelParams {
+                card_id: &card.summary.id,
+                model_name: &model_name,
+                card_name: &card.summary.name,
+                org: card.summary.org.as_deref(),
+                description: card.summary.description.as_deref(),
+                engine_name: &card.summary.engine_name,
+                engine_version: card.summary.engine_version.as_deref(),
+                size_bytes: card.summary.size_bytes as i64,
+                quantization: card.summary.quantization.as_deref(),
+                source_repo_id: card.source_repo_id.as_deref(),
+                source_filename: card.source_filename.as_deref(),
+                scripts: &card.scripts,
+                status: &status,
+                profiles: &card.profiles,
+                deploy_topology: card.summary.deploy_topology,
+                card_source: "store",
+            },
+            &reservation.root.to_string_lossy(),
+        )
+        .map_err(|e| ModelManagerError::new(format!("记录模型下载状态失败：{e}")))?;
+        reservation.complete().map_err(ModelManagerError::new)?;
+        drop(quota_lock);
+        // 内存档位随这次成功下载的卡片一起固化；启用时不再依赖商店网络，也不会把
+        // 权重文件大小误当作内存预算。空结构的语义是“当前卡片没有给可信预算”。
+        // 这个档位只影响后续的启用前提醒，不能把已经完成的下载误报成失败。
+        // 写入失败时保守地回退到“需要用户确认”的未知档位即可。
+        if let Err(e) =
+            db::set_resource_requirements(&card.summary.id, &card.summary.resource_requirements)
+        {
+            eprintln!("[model-store] 保存模型内存档位失败（将使用保守提示）：{e}");
+        }
+
+        // 把六类脚本的正文固化到本地：从这一刻起，这个模型的部署/启用/停用/
+        // 卸载全部用本地副本执行，不再依赖商店可达——商店重启、上架、改脚本
+        // 都不会影响用户手上的流程。
+        //
+        // 正常情况下开头已经整套抓下来了（pinned_blobs），这里直接写库，不再多
+        // 跑一趟 HTTP。只有开头那次抓取失败、退回按需获取时才在这兜底补一次；
+        // 补不到也不让整个下载失败（模型已经下好了），只提示一句，后续操作走
+        // 按 URL 取的兼容路径。
+        let pkg = match pinned_pkg {
+            Some(pkg) => Some(pkg),
+            None => match self.fetch_and_store_scripts(&card, None) {
+                Ok(pkg) => Some(pkg),
+                Err(e) => {
+                    eprintln!("[download] 抓取脚本副本失败（不影响本次下载）：{e}");
+                    on_progress("提示：脚本本地副本未能保存，后续操作仍需连接商店");
+                    None
+                }
+            },
+        };
+        if let Some(pkg) = pkg {
+            if let Err(e) = db::set_scripts_content(&card.summary.id, &pkg.scripts, &pkg.assets) {
+                eprintln!("[download] 固化脚本副本失败（不影响本次下载）：{e}");
+            }
+        }
+
+        Ok(DownloadResult {
+            model_name,
+            engine_reused,
+            model_reused,
+        })
+    }
+
+    /// 「装引擎 → 排队 → 找本机权重 → 下载权重」：商店卡下载（download_from_store）
+    /// 和本地卡片安装（install_local_from_cards_dir）**完全同路**的那一段。
+    ///
+    /// 两条流程只有脚本来源不同（一个从商店取并固化、一个就地用盘上的卡），
+    /// 引擎探针、提权分岔、排队闸门位置、import_scan、断点续传逐行共享——
+    /// 任何一边修出的坑（比如闸门必须在弹密码框之后），另一边不该再踩一遍。
+    ///
+    /// install_engine 需要 root（pkexec，每次都要输管理员密码）。所以先以普通
+    /// 用户身份跑一个只读探针（install_engine 读到 LMM_PROBE_ONLY=1 时只做
+    /// "装没装"检查、不发任何安装动作）：命中就跳过 root 步，避免每次下载都为
+    /// 已装好的引擎重复输密码；只有探针说"没装/脚本不支持探针"才真正走 root 安装。
+    fn install_engine_and_download_weights(
+        &self,
+        source: &ScriptsSource,
+        card_id: &str,
+        engine_name: &str,
+        engine_version: Option<&str>,
+        env: HashMap<String, String>,
+        on_progress: &mut ProgressFn<'_>,
+        control: script_runner::RunControl,
+        mut wait_for_slot: Option<&mut dyn FnMut() -> Result<(), ModelManagerError>>,
+        download_lease: &mut super::version_store::DownloadLease,
+    ) -> Result<(), ModelManagerError> {
         let mut docker_image: Option<String> = None;
-        let probe = self.engine_probe(&source, card_id, &env);
+        let probe = self.engine_probe(source, card_id, &env);
         let probe_ok = probe.installed;
 
         // 光看"引擎装没装"不够。install_engine 除了装引擎，还负责把整个部署包
@@ -1525,13 +1788,10 @@ impl ModelManager {
         // 的哈希：跟上次成功执行的那份不一样，就算引擎在也要重跑一遍，把新的
         // 部署包刷下去。
         let current_hash = source.script_hash("install_engine");
-        let recorded_hash = db::get_installed_engine(
-            &card.summary.engine_name,
-            card.summary.engine_version.as_deref(),
-        )
-        .ok()
-        .flatten()
-        .and_then(|r| r.install_script_sha256);
+        let recorded_hash = db::get_installed_engine(engine_name, engine_version)
+            .ok()
+            .flatten()
+            .and_then(|r| r.install_script_sha256);
         let script_changed = match (&current_hash, &recorded_hash) {
             (Some(cur), Some(old)) => cur != old,
             // 记录里没有哈希（老版本装的）就不强制重跑，避免所有老用户平白
@@ -1562,14 +1822,13 @@ impl ModelManager {
                 // 会弹系统的管理员授权框（pkexec）。先把话说在前面，否则用户
                 // 看到密码框会不知道是哪来的、在等什么。
                 on_progress(&format!(
-                    "首次配置 {} 运行环境需要管理员权限，请在弹出的授权窗口中输入密码…",
-                    card.summary.engine_name
+                    "首次配置 {engine_name} 运行环境需要管理员权限，请在弹出的授权窗口中输入密码…"
                 ));
             } else {
-                on_progress(&format!("正在安装 {} 引擎…", card.summary.engine_name));
+                on_progress(&format!("正在安装 {engine_name} 引擎…"));
             }
             let install_lines = self.install_engine(
-                &source,
+                source,
                 &env,
                 &mut |line| on_progress(&script_runner::prefix_log_line("[安装引擎] ", line)),
                 control.clone(),
@@ -1581,8 +1840,8 @@ impl ModelManager {
             // stdout 是卡片作者可控的输入，先过形式白名单、且不覆盖共享行里
             // 已登记的不同镜像名（r19 评审 P2-1，判据见 engine_image_to_record）。
             docker_image = engine_image_to_record(
-                &card.summary.engine_name,
-                card.summary.engine_version.as_deref(),
+                engine_name,
+                engine_version,
                 extract_marker(&install_lines, "LMM_ENGINE_IMAGE="),
             );
         }
@@ -1593,14 +1852,14 @@ impl ModelManager {
             Err(error) => {
                 eprintln!(
                     "[download] 未能固化原生引擎清理脚本（{}）：{error}",
-                    card.summary.id
+                    card_id
                 );
                 None
             }
         };
         db::mark_engine_installed(
-            &card.summary.engine_name,
-            card.summary.engine_version.as_deref(),
+            engine_name,
+            engine_version,
             docker_image.as_deref(),
             // 记下这次跑的 install_engine 是哪个版本；下次比对哈希决定要不要
             // 为了刷新部署包再跑一遍
@@ -1684,21 +1943,173 @@ impl ModelManager {
 
         on_progress("检查模型权重…");
         self.run_card_script_with_retry(
-            &source,
+            source,
             &env,
             &mut |line| on_progress(&script_runner::prefix_log_line("[下载模型] ", line)),
             control.clone(),
-            reservation.script_lease(),
+            download_lease,
         )?;
         // A script can return while a forked downloader still owns its lease.
         // Refuse success before registering any installed/deployed state.
+        download_lease
+            .confirm_stopped()
+            .map_err(ModelManagerError::new)?;
+        Ok(())
+    }
+
+    /// 执行已经物化在 `<store_root>/cards/<card_id>/` 的本地卡片（MCP 按 HF 仓库
+    /// 元数据生成的驭光卡，或用户按同规格放好的卡）。
+    ///
+    /// 与 `download_from_store` 的差别**只有两段**：脚本不连商店取（没有"取脚本
+    /// + sha256 校验"那一段，盘上内容就是全部来源——这些是用户自己目录里的卡，
+    /// 语义与商店固化脚本同级），以及末尾多走一步部署（这张卡的消费场景是
+    /// 「装完就能被管理面/用户直接启用」，停在"已下载"等于把最后一步又推回去）。
+    /// 其余各段——引擎探针（LMM_PROBE_ONLY=1；输出含 LMM_NEED_ROOT=1 走既有
+    /// pkexec 提权路径，不拒绝）、装引擎、下载排队、import_scan、download_model
+    /// （断点续传）、权重校验、磁盘预检、进度行、取消、humanize 错误——全部复用
+    /// 既有实现（引擎+权重那段逐行共享，见 install_engine_and_download_weights）。
+    ///
+    /// 落库口径：add_store_model 的 scripts 存盘上路径（与内置测试商店同例），
+    /// scripts_content_json 用盘上脚本正文固化（此后部署/启用/停用/卸载全部离线
+    /// 用副本），status 以 deploy 成功后的 "deployed" 收尾；端点按既有口径——
+    /// cmsd 管理这张卡时钉管理面网关端点（同 enable 的委托路径），否则留给
+    /// enable 阶段按 LMM_ENDPOINT_URL/LMM_ENDPOINT_MODEL 标记写。
+    pub fn install_local_from_cards_dir(
+        &self,
+        card_id: &str,
+        on_progress: &mut ProgressFn<'_>,
+        control: script_runner::RunControl,
+        wait_for_slot: Option<&mut dyn FnMut() -> Result<(), ModelManagerError>>,
+    ) -> Result<DownloadResult, ModelManagerError> {
+        self.install_local_from_cards_dir_checked(
+            card_id,
+            on_progress,
+            control,
+            wait_for_slot,
+            None,
+        )
+    }
+
+    pub(super) fn install_local_from_cards_dir_checked(
+        &self,
+        card_id: &str,
+        on_progress: &mut ProgressFn<'_>,
+        control: script_runner::RunControl,
+        wait_for_slot: Option<&mut dyn FnMut() -> Result<(), ModelManagerError>>,
+        expected_package: Option<&str>,
+    ) -> Result<DownloadResult, ModelManagerError> {
+        let resources = super::version_store::wait_resource_operation_lock(
+            true,
+            || control.cancelled(),
+            || on_progress("等待其他模型资源操作完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
+        Self::check_fresh_local_install(card_id)?;
+        if let Some(expected) = expected_package {
+            if Self::preview_local_install(card_id)?.1 != expected {
+                return Err(ModelManagerError::new("installation_package_changed"));
+            }
+        }
+        let safe_id = config::safe_path_component(card_id)
+            .map_err(|e| ModelManagerError::new(format!("卡片 id 不合法：{e}")))?;
+        let dir = config::data_dir().join("cards").join(&safe_id);
+        let local_card = load_local_card(&dir, card_id, on_progress)?;
+        let card = local_card.detail;
+        let model_name = suggest_model_name(&card);
+
+        let mut reservation = super::version_store::DownloadReservation::acquire(
+            card_id,
+            &self.settings.models_path(),
+            || control.cancelled(),
+            || on_progress("等待同一卡片下载完成，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
+        let quota_lock = super::version_store::wait_quota_reservation_lock(
+            || control.cancelled(),
+            || on_progress("等待其他模型下载登记存储配额，可取消…"),
+        )
+        .map_err(ModelManagerError::new)?;
+        reservation
+            .publish(card.summary.size_bytes)
+            .map_err(ModelManagerError::new)?;
+        let retained = if self.settings.storage_quota_gb.is_some() {
+            super::version_store::retained_bytes().map_err(ModelManagerError::new)?
+        } else {
+            0
+        };
+        let check = self.check_can_download_increment_with_retained(
+            card.summary.size_bytes,
+            0,
+            &reservation.root,
+            retained,
+        );
+        if !check.ok {
+            return Err(ModelManagerError::new(check.reason));
+        }
+        drop(quota_lock);
+
+        let mut env = self.env_for_card(&card, &model_name);
+        env.insert(
+            "LMM_MODELS_DIR".into(),
+            reservation.root.to_string_lossy().into_owned(),
+        );
+        let source = ScriptsSource::LocalDir {
+            dir: dir.clone(),
+            blobs: local_card.blobs.clone(),
+            profiles: card.profiles.clone(),
+        };
+
+        // 仅供最后 toast 提示措辞参考，不用来决定要不要跑脚本（同 download_from_store）
+        let engine_reused = db::is_engine_installed(
+            &card.summary.engine_name,
+            card.summary.engine_version.as_deref(),
+        )
+        .unwrap_or(false);
+        let model_reused = db::get_store_model(&card.summary.id)
+            .ok()
+            .flatten()
+            .is_some();
+        let existing_status = db::get_store_model(&card.summary.id)
+            .ok()
+            .flatten()
+            .map(|r| r.status);
+
+        eprintln!("[install_local] 开始：card={card_id} model={model_name}");
+        on_progress(&format!(
+            "检查 {} 引擎是否已安装…",
+            card.summary.engine_name
+        ));
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消"));
+        }
+        // 与商店下载同规：进脚本阶段前钉定目标，进程被杀后重试仍命中原根续传。
+        reservation
+            .start_scripts()
+            .map_err(ModelManagerError::new)?;
+        self.install_engine_and_download_weights(
+            &source,
+            card_id,
+            &card.summary.engine_name,
+            card.summary.engine_version.as_deref(),
+            env,
+            on_progress,
+            control.clone(),
+            wait_for_slot,
+            reservation.script_lease(),
+        )?;
         reservation
             .confirm_stopped()
             .map_err(ModelManagerError::new)?;
 
-        // 重新下载时只保留真实的“已部署”状态；“权重不完整”必须在本次成功后
-        // 恢复成已下载。若原样保留 incomplete，用户即使补齐了文件，界面仍只能
-        // 看见“继续下载”，又会造出另一种假状态。
+        // Installation can legitimately refresh package configuration (for
+        // example ENGINE_BIN_SHA256 in common.sh). Snapshot the delivered
+        // files now, without importing the runtime trees created alongside.
+        let delivered = load_local_card(&dir, card_id, on_progress)?;
+
+        // 落库：重新下载时只保留真实的“已部署”状态（重新安装不退回「已下载」）；
+        // “权重不完整”必须在本次成功后恢复成已下载。若原样保留 incomplete，
+        // 用户即使补齐了文件，界面仍只能看见“继续下载”，又会造出另一种假状态。
+        // 全新记录先按「已下载」起步——deploy 成功后立刻翻成「已部署」。
         let status = match existing_status.as_deref() {
             Some("deployed") => "deployed".to_string(),
             _ => "downloaded".to_string(),
@@ -1721,11 +2132,13 @@ impl ModelManager {
                 quantization: card.summary.quantization.as_deref(),
                 source_repo_id: card.source_repo_id.as_deref(),
                 source_filename: card.source_filename.as_deref(),
-                scripts: &card.scripts,
+                // 盘上路径入库（与内置测试商店同一例）：记录里的 scripts 只是兜底
+                // 展示/老路径回退用，真正执行靠的是下面固化的正文副本。
+                scripts: &local_card.script_paths,
                 status: &status,
                 profiles: &card.profiles,
                 deploy_topology: card.summary.deploy_topology,
-                card_source: "store",
+                card_source: "local",
             },
             &reservation.root.to_string_lossy(),
         )
@@ -1742,28 +2155,39 @@ impl ModelManager {
             eprintln!("[model-store] 保存模型内存档位失败（将使用保守提示）：{e}");
         }
 
-        // 把六类脚本的正文固化到本地：从这一刻起，这个模型的部署/启用/停用/
-        // 卸载全部用本地副本执行，不再依赖商店可达——商店重启、上架、改脚本
-        // 都不会影响用户手上的流程。
-        //
-        // 正常情况下开头已经整套抓下来了（pinned_blobs），这里直接写库，不再多
-        // 跑一趟 HTTP。只有开头那次抓取失败、退回按需获取时才在这兜底补一次；
-        // 补不到也不让整个下载失败（模型已经下好了），只提示一句，后续操作走
-        // 按 URL 取的兼容路径。
-        let pkg = match pinned_pkg {
-            Some(pkg) => Some(pkg),
-            None => match self.fetch_and_store_scripts(&card, None) {
-                Ok(pkg) => Some(pkg),
-                Err(e) => {
-                    eprintln!("[download] 抓取脚本副本失败（不影响本次下载）：{e}");
-                    on_progress("提示：脚本本地副本未能保存，后续操作仍需连接商店");
-                    None
+        // 用盘上脚本正文固化副本：从这一刻起，这张卡的部署/启用/停用/卸载全部
+        // 用这份副本执行（之后界面上的操作走 local_scripts_source 的 Local 形态，
+        // 内容一致地重新展开到同一个卡片目录里跑）。
+        db::set_scripts_content(&card.summary.id, &delivered.blobs, &delivered.assets)
+            .map_err(|e| ModelManagerError::new(format!("固化脚本副本失败：{e}")))?;
+
+        // 部署：复用 ModelManager::deploy 的完整语义（本地固化副本 + 方案解析 +
+        // deployed_script_sha256），不另起炉灶。日志行**原样透传不加前缀**——
+        // 跟 start_deploy 同一个理由：脚本请求输入的 LMM_PROMPT= 约定行是靠行首
+        // 前缀识别的，加了前缀输入框就再也不会弹（双机卡问从机 IP 走的就是它）。
+        on_progress("开始部署…");
+        drop(resources);
+        self.deploy(card_id, None, on_progress, control)?;
+
+        // Installation/deployment has completed. Endpoint enrollment is optional
+        // and may publish only confirmed gateway and per-card identity facts;
+        // the global default alias cannot stand in for a missing model name.
+        if let Ok(client) = crate::features::megacube::Client::connect() {
+            if let Ok(real_model) =
+                crate::features::megacube::delegate::endpoint_model_for(&client, card_id)
+            {
+                if let Some((gateway_url, _)) =
+                    crate::features::megacube::delegate::gateway_endpoint()
+                {
+                    let _ = db::set_endpoint_info(
+                        card_id,
+                        Some(gateway_url.as_str()),
+                        Some(real_model.as_str()),
+                    );
+                    on_progress(&format!(
+                        "管理面端点已登记：{gateway_url}（模型 {real_model}）"
+                    ));
                 }
-            },
-        };
-        if let Some(pkg) = pkg {
-            if let Err(e) = db::set_scripts_content(&card.summary.id, &pkg.scripts, &pkg.assets) {
-                eprintln!("[download] 固化脚本副本失败（不影响本次下载）：{e}");
             }
         }
 
@@ -2842,11 +3266,12 @@ impl ModelManager {
         control: script_runner::RunControl,
     ) -> Result<serde_json::Value, ModelManagerError> {
         let _resources = super::version_store::wait_resource_operation_lock(
-            false,
+            true,
             || control.cancelled(),
             || on_progress("等待其他模型资源操作完成，可取消…"),
         )
         .map_err(ModelManagerError::new)?;
+
         let rec = self.get_record(card_id)?;
         versions::ensure_not_deleting(&rec)?;
         if rec.running {
@@ -2879,7 +3304,7 @@ impl ModelManager {
         .can_update
         {
             return Err(ModelManagerError::new(
-                "新旧权重不同或缺少验证依据，请通过历史版本下载新版；现有部署已保留。",
+                "新旧权重不同或缺少验证依据，请通过版本与存储下载新版；现有部署已保留。",
             ));
         }
         if control.cancelled() {
@@ -2996,11 +3421,12 @@ impl ModelManager {
         control: script_runner::RunControl,
     ) -> Result<(), ModelManagerError> {
         let _resources = super::version_store::wait_resource_operation_lock(
-            false,
+            true,
             || control.cancelled(),
             || on_progress("等待其他模型资源操作完成，可取消…"),
         )
         .map_err(ModelManagerError::new)?;
+
         let rec = self.get_record(card_id)?;
         versions::ensure_not_deleting(&rec)?;
         // 状态门（r21 P1-1，对照 enable 的 status 门）。此前 deploy 对任何状态都
@@ -3132,6 +3558,43 @@ impl ModelManager {
         if rec.status != "deployed" {
             return Err(ModelManagerError::new("该模型尚未部署，请先部署再启用"));
         }
+
+        // MegaCube 深度整合：cmsd 在场且登记了这张原生卡时，启用权威让位给
+        // systemd 守护层（崩溃自愈/开机自启/内存预算/熔断），进度事件复用
+        // run 日志。确认未配置本机管理或该卡不存在时才走原脚本；失联、
+        // 历史冲突与同名仅观察资源不回退。远端只读配置不占本机管理权。
+        // 委托臂必须先于下方 P2-8 守卫：cmsd 托管的卡端点存活是自愈/接管的
+        // 常态，不该被「外来实例」误拦；守卫只约束脚本路径。
+        match crate::features::megacube::delegate::enable(
+            card_id,
+            &mut |line| on_progress(line),
+            &|| control.cancelled(),
+        ) {
+            Ok(crate::features::megacube::delegate::DelegateOutcome::NotManaged) => {}
+            Ok(crate::features::megacube::delegate::DelegateOutcome::Enabled {
+                endpoint_url,
+                endpoint_model,
+            }) => {
+                db::set_running(card_id, true)
+                    .map_err(|e| ModelManagerError::new(format!("记录运行状态失败：{e}")))?;
+                // Bind the confirmed gateway and this card's actual model name;
+                // a device-wide default alias could select another running card.
+                let _ = db::set_endpoint_info(
+                    card_id,
+                    Some(endpoint_url.as_str()),
+                    Some(endpoint_model.as_str()),
+                );
+                return Ok(());
+            }
+            Ok(crate::features::megacube::delegate::DelegateOutcome::Stopped) => {
+                unreachable!("enable 不会产生 Stopped 结局")
+            }
+            Ok(crate::features::megacube::delegate::DelegateOutcome::Purged) => {
+                unreachable!("enable 不会产生 Purged 结局")
+            }
+            Err(e) => return Err(ModelManagerError::new(e)),
+        }
+
         // 本批评审 P2-8：启用前的廉价在跑守卫。卸载侧有三重停验，启用此前只有
         // 内存准入——一张被遗留脚本 fail-open 启过的卡（老版 enable.sh 半途失败
         // 仍报成功、或运维照卡片文档手工跑过脚本），库里 running=0 而服务真在跑，
@@ -3320,6 +3783,23 @@ impl ModelManager {
         control: script_runner::RunControl,
     ) -> Result<(), ModelManagerError> {
         let rec = self.get_record(card_id)?;
+
+        // 同 enable 的让位约定：cmsd 管理的原生卡经管理面停用。
+        match crate::features::megacube::delegate::stop(
+            card_id,
+            &mut |line| on_progress(line),
+            &|| control.cancelled(),
+        ) {
+            Ok(crate::features::megacube::delegate::DelegateOutcome::NotManaged) => {}
+            Ok(crate::features::megacube::delegate::DelegateOutcome::Stopped) => {
+                db::set_running(card_id, false)
+                    .map_err(|e| ModelManagerError::new(format!("记录运行状态失败：{e}")))?;
+                return Ok(());
+            }
+            Ok(_) => unreachable!("stop 不会产生其他结局"),
+            Err(e) => return Err(ModelManagerError::new(e)),
+        }
+
         let env = self.env_for_record(&rec);
         let source = self.local_scripts_source(&rec)?;
         self.run_card_script(
@@ -3363,12 +3843,18 @@ impl ModelManager {
         on_progress: &mut ProgressFn<'_>,
         control: script_runner::RunControl,
     ) -> Result<UninstallOutcome, ModelManagerError> {
+        if control.cancelled() {
+            return Err(ModelManagerError::new("已取消"));
+        }
+        crate::features::megacube::delegate::prepare_reader(card_id)
+            .map_err(ModelManagerError::new)?;
         let _resources = super::version_store::wait_resource_operation_lock(
-            purge_weights,
+            true,
             || control.cancelled(),
             || on_progress("等待其他模型资源操作完成，可取消…"),
         )
         .map_err(ModelManagerError::new)?;
+
         if super::version_store::has_history(card_id).map_err(ModelManagerError::new)? {
             return Err(ModelManagerError::new(
                 "请先在历史版本中清理保留版本，再卸载或删除当前模型。",
@@ -3382,6 +3868,69 @@ impl ModelManager {
                 .map_err(|error| ModelManagerError::new(error.to_string()))?;
         }
         let rec = self.get_record(card_id)?;
+        let mut transaction = super::maintenance::Transaction::begin(
+            card_id,
+            &rec.card_name,
+            purge_weights,
+            &control,
+        )
+        .map_err(ModelManagerError::new)?;
+        let result = self.uninstall_inner(
+            card_id,
+            purge_weights,
+            on_progress,
+            control,
+            transaction.as_mut(),
+        );
+        match result {
+            Ok(outcome) => {
+                if let Some(transaction) = transaction.as_mut() {
+                    transaction.finish().map_err(|error| {
+                        transaction.failed(&error);
+                        ModelManagerError::new(format!(
+                            "{error}；事务尚未核实结束，请在模型商店恢复维护"
+                        ))
+                    })?;
+                }
+                Ok(outcome)
+            }
+            Err(error) => {
+                if let Some(transaction) = transaction.as_mut() {
+                    transaction.failed(&error.to_string());
+                    return Err(ModelManagerError::new(format!(
+                        "{error}；事务尚未核实结束，未自动回滚，请核实并恢复维护"
+                    )));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn uninstall_inner(
+        &self,
+        card_id: &str,
+        purge_weights: bool,
+        on_progress: &mut ProgressFn<'_>,
+        mut control: script_runner::RunControl,
+        mut transaction: Option<&mut super::maintenance::Transaction>,
+    ) -> Result<UninstallOutcome, ModelManagerError> {
+        let rec = self.get_record(card_id)?;
+        // Verify ownership before any uninstall script can stop a process or
+        // remove files. An unavailable cmsd must not hand control to old scripts.
+        if let Some(transaction) = transaction.as_mut() {
+            transaction
+                .action("disable", &control, &mut |line| on_progress(line))
+                .map_err(ModelManagerError::new)?;
+            control.execution_fence = Some(transaction.fence().map_err(ModelManagerError::new)?);
+        } else {
+            crate::features::megacube::delegate::stop(
+                card_id,
+                &mut |line| on_progress(line),
+                &|| control.cancelled(),
+            )
+            .map_err(ModelManagerError::new)?;
+        }
+
         let source = self.local_scripts_source(&rec)?;
         let uninstall = source.entry_content("uninstall", source.fetch_policy("uninstall"))?;
         // Exact published-body backstop for a confirmed destructive version.
@@ -3456,10 +4005,34 @@ impl ModelManager {
             "uninstall",
             &env,
             &mut |line| on_progress(line),
-            control,
+            control.clone(),
             false,
         )?;
-
+        let _script_finished = control
+            .execution_fence
+            .as_ref()
+            .map(|fence| fence.quiesce())
+            .transpose()
+            .map_err(ModelManagerError::new)?;
+        if let Some(transaction) = transaction.as_mut() {
+            transaction
+                .stage("script_finished")
+                .map_err(ModelManagerError::new)?;
+            if control.cancelled() {
+                return Err(ModelManagerError::new("已取消，保留维护与现场"));
+            }
+        }
+        // 记录留还是删，取决于用户按的是哪个按钮——这是两个动作**唯一**的语义
+        // 差别，也是它们在界面上叫不同名字的原因：
+        //
+        //   仅卸载：只是把模型从引擎上撤下来。权重还在盘上，卡片就该还在库里，
+        //           退回「已下载」，按钮变回「部署」。
+        //   彻底删除：权重都没了，留着记录就是一条指向空气的死数据。
+        //
+        // 以前两条路径都走 delete_store_model，于是「仅卸载」会把卡片从库里抹掉，
+        // 盘上几十 GB 权重从此没有任何界面管得到——用户要么手工 rm，要么重下一遍
+        // 才能重新接管。那不是"保留"，是把东西弄丢在原地。
+        //
         // `cards/<card-id>` 由 LMM 自己创建，里面只有这张卡下载的脚本、厂商附属包
         // 与标记文件。用户选择“删除模型数据”后，这些文件也在删除范围内；不能让
         // 卡片脚本各自记得删，否则脚本升级/回滚一次就会留下看不见的部署包。
@@ -3474,6 +4047,17 @@ impl ModelManager {
             .ok()
             .map(|safe_id| config::data_dir().join("cards").join(safe_id));
 
+        if purge_weights {
+            if let Some(transaction) = transaction.as_mut() {
+                transaction
+                    .action("purge", &control, &mut |line| on_progress(line))
+                    .map_err(ModelManagerError::new)?;
+            } else {
+                self.propagate_removal_to_cmsd(card_id, &mut |line| on_progress(line), &|| {
+                    control.cancelled()
+                })?;
+            }
+        }
         // 受管（版本化）布局由应用直接删除——卡片卸载脚本只懂旧式布局，删不了
         // .versions 隔离根。主线语义：purge 失败在动任何记录之前如实报错。
         if purge_weights && managed_purge {
@@ -3560,6 +4144,10 @@ impl ModelManager {
                         format!("刷新下载目录登记大小失败，未删除模型记录：{error}"),
                     ),
                 })?;
+                if transaction.is_some() {
+                    crate::features::megacube::delegate::forget_ownership(card_id)
+                        .map_err(ModelManagerError::new)?;
+                }
             } else {
                 db::mark_cleanup_required(card_id)
                     .map_err(|e| ModelManagerError::new(format!("保留待清理模型记录失败：{e}")))?;
@@ -3571,6 +4159,11 @@ impl ModelManager {
         } else {
             db::mark_uninstalled(card_id)
                 .map_err(|e| ModelManagerError::new(format!("更新模型状态失败：{e}")))?;
+        }
+        if let Some(transaction) = transaction.as_mut() {
+            transaction
+                .stage("committed")
+                .map_err(ModelManagerError::new)?;
         }
 
         // 共享下载根与登记版本根的折叠披露放在**删除闸门之后**：登记路径是
@@ -3674,6 +4267,31 @@ impl ModelManager {
         })
     }
 
+    /// 删除传播在库记录移除前完成。管理权核实或注销失败时保留记录和
+    /// 卡片，供用户恢复；不能把失联当成允许使用旧脚本或删除登记。
+    fn propagate_removal_to_cmsd(
+        &self,
+        card_id: &str,
+        log: &mut dyn FnMut(&str),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), ModelManagerError> {
+        match crate::features::megacube::delegate::purge(card_id, log, cancelled) {
+            Ok(crate::features::megacube::delegate::DelegateOutcome::Purged) => {}
+            Ok(crate::features::megacube::delegate::DelegateOutcome::NotManaged) => {}
+            Ok(_) => {}
+            Err(e) => {
+                return Err(ModelManagerError::new(format!(
+                    "[cmsd] 注销未完成，保留商店记录和卡片以便恢复：{e}"
+                )));
+            }
+        }
+        // 合并修正（r23）：main 侧 r23-P1-1 新序下，卡目录只在 uninstall_inner
+        // 的成功分支按 own_card_dir 删除；失败路径必须保留 vendor/.deploy-env
+        // 消歧提示给重试轮（failed_purge_keeps_disambiguation_hint 钉住）。
+        // 这里不再提前删除物化目录。
+        Ok(())
+    }
+
     /// 逃生出口：**只删数据库记录，一个字节都不删**。
     ///
     /// 什么时候需要它
@@ -3709,6 +4327,7 @@ impl ModelManager {
     /// 这是破坏性且不可逆的操作（连这张卡的 API Key 一并删掉），调用方必须显式
     /// 走这条方法/这个端点，普通卸载不会拐到这里来。
     pub fn force_remove_record(&self, card_id: &str) -> Result<ForcedRemoval, ModelManagerError> {
+        super::maintenance::ensure_clear(card_id).map_err(ModelManagerError::new)?;
         let rec = self.get_record(card_id)?;
         // r32 P2-1：running 标志为真即拒——不查 require_actually_stopped（那是
         // 三重停验，查不动 docker daemon 时会破坏本操作的逃生口用途）；
@@ -3745,6 +4364,9 @@ impl ModelManager {
         super::version_store::abandon_card_records(card_id)
             .map_err(|e| ModelManagerError::new(format!("删除模型及历史记录失败：{e}")))?;
 
+        // A record-only escape hatch never invokes cmsd purge (native purge
+        // deletes weights) or removes card files. Runtime ownership remains
+        // visible in device settings until explicitly uninstalled.
         let warning = if residual_paths.is_empty() {
             "force_remove_records_only"
         } else {
@@ -4638,6 +5260,27 @@ impl ModelManager {
     }
 }
 
+/// 清理卡片物化目录 `cards_root/<card_id>`（商店/MC 下载时物化的脚本工作
+/// 副本，可再生物）：商店记录没了它还留着的话，cmsd 按目录扫卡会继续把
+/// 已删模型报成「已下载」。尽力而为——标识非法、目录不存在都不动；删除
+/// 失败只记日志行，不让上层的删除流程失败。
+fn remove_materialized_card_dir(cards_root: &Path, card_id: &str, log: &mut dyn FnMut(&str)) {
+    let Ok(component) = config::safe_path_component(card_id) else {
+        return;
+    };
+    let dir = cards_root.join(component);
+    if !dir.is_dir() {
+        return;
+    }
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => log(&format!("已清理卡片物化目录：{}", dir.display())),
+        Err(e) => log(&format!(
+            "清理卡片物化目录失败（不阻断删除，可手动删除 {}）：{e}",
+            dir.display()
+        )),
+    }
+}
+
 /// 给一次脚本运行起个人话名字，只用于「上次没退干净、这次启动清理掉了什么」
 /// 的提示文案。脚本参数里 LMM_MODEL_NAME 是用户看得懂的模型名，没有时退回
 /// 卡片 id。
@@ -4685,6 +5328,306 @@ fn format_quota(q: f64) -> String {
     } else {
         format!("{q}")
     }
+}
+
+// ---------------------------------------------------------------- 本地卡片（install_local）
+
+/// 本地卡片的六个入口脚本（script_type，对应 `<script_type>.sh`）。
+const LOCAL_CARD_ENTRY_SCRIPTS: [&str; 6] = [
+    "install_engine",
+    "download_model",
+    "deploy",
+    "enable",
+    "stop",
+    "uninstall",
+];
+
+/// MCP（megacube-admin）生成的卡自带的来源标记行。含这行的优先放行；没有的也
+/// 接受（用户按同规格放好的卡），但日志里说明来源未标记。
+const LOCAL_CARD_GENERATED_MARK: &str = "本卡由 megacube-admin 按";
+
+/// 从盘上读出来的一张本地卡片。
+struct LocalCard {
+    /// 由 card.json 重建的卡片详情（缺字段按最小集推定）
+    detail: StoreCardDetail,
+    /// 六个入口脚本正文 + 自算 sha256（固化进 scripts_content_json）
+    blobs: BTreeMap<String, db::ScriptBlob>,
+    /// 其余随卡文件（common.sh、weights.sha256、vendor 包文件等非状态文件），
+    /// 固化进 assets_content_json——之后界面上的操作靠它们把整包重新展开到
+    /// 同一个卡片目录里跑。
+    assets: BTreeMap<String, db::ScriptBlob>,
+    /// 六个入口脚本的盘上路径（入库 scripts 字段，与内置测试商店同例）
+    script_paths: BTreeMap<String, String>,
+}
+
+/// Legacy cards have no package manifest. Prune runtime trees before walking
+/// them, and never import a symlink as a package file.
+fn collect_card_files(base: &Path, sub: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(base.join(sub)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let rel = sub.join(entry.file_name());
+        if is_card_state_file(&rel) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            collect_card_files(base, &rel, out);
+        } else if meta.is_file() {
+            out.push(rel);
+        }
+    }
+}
+
+fn local_card_package_files(
+    dir: &Path,
+    meta: Option<&serde_json::Value>,
+) -> Result<Vec<PathBuf>, ModelManagerError> {
+    let Some(manifest) = meta.and_then(|m| m.get("package_files")) else {
+        let mut files = Vec::new();
+        collect_card_files(dir, Path::new(""), &mut files);
+        return Ok(files);
+    };
+    let entries = manifest
+        .as_array()
+        .filter(|a| a.len() <= 10000)
+        .ok_or_else(|| {
+            ModelManagerError::new(
+                "card.json 的 package_files 必须是最多 10000 项的相对文件路径清单",
+            )
+        })?;
+    let mut files = std::collections::BTreeSet::new();
+    for item in entries {
+        let name = item.as_str().ok_or_else(|| {
+            ModelManagerError::new("package_files 中每项必须是相对文件路径字符串")
+        })?;
+        let rel = script_runner::sanitize_relative_path(name)?;
+        if is_card_state_file(&rel) {
+            return Err(ModelManagerError::new(format!(
+                "package_files 不能包含运行状态、缓存或虚拟环境：{name}"
+            )));
+        }
+        let mut target = dir.to_path_buf();
+        for component in rel.components() {
+            target.push(component);
+            let info = std::fs::symlink_metadata(&target)
+                .map_err(|e| ModelManagerError::new(format!("读取包装文件 {name} 失败：{e}")))?;
+            if info.file_type().is_symlink() {
+                return Err(ModelManagerError::new(format!(
+                    "package_files 不能经过符号链接：{name}"
+                )));
+            }
+        }
+        if !target.is_file() {
+            return Err(ModelManagerError::new(format!(
+                "包装文件不是普通文件：{name}"
+            )));
+        }
+        files.insert(rel);
+    }
+    // Metadata keeps even a minimal card in its persistent package directory.
+    files.insert(PathBuf::from("card.json"));
+    Ok(files.into_iter().collect())
+}
+
+/// 校验并读入一张本地卡片。
+///
+/// 校验三件事（拒绝理由必须是一句能直接给cmsd/用户看的中文）：
+/// 1. 六个入口脚本齐；
+/// 2. 形态可辨——common.sh（驭光原生卡/docker 容器卡）或 compose 型 vendor
+///    布局（install_engine.sh 里声明 VENDOR_DIR 且内嵌 compose.yaml，与 cmsd
+///    的 scan_compose_card 同一把尺）至少其一；
+/// 3. 来源标记只影响日志措辞，不影响放行。
+fn load_local_card(
+    dir: &Path,
+    card_id: &str,
+    on_progress: &mut ProgressFn<'_>,
+) -> Result<LocalCard, ModelManagerError> {
+    if !dir.is_dir() {
+        return Err(ModelManagerError::new(format!(
+            "本地卡片目录不存在：{}。这张卡应先由 megacube-admin 生成、\
+             或按同一规格放进该目录",
+            dir.display()
+        )));
+    }
+
+    let missing: Vec<String> = LOCAL_CARD_ENTRY_SCRIPTS
+        .iter()
+        .map(|t| format!("{t}.sh"))
+        .filter(|name| !dir.join(name).is_file())
+        .collect();
+    if !missing.is_empty() {
+        return Err(ModelManagerError::new(format!(
+            "本地卡片不完整：缺少入口脚本 {}（目录 {}）",
+            missing.join("、"),
+            dir.display()
+        )));
+    }
+
+    let install_engine_text = std::fs::read_to_string(dir.join("install_engine.sh"))
+        .map_err(|e| ModelManagerError::new(format!("读取 install_engine.sh 失败：{e}")))?;
+    let has_common_sh = dir.join("common.sh").is_file();
+    let compose_shaped =
+        install_engine_text.contains("VENDOR_DIR=") && install_engine_text.contains("compose.yaml");
+    if !has_common_sh && !compose_shaped {
+        return Err(ModelManagerError::new(
+            "无法识别这张本地卡片的形态：既没有 common.sh（驭光原生卡/docker 容器卡），\
+             install_engine.sh 里也没有 compose 型 vendor 布局的记号（VENDOR_DIR + compose.yaml）",
+        ));
+    }
+
+    // 来源标记：六个入口脚本或 common.sh 任何一处带「本卡由 megacube-admin 按 …」
+    let mut marked = install_engine_text.contains(LOCAL_CARD_GENERATED_MARK);
+    if !marked {
+        for name in [
+            "download_model.sh",
+            "deploy.sh",
+            "enable.sh",
+            "stop.sh",
+            "uninstall.sh",
+            "common.sh",
+        ] {
+            if std::fs::read_to_string(dir.join(name))
+                .map(|t| t.contains(LOCAL_CARD_GENERATED_MARK))
+                .unwrap_or(false)
+            {
+                marked = true;
+                break;
+            }
+        }
+    }
+    if marked {
+        on_progress("本地卡片来源：megacube-admin 生成（含生成标记行）");
+    } else {
+        on_progress(
+            "这张本地卡片没有生成来源标记（「本卡由 megacube-admin 按 … 生成」），\
+             按用户自备卡片放行——与商店固化脚本同级处理",
+        );
+    }
+
+    // 六个入口脚本：正文 + 自算 sha256（哈希是"内容没变过"的指纹，install_engine
+    // 的版本比对靠它；来源可信性由"这是用户自己目录里的卡"承担，不走商店验签）。
+    let mut blobs = BTreeMap::new();
+    let mut script_paths = BTreeMap::new();
+    for script_type in LOCAL_CARD_ENTRY_SCRIPTS {
+        let path = dir.join(format!("{script_type}.sh"));
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| ModelManagerError::new(format!("读取 {} 失败：{e}", path.display())))?;
+        blobs.insert(
+            script_type.to_string(),
+            db::ScriptBlob {
+                sha256: script_runner::sha256_hex(&content),
+                content,
+            },
+        );
+        script_paths.insert(script_type.to_string(), path.to_string_lossy().to_string());
+    }
+
+    // 其余随卡文件（排除入口脚本与状态/产物文件）固化为附属文件。
+    // 只收能过 sanitize_relative_path 的相对路径——过不了的名字将来重新展开时
+    // 必然被拒，与其那时失败，不如现在就不收（并说出来）。
+    //
+    // card.json **必须**收进来，而且不只是因为它是元数据副本：附属副本为空时，
+    // 之后界面上的操作（部署/启用/停用/卸载）会按「单文件卡」把入口脚本落成
+    // 临时文件、以进程 cwd 执行——而本地卡的脚本按 CARD_DIR 相对引用盘上的
+    // vendor/、weights.sha256（零附属 ≠ 自包含）。有 card.json 垫底，附属副本
+    // 恒非空，之后的操作永远在卡片目录里就地跑（与 LocalDir 同一个工作目录）。
+    let mut assets = BTreeMap::new();
+    let entry_names: std::collections::HashSet<String> = LOCAL_CARD_ENTRY_SCRIPTS
+        .iter()
+        .map(|t| format!("{t}.sh"))
+        .collect();
+    let meta = std::fs::read_to_string(dir.join("card.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let rel_files = local_card_package_files(dir, meta.as_ref())?;
+    for rel in rel_files {
+        let rel_text = rel.to_string_lossy().replace('\\', "/");
+        if rel.components().count() == 1 && entry_names.contains(&rel_text) {
+            continue;
+        }
+        if is_card_state_file(&rel) {
+            continue;
+        }
+        if let Err(e) = script_runner::sanitize_relative_path(&rel_text) {
+            on_progress(&format!("跳过一个不能固化的卡片文件 {rel_text}（{e}）"));
+            continue;
+        }
+        let content = match std::fs::read_to_string(dir.join(&rel)) {
+            Ok(c) => c,
+            Err(e) => {
+                on_progress(&format!("跳过读不到的卡片文件 {rel_text}（{e}）"));
+                continue;
+            }
+        };
+        assets.insert(
+            rel_text,
+            db::ScriptBlob {
+                sha256: script_runner::sha256_hex(&content),
+                content,
+            },
+        );
+    }
+
+    // card.json：MCP 物化时随卡写入的元数据（体积口径、引擎名、来源仓库）。
+    // 缺了/解析不了不拒——按最小集推定并把话说清楚（体积按 0 意味着磁盘预检
+    // 放行，这张卡多半没按规格放好，值得在日志里喊一嗓子）。
+    if meta.is_none() {
+        on_progress(
+            "卡片目录里没有可解析的 card.json，元数据按最小集推定（体积按 0、引擎名 \
+             unknown）——磁盘预检将按 0 字节放行，建议核对这些文件是不是按规格放好的",
+        );
+    }
+    let get_str = |key: &str| {
+        meta.as_ref()
+            .and_then(|m| m.get(key))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let size_bytes = meta
+        .as_ref()
+        .and_then(|m| m.get("size_bytes"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let detail = StoreCardDetail {
+        summary: StoreCardSummary {
+            // 目录名是身份：请求就是按它找到这张卡的，card.json 里的 id 对不上
+            // 也以目录名为准（cmsd 扫描同样按目录名认卡）。
+            id: card_id.to_string(),
+            // 本地卡目前没有双机形态（双机卡要 LMM_WORKER，那是一期就划出去的）
+            deploy_topology: DeployTopology::Single,
+            name: get_str("name").unwrap_or_else(|| card_id.to_string()),
+            org: get_str("org"),
+            description: get_str("description"),
+            size_bytes,
+            quantization: get_str("quantization"),
+            engine_name: get_str("engine_name").unwrap_or_else(|| "unknown".to_string()),
+            engine_version: get_str("engine_version"),
+            script_sha256: Default::default(),
+            weight_verification: Default::default(),
+            resource_requirements: Default::default(),
+        },
+        source_repo_id: get_str("source_repo_id"),
+        source_filename: get_str("source_filename"),
+        scripts: script_paths.clone(),
+        script_sha256: None,
+        assets: Default::default(),
+        asset_sha256: None,
+        profiles: Vec::new(),
+    };
+
+    Ok(LocalCard {
+        detail,
+        blobs,
+        assets,
+        script_paths,
+    })
 }
 
 /// 一批目录此刻合计占多少字节（不存在的算 0）。
@@ -5962,6 +6905,36 @@ mod tests {
     }
 
     #[test]
+    fn remove_materialized_card_dir_cleans_only_safe_existing_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("cards");
+
+        // 存在的物化目录（含嵌套内容）：删掉并记一行日志
+        std::fs::create_dir_all(root.join("qwen38-27b-nvfp4-mtp/nested")).unwrap();
+        std::fs::write(root.join("qwen38-27b-nvfp4-mtp/nested/x.sh"), b"x").unwrap();
+        let mut lines: Vec<String> = Vec::new();
+        remove_materialized_card_dir(&root, "qwen38-27b-nvfp4-mtp", &mut |l| {
+            lines.push(l.to_string())
+        });
+        assert!(!root.join("qwen38-27b-nvfp4-mtp").exists());
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("已清理卡片物化目录"));
+
+        // 不存在的目录：不动、不记日志（删除流程不该被噪音刷屏）
+        let mut lines: Vec<String> = Vec::new();
+        remove_materialized_card_dir(&root, "never-existed", &mut |l| lines.push(l.to_string()));
+        assert!(lines.is_empty());
+
+        // 路径穿越标识：safe_path_component 拒掉，目录外的东西一个字节都不碰
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let mut lines: Vec<String> = Vec::new();
+        remove_materialized_card_dir(&root, "../outside", &mut |l| lines.push(l.to_string()));
+        assert!(outside.exists());
+        assert!(lines.is_empty());
+    }
+
+    #[test]
     fn suggest_model_name_falls_back_to_sanitized_colon_free_card_id() {
         // 原名归一为空的卡片走 card id 兜底，但 id 是自由文本可能带冒号（第九
         // 轮评审 P2）：商店 model_name 永无冒号是移除守卫去 tag 兜底的
@@ -6784,6 +7757,10 @@ echo pwned
 
         add_stuck_record("card-stuck", "Org/Ornith-1.5-35B-A3B", 168_000_000_000);
         let mgr = manager_with_models_dir(&models_dir);
+        let card_dir = config::data_dir().join("cards/card-stuck");
+        std::fs::create_dir_all(&card_dir).unwrap();
+        std::fs::write(card_dir.join("card.json"), "{}").unwrap();
+        std::fs::write(card_dir.join("uninstall.sh"), "do not execute").unwrap();
 
         let removal = mgr
             .force_remove_record("card-stuck")
@@ -6792,6 +7769,11 @@ echo pwned
             db::get_store_model("card-stuck").unwrap().is_none(),
             "记录必须真的从库里消失，否则卡片还是赖着"
         );
+        assert!(
+            card_dir.join("uninstall.sh").exists(),
+            "只删记录不能清卡片文件或调用 cmsd purge"
+        );
+        assert!(weights.exists(), "只删记录不能删除权重");
         assert_eq!(removal.recorded_bytes, 168_000_000_000);
         assert!(
             removal
@@ -9031,6 +10013,462 @@ true
             );
         }
     }
+
+    // ------------------------------------------------ 本地卡片安装（install_local）
+
+    /// install_local fixture：探针即过的 install_engine（引擎「已就绪」，整步跳过，
+    /// 全程没有任何真实安装动作）。
+    const LOCAL_FIXTURE_INSTALL_ENGINE: &str =
+        "#!/bin/sh\nif [ \"${LMM_PROBE_ONLY:-0}\" = \"1\" ]; then exit 0; fi\nexit 0\n";
+
+    /// install_local fixture：写一笔假权重、报一条进度、成功返回。
+    const LOCAL_FIXTURE_DOWNLOAD: &str = "#!/bin/sh
+mkdir -p \"$LMM_MODELS_DIR/Fixture-Model\"
+echo 'fake-weights' > \"$LMM_MODELS_DIR/Fixture-Model/model.bin\"
+echo 'LMM_PROGRESS_BYTES=16/16'
+echo '权重就绪'
+";
+
+    /// install_local fixture：deploy 往卡片目录写 .deploy-env（驭光卡同款产物）。
+    const LOCAL_FIXTURE_DEPLOY: &str = "#!/bin/sh
+cat > .deploy-env <<EOF
+PORT=\"18080\"
+HOST=\"127.0.0.1\"
+MODEL_ID=\"fixture-model\"
+EOF
+echo '部署完成'
+";
+
+    /// 写一张 stub 本地卡片到 `<store_root>/cards/<card_id>/`。
+    ///
+    /// `marked` 控制来源标记行（「本卡由 megacube-admin 按 … 生成」）写不写进
+    /// common.sh；`with_common_sh` 控制给不给 common.sh（不给时 install_engine
+    /// 里带 compose 型 vendor 布局的记号，形态照样可辨）。
+    fn write_local_fixture_card(card_id: &str, marked: bool, with_common_sh: bool) -> PathBuf {
+        let dir = config::data_dir().join("cards").join(card_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let install_engine = if with_common_sh {
+            LOCAL_FIXTURE_INSTALL_ENGINE.to_string()
+        } else {
+            // compose 型容器卡（mtp/vllm 一代）的布局记号：VENDOR_DIR + compose.yaml，
+            // 与 cmsd scan_compose_card 的判据一致
+            format!(
+                "{LOCAL_FIXTURE_INSTALL_ENGINE}\
+                 # compose 型容器卡布局\nVENDOR_DIR=\"$CARD_DIR/vendor\"\n# 内嵌 compose.yaml\n"
+            )
+        };
+        for (name, body) in [
+            ("install_engine.sh", install_engine.as_str()),
+            ("download_model.sh", LOCAL_FIXTURE_DOWNLOAD),
+            ("deploy.sh", LOCAL_FIXTURE_DEPLOY),
+            ("enable.sh", "#!/bin/sh\nexit 0\n"),
+            ("stop.sh", "#!/bin/sh\nexit 0\n"),
+            ("uninstall.sh", "#!/bin/sh\nexit 0\n"),
+        ] {
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+        if with_common_sh {
+            let marker = if marked {
+                "# 本卡由 megacube-admin 按 Test/Fixture 的 artifact-manifest 生成\n"
+            } else {
+                ""
+            };
+            std::fs::write(
+                dir.join("common.sh"),
+                format!("#!/bin/sh\n{marker}MODEL_ID=\"fixture-model\"\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            dir.join("card.json"),
+            format!(
+                "{{\"id\":\"{card_id}\",\"name\":\"Fixture Model\",\"size_bytes\":16,\
+                 \"engine_name\":\"fixture-engine\",\"source_repo_id\":\"Test/Fixture\"}}"
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    fn local_install_manager(models_dir: &std::path::Path) -> ModelManager {
+        // 余量闸清零：这几条盯的是编排本身，不该跟着跑测试那台机器还剩多少盘走
+        let settings = Settings {
+            models_dir: models_dir.to_string_lossy().to_string(),
+            staging_dir: models_dir.join("staging").to_string_lossy().to_string(),
+            min_free_space_gb: 0.0,
+            ..Default::default()
+        };
+        ModelManager::new(Some(settings), None)
+    }
+
+    #[test]
+    fn install_local_preserves_runtime_files_and_does_not_snapshot_virtualenv() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let card_dir = write_local_fixture_card("fixture-runtime", true, true);
+        for name in [
+            "vendor/.cache/sglang/flashinfer_jit.log",
+            ".venv/lib/site-packages/tool.py",
+            "vendor/logs/engine.txt",
+        ] {
+            let path = card_dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "runtime-owned content").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
+        let cache = card_dir.join("vendor/.cache/sglang/flashinfer_jit.log");
+        let before = std::fs::metadata(&cache).unwrap().modified().unwrap();
+        let mgr = local_install_manager(&models_dir);
+        for attempt in 0..2 {
+            let mut lines = Vec::new();
+            if attempt == 0 {
+                mgr.install_local_from_cards_dir(
+                    "fixture-runtime",
+                    &mut |l| lines.push(l.to_string()),
+                    Default::default(),
+                    None,
+                )
+                .unwrap();
+            } else {
+                mgr.deploy(
+                    "fixture-runtime",
+                    None,
+                    &mut |l| lines.push(l.to_string()),
+                    Default::default(),
+                )
+                .expect("已登记模型通过固定当前配方修复，不回写运行缓存");
+            }
+            let record = db::get_store_model("fixture-runtime").unwrap().unwrap();
+            assert!(record.assets_content.contains_key("common.sh"));
+            assert!(
+                !record
+                    .assets_content
+                    .keys()
+                    .any(|k| k.contains(".cache") || k.contains(".venv") || k.contains("logs"))
+            );
+            assert!(!lines.iter().any(|line| line.contains("跳过读不到")));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&cache).unwrap(),
+            "runtime-owned content"
+        );
+        assert_eq!(
+            std::fs::metadata(&cache).unwrap().modified().unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn local_card_manifest_selects_only_delivery_files_and_rejects_unsafe_entries() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = setup_temp_db();
+        let card_dir = write_local_fixture_card("fixture-manifest", true, true);
+        std::fs::write(card_dir.join("generated-state.txt"), "not a package file").unwrap();
+        let meta = serde_json::json!({"package_files": ["common.sh"]});
+        std::fs::write(card_dir.join("card.json"), meta.to_string()).unwrap();
+        let card = load_local_card(&card_dir, "fixture-manifest", &mut |_| {}).unwrap();
+        assert_eq!(
+            card.assets.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["card.json", "common.sh"]
+        );
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "outside").unwrap();
+        std::os::unix::fs::symlink(&outside, card_dir.join("linked.txt")).unwrap();
+        for name in [
+            "../outside.txt",
+            ".venv/tool.py",
+            "missing.txt",
+            "linked.txt",
+        ] {
+            let meta = serde_json::json!({"package_files": [name]});
+            std::fs::write(card_dir.join("card.json"), meta.to_string()).unwrap();
+            assert!(
+                load_local_card(&card_dir, "fixture-manifest", &mut |_| {}).is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_local_keeps_configuration_refreshed_by_engine_installation() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let card_dir = write_local_fixture_card("fixture-config-refresh", true, true);
+        std::fs::write(
+            card_dir.join("install_engine.sh"),
+            r#"#!/bin/sh
+if [ "${LMM_PROBE_ONLY:-0}" = "1" ]; then
+    test -f engine-installed
+    exit $?
+fi
+printf 'MODEL_ID="fixture-model"\nENGINE_BIN_SHA256="installed-digest"\n' > common.sh
+touch engine-installed
+"#,
+        )
+        .unwrap();
+        local_install_manager(&models_dir)
+            .install_local_from_cards_dir(
+                "fixture-config-refresh",
+                &mut |_| {},
+                Default::default(),
+                None,
+            )
+            .expect("安装脚本生成的配置必须进入最终交付快照");
+        let record = db::get_store_model("fixture-config-refresh")
+            .unwrap()
+            .unwrap();
+        assert!(
+            record.assets_content["common.sh"]
+                .content
+                .contains("installed-digest")
+        );
+        assert!(
+            std::fs::read_to_string(card_dir.join("common.sh"))
+                .unwrap()
+                .contains("installed-digest")
+        );
+    }
+
+    #[test]
+    fn old_local_snapshot_never_overwrites_live_cache() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _tmp = setup_temp_db();
+        let card_dir = write_local_fixture_card("fixture-old-snapshot", true, true);
+        let runtime_name = "vendor/.cache/sglang/flashinfer_jit.log";
+        let runtime = card_dir.join(runtime_name);
+        std::fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        std::fs::write(&runtime, "live content").unwrap();
+        let blob = |text: &str| db::ScriptBlob {
+            content: text.to_string(),
+            sha256: script_runner::sha256_hex(text),
+        };
+        let source = ScriptsSource::Local {
+            blobs: BTreeMap::from([("enable".to_string(), blob("#!/bin/sh\nexit 0\n"))]),
+            assets: BTreeMap::from([
+                ("card.json".to_string(), blob("{}")),
+                (runtime_name.to_string(), blob("stale cached content")),
+            ]),
+            profiles: Vec::new(),
+        };
+        source.prepare("fixture-old-snapshot", "enable").unwrap();
+        assert_eq!(std::fs::read_to_string(&runtime).unwrap(), "live content");
+    }
+
+    /// 端到端：物化好的卡从探针一路走到「已部署」落库。
+    ///
+    /// 钉的是整条编排的**收尾形状**：引擎登记、权重真写、库记录 status=deployed
+    /// （含 deployed_at 与 deploy 脚本哈希）、六脚本正文固化、common.sh 进附属
+    /// 副本而 card.json 不进、.deploy-env 落在卡片目录里（deploy 的工作目录
+    /// 必须是卡片目录，否则 cmsd 扫不到部署产物）。
+    #[test]
+    fn install_local_runs_a_materialized_card_through_to_deployed() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let card_dir = write_local_fixture_card("fixture-local", true, true);
+        std::fs::write(
+            card_dir.join("deploy.sh"),
+            format!("#!/bin/sh\ntest -f \"$LMM_MODELS_DIR/Fixture-Model/model.bin\" || exit 42\n{LOCAL_FIXTURE_DEPLOY}"),
+        )
+        .unwrap();
+
+        let mut lines: Vec<String> = Vec::new();
+        let result = local_install_manager(&models_dir)
+            .install_local_from_cards_dir(
+                "fixture-local",
+                &mut |l| lines.push(l.to_string()),
+                Default::default(),
+                None,
+            )
+            .expect("fixture 卡应当一路装到已部署");
+        assert_eq!(result.model_name, "fixture-model");
+        assert!(!result.engine_reused);
+        assert!(!result.model_reused);
+
+        // 权重真的写了（fixture download_model 的职责）
+        assert!(
+            models_dir.join("Fixture-Model/model.bin").is_file(),
+            "权重文件应当按 LMM_MODELS_DIR 落盘"
+        );
+        // deploy 的工作目录是卡片目录：.deploy-env 必须落在那里（cmsd 按同位置扫）
+        assert!(
+            card_dir.join(".deploy-env").is_file(),
+            "部署产物必须落在卡片目录里"
+        );
+        // 引擎登记了（探针即过，没真装，但口径与商店下载一致：探针命中 = 已安装）
+        assert!(db::is_engine_installed("fixture-engine", None).unwrap());
+        // 来源标记行的日志措辞
+        assert!(
+            lines.iter().any(|l| l.contains("megacube-admin 生成")),
+            "含标记行的卡要在日志里说明来源：{lines:?}"
+        );
+
+        let rec = db::get_store_model("fixture-local")
+            .unwrap()
+            .expect("安装完必须落库");
+        assert_eq!(rec.status, "deployed", "install_local 收尾必须是已部署");
+        assert_eq!(
+            rec.models_root.as_deref(),
+            models_dir.canonicalize().unwrap().to_str(),
+            "the completed local install retains its actual download root"
+        );
+        let changed_root = tmp.path().join("later-default-models");
+        local_install_manager(&changed_root)
+            .deploy("fixture-local", None, &mut |_| {}, Default::default())
+            .expect("changing the default must not redirect an installed local card");
+        assert!(models_dir.join("Fixture-Model/model.bin").is_file());
+        assert!(!changed_root.join("Fixture-Model/model.bin").exists());
+        assert!(rec.deployed_at.is_some());
+        assert!(
+            rec.deployed_script_sha256.is_some(),
+            "要记下这次部署用的 deploy 脚本哈希（重新部署判定靠它）"
+        );
+        for t in LOCAL_CARD_ENTRY_SCRIPTS {
+            assert!(
+                rec.scripts_content.contains_key(t),
+                "六个入口脚本要全部固化：缺 {t}"
+            );
+        }
+        assert!(
+            rec.assets_content.contains_key("common.sh"),
+            "common.sh 必须进附属副本（之后的启用/停用靠它重新展开）"
+        );
+        assert!(
+            rec.assets_content.contains_key("card.json"),
+            "card.json 要进附属副本：它垫住「多文件包」形态，之后的操作才会在卡片目录里跑"
+        );
+        // 非 MegaCube 测试环境（或 cmsd 不认识这张卡）：不落端点，留给 enable 阶段
+        assert!(rec.endpoint_url.is_none());
+    }
+
+    /// 无标记卡也放行，但日志里必须说明来源未标记。
+    #[test]
+    fn install_local_accepts_an_unmarked_card_but_says_so_in_the_log() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        write_local_fixture_card("fixture-unmarked", false, true);
+
+        let mut lines: Vec<String> = Vec::new();
+        local_install_manager(&models_dir)
+            .install_local_from_cards_dir(
+                "fixture-unmarked",
+                &mut |l| lines.push(l.to_string()),
+                Default::default(),
+                None,
+            )
+            .expect("无标记卡应当照样放行");
+        assert!(
+            lines.iter().any(|l| l.contains("没有生成来源标记")),
+            "无标记卡必须在日志里说明来源未标记：{lines:?}"
+        );
+        let rec = db::get_store_model("fixture-unmarked").unwrap().unwrap();
+        assert_eq!(rec.status, "deployed");
+    }
+
+    /// compose 型 vendor 布局（没有 common.sh）形态可辨，照样走通。
+    ///
+    /// 这张卡除了六个入口脚本和 card.json 什么都没有——附属副本只剩 card.json
+    /// 一份。这里钉的是它**依然**被当成多文件包执行：deploy 的工作目录必须是
+    /// 卡片目录（.deploy-env 落在那里），不能落成临时文件以进程 cwd 跑——
+    /// 零附属文件不等于自包含，卡的脚本按 CARD_DIR 相对引用盘上内容。
+    #[test]
+    fn install_local_recognizes_compose_vendor_layout_without_common_sh() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let card_dir = write_local_fixture_card("fixture-compose", true, false);
+
+        local_install_manager(&models_dir)
+            .install_local_from_cards_dir("fixture-compose", &mut |_| {}, Default::default(), None)
+            .expect("compose 型布局的卡应当走通");
+        let rec = db::get_store_model("fixture-compose").unwrap().unwrap();
+        assert_eq!(rec.status, "deployed");
+        assert_eq!(
+            rec.assets_content.keys().collect::<Vec<_>>(),
+            vec!["card.json"],
+            "零附属卡的附属副本应当只剩 card.json 垫底"
+        );
+        assert!(
+            card_dir.join(".deploy-env").is_file(),
+            "deploy 必须以卡片目录为工作目录，.deploy-env 不能写到别处去"
+        );
+    }
+
+    /// 缺入口脚本的卡：明确中文拒绝，说出缺哪个，且不留库记录。
+    #[test]
+    fn install_local_rejects_a_card_missing_entry_scripts_in_plain_chinese() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let card_dir = write_local_fixture_card("fixture-broken", true, true);
+        std::fs::remove_file(card_dir.join("uninstall.sh")).unwrap();
+
+        let err = local_install_manager(&models_dir)
+            .install_local_from_cards_dir("fixture-broken", &mut |_| {}, Default::default(), None)
+            .expect_err("缺脚本的卡必须拒");
+        let msg = err.to_string();
+        assert!(msg.contains("缺少入口脚本"), "拒绝理由要说是缺脚本：{msg}");
+        assert!(msg.contains("uninstall.sh"), "拒绝理由要点名缺哪个：{msg}");
+        assert!(
+            db::get_store_model("fixture-broken").unwrap().is_none(),
+            "被拒的卡不能留下库记录"
+        );
+        assert!(
+            !db::is_engine_installed("fixture-engine", None).unwrap(),
+            "校验都没过的卡不能登记引擎"
+        );
+    }
+
+    /// 目录不存在 / 形态不可辨：都是明确中文拒绝。
+    #[test]
+    fn install_local_rejects_missing_dir_and_unrecognizable_cards() {
+        let _guard = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = setup_temp_db();
+        let models_dir = tmp.path().join("models");
+        let mgr = local_install_manager(&models_dir);
+
+        let err = mgr
+            .install_local_from_cards_dir("no-such-card", &mut |_| {}, Default::default(), None)
+            .expect_err("目录不存在必须拒");
+        assert!(
+            err.to_string().contains("本地卡片目录不存在"),
+            "拒绝理由：{err}"
+        );
+
+        // 形态不可辨：六脚本齐，但既没有 common.sh，install_engine 里也没有
+        // compose 布局记号
+        let dir = write_local_fixture_card("fixture-alien", true, true);
+        std::fs::remove_file(dir.join("common.sh")).unwrap();
+        let err = mgr
+            .install_local_from_cards_dir("fixture-alien", &mut |_| {}, Default::default(), None)
+            .expect_err("形态不可辨必须拒");
+        assert!(
+            err.to_string().contains("无法识别这张本地卡片的形态"),
+            "拒绝理由：{err}"
+        );
+    }
+
     #[test]
     fn openai_style_detection_separates_v1_endpoints_from_generate() {
         // 原生引擎报上来的都是这两种形态：/v1 或 /v1/chat/completions。
@@ -9253,6 +10691,7 @@ true
                 true,
             ))),
             prompt: None,
+            ..Default::default()
         };
         let error = mgr
             .update_card("update-preview", &revision, &mut |_| {}, control)

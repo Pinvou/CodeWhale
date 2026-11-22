@@ -2389,6 +2389,56 @@ impl Drop for WatcherShieldDropGuard {
     }
 }
 
+/// r3 评审 P2-3：空闲会话换模 CAS 的语义核心，独立于 EnginePool 的
+/// AppHandle——headless CI 无显示环境不能初始化 GTK/事件循环，核心与
+/// 其三个协作者（生命周期预留、回合锁、会话库）抽出后可直接测试。
+/// 锁序与池方法此前实现逐行一致：预留 → try_lock → 存在性/期望校验 →
+/// 写入 → 锁内回收（evict_future 在写入成功后才被 await，全程持锁）。
+async fn switch_idle_session_model_core<E>(
+    turn_lifecycles: &SessionTurnLifecycles,
+    turn_locks: &SessionTurnLocks,
+    store: &SessionStore,
+    session_id: &str,
+    model_id: Option<String>,
+    expected_model_id: Option<String>,
+    expected_default_model_id: Option<String>,
+    evict_future: impl std::future::Future<Output = E>,
+) -> Result<()> {
+    let _reservation = turn_lifecycles.for_session(session_id).reserve()?;
+    let turn_lock = turn_locks.for_session(session_id).await;
+    let _turn = turn_lock
+        .try_lock()
+        .map_err(|_| anyhow::anyhow!("session_turn_in_progress"))?;
+    // A persisted handoff must not resurrect a conversation deleted while
+    // the desktop was closed.
+    store.load(session_id)?;
+    if store.session_model_id(session_id) != expected_model_id
+        || (expected_model_id.is_none()
+            && UserPrefs::load().advanced.active_model_id != expected_default_model_id)
+    {
+        anyhow::bail!("session_model_changed");
+    }
+    store.set_session_model_id(session_id, model_id)?;
+    let _ = evict_future.await;
+    Ok(())
+}
+
+/// r5 台账 #1：ref 变体换模的语义核心（锁内写+锁内回收），与上面的 CAS 核心
+/// 同样独立于 AppHandle，可无显示测试并钉住锁纪律。
+async fn switch_session_model_ref_core<E>(
+    turn_locks: &SessionTurnLocks,
+    store: &SessionStore,
+    session_id: &str,
+    model_ref: Option<ModelSelectionRef>,
+    evict_future: impl std::future::Future<Output = E>,
+) -> Result<()> {
+    let turn_lock = turn_locks.for_session(session_id).await;
+    let _turn = turn_lock.lock().await;
+    store.set_session_model_ref(session_id, model_ref)?;
+    let _ = evict_future.await;
+    Ok(())
+}
+
 impl EnginePool {
     pub fn new_with_dependencies(
         app: AppHandle,
@@ -4388,9 +4438,34 @@ impl EnginePool {
         session_id: &str,
         model_id: Option<String>,
     ) -> Result<()> {
+        let turn_lock = self.turn_locks.for_session(session_id).await;
+        let _turn = turn_lock.lock().await;
         self.store.set_session_model_id(session_id, model_id)?;
-        self.evict(session_id).await;
+        self.evict_locked(session_id).await;
         Ok(())
+    }
+
+    /// Automatic device-task handoff must never cancel the tool turn that
+    /// initiated it. Reserve the same admission slot as a send before writing
+    /// its binding; a concurrent turn therefore wins or is held out atomically.
+    pub async fn switch_idle_session_model(
+        &self,
+        session_id: &str,
+        model_id: Option<String>,
+        expected_model_id: Option<String>,
+        expected_default_model_id: Option<String>,
+    ) -> Result<()> {
+        switch_idle_session_model_core(
+            &self.turn_lifecycles,
+            &self.turn_locks,
+            &self.store,
+            session_id,
+            model_id,
+            expected_model_id,
+            expected_default_model_id,
+            self.evict_locked(session_id),
+        )
+        .await
     }
 
     pub async fn switch_session_model_ref(
@@ -4398,9 +4473,18 @@ impl EnginePool {
         session_id: &str,
         model_ref: Option<ModelSelectionRef>,
     ) -> Result<()> {
-        self.store.set_session_model_ref(session_id, model_ref)?;
-        self.evict(session_id).await;
-        Ok(())
+        // r3 评审 P2-3：与 switch_idle_session_model / reconfigure_multi_agent_mode
+        // 同一的回合锁纪律——持久化写入与引擎回收都在锁内完成，防止 handoff
+        // 验收的 CAS 写与本路径并发时一侧写入被另一侧静默覆盖。阻塞等待在途
+        // 回合结束，不为本路径新增失败面（无 reserve/try-lock 拒绝）。
+        switch_session_model_ref_core(
+            &self.turn_locks,
+            &self.store,
+            session_id,
+            model_ref,
+            self.evict_locked(session_id),
+        )
+        .await
     }
 
     // ── High-level routing (called by commands.rs) ──────────────────────
@@ -7346,6 +7430,7 @@ mod scheduled_model_tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -7962,6 +8047,7 @@ mod scheduled_model_tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -12276,6 +12362,7 @@ mod probed_facts_wiring_tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,

@@ -581,6 +581,10 @@ pub struct SavedModel {
     pub vendor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_mode: Option<String>,
+    /// cmsd 卡片关联，也可指向明确托管的实验模型；不等价于模型商店来源。
+    /// 保留既有 wire 名称以兼容旧配置，单凭此标记不授予生命周期权限。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_card_id: Option<String>,
     /// 用户对端点鉴权的显式声明（设置页「此端点无需鉴权」开关）：`Some("none")`
     /// = 该端点不需要任何上游鉴权（自建网关/免鉴权服务）。落盘前经
     /// `normalize_provider_metadata` 归一：仅保留底座
@@ -753,12 +757,44 @@ impl SavedModel {
             endpoint_mode: None,
             auth_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
             credential_state: CredentialState::Missing,
             has_secret: false,
             credential_action: None,
+        }
+    }
+
+    /// Exact local routing identity; store provenance still requires model_store_card_id.
+    pub fn linked_management_card(&self) -> Option<&str> {
+        if self.model_store_link_detached {
+            return None;
+        }
+        match (
+            self.model_store_card_id.as_deref(),
+            self.store_card_id.as_deref(),
+        ) {
+            (Some(a), Some(b)) if a != b => None,
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn normalize_store_link(&mut self) {
+        // The older cmsd tag also identifies explicitly managed experiments.
+        // Only a confirmed store association supplies both names; never elevate
+        // a generic daemon tag into store provenance at prefs-load time.
+        if let Some(card) = self.model_store_card_id.clone() {
+            if self.model_store_link_detached
+                || self.store_card_id.as_ref().is_some_and(|old| old != &card)
+            {
+                self.model_store_link_detached = true;
+                self.model_store_card_id = None;
+                self.store_card_id = None;
+            } else {
+                self.store_card_id = Some(card);
+            }
         }
     }
 
@@ -929,6 +965,7 @@ impl SavedModel {
     }
 
     fn normalize_provider_metadata(&mut self) {
+        self.normalize_store_link();
         self.base_url = strip_chat_completions_suffix(&self.base_url);
         // auth_mode 归一:仅保留底座 `auth_mode_disables_api_key` 认可的
         // no-auth 同义词并统一为 "none";其余值(含空串/未知档位)清空,
@@ -2017,6 +2054,7 @@ impl UserPrefs {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key,
             credential_ref: None,
@@ -2491,6 +2529,7 @@ impl UserPrefs {
 
     /// 增或改(按 id)一条模型。
     pub fn upsert_model(&mut self, mut m: SavedModel) {
+        m.normalize_store_link();
         m.normalize_alias();
         m.normalize_provider_metadata();
         m.normalize_route_limits();
@@ -2719,6 +2758,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -2783,6 +2823,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -3154,6 +3195,7 @@ mod tests {
             credential_state: CredentialState::Missing,
             has_secret: false,
             credential_action: None,
+            store_card_id: None,
         };
 
         for spelling in [
@@ -3286,6 +3328,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: Default::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -3394,6 +3437,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: Default::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -3927,6 +3971,7 @@ mod tests {
             vendor: None,
             endpoint_mode: Some("full_chat_completions".into()),
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -3975,6 +4020,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -4028,6 +4074,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -4049,6 +4096,7 @@ mod tests {
         let build = |auth_mode: Option<&str>| {
             let mut prefs = UserPrefs::default();
             let mut model = SavedModel {
+                store_card_id: None,
                 auth_mode: None,
                 id: "auth-mode-model".into(),
                 name: "auth mode".into(),
@@ -4125,6 +4173,7 @@ mod tests {
         let build = |base_url: &str, auth_mode: Option<&str>| {
             let mut prefs = UserPrefs::default();
             let mut model = SavedModel {
+                store_card_id: None,
                 auth_mode: None,
                 id: "auth-mode-plan".into(),
                 name: "auth mode plan".into(),
@@ -4188,6 +4237,7 @@ mod tests {
         let build = |preset: ModelPreset, auth_mode: Option<&str>| {
             let mut prefs = UserPrefs::default();
             let mut model = SavedModel {
+                store_card_id: None,
                 auth_mode: None,
                 id: "auth-mode-local".into(),
                 name: "auth mode local".into(),
@@ -4253,6 +4303,7 @@ mod tests {
             let mut prefs = UserPrefs::default();
             prefs.advanced.saved_models.clear();
             let mut model = SavedModel {
+                store_card_id: None,
                 auth_mode: None,
                 id: "keyless-load".into(),
                 name: "Keyless".into(),
@@ -4321,6 +4372,7 @@ mod tests {
             let mut prefs = UserPrefs::default();
             prefs.advanced.saved_models.clear();
             let model = SavedModel {
+                store_card_id: None,
                 auth_mode: None,
                 id: "keyless-wrong-type".into(),
                 name: "Keyless".into(),
@@ -4439,6 +4491,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -4498,6 +4551,7 @@ mod tests {
                 vendor: None,
                 endpoint_mode: None,
                 image_capability_override: ImageCapabilityOverride::default(),
+                store_card_id: None,
                 vision_model_id: None,
                 api_key: String::new(),
                 credential_ref: None,
@@ -4530,6 +4584,7 @@ mod tests {
                 vendor: None,
                 endpoint_mode: None,
                 image_capability_override: ImageCapabilityOverride::default(),
+                store_card_id: None,
                 vision_model_id: None,
                 api_key: String::new(),
                 credential_ref: None,
@@ -4636,6 +4691,7 @@ mod tests {
                 credential_state: CredentialState::Missing,
                 has_secret: false,
                 credential_action: None,
+                store_card_id: None,
             });
             prefs.advanced.saved_models.push(SavedModel {
                 auth_mode: None,
@@ -4668,6 +4724,7 @@ mod tests {
                 credential_state: CredentialState::Missing,
                 has_secret: false,
                 credential_action: None,
+                store_card_id: None,
             });
             prefs.advanced.saved_models.push(SavedModel {
                 auth_mode: None,
@@ -4705,6 +4762,7 @@ mod tests {
                 credential_state: CredentialState::Missing,
                 has_secret: false,
                 credential_action: None,
+                store_card_id: None,
             });
             prefs.advanced.active_model_id = Some("k31-official".into());
             let path = super::super::paths::settings_path();
@@ -4806,6 +4864,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -4855,6 +4914,7 @@ mod tests {
             vendor: vendor.map(str::to_string),
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -5139,6 +5199,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
@@ -6023,6 +6084,7 @@ mod tests {
             vendor: None,
             endpoint_mode: None,
             image_capability_override: ImageCapabilityOverride::default(),
+            store_card_id: None,
             vision_model_id: None,
             api_key: String::new(),
             credential_ref: Some(crate::platform::credential_store::CredentialReference {

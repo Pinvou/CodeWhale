@@ -1,4 +1,6 @@
-//! Runtime caches are mutable state, never an offline card's source files.
+use std::path::Path;
+
+// Runtime caches are mutable state, never an offline card's source files.
 pub(super) fn is_runtime_cache(path: &str) -> bool {
     // Leave malformed paths to the existing path guard instead of hiding them.
     if path.chars().any(char::is_control) {
@@ -13,8 +15,8 @@ pub(super) fn is_runtime_cache(path: &str) -> bool {
     })
 }
 
-/// Preserve live state while replaying an old offline recipe. Explicitly
-/// bundled source (including venv code) still belongs to the recipe.
+/// Old snapshots may contain live state. Do not replay it over the current
+/// deployment, but keep explicitly declared source files (including venv code).
 pub(super) fn is_mutable_runtime_asset(path: &str) -> bool {
     // Malformed paths must still reach the materialization path guard.
     if path.chars().any(char::is_control) {
@@ -110,5 +112,39 @@ mod tests {
         ] {
             assert!(!is_mutable_runtime_asset(path), "{path}");
         }
+        // Discovery still prunes generated dependency trees from new snapshots.
+        assert!(is_card_state_file(Path::new(".venv/lib/module.py")));
     }
+}
+
+/// 导入扫描时跳过卡片生成的状态、依赖树和大型权重，不将它们固化进新配方。
+/// 已有配方可能明确声明依赖树中的源码；执行时应使用较窄的运行状态过滤。
+pub(super) fn is_card_state_file(rel: &Path) -> bool {
+    let components: Vec<String> = rel
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+    components.iter().any(|c| {
+        matches!(
+            c.as_str(),
+            ".runtime"
+                | ".deploy-env"
+                | ".env"
+                | ".cache"
+                | ".venv"
+                | "venv"
+                | "__pycache__"
+                | ".git"
+                | "node_modules"
+                | "logs"
+        ) || c.starts_with(".tmp-")
+    }) || rel.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e,
+            "part" | "incomplete" | "log" | "pyc" | "pyo" | "safetensors" | "gguf" | "ggml"
+        )
+    })
 }

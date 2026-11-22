@@ -88,10 +88,15 @@ function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, 
       </button>
     );
   }
+  // MegaCube 观察态：cmsd 未托管这张卡（managed=false）时，本机侧不主动
+  // 启/停——启用要等卡片可被接管（canAdopt），停止交给设备管理面，避免
+  // 两个权威打架。托管中的卡行为不变。
+  const observed = model.record?.cmsd?.managed === false;
   if (model.state === 'deployed') {
     const BTN_PRIMARY = tone('enable');
     return (
-      <button type="button" className={`${BTN_PRIMARY} ${ACTION_MIN_W}`} disabled={busy}
+      <button type="button" className={`${BTN_PRIMARY} ${ACTION_MIN_W}`}
+        disabled={busy || (observed && !model.record.cmsd.canAdopt)}
         data-testid="model-store-enable"
         onClick={(e) => { e.stopPropagation(); onEnable(model.record); }}>
         {busyKind === 'enable' ? null : <Play size={13} className="mr-1 inline" />}
@@ -101,7 +106,7 @@ function PrimaryAction({ model, copy, busyKind, onDownload, onDeploy, onEnable, 
   }
   const BTN_DANGER = tone('stop');
   return (
-    <button type="button" className={`${BTN_DANGER} ${ACTION_MIN_W}`} disabled={busy} data-testid="model-store-stop"
+    <button type="button" className={`${BTN_DANGER} ${ACTION_MIN_W}`} disabled={busy || observed} data-testid="model-store-stop"
       onClick={(e) => { e.stopPropagation(); onStop(model.record); }}>
       {busyKind === 'stop' ? null : <StopCircle size={13} className="mr-1 inline" />}
       {label('stop', copy.stopping, copy.stop)}
@@ -218,6 +223,31 @@ function ModelRow({ model, copy, busyKind, scriptUpdate, onOpen, onDownload, onD
           <PrimaryAction model={model} copy={copy} busyKind={busyKind}
             onDownload={onDownload} onDeploy={onDeploy} onEnable={onEnable} onStop={onStop} onUninstall={onUninstall} />
         </div>
+        {/* 管理归属单列展示，避免与下载/部署/运行状态混为一谈。 */}
+        {model.record?.cmsd && <div className="mt-1 flex flex-wrap items-center gap-1 text-[10px] text-slate-500 dark:text-slate-400" data-testid="model-store-row-ownership">
+          <span>{copy.cmsdOwnership}</span>
+          <span
+              data-testid="model-store-row-cmsd"
+              title={
+                !model.record.cmsd.managed ? copy.cmsdObservedHint : model.record.cmsd.restartCount > 0
+                  ? copy.cmsdRestarts(model.record.cmsd.restartCount)
+                  : copy.cmsdManagedHint
+              }
+              className={`shrink-0 rounded-full px-1.5 py-0.5 font-semibold ${model.record.cmsd.managed ? 'bg-violet-50 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300' : 'bg-slate-100 text-slate-600 dark:bg-white/5 dark:text-slate-400'}`}
+            >
+              {model.record.cmsd.managed ? copy.cmsdManaged : copy.cmsdObserved}
+          </span>
+          {model.record?.cmsd?.degraded ? (
+            <span
+              data-testid="model-store-row-cmsd-degraded"
+              title={model.record.cmsd.degradedReason || ''}
+              className="shrink-0 rounded-full bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 dark:bg-red-500/10 dark:text-red-300"
+            >
+              {copy.cmsdDegraded}
+            </span>
+          ) : null}
+        </div>}
+
       </div>
 
       {/* 规格行（头部下方独立块，原型 .card-spec） */}

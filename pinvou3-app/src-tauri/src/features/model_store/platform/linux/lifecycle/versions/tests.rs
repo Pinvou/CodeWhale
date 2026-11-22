@@ -285,6 +285,43 @@ fn prepare_switch_rollback_and_cleanup_preserve_credentials_and_old_weights() {
     let restored = db::get_store_model(&current.card_id).unwrap().unwrap();
     assert_eq!(restored.source_filename, current.source_filename);
     assert_eq!(restored.engine_version, current.engine_version);
+    // Rollback restores the full local card, not only the selected weights.
+    assert_eq!(restored.card_name, current.card_name);
+    assert_eq!(restored.source_repo_id, current.source_repo_id);
+    assert_eq!(
+        serde_json::to_value(&restored.profiles).unwrap(),
+        serde_json::to_value(&current.profiles).unwrap()
+    );
+    assert_eq!(restored.active_profile_id, current.active_profile_id);
+    assert_eq!(
+        serde_json::to_value(&restored.scripts_content).unwrap(),
+        serde_json::to_value(&current.scripts_content).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&restored.assets_content).unwrap(),
+        serde_json::to_value(&current.assets_content).unwrap()
+    );
+    // Lifecycle entries are materialized on demand. Every later action must
+    // resolve to the restored card's script, without fetching the current store.
+    let source = mgr.local_scripts_source(&restored).unwrap();
+    let runtime = restored
+        .runtime_card_id
+        .as_deref()
+        .unwrap_or(&restored.card_id);
+    for (name, script) in &current.scripts_content {
+        let prepared = source.prepare(runtime, name).unwrap();
+        assert_eq!(fs::read_to_string(prepared.entry).unwrap(), script.content);
+    }
+    assert_eq!(
+        fs::read_to_string(runtime_path(&restored).unwrap().join("weights.sha256")).unwrap(),
+        current.assets_content["weights.sha256"].content
+    );
+    assert!(
+        !runtime_path(&restored)
+            .unwrap()
+            .join("native_engine_process.py")
+            .exists()
+    );
     assert_eq!(
         fs::read_to_string(runtime_path(&restored).unwrap().join(".deploy-env")).unwrap(),
         format!(
@@ -495,6 +532,7 @@ fn interrupted_cleanup_and_cancelled_download_remain_manageable() {
     let control = script_runner::RunControl {
         cancel: Some(cancel.clone()),
         prompt: None,
+        ..Default::default()
     };
     assert!(
         mgr.stage_verified(
@@ -916,6 +954,7 @@ fn interrupted_stage_is_recoverable_and_cancelled_cleanup_does_not_remove_files(
             true,
         ))),
         prompt: None,
+        ..Default::default()
     };
     assert!(
         mgr.delete_version(&current.card_id, &id, &mut |_| {}, control)
@@ -3038,6 +3077,82 @@ fn new_upgrade_requires_current_managed_ownership_but_history_can_recover() {
 }
 
 #[test]
+fn deployment_writers_wait_for_cmsd_launch_readers_and_can_be_cancelled() {
+    let (_temp, mgr, current, _card, _pkg, id) = fixture();
+    let reader = version_store::resource_operation_lock(false).unwrap();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let control = || script_runner::RunControl {
+        cancel: Some(cancel.clone()),
+        ..Default::default()
+    };
+    let mut waiting = |_line: &str| cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        mgr.deploy(&current.card_id, None, &mut waiting, control())
+            .unwrap_err()
+            .to_string()
+            .contains("已取消")
+    );
+    cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        mgr.update_card(&current.card_id, &id, &mut waiting, control())
+            .unwrap_err()
+            .to_string()
+            .contains("已取消")
+    );
+    drop(reader);
+}
+
+#[test]
+fn local_install_and_retry_preview_never_replay_registered_or_versioned_directories() {
+    let (_temp, mgr, current, card, pkg, id) = fixture();
+    assert!(ModelManager::check_fresh_local_install("fresh-experiment").is_ok());
+    assert!(
+        mgr.install_local_from_cards_dir(&current.card_id, &mut |_| {}, Default::default(), None)
+            .unwrap_err()
+            .to_string()
+            .starts_with("registered_model_requires_store_workflow")
+    );
+    mgr.stage_verified(&current, &card, &id, pkg, &mut |_| {}, Default::default())
+        .unwrap();
+    let prepared = version_store::get(&current.card_id, &id).unwrap().unwrap();
+    assert!(
+        ModelManager::preview_local_install(&prepared.runtime_card_id)
+            .unwrap_err()
+            .to_string()
+            .starts_with("archived_model_version")
+    );
+    assert!(
+        mgr.install_local_from_cards_dir(
+            &prepared.runtime_card_id,
+            &mut |_| {},
+            Default::default(),
+            None
+        )
+        .unwrap_err()
+        .to_string()
+        .starts_with("archived_model_version")
+    );
+    mgr.switch_version(&current.card_id, &id, &mut |_| {}, Default::default())
+        .unwrap();
+    let before = db::get_store_model(&current.card_id).unwrap().unwrap();
+    assert!(ModelManager::preview_local_install(&current.card_id).is_err());
+    assert!(
+        mgr.install_local_from_cards_dir(
+            &prepared.runtime_card_id,
+            &mut |_| {},
+            Default::default(),
+            None
+        )
+        .is_err()
+    );
+    let after = db::get_store_model(&current.card_id).unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(before).unwrap(),
+        serde_json::to_value(after).unwrap()
+    );
+}
+
+#[test]
 fn changed_legacy_history_has_manual_recovery_and_explicit_record_only_escape() {
     let (_temp, mgr, current, card, pkg, id) = fixture();
     let key = db::add_api_key(&current.card_id, Some("escape")).unwrap();
@@ -3138,6 +3253,7 @@ fn weight_hash_reports_file_bytes_and_remains_cancellable_before_reading() {
     let control = script_runner::RunControl {
         cancel: Some(cancel.clone()),
         prompt: None,
+        ..Default::default()
     };
     let error = file_digest(&path, &control, &mut |_| {
         cancel.store(true, std::sync::atomic::Ordering::SeqCst)

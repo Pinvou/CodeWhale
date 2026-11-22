@@ -156,6 +156,11 @@ export const REMOTE_CONTROL_RELEASE_PREFIXES = Object.freeze([
 ]);
 
 export const PR_RELEASE_CONTRACT_EXTRA_PATHS = Object.freeze([
+  "components/cmsd/**",
+  "scripts/check-cmsd-bundled-package.py",
+  "scripts/tests/test_cmsd_release_policy.py",
+  "pinvou3-app/scripts/tauri/cmsd-component.js",
+  "pinvou3-app/tests/cmsd_bundled_packaging.test.js",
   "scripts/package-deb-loongarch64.sh",
   "scripts/ci-build-linux-loongarch64.sh",
   "scripts/ci-loongarch64-toolchain.sh",
@@ -198,6 +203,12 @@ export const PR_RELEASE_CONTRACT_EXTRA_PATHS = Object.freeze([
 ]);
 
 export const RELEASE_PACKAGES_EXTRA_PATHS = Object.freeze([
+  "components/cmsd/**",
+  "scripts/check-cmsd-bundled-package.py",
+  "scripts/release-deb.sh",
+  "scripts/tests/test_cmsd_release_policy.py",
+  "pinvou3-app/scripts/tauri/cmsd-component.js",
+  "pinvou3-app/tests/cmsd_bundled_packaging.test.js",
   "VERSION",
   "scripts/sync-version.mjs",
   "scripts/windows-release-workspace.ps1",

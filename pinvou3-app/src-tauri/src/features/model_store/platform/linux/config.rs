@@ -735,6 +735,9 @@ pub struct TempHome {
     dir: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
     previous_pinvou3_home: Option<std::ffi::OsString>,
+    previous_xdg_runtime_dir: Option<std::ffi::OsString>,
+    previous_cmsd_socket: Option<std::ffi::OsString>,
+    previous_pinvou3_cmsd_unit: Option<std::ffi::OsString>,
     // 声明在最后 => 最后析构：HOME 已经还原、临时目录也删掉之后才放锁。
     _lock: std::sync::MutexGuard<'static, ()>,
 }
@@ -746,6 +749,9 @@ impl TempHome {
         let dir = tempfile::tempdir().unwrap();
         let previous = std::env::var_os("HOME");
         let previous_pinvou3_home = std::env::var_os("PINVOU3_HOME");
+        let previous_xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
+        let previous_cmsd_socket = std::env::var_os("CMSD_SOCKET");
+        let previous_pinvou3_cmsd_unit = std::env::var_os("PINVOU3_CMSD_UNIT");
         // SAFETY: edition 2024 起 set_var 是 unsafe——并发改环境变量是 UB。
         // 这里全程持有 ENV_TEST_LOCK，同一时刻只有一个测试在动这两个变量。
         unsafe {
@@ -754,11 +760,23 @@ impl TempHome {
             // `<tmp>/model-store`，跟生产路径 `$HOME/.pinvou3/model-store` 差一层，
             // 测试也就不再覆盖真实布局了。
             std::env::remove_var("PINVOU3_HOME");
+            // 单机守卫（cmsd 设备服务）按 XDG_RUNTIME_DIR/megacube/cmsd.sock 与
+            // 显式 CMSD_SOCKET/PINVOU3_CMSD_UNIT 判定本机权威。开发机若真跑着
+            // 用户级 cmsd，socket 探测就会连上真实服务，让「无设备服务则走旧
+            // 脚本」路径的测试随宿主状态漂移。三个输入一并钉进临时环境：运行
+            // 目录指到临时目录（socket 必不存在），显式配置清除（显式存在反而
+            // 会被判为「权威应在线」，走向另一条保守错误路径）。
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path().join("xdg-runtime"));
+            std::env::remove_var("CMSD_SOCKET");
+            std::env::remove_var("PINVOU3_CMSD_UNIT");
         }
         Self {
             dir,
             previous,
             previous_pinvou3_home,
+            previous_xdg_runtime_dir,
+            previous_cmsd_socket,
+            previous_pinvou3_cmsd_unit,
             _lock: lock,
         }
     }
@@ -785,6 +803,18 @@ impl Drop for TempHome {
                 // 万一有别的代码设上了它，就会漏到后面的测试里，而那正是 TempHome
                 // 这个类型存在的理由。
                 None => std::env::remove_var("PINVOU3_HOME"),
+            }
+            match &self.previous_xdg_runtime_dir {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+            match &self.previous_cmsd_socket {
+                Some(v) => std::env::set_var("CMSD_SOCKET", v),
+                None => std::env::remove_var("CMSD_SOCKET"),
+            }
+            match &self.previous_pinvou3_cmsd_unit {
+                Some(v) => std::env::set_var("PINVOU3_CMSD_UNIT", v),
+                None => std::env::remove_var("PINVOU3_CMSD_UNIT"),
             }
         }
     }

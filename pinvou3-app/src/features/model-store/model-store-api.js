@@ -134,6 +134,9 @@ function startDownload(cardId) {
   return invokeTauri('model_store_start_download', { cardId });
 }
 
+function previewIncomplete(runId) { return invokeTauri('model_store_preview_incomplete', { runId }); }
+function retryIncomplete(runId, expectedSha256) { return invokeTauri('model_store_retry_incomplete', { runId, expectedSha256 }); }
+
 /**
  * 发起部署。
  * @param {string} cardId - 卡片 ID。
@@ -211,8 +214,8 @@ function forceRemoveModel(cardId) {
  * @param {number} [wait] - 服务端最多挂多少秒；默认 LOG_WAIT_SECONDS。
  * @returns {Promise<{lines:Array<string>, next:number, done:boolean, ok:boolean, cancelled:boolean, result:unknown, error:unknown}>} 日志分片。
  */
-function pollRunLog(runId, from, wait = LOG_WAIT_SECONDS) {
-  return invokeTauri('model_store_run_log', { runId, from, wait });
+function pollRunLog(runId, from, wait = LOG_WAIT_SECONDS, fromByte = 0) {
+  return invokeTauri('model_store_run_log', { runId, from, wait, fromByte });
 }
 
 /**
@@ -306,6 +309,10 @@ function fetchStorageSettings() {
  * @param {{modelsDir?:string|null, importScanDirs?:string[]|null, startupUpdateCheckEnabled?:boolean|null}} patch - 要改的项。
  * @returns {Promise<object>} 保存后的设置，形状同 fetchStorageSettings。
  */
+function startMaintenanceRecovery(cardId) {
+  return invokeTauri('model_store_start_lifecycle', { cardId, action: 'recover_maintenance' });
+}
+
 function saveStorageSettings({ modelsDir = null, importScanDirs = null, startupUpdateCheckEnabled = null } = {}) {
   return invokeTauri('model_store_set_storage_settings', { modelsDir, importScanDirs, startupUpdateCheckEnabled });
 }
@@ -330,11 +337,14 @@ export {
   setLanSharing,
   revokeApiKey,
   startDownload,
+  previewIncomplete,
+  retryIncomplete,
   startCardScripts,
   startDeploy,
   startEnable,
   startStop,
   startUninstall,
+  startMaintenanceRecovery,
   forceRemoveModel,
   pollRunLog,
   cancelRun,

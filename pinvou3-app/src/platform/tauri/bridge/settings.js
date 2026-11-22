@@ -311,6 +311,8 @@ async function reloadSavedModels() {
   }
   async function setActiveModel(id) {
     await invoke("set_active_model", { id: id });
+    // r10 P2-A：成功后广播（失败不登记）。
+    if (typeof window.CustomEvent === 'function') window.dispatchEvent(new window.CustomEvent('pinvou:manual-model-selection', { detail: { sessionId: null } }));
     await loadModels();
     await loadSettings();
     await loadEffectiveModelConfig();
@@ -355,10 +357,20 @@ async function reloadSavedModels() {
     } else {
       throw new Error("unsupported model selection source");
     }
+    // r10 P2-A：切换成功后才广播手动选择意图（失败不登记抑制状态）。
+    if (typeof window.CustomEvent === 'function') window.dispatchEvent(new window.CustomEvent('pinvou:manual-model-selection', { detail: { sessionId: sessionId || null } }));
     await loadSessionModel(sessionId);
   }
-  async function switchModel(sessionId, modelId) {
-    return switchModelRef(sessionId, { source: "LOCAL_CONFIG", saved_model_id: modelId });
+  async function switchModel(sessionId, modelId, options) {
+    if (!options?.ifIdle) {
+      await switchModelRef(sessionId, { source: "LOCAL_CONFIG", saved_model_id: modelId });
+    } else {
+      if (!sessionId) throw new Error("idle handoff requires a session");
+      await invoke("set_session_model", { sessionId: sessionId, modelId: modelId,
+        ifIdle: true, expectedModelId: options.expectedModelId || null,
+        expectedDefaultModelId: options.expectedDefaultModelId || null });
+      await loadSessionModel(sessionId);
+    }
   }
   async function testModelConnection(baseUrl, apiKey, modelId, noAuth) {
     return await invoke("test_model_connection", { baseUrl: baseUrl, apiKey: apiKey, modelId: modelId || null, noAuth: !!noAuth });

@@ -17,6 +17,7 @@
 //! | `lifecycle` | 六个入口脚本的编排（下载/装引擎/部署/启用/停用/卸载） |
 //! | `run_state` | 运行中任务注册表、日志缓冲、卡片级并发互斥、下载队列 |
 //! | `run_log_store` | 运行日志落盘（`~/.pinvou3/model-store/logs/`）+ 脱敏 + 轮转 |
+//! | `local_service` | 本地下载服务（service.sock）：cmsd 等本机入口经它委托商店执行下载 |
 //! | `orphans` | 启动时回收上次没收干净的**脚本进程**（权重一个字节都不动） |
 //! | `errors` | 把技术错误翻译成用户看得懂的话 |
 //! | `disk` | 字节格式化与目录体积统计 |
@@ -28,11 +29,15 @@
 //! 品悟有自己的更新机制）、`worker.rs` / `system_probe.rs`（双机从机控制、硬件探测）。
 //! LAN 共享由本模块自己的窄代理实现，不复用 sidecar 管理接口。
 
+pub mod background;
 pub mod boundary;
 mod card_assets;
 pub mod card_update;
+pub mod cmsd_inventory;
 pub mod config;
+mod control_file;
 pub mod db;
+mod delegated_run;
 pub mod deploy_profiles;
 
 // 商店边界在 platform/mod.rs 经 `use linux as backend` 转发，必须先在本模块根
@@ -43,13 +48,18 @@ pub(crate) use boundary::{
 };
 pub mod disk;
 pub mod errors;
+pub mod execution_fence;
+mod host_control;
 pub mod import_scan;
+mod incomplete;
 mod lan_gateway;
 mod lan_network;
 mod lan_store;
 pub mod lifecycle;
 mod linked_models;
-pub(crate) use linked_models::linked_models_startup_sync;
+pub mod local_service;
+mod log_page;
+pub mod maintenance;
 pub(crate) use linked_models::matches_current_model_route;
 mod memory_policy;
 pub mod native_card_compat;
@@ -74,9 +84,10 @@ pub use service::{
     ModelStoreService, active_runs, answer_run, api_keys, cancel_run, check_card_update,
     create_api_key, delete_engine, export_run_log, follow_deployment_context, force_remove,
     installed_engines, library, list_cards, local_resources, memory_admission, model_detail,
-    reveal_run_logs_dir, run_log, run_startup_cleanup, set_storage_settings, start_card_scripts,
-    start_card_update, start_deploy, start_download, start_lifecycle, start_version_action,
-    startup_update_check, storage_settings, take_startup_cleanup, versions,
+    preview_incomplete, retry_incomplete, reveal_run_logs_dir, run_log, run_startup_cleanup,
+    run_startup_linked_sync, set_storage_settings, start_card_scripts, start_card_update,
+    start_deploy, start_download, start_lifecycle, start_version_action, startup_update_check,
+    storage_settings, take_startup_cleanup, versions,
 };
 
 // 可见性契约：`installed_weight_paths_checked` 与 `installed_weight_candidate_names_checked`

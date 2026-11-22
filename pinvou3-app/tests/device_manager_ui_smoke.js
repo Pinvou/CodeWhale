@@ -563,6 +563,38 @@ async function clickTestId(page, testId) {
   await page.waitForFunction(() => !!document.querySelector('[data-testid="device-manager-doctor"]'), { timeout: 8000 });
   rec('② 设备管理页挂载且轮询已发起', (await callsOf(page, 'get_device_snapshot')).length > 0);
 
+  // Tabs share currentView='monitor'. Both prompt sampling and an accepted
+  // send must lose navigation ownership when the user selects CMS maintenance.
+  for (const phase of ['prompt', 'completion']) {
+    const gate = phase === 'prompt' ? 'hangDoctorPrompt' : 'hangDoctorChat';
+    const resolver = phase === 'prompt' ? 'resolveDoctorPrompt' : 'resolveDoctorChat';
+    const before = await page.evaluate(() => window.__DEVICE_MGR_TEST__.callsOf('chat').length);
+    await page.evaluate(key => { window.__DEVICE_MGR_TEST__[key] = true; }, gate);
+    await clickTestId(page, 'device-manager-doctor-packages');
+    await page.waitForFunction(key => typeof window.__DEVICE_MGR_TEST__[key] === 'function', { timeout: 8000 }, resolver);
+    await page.evaluate(() => [...document.querySelectorAll('[role="tab"]')]
+      .find(tab => tab.textContent.trim() === 'MegaCube').click());
+    await page.waitForSelector('[data-testid="cms-panel-refresh"]');
+    await page.evaluate((key, release) => {
+      window.__DEVICE_MGR_TEST__[key] = false;
+      window.__DEVICE_MGR_TEST__[release]();
+    }, gate, resolver);
+    await page.waitForFunction(count => window.__DEVICE_MGR_TEST__.callsOf('chat').length === count + 1, { timeout: 15000 }, before);
+    await sleep(600);
+    const outcome = await page.evaluate(() => ({
+      view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
+      cms: !!document.querySelector('[data-testid="cms-panel-refresh"]'),
+      chats: window.__DEVICE_MGR_TEST__.callsOf('chat').length,
+    }));
+    assert.ok(outcome.view === 'monitor' && outcome.cms && outcome.chats === before + 1,
+      `late ${phase} must keep the selected CMS panel and deliver once: ${JSON.stringify(outcome)}`);
+    rec(`②-a ${phase} 等待期间切到 CMS 后保持维护页且消息仅送达一次`, true);
+    await page.reload({ waitUntil: 'networkidle0' });
+    await page.waitForFunction(() => window.TauriBridge && document.querySelector('[data-testid="app-root"]'), { timeout: 20000 });
+    await clickNavByLabel(page, '设备管理');
+    await page.waitForSelector('[data-testid="device-manager-view"]');
+  }
+
   // ③ 区块齐全：概览（内嵌运行状态）/传感器/存储/网络/进程/模型管理/故障排查。
   const sections = await page.evaluate(() => Object.fromEntries([
     'device-manager-overview', 'device-manager-sensors', 'device-manager-storage',
@@ -1838,6 +1870,26 @@ async function clickTestId(page, testId) {
   rec('⑪-b 非 MegaCube 平台运行状态页渲染旧 MonitorView 且不渲染设备管理视图',
     monitorRendered && monitorOnly.deviceViewAbsent,
     JSON.stringify({ monitorRendered, ...monitorOnly }));
+
+  // Diagnostics and CMS maintenance share the destination. Only the selected
+  // panel owns its polling lifecycle; switching back keeps diagnosis reachable.
+  await page.evaluate(() => { window.__testSetMegacubeDevice(true); });
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => window.TauriBridge && document.querySelector('[data-testid="app-root"]'), { timeout: 20000 });
+  await clickNavByLabel(page, '设备管理');
+  await page.waitForSelector('[data-testid="device-manager-view"]');
+  await page.evaluate(() => [...document.querySelectorAll('[role="tab"]')]
+    .find(tab => tab.textContent.trim() === 'MegaCube').click());
+  await page.waitForSelector('[data-testid="cms-panel-refresh"]');
+  rec('⑫ 同一入口保留 CMS 维护页签且诊断页卸载', await page.evaluate(() =>
+    !!document.querySelector('[data-testid="cms-panel-refresh"]')
+    && !document.querySelector('[data-testid="device-manager-view"]')));
+  await page.evaluate(() => [...document.querySelectorAll('[role="tab"]')]
+    .find(tab => tab.textContent.trim() === '设备管理').click());
+  await page.waitForSelector('[data-testid="device-manager-doctor"]');
+  rec('⑫-b CMS 返回设备概览保留诊断和模型管理', await page.evaluate(() =>
+    !!document.querySelector('[data-testid="device-manager-models"]')
+    && !document.querySelector('[data-testid="cms-panel-refresh"]')));
 
   const failed = results.filter(result => !result.pass).length;
   console.log(failed ? `\n❌ ${failed}/${results.length} FAILED` : `\n✅ ALL ${results.length} PASS`);
