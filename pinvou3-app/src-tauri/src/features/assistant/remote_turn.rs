@@ -91,7 +91,7 @@ fn reserve_remote_chat_turn(
     })
 }
 use crate::features::remote_control::controller::turn_budget::{
-    CANCEL_SETTLE_BUDGET, TURN_TIMEOUT_CODE, TurnBudget,
+    CANCEL_SETTLE_BUDGET, TURN_TIMEOUT_CODE, TurnBudget, settle_owned,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -963,6 +963,18 @@ impl EnginePoolChatTurnPort {
         let owner = Arc::new(RemoteTurnOwner::default());
         let mut reserved = self.engine.reserve_remote_turn(session_id)?;
         let generation = reserved.as_ref().map(|reserved| reserved.generation);
+        let input_guard = generation
+            .map(|generation| {
+                super::remote_user_input::RemoteInputTurn::register(
+                    session_id,
+                    task_id,
+                    generation,
+                    owner.clone(),
+                    cancel.clone(),
+                    budget,
+                )
+            })
+            .transpose()?;
         // Keep the exact published owner alive through unwind settlement. The
         // outer service owns the durable failure, but its model-package hook
         // cannot retire this pool entry or the turn it already submitted.
@@ -1021,12 +1033,14 @@ impl EnginePoolChatTurnPort {
         }))
         .catch_unwind()
         .await;
+        // Retire questions before the asynchronous exact-owner engine cleanup.
+        drop(input_guard);
         // All remote model sources own a private skills root. Retire only this
         // attempt's entry before releasing credentials; never rewrite shared B
         // skills here, especially when a replacement already owns the session.
         let engine = self.engine.clone();
         let session_id = session_id.to_owned();
-        crate::features::remote_control::controller::turn_budget::settle_owned(async move {
+        settle_owned(async move {
             engine.release_task_model(&session_id, &owner).await;
         })
         .await;

@@ -2633,6 +2633,39 @@ impl AppEngine {
         Ok(())
     }
 
+    /// Queue a remote preference only while this exact turn is still running.
+    /// The foundation send has a single bounded-mpsc await and no post-send
+    /// await: Pending means no capacity was acquired and dropping it is safe.
+    /// Ready proves mailbox acceptance, not that a model/tool has executed.
+    pub(crate) fn try_remote_user_input(
+        &self,
+        generation: u64,
+        id: &str,
+        response: Option<UserInputResponse>,
+        check_budget: impl FnOnce() -> std::result::Result<(), String>,
+    ) -> std::result::Result<(), String> {
+        use futures_util::FutureExt as _;
+        let state = self.turn_lifecycle.state.lock();
+        if generation == 0
+            || state.turn_epoch != generation
+            || !state.active
+            || state.terminal_closing
+            || self.handle.is_cancelled()
+        {
+            return Err("user_input_stale".into());
+        }
+        check_budget()?;
+        let send = async {
+            match response {
+                Some(response) => self.handle.submit_user_input(id.to_owned(), response).await,
+                None => self.handle.cancel_user_input(id.to_owned()).await,
+            }
+        };
+        send.now_or_never()
+            .ok_or_else(|| "user_input_busy".to_owned())?
+            .map_err(|_| "user_input_unavailable".to_owned())
+    }
+
     /// 切换 engine 内部 session 状态：替换 messages + 切到 session-specific
     /// workspace。
     ///
