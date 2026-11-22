@@ -288,7 +288,8 @@ fn write_active(conn: &rusqlite::Connection, r: &db::StoreModelRecord) -> Result
         downloaded_at=?16,deployed_at=?17,endpoint_url=?18,endpoint_model=?19,scripts_fetched_at=?20,
         deploy_topology=?21,deployed_script_sha256=?22,card_source=?23,card_update_pending=?24,
         container_name=?25,models_root=?26,runtime_card_id=?27,active_version_id=?28,
-        script_install_engine=?29,script_download_model=?30,script_deploy=?31,script_enable=?32,script_stop=?33,script_uninstall=?34
+        script_install_engine=?29,script_download_model=?30,script_deploy=?31,script_enable=?32,script_stop=?33,script_uninstall=?34,
+        resource_requirements_json=?35
         WHERE card_id=?1",params![r.card_id,r.card_name,r.org,r.description,r.engine_name,r.engine_version,
         r.size_bytes,r.quantization,r.source_repo_id,r.source_filename,r.status,
         serde_json::to_string(&r.scripts_content).map_err(|e|e.to_string())?,
@@ -300,7 +301,8 @@ fn write_active(conn: &rusqlite::Connection, r: &db::StoreModelRecord) -> Result
         r.models_root,r.runtime_card_id,r.active_version_id,
         r.scripts.get("install_engine").cloned().flatten(),r.scripts.get("download_model").cloned().flatten(),
         r.scripts.get("deploy").cloned().flatten(),r.scripts.get("enable").cloned().flatten(),
-        r.scripts.get("stop").cloned().flatten(),r.scripts.get("uninstall").cloned().flatten()])
+        r.scripts.get("stop").cloned().flatten(),r.scripts.get("uninstall").cloned().flatten(),
+        serde_json::to_string(&r.resource_requirements).map_err(|e|e.to_string())?])
         .map_err(|e|e.to_string())?;
     Ok(())
 }

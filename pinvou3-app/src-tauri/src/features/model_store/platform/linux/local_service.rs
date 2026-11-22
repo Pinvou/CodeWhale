@@ -606,7 +606,7 @@ fn handle_retry_install(req: &Request, service: &Arc<ModelStoreService>) -> Resp
 fn handle_install(
     req: &Request,
     service: &Arc<ModelStoreService>,
-    test_mode: bool,
+    _test_mode: bool,
     local: bool,
 ) -> Response {
     let card_id = match parse_card_id(req) {
@@ -647,11 +647,9 @@ fn handle_install(
     } else {
         // 商店卡片：先确认商店里真有这张卡——不存在要当场 404，而不是等任务
         // 线程跑起来再失败。商店够不着时不放行：排一个注定失败的下载没有意思。
-        let mgr = if test_mode {
-            ModelManager::new_test_store()
-        } else {
-            ModelManager::new(None, None)
-        };
+        // 内置测试商店已随主线移除：test_mode 形参保留是为了 socket 协议与
+        // 存量回执兼容，商店来源统一走真实商店。
+        let mgr = ModelManager::new(None, None);
         if let Err(e) = mgr.get_store_card(&card_id) {
             let msg = e.to_string();
             // 真实商店（「未找到对应的商店内容」）与测试商店（「未找到测试商店
@@ -671,7 +669,7 @@ fn handle_install(
         }
         (
             "download",
-            service::start_download_with_id(service, card_id.clone(), test_mode, requested_run_id),
+            service::start_download_with_id(service, card_id.clone(), requested_run_id),
         )
     };
     match result {

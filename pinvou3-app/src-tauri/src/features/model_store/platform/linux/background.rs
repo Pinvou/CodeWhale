@@ -311,7 +311,6 @@ pub fn run_host() -> Result<(), String> {
     let service = Arc::new(service::ModelStoreService::new());
     service::run_startup_cleanup(&service);
     service.restore_runs()?;
-    service::run_startup_refresh(&service);
     let _listener = LocalService::bind(Arc::clone(&service), root.join("service.sock"), false)
         .map_err(|e| e.to_string())?;
     eprintln!(
@@ -347,27 +346,30 @@ pub fn dispatch(
         "incomplete_retry" => {
             service::retry_incomplete(service, string("run_id")?, string("expected_sha256")?)
         }
-        "download" => service::start_download(
-            service,
-            string("card_id")?,
-            a["test_mode"].as_bool().unwrap_or(false),
-        ),
+        "download" => service::start_download(service, string("card_id")?),
         "version_action" => service::start_version_action(
             service,
             string("card_id")?,
             string("action")?,
             string("version_id")?,
+            a["memory_confirmed"].as_bool().unwrap_or(false),
         ),
         "card_update" => {
             service::start_card_update(service, string("card_id")?, string("revision")?)
         }
-        "deploy" => service::start_deploy(service, string("card_id")?, optional("profile_id")),
-        "lifecycle" => service::start_lifecycle(
+        "deploy" => tauri::async_runtime::block_on(service::start_deploy(
+            service,
+            string("card_id")?,
+            optional("profile_id"),
+            a["memory_confirmed"].as_bool().unwrap_or(false),
+        )),
+        "lifecycle" => tauri::async_runtime::block_on(service::start_lifecycle(
             service,
             string("card_id")?,
             string("action")?,
             a["purge_weights"].as_bool().unwrap_or(false),
-        ),
+            a["memory_confirmed"].as_bool().unwrap_or(false),
+        )),
         "cancel" => service::cancel_run(service, string("run_id")?),
         "answer" => service::answer_run(service, string("run_id")?, optional("answer")),
         "active" => service::active_runs(service, optional("card_id")),

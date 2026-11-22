@@ -18,7 +18,8 @@
           "webkit2gtk-driver",
           "libpipewire-0.3-0",
           "libgbm1",
-          "libegl1"
+          "libegl1",
+          "libssl3"
         ],
         "recommends": [
           "poppler-utils",

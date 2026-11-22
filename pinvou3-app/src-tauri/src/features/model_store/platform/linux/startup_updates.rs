@@ -79,7 +79,7 @@ pub fn check() -> Report {
         return Report::default();
     }
     log::info!("[model-store] startup_update_check:start");
-    let store = StoreClient::for_startup(&config::load_settings().store_url);
+    let store = StoreClient::for_startup(super::config::STORE_URL);
     let Ok(ids) = db::startup_card_ids() else {
         return Report {
             skipped: 1,

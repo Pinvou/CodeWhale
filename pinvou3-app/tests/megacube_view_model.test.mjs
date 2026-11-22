@@ -335,7 +335,10 @@ test('task observation: store failure retains known device tasks without confirm
 });
 
 test('task names cover actual store producers and the current CMS task contract in all three languages', () => {
-  const rust = file => fs.readFileSync(path.join(ROOT, 'src-tauri/src/features/model_store/platform/linux', file), 'utf8').split('#[cfg(test)]')[0];
+  // 只在模块级 `mod tests` 边界截断：合并树在 impl 内还带一个缩进的
+  // `#[cfg(test)] fn new_memory_only`（测试专用构造器），整段生产代码都在它之后，
+  // 按任意属性截断会把 version_* 等真实任务 kind 误判成测试代码。
+  const rust = file => fs.readFileSync(path.join(ROOT, 'src-tauri/src/features/model_store/platform/linux', file), 'utf8').split('\n#[cfg(test)]\nmod tests')[0];
   const storeKinds = [...new Set([...rust('run_state.rs').matchAll(/kind:\s*"([^"\n]+)"/g), ...rust('service.rs').matchAll(/kind:\s*"([^"\n]+)"/g)].map(match => match[1]))]
     // force_remove is synchronous and explicitly never gets a run/task record.
     .filter(kind => kind !== 'force_remove');

@@ -332,6 +332,30 @@ pub fn notice_manifest(rec: &db::StoreModelRecord) -> Value {
     })
 }
 
+/// 轻量行（`list_store_models_light`：正文列是 NULL 占位、只剩逐文件 sha256
+/// 摘要）用的等价 manifest。digest 语义与 [`notice_manifest`]（即
+/// `startup_card_manifest`）逐字节一致：同一张卡两条路必须算出**同一个**
+/// revision，前端「有更新」徽标的等值匹配才成立。
+pub fn notice_manifest_from_digests(
+    rec: &db::StoreModelRecord,
+    script_hashes: &BTreeMap<String, String>,
+    asset_hashes: &BTreeMap<String, String>,
+) -> Value {
+    json!({
+        "name": rec.card_name, "org": rec.org, "description": rec.description,
+        "engine_name": rec.engine_name, "engine_version": rec.engine_version,
+        "size_bytes": rec.size_bytes, "quantization": rec.quantization,
+        "source_repo_id": rec.source_repo_id, "source_filename": rec.source_filename,
+        "profiles": rec.profiles, "deploy_topology": rec.deploy_topology,
+        "scripts": script_hashes.iter()
+            .map(|(k, h)| (k.clone(), super::native_card_compat::upstream_digest(k, h)))
+            .collect::<BTreeMap<_, _>>(),
+        "assets": asset_hashes.iter()
+            .map(|(k, h)| (k.clone(), super::native_card_compat::upstream_digest(k, h)))
+            .collect::<BTreeMap<_, _>>(),
+    })
+}
+
 fn local_manifest_with(
     rec: &db::StoreModelRecord,
     digest: impl Fn(&str, &db::ScriptBlob) -> String,

@@ -33,7 +33,9 @@ impl Context {
             models_dir: settings.models_dir.clone(),
             staging_dir: settings.staging_dir.clone(),
             hf_endpoint: settings.hf_endpoint.clone(),
-            store_url: (source == "store").then(|| settings.store_url.clone()),
+            // 主线把商店地址定成常量（config::STORE_URL，配置键已废）：回执里
+            // 记录的"来源"只区分 store/local，不再保存可配置地址。
+            store_url: (source == "store").then(|| config::STORE_URL.to_string()),
         }
     }
 
@@ -327,11 +329,9 @@ pub(super) fn preview_for_retry(
     let receipt = candidate(run_id, accepted_run)?;
     let receipt_sha256 = receipt_digest(&receipt)?;
     let context = context(&receipt)?;
-    let manager = if context.test_mode() {
-        ModelManager::new_test_store()
-    } else {
-        ModelManager::new(None, None)
-    };
+    // 内置测试商店已随主线 2026-09-30 移除；test_mode() 只是存量回执的兼容
+    // 判读，统一走真实商店来源。
+    let manager = ModelManager::new(None, None);
     let (name, package_sha256) = if receipt.kind == "install_local" {
         ModelManager::preview_local_install(&receipt.card_id)
     } else {

@@ -24,43 +24,16 @@ function storeAvailability() {
 }
 
 /**
- * 商店在架卡片。`testMode` 走的是打包在应用内的测试卡片——只有开启了测试商店
- * 并把数据源切过去时才传 true，默认永远是正式商店。
- * @param {boolean} [testMode] - 是否测试模式。
+ * 商店在架卡片。数据源只有一个：生产商店（地址是后端的编译期常量，不可配）。
+ *
+ * 这里原来有一个 `testMode` 形参，走的是打包在应用内的 6 张测试卡片，另外还有
+ * `fetchTestStoreState` / `unlockTestStore` / `disableTestStore` 三个开关调用。
+ * 内置测试商店 2026-09-30 整体拿掉了——内置副本跟生产在架卡片已经分叉，排障时
+ * 看错文件是常事。
  * @returns {Promise<Array<object>>} 卡片摘要列表。
  */
-function fetchStoreCards(testMode = false) {
-  return invokeTauri('model_store_cards', { testMode });
-}
-
-/**
- * 测试商店的开关状态。测试商店的卡片和脚本打包在应用内、不依赖商店服务器，
- * 只给开发验证脚本本身用，所以它默认是关的、且必须凭口令才能打开。
- * @returns {Promise<{enabled:boolean}>} 当前是否已开启。
- */
-function fetchTestStoreState() {
-  return invokeTauri('model_store_test_store_state');
-}
-
-/**
- * 用口令开启测试商店。
- *
- * 口令不对回的是 `{ok:false}` 而**不是**异常——这条路径上「口令错」是一个正常
- * 结果，不该和「配置写不进去」混成同一个 catch 分支，那样界面只能给出一句含糊的
- * 「失败」。
- * @param {string} password - 口令。
- * @returns {Promise<{ok:boolean}>} ok 为假表示口令不对。
- */
-function unlockTestStore(password) {
-  return invokeTauri('model_store_unlock_test_store', { password });
-}
-
-/**
- * 关闭测试商店。关掉之后连入口都不再提示，重开要再输一次口令。
- * @returns {Promise<{enabled:boolean}>} 关闭后的状态。
- */
-function disableTestStore() {
-  return invokeTauri('model_store_disable_test_store');
+function fetchStoreCards() {
+  return invokeTauri('model_store_cards');
 }
 
 /**
@@ -83,6 +56,27 @@ export function fetchSavedModels() {
  */
 function fetchModelDetail(cardId) {
   return invokeTauri('model_store_model_detail', { cardId });
+}
+
+/** 已验证存在的模型商店推理引擎；历史数据库残留不会混进列表。 */
+function fetchInstalledEngines() {
+  return invokeTauri('model_store_installed_engines');
+}
+
+/** 本机扫描到的外部权重候选。它们尚未被认定为某张卡片的完整模型。 */
+function fetchLocalResources() {
+  return invokeTauri('model_store_local_resources');
+}
+
+/** 启用模型前的内存准入快照。 */
+function fetchMemoryAdmission(cardId, versionId) {
+  // r43 P1-4：版本切换预检传 versionId，准入按切换目标版本评估。
+  return invokeTauri('model_store_memory_admission', versionId ? { cardId, versionId } : { cardId });
+}
+
+/** 删除一个未被模型绑定、且客户端能安全清理的推理引擎。 */
+function deleteInstalledEngine(engineName, engineVersion = null) {
+  return invokeTauri('model_store_delete_engine', { engineName, engineVersion });
 }
 
 /** Clear only this linked model's fixed context cap, then refresh its consumers. */
@@ -119,14 +113,25 @@ function createApiKey(cardId, label = null) {
   return invokeTauri('model_store_create_api_key', { cardId, label });
 }
 
+function fetchLanStatus(cardId) { return invokeTauri('model_store_lan_status', { cardId }); }
+function setLanSharing(cardId, enabled, address, port = 8090) {
+  return invokeTauri('model_store_set_lan_sharing', { cardId, enabled: enabled === true, address, port });
+}
+function revokeApiKey(keyId) { return invokeTauri('model_store_revoke_api_key', { keyId }); }
+
 /**
  * 发起下载。长操作：立刻返回 run_id，进度靠 `pollRunLog` 读。
  * @param {string} cardId - 卡片 ID。
- * @param {boolean} [testMode] - 是否测试模式。
  * @returns {Promise<{run_id:string}>} 运行句柄。
  */
-function startDownload(cardId, testMode = false) {
-  return invokeTauri('model_store_start_download', { cardId, testMode });
+
+
+function startCardScripts(cardId, confirmed = false) {
+  return invokeTauri('model_store_start_card_scripts', { cardId, confirmed: confirmed === true });
+}
+
+function startDownload(cardId) {
+  return invokeTauri('model_store_start_download', { cardId });
 }
 
 function previewIncomplete(runId) { return invokeTauri('model_store_preview_incomplete', { runId }); }
@@ -136,10 +141,11 @@ function retryIncomplete(runId, expectedSha256) { return invokeTauri('model_stor
  * 发起部署。
  * @param {string} cardId - 卡片 ID。
  * @param {string|null} [profileId] - 部署方案 ID；单方案卡片传 null。
+ * @param {boolean} [memoryConfirmed] - 用户是否明确确认了本次操作的内存风险。
  * @returns {Promise<{run_id:string}>} 运行句柄。
  */
-function startDeploy(cardId, profileId = null) {
-  return invokeTauri('model_store_start_deploy', { cardId, profileId });
+function startDeploy(cardId, profileId = null, memoryConfirmed = false) {
+  return invokeTauri('model_store_start_deploy', { cardId, profileId, memoryConfirmed: memoryConfirmed === true });
 }
 
 /**
@@ -147,8 +153,12 @@ function startDeploy(cardId, profileId = null) {
  * @param {string} cardId - 卡片 ID。
  * @returns {Promise<{run_id:string}>} 运行句柄。
  */
-function startEnable(cardId) {
-  return invokeTauri('model_store_start_lifecycle', { cardId, action: 'enable' });
+function startEnable(cardId, memoryConfirmed = false) {
+  return invokeTauri('model_store_start_lifecycle', {
+    cardId,
+    action: 'enable',
+    memoryConfirmed: memoryConfirmed === true,
+  });
 }
 
 /**
@@ -231,6 +241,29 @@ function answerRun(runId, answer) {
 }
 
 /**
+ * 在文件管理器里打开模型商店的运行日志目录（`~/.pinvou3/model-store/logs/`）。
+ *
+ * 只"打开目录"、不"把日志读回前端"：那几 MB 文本走 IPC 再塞进一个浮动任务卡没有
+ * 任何意义，而用户真正要做的是把文件发给别人。
+ * @returns {Promise<{path:string}>} 目录路径。
+ */
+function revealRunLogsDir() {
+  return invokeTauri('model_store_reveal_run_logs_dir');
+}
+
+/**
+ * 导出一次运行的日志，生成一份**可外发**的副本。
+ *
+ * 跟落盘那份的区别是脱敏强度：落盘那份刻意留着路径和内网地址（不留就没法诊断），
+ * 导出那份会把它们一起抹掉——它是要离开这台机器的那一份。
+ * @param {string} runId - 运行 ID。
+ * @returns {Promise<{path:string}>} 导出文件路径。
+ */
+function exportRunLog(runId) {
+  return invokeTauri('model_store_export_run_log', { runId });
+}
+
+/**
  * 还在跑的长操作。给了 `cardId` 就只问那一张卡。
  *
  * 进入模型商店时用它把任务卡接回去。任务态在前端随视图销毁（模型商店是条件挂载
@@ -292,16 +325,21 @@ export {
   fetchStorageSettings,
   saveStorageSettings,
   fetchStoreCards,
-  fetchTestStoreState,
-  unlockTestStore,
-  disableTestStore,
   fetchLibrary,
   fetchModelDetail,
+  fetchInstalledEngines,
+  fetchLocalResources,
+  fetchMemoryAdmission,
+  deleteInstalledEngine,
   fetchApiKeys,
   createApiKey,
+  fetchLanStatus,
+  setLanSharing,
+  revokeApiKey,
   startDownload,
   previewIncomplete,
   retryIncomplete,
+  startCardScripts,
   startDeploy,
   startEnable,
   startStop,
@@ -311,6 +349,8 @@ export {
   pollRunLog,
   cancelRun,
   answerRun,
+  revealRunLogsDir,
+  exportRunLog,
   fetchActiveRuns,
 };
 
@@ -319,4 +359,4 @@ export function fetchVersions(cardId, opts) {
   const measure = !!(opts && opts.measure);
   return invokeTauri("model_store_versions", measure ? { cardId, measure } : { cardId });
 }
-export function startVersionAction(cardId, action, versionId) { return invokeTauri("model_store_start_version_action", { cardId, action, versionId }); }
+export function startVersionAction(cardId, action, versionId, memoryConfirmed = false) { return invokeTauri("model_store_start_version_action", { cardId, action, versionId, memoryConfirmed: memoryConfirmed === true }); }

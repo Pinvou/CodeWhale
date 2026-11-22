@@ -20,7 +20,10 @@ const render = (model, copy) => renderToStaticMarkup(React.createElement(ModelRo
 
 test('a fresh unmanaged observation never changes existing download, deployment or runtime state', () => {
   for (const [status, running, state, key] of [['pending', false, 'downloaded', 'statusPending'], ['deployed', false, 'deployed', 'statusDeployed'], ['deployed', true, 'running', 'statusRunning']]) {
-    const record = { card_id: 'existing', card_name: 'Existing model', status, running, cmsd: { managed: false, status: 'stopped', canAdopt: true } };
+    // weights_ready_at：主线把「无已核实权重时间戳」的已下载行派生为
+    // incomplete 状态（resume-download）；这三行要测的是已下载/已部署/运行中，
+    // 给上时间戳以走主线派生的这三个状态。
+    const record = { card_id: 'existing', card_name: 'Existing model', status, running, weights_ready_at: '2026-10-01T00:00:00Z', cmsd: { managed: false, status: 'stopped', canAdopt: true } };
     const original = structuredClone(record);
     const models = mergeModels([], { models: [record] });
     assert.equal(models[0].state, state);
@@ -41,7 +44,7 @@ test('a fresh unmanaged observation never changes existing download, deployment 
 
 test('unmanaged running models remain protected, and enable follows explicit adoption eligibility', () => {
   for (const [running, canAdopt, button, disabled] of [[true, true, 'stop', true], [false, false, 'enable', true], [false, true, 'enable', false]]) {
-    const [model] = mergeModels([], { models: [{ card_id: 'existing', status: 'deployed', running, cmsd: { managed: false, canAdopt } }] });
+    const [model] = mergeModels([], { models: [{ card_id: 'existing', status: 'deployed', running, weights_ready_at: '2026-10-01T00:00:00Z', cmsd: { managed: false, canAdopt } }] });
     const html = render(model, copies[0]);
     const tag = html.match(new RegExp(`<button[^>]*data-testid="model-store-${button}"[^>]*>`))?.[0];
     assert.ok(tag); assert.equal(/\sdisabled(?:=|[\s>])/.test(tag), disabled);

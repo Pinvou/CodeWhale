@@ -412,6 +412,60 @@ export const dictZh = {
         uiWorkflow: { pick:'选择一个工作流模板开始', empty:'没有可用的工作流（请检查工作流资源）', workflow:'工作流', stopFailed:e=>`停止工作流失败：${e}`, completed:'🎉 工作流完成' },
         uiMegacube: { ...CMS_LAYOUT_COPY.zh, ...MEGACUBE_OWNERSHIP_COPY.zh, service:CMSD_SERVICE_COPY.zh, guidance:CMS_MODEL_GUIDANCE_COPY.zh, adoptNote:'仅发现，暂无启停权。接管并启用将交由设备服务管理，允许启停与默认切换，并登记自动启动。', adoptModel:'接管并启用', hideInactive:'收起已停止的外部容器', showInactive:n=>`查看 ${n} 个已停止的外部容器`, loading:'正在读取设备数据…', queryFailed:'查询失败，请刷新重试', taskContinueBackground:'转到后台，前往设备面板查看进度', offlineHelp:'设备服务失联，已暂停管理操作。恢复后台服务后可在此刷新；已有模型可能仍在运行。', partialError:'部分设备查询失败，缺失数据不代表资源不存在，请刷新重试。', startModel:'启用 / 恢复', stopModel:'停用', setDefault:'设为默认', stopWarning:'停用会中断该模型的会话并撤销自启。模型文件保留。', confirmStop:'确认停用', keepRunning:'保持运行', sectionTasks:'后台任务', noTasks:'暂无后台任务', cancelTask:'取消安装（保留断点）', taskStatus:{running:'进行中',queued:'排队中',succeeded:'已完成',failed:'失败 / 中断',cancelled:'已取消',cancelling:'取消中'},  taskSwitching:c=>`正在切换到 ${c}…`, taskBusyNote:'切换期间该模型服务可能暂不可用。成功后自动复用或登记目标模型，并在本轮生成结束后切换发起会话的模型；手动选择其他模型会保留你的选择。', taskElapsed:s=>`已用时 ${s} 秒`, taskDone:'已完成', taskFailedTitle:'操作失败', taskOk:'知道了', switchAutoSelected:n=>`已切换到 ${n}`, linkAutoSelected:n=>`已接入并切换到 ${n}`, linkAutoSelectFailed:'自动切换未完成，请在模型列表手动选择', sectionStatus:'管理面状态', daemon:'管理服务', online:'在线', uptime:'运行时长', uptimeHours:n=>`${n} 小时`, uptimeMinutes:n=>`${n} 分钟`, uptimeSeconds:n=>`${n} 秒`, gateway:'固定端点', activeModel:'设备默认模型', noActiveModel:'尚未设置默认模型', degradedBanner:(card,reason)=>`${card} 已降级：${reason}`, unavailable:'管理能力不可用', sectionModels:'模型', noModels:'暂无登记模型', port:'端口', residentMemory:'常驻内存实测', restarts:(n,time)=>`重启 ${n} 次（最近 ${time}）`, bootEnabled:'开机自启', activeTag:'默认', status:{ running:'运行中', starting:'启动中', stopped:'已停止', degraded:'已降级' }, sectionEngines:'引擎注册表', noEngines:'暂无登记引擎', engineIdle:'未在运行', sourceExternal:'外部资源（只读）', sourceManaged:'Cube Manage Software 托管', instanceGone:'进程已消失', sectionCapacity:'内存容量', memoryTotal:'总内存', memoryAvailable:'当前可用', safetyMargin:'安全边际', residentRow:card=>`${card} 常驻`, refresh:'刷新', lastRefresh:t=>`更新于 ${t}`, notRefreshed:'尚未刷新' },
         uiModelStore: {
+          lanLoading:"正在读取共享状态…",
+          lanUnknown:"暂时无法确认共享状态",
+          lanNoAddress:"尚未找到可共享的私网地址，请连接局域网后重试。",
+          lanKeyUnknown:"暂时无法确认 Key 状态，请重试。",
+          lanTitle:"局域网共享",
+          lanHint:"开启后，同一局域网的设备可凭此模型的 Key 调用。仅在信任的网络开启，HTTP 连接不加密。退出应用后共享关闭。",
+          lanOn:"共享已开启",
+          lanOff:"共享已关闭 · 仅供本机使用",
+          lanAddress:"网络地址",
+          lanChoose:"选择网络地址",
+          lanPort:"端口",
+          lanEnable:"开启共享",
+          lanDisable:"关闭共享",
+          lanBaseUrl:"Base URL",
+          lanEndpoint:"完整调用地址",
+          lanCopySample:"复制 Bash 调用示例",
+          lanSampleHint:"把此模型的 Key 设置为 PINVOU_API_KEY 环境变量，再运行示例。其他设备若无法连接，请检查是否在同一网络及主机是否允许该端口。",
+          lanSupport:"支持 OpenAI /v1/models、/v1/chat/completions、SSE 流式输出与取消。此入口不支持图像生成、ComfyUI、Ollama 原生 API。",
+          lanCancel:"取消",
+          keyActive:"有效 · 此模型",
+          keyLegacy:"旧全局 Key · 共享不可用",
+          keyRevoke:"撤销",
+          keyRevokeConfirm:"确认撤销此 Key",
+          keyRevoked:"此 Key 已撤销，其他 Key 不受影响",
+          lanKeyStatus:n=>`此模型有效 Key：${n} 把${n ? "" : "，请先生成 Key"}`,
+          lanErrors:{"lan_select_address": "请选择一个本机私网地址和 1024–65535 端口。", "lan_address_changed": "网络地址已变化，请重新选择地址并开启共享。", "lan_bind_failed": "此端口无法使用，请换一个端口；若地址已断开，请重新连接网络。", "lan_listener_in_use": "其他模型正在使用该共享地址和端口。请使用相同设置，或先关闭其他模型的共享。", "lan_model_unavailable": "模型尚未就绪或实际模型身份不匹配，请检查并启用模型后重试。", "lan_unsupported": "此模型尚无支持的 OpenAI 对话接口，暂不能共享。", "lan_upstream_exposed": "引擎原始端口已对其他设备开放。请先让模型部署仅监听本机，再开启共享。", "lan_isolation_unknown": "无法确认模型原始端口的隔离状态。请检查模型部署及容器访问权限后重试。", "lan_address_unavailable": "无法读取网络地址，请检查网络连接后重试。", "lan_key_store": "无法验证或撤销 Key，请检查应用数据目录权限后重试。", "lan_unavailable": "共享暂不可用，请稍后重试；若持续失败，请重新打开应用。"},
+          cardScriptsTitle: "卡片脚本维护",
+          cardScriptsHint: "只更新操作脚本和附属文件，不下载或删除模型权重、引擎。",
+          cardScriptsStopFirst: "此模型正在运行。请先停用，再更新脚本。",
+          cardScriptsUpdate: "检查并更新脚本",
+          cardScriptsConfirm: "确认继续",
+          cardScriptsCancel: "取消",
+          cardScriptsUpdateWarning: "将从模型商店获取并校验完整脚本包。失败时保留原版本；成功后已部署模型需要重新部署。不会自动启用模型。",
+          cardScriptsDone: "脚本包已保存，请重新部署后启用。",
+          cardScriptsCurrent: "脚本已是当前版本，没有修改。",
+          cardScriptsTask: name => `更新脚本「${name}」`,
+          memoryTitle:'确认运行内存风险', memoryTotal:s=>`设备内存：${s}`, memoryAvailable:s=>`当前可用：${s}`,
+          memoryReserve:s=>`系统安全预留：${s}`, memoryCandidate:n=>`准备启用：${n}`,
+          memoryPeak:s=>`配置对应的峰值预算：约 ${s}`, memoryProjected:s=>`启用后预计可用：约 ${s}`,
+          memoryUnknownPeak:'尚未提供可信的峰值内存预算', memoryUnreadable:'暂无法读取',
+          memoryRunning:(n,s)=>`正在运行：${n}（进程树当前占用 ${s}）`,
+          memoryMeasurementHint:'当前进程占用仅供参考，不等同于完整的统一内存占用或最大需求。数据不全时不会判断为安全。',
+          memoryCancel:'暂不启用', memoryContinue:'了解风险，继续启用',
+          memoryCheckFailed:e=>`无法检查启用条件：${e}`,
+          memoryDeployHint:'部署脚本可能直接启动推理服务，因此部署前也需要检查内存风险。',
+          memoryDeployCandidate:n=>`准备部署：${n}`, memoryCancelDeploy:'暂不部署', memoryContinueDeploy:'了解风险，继续部署',
+          memoryMessages:{
+            measurement_unavailable:'暂时无法读取系统内存，不能评估本次启动的风险。建议稍后重试；如仍要继续，请明确确认。',
+            insufficient:'当前或预计内存低于安全下限，可能导致设备卡顿或服务退出。建议先停用其他模型。',
+            limited:'启用后内存余量较小，已考虑其他模型的后续增长。建议先停用其他模型。',
+            sufficient:'按当前模型配置和内存预算，设备余量充足。',
+            first_unverified:'允许尝试启用首个模型；尚无可信峰值预算，不能保证所有负载下均有足够内存。',
+            unverified:'模型峰值预算或当前占用数据不完整，无法可靠预测能否同时运行。建议先停用其他模型。',
+          },
           title:'模型商店', subtitle:'浏览、下载并在本机部署大模型。',
           tabStore:'模型市场', tabLibrary:'我的模型',
           sectionInstalled:'本机已有', sectionAvailable:'可下载',
@@ -440,7 +494,7 @@ export const dictZh = {
           // undefined，会回落到 guideErrorTitle——于是每次正常进页面都先说一句
           // 「无法使用」，跟事实相反。
           guideUnsupportedTitle:'模型商店在这个平台上不可用',
-          accessLocalOnly:'这是本机地址，只能在这台设备上调用。要让局域网里的其他应用接入，需要 API 网关，该功能尚未在此版本中提供。',
+          accessLocalOnly:"这是本机地址。其他设备请开启下方的局域网共享，并使用共享地址和此模型的 Key。",
           guideLoadingTitle:'正在启动本地模型管理…',
           guideErrorTitle:'本地模型管理无法使用',
           guideStart:'启动', guideStarting:'正在启动…', guideStartFailed:e=>`启动失败：${e}`, guideVersion:v=>`版本 ${v}`,
@@ -460,13 +514,10 @@ export const dictZh = {
           // 权重校验档位的黄条（WeightVerifyNotice）。三句话各管一件事：这是什么、
           // 意味着什么、你可以怎么办。只写一句「未校验」的话，用户既不知道风险在
           // 哪儿，也不知道该做什么，剩下的只有不安。
-          weightVerifyTitle:'权重完整性：没有逐文件校验',
-          weightVerifyNone:'这张卡判断「下载完成」的依据只是文件都在，没有拿官方摘要逐个比对过。如果下载源上的那份副本被换过，应用这边发现不了。',
-          weightVerifyManifest:'这张卡下载时逐个文件比对过摘要，但比对用的摘要跟权重来自同一处。它能发现传输损坏和事后被改动，发现不了来源那一份本身就是坏的。',
-          weightVerifyAdvice:'这不代表这张卡有问题——内置卡都由研究团队提供。想更稳妥：在可信网络下下载，不要在设置里填来路不明的镜像地址；权重如果是从别人的 U 盘拷来的，建议重新下载一次。',
           libraryEmpty:'还没有下载任何模型，去模型市场看看吧',
-          statusRunning:'运行中', statusDeployed:'已部署', statusPending:'待部署',
-          deploy:'部署', deploying:'部署中…', redeploy:'重新部署',
+          statusRunning:'运行中', statusDeployed:'已部署', statusPending:'待部署', statusDownloaded:'已下载，待部署', statusIncomplete:'需继续下载', statusCleanupRequired:'需继续清理',
+          deploy:'部署', deploying:'部署中…', redeploy:'重新部署', resumeDownload:'继续下载', resumingDownload:'继续下载中…',
+          enable:'启用', enabling:'启用中…', stop:'停用', stopping:'停用中…', uninstall:'卸载', uninstalling:'卸载中…', continueCleanup:'继续清理', cleaningUp:'清理中…',
           versionRemaining:"以下目录或其他文件仍保留；本次仅删除了已确认属于所选版本的文件。",
           operationErrors:{ model_store_linked_resource_path:'资源路径包含符号链接，现有资源和记录已保留。请先停用模型服务、退出应用并备份，再按迁移文档改用实际目录后重试。不要直接删除符号链接的目标目录。' },
           operationResultsTitle:"模型操作结果", operationResultDismiss:"已阅并关闭",
@@ -516,7 +567,6 @@ export const dictZh = {
           cardUpdatePending:'卡片已更新，等待重新部署后生效。',
           cardUpdateDone:'卡片已更新，请重新部署后再启用模型。',
           taskCardUpdate:n=>`更新「${n}」卡片`,
-          enable:'启用', enabling:'启用中…', stop:'停用', stopping:'停用中…', uninstall:'卸载', uninstalling:'卸载中…',
           taskDeploy:n=>`部署「${n}」`, taskEnable:n=>`启用「${n}」`, taskStop:n=>`停用「${n}」`, taskUninstall:n=>`卸载「${n}」`,
           deployDone:n=>`「${n}」部署完成`, enableDone:n=>`「${n}」已启用`, stopDone:n=>`「${n}」已停用`, uninstallDonePurged:(n,s)=>`已卸载「${n}」，模型权重已删除，释放 ${s}`, uninstallDoneResidual:(n,c)=>`已卸载「${n}」，但有 ${c} 处权重文件没能删掉，磁盘空间未释放`, uninstallDoneKept:n=>`已卸载「${n}」，权重已保留，卡片仍在模型库里，可直接重新部署`,
           corrected:n=>`「${n}」的运行状态已按实际容器状态纠正为未运行`,
@@ -535,9 +585,15 @@ export const dictZh = {
           // （没有服务、没有容器、没有部署配置），只剩「删除」有意义，所以对话框此时
           // 只给一个按钮，文案也不能再提"停止服务"——那会让用户以为有什么东西在跑。
           uninstallIntroDownloaded:n=>`「${n}」只是下载在本机，还没有部署到引擎上，没有需要卸载的服务。删除会清掉磁盘上的模型权重，并把卡片移出模型库。`,
+          cleanupIntro:n=>`「${n}」上一次删除没有清理完，模型卡片仍保留在列表中，避免遗留文件变得不可管理。请再次确认清理范围后重试。`,
+          cleanupScopeModel:s=>`会再次清理这张模型的权重、下载缓存、脚本和部署标记；预计可释放约 ${s}，以清理后的实际磁盘结果为准。`,
+          cleanupScopeEngine:'不会删除推理引擎。引擎由“推理引擎”单独管理，且只有未被任何模型使用时才能删除。',
           // 卸载失败后的逃生路径。措辞的全部重点是「不会删掉什么」——用户在这一步
           // 最容易误以为磁盘终于清干净了。
           forceRemoveEntry:'强制从列表移除',
+          stopRetainedProcess:'停用残留进程',
+          stopRetainedConfirm:(name)=>`「${name}」的启用检查未通过，但卡片报告仍有自己的引擎进程。停用会中断该实例可能正在处理的请求，不会删除权重、引擎或日志。仅在重新核对进程身份成功后才会执行；确定停用吗？`,
+          stopRetainedUnavailable:'模型记录已变化，请刷新模型列表后处理；未执行停用。',
           forceRemoveTitle:'强制从列表移除？',
           forceRemoveIntro:(n,s)=>`「${n}」的卸载没有完成，记录还留在模型库里，所以这张卡还显示在列表上。强制移除会删除它的模型记录、全部历史版本记录和 API Key，让它从列表消失。当前卡片登记的体积是 ${s}；当前及历史版本文件占用的空间都不会被释放。`,
           forceRemovePointRecordOnly:'只删除本卡片的模型记录、全部历史版本记录和 API Key，磁盘上一个字节都不会被删除；此后无法从历史版本中管理或回退这些文件。',
@@ -552,6 +608,9 @@ export const dictZh = {
           forceRemoveFailed:e=>`强制移除失败：${e}`,
           detailStatus:'状态', detailEndpoint:'本机地址',
           runtimeTitle:'运行时', runtimeEmpty:'暂无运行时数据',
+          shareTitle:'分享此模型',
+          shareAgentSection:'Agent 接入（本机应用）',
+          shareLanSection:'局域网共享',
           accessTitle:'供 Agent 应用接入', accessModelId:'模型 ID', accessApiUrl:'API 地址', accessApiKey:'API Key',
           accessGatewayOff:'API 网关未启用，启动后这里才会给出局域网可用的地址。',
           startGateway:'启动网关', gatewayStarted:'API 网关已启动',
@@ -563,13 +622,55 @@ export const dictZh = {
           // （uninstallPurge 或 forceRemoveEntry，两条都走 delete_store_model，
           // 它在同一个事务里连 api_keys 一起删）；uninstallKeep 那条只是 mark_uninstalled，
           // Key 原样留着照样能用。等 delete_api_key 接上命令和按钮，这句再改回去。
-          keysEmpty:'还没有 Key，点「生成新的 Key」', keysHint:'可以生成多把 Key 按调用方分发。暂不支持单独吊销：只有把这张卡片移出模型库（「删除（含权重）」或「强制从列表移除」）时，它名下的 Key 才会一并作废。',
+          keysEmpty:'还没有 Key，点「生成新的 Key」', keysHint:"可按调用方分发多把 Key，并单独撤销。旧全局 Key 不用于局域网共享，请为需要共享的模型新建 Key。",
           addKey:'生成新的 Key', keyCreated:'已生成新的 API Key',
           copy:'复制', copied:'已复制到剪贴板', copyFailed:'复制失败，请手动选中复制',
           notRunningHint:'这个模型当前未启用，Agent 现在调用会收到「模型未启用」。',
           tasksTitle:'正在进行', taskRunning:'正在执行…', taskCancelling:'正在取消…', taskCancelled: '已取消', taskWaitingInput:'等待你输入…',
-          taskCancel:'取消', taskClose:'关闭', taskExpand:'展开日志', taskCollapse:'收起日志', taskNoOutput:'（暂无输出）', taskErrorSummarized:'部分错误说明文字已摘要；完整原因见下方日志。',
+          taskCancel:'取消', taskClose:'关闭', taskMore:'更多', taskExpand:'展开日志', taskCollapse:'收起日志', taskNoOutput:'（暂无输出）', taskCancelFailed:(m)=>`取消没有生效：${m}`, taskAnswerFailed:(m)=>`这次作答没有送达：${m}`, taskErrorSummarized:'部分错误说明文字已摘要；完整原因见下方日志。',
           taskProgress:(done,total)=>`${done} / ${total}`, taskSpeed:s=>`${s}/s`, taskEta:d=>`剩余约 ${d}`,
+          // 「估算」不是客套：这一档的分母是 docker 已经露面的那些镜像层之和，会随 pull
+          // 推进往上长，百分比因此会往回跳。不标出来，用户会以为进度条坏了。
+          taskProgressEstimated:'估算', taskStep:(i,n)=>`第 ${i} 步 / 共 ${n} 步`,
+          taskAwaitingCompletion:'任务仍在执行，等待完成确认',
+          taskLayers:(done,total)=>`镜像层 ${done}/${total}`, taskCopyLog:'复制详情',
+          taskOpenLogDir:'打开日志目录', taskOpenLogDirFailed:(m)=>`打不开日志目录：${m}`,
+          // 「可外发」不是修饰词：导出那份比落盘那份多抹掉内网地址和路径，就是为了能发出去。
+          taskExportLog:'导出日志（可外发）', taskExportLogDone:(p)=>`已导出到 ${p}`,
+          taskExportLogFailed:(m)=>`导出失败：${m}`,
+          dialogRefresh:'刷新', dialogCancel:'取消', dialogClose:'关闭', listJoin:'、',
+          navEngines:'推理引擎', navLocalResources:'本地资源',
+          enginesTitle:'推理引擎',
+          enginesIntro:'只显示已在本机验证存在的引擎。只有未被任何模型绑定的引擎可以删除；删除后，下次下载需要该引擎的模型时会自动重新安装。',
+          enginesChecking:'正在检查本机引擎…', enginesEmpty:'未发现可管理的推理引擎。',
+          enginesVerifiedLocal:'已验证本机安装', enginesSizeLabel:'占用空间：', enginesSizeUnknown:'暂无法精确统计',
+          enginesBound:(names)=>`已绑定：${names}。请先处理这些模型。`,
+          enginesNoCleanup:'该引擎没有安全的独立清理方式，暂不提供自动删除。',
+          enginesDelete:'删除',
+          // r19 P2-1：镜像名来自卡片脚本自报的 LMM_ENGINE_IMAGE，宿主没有独立
+          // 核实渠道；删除按这个名字 docker rmi，说清楚它未必可信。
+          enginesConfirm:(name)=>`删除“${name}”？此操作会释放引擎空间；模型权重不会被删除。镜像名由卡片脚本自报，未经独立核实。`,
+          enginesConfirmDelete:'确认删除',
+          scriptUpdateBadge:'有可用更新',
+          detail:'详情',
+          actionDeploy:'部署模型',
+          actionUninstall:'卸载部署',
+          moreActions:'更多',
+          actionUpdate:'更新脚本',
+          actionRedeploy:'重新部署',
+          actionDelete:'删除模型',
+          redeployBlockedByRunning:'模型运行中，请先停用再重新部署。',
+          updateConfirmRunning:'模型正在运行，更新脚本会先停止它，再更新脚本内容（已下载的权重不受影响）。更新完成后需要重新部署才会生效。确定继续吗？',
+          updateConfirmStopped:'更新脚本只更新脚本内容，已下载的权重不受影响。更新完成后需要重新部署才会生效。确定继续吗？',
+          resourceManager:'资源管理',
+          storageHint:'管理权重存放路径、导入扫描目录和磁盘配额。',
+          enginesConfirmOllama:(name)=>`删除「${name}」？此操作会删除 ollama 引擎及其全部模型数据（含权重，通常几十 GB）。如需再用，须重新下载所有模型。`,
+          enginesDeleted:(freed,purged)=>`已删除，释放 ${freed}。${purged?'注意：模型数据已一并删除。':''}`,
+          enginesDeleteFailed:(m)=>`删除失败：${m}`,
+          localResTitle:'本地资源',
+          localResIntro:'这里列出模型商店在指定目录中发现的权重候选。下载时会由模型卡片再次核验是否属于该模型且文件完整；未知资源不会被自动删除。',
+          localResScanning:'正在扫描本地资源…', localResEmpty:'在当前扫描目录中未发现权重候选。',
+          localResRemovable:'可移动介质', localResManage:'管理扫描目录',
           etaSec:n=>`${n} 秒`, etaMin:n=>`${n} 分钟`, etaHour:(h,m)=>`${h} 小时 ${m} 分`,
           promptTitle:'需要你补充几项信息', promptSubmit:'确定', promptCancel:'取消', promptYes:'是', promptNo:'否',
 
@@ -613,22 +714,22 @@ export const dictZh = {
           //
           // 分工是：宿主答「去哪找」（扫描根通过 LMM_IMPORT_DIRS 下发、结果通过
           // LMM_IMPORT_CANDIDATES 交给脚本，并写进运行日志），卡片脚本答「这份
-          // 对不对、要不要用」。于是**两套卡片行为不同**：
-          //   - 正式商店的远端卡片：已消费 LMM_IMPORT_DIRS（2026-09-21 上架生产，
-          //     在架 7 张里 7 张都接了），会复用完整的本机副本，不再重复下载。
-          //   - 内置测试商店的卡片（打进二进制的 data/test-store/）：没接，仍会
-          //     联网下载。仓库里那份是旧副本，跟正式商店不同步。
+          // 对不对、要不要用」。而卡片脚本不在这个仓库里，只在商店服务器上：
+          // 2026-09-21 在架那 7 张都消费了 LMM_IMPORT_DIRS，但那是**当时那一批**的
+          // 情况，不是对将来每一张卡的承诺。
           //
-          // 所以早先两版文案都是假话，只是方向相反：一版承诺「会被自动找到并复用」
-          // （对测试卡片是假的），一版改成「当前版本不会自动复用」（对正式商店的
-          // 用户是假的）。现在按「宿主做了什么 + 复用取决于卡片」写，两边都不撒谎，
-          // 测试卡片接上之后也不用再改。
+          // 早先两版文案都是假话，只是方向相反：一版承诺「会被自动找到并复用」，
+          // 一版改成「当前版本不会自动复用」。现在按「宿主做了什么 + 复用取决于
+          // 卡片」写，不替任何一张卡下断言。
+          //
+          // （这里原来还要点名「内置测试商店的卡片没接」，内置测试商店 2026-09-30
+          // 拿掉之后不再有第二个数据源要区分。）
           storageModelsDirHint: '改目录不会搬运已下载的权重。旧目录里的模型仍在本机，但不会自动进入下面的查找范围——想继续复用，请把旧目录填到「额外的查找目录」里。',
           storageFree: (size) => `可用 ${size}`,
           storageImportLabel: '额外的查找目录',
           storageImportHint: '一行一个绝对路径。如果你把模型放在我们猜不到的地方（比如另一块数据盘），填在这里。',
           storageScanLabel: '下载前实际查找的位置',
-          storageScanHint: '按这个顺序找；扫到的结果写进运行日志，并交给模型卡片核对。是否复用由卡片脚本决定：正式商店的卡片会直接复用完整的本机副本，内置测试商店的卡片尚未接入、仍会联网下载。U 盘和移动硬盘会自动加入。',
+          storageScanHint: '按这个顺序找；扫到的结果写进运行日志，并交给模型卡片核对。是否复用由卡片脚本决定，不由品悟决定：卡片认下本机副本就跳过下载，认不下就照常下载。U 盘和移动硬盘会自动加入。',
           storageRemovable: '可移动介质',
           storageSave: '保存',
           storageCancel: '取消',
@@ -636,19 +737,9 @@ export const dictZh = {
           // 读取设置失败时，保存按钮会被禁用——空的「额外的查找目录」一旦提交
           // 会被解析成空列表，把用户已存的几条目录静默清空。这句话解释按钮为什么灰着。
           storageLoadFailedHint: '没能读到当前的存储设置，已暂时禁用保存，以免把已保存的查找目录覆盖掉。请关闭后重新打开。',
-          // —— 测试模型商店(隐藏入口:连点页面标题 7 次,间隔不超过 1.5 秒) ——
-          testStoreUnlockTitle: '开启测试模型商店',
-          testStoreUnlockHint: '测试商店的卡片和脚本打包在应用内、不依赖商店服务器，仅供开发验证脚本本身。',
-          testStorePasswordPlaceholder: '口令',
-          testStoreUnlockConfirm: '开启',
-          testStoreUnlockCancel: '取消',
-          testStoreWrongPassword: '口令不对',
-          testStoreUnlocked: '测试模型商店已开启，可在上方切换数据源',
-          testStoreBanner: '测试模型商店已开启（仅供开发验证，卡片打包在应用内）',
-          testStoreDisable: '关闭',
-          testStoreDisabled: '测试模型商店已关闭。再次开启需重新输入口令',
-          sourceOfficial: '正式商店',
-          sourceTest: '测试商店',
+          // 这里原来有一组 testStore* 文案和 sourceOfficial / sourceTest 两个数据源
+          // 标签，服务的是「测试模型商店」那个隐藏开关（连点页面标题 7 次弹口令框）。
+          // 内置测试商店 2026-09-30 整体拿掉，三语一起删（en/ja 有 parity 断言）。
 incompleteTitle:'未完成的模型安装',
 taskBackendPending:'设备任务已接单，正在等待商店建立运行记录…',
 taskLogRetained:'当前显示保留的最近日志；较早的内容已清理，任务结果和恢复记录仍保留。',
