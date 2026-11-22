@@ -20,6 +20,7 @@
     "tests/*.js",
     "tests/remote_archive_smoke.mjs",
     "tests/remote_permission_state_smoke.mjs",
+    "tests/remote_user_input_smoke.mjs",
     "tests/remote_quarantine_smoke.mjs",
     "tests/controlled_preconnect_smoke.mjs",
     "tests/remote_dispatch_ownership_smoke.mjs",

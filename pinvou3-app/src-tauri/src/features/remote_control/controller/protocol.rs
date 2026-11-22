@@ -105,7 +105,7 @@ const MAX_ARTIFACTS: usize = 256;
 pub(crate) const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "98e97089e09533376d4e0df65a93d6434ab4ead2dc4dc6f403edfce3214748c1";
+    "20ba5b032e06ad7dd8902da538f6570d36059c568622c7ea73c9e1e7d89cde19";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -174,6 +174,8 @@ pub(crate) const CONTROLLER_PAYLOAD_TYPES: &[&str] = &[
 /// Command name transported over the controller lane. The unshipped legacy
 /// permission/transfer/artifact payloads were replaced by this single pair.
 pub(crate) const REMOTE_ACTION_OPERATIONS: &[&str] = &[
+    "user_input_list",
+    "user_input_respond",
     "permission_list",
     "permission_decide",
     "attachment_begin",
@@ -2144,13 +2146,14 @@ pub(crate) fn validate_controller_runtime_payload_json(
     let value = validate_controller_payload_json_in_context(input, sender_role, Some(lease))?;
     if matches!(kind, "remote_action_request" | "remote_action_result") {
         let operation = object_string(as_object(&value, "payload")?, "operation", "payload")?;
-        let required = if operation.starts_with("permission_") {
-            "permission_v1"
-        } else if operation.starts_with("attachment_") {
-            "attachment_v1"
-        } else {
-            "artifact_v1"
-        };
+        let required =
+            if operation.starts_with("permission_") || operation.starts_with("user_input_") {
+                "permission_v1"
+            } else if operation.starts_with("attachment_") {
+                "attachment_v1"
+            } else {
+                "artifact_v1"
+            };
         if !context
             .negotiated_capabilities
             .iter()
@@ -2965,6 +2968,8 @@ fn validate_artifact_index(payload: &Map<String, Value>) -> Result<()> {
 fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<()> {
     let operation = object_string(payload, "operation", "payload")?;
     let (required, optional): (&[&str], &[&str]) = match (result, operation) {
+        (false, "user_input_list") => (&["task_id"], &[]),
+        (false, "user_input_respond") => (&["task_id", "input_id", "cancel", "answers"], &[]),
         (false, "permission_list") => (&["task_id"], &[]),
         (false, "permission_decide") => (&["task_id", "permission_request_id", "decision"], &[]),
         (false, "attachment_begin") => (
@@ -3009,6 +3014,8 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
             (&[], &[])
         }
         (true, "permission_list") => (&["permissions"], &[]),
+        (true, "user_input_list") => (&["requests"], &[]),
+        (true, "user_input_respond") => (&["state"], &[]),
         (true, "permission_decide") => (&["state"], &[]),
         (true, "attachment_begin") => (&["transfer_id", "chunk_bytes", "total_bytes"], &[]),
         (true, "attachment_chunk") => (&["state", "received_bytes"], &["sha256"]),
@@ -3046,7 +3053,7 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
     for field in required.iter().chain(optional.iter()) {
         if let Some(value) = body.get(*field) {
             match *field {
-                "aborted" | "completed" | "truncated" | "cleanup_confirmed" => {
+                "aborted" | "completed" | "truncated" | "cleanup_confirmed" | "cancel" => {
                     if !value.is_boolean() {
                         return Err(ControllerProtocolError::new(
                             "invalid_field",
@@ -3055,6 +3062,31 @@ fn validate_remote_action(payload: &Map<String, Value>, result: bool) -> Result<
                     }
                 }
                 "permissions" => validate_remote_action_permissions(value)?,
+                "requests" => {
+                    let requests: Vec<super::user_input::InputRequest> =
+                        serde_json::from_value(value.clone()).map_err(|_| {
+                            ControllerProtocolError::new("invalid_field", "body.requests")
+                        })?;
+                    if !super::user_input::valid_requests(&requests) {
+                        return Err(ControllerProtocolError::new(
+                            "invalid_field",
+                            "body.requests",
+                        ));
+                    }
+                }
+                "answers" => {
+                    let answers: Vec<super::user_input::InputAnswer> =
+                        serde_json::from_value(value.clone()).map_err(|_| {
+                            ControllerProtocolError::new("invalid_field", "body.answers")
+                        })?;
+                    if !super::user_input::valid_answer_shape(&answers) {
+                        return Err(ControllerProtocolError::new(
+                            "invalid_field",
+                            "body.answers",
+                        ));
+                    }
+                }
+                "input_id" => validate_identifier(value, "body.input_id")?,
                 "artifacts" => validate_remote_action_artifacts(value)?,
                 "preview_kind" => validate_enum(
                     value,
@@ -4480,6 +4512,10 @@ mod tests {
         json!({
             "protocol_version": CONTROLLER_PROTOCOL_VERSION,
             "subprotocol": CONTROLLER_SUBPROTOCOL,
+            "remote_action_operations": REMOTE_ACTION_OPERATIONS,
+            "user_input_limits": {"pending":super::super::user_input::MAX_REQUESTS,
+                "questions":super::super::user_input::MAX_QUESTIONS,"custom_chars":super::super::user_input::MAX_CUSTOM_CHARS,
+                "view_bytes":super::super::user_input::MAX_VIEW_BYTES},
             "integer_wire_format": "canonical-u64-decimal-string",
             "json_object_keys": "unique-after-unescape",
             "limits": {
@@ -5744,6 +5780,18 @@ mod tests {
         let lease = context();
         for (operation, request_body, response_body, fine) in [
             (
+                "user_input_list",
+                json!({"task_id":"task-1"}),
+                json!({"requests":[]}),
+                "permission_v1",
+            ),
+            (
+                "user_input_respond",
+                json!({"task_id":"task-1","input_id":"input-1","cancel":true,"answers":[]}),
+                json!({"state":"accepted"}),
+                "permission_v1",
+            ),
+            (
                 "permission_list",
                 json!({"task_id":"task-1"}),
                 json!({"permissions":[]}),
@@ -5797,6 +5845,71 @@ mod tests {
                 validate_controller_runtime_payload_json(&raw, role, Some(&runtime(&capabilities)))
                     .unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn remote_user_input_shared_vectors_use_the_actual_runtime_parser() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../../../remote-control-relay/test/fixtures/controller-user-input.json"
+        ))
+        .unwrap();
+        let lease = context();
+        let packet = |body: Value, result: bool| {
+            let mut value = json!({"v":1,"type":if result {"remote_action_result"} else {"remote_action_request"},
+                "connection_id":lease.connection_id,"controller_lease_id":lease.controller_lease_id,
+                "lease_epoch":lease.lease_epoch,"relay_epoch":lease.relay_epoch,
+                "remote_control_generation":lease.remote_control_generation,
+                "request_id":"request-input-1","session_id":"session-ref-1",
+                "operation":if result {"user_input_list"} else {"user_input_respond"},"body":body});
+            if result {
+                value["ok"] = json!(true);
+            }
+            validate_controller_runtime_payload_json(
+                &value.to_string(),
+                if result { B } else { A },
+                Some(&runtime(&["permission_v1", "task_v1"])),
+            )
+        };
+        packet(json!({"requests":fixture["requests"]}), true).unwrap();
+        packet(json!({"requests":fixture["mixed_requests"]}), true).unwrap();
+        for mutation in fixture["invalid_request_mutations"].as_array().unwrap() {
+            let mut requests = fixture["requests"].clone();
+            *requests
+                .pointer_mut(mutation["path"].as_str().unwrap())
+                .unwrap() = mutation["value"].clone();
+            assert!(
+                packet(json!({"requests":requests}), true).is_err(),
+                "{mutation}"
+            );
+        }
+        for (key, valid) in [("valid_answers", true), ("invalid_answers", false)] {
+            for answers in fixture[key].as_array().unwrap() {
+                let result = packet(
+                    json!({"task_id":"task-1","input_id":"input-fixture-1","cancel":false,"answers":answers}),
+                    false,
+                );
+                assert_eq!(result.is_ok(), valid, "{key}: {answers}");
+            }
+        }
+        let mut requests = fixture["requests"].clone();
+        requests[0]["questions"][0]["header"] = json!("🙂".repeat(64));
+        packet(json!({"requests":requests}), true).unwrap();
+        let mut requests = fixture["requests"].clone();
+        requests[0]["questions"][0]["header"] = json!("🙂".repeat(65));
+        assert!(packet(json!({"requests":requests}), true).is_err());
+        let mut requests = fixture["requests"].clone();
+        requests[0]["questions"][0]["extra"] = json!(true);
+        assert!(packet(json!({"requests":requests}), true).is_err());
+        for text in ["x".repeat(4097), "\u{85}".into()] {
+            assert!(
+                packet(
+                    json!({"task_id":"task-1","input_id":"input-fixture-1","cancel":false,
+                "answers":[{"question_id":"0","option_ids":[],"custom_text":text}]}),
+                    false
+                )
+                .is_err()
+            );
         }
     }
 

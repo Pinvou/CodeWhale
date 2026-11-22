@@ -44,6 +44,59 @@ function host(onSessionsPorts) {
   return { window, api: window.TauriBridge, respond(fn) { response = fn; } };
 }
 
+test('real public bridge forwards bounded user-question intents and retains unknown mutation identity', async () => {
+  const h = host();
+  const calls = [];
+  let attempts = 0;
+  h.respond(async (command, args) => {
+    if (command === 'get_platform_capabilities') return { os: 'windows', desktopRemoteControlSupported: true };
+    if (command === 'desktop_remote_controller_status') return { status: 'idle' };
+    assert.equal(command, 'desktop_remote_action_a');
+    calls.push(structuredClone(args));
+    if (args.intent.operation === 'user_input_list') return { requests: [] };
+    attempts += 1;
+    if (attempts === 1) throw Object.assign(new Error('result_unknown'), { code: 'result_unknown', requestId: args.requestId });
+    if (attempts === 2) throw Object.assign(new Error('remote_action_failed'), { code: 'remote_action_failed', requestId: args.requestId });
+    return { state: 'accepted' };
+  });
+  await h.api.platform.loadPlatformCapabilities();
+  await h.api.desktopRemoteControl.userInputList('local', 'ref', 'task-1');
+  await h.api.desktopRemoteControl.userInputList('local', 'ref', 'task-1');
+  assert.notEqual(calls[0].requestId, calls[1].requestId, 'each read observes a fresh snapshot');
+  const answers = [{ question_id: '0', option_ids: ['0', '1'] }];
+  await assert.rejects(h.api.desktopRemoteControl.userInputRespond('local', 'ref', 'task-1', 'input-1', false, answers),
+    failure => failure.resultUnknown === true);
+  await h.api.desktopRemoteControl.userInputRespond('local', 'ref', 'task-1', 'input-1', false, answers);
+  assert.equal(calls[2].requestId, calls[3].requestId);
+  assert.equal(calls[3].requestId, calls[4].requestId, 'retry after a different transport failure recovers the original command');
+  const { requestId, ...payload } = calls[4];
+  assert.ok(requestId);
+  assert.deepEqual(payload, { localSessionId: 'local', remoteRef: 'ref', intent: {
+    operation: 'user_input_respond', taskId: 'task-1', inputId: 'input-1', cancel: false, answers,
+  } });
+});
+
+test('unknown question reads release correlation capacity and cannot exhaust answer admission', async () => {
+  const h = host(); const reads = new Set(); let mutation = 0;
+  h.respond(async (command, args) => {
+    if (command === 'get_platform_capabilities') return { os: 'windows', desktopRemoteControlSupported: true };
+    if (command === 'desktop_remote_controller_status') return { status: 'idle' };
+    assert.equal(command, 'desktop_remote_action_a');
+    if (args.intent.operation === 'user_input_list') {
+      reads.add(args.requestId);
+      throw Object.assign(new Error('result_unknown'), { code: 'result_unknown', requestId: args.requestId });
+    }
+    mutation += 1; return { state: 'accepted' };
+  });
+  await h.api.platform.loadPlatformCapabilities();
+  for (let i = 0; i < 140; i += 1) await assert.rejects(h.api.desktopRemoteControl.userInputList('local', 'ref', 'task-1'));
+  assert.equal(reads.size, 140);
+  await h.api.desktopRemoteControl.userInputRespond('local', 'ref', 'task-1', 'input-1', true, []);
+  assert.equal(mutation, 1);
+  await assert.rejects(h.api.desktopRemoteControl.userInputRespond('local', 'ref', 'task-1', 'bad/id', true, []));
+  assert.equal(mutation, 1, 'invalid IDs never reach native effects');
+});
+
 test('production sessions facade keeps navigation distinct from background and view reads', async () => {
   let sessionsPorts;
   const h = host(ports => { sessionsPorts = ports; });

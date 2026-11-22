@@ -920,7 +920,7 @@ outcomes and already-admitted requests are not refusal receipts. Both clients
 must support these fields; older strict decoders may reject such receipts.
 
 The contract digest is
-`98e97089e09533376d4e0df65a93d6434ab4ead2dc4dc6f403edfce3214748c1`.
+`20ba5b032e06ad7dd8902da538f6570d36059c568622c7ea73c9e1e7d89cde19`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
@@ -1397,6 +1397,30 @@ snapshots or journal contents. Validation errors identify only the bounded field
 name, not its supplied value.
 
 ## B-local turn budget and capability identities
+
+### Native user questions
+
+`user_input_list` and `user_input_respond` are closed remote action operations
+requiring both `task_v1` and `permission_v1`. A list request carries only
+`task_id`; its successful body is `{requests:[{input_id,questions}]}`. Question
+groups carry `{id,header,question,options,multi_select}` and options carry
+`{value,label,description}`. Group/option identifiers are positional decimal
+strings, not B's original identifiers. `input_id` is an opaque one-shot nonce.
+A response request carries `{task_id,input_id,cancel,answers}`; each answer is
+`{question_id,option_ids,custom_text?}`. Cancel requires empty answers. The
+successful body `{state:"accepted"}` means mailbox acceptance, not task success.
+Both codecs reject excess authority fields, malformed nested schemas and limits
+specified by `user_input_limits` in their contract manifests. Original raw
+question and option values are resolved only at B under the live lease/task/
+execution-owner fence. Duplicate identical decisions replay without a second
+enqueue; conflicting, expired and successor-turn decisions fail closed.
+
+No capability name is added. All peers and any deployment using the runtime
+payload validator must support these new operations for interactive questions.
+Older strict peers reject them; a new controller stops automatic question reads
+on failure and exposes manual refresh. Ordinary task and permission messages
+retain their existing shapes. See [the user-question contract](../docs/remote-task-user-input.md)
+for lifecycle, bounds, recovery and native/ACP scope.
 
 The remote chat and ACP adapters share one total deadline, starting before
 admission/submission and including the subsequent busy wait. The B process

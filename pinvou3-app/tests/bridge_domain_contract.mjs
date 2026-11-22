@@ -44,6 +44,7 @@ export const desktopBridgeApi = {
     'archiveRemoteProxyHistory', 'quarantineRemoteProxyHistory', 'listRemoteProxyArchiveCandidates', 'listRemoteProxyArchives',
     'getRemoteProxyLoadStatus', 'recoverRemoteProxyFile',
     'permissionDecide', 'permissionDenyTask', 'permissionList', 'controlledPermissionList', 'setEndpointProfile',
+    'userInputList', 'userInputRespond',
     'reserveRemoteTask', 'commitRemoteTask', 'cancelRemoteTask', 'abandonRemoteTask',
   ],
   artifacts: ['artifactInfo', 'downloadArtifact', 'listDeliverableIndex', 'openArtifactExternal', 'openContainingFolder', 'openScheduledTaskFolder', 'openUserExternalUrl', 'readArtifactImageB64', 'readArtifactText', 'readArtifactThumbnail', 'renderArtifactVisual', 'revealSessionFolder', 'writeArtifactText'],
