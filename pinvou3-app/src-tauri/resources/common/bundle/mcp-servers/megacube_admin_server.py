@@ -47,6 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import megacube_tools
 from megacube_tools.task_view import task_page, task_next, store_task_handle
 from megacube_tools.state import remember_local_device as _remember_local_device
+from megacube_tools.redact import redact_text as _redact_text
 
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
@@ -3250,8 +3251,10 @@ def _handle(msg):
             response["next"] = "先核对本机设备连接和记录目录，修复后重新核实原任务；不要因查询失败重复提交管理动作。独立下载工具仍可使用。"
             _result(req_id, _text_content(response, is_error=True))
         except Exception as e:
+            # r20 P2-2：异常串可内嵌响应片段（如 JSONDecodeError 引用原文），
+            # 出站前脱敏。
             _result(req_id, _text_content({
-                "summary": "查询失败：%s" % e,
+                "summary": "查询失败：%s" % _redact_text(str(e)),
                 "data": None,
                 "next": "稍后重试；持续失败说明管理面异常。",
             }, is_error=True))

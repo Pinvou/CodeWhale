@@ -51,7 +51,9 @@ def _rpc(method, args):
         value = json.loads(raw)
         if response.status != 200 or "error" in value:
             error = value.get("error") or {}
-            raise ToolError("STORE_REQUEST_REJECTED", str(error.get("message") or "商店拒绝请求。"))
+            # r20 P2-2：商店拒绝 message 可能内嵌上游 JSON 回显（admission
+            # 类错误整体内嵌上游应答），与 task()/list_incomplete 同口径脱敏。
+            raise ToolError("STORE_REQUEST_REJECTED", redact_text(str(error.get("message") or "商店拒绝请求。")))
         if "result" not in value:
             raise ToolError("STORE_PROTOCOL_ERROR", "商店未返回完整结果。")
         return value["result"]
