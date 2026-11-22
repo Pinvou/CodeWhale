@@ -948,6 +948,25 @@ pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
                 out.push_str(key);
                 out.push('=');
                 out.push_str(REDACTED);
+            } else if !word.contains("://")
+                && word.contains('@')
+                && word.split('@').next().is_some_and(|prefix| {
+                    // r51 P1：等号黏连的同类形状——`mount remote=user:pass@host:/x`、
+                    // `connect key=user:pass@host`。裸词臂（r49 P1-2）够不着带 `=` 的
+                    // 词，而 redact_url_secrets 对无 `://` 的词原样返回，于是 r47
+                    // 「等号臂」与 r49「无 scheme userinfo」两修在此交集漏臂：
+                    // `KEY=user:pass@host` 原样落盘+导出（评审 6011075265 探针）。
+                    // 这里套同一形状门，键名保留、仅抹 `user:pass@`；误伤面与裸词臂
+                    // 完全一致（@ 前段含冒号才收，`server=web@host` 不受牵连）。
+                    prefix.contains(':') && !prefix.contains(' ') && prefix.len() <= 128
+                })
+            {
+                let at = word.rfind('@').unwrap_or_default();
+                out.push_str(key);
+                out.push('=');
+                out.push_str(REDACTED);
+                out.push('@');
+                out.push_str(&word[at + 1..]);
             } else {
                 out.push_str(&redact_url_secrets(word));
             }
@@ -1565,6 +1584,41 @@ mod tests {
         // 含空格普通句子不误伤。
         let q2 = sanitize_for_disk("echo a=1 & password is set here");
         assert!(q2.contains("password"), "普通句子过抹: {q2}");
+    }
+
+    /// r51 P1：**等号黏连**的无 scheme userinfo——`KEY=user:pass@host` 形态。
+    /// 此前等号臂 else 整词交 redact_url_secrets（无 `://` 原样返回），r49 裸词
+    /// 臂够不着带 `=` 的词，落盘+导出双泄漏（评审 6011075265 探针双跑确认）。
+    /// 修后与裸词臂同一形状门：键名保留，仅抹 `user:pass@`。
+    #[test]
+    fn disk_sanitizer_blocks_eq_glued_no_scheme_userinfo() {
+        let e1 = sanitize_for_disk("mount remote=user:pass@host.example.com:/x /mnt");
+        assert!(
+            !e1.contains("user:pass"),
+            "等号黏连无 scheme userinfo 泄漏: {e1}"
+        );
+        assert!(e1.contains("remote="), "键名被抹: {e1}");
+        assert!(e1.contains("@host.example.com"), "host 过抹: {e1}");
+        let e2 = sanitize_for_disk("connect key=user:pass@host now");
+        assert!(
+            !e2.contains("user:pass"),
+            "等号黏连无 scheme userinfo 泄漏: {e2}"
+        );
+        // 导出/复制与落盘同一道词级臂（460 行注释口径）。
+        let x1 = sanitize_for_export("mount remote=user:pass@host.example.com:/x");
+        assert!(!x1.contains("user:pass"), "导出臂等号黏连泄漏: {x1}");
+        // 负控一：带 scheme 的等号黏连仍走既有 URL 臂（形态不变）。
+        let n1 = sanitize_for_disk("git push https://user:pass@host.example.com/repo");
+        assert!(!n1.contains("pass"), "带 scheme userinfo 泄漏: {n1}");
+        // 负控二：@ 前无冒号的普通地址不受牵连（与裸词臂 user@host 同判据）。
+        let n2 = sanitize_for_disk("deploy server=web@host.example.com");
+        assert!(n2.contains("web@host.example.com"), "无密码地址误抹: {n2}");
+        // 负控三：普通 KEY=value（无 @、键不在机密名单）不误伤。
+        let n3 = sanitize_for_disk("export BUILD_ID=hello-world-plain");
+        assert!(
+            n3.contains("BUILD_ID=hello-world-plain"),
+            "普通赋值误抹: {n3}"
+        );
     }
 
     /// r49 P1-1：finish **先脱敏后盖章**的跨行 pending 链四形态——此前次序相反
