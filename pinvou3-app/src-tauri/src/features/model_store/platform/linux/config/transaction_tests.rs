@@ -22,7 +22,7 @@ fn settings_patch_child() {
             .unwrap();
         }
         "test-mode" => {
-            super::super::service::disable_test_store().unwrap();
+            super::super::service::set_storage_settings(None, None, Some(true)).unwrap();
         }
         "reader" => {
             assert!(!load_settings().startup_update_check_enabled);
@@ -86,7 +86,7 @@ fn both_production_writers_wait_then_patch_the_fresh_cross_process_settings() {
     for mode in ["storage", "test-mode"] {
         let home = TempHome::new();
         let first = Settings {
-            test_mode_enabled: true,
+            startup_update_check_enabled: true,
             ..Default::default()
         };
         save_settings(&first).unwrap();
@@ -94,7 +94,7 @@ fn both_production_writers_wait_then_patch_the_fresh_cross_process_settings() {
         let mut child = spawn_waiter(home.path(), mode);
         let mut latest = read_settings_unlocked().unwrap();
         latest.startup_update_check_enabled = false;
-        latest.store_url = "https://updated.example.test/store".into();
+        latest.ollama_host = "http://127.0.0.1:11434".to_string();
         latest.models_dir = home
             .path()
             .join("new-models")
@@ -104,14 +104,15 @@ fn both_production_writers_wait_then_patch_the_fresh_cross_process_settings() {
         drop(lock);
         finish(&mut child);
         let after = read_settings().unwrap();
-        assert!(!after.startup_update_check_enabled);
-        assert_eq!(after.store_url, latest.store_url);
+        assert_eq!(after.ollama_host, latest.ollama_host);
         assert_eq!(after.models_dir, latest.models_dir);
         if mode == "storage" {
             assert_eq!(after.import_scan_dirs, ["/child/import"]);
-            assert!(after.test_mode_enabled);
+            // storage 写手不碰开关：父进程刚写入的最新值必须被保留。
+            assert!(!after.startup_update_check_enabled);
         } else {
-            assert!(!after.test_mode_enabled);
+            // 开关写手读到的是**最新**配置再打补丁：它的写回赢过父进程的旧值。
+            assert!(after.startup_update_check_enabled);
         }
     }
 }
@@ -149,7 +150,7 @@ fn quarantine_blocks_all_production_settings_patches_until_recovery() {
     assert!(
         update_settings(|settings| {
             patched = true;
-            settings.test_mode_enabled = true;
+            settings.import_scan_dirs = vec!["/patched/import".into()];
             Ok(())
         })
         .is_err()
@@ -159,11 +160,15 @@ fn quarantine_blocks_all_production_settings_patches_until_recovery() {
         "an unreadable snapshot must never reach the patch"
     );
     assert!(!load_settings().startup_update_check_enabled);
+    assert!(
+        load_settings().import_scan_dirs.is_empty(),
+        "被拒绝的补丁不能留下扫描目录"
+    );
     let backup = config_file().with_extension("json.bad");
     assert!(!config_file().exists());
     assert_eq!(fs::read_to_string(&backup).unwrap(), broken);
     assert!(!startup_update_check_enabled().unwrap());
-    let error = super::super::service::disable_test_store().unwrap_err();
+    let error = super::super::service::set_storage_settings(None, None, Some(false)).unwrap_err();
     assert!(error.contains("隔离留存"), "{error}");
     assert!(!startup_update_check_enabled().unwrap());
     let error = super::super::service::set_storage_settings(
@@ -217,20 +222,18 @@ fn valid_restoration_allows_fresh_patches_without_losing_protected_roots_or_cons
         models_dir_history: vec![old_models.clone()],
         import_scan_dirs: vec![scan.clone()],
         import_scan_dirs_history: vec![old_scan.clone()],
-        store_url: "https://restored.example.test/store".into(),
-        test_mode_enabled: true,
+        ollama_host: "http://127.0.0.1:11435".to_string(),
         startup_update_check_enabled: false,
         ..Default::default()
     };
     // Manual repair restores the actual valid configuration, not a synthesized
     // settings save that could erase the unknown roots in the backup.
     fs::write(config_file(), serde_json::to_vec(&restored).unwrap()).unwrap();
-    super::super::service::disable_test_store().unwrap();
+    super::super::service::set_storage_settings(None, None, Some(false)).unwrap();
     super::super::service::set_storage_settings(None, Some(Vec::new()), None).unwrap();
     let after = try_load_settings().unwrap();
-    assert!(!after.test_mode_enabled);
     assert!(!after.startup_update_check_enabled);
-    assert_eq!(after.store_url, restored.store_url);
+    assert_eq!(after.ollama_host, restored.ollama_host);
     assert_eq!(after.models_dir, models);
     assert_eq!(after.models_dir_history, [old_models]);
     assert!(after.import_scan_dirs.is_empty());
@@ -251,7 +254,7 @@ fn explicit_manual_abandonment_of_quarantine_allows_fresh_settings_creation() {
     let _home = TempHome::new();
     let backup = config_file().with_extension("json.bad");
     fs::write(&backup, r#"{"models_dir":"/abandoned/custom/root"}"#).unwrap();
-    assert!(super::super::service::disable_test_store().is_err());
+    assert!(super::super::service::set_storage_settings(None, None, Some(true)).is_err());
     assert!(!config_file().exists());
     assert!(
         backup.exists(),
@@ -260,13 +263,13 @@ fn explicit_manual_abandonment_of_quarantine_allows_fresh_settings_creation() {
     // This is an operator's explicit filesystem action; no automatic save path
     // removes the marker or claims to restore the abandoned roots.
     fs::remove_file(&backup).unwrap();
-    super::super::service::disable_test_store().unwrap();
+    super::super::service::set_storage_settings(None, None, Some(false)).unwrap();
     let after = try_load_settings().unwrap();
     assert!(
-        after.startup_update_check_enabled,
-        "fresh installs keep the old default"
+        !after.startup_update_check_enabled,
+        "the writer's explicit opt-out must land on a fresh install"
     );
-    assert!(!after.test_mode_enabled);
+    assert!(after.ollama_host == Settings::default().ollama_host);
     assert!(after.models_dir_history.is_empty());
     assert!(after.import_scan_dirs_history.is_empty());
     assert_ne!(after.models_dir, "/abandoned/custom/root");

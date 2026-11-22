@@ -338,10 +338,13 @@ fn ensure_release_env() {
 
 /// 进程级选定并安装 rustls 的 CryptoProvider(aws-lc-rs)。
 ///
-/// 幂等:`install_default` 返回 `Err` 表示已装过(本次或之前的 reqwest/tungstenite 调用),
-/// 用 `drop` 吞掉即可,不会二次注册。装在 `run()` 最前,保证后续 reqwest / relay 的
-/// `connect_async` 都用已确定的 provider,避开「aws-lc-rs + ring 同时启用时无参
-/// ClientConfig::builder().expect() panic」(见 Cargo.toml rustls 注释)。
+/// 注意(2026-10-30 评审勘误):应用侧 reqwest 已切 native-tls(见 Cargo.toml 的
+/// TLS 底座记录),这行**不再**覆盖 reqwest;仍需要它的是图里残留的 rustls 腿——
+/// tokio-tungstenite 的 `connect_async`。幂等:`install_default` 返回 `Err` 表示
+/// 已装过(本次或之前的 tungstenite 调用),用 `drop` 吞掉即可,不会二次注册。
+/// 装在 `run()` 最前,保证 relay 的 connect_async 用已确定的 provider,避开
+/// 「aws-lc-rs + ring 同时启用时无参 ClientConfig::builder().expect() panic」
+/// (见 Cargo.toml rustls 注释)。
 fn install_rustls_provider() {
     drop(rustls::crypto::aws_lc_rs::default_provider().install_default());
 }
@@ -1300,10 +1303,24 @@ pub fn run() {
             // 下一次下载会一直卡住且没有任何提示——真机上这么僵持过 16 小时。
             // 报告攒在服务里，等界面起来后由 model_store_take_startup_cleanup 取走。
             features::model_store::run_startup_cleanup(&model_store);
-            // 内置卡片的脚本编译在二进制里：应用升级就等于脚本升级，这里把已下载的
-            // 内置卡刷到当前版本。不刷的话，卡片会一直跑下载那天固化的旧脚本——
-            // 真机上因此白查过一轮：推了新应用、脚本改动一个都没生效。
-            features::model_store::run_startup_refresh(&model_store);
+            // 这里原来还有一句 `run_startup_refresh()`：把已下载的**内置测试卡片**
+            // 的固化脚本刷到当前应用版本（它们的正文编译在二进制里，应用升级就等于
+            // 脚本升级）。内置测试商店 2026-09-30 整体拿掉，这一步也就没有对象了。
+            // r36 P2-1：原函数还顺带做了一次 linked-models 后台对账
+            // （sync_linked_models），随函数整体删除而丢失。这里补一句
+            // fire-and-forget 启动同步——启动后不依赖用户打开商店视图就能完成
+            // 路由/上下文修复对账；失败只记 stderr 不弹（打开视图时会重试）。
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = tokio::task::spawn_blocking(
+                    features::model_store::platform::linked_models_startup_sync,
+                )
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r)
+                {
+                    eprintln!("[startup] linked-models 同步失败（下次打开商店视图会重试）：{error}");
+                }
+            });
             app.handle().manage(model_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();
@@ -2163,6 +2180,11 @@ pub fn run() {
             commands::model_store::model_store_cards,
             commands::model_store::model_store_library,
             commands::model_store::model_store_model_detail,
+            commands::model_store::model_store_installed_engines,
+            commands::model_store::model_store_local_resources,
+            commands::model_store::model_store_memory_admission,
+            commands::model_store::model_store_delete_engine,
+            commands::model_store::model_store_start_card_scripts,
             commands::model_store::model_store_follow_deployment_context,
             commands::model_store::model_store_check_card_update,
             commands::model_store::model_store_startup_update_check,
@@ -2174,14 +2196,16 @@ pub fn run() {
             commands::model_store::model_store_start_lifecycle,
             commands::model_store::model_store_force_remove,
             commands::model_store::model_store_run_log,
+            commands::model_store::model_store_reveal_run_logs_dir,
+            commands::model_store::model_store_export_run_log,
             commands::model_store::model_store_cancel_run,
             commands::model_store::model_store_answer_run,
             commands::model_store::model_store_active_runs,
             commands::model_store::model_store_api_keys,
             commands::model_store::model_store_create_api_key,
-            commands::model_store::model_store_test_store_state,
-            commands::model_store::model_store_unlock_test_store,
-            commands::model_store::model_store_disable_test_store,
+            commands::model_store::model_store_lan_status,
+            commands::model_store::model_store_set_lan_sharing,
+            commands::model_store::model_store_revoke_api_key,
             commands::model_store::model_store_take_startup_cleanup,
             commands::model_store::model_store_storage_settings,
             commands::model_store::model_store_set_storage_settings,

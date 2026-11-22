@@ -24,6 +24,7 @@ use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use super::lifecycle::ModelManager;
+use super::run_log_store::{self, RunLogFile};
 use super::run_state::{
     ActiveCardOps, CancelRegistry, CardOp, DownloadQueue, OP_DEPLOY, OP_DOWNLOAD, OP_ENABLE,
     OP_FORCE_REMOVE, OP_STOP, OP_UNINSTALL, StartupCleanup,
@@ -31,7 +32,18 @@ use super::run_state::{
 use super::{config, db, disk, import_scan, script_runner};
 
 /// 运行记录保留多久。一次下载的日志能有几万行，不清会一直涨。
+///
+/// 到点之后**内存里**这条运行整个消失（`sweep_old_runs`）。日志本身不会跟着没——
+/// 它已经由 `run_log_store` 落在 `~/.pinvou3/model-store/logs/` 下了，这正是加那个
+/// 模块的原因：在它之前，600 秒一过「昨天那次下载为什么失败」在设备上无法回答。
 const RUN_RETENTION: Duration = Duration::from_secs(600);
+
+/// 内存里最多留多少行。
+///
+/// 在这之前 `RunLog::lines` 是**无上限**的 `Vec`：一次 168GB 的下载能打出几万行，
+/// 连同 `script_runner` 那份 `output_lines` 一起常驻，而它们在 600 秒的保留期里
+/// 一直不释放。封顶之后丢掉的是最老的行，完整的一份在磁盘上。
+const MAX_MEMORY_LINES: usize = 5_000;
 /// 长轮询最多挂多久。跟前端的 `LOG_WAIT_SECONDS` 对齐。
 const LOG_WAIT: Duration = Duration::from_secs(25);
 
@@ -45,14 +57,101 @@ fn is_prompt_line(line: &str) -> bool {
     t.starts_with(script_runner::PROMPT_MARKER) || t.starts_with(script_runner::PROMPT_FORM_MARKER)
 }
 
+/// Docker pull 会为每一层反复重绘同一行，例如
+/// `[安装引擎] a1b2c3d4: Downloading [====>] 1.2GB/4GB`。
+///
+/// 界面侧需要这些行来汇总成一条可读的「镜像层 / 估算进度」，所以不能在进入
+/// `RunLog` 前整体丢掉；但把每一次重绘都写进持久日志，会在长下载尚未结束时把
+/// 4 MiB 的诊断配额耗尽，真正的错误和结束结果反而落不进去。这里严格识别 Docker
+/// 的层格式，只让它跳过**磁盘副本**。普通 Docker 信息、错误，以及任意非 Docker
+/// 的 `hex: 内容` 行仍照常保留。
+fn is_docker_layer_progress_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let body = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once("] ").map(|(_, body)| body.trim()))
+        .unwrap_or(trimmed);
+    let Some((layer, status)) = body.split_once(": ") else {
+        return false;
+    };
+    if !(8..=64).contains(&layer.len()) || !layer.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    let status = status.trim().to_ascii_lowercase();
+    [
+        "pulling fs layer",
+        "waiting",
+        "downloading",
+        "download complete",
+        "extracting",
+        "pull complete",
+        "verifying checksum",
+        "already exists",
+        "layer already exists",
+    ]
+    .iter()
+    .any(|prefix| status.starts_with(prefix))
+}
+
 // ---------------------------------------------------------------- 运行记录
+
+/// 有上限的行缓冲，**同时保住长轮询的绝对游标语义**。
+///
+/// 封顶不能简单地 `lines.drain(..n)`：前端握着的 `from` 是**绝对序号**，重排之后
+/// 同一个游标会指到别的行上——界面会把一段日志重收一遍，而在有 `LMM_PROMPT=` 的
+/// 路径上"重收一遍"等于把答过的提示再弹一次。所以丢掉的行数记在 `base` 里，
+/// 序号只增不减；游标落在已丢掉的区间时，从现存最老的那一行开始给。
+struct LineRing {
+    /// `items[0]` 在整条运行里的绝对序号。
+    base: usize,
+    items: std::collections::VecDeque<String>,
+}
+
+impl LineRing {
+    fn new() -> Self {
+        Self {
+            base: 0,
+            items: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, line: &str) {
+        self.items.push_back(line.to_string());
+        while self.items.len() > MAX_MEMORY_LINES {
+            self.items.pop_front();
+            self.base += 1;
+        }
+    }
+
+    /// 整条运行到目前为止一共有过多少行（= 下一个游标）。
+    fn total(&self) -> usize {
+        self.base + self.items.len()
+    }
+
+    fn slice_from(&self, from: usize) -> Vec<String> {
+        let offset = from.saturating_sub(self.base);
+        if offset >= self.items.len() {
+            return Vec::new();
+        }
+        self.items.iter().skip(offset).cloned().collect()
+    }
+}
 
 /// 一次长操作的输出与结局。
 ///
-/// 行存在 `Vec` 里而不是只往外推：调用方可能晚到（界面切走再切回来、应用重启），
+/// 行存在内存里而不是只往外推：调用方可能晚到（界面切走再切回来、应用重启），
 /// 没有回放就会丢掉前半段日志，而前半段往往正是出错的地方。
+///
+/// 内存那份有上限（`MAX_MEMORY_LINES`）且 600 秒后整条消失；**完整的一份落在磁盘
+/// 上**（`disk`）。两份的分工：内存那份服务于"现在正在看的界面"，磁盘那份服务于
+/// "明天再来问为什么失败的人"。
 struct RunLog {
-    lines: Mutex<Vec<String>>,
+    lines: Mutex<LineRing>,
+    /// 落盘句柄。**开不出来就是 `None`，操作照常跑**——日志是诊断手段，不是功能，
+    /// 为了记日志而让用户下不了模型是本末倒置。
+    disk: Option<RunLogFile>,
+    /// Docker 层的逐帧刷新不落盘时，留一条说明，避免诊断人员以为日志突然缺了一段。
+    docker_progress_notice_emitted: Mutex<bool>,
     /// `None` = 还在跑；`Some(Ok(v))` = 成功及其返回值；`Some(Err(msg))` = 失败
     outcome: Mutex<Option<Result<Value, String>>>,
     /// 用户主动取消。取消在底层也是一个 Err，但对用户是两回事——"你点了取消"
@@ -66,18 +165,27 @@ struct RunLog {
     /// 脚本于是拿着错误的输入继续往下跑（双机部署里那就是拿旧 IP 去连从机）。
     /// 所以"还在不在等"得由后端说了算，它是唯一知道真相的一方。
     awaiting_prompt: Mutex<bool>,
+    /// 脚本有没有声明「失败后保留原生引擎进程」（`LMM_RETAINED_NATIVE_PROCESS=1`）。
+    ///
+    /// 声明过就**置位到底**：界面的「二次确认停用」入口靠它，而它以前只能从日志行
+    /// 里认——回放一裁剪（前端只回放末尾 200 行）标志就丢，任务过期后残存进程占着
+    /// 内存却没有任何常驻停用入口。和 `awaiting_prompt` 一样由后端结构化下发。
+    retained_native: Mutex<bool>,
     finished_at: Mutex<Option<Instant>>,
     /// 有新行或结束时唤醒正在长轮询的调用
     notify: Arc<tokio::sync::Notify>,
 }
 
 impl RunLog {
-    fn new() -> Self {
+    fn new(run_id: &str, label: &str, active_run_ids: &[String]) -> Self {
         Self {
-            lines: Mutex::new(Vec::new()),
+            lines: Mutex::new(LineRing::new()),
+            disk: RunLogFile::open(run_id, label, active_run_ids),
+            docker_progress_notice_emitted: Mutex::new(false),
             outcome: Mutex::new(None),
             cancelled: Mutex::new(false),
             awaiting_prompt: Mutex::new(false),
+            retained_native: Mutex::new(false),
             finished_at: Mutex::new(None),
             notify: Arc::new(tokio::sync::Notify::new()),
         }
@@ -87,8 +195,47 @@ impl RunLog {
         // 提示行之后脚本就阻塞在 read 上，再出现任何一行输出就说明它已经拿到
         // 答案往下走了——这是日志流里唯一能看出"还在不在等"的地方。
         *self.awaiting_prompt.lock() = is_prompt_line(line);
-        self.lines.lock().push(line.to_string());
+        // 「失败后保留进程」是一次性声明，置位后不回退（后续行不会撤销它）。
+        if line.trim() == "LMM_RETAINED_NATIVE_PROCESS=1" {
+            *self.retained_native.lock() = true;
+        }
+        // 落盘挂在这里、而不是在 pty 读取循环里另开一个出口：这一条是「已经
+        // strip_ansi 过、已经切好行、已经加过阶段前缀」的唯一汇聚点，挂在它后面
+        // 就自动继承了那些处理。落盘前还要过一道定向脱敏，见 run_log_store。
+        // Docker 的层刷新例外：界面会聚合它，磁盘只留一次说明，以保证错误/结局
+        // 不会被数万次重绘挤掉。
+        if let Some(disk) = self.disk.as_ref() {
+            if is_docker_layer_progress_line(line) {
+                let mut emitted = self.docker_progress_notice_emitted.lock();
+                if !*emitted {
+                    disk.append("Docker 镜像层进度已在界面中汇总显示；日志省略重复的逐层刷新。");
+                    *emitted = true;
+                }
+            } else {
+                disk.append(line);
+            }
+        }
+        self.lines.lock().push(line);
         self.notify.notify_waiters();
+    }
+
+    /// 只在内存里的 RunLog，给测试用。
+    ///
+    /// 不让测试走 `new()`：那会在开发机/CI 的**真实** `~/.pinvou3/model-store/logs/`
+    /// 下留文件。落盘本身有专门的文件级测试（`run_log_store`），用 `TempHome` 隔离。
+    #[cfg(test)]
+    fn new_memory_only() -> Self {
+        Self {
+            lines: Mutex::new(LineRing::new()),
+            disk: None,
+            docker_progress_notice_emitted: Mutex::new(false),
+            outcome: Mutex::new(None),
+            cancelled: Mutex::new(false),
+            awaiting_prompt: Mutex::new(false),
+            retained_native: Mutex::new(false),
+            finished_at: Mutex::new(None),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
     }
 
     /// 界面答完了。不等脚本打出下一行就落下标志：用户完全可能答完立刻切走，
@@ -98,6 +245,17 @@ impl RunLog {
     }
 
     fn finish(&self, outcome: Result<Value, String>, cancelled: bool) {
+        if let Some(disk) = self.disk.as_ref() {
+            let text = if cancelled {
+                "已取消".to_string()
+            } else {
+                match &outcome {
+                    Ok(_) => "成功".to_string(),
+                    Err(e) => format!("失败：{e}"),
+                }
+            };
+            disk.finish(&text);
+        }
         *self.cancelled.lock() = cancelled;
         *self.awaiting_prompt.lock() = false;
         *self.outcome.lock() = Some(outcome);
@@ -107,13 +265,11 @@ impl RunLog {
 
     fn snapshot(&self, from: usize) -> (Vec<String>, usize, Option<Result<Value, String>>) {
         let lines = self.lines.lock();
-        let total = lines.len();
-        let slice = if from < total {
-            lines[from..].to_vec()
-        } else {
-            Vec::new()
-        };
-        (slice, total, self.outcome.lock().clone())
+        (
+            lines.slice_from(from),
+            lines.total(),
+            self.outcome.lock().clone(),
+        )
     }
 }
 
@@ -125,6 +281,7 @@ impl RunLog {
 /// 依据，各持一份等于没有约束。真机上踩过——两个 `hf download` 抢同一批文件的锁，
 /// 速度从 2.2MB/s 掉到 569KB/s。
 pub struct ModelStoreService {
+    pub(super) lan: super::lan_gateway::Gateway,
     registry: CancelRegistry,
     active: Arc<ActiveCardOps>,
     queue: Arc<DownloadQueue>,
@@ -143,6 +300,7 @@ impl Default for ModelStoreService {
 impl ModelStoreService {
     pub fn new() -> Self {
         Self {
+            lan: super::lan_gateway::Gateway::default(),
             registry: CancelRegistry::default(),
             active: Arc::new(ActiveCardOps::default()),
             queue: Arc::new(DownloadQueue::default()),
@@ -178,9 +336,13 @@ impl ModelStoreService {
         Ok(())
     }
 
-    fn new_run(&self, run_id: &str) -> Arc<RunLog> {
+    fn new_run(&self, run_id: &str, label: &str) -> Arc<RunLog> {
         self.sweep_old_runs();
-        let log = Arc::new(RunLog::new());
+        // 新建日志前把「现有活跃 + 自己」交给轮转：正在跑的运行日志不能被
+        // prune 删掉（等输入的静默期里 mtime 会变旧，恰好落在删除线上）。
+        let mut active: Vec<String> = self.runs.lock().keys().cloned().collect();
+        active.push(run_id.to_string());
+        let log = Arc::new(RunLog::new(run_id, label, &active));
         self.runs
             .lock()
             .insert(run_id.to_string(), Arc::clone(&log));
@@ -218,14 +380,6 @@ fn new_run_id() -> String {
     )
 }
 
-fn manager(test_mode: bool) -> ModelManager {
-    if test_mode {
-        ModelManager::new_test_store()
-    } else {
-        ModelManager::new(None, None)
-    }
-}
-
 /// 把 panic 的 payload 抠成一句能给人看的话。`panic!("……")` 的 payload 是
 /// `String`，`panic!("字面量")` 是 `&str`，其余（比如 `panic_any`）只能认栽。
 fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
@@ -243,32 +397,30 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 /// 它是一条**派生判定**，不在 `StoreModelRecord`（那是库表的投影）里。界面靠它
 /// 决定「重新部署」按钮出不出现——没有它就只能对所有已部署模型常驻这个按钮，
 /// 用户根本不知道自己为什么要点。
-fn needs_redeploy(record: &db::StoreModelRecord) -> bool {
+/// 轻量版判定（P2-4）：deploy 脚本哈希从摘要映射取，判据与全量读正文的旧版
+/// 相同（含老记录的时间戳回退），并集主线 card_update_pending 整包更新门。
+fn needs_redeploy_light(
+    record: &db::StoreModelRecord,
+    hashes: &std::collections::BTreeMap<String, String>,
+) -> bool {
     if record.status != "deployed" {
         return false;
     }
+    // 主线并集：整包更新在等重新部署时也算「需要重新部署」。
     if record.card_update_pending {
         return true;
     }
     if let (Some(deployed), Some(current)) = (
         record.deployed_script_sha256.as_deref(),
-        record
-            .scripts_content
-            .get("deploy")
-            .map(|b| b.sha256.as_str()),
+        hashes.get("deploy").map(|s| s.as_str()),
     ) {
         return deployed != current;
     }
-    // 老记录没有部署时的哈希（这个字段是后加的）。退而用时间戳判断：脚本副本
-    // 是在部署**之后**才抓下来的，就说明部署用的是更老的脚本。两个时间戳都是
-    // 同一个 now_iso() 生成的 RFC3339，按字典序比较就是按时间比较。
     match (
         record.scripts_fetched_at.as_deref(),
         record.deployed_at.as_deref(),
     ) {
         (Some(fetched), Some(deployed_at)) => fetched > deployed_at,
-        // 信息不足时一律不提示。宁可少提醒一次，也不要凭空冒出一个「重新部署」
-        // 让用户莫名其妙。
         _ => false,
     }
 }
@@ -305,25 +457,60 @@ fn strip_bulky_fields<T: serde::Serialize>(models: T) -> Value {
 /// `strip_bulky_fields` 正是要把 `scripts_content` 摘掉。先摘后算的话这个字段会
 /// 永远是 false，界面上「重新部署」就永远不出现——比常驻还糟，因为脚本真的更新了
 /// 也没人提示。
-fn library_payload(models: Vec<db::StoreModelRecord>) -> Value {
-    let flags: Vec<bool> = models.iter().map(needs_redeploy).collect();
-    let defaults: Vec<_> = models
+fn library_payload(rows: Vec<db::LibraryRow>) -> Value {
+    // r5 评审 P2-4：改走 `list_store_models_light`——正文一个字节不出库（此前
+    // SELECT * 读入 ~8.6MB 再在应用层丢掉，且每次界面操作都触发）。派生判定
+    // 从轻量行的 sha256 摘要算，语义与原先读正文时一致。
+    let flags: Vec<bool> = rows
         .iter()
-        .map(|record| {
-            super::deploy_profiles::default_id(&record.card_id, &record.profiles).map(str::to_owned)
+        .map(|row| needs_redeploy_light(&row.record, &row.script_hashes))
+        .collect();
+    // 本地脚本哈希摘要（script_type -> sha256）。前端拿它跟卡片列表的
+    // script_sha256 比对，自动检测「服务器有更新」——用户不需要手动检查。
+    let local_hashes: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let mut map = serde_json::Map::new();
+            for (kind, sha) in &row.script_hashes {
+                map.insert(kind.clone(), Value::String(sha.clone()));
+            }
+            Value::Object(map)
         })
         .collect();
-    let revisions: Vec<_> = models
+    let defaults: Vec<_> = rows
         .iter()
-        .map(|record| super::card_update::revision(&super::card_update::notice_manifest(record)))
+        .map(|row| {
+            super::deploy_profiles::default_id(&row.record.card_id, &row.record.profiles)
+                .map(str::to_owned)
+        })
         .collect();
+    let revisions: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            // 轻量行的正文列是空占位——manifest 必须从逐文件摘要构建
+            // （与 startup_card_manifest 同一套 digest 语义），否则算出的
+            // revision 永远不等于启动检查的 local_revision，「有更新」徽标
+            // 永远不亮。
+            super::card_update::revision(&super::card_update::notice_manifest_from_digests(
+                &row.record,
+                &row.script_hashes,
+                &row.asset_hashes,
+            ))
+        })
+        .collect();
+    let models: Vec<db::StoreModelRecord> = rows.into_iter().map(|row| row.record).collect();
     let mut value = strip_bulky_fields(models);
     if let Some(items) = value.as_array_mut() {
-        for (((item, needs), default), revision) in
-            items.iter_mut().zip(flags).zip(defaults).zip(revisions)
+        for ((((item, needs), hashes), default), revision) in items
+            .iter_mut()
+            .zip(flags)
+            .zip(local_hashes)
+            .zip(defaults)
+            .zip(revisions)
         {
             if let Some(obj) = item.as_object_mut() {
                 obj.insert("needs_redeploy".to_string(), Value::Bool(needs));
+                obj.insert("local_script_hashes".to_string(), hashes);
                 obj.insert("default_profile_id".to_string(), json!(default));
                 obj.insert("card_revision".to_string(), json!(revision));
             }
@@ -340,6 +527,7 @@ fn library_payload(models: Vec<db::StoreModelRecord>) -> Value {
 /// panic 就一件都不做：卡片在 `ActiveCardOps` 里被**永久锁死**（此后一律拒绝）、
 /// `RunLog::finish` 不被调用导致长轮询永远不返回、下载名额不释放、运行记录也清不掉。
 struct OpCleanup {
+    _card_guard: Option<super::runtime_guard::StartupGuard>,
     registry_owner: Arc<ModelStoreService>,
     card: String,
     run_id: String,
@@ -413,10 +601,13 @@ where
     // All lifecycle actions share the lock with package replacement, including
     // another app process. Closing the fd releases it after panic/cancellation.
     let operation_lock = card_operation_lock(card_id)?;
+    // PR 侧的按卡保护锁（哈希文件名，任意 card_id 可用）：与上面的
+    // operation-lock 互为补充，混跑新旧版本的应用窗口时两把都能对上。
+    let card_guard = super::runtime_guard::StartupGuard::for_card(card_id)?;
     // 卡片级互斥：同一张卡不许被两处同时操作。
     service.active.try_begin(card_id, op, Some(&run_id))?;
 
-    let log = service.new_run(&run_id);
+    let log = service.new_run(&run_id, op.label);
     let control = service.registry.register(&run_id);
 
     let svc = Arc::clone(service);
@@ -426,47 +617,56 @@ where
     // 留一份给结束后回查：control 本身要 move 进 job
     let control_probe = control.clone();
     let rid_for_job = run_id.clone();
-    std::thread::spawn(move || {
-        let mut guard = OpCleanup {
-            registry_owner: svc,
-            card,
-            run_id: rid,
-            log: Arc::clone(&log_for_thread),
-            control: control_probe,
-            outcome: None,
-            operation_lock: Some(operation_lock),
-        };
-        // catch_unwind 只负责把 panic 变成一句人话，"一定会收尾"是守卫保证的。
-        // AssertUnwindSafe：job 只被调用一次，panic 之后我们不再碰它捕获的任何
-        // 状态，唯一跨过边界的 RunLog / ActiveCardOps 都在锁后面（parking_lot
-        // 的锁不会因为持锁线程 panic 而中毒，拿到的是已写完的一致状态）。
-        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            job(&log_for_thread, control, &rid_for_job)
-        }));
-        guard.outcome = Some(match caught {
-            Ok(outcome) => outcome,
-            Err(payload) => {
-                let detail = panic_text(payload.as_ref());
-                let line = format!("内部错误：{}任务线程崩溃（{detail}）", op.label);
-                // 崩溃原因也塞进日志正文：调用方长轮询到的是日志，让它跟 error
-                // 字段对得上，用户不用去翻应用的 stderr。
-                log_for_thread.push(&line);
-                Err(format!(
-                    "{line}。这是模型商店自身的缺陷，请把日志反馈给我们；\
+    // Construct before spawning: if the OS cannot allocate a worker, dropping
+    // the closure must still release the card slot and finish the run log.
+    let guard = OpCleanup {
+        _card_guard: Some(card_guard),
+        registry_owner: svc,
+        card,
+        run_id: rid,
+        log: Arc::clone(&log_for_thread),
+        control: control_probe,
+        outcome: Some(Err("无法创建模型操作线程，请稍后重试。".into())),
+        operation_lock: Some(operation_lock),
+    };
+    std::thread::Builder::new()
+        .name("model-store-job".into())
+        .spawn(move || {
+            // Move the complete Drop guard, not just the outcome field through
+            // disjoint closure capture. Cleanup belongs to this worker's scope.
+            let mut guard = guard;
+            // catch_unwind 只负责把 panic 变成一句人话，"一定会收尾"是守卫保证的。
+            // AssertUnwindSafe：job 只被调用一次，panic 之后我们不再碰它捕获的任何
+            // 状态，唯一跨过边界的 RunLog / ActiveCardOps 都在锁后面（parking_lot
+            // 的锁不会因为持锁线程 panic 而中毒，拿到的是已写完的一致状态）。
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                job(&log_for_thread, control, &rid_for_job)
+            }));
+            guard.outcome = Some(match caught {
+                Ok(outcome) => outcome,
+                Err(payload) => {
+                    let detail = panic_text(payload.as_ref());
+                    let line = format!("内部错误：{}任务线程崩溃（{detail}）", op.label);
+                    // 崩溃原因也塞进日志正文：调用方长轮询到的是日志，让它跟 error
+                    // 字段对得上，用户不用去翻应用的 stderr。
+                    log_for_thread.push(&line);
+                    Err(format!(
+                        "{line}。这是模型商店自身的缺陷，请把日志反馈给我们；\
                      该模型现在可以重新操作。"
-                ))
-            }
-        });
-    });
+                    ))
+                }
+            });
+        })
+        .map_err(|error| format!("无法创建模型操作线程，请稍后重试：{error}"))?;
 
     Ok(json!({ "run_id": run_id }))
 }
 
 // ---------------------------------------------------------------- 只读查询
 
-pub async fn list_cards(test_mode: bool) -> Result<Value, String> {
-    tokio::task::spawn_blocking(move || {
-        manager(test_mode)
+pub async fn list_cards() -> Result<Value, String> {
+    tokio::task::spawn_blocking(|| {
+        ModelManager::new(None, None)
             .list_store_cards()
             .map_err(|e| e.to_string())
             .and_then(|cards| serde_json::to_value(cards).map_err(|e| e.to_string()))
@@ -482,9 +682,9 @@ pub async fn library(service: Arc<ModelStoreService>) -> Result<Value, String> {
         // 库里的 running 标记这时候是过期的。
         let corrected = mgr.reconcile_running_status();
         let link_sync_error = service.sync_linked_models(None).err();
-        let models = db::list_store_models().map_err(|e| e.to_string())?;
+        let rows = db::list_store_models_light().map_err(|e| e.to_string())?;
         Ok(json!({
-            "models": library_payload(models),
+            "models": library_payload(rows),
             "corrected": corrected,
             "link_sync_error": link_sync_error,
         }))
@@ -510,6 +710,17 @@ pub async fn model_detail(card_id: String) -> Result<Value, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// 仅列出已经过实体校验的引擎。数据库里的历史记录不能直接拿来显示，否则用户会
+/// 看见“0 B、删不掉”的幽灵条目。
+pub async fn installed_engines() -> Result<Value, String> {
+    tokio::task::spawn_blocking(|| {
+        serde_json::to_value(ModelManager::new(None, None).list_installed_engines())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 pub async fn follow_deployment_context(
     service: Arc<ModelStoreService>,
     card_id: String,
@@ -524,11 +735,109 @@ pub async fn follow_deployment_context(
     .map_err(|e| e.to_string())?
 }
 
+/// 扫描用户配置的本地导入目录。结果只是“可能的权重资源”，不是模型归属结论；卡片
+/// 脚本仍需在下载时核验它是否完整且确实属于当前模型。
+pub async fn local_resources() -> Result<Value, String> {
+    tokio::task::spawn_blocking(|| {
+        let settings = config::load_settings();
+        let candidates = import_scan::scan(&import_scan::roots(
+            &settings.import_scan_dirs,
+            &settings.models_path(),
+            &settings.staging_path(),
+        ));
+        Ok(json!({
+            "resources": candidates,
+            "scan_dirs": import_scan::roots(
+                &settings.import_scan_dirs,
+                &settings.models_path(),
+                &settings.staging_path(),
+            ).iter().map(|path| path.to_string_lossy().to_string()).collect::<Vec<_>>(),
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 启用前内存准入快照。前端据此决定是否需要给用户二次确认，真正开始启用时还会在
+/// `start_lifecycle` 里复算一次，避免用户打开确认框后内存状态已变化。
+pub async fn memory_admission(
+    card_id: String,
+    version_id: Option<String>,
+) -> Result<Value, String> {
+    // r43 P1-4：带 version_id 时按切换目标版本的记录评估（版本切换预检用），
+    // 否则按 active 记录（启用/部署预检用）。
+    tokio::task::spawn_blocking(move || {
+        let eval = match version_id.as_deref() {
+            Some(vid) => ModelManager::new(None, None).memory_admission_for_version(&card_id, vid),
+            None => ModelManager::new(None, None).memory_admission(&card_id),
+        };
+        eval.map_err(|e| e.to_string())
+            .and_then(|admission| serde_json::to_value(admission).map_err(|e| e.to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 pub async fn check_card_update(card_id: String) -> Result<Value, String> {
     tokio::task::spawn_blocking(move || {
         ModelManager::new(None, None)
             .check_card_update(&card_id)
             .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 删除未被任何模型绑定的、且当前客户端有安全删除方式的引擎。
+pub async fn delete_engine(
+    service: &Arc<ModelStoreService>,
+    engine_name: String,
+    engine_version: Option<String>,
+) -> Result<Value, String> {
+    // 已下载的模型才会写入 store_models；正在下载或部署的卡片尚未必有一条
+    // 可供 affected_models 查到的记录。若此时按“没有模型绑定”删除引擎，会让
+    // 当前任务在末尾失去可复用的运行环境，下一步又得重下几十 GB。因此删除
+    // 引擎必须同时避开所有活跃的模型商店操作。
+    let cleanup_guard = service.active.try_begin_engine_cleanup()?;
+    tokio::task::spawn_blocking(move || {
+        // 由工作线程持有直到清理完成，即使调用方断开也不提前放开互斥。
+        let _cleanup_guard = cleanup_guard;
+        // r43 P1-7：ActiveCardOps 只互斥**本进程**的操作；下载/部署持有的是
+        // 跨进程资源锁（wait_resource_operation_lock 共享档）——另一进程正在
+        // 下载首个模型（尚未写 store_models 绑定行）时，本进程按"无绑定"删
+        // 引擎会抽掉对方末尾要复用的运行环境（Ollama 形态甚至删整个数据目录）。
+        // 取独占档：与所有持共享档的资源操作互斥，绑定复核+删除全程持锁。
+        let _cross_process_resources = super::version_store::wait_resource_operation_lock(
+            true,
+            || false,
+            || {
+                let _ = std::io::Write::write(
+                    &mut std::io::stderr(),
+                    b"[engine-cleanup] waiting for cross-process resource operations...
+",
+                );
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let manager = ModelManager::new(None, None);
+        let current = manager.list_installed_engines();
+        let engine = current
+            .iter()
+            .find(|engine| engine.engine_name == engine_name && engine.engine_version == engine_version)
+            .ok_or_else(|| "未找到可验证的本地引擎；它可能已被手动删除，请刷新列表。".to_string())?;
+        if !engine.affected_models.is_empty() {
+            return Err(format!(
+                "该引擎仍被以下模型绑定，不能删除：{}。请先删除或重新部署这些模型。",
+                engine.affected_models.join("、")
+            ));
+        }
+        if !engine.cleanup_supported {
+            return Err("该引擎已验证存在，但模型卡片尚未提供安全的独立清理方式；为避免误删模型文件，当前不能自动删除。".to_string());
+        }
+        manager
+            .delete_engine(&engine_name, engine_version.as_deref())
+            .map_err(|e| e.to_string())
+            .and_then(|outcome| serde_json::to_value(outcome).map_err(|e| e.to_string()))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -559,6 +868,7 @@ pub fn start_version_action(
     card_id: String,
     action: String,
     version_id: String,
+    memory_confirmed: bool,
 ) -> Result<Value, String> {
     let op = match action.as_str() {
         "stage" => CardOp {
@@ -575,9 +885,19 @@ pub fn start_version_action(
         },
         _ => return Err("不支持的版本操作".into()),
     };
+    // r42 P1-1 + r43 P1-4：switch 的 deploy 臂可能与部署脚本一样自行启动运行时
+    // （同一理由见 start_deploy_checked 的守卫注释）——必须走与 enable/deploy 同一
+    // 内存准入 + 启动槽位，且准入按**切换目标版本**的记录评估（active 记录属于
+    // 即将被替换的版本）。stage/delete 不启动运行时，不占启动槽。guard 在
+    // spawn_op 之前获取（锁序与 start_deploy_checked 一致：StartupGuard →
+    // ActiveCardOps），并 move 进任务闭包持有全程。
+    let startup_guard = (action == "switch")
+        .then(|| prepare_model_start_for_version(&card_id, &version_id, memory_confirmed))
+        .transpose()?;
     let card = card_id.clone();
     let queue = Arc::clone(&service.queue);
     spawn_op(service, &card_id, op, move |log, control, run_id| {
+        let _startup_guard = startup_guard;
         if action == "stage" {
             let ticket = queue.enqueue(run_id);
             while !queue.try_start(ticket, config::load_settings().max_concurrent_downloads()) {
@@ -618,14 +938,9 @@ pub fn start_card_update(
         },
     )
 }
-
 // ---------------------------------------------------------------- 长操作
 
-pub fn start_download(
-    service: &Arc<ModelStoreService>,
-    card_id: String,
-    test_mode: bool,
-) -> Result<Value, String> {
+pub fn start_download(service: &Arc<ModelStoreService>, card_id: String) -> Result<Value, String> {
     let card_for_job = card_id.clone();
     let queue = Arc::clone(&service.queue);
 
@@ -653,9 +968,12 @@ pub fn start_download(
                     if !announced {
                         announced = true;
                         let ahead = queue.position(ticket);
+                        // 不说"引擎已就绪"——这条只是排队位的播报，引擎检查/安装
+                        // 在轮到之后才做（.48 真机反馈：排队时说就绪、轮到后装
+                        // 引擎失败，前后矛盾让用户以为是误判）。
                         log_gate.push(&format!(
-                            "引擎已就绪。当前有模型正在下载，本任务排队中（前面还有 {ahead} 个）\
-                         ——可以放着不管，轮到它会自动开始下载"
+                            "已进入下载队列（前面还有 {ahead} 个）\
+                         ——可以放着不管，轮到它会自动检查引擎并开始下载"
                         ));
                     }
                     std::thread::sleep(Duration::from_millis(500));
@@ -663,7 +981,7 @@ pub fn start_download(
             };
             let log_cb = Arc::clone(log);
             let mut cb = move |line: &str| log_cb.push(line);
-            manager(test_mode)
+            ModelManager::new(None, None)
                 .download_from_store(&card_for_job, &mut cb, control, Some(&mut gate))
                 .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
                 .map_err(|e| e.to_string())
@@ -671,17 +989,64 @@ pub fn start_download(
     )
 }
 
-pub fn start_deploy(
+pub fn start_card_scripts(
+    service: &Arc<ModelStoreService>,
+    card_id: String,
+    confirmed: bool,
+) -> Result<Value, String> {
+    if !confirmed {
+        return Err("更新卡片脚本需要明确确认；不会下载或删除模型权重。".into());
+    }
+    let card = card_id.clone();
+    let op = CardOp {
+        kind: "card_scripts",
+        label: "更新卡片脚本",
+    };
+    spawn_op(service, &card_id, op, move |log, control, _run_id| {
+        let _startup_guard = super::runtime_guard::StartupGuard::acquire()?;
+        log.push("检查模型运行状态及完整脚本包；不修改权重或引擎文件…");
+        let changed = ModelManager::new(None, None)
+            .change_card_scripts(&card, &control)
+            .map_err(|e| e.to_string())?;
+        log.push(if changed {
+            "脚本包已安全保存。已部署模型请重新部署后再启用。"
+        } else {
+            "本地脚本包已是当前版本，没有修改。"
+        });
+        Ok(json!({ "changed": changed }))
+    })
+}
+
+pub async fn start_deploy(
     service: &Arc<ModelStoreService>,
     card_id: String,
     profile_id: Option<String>,
+    memory_confirmed: bool,
 ) -> Result<Value, String> {
+    let service = Arc::clone(service);
+    tokio::task::spawn_blocking(move || {
+        start_deploy_checked(&service, card_id, profile_id, memory_confirmed)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn start_deploy_checked(
+    service: &Arc<ModelStoreService>,
+    card_id: String,
+    profile_id: Option<String>,
+    memory_confirmed: bool,
+) -> Result<Value, String> {
+    // Some deployment scripts start the runtime themselves. They must use the
+    // same admission/startup slot as enable; otherwise deploy bypasses the gate.
+    let startup_guard = prepare_model_start(&card_id, memory_confirmed)?;
     let card = card_id.clone();
     spawn_op(
         service,
         &card_id,
         OP_DEPLOY,
         move |log, control, _run_id| {
+            let _startup_guard = startup_guard;
             let log_cb = Arc::clone(log);
             let mut cb = move |line: &str| log_cb.push(line);
             ModelManager::new(None, None)
@@ -692,21 +1057,82 @@ pub fn start_deploy(
     )
 }
 
+fn prepare_model_start(
+    card_id: &str,
+    memory_confirmed: bool,
+) -> Result<super::runtime_guard::StartupGuard, String> {
+    let guard = super::runtime_guard::StartupGuard::acquire()?;
+    let admission = ModelManager::new(None, None)
+        .memory_admission(card_id)
+        .map_err(|e| e.to_string())?;
+    if admission.requires_confirmation && !memory_confirmed {
+        return Err(format!(
+            "启动前需要确认内存风险：{} 请重新发起操作，确认后继续。",
+            admission.message
+        ));
+    }
+    Ok(guard)
+}
+
+/// r43 P1-4：版本切换的准入按目标版本评估（active 记录属于即将被替换的
+/// 版本，画像可能远小于切换目标——拿它放行等于查错了对象）。
+fn prepare_model_start_for_version(
+    card_id: &str,
+    version_id: &str,
+    memory_confirmed: bool,
+) -> Result<super::runtime_guard::StartupGuard, String> {
+    let guard = super::runtime_guard::StartupGuard::acquire()?;
+    let admission = ModelManager::new(None, None)
+        .memory_admission_for_version(card_id, version_id)
+        .map_err(|e| e.to_string())?;
+    if admission.requires_confirmation && !memory_confirmed {
+        return Err(format!(
+            "启动前需要确认内存风险（按切换目标版本评估）：{} 请重新发起操作，确认后继续。",
+            admission.message
+        ));
+    }
+    Ok(guard)
+}
+
 /// 启用 / 停用 / 卸载三个动作形状一样，只差调哪个方法，合并成一个入口。
 ///
 /// `purge_weights` 只对卸载有意义，而且**缺省是保留**——不可逆的那一侧绝不能靠
 /// "没写"命中。
-pub fn start_lifecycle(
+pub async fn start_lifecycle(
     service: &Arc<ModelStoreService>,
     card_id: String,
     action: String,
     purge_weights: bool,
+    memory_confirmed: bool,
+) -> Result<Value, String> {
+    let service = Arc::clone(service);
+    tokio::task::spawn_blocking(move || {
+        start_lifecycle_checked(&service, card_id, action, purge_weights, memory_confirmed)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn start_lifecycle_checked(
+    service: &Arc<ModelStoreService>,
+    card_id: String,
+    action: String,
+    purge_weights: bool,
+    memory_confirmed: bool,
 ) -> Result<Value, String> {
     let op = match action.as_str() {
         "enable" => OP_ENABLE,
         "stop" => OP_STOP,
         "uninstall" => OP_UNINSTALL,
         other => return Err(format!("未知操作：{other}")),
+    };
+
+    // Acquire before reading memory/running state, and carry into the job. A
+    // per-card mutex cannot stop two different cards both observing zero models.
+    let startup_guard = if op == OP_ENABLE {
+        Some(prepare_model_start(&card_id, memory_confirmed)?)
+    } else {
+        None
     };
 
     // 正在跑的模型不许直接卸载，先停用。
@@ -724,21 +1150,18 @@ pub fn start_lifecycle(
     // **策略**，属于最外层接口——本模块既有的分层就是这么定的：`purge_weights` 的
     // 默认值也只在最外层定，方法签名里留必填参数（见 lifecycle.rs 里 uninstall 的
     // 文档注释）。
-    if op == OP_UNINSTALL {
-        if let Ok(Some(rec)) = db::get_store_model(&card_id) {
-            if rec.running {
-                return Err(format!(
-                    "「{}」正在运行，请先停用再卸载。直接卸载会在服务还没停干净时\
-                     就删掉权重和库记录，之后那个还在跑的进程就没有任何界面能停得掉了。",
-                    rec.card_name
-                ));
-            }
-        }
-    }
+    //
+    // r21 P2-1：核验本体挪进了 job 闭包顶部（下方 uninstall 臂）。原先它做在
+    // `spawn_op` 之前——与取锁（StartupGuard 的 flock + ActiveCardOps 的卡片
+    // 互斥）之间留着一个窗口：并发的 enable 恰好卡在两步之间完成时，解锁后的
+    // 卸载直跑清理脚本，活实例脚下删权重（正是上面注释自列的 `stop || echo
+    // 继续` 卡类）。挪到锁内复跑，分层语义不变（策略仍在最外层接口，只是换到
+    // 持锁后执行）；失败同样如实报给 run log，任务卡上看得见。
 
     let card = card_id.clone();
     let service_for_job = Arc::clone(service);
     spawn_op(service, &card_id, op, move |log, control, _run_id| {
+        let _startup_guard = startup_guard;
         let log_cb = Arc::clone(log);
         let mut cb = move |line: &str| log_cb.push(line);
         let mgr = ModelManager::new(None, None);
@@ -757,10 +1180,22 @@ pub fn start_lifecycle(
                 .stop(&card, &mut cb, control)
                 .map(|_| Value::Null)
                 .map_err(|e| e.to_string()),
-            _ => mgr
-                .uninstall(&card, purge_weights, &mut cb, control)
-                .map(|outcome| serde_json::to_value(outcome).unwrap_or(Value::Null))
-                .map_err(|e| e.to_string()),
+            _ => {
+                // 三重停验（r21 P2-1 挪进锁内，见上方注释）：此刻 StartupGuard 的
+                // flock 与 ActiveCardOps 的卡片互斥都已持有，并发 enable 不可能再
+                // 从这条核验和清理脚本之间挤过去。DB 读错必须显式失败（静默放行 =
+                // 带病卸载）；running 检查是真实核验——stop 半成功时标志是 false
+                // 而进程还活，只信标志会在活进程脚下卸载并抹掉 container_name
+                // （reconcile 反向认领靠它，清掉即永久失控）。
+                let rec = db::get_store_model(&card)
+                    .map_err(|e| format!("读取模型记录失败，已取消卸载：{e}"))?
+                    .ok_or_else(|| "该模型尚未下载".to_string())?;
+                mgr.require_actually_stopped(&rec, "卸载")
+                    .map_err(|e| format!("「{}」{}", rec.card_name, e))?;
+                mgr.uninstall(&card, purge_weights, &mut cb, control)
+                    .map(|outcome| serde_json::to_value(outcome).unwrap_or(Value::Null))
+                    .map_err(|e| e.to_string())
+            }
         }
     })
 }
@@ -786,6 +1221,21 @@ pub async fn run_log(
         .unwrap_or(LOG_WAIT);
     let deadline = Instant::now() + wait;
     loop {
+        // **先登记成等待者，再取快照**，顺序不能反。
+        //
+        // `RunLog::push` 用的是 `notify_waiters()`，它只唤醒**此刻已经登记**的等待
+        // 者、不预存许可。原先的写法是先 snapshot、再 `notified()`，于是 worker 在
+        // 这两步之间 push 的那一行唤醒会丢：本次长轮询拿不到新行，又等不到唤醒，
+        // 只能挂满剩余的 `LOG_WAIT`（25 秒）才靠超时重查。
+        //
+        // 这条恰好压在交互提示（`awaiting_input`）的路径上——脚本问一句话，用户
+        // 最坏要等 25 秒才看见。`enable()` 是 tokio 给这个场景的惯用法：它把
+        // waiter 立刻挂上去而不 await，所以「登记 → 快照 → 等待」三步之间不存在
+        // 能丢唤醒的窗口。
+        let notified = log.notify.notified();
+        let mut notified = std::pin::pin!(notified);
+        notified.as_mut().enable();
+
         let (lines, next, outcome) = log.snapshot(from);
         // 有新行、或者已经结束，就立刻返回；否则挂着等唤醒
         if !lines.is_empty() || outcome.is_some() || Instant::now() >= deadline {
@@ -805,14 +1255,40 @@ pub async fn run_log(
                 // 再弹一次，用户填的答案落进一个没人来取的槽，下一次真正的提问
                 // 会被这份陈答案顶掉。
                 "awaiting_input": *log.awaiting_prompt.lock(),
+                // 「这次运行声明过保留原生进程吗」。结构化下发而不是让前端从日志
+                // 行里认：回放一裁剪，行可以丢，声明不能丢——丢了它，残存进程就
+                // 没有常驻的停用入口了。
+                "retained_native_process": *log.retained_native.lock(),
                 "result": result,
                 "error": error,
             }));
         }
-        let notified = log.notify.notified();
         let _ = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), notified)
             .await;
     }
+}
+
+/// 在文件管理器里打开运行日志目录。
+///
+/// 原始日志只在本机查看；复制/导出另走更严格脱敏后的有界快照。
+pub fn reveal_run_logs_dir() -> Result<Value, String> {
+    let dir = run_log_store::logs_dir();
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&dir)
+    }
+    .map_err(|e| format!("创建日志目录失败：{e}"))?;
+    crate::platform::os::reveal_target(&dir)?;
+    Ok(json!({ "path": dir.to_string_lossy() }))
+}
+
+/// 导出一次运行的日志（比落盘那份多过一道脱敏，见 `run_log_store`）。
+pub fn export_run_log(run_id: String) -> Result<Value, String> {
+    let (path, text) = run_log_store::export_run_log(&run_id)?;
+    Ok(json!({ "path": path.to_string_lossy(), "text": text }))
 }
 
 pub fn cancel_run(service: &Arc<ModelStoreService>, run_id: String) -> Result<Value, String> {
@@ -873,53 +1349,13 @@ pub fn create_api_key(card_id: String, label: Option<String>) -> Result<Value, S
         .and_then(|key| serde_json::to_value(key).map_err(|e| e.to_string()))
 }
 
-// ---------------------------------------------------------------- 测试商店开关
-
-/// 测试商店口令的 sha256。
-///
-/// 只存哈希、且校验放在后端：明文写进前端的话，打开开发者工具就看见了。
-/// 但要说清楚——**这是防呆，不是防攻击**。拿到 deb 逆向出这个哈希、再爆破一个
-/// 简单口令是分分钟的事。它挡的是「客户误点进来」，挡不住「有人存心要开」。
-const TEST_STORE_PASSWORD_SHA256: &str =
-    "b1462f7b2997b606480c26ab059074104a27bf667f406f9b4d8af38132ba5772";
-
-/// 首尾空白要 trim 掉：从别处复制口令时经常带着换行，那不该被当成输错。
-fn test_store_password_matches(input: &str) -> bool {
-    use sha2::{Digest, Sha256};
-    crate::platform::encoding::hex_lower(&Sha256::digest(input.trim().as_bytes()))
-        == TEST_STORE_PASSWORD_SHA256
-}
-
-pub fn test_store_state() -> Result<Value, String> {
-    Ok(json!({ "enabled": config::load_settings().test_mode_enabled }))
-}
-
-/// **口令错也算成功返回**，body 是 `{"ok": false}`。
-///
-/// 口令不对不是错误：调用方要能区分「口令输错了」和「配置没写进去」——前者提示
-/// 用户重输，后者得让用户去看磁盘/权限。都压成 Err 的话这两件事在界面上长得
-/// 一模一样。配置读不出来（哪怕只是瞬态 I/O 故障，读不到就不改，二十八轮评审
-/// P1）或写不进配置文件才返回 Err。
-pub fn unlock_test_store(password: String) -> Result<Value, String> {
-    if !test_store_password_matches(&password) {
-        return Ok(json!({ "ok": false }));
-    }
-    set_test_store_enabled(true)?;
-    Ok(json!({ "ok": true }))
-}
-
-pub fn disable_test_store() -> Result<Value, String> {
-    set_test_store_enabled(false)?;
-    Ok(json!({ "enabled": false }))
-}
-
-fn set_test_store_enabled(enabled: bool) -> Result<(), String> {
-    config::update_settings(|settings| {
-        settings.test_mode_enabled = enabled;
-        Ok(())
-    })
-    .map(|_| ())
-}
+// 这里原来是**测试商店开关**：一个口令哈希、`test_store_state` /
+// `unlock_test_store` / `disable_test_store` 三个操作，以及把开关写进
+// `config.json` 的 `set_test_store_enabled`。整组连同内置测试卡片一起在
+// 2026-09-30 拿掉了，前端那个「连点标题 7 次弹口令框」的隐藏入口也一起没了。
+//
+// 那个口令从来只是防呆（哈希编译在二进制里，逆向拿得到），真正的边界是**卡片
+// 根本不进发布包**——现在是这样了。
 
 // ------------------------------------------------------ 启动时回收残留进程
 
@@ -933,6 +1369,17 @@ fn set_test_store_enabled(enabled: bool) -> Result<(), String> {
 /// 同步跑而不是丢后台：这一步只是读一个登记文件、对着 `/proc` 核对几条记录再发信号，
 /// 代价是毫秒级；而放后台就会跟前端 `take` 抢时序，用户可能永远看不到那条提示。
 pub fn run_startup_cleanup(service: &Arc<ModelStoreService>) {
+    // r43 P1-3：老库内置卡一次性迁移必须先于孤儿清理——迁移后行才有脚本副本，
+    // 用户随后的停用/卸载不再撞「本地路径被拒」死锁。幂等：全套已补齐的行
+    // 零成本跳过；迁移失败不阻断启动（行保持原状，与迁移前行为一致）。
+    let migrated = ModelManager::migrate_legacy_builtin_scripts();
+    if !migrated.is_empty() {
+        eprintln!(
+            "[model-store] 老库内置卡迁移完成：{} 张（{}）",
+            migrated.len(),
+            migrated.join("、")
+        );
+    }
     let report = super::orphans::cleanup_on_startup();
     if report.is_empty() {
         return;
@@ -943,33 +1390,6 @@ pub fn run_startup_cleanup(service: &Arc<ModelStoreService>) {
         report.skipped_root.len()
     );
     service.startup_cleanup.set(report);
-}
-
-/// 启动时把内置（测试商店）卡片的固化脚本刷新成应用当前版本。
-///
-/// **必须在启动阶段真的被调用**——`refresh_builtin_cards` 的文档一直写着「应用
-/// 启动时跑一次」，但在此之前全仓零调用点。它要防的事故在真机上发生过：推了新
-/// 应用、脚本改动一个都没生效，卡片跑的还是下载那天固化的旧脚本，白查了一轮。
-///
-/// 内置卡的脚本正文编译在二进制里，所以应用升级就等于脚本升级，不该还要用户
-/// 手动点一次「检查卡片更新」。
-///
-/// 失败不影响启动：它只碰 `card_source = 'builtin'` 的记录，刷不动就维持原样。
-pub fn run_startup_refresh(service: &Arc<ModelStoreService>) {
-    let refreshed = ModelManager::refresh_builtin_cards();
-    if !refreshed.is_empty() {
-        eprintln!(
-            "[model-store] 启动刷新：{} 张内置卡片的脚本已更新到当前应用版本（{}）",
-            refreshed.len(),
-            refreshed.join("、")
-        );
-    }
-    let service = Arc::clone(service);
-    std::thread::spawn(move || {
-        if let Err(error) = service.sync_linked_models(None) {
-            log::warn!("model-store linked model refresh failed: {error}");
-        }
-    });
 }
 
 /// 取走启动清理的报告。**取一次就没了**——否则用户每切一次视图就被同一条提示弹一遍。
@@ -1426,7 +1846,15 @@ pub fn set_storage_settings(
         })
         .transpose()?;
     if let Some(dir) = &models_dir {
-        std::fs::create_dir_all(dir).map_err(|e| format!("无法创建权重目录「{dir}」：{e}"))?;
+        // 建不出来就不写进配置；0o700：权重清单/日志不该按 umask 落成同机可读。
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(dir)
+        }
+        .map_err(|e| format!("无法创建权重目录「{dir}」：{e}"))?;
     }
     config::update_settings(|settings| {
         if let Some(dir) = models_dir {
@@ -1501,19 +1929,86 @@ pub fn force_remove(
     // 还是要过卡片互斥：真有一个卸载正在删文件时把记录抽走，脚本删到一半就会
     // 对着一个不存在的记录继续跑。
     let _operation_lock = card_operation_lock(&card_id)?;
+    let _card_guard = super::runtime_guard::StartupGuard::for_card(&card_id)?;
     service.active.try_begin(&card_id, OP_FORCE_REMOVE, None)?;
-    let result = ModelManager::new(None, None)
+    // P2-8（r24）：手工 try_begin/finish 对在 panic 时会跳过 finish——
+    // 卡片从此被 ActiveCardOps 永久锁死（此后一律拒绝）。与 spawn_op 的
+    // OpCleanup 同理，用 guard 保证 finish 在任何退出路径都执行。
+    struct FinishGuard {
+        owner: Arc<ModelStoreService>,
+        card: String,
+    }
+    impl Drop for FinishGuard {
+        fn drop(&mut self) {
+            self.owner.active.finish(&self.card);
+        }
+    }
+    let _finish = FinishGuard {
+        owner: Arc::clone(service),
+        card: card_id.clone(),
+    };
+    ModelManager::new(None, None)
         .force_remove_record(&card_id)
         .map_err(|e| e.to_string())
-        .and_then(|r| serde_json::to_value(r).map_err(|e| e.to_string()));
-    service.active.finish(&card_id);
-    result
+        .and_then(|r| serde_json::to_value(r).map_err(|e| e.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     mod recovery;
     use super::*;
+
+    #[test]
+    fn dropping_an_unstarted_worker_releases_its_card_and_finishes_the_log() {
+        let service = Arc::new(ModelStoreService::new());
+        service
+            .active
+            .try_begin("card", OP_ENABLE, Some("run"))
+            .unwrap();
+        let log = Arc::new(RunLog::new_memory_only());
+        let control = service.registry.register("run");
+        let guard = OpCleanup {
+            _card_guard: None,
+            registry_owner: Arc::clone(&service),
+            card: "card".into(),
+            run_id: "run".into(),
+            log: Arc::clone(&log),
+            control,
+            outcome: Some(Err("worker unavailable".into())),
+            operation_lock: None,
+        };
+        // Builder::spawn drops its captured closure when thread creation fails.
+        // Simulate that path without exhausting the host's thread quota.
+        let worker = move || {
+            let _guard = guard;
+        };
+        drop(worker);
+        assert!(service.active.run_for_card("card").is_none());
+        assert!(log.finished_at.lock().is_some());
+        assert!(log.outcome.lock().as_ref().unwrap().is_err());
+    }
+
+    #[test]
+    fn docker_layer_refreshes_are_recognized_without_hiding_real_messages() {
+        assert!(is_docker_layer_progress_line(
+            "[安装引擎] ae5a106b6076: Pulling fs layer"
+        ));
+        assert!(is_docker_layer_progress_line(
+            "7014a14111a1: Downloading [====>    ] 1.967GB/4.07GB"
+        ));
+        assert!(is_docker_layer_progress_line("abcdef123456: Pull complete"));
+
+        // 这两类信息能解释下载结果，绝不能为了节省日志空间一并吞掉。
+        assert!(!is_docker_layer_progress_line(
+            "Status: Downloaded newer image for lmsysorg/sglang:v0.5.16-cu130"
+        ));
+        assert!(!is_docker_layer_progress_line(
+            "脚本执行失败：镜像源返回 429"
+        ));
+        assert!(!is_docker_layer_progress_line(
+            "not-a-layer: Downloading [====>] 1GB/4GB"
+        ));
+    }
 
     #[tokio::test]
     async fn enable_synchronizes_linked_route_and_notifies_after_commit_without_a_view() {
@@ -1586,8 +2081,9 @@ mod tests {
                 prefs.model_by_id("stable-id").unwrap().model.clone(),
             ));
         }));
-        let started =
-            start_lifecycle(&service, "sync-card".into(), "enable".into(), false).unwrap();
+        let started = start_lifecycle(&service, "sync-card".into(), "enable".into(), false, false)
+            .await
+            .unwrap();
         let log = service.run(started["run_id"].as_str().unwrap()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while log.outcome.lock().is_none() && Instant::now() < deadline {
@@ -1626,7 +2122,9 @@ mod tests {
         // a different context profile, so the next turn still needs a fresh probe.
         observed.lock().clear();
         let restarted =
-            start_lifecycle(&service, "sync-card".into(), "enable".into(), false).unwrap();
+            start_lifecycle(&service, "sync-card".into(), "enable".into(), false, false)
+                .await
+                .unwrap();
         let restarted_log = service.run(restarted["run_id"].as_str().unwrap()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while restarted_log.outcome.lock().is_none() && Instant::now() < deadline {
@@ -1694,7 +2192,7 @@ mod tests {
     /// 那就是拿着上一轮的 IP 去连从机。
     #[test]
     fn a_prompt_stops_awaiting_once_anything_else_comes_out() {
-        let log = RunLog::new();
+        let log = RunLog::new_memory_only();
         assert!(!*log.awaiting_prompt.lock(), "还没问就不该在等");
 
         log.push("LMM_PROMPT=text|请输入从机 IP");
@@ -1715,20 +2213,74 @@ mod tests {
     /// 的话，回放会把这条已经答过的提示又弹一次。
     #[test]
     fn answering_clears_awaiting_before_the_script_says_anything() {
-        let log = RunLog::new();
+        let log = RunLog::new_memory_only();
         log.push("LMM_PROMPT=password|输入本机密码");
         log.answered();
         assert!(!*log.awaiting_prompt.lock());
+    }
+
+    /// 「失败后保留原生进程」是一次性声明：置位后不随后续行回退，运行结束也保留——
+    /// 结束后正是残存进程占内存的时段，「二次确认停用」入口恰恰这时候最不能消失。
+    /// 2026-10-20 评审 A5：此前前端只能从日志行里认这行声明，回放一裁剪（末尾
+    /// 200 行）标志就丢。结构化字段跟着 run_log 走，行被裁掉声明仍在。
+    #[test]
+    fn retained_native_declaration_is_sticky() {
+        let log = RunLog::new_memory_only();
+        assert!(!*log.retained_native.lock());
+
+        // 协议行经 prefix_log_line 原样透传（不加阶段前缀），到达这里就是裸行
+        log.push("LMM_RETAINED_NATIVE_PROCESS=1");
+        assert!(*log.retained_native.lock(), "声明行一出现就置位");
+
+        // 后续输出不撤销声明
+        log.push("引擎进程已保留，等待手动停止");
+        assert!(*log.retained_native.lock());
+
+        // 结束也不撤销——任务过期后仍要有常驻的停用入口
+        log.finish(Err("启用失败".to_string()), false);
+        assert!(*log.retained_native.lock());
     }
 
     /// 跑完了就没有什么可答的了。留着这个标志，界面接回一条已结束的运行时会弹出
     /// 一个永远送不出去的输入框。
     #[test]
     fn finishing_clears_awaiting() {
-        let log = RunLog::new();
+        let log = RunLog::new_memory_only();
         log.push("LMM_PROMPT=confirm|继续吗");
         log.finish(Err("脚本非零退出".to_string()), false);
         assert!(!*log.awaiting_prompt.lock());
+    }
+
+    /// 行数封顶之后，长轮询的**绝对游标**语义不能变。
+    ///
+    /// 前端握着的 `from` 是绝对序号。丢掉最老的行时若把序号重算成 0，同一个游标会
+    /// 指到别的行上——界面会把一段日志重收一遍，而在有 `LMM_PROMPT=` 的路径上
+    /// "重收一遍"就等于把答过的提示再弹一次（那条路的后果见
+    /// `a_prompt_stops_awaiting_once_anything_else_comes_out`）。
+    #[test]
+    fn capping_lines_keeps_absolute_cursors_monotonic() {
+        let mut ring = LineRing::new();
+        for index in 0..(MAX_MEMORY_LINES + 10) {
+            ring.push(&format!("line-{index}"));
+        }
+        // 总行数照实数，不因为丢了行就缩回去
+        assert_eq!(ring.total(), MAX_MEMORY_LINES + 10);
+        assert_eq!(ring.base, 10);
+        // 游标落在还留着的区间：从那一行开始给
+        let tail = ring.slice_from(MAX_MEMORY_LINES + 8);
+        assert_eq!(
+            tail,
+            vec![
+                format!("line-{}", MAX_MEMORY_LINES + 8),
+                format!("line-{}", MAX_MEMORY_LINES + 9)
+            ]
+        );
+        // 游标落在已经丢掉的区间：从现存最老的那一行开始给，**不是**从 0
+        let from_stale = ring.slice_from(0);
+        assert_eq!(from_stale.len(), MAX_MEMORY_LINES);
+        assert_eq!(from_stale[0], "line-10");
+        // 游标已经追到头：给空，别让轮询以为有新行
+        assert!(ring.slice_from(ring.total()).is_empty());
     }
 
     #[test]
@@ -1737,6 +2289,59 @@ mod tests {
         assert!(is_prompt_line("  LMM_PROMPT_FORM={}  "));
         assert!(!is_prompt_line("LMM_PROMPTX=1"));
         assert!(!is_prompt_line("正在下载 …"));
+    }
+
+    /// `notify_waiters()` **不预存许可**——这是长轮询里顺序不能反的全部原因。
+    ///
+    /// 把这条单独钉出来，是因为它是那个 bug 的根：读代码的人很容易以为「push 里
+    /// 已经通知了，谁来等都能收到」。实际上没有等待者时这次通知直接丢弃，后来
+    /// 才登记的等待者拿不到任何东西，只能挂到超时。
+    ///
+    /// 这条同时是一道护栏：谁要是把 `push` 改成 `notify_one()`（它**会**存一个
+    /// 许可，看起来「更安全」），这条会红——而那个改法会让多个并发长轮询里只有
+    /// 一个被唤醒，是另一个更难查的错。唤醒的安全性必须来自登记顺序，不是许可。
+    #[tokio::test(start_paused = true)]
+    async fn notify_waiters_drops_the_wakeup_when_nobody_is_waiting_yet() {
+        let log = RunLog::new_memory_only();
+
+        // 此刻没有任何等待者，这一次唤醒被丢弃
+        log.push("先推一行");
+
+        // 之后才登记的等待者收不到它 —— 所以「先 snapshot 再 notified()」会丢唤醒
+        let late = log.notify.notified();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), late)
+                .await
+                .is_err(),
+            "notify_waiters 竟然预存了许可：那长轮询里的顺序就无所谓了，             这条测试和 run_log 里那段注释都要重写"
+        );
+    }
+
+    /// 长轮询必须**先把自己登记成等待者、再取快照**。
+    ///
+    /// 真正的竞态发生在 `run_log` 里相邻两条语句之间（worker 恰好在 snapshot 之后、
+    /// 登记之前 push），从测试外部注入不了这个时机，所以这里退一步断源码结构——
+    /// 跟 `tauri_cross_build_gate.test.js` 对备料守卫的做法一致。等价重构（改名、
+    /// 换等待方式）不会误伤，把两行调回原来的顺序则必红。
+    ///
+    /// 会红意味着什么：脚本问一句话，用户最坏要等满 `LOG_WAIT`（25 秒）才看见。
+    #[test]
+    fn the_long_poll_registers_its_waiter_before_taking_the_snapshot() {
+        const SERVICE_SOURCE: &str = include_str!("service.rs");
+        let body = SERVICE_SOURCE
+            .split("pub async fn run_log(")
+            .nth(1)
+            .expect("run_log 没了？这条测试要跟着改");
+        let registered = body
+            .find("notified.as_mut().enable()")
+            .expect("run_log 里找不到 enable()：等待者没有被提前登记，会丢唤醒");
+        let snapshot = body
+            .find("log.snapshot(from)")
+            .expect("run_log 里找不到 snapshot 调用");
+        assert!(
+            registered < snapshot,
+            "登记等待者必须在取快照之前。现在反了——worker 在这两步之间 push 的行             会丢唤醒，本次长轮询要挂满 25 秒，而这条路径上跑的是交互提示。"
+        );
     }
 
     #[test]
@@ -2309,7 +2914,7 @@ mod tests {
                 status: "downloaded",
                 profiles: &[],
                 deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
-                card_source: "store",
+            card_source: "store",
             })
             .expect("insert model");
         };
@@ -2363,7 +2968,7 @@ mod tests {
                 status: "downloaded",
                 profiles: &[],
                 deploy_topology: crate::features::model_store::platform::linux::store_client::DeployTopology::default(),
-                card_source: "store",
+            card_source: "store",
             })
             .expect("insert model");
         };
@@ -2618,7 +3223,9 @@ mod tests {
     /// 当合法配置接受，权重根保护失效。修复后两个入口首读走
     /// [`super::config::try_load_settings`]、读不到就不改。权限位（mode 000）构造
     /// 不出这个时序——权限失败到重读时仍在，所以用 config 的测试注入缝受控打出
-    /// 「首读 Err → 重读 Ok」，两个入口各打一遍再各验证一次恢复后的正常路径。
+    /// 「首读 Err → 重读 Ok」，入口打一遍再验证一次恢复后的正常路径（原来是两个
+    /// 普通设置入口各打一遍，其中测试商店开关那个随内置测试商店一起拿掉了，
+    /// 生产只剩存储入口这一个普通设置入口）。
     #[test]
     fn transient_first_read_failure_must_not_persist_the_default_snapshot() {
         let ctx = super::config::TempHome::new();
@@ -2632,7 +3239,10 @@ mod tests {
 
         // 注入恰好 1 次：入口首读 Err、保存端闸门重读 Ok——正是评审点名的恢复时序。
         super::config::arm_transient_read_failure(1);
-        let error = set_test_store_enabled(true).expect_err("首读失败不得拿默认快照落盘");
+        let scan = ctx.path().join("scan-more");
+        let error =
+            set_storage_settings(None, Some(vec![scan.to_string_lossy().to_string()]), None)
+                .expect_err("首读失败不得拿默认快照落盘");
         assert!(
             error.contains("读取当前配置失败"),
             "报错应说明读取失败、未做任何修改：{error}"
@@ -2643,29 +3253,11 @@ mod tests {
             "失败的调用不得动真实配置：默认快照落盘就是不可恢复的重置"
         );
 
-        // 存储入口同样的时序：改的只是补充扫描目录，真实设置必须原样保留。
-        super::config::arm_transient_read_failure(1);
-        let scan = ctx.path().join("scan-more");
-        let error =
-            set_storage_settings(None, Some(vec![scan.to_string_lossy().to_string()]), None)
-                .expect_err("首读失败不得拿默认快照落盘");
-        assert!(
-            error.contains("读取当前配置失败"),
-            "unexpected error: {error}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            original,
-            "失败的调用不得动真实配置"
-        );
-
         // 注入耗尽后的下一次调用走真实设置：改动生效、自定义 models_dir 与真实
         // 字段不丢——若默认快照曾被固化，这里读到的就是默认值了。
-        set_test_store_enabled(true).expect("恢复后普通开关放行");
         set_storage_settings(None, Some(vec![scan.to_string_lossy().to_string()]), None)
             .expect("恢复后普通保存放行");
         let settings = super::config::try_load_settings().expect("恢复后严格读取应接受写回的配置");
-        assert!(settings.test_mode_enabled, "开关改动要落进新配置");
         assert_eq!(
             settings.models_dir, "/home/u/ai/shared/weights",
             "自定义权重目录不得被默认值覆盖"

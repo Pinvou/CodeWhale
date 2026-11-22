@@ -43,17 +43,17 @@ test('没有卸载按钮的行必须留等宽空位，否则两个分区的主�
   );
 });
 
-test('四个主动作按钮宽度下限一致，「部署」不能因为没图标而窄一截', () => {
-  const primaries = ROW.match(/data-testid="model-store-(download|deploy|enable|stop)"/g) || [];
-  assert.equal(primaries.length, 4, `应该正好四个主动作，实际：${primaries.join(', ')}`);
-
-  // 每个主动作按钮的 className 都要带上那个下限
-  const withMinWidth = ROW.match(/className=\{`\$\{BTN_(?:PRIMARY|DANGER)\} \$\{ACTION_MIN_W\}`\}/g) || [];
-  assert.equal(
-    withMinWidth.length,
-    4,
-    `四个主动作都要带 ACTION_MIN_W，实际只有 ${withMinWidth.length} 个`
-  );
+test('全部主动作（含继续下载、继续清理）宽度下限一致', () => {
+  // 下载和继续下载共用按钮，testid 是表达式；不能只匹配静态 JSX 属性，
+  // 也不能继续假设增加恢复操作之前的“四个按钮”。逐个验证实际按钮分支。
+  const buttons = [...ROW.matchAll(/<button\b[\s\S]*?<\/button>/g)].map((match) => match[0]);
+  const ids = ['download', 'resume-download', 'continue-cleanup', 'deploy', 'enable', 'stop'];
+  for (const id of ids) {
+    const candidates = buttons.filter((button) => button.includes(`model-store-${id}'`) || button.includes(`model-store-${id}"`));
+    assert.equal(candidates.length, 1, `${id} 应恰好对应一个主动作按钮`);
+    assert.match(candidates[0], /className=\{`\$\{BTN_(?:PRIMARY|DANGER)\} \$\{ACTION_MIN_W\}`\}/,
+      `${id} 必须使用统一的 ACTION_MIN_W`);
+  }
 
   // 下限本身得是个真值，别被改成空串把这条测试架空
   assert.match(ROW, /const ACTION_MIN_W = 'min-w-\[\d+px\]';/, 'ACTION_MIN_W 必须是一个具体的 min-w 值');

@@ -1,0 +1,2855 @@
+//! 模型商店的**专属运行日志落盘**。
+//!
+//! # 在这之前：日志一个字都不落盘
+//!
+//! 一次长操作的输出走的是 pty → `strip_ansi` → `script_runner` 的 `output_lines`
+//! → `service::RunLog::lines` → 长轮询。全程只在内存里，而且：
+//!
+//! - `RUN_RETENTION` 是 600 秒，`sweep_old_runs` 到点把整条运行从 HashMap 里删掉，
+//!   日志**永久消失**；应用重启同样清零。
+//! - 于是「昨天那次下载为什么失败」这个问题在设备上**无法回答**。后端报错只带最后
+//!   20 行 tail，前端只留 500 行，真正的根因往往在那之前几千行。
+//!
+//! # 为什么不是 `~/.pinvou3/logs/model-store/`
+//!
+//! 落点是 **`~/.pinvou3/model-store/logs/`**，跟着 `config.rs` 已经定下的决策走：
+//! 那个文件开头写着「模型商店数据跟着品悟走 `~/.pinvou3/model-store/`，卸载品悟时
+//! 一目了然」，`store_root` / `config_dir` / `data_dir` 和 hf_token 的回退文件全挂在
+//! 这下面，理由是「卸载时一起走」。日志换到 `~/.pinvou3/logs/` 下就让「卸载模型商店
+//! 要清哪些」这件事重新变成两处答案——而 `config.rs` 花了一整段说明它只能有一处。
+//!
+//! # 品悟没有统一日志模块，所以这里是第五套手写诊断
+//!
+//! `tauri-plugin-log` 只在 `cfg!(debug_assertions)` 下注册（`lib.rs`），release 包里
+//! 四百多处 `log::*` 全部丢弃。真正落盘的是四套各自手写的诊断
+//! （`platform/startup.rs`、`features/sessions/diagnostics.rs`、
+//! `features/codex_acp/diagnostics.rs`、`features/memory/llm_review.rs`），**没有**
+//! `logs_dir()` / `write_log()` 之类的抽象可以复用。
+//!
+//! 本模块因此照 `codex_acp/diagnostics.rs` 的形状写（体积上限 + 脱敏 + 0600），
+//! 刻意**不**顺手去抽一个全局日志层：那要动 `platform/`，是跨功能的地基改动，
+//! 跟这次「模型商店的运行日志」不是一件事，塞进同一个改动里谁也审不动。
+//!
+//! # 🔴 脱敏是这个模块存在的前提
+//!
+//! 宿主对**所有卡片的所有操作**统一注入 `LMM_HF_TOKEN`（`lifecycle::common_env`），
+//! 脚本侧到处 re-export 成 `HF_TOKEN` 再 `-e HF_TOKEN` 传进 docker。而卡片**来自
+//! 网络、可能被投毒**：脚本里一句 `set -x` 就会把 token 原样打进输出，而输出在这之前
+//! 是不落盘的、看过就没了。一旦落盘，同一句 `set -x` 就变成一个**持久**的凭证泄漏。
+//!
+//! 所以这里有两道，分工明确：
+//!
+//! - [`sanitize_for_disk`]：落盘用。**定向**脱敏——登记过的字面量机密、`hf_*` /
+//!   `sk-*` / `ghp_*` 这类前缀、`Bearer <x>`、URL 里的 userinfo 和 query 参数、
+//!   `--token=<x>` 这类命令行取值。
+//! - [`sanitize_for_export`]：导出/上报用。在上面之外**再过一道**
+//!   `credential_store::redact_secret`（全仓通用的那把尺子）以及 IP 地址
+//!   （IPv4/IPv6，含 `IP:端口`、URL、参数、中文标点包裹等内嵌形态——按标准库
+//!   逐候选验证，不区分公网私网）。**主机名不识别也不猜测**：没有可靠的
+//!   「这是主机名而非普通单词」判据，猜错的代价是把整份日志变得读不懂；
+//!   这是保守取舍，不是疏漏。
+//!
+//! 为什么分两道，而不是落盘时就上 `redact_secret`：它的通用判据是「长度 ≥ 24 且
+//! 同时含字母和数字」，而 `/home/l28756/.pinvou3/model-store/models` 正好命中——
+//! 落盘时就上这把尺子，日志里**每一条路径**都会变成 `[REDACTED]`，一份读不懂的日志
+//! 比没有日志更糟（守卫见本文件测试 `broad_redaction_would_eat_ordinary_paths`）。
+//! 真正会离开这台机器的是"导出"，那一步该按最严的尺子来，而它也确实按最严的来了。
+//!
+//! # 绝不新增的东西
+//!
+//! **不记录我们写回 pty 的内容。** 双机卡会问本机密码和从机密码，答案是直接写进 pty
+//! 主端的；不被回显是靠两道 fail-closed 校验兜住的（`script_runner::build_command`
+//! spawn 前关 ECHO、关不掉就拒绝执行；写每个答案前再确认一次 ECHO 仍关着，被打开就
+//! SIGKILL）。这个模块只挂在 `RunLog::push` 之后——也就是「已经 `strip_ansi` 过、
+//! 已经切好行」的那条既有出口上，一个新的读取点都不开。
+
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+use parking_lot::Mutex;
+
+use super::config;
+
+/// 单次运行的日志文件上限。
+///
+/// 一次 168GB 的下载能打出几万行。**必须有上限**：这个目录跟用户的权重同盘，
+/// 日志把盘写满的后果是下载失败，而且是以一种完全看不懂的方式失败。
+const MAX_RUN_LOG_BYTES: u64 = 4 * 1024 * 1024;
+
+// A final UTF-8 line and truncation notice can slightly exceed the write cap.
+const MAX_EXPORT_LOG_BYTES: u64 = MAX_RUN_LOG_BYTES + (MAX_LINE_CHARS as u64 * 4) + 1024;
+
+/// 单行上限（字符）。脚本可以打出一行几 MB 的 base64。
+const MAX_LINE_CHARS: usize = 4_000;
+
+/// 目录里最多留几次运行的日志。够覆盖「昨天那次为什么失败」，又不会无限涨。
+const MAX_RUN_FILES: usize = 20;
+/// 用户导出件的独立上界（r6 P2-5）：不吃运行日志预算，但源日志轮转掉之后
+/// 旧导出件就是孤儿，只增不减。
+const MAX_EXPORT_FILES: usize = 10;
+
+/// 登记的字面量机密最多留几条。宿主目前只会登记一条（HF Token）；给点余量，
+/// 但必须有上限——这张表是全进程常驻的。
+const MAX_LITERAL_SECRETS: usize = 16;
+
+/// 太短的字面量不登记：三四个字符的"机密"会把正常文本打成筛子，
+/// 而一份被打成筛子的日志等于没有日志。
+const MIN_LITERAL_SECRET_LEN: usize = 8;
+
+const REDACTED: &str = "[REDACTED]";
+
+/// 已知的**字面量**机密。写进这里的值会在落盘前被逐字替换掉。
+///
+/// 为什么要有字面量这一档，而不是只靠前缀匹配：HF Token 的形状会变（`hf_` 前缀是
+/// 现在的约定，不是规范），而宿主**恰好知道自己注进去的那个值是什么**。知道确切
+/// 值时按确切值匹配，是这里能给出的最强保证。
+static LITERAL_SECRETS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// 日志目录：`~/.pinvou3/model-store/logs/`。
+pub fn logs_dir() -> PathBuf {
+    config::data_dir().join("logs")
+}
+
+/// 登记一个字面量机密。宿主在注入凭证时调一次即可（重复调用是幂等的）。
+pub fn register_secret(value: &str) {
+    let value = value.trim();
+    if value.len() < MIN_LITERAL_SECRET_LEN {
+        return;
+    }
+    let mut list = LITERAL_SECRETS.lock();
+    if list.iter().any(|known| known == value) || list.len() >= MAX_LITERAL_SECRETS {
+        return;
+    }
+    list.push(value.to_string());
+}
+
+/// 把登记过的字面量机密逐字换掉。
+fn mask_literal_secrets(line: &str) -> String {
+    let list = LITERAL_SECRETS.lock();
+    let mut out = line.to_string();
+    for secret in list.iter() {
+        if out.contains(secret.as_str()) {
+            out = out.replace(secret.as_str(), REDACTED);
+        }
+    }
+    out
+}
+
+/// 一眼就是凭证的前缀。命中就把整个词换掉。
+const SECRET_PREFIXES: [&str; 9] = [
+    "hf_",
+    "sk-",
+    "ghp_",
+    "gho_",
+    "github_pat_",
+    "xoxb-",
+    "AKIA",
+    // P2-14（r24）：AWS 临时凭证 ASIA 前缀与 AKIA 同族（导出侧已建模，落盘缺）。
+    "ASIA",
+    "bce-v3/",
+];
+
+/// URL 的 query 里叫这些名字的参数，取值一律抹掉。
+///
+/// `credential_store::redact_secret` 按**空白**分词，所以
+/// `https://host/f?token=abc123` 对它是一个整词、而这个整词不长得像机密——
+/// 嵌在 query 里的 token 它一个都抓不到。这一档就是补这个洞。
+const SECRET_QUERY_KEYS: [&str; 15] = [
+    "token",
+    "access_token",
+    "accesstoken",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "apikey",
+    "api_key",
+    // r32 P1-1：连字形态 `api-key`——三个兄弟拼写都在、独漏最常用的
+    // Azure OpenAI 生态主字面头名（名单碎片化第四次应验）。
+    "api-key",
+    "signature",
+    "x-api-key",
+    "refresh_token",
+    "client_secret",
+    "x-auth-token",
+];
+
+/// query 参数名带这些**前缀**的，取值也一律抹掉。SigV4 签名全家
+/// （`X-Amz-Signature` / `X-Amz-Credential` / `X-Amz-Security-Token`……）逐名
+/// 枚举永远追不全（评审 P2：整名精确匹配漏掉大小写/新参数），按前缀收——
+/// `X-Amz-Algorithm`、`X-Amz-Date` 不是机密，但一起抹掉只是少一个非必要信息，
+/// 漏一个签名值却是签名本身持久化落盘。
+///
+/// r21 P2-9：Google 云签名 query 同族（`X-Goog-Signature` /
+/// `X-Goog-Credential` / `X-Goog-Access-Token`……）按同样的前缀收。
+const SECRET_QUERY_PREFIXES: [&str; 2] = ["x-amz-", "x-goog-"];
+
+/// Azure SAS 令牌的 query 参数名（r21 P2-9）：`sp`（权限）/`se`（过期时间）/
+/// `sig`（签名）合在一起才是一把可用钥匙，单 `sig` 已是签名本体。刻意**不**并进
+/// `SECRET_QUERY_KEYS`：那张表还喂 bare-词形态（`token` 裸键后跟取值），而
+/// `se`/`sp` 是常见普通词根，收进去会把无辜的下一个词抹掉；这里只按
+/// 「URL query 参数名 / `KEY=` 取值 / `-H KEY=值`」的键名语境收。
+const AZURE_SAS_QUERY_KEYS: [&str; 3] = ["sig", "se", "sp"];
+
+/// query 参数名是否命中机密名单（整名或前缀，均大小写不敏感）。
+///
+/// r33 P2-2：最后一档并进 [`auth_side_secret_name`] 单一谓词。SigV4 的
+/// `credential`/`session_token`/`security-token` 此前只在名字侧名单里——
+/// URL query 语境（`?credential=AKIA…`）以原值落盘，实测三条全漏（名单
+/// 碎片化第五次应验）。谓词按小写收口，与名字侧同一份名单。
+fn query_key_is_secret(key: &str) -> bool {
+    SECRET_QUERY_KEYS
+        .iter()
+        .any(|known| key.eq_ignore_ascii_case(known))
+        || AZURE_SAS_QUERY_KEYS
+            .iter()
+            .any(|known| key.eq_ignore_ascii_case(known))
+        || SECRET_QUERY_PREFIXES
+            .iter()
+            .any(|prefix| key.to_ascii_lowercase().starts_with(prefix))
+        || auth_side_secret_name(&key.to_ascii_lowercase())
+}
+
+/// 命令行上叫这些名字的开关，紧跟的取值一律抹掉（`--token abc` 和 `--token=abc`）。
+///
+/// **刻意不收 `-p`**（`mysql -p<密码>` 那个）：它跟 `mkdir -p` 撞名，收进来会把脚本
+/// 里每一个 `mkdir -p <目录>` 的目录名抹掉。单字母开关的歧义没法靠这张表消除，而
+/// 抹掉路径的代价（日志读不懂）比这一档能挡住的风险大。
+///
+/// `--header` / `-H` 是**两段式**取值（`名字: 值` 可能拆成两个词），它们不走
+/// `redact_next` 的"整词抹掉"，走 [`HeaderExpect`] 的名字保留/取值抹掉。
+const SECRET_FLAGS: [&str; 8] = [
+    "--token",
+    "--password",
+    "--passwd",
+    "--secret",
+    "--api-key",
+    "--apikey",
+    "--hf-token",
+    "--header",
+];
+
+/// `--header` / `-H` 之后处于等名字还是等取值。
+enum HeaderExpect {
+    Name,
+    Value,
+}
+
+/// 这些环境变量名后面跟的取值一律抹掉（脚本 `set -x` / `env` 时会整行打出来）。
+const SECRET_ENV_KEYS: [&str; 7] = [
+    "HF_TOKEN",
+    "LMM_HF_TOKEN",
+    "HUGGINGFACE_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
+    "PASSWORD",
+    "LMM_ANSWER",
+    "API_KEY",
+];
+
+/// 这个词是不是该整体抹掉。
+fn word_is_secret(word: &str) -> bool {
+    let trimmed =
+        // r27 P2-14: `<>` 进 trim——`<AKIA…>` 尖括号包裹的 AWS key 此前不剥离
+        word.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | ')' | '(' | '`' | '<' | '>'));
+    if trimmed.len() < MIN_LITERAL_SECRET_LEN {
+        return false;
+    }
+    if SECRET_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+    {
+        return true;
+    }
+    // 紧凑 JSON（r5 评审 P2-3 实测泄漏）："api_key":"sk-xxx" 整体是一个词，
+    // `sk-` 不在词首——把常见值定界符（冒号/逗号/引号）后的段也按前缀查一遍。
+    // 只切这几个 ASCII 定界符，不切 CJK（前缀表全是 ASCII 开头，切中文白费）。
+    // r29 阻断一: < > 也作为定界符——<AccessKey>AKIA…</AccessKey> 的
+    // trim_matches 只剥词边缘，词中 <> 够不着；作为 split 定界符后
+    // AKIA… 独立成段可命中前缀。
+    for segment in trimmed.split([':', ',', '"', '<', '>']) {
+        let segment = segment.trim_matches(['\'', '{', '}', '[', ']', '<', '>']); // r28 P2-14: <> 并入 segment trim
+        if segment.len() >= MIN_LITERAL_SECRET_LEN
+            && SECRET_PREFIXES
+                .iter()
+                .any(|prefix| segment.starts_with(prefix))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// `KEY=VALUE` 里的 KEY 是不是机密名。大小写不敏感：脚本里两种写法都见过。
+/// SigV4 全家（`Credential=AKIA…/…`、`Signature=…`、`X-Amz-Credential=` 等）按
+/// 前缀+整名收——签名材料持久化落盘等于把凭证落盘（r5 评审 P2-3 实测）。
+/// r21 P2-9：前缀表扩到 X-Goog-，Azure SAS 键（sig/se/sp）一并按键名收。
+fn key_is_secret(key: &str) -> bool {
+    let key = key.trim_matches(|c: char| matches!(c, '"' | '\'' | '$' | '{' | '}'));
+    let lowered = key.to_ascii_lowercase();
+    SECRET_ENV_KEYS
+        .iter()
+        .any(|known| key.eq_ignore_ascii_case(known))
+        || SECRET_QUERY_PREFIXES
+            .iter()
+            .any(|prefix| lowered.starts_with(prefix))
+        || AZURE_SAS_QUERY_KEYS
+            .iter()
+            .any(|known| key.eq_ignore_ascii_case(known))
+        // r32 P1-1：单一谓词（不再手抄）——SigV4/auth/session/secret_key 族。
+        || auth_side_secret_name(&lowered)
+}
+
+/// r32 P1-1（第四次同族复发后的一次做对）：**单一名字侧谓词**。
+/// 此前 SigV4 三员/auth 头名在 key_is_secret / colon_side_secret_name 两处
+/// 独立 matches! 手抄，每次加名漏一处（credential/security-token→authorization
+/// →api-key 四连）。此后所有名字侧收口都走这一个函数，不再手抄名单。
+fn auth_side_secret_name(lowered: &str) -> bool {
+    auth_header_name(lowered)
+        || matches!(
+            lowered,
+            "credential" | "signature" | "security-token" | "session_token" | "secret_key"
+        )
+        // r38 P1-2（名单碎片化第七次，按评审建议谓词化收口）：整名精确匹配永远
+        // 追不上真实世界——本轮漏的是 DB 密码族（PGPASSWORD/POSTGRES_PASSWORD/
+        // MYSQL_PWD/MONGO_PASSWORD/REDIS_PASSWORD，短值原样落盘+导出双漏）与
+        // AWS 裸 KEY=VALUE 臂（AWS_SECRET_ACCESS_KEY=/AWS_SESSION_TOKEN=，
+        // r35 已登记）。子串族一并兜住 GITHUB_TOKEN 等未登记成员。
+        // `_pwd` 刻意带下划线：裸 `pwd` 会误伤 PWD/OLDPWD（工作目录回显）。
+        // `token` 子串会波及 TOKENIZERS_PARALLELISM/MAX_TOKENS 一类非机密键，
+        // 属 fail-closed 取舍：多抹一行日志比漏一把密码便宜。
+        // r39 P2-2：`cookie` 入族——Set-Cookie/Cookie 头的会话凭据（SID= 等）
+        // 落盘+导出双漏（AGENTS.md 明令 Cookie 不得入日志），子串收口同时覆盖
+        // cookie/session 专名形态。
+        || ["password", "passwd", "_pwd", "secret", "token", "api_key", "apikey", "access_key"]
+            .iter()
+            .any(|frag| lowered.contains(*frag))
+        // r39 P2-2：Cookie 族（Set-Cookie/Cookie 头的 SID= 等会话凭据）落盘+
+        // 导出双漏（AGENTS.md 明令 Cookie 不得入日志）——子串收口等价并入。
+        || lowered.contains("cookie")
+}
+
+/// r31 P1-1：Authorization 族头名。
+fn auth_header_name(lowered: &str) -> bool {
+    lowered == "authorization" || lowered == "proxy-authorization"
+}
+
+/// r31 P1-1/P2-1 + r32 P1-1 统一：冒号/JSON 语境名字侧 = 单一谓词。
+fn colon_side_secret_name(name: &str) -> bool {
+    auth_side_secret_name(&name.to_ascii_lowercase())
+}
+
+/// 「这个名字是不是机密键名」的统一判据（r21 P2-8② 冒号黏连形态用）：
+/// 环境变量名、URL query 参数名（含前缀族）、Azure SAS 键，全部大小写不敏感。
+fn secret_key_name(name: &str) -> bool {
+    // r27 P2-12: `\\` 进名字侧 trim——转义 JSON 的 `\"api_key\` 依赖此 trim 化简
+    let name =
+        name.trim_matches(|c: char| matches!(c, '"' | '\'' | '$' | '{' | '}' | '[' | ']' | '\\'));
+    !name.is_empty()
+        && (SECRET_ENV_KEYS
+            .iter()
+            .any(|known| name.eq_ignore_ascii_case(known))
+            || query_key_is_secret(name)
+            // r31 P1-1⑤⑥/P2-1：紧凑 JSON、python dict、冒号黏连的 auth 族与
+            // SigV4 两员（signature 已在 query 表）。
+            || colon_side_secret_name(&name.to_ascii_lowercase()))
+}
+
+/// r31 P1-1：colon_glued 命中的名字是否 authorization 族——值侧为空时不能直接
+/// redact_next（会把 Basic/Bearer scheme 词当凭据吃掉、放过真凭据，P2-09 陷阱），
+/// 要转 auth_pending（scheme 感知）。名字可能带 `headers={'` 类前缀，按同一把
+/// rfind 切法化简后再比。
+fn is_authorization_glued_name(name: &str) -> bool {
+    let cut = name
+        .rfind(['{', ',', '='])
+        .map(|i| &name[i + 1..])
+        .unwrap_or(name);
+    let bare =
+        cut.trim_matches(|c: char| matches!(c, '"' | '\'' | '\\' | '{' | '}' | '[' | ']' | '$'));
+    auth_header_name(&bare.to_ascii_lowercase())
+}
+
+/// 取值侧「长得像机密」的判据（r21 P2-8①：键不在名单、值本身像机密的
+/// `MY_TOKEN=hf_xxx…` / ②冒号黏连的 `api_key:plainsecret123`）。
+/// 只发生在「键名/键语境已经是机密键名」的前提下，误伤面可控。
+fn value_looks_secret(value: &str) -> bool {
+    let value = value.trim_matches(|c: char| {
+        matches!(
+            c,
+            // P2-12（r24）：转义 JSON `\"api_key\": \"supersecret\"}` 的键值
+            // 片段带反斜杠前缀——trim 集并入 `\` 让 `\"api_key\` 化简为 api_key。
+            '"' | '\'' | ',' | ';' | ')' | '(' | '{' | '}' | '[' | ']' | '\\'
+            // P2-14（r24）：<AKIA…> 尖括号包裹的 AWS key 落盘+导出双泄漏。
+            | '<' | '>'
+        )
+    });
+    // 前缀族短值（不足 8 字符的 sk-abc）也收：前缀本身就是形状声明。
+    SECRET_PREFIXES
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+        || word_is_secret(value)
+}
+
+/// r30 P2-1：`-H`/`--header` 语境里 `名:值` 冒号形态的内联值收口。值非空即抹
+/// （沿 :509 旧臂的无条件口径），但 Authorization / Proxy-Authorization 的值是
+/// basic/bearer scheme 词时，真正的凭据在**下一个词**（`curl -H
+/// Authorization:basic dXNlcjpwYXNz… https://x`）——补设 redact_next，与
+/// Value 臂的 scheme 链同语义。scheme 判据带名字门：`X-Custom:basic` 后面跟
+/// 的多半是 URL 而不是凭据，无名字门会把下一个参数误吞。
+/// r45 P1-2：cookie 族名字的单一判定谓词——空值冒号臂 / -H Name 臂（冒号与
+/// 等号两形态）/ eq 臂 / push_header_colon_value 五处共用。此前各臂各写一份
+/// 名单，「每次加名漏一处」同族教训第五次复发（r29→r32→r43→r44→本次）：
+/// Set-Cookie 在三个臂里全缺席。
+fn header_name_is_cookie_family(bare_name: &str) -> bool {
+    bare_name.eq_ignore_ascii_case("cookie") || bare_name.eq_ignore_ascii_case("set-cookie")
+}
+
+fn push_header_colon_value(
+    name: &str,
+    value: &str,
+    out: &mut String,
+    redact_next: &mut bool,
+    cookie_rest: &mut bool,
+) {
+    // r30 P1-3 同理：set -x 回显带引号，名字先剥引号再比。
+    // r43 P1-2：紧凑 JSON 的名字带 `{"` 前缀（`{"Authorization":"Bearer x"}` 无
+    // 空白可分词）——不剥花括号 is_auth 永远失配，scheme 链不启动、下一个词
+    // 的真凭据裸落。与 key_is_secret 同一 trim 集。
+    let bare_name =
+        name.trim_matches(|c: char| matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | ','));
+    let is_auth = bare_name.eq_ignore_ascii_case("authorization")
+        || bare_name.eq_ignore_ascii_case("proxy-authorization");
+    let is_cookie = header_name_is_cookie_family(bare_name);
+    // r44 P2-3：trim 集补反斜杠——转义引号形态（`\"Bearer`）不剥则 scheme
+    // 判定失配、redact_next 不置位，凭据词裸落（磁盘+导出同漏）。
+    let scheme = value.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';' | '\\'));
+    out.push_str(name);
+    out.push(':');
+    out.push_str(REDACTED);
+    if is_cookie {
+        // r43 P1-2：Cookie 值是分号多对（theme=dark; SID=…）——只抹第一段
+        // 会把会话 ID 漏出去。整段抹到行末（折行不延续，两害取其轻）。
+        *cookie_rest = true;
+    } else if is_auth
+        && (scheme.eq_ignore_ascii_case("basic") || scheme.eq_ignore_ascii_case("bearer"))
+    {
+        *redact_next = true;
+    }
+}
+
+/// r30 P1-1/P1-3：`-H`/`--header` 语境里 `名=值` 形态的收口（`-H
+/// 'X-Api-Key=shortsecret1'`——set -x 对带引号参数的回显必带引号，名字/值的
+/// 判据前先剥引号，否则 `'X-Api-Key` 因前导引号对全部名单失配、逐字透传）。
+/// 机密键判据 = query 表 ∪ key 表：r29 P1-1 只换 query 单表，漏掉了 SigV4 三员
+/// 里只在 key 表的 credential / security-token。命中写入 `名=[REDACTED]` 并返回
+/// true；无 `=` / 值空 / 键不机密返回 false（调用方走透传 + 等值）。
+fn push_header_equals_spec(spec: &str, out: &mut String, cookie_rest: &mut bool) -> bool {
+    let Some((name, value)) = spec.split_once('=') else {
+        return false;
+    };
+    let bare_name = name.trim_matches(['"', '\'']);
+    let bare_value = value.trim_matches(['"', '\'']);
+    if !bare_value.is_empty()
+        && (query_key_is_secret(bare_name)
+            || key_is_secret(bare_name)
+            || header_name_is_cookie_family(bare_name))
+    {
+        out.push_str(name);
+        out.push('=');
+        out.push_str(REDACTED);
+        // r45 P1-2：`-H 'Cookie=a=1; session=y'` 紧凑等号黏连形态——值是分号
+        // 多对且键名不在机密名单，该路径此前不置 cookie_rest，第二对起裸落。
+        if header_name_is_cookie_family(bare_name) {
+            *cookie_rest = true;
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// 把 URL 里的 userinfo（`https://user:pass@host`）和机密 query 参数抹掉。
+///
+/// 只动**取值**，保留参数名和主机路径——`?token=[REDACTED]` 比整条 URL 变成
+/// `[REDACTED]` 有用得多：排查的第一个问题往往是"它到底在连哪儿"。
+fn redact_url_secrets(word: &str) -> String {
+    // P2-15（r24）：相对 URL（`/x?token=secret`）无 `://` 也可能带机密 query。
+    // 原门 `!word.contains("://")` 把这类词整体放行。改为：有 `://` 走完整
+    // URL 脱敏（userinfo+query），无 scheme 但含 `?key=value` 形态也走 query 脱敏。
+    // r49 P1-2：无 scheme userinfo（`admin:pass@host`）——redact 前置判定
+    // （主链 URL 兜底臂前），此处只处理带 scheme 的形态。
+    // r49 P1-3：裸 query 黏连（`a=1&password=x`，无 `?` 断词）——`&` 分段
+    // 里含机密键值对即逐对脱敏（与 `?` 形态同构的逐对重写）。
+    let has_scheme = word.contains("://");
+    let has_query = !has_scheme && word.contains('?') && word.contains('=');
+    let has_bare_amp_query = !has_scheme
+        && !word.contains('?')
+        && word.contains('&')
+        && word.contains('=')
+        && !word.contains(' ')
+        && word.split('&').any(|pair| {
+            pair.split_once('=').is_some_and(|(k, v)| {
+                let bare = k.trim_matches(|c: char| matches!(c, '"' | '\''));
+                !v.is_empty() && query_key_is_secret(bare)
+            })
+        });
+    if !has_scheme && !has_query && !has_bare_amp_query {
+        return word.to_string();
+    }
+    if has_bare_amp_query {
+        // 裸 query：整个词就是 `k1=v1&k2=v2…`——无路径前缀可保留，逐对重写。
+        let mut out = String::with_capacity(word.len());
+        for (idx, pair) in word.split('&').enumerate() {
+            if idx > 0 {
+                out.push('&');
+            }
+            match pair.split_once('=') {
+                Some((k, v)) if !v.is_empty() => {
+                    let bare = k.trim_matches(|c: char| matches!(c, '"' | '\''));
+                    out.push_str(k);
+                    out.push('=');
+                    if query_key_is_secret(bare) {
+                        out.push_str(REDACTED);
+                    } else {
+                        out.push_str(v);
+                    }
+                }
+                _ => out.push_str(pair),
+            }
+        }
+        return out;
+    }
+    if has_query {
+        // 相对路径：只处理 query 部分，路径原样保留。
+        let (path, query) = match word.split_once('?') {
+            Some(pair) => pair,
+            None => return word.to_string(),
+        };
+        let mut out = String::with_capacity(word.len());
+        out.push_str(path);
+        out.push('?');
+        let mut first = true;
+        for pair in query.split('&') {
+            if !first {
+                out.push('&');
+            }
+            first = false;
+            let (key, value) = match pair.split_once('=') {
+                Some(kv) => kv,
+                None => {
+                    out.push_str(pair);
+                    continue;
+                }
+            };
+            out.push_str(key);
+            out.push('=');
+            if query_key_is_secret(key) {
+                out.push_str(REDACTED);
+            } else {
+                out.push_str(value);
+            }
+        }
+        return out;
+    }
+    let mut out = String::with_capacity(word.len());
+    // userinfo：`scheme://` 之后、第一个 `@` 之前的 `user:pass`。密码才是机密，
+    // 但用户名也可能是账号，一起抹掉更省心。
+    let (scheme, rest) = match word.split_once("://") {
+        Some(pair) => pair,
+        None => return word.to_string(),
+    };
+    out.push_str(scheme);
+    out.push_str("://");
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    match authority.rsplit_once('@') {
+        Some((_, host)) => {
+            out.push_str(REDACTED);
+            out.push('@');
+            out.push_str(host);
+        }
+        None => out.push_str(authority),
+    }
+    // query：逐个参数看名字。
+    match tail.split_once('?') {
+        None => out.push_str(tail),
+        Some((path, query)) => {
+            out.push_str(path);
+            out.push('?');
+            let mut first = true;
+            for pair in query.split('&') {
+                if !first {
+                    out.push('&');
+                }
+                first = false;
+                match pair.split_once('=') {
+                    Some((key, _)) if query_key_is_secret(key) => {
+                        out.push_str(key);
+                        out.push('=');
+                        out.push_str(REDACTED);
+                    }
+                    _ => out.push_str(pair),
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 定向脱敏：落盘走这一道。
+///
+/// 按空白分词逐词处理，然后把词拼回去。**刻意不做全量启发式**，理由见模块文档。
+///
+/// # 行首缩进要留着
+///
+/// 分词重拼会把所有连续空白压成一个空格。词**内部**的空白压掉无所谓，但**行首缩进**
+/// 不行：Python traceback 是这份日志里最有价值的形状，而它全靠缩进才读得出调用层级——
+///
+/// ```text
+///   File "/opt/x.py", line 3, in <module>
+///     raise ValueError(...)
+/// ```
+///
+/// 压平之后这两行看起来是同一层，一份读不顺的日志会让人放弃往下看。所以行首那段
+/// 原样搬过去。
+/// r31 P2-2：跨物理行延续的 pending 状态。redact_next 此前按单行调用生灭——
+/// pretty-print JSON 的键行（`  "api_key":`）在行尾置位后没有下一个词可抹，
+/// 下一行的值词以全新状态透传落盘。落盘写入侧按 run 持有本状态逐行传入。
+#[derive(Default)]
+pub struct DiskCarry {
+    pub redact_next: bool,
+    /// r31 P1-1：`Authorization:`（非 -H 语境）已出现、等下一个词判 scheme/凭据。
+    pub auth_pending: bool,
+    /// r43 P1-2：-H 两段式的「等名字」「等值」悬置态跨行延续——set -x 对跨行
+    /// 引号参数的回显会让 `-H 'X-Api-Key:` 停在行尾、值在下一行；行间丢状态
+    /// 就是值裸落。curl_user_next 同理（`--user` 与取值分行）。
+    pub header_expect_name: bool,
+    pub header_expect_value: bool,
+    pub curl_user_next: bool,
+}
+
+/// 定向脱敏：落盘走这一道（单行、无跨行状态的兼容入口；测试与既有调用方用）。
+pub fn sanitize_for_disk(line: &str) -> String {
+    let mut carry = DiskCarry::default();
+    sanitize_line_with(line, &mut carry)
+}
+
+/// r31 P2-2：带跨行状态的落盘脱敏——run 写入侧每行调用、行间延续 pending。
+pub fn sanitize_line_with(line: &str, carry: &mut DiskCarry) -> String {
+    let masked = mask_literal_secrets(line);
+    let mut out = String::with_capacity(masked.len());
+    let indent: String = masked
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        // 制表符在 `clamp_line` 里会变成空格，这里先按同样的宽度铺开，免得缩进
+        // 在两道处理之间对不上
+        .map(|c| if c == '\t' { ' ' } else { c })
+        .take(MAX_LINE_CHARS / 8)
+        .collect();
+    out.push_str(&indent);
+    // 上一个词要求把下一个词抹掉（`--token abc` / `Bearer abc` 这种分开写的）。
+    let mut redact_next = carry.redact_next;
+    let mut auth_pending = carry.auth_pending;
+    // r43 P1-2：悬置态从 carry 恢复（跨行延续）。
+    // Cookie 整段抹是行内语义：行末即清。跨行永久置位会把 Cookie 之后整份
+    // 日志全部过抹——折行 Cookie 属罕见形态，两害取其轻。
+    let mut cookie_rest = false;
+    let mut curl_user_next = carry.curl_user_next;
+    let mut header_expect = if carry.header_expect_value {
+        Some(HeaderExpect::Value)
+    } else if carry.header_expect_name {
+        Some(HeaderExpect::Name)
+    } else {
+        None
+    };
+    // r21 P2-8③：curl 的 `-u` / `--user`，取值形态是 `user:password`。**要求
+    // 取值里带冒号**才整词抹（用户名+密码一起，与 URL userinfo 同口径）：
+    // `sudo -u root` 的 -u 是「以该用户执行」，值是普通用户名、没有冒号——
+    // 不设这道形状门，排障日志里最常见的 sudo 命令会被打得读不了。
+    // `--header` / `-H` 的两段式取值：先等 `名字:`、再等值。名字要留着（排查靠
+    // 它认出是哪个头），值才是机密——整词抹掉会把"哪个头"一起丢掉。
+    //（r43 P1-2：态本体已在上方从 carry 恢复，行尾由回写段延续。）
+    let mut first = true;
+    for word in masked.split_whitespace() {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        // r43 P1-2：Cookie 值的剩余对（分号多对/折行）全部抹——逐词判键名永远
+        // 挡不住 `SID=…` 这类非名单 cookie 名，Cookie 头的值整段都是会话材料。
+        // 终止条件=词尾闭合引号（-H '…' 参数的收尾）：之后的 URL/其它参数
+        // 不受过抹牵连。
+        if cookie_rest {
+            out.push_str(REDACTED);
+            if word.ends_with('\'') || word.ends_with('"') {
+                cookie_rest = false;
+            }
+            continue;
+        }
+        if redact_next {
+            // r7 P1-4：`password => 'secret'` 的 `=>` 是操作符不是值——把它当值
+            // 消耗后真正的凭据词反而存活。操作符词（纯符号+引号+冒号+等号）不
+            // 抹零、继续等下一个真正的值词。
+            let is_operator = word
+                .chars()
+                .all(|c| matches!(c, '=' | '>' | '<' | '|' | '&' | ':' | ',' | ';' | '"'));
+            if is_operator {
+                out.push_str(word);
+                // 保持 redact_next = true，等下一个真正的值
+            } else {
+                out.push_str(REDACTED);
+                redact_next = false;
+            }
+            continue;
+        }
+        // r31 P1-1：auth 名待定态——`Authorization:`（非 -H 语境）后的下一个词：
+        // 是 basic/bearer 则它只是 scheme 声明，真凭据在再下一个词（走既有
+        // redact_next 链）；否则它就是凭据本体，整词抹。**不能直接置
+        // redact_next**——会把 scheme 词吃掉、放过真凭据（P2-09 陷阱）。
+        if auth_pending {
+            let scheme = word.trim_matches(|c: char| {
+                matches!(c, '"' | '\'' | ',' | ';' | '}' | ')' | '>' | '`')
+            });
+            let is_operator = word
+                .chars()
+                .all(|c| matches!(c, '=' | '>' | '<' | '|' | '&' | ':' | ',' | ';' | '"'));
+            if scheme.eq_ignore_ascii_case("basic") || scheme.eq_ignore_ascii_case("bearer") {
+                out.push_str(word);
+                auth_pending = false;
+                redact_next = true;
+            } else if is_operator {
+                out.push_str(word);
+            } else {
+                out.push_str(REDACTED);
+                auth_pending = false;
+            }
+            continue;
+        }
+        if curl_user_next {
+            curl_user_next = false;
+            if word.contains(':') {
+                out.push_str(REDACTED);
+            } else {
+                out.push_str(word);
+            }
+            continue;
+        }
+        if let Some(HeaderExpect::Value) = header_expect {
+            // r6 P1-5：`Authorization: Basic <凭据>`——scheme 词（Basic/Bearer）
+            // 本身不是机密，真正的凭据是它**后面**那个词。只抹 scheme 词会把
+            // 凭据词原样留下（实测泄漏）。scheme 词照抹（无诊断价值），并连带
+            // 标记紧随的凭据词。
+            let scheme_word = word.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';'));
+            out.push_str(REDACTED);
+            header_expect = None;
+            if scheme_word.eq_ignore_ascii_case("basic")
+                || scheme_word.eq_ignore_ascii_case("bearer")
+            {
+                redact_next = true;
+            }
+            continue;
+        }
+        if let Some(HeaderExpect::Name) = header_expect.take() {
+            let trimmed = word.trim_end_matches(',');
+            match trimmed.split_once(':') {
+                Some((name, value)) if !value.is_empty() => {
+                    // r30 P2-1：冒号形态统一走 helper（补 scheme 链 + 引号 trim）。
+                    push_header_colon_value(
+                        name,
+                        value,
+                        &mut out,
+                        &mut redact_next,
+                        &mut cookie_rest,
+                    );
+                }
+                Some((name, _)) => {
+                    out.push_str(name);
+                    out.push(':');
+                    // r43 P1-2 + r45 P1-2：Cookie/Set-Cookie 头（`-H 'Cookie: a=1;
+                    // SID=…'）——值是分号多对且键名不在机密名单，两段式 Value
+                    // 臂抹一个词就收口会漏第二对。cookie_rest 把本行剩余词全抹
+                    // （行末清）。谓词统一走 header_name_is_cookie_family。
+                    if header_name_is_cookie_family(name.trim_matches(['"', '\''])) {
+                        cookie_rest = true;
+                    } else {
+                        header_expect = Some(HeaderExpect::Value);
+                    }
+                }
+                None => {
+                    // r30 P1-1/P1-3：`= `形态统一走 helper（三表并集 + 引号 trim）。
+                    // r47 P1-1：删除 r45 的 is_cookie_eq 特判——它把含首对
+                    // `NAME=VALUE` 的整词原样落盘再补 [REDACTED]，首对值逐字泄漏，
+                    // 且拦截了 helper 本可正确产出的 `名=[REDACTED]`。cookie 族
+                    // 现由 push_header_equals_spec 统一处理（命中即置
+                    // cookie_rest，见其内部）。
+                    if !push_header_equals_spec(trimmed, &mut out, &mut cookie_rest) {
+                        out.push_str(trimmed);
+                        header_expect = Some(HeaderExpect::Value);
+                    }
+                }
+            }
+            continue;
+        }
+        // r31 P1-1①②⑦：非 -H 语境的裸 `Authorization:` / `Proxy-Authorization:`
+        // 空格分离形态（curl -v 的 `> ` 回显、python 打印、set -x 整参数引号
+        // `'Authorization:`）。此前的黏连臂只认 len>14（词尾冒号的裸形态恰好
+        // 14 字节被排除）、名字又不在任何名字表——值词以无上下文透传落盘。
+        // 值在下一个词 → 置 auth_pending（scheme 感知，见上方消费块）。
+        {
+            let probe = word.trim_matches(|c| {
+                char::is_ascii_whitespace(&c) || matches!(c, '"' | '\'' | ',' | ';' | '`')
+            });
+            if probe.eq_ignore_ascii_case("authorization:")
+                || probe.eq_ignore_ascii_case("proxy-authorization:")
+            {
+                out.push_str(word);
+                auth_pending = true;
+                continue;
+            }
+        }
+        // r31 P1-1④：黏连臂扩到 Proxy-Authorization 前缀（20 字节）。
+        //
+        // r22（10:21 分片 P2-1b）：`Authorization:Basic <b64>` 冒号黏连的
+        // scheme 声明词——词本身不含机密（值是 Basic/Bearer），base64 凭证
+        // 在**下一个词**。与 bare bearer/basic 同语义：标记下一个词整词抹除，
+        // 本词保留供排查。**必须长于前缀**（冒号后真的黏了内容）才走这臂：
+        // 裸 `Authorization:`（空格分离形态）由上方的 auth_pending 探测块接。
+        //
+        // r29 P1-2：黏连值**不是 scheme**（basic/bearer）时是凭证本体
+        // （`Authorization:$TOKEN` set -x 展开的标准产物）——不能只标下一词
+        // （值在本词内），必须当场抹值。
+        //
+        // r30 P1-2：r29 把这臂放在下方 bare 链里，而主链此刻已把整词推入
+        // out（word_is_secret / colon_glued / `=` / URL 兜底四路必推其一），
+        // 臂内再 push 等于原值照落 + 追加垃圾。重构为替换式：以 continue
+        // 收口，整词不经其它任何臂。scheme 词两侧引号/尾随标点剥掉再比。
+        // r47 P1-4：前缀比对前先剥引号——`'Authorization:Basic <b64>'`（set -x
+        // 回显形态）带前导引号时 get(..14) 不命中、臂不启动，b64 词双漏。与
+        // 上方 probe 探测块同口径（那边一直剥着）。剥出的纯词参与比对，输出
+        // 仍写原词（排查需要看到原文骨架）。
+        let glue_trimmed = word.trim_start_matches(|c: char| matches!(c, '"' | '\'' | '`'));
+        let auth_glued_prefix = if glue_trimmed.len() > 20
+            && glue_trimmed
+                .get(..20)
+                .is_some_and(|p| p.eq_ignore_ascii_case("proxy-authorization:"))
+        {
+            word.len() - glue_trimmed.len() + 20
+        } else if glue_trimmed.len() > 14
+            && glue_trimmed
+                .get(..14)
+                .is_some_and(|p| p.eq_ignore_ascii_case("authorization:"))
+        {
+            word.len() - glue_trimmed.len() + 14
+        } else {
+            0
+        };
+        if auth_glued_prefix > 0 {
+            let glued = word[auth_glued_prefix..]
+                .trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | ';'));
+            if glued.eq_ignore_ascii_case("basic") || glued.eq_ignore_ascii_case("bearer") {
+                out.push_str(word);
+                redact_next = true;
+            } else {
+                out.push_str(&word[..auth_glued_prefix]);
+                out.push_str(REDACTED);
+            }
+            continue;
+        }
+        if word_is_secret(word) {
+            out.push_str(REDACTED);
+        } else if let Some((name, value)) = colon_glued_secret(word) {
+            // r21 P2-8②：冒号黏连——`api_key:plainsecret123`、
+            // `{"api_key":"plainsecret123"}`（紧凑 JSON 无空白可分）。bare 检查
+            // 要求整词相等、`=` 分支只看等号，这条缝隙此前两个都够不着。键名
+            // 留着（排查靠它认出是哪个凭证），值抹掉。URL 的 `scheme://…` 左段
+            // 是 scheme，不在键名单里，不受影响。
+            // r23 P1-2：值侧为空的命中（词尾冒号形态）改置 redact_next——值在
+            // 下一个词，本词保留键名供排查。
+            if value.is_empty() {
+                out.push_str(name);
+                out.push(':');
+                // r31 P1-1：authorization 族的空值命中不能直接 redact_next——
+                // 下一词若是 Basic/Bearer scheme，直接置位会把 scheme 词当凭据
+                // 吃掉、真凭据漏网（P2-09 陷阱）。转 auth_pending（scheme 感知）。
+                if is_authorization_glued_name(name) {
+                    auth_pending = true;
+                } else if header_name_is_cookie_family(
+                    name.trim_matches(|c: char| {
+                        matches!(c, '"' | '\'' | '{' | '}' | '[' | ']' | ',')
+                    }),
+                ) {
+                    // r45 P1-2：`> Set-Cookie: SID=x; session=y`（curl -v 回显等
+                    // 非 -H 语境的空值冒号形态）——值在下一词且是分号多对，单发
+                    // redact_next 只抹第一段，第二对起原样落盘（含导出侧）。
+                    // r44 提交曾声称修复此处但 diff 只落在非空值路径（评审实证）；
+                    // 本轮谓词统一后此臂与其它臂共用同一份名单。
+                    cookie_rest = true;
+                } else {
+                    redact_next = true;
+                }
+            } else {
+                // r43 P1-2：非空值统一走 helper（含 name+:+[REDACTED] 输出）——
+                // 值若是 scheme 声明（`{"Authorization":"Bearer` + 空格 + 真凭据），
+                // scheme 链必须启动把下一个词抹掉；此前本臂只把值自身抹成
+                // [REDACTED] 就收口，紧跟其后的真凭据词原样落盘（r43 实测形态）。
+                // 名字是 cookie 时置 cookie_rest 整段抹。
+                push_header_colon_value(name, value, &mut out, &mut redact_next, &mut cookie_rest);
+            }
+        } else if let Some((key, rest)) = word.split_once('=') {
+            // `KEY=VALUE`：只看 KEY。命令行开关（`--token=abc`）和环境变量
+            // （`HF_TOKEN=abc`）共用这一支。
+            let flag_secret = SECRET_FLAGS
+                .iter()
+                .any(|known| key.eq_ignore_ascii_case(known));
+            // r18 P1-3：bare 键分支（下方）r7 已并入 query 名单，`=` 分支漏了
+            // 同一次并入——`+ export token=sk-xxx` / `passwd=` / `apikey=` 整值
+            // 落盘+导出。两个分支必须同一张名单，分开维护就会再来一轮。
+            if flag_secret || key_is_secret(key) || query_key_is_secret(key) {
+                out.push_str(key);
+                out.push('=');
+                // `--header=X-Api-Key:value`：`= ` 形式里 header 的名字同样要留。
+                if key.eq_ignore_ascii_case("--header") {
+                    // r30 同族统筹：`= `黏连形态此前只认冒号、其余直通透传
+                    // （`--header='X-Api-Key=v'` 原样落盘）——与 -H 两段式
+                    // Name 臂的判据不一致（r18 P1-3 教训：两个分支必须同一张
+                    // 名单）。统一走与 Name 臂相同的两个 helper。
+                    match rest.split_once(':') {
+                        Some((name, value)) if !value.is_empty() => {
+                            push_header_colon_value(
+                                name,
+                                value,
+                                &mut out,
+                                &mut redact_next,
+                                &mut cookie_rest,
+                            );
+                        }
+                        _ => {
+                            if !push_header_equals_spec(rest, &mut out, &mut cookie_rest) {
+                                out.push_str(rest);
+                                header_expect = Some(HeaderExpect::Value);
+                            }
+                        }
+                    }
+                    // 状态已在上面落好，不能再走底部的 bare 检查（会把它覆写回等名字）
+                    continue;
+                }
+                out.push_str(REDACTED);
+            } else if (key == "--user" || key == "-u") && rest.contains(':') {
+                // r21 P2-8③：`--user=admin:s3cr3t` 黏连形态。带冒号才是
+                // user:password 凭证（与上方分开写形态同一道形状门）。
+                out.push_str(key);
+                out.push('=');
+                out.push_str(REDACTED);
+            } else if value_looks_secret(rest) && !word.contains("://") {
+                // r21 P2-8①：键不在任何名单、值本身长得像机密——
+                // `MY_TOKEN=hf_AbC123…`。此前 `=` 分支只查键不查值，带前缀的
+                // 机密黏在陌生键后面原样落盘+导出。键名保留，值抹掉。带 `://`
+                // 的词走下方 URL 那一道（`?token=hf_…` 在那边有更好的键名保留
+                // 形态，别在这里按第一个 `=` 拦腰切）。
+                out.push_str(key);
+                out.push('=');
+                out.push_str(REDACTED);
+            } else if !word.contains("://")
+                && word.contains('@')
+                && word.split('@').next().is_some_and(|prefix| {
+                    // r51 P1：等号黏连的同类形状——`mount remote=user:pass@host:/x`、
+                    // `connect key=user:pass@host`。裸词臂（r49 P1-2）够不着带 `=` 的
+                    // 词，而 redact_url_secrets 对无 `://` 的词原样返回，于是 r47
+                    // 「等号臂」与 r49「无 scheme userinfo」两修在此交集漏臂：
+                    // `KEY=user:pass@host` 原样落盘+导出（评审 6011075265 探针）。
+                    // 这里套同一形状门，键名保留、仅抹 `user:pass@`；误伤面与裸词臂
+                    // 完全一致（@ 前段含冒号才收，`server=web@host` 不受牵连）。
+                    prefix.contains(':') && !prefix.contains(' ') && prefix.len() <= 128
+                })
+            {
+                let at = word.rfind('@').unwrap_or_default();
+                out.push_str(key);
+                out.push('=');
+                out.push_str(REDACTED);
+                out.push('@');
+                out.push_str(&word[at + 1..]);
+            } else {
+                out.push_str(&redact_url_secrets(word));
+            }
+        } else if (word.starts_with("-u") || word.starts_with("--user"))
+            && word.len() > if word.starts_with("--user") { 6 } else { 2 }
+            && word[if word.starts_with("--user") { 6 } else { 2 }..].contains(':')
+            && !word.contains("://")
+        {
+            // r47 P1-3：`-uadmin:s3cr3t` / `--useradmin:pass` 的**非等号**短
+            // 黏连（无空格无 `=`）——split_once('=') 臂够不着、bare 相等也够
+            // 不着，此前整词经 URL 兜底原样落盘。同一道形状门：剩余段带冒号
+            // 才算 user:password 凭证（`sudo -u root` 无冒号不收）。
+            let flag_len = if word.starts_with("--user") { 6 } else { 2 };
+            out.push_str(&word[..flag_len]);
+            out.push_str(REDACTED);
+        } else if !word.contains("://")
+            && word.contains('@')
+            && word.split('@').next().is_some_and(|prefix| {
+                // r49 P1-2：无 scheme userinfo——`curl admin:pass@host/api`、
+                // `rsync admin:s3cr3tpw1@host:/x`。redact_url_secrets 只认带
+                // scheme 的 userinfo；无 scheme 时 `user:pass@` 前缀整词原样
+                // 落盘（评审 e1/e2 探针）。形状门：@ 前段含冒号（与 -u 同族
+                // 的 user:password 判据），避免 `user@host` 单冒号都没有的
+                // 普通地址误伤。
+                prefix.contains(':') && !prefix.contains(' ') && prefix.len() <= 128
+            })
+        {
+            // 保住 @host 部分（排查需要看到连去哪儿），抹掉 user:pass@。
+            let at = word.rfind('@').unwrap_or_default();
+            out.push_str(REDACTED);
+            out.push('@');
+            out.push_str(&word[at + 1..]);
+        } else {
+            out.push_str(&redact_url_secrets(word));
+        }
+        // r23 P1-2：trim 集并入 {}[]() ——与下方 colon_glued 名字侧同集。缺括号时
+        // `body={"api_key": "supersecret"}`（json.dumps 默认分隔符就是 `": "`）拆成
+        // `body={"api_key":` / `"supersecret"}` 两词：键不化简为 api_key（不触发
+        // redact_next）、colon 值侧为空（长度门跳过）、值词无前缀且 <24（导出粗尺
+        // 不接）——三道臂全绕过，落盘+导出双泄漏。补集后键化简命中、值侧按
+        // redact_next 正常抹除。
+        let bare = word.trim_matches(|c: char| {
+            matches!(
+                c,
+                // r27 P2-12: `\\` 同步进名字侧 trim（与 colon_glued/secret_key_name 对齐）
+                '"' | '\'' | ',' | ';' | ':' | '{' | '}' | '[' | ']' | '(' | ')' | '\\'
+            )
+        });
+        // `--TOKEN x`（空格形态）此前大小写敏感漏网——`=` 形态早已不敏感，两处对齐。
+        // r6 P1-5 + r7 P1-4：bare 键检查大小写不敏感，且并入 SECRET_QUERY_KEYS
+        // （token / x-api-key / access_token 等 URL query 表已有的名字，此前
+        // 裸键漏检：`token: ab12cd34` / `> x-api-key: abcdef012` 落盘+导出）。
+        // r19 P2-8：scheme 词同样有裸形态。`-H` 两段式那分支（上面 HeaderExpect）
+        // 早就认 basic+bearer 两个 scheme，这里却只认 bearer——脚本手动
+        // `export Authorization: Basic dXNlcjpwYXNz`（无 -H 上下文）时 basic
+        // 后面的 base64 凭据原样落盘+导出。对齐 bearer 的既有语义：scheme 词
+        // 标记下一个词整值脱敏。
+        if bare.eq_ignore_ascii_case("bearer")
+            || bare.eq_ignore_ascii_case("basic")
+            || SECRET_ENV_KEYS
+                .iter()
+                .any(|known| bare.eq_ignore_ascii_case(known))
+            || SECRET_QUERY_KEYS
+                .iter()
+                .any(|known| bare.eq_ignore_ascii_case(known))
+            // r22 P2-2：这里刻意**不走** query_key_is_secret——那张表 r21 并入了
+            // Azure SAS 键（sig/se/sp），而 `se`/`sp` 是常见普通词根，进 bare
+            // 词表会把无辜的下一个词抹掉（AZURE_SAS_QUERY_KEYS 的注释一直这么
+            // 声称，代码却在 r21 P2-9 时顺手破坏了它）。bare 语境只额外收
+            // 前缀族（x-amz-/x-goog-），Azure 键维持「仅键名语境」的边界。
+            || SECRET_QUERY_PREFIXES
+                .iter()
+                .any(|prefix| bare.to_ascii_lowercase().starts_with(prefix))
+            || SECRET_FLAGS
+                .iter()
+                .any(|known| bare.eq_ignore_ascii_case(known))
+        {
+            if bare.eq_ignore_ascii_case("--header") {
+                header_expect = Some(HeaderExpect::Name);
+            } else {
+                redact_next = true;
+            }
+        } else if bare == "-H" {
+            // curl 的 `-H`（大写）与 `--header` 同义；`-h` 是 help，刻意不收。
+            header_expect = Some(HeaderExpect::Name);
+        } else if bare == "-u" || bare == "--user" {
+            // r21 P2-8③：curl 凭证开关（见上方 curl_user_next 的形状门说明）。
+            // 刻意不进 SECRET_FLAGS：那张表对下一个词无条件整词抹，这里要按
+            // 「带冒号才抹」收，避免误伤 `sudo -u root`。
+            curl_user_next = true;
+        }
+    }
+    carry.redact_next = redact_next;
+    carry.auth_pending = auth_pending;
+    carry.header_expect_name = matches!(header_expect, Some(HeaderExpect::Name));
+    carry.header_expect_value = matches!(header_expect, Some(HeaderExpect::Value));
+    carry.curl_user_next = curl_user_next;
+    clamp_line(&out)
+}
+
+/// r21 P2-8②：把 `名字:取值` 冒号黏连的词拆开，仅当名字是机密键名、取值达到
+/// 字面量机密的最小长度时命中。取值里的引号/花括号/逗号（紧凑 JSON 的 `"v"}`、
+/// `body={"k":"v"}` 的尾巴）先剥掉；名字一侧按**最后一个** `{` / `,` / `=` 切断
+/// （`body={"api_key"` → `api_key`）。
+/// **不要求取值带机密前缀**——这里的信号是键名本身（api_key/password……），正是
+/// 「无前缀裸值」这一族此前两个分支都够不着的根本原因；长度门负责把 Python
+/// 注解（`password: str`）这类短非值挡在外面。
+///
+/// r22 P2-1：**全词逐冒号扫描**，不再只看第一个冒号。紧凑 JSON 的机密键未必是
+/// 首位键——`{"user":"bob","api_key":"supersecretvalue"}` 按首个冒号切出的
+/// 名字是 `user`，`split_once` 永远够不着后面的 `api_key`（r21 修复面窄于
+/// 声明的根因）。取**第一个命中**的键：命中后值是抹到词尾的，后面的键值段
+/// 一并被覆盖，继续扫只会让保留的前缀更短、丢更多无害上下文。
+fn colon_glued_secret(word: &str) -> Option<(&str, &str)> {
+    let mut hit: Option<(&str, &str)> = None;
+    for (colon, c) in word.char_indices() {
+        if c != ':' {
+            continue;
+        }
+        let name_part = &word[..colon];
+        let value = &word[colon + 1..];
+        // 名字取最后一个结构定界符（{ / , / =）之后的那一段；都没有就整段。
+        let name = name_part
+            .rfind(['{', ',', '='])
+            .map(|cut| &name_part[cut + 1..])
+            .unwrap_or(name_part);
+        let trimmed_name = name.trim_matches(|c: char| {
+            matches!(
+                c,
+                // r27 P2-12: `\\` 进名字侧——转义 JSON 的 `\"api_key\` 化简依赖此 trim
+                '"' | '\'' | '{' | '}' | '[' | ']' | ',' | ';' | '(' | ')' | '\\'
+            )
+        });
+        if !secret_key_name(trimmed_name) {
+            continue;
+        }
+        let trimmed_value = value.trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | '{' | '}' | '[' | ']' | ',' | ';' | '(' | ')'
+            )
+        });
+        // r23 P1-2：值侧为空（词尾就是冒号）也命中——`body={"api_key": "x"` 的
+        // 值在**下一个词**（json.dumps 默认分隔符就是 `": "`，非紧凑形态必然
+        // 词尾留冒号）。返回空值串作信号，调用方据此改置 redact_next（与 bare
+        // 键臂 `token: abc` 同语义）；非空值仍走原长度门。
+        if trimmed_value.is_empty() {
+            hit = Some((trimmed_name, ""));
+            break;
+        }
+        // P2-11（r24）：带引号的值绕过 8 字符门——键名已是 SECRET_QUERY_KEYS
+        // 的确定信号，引号表明这是字符串值而非 Python 注解（`password: str`）。
+        // `{"password":"hunter2"}`（7 字符）不再与空格形态同密不同命。
+        let is_quoted = value.starts_with('"') || value.starts_with('\'');
+        if !is_quoted && trimmed_value.len() < MIN_LITERAL_SECRET_LEN {
+            continue;
+        }
+        hit = Some((trimmed_name, value));
+        break;
+    }
+    hit
+}
+
+/// 导出/上报走这一道：定向脱敏 + 全仓通用尺子 + 内网地址。
+///
+/// `AGENTS.md` 的禁写清单里内网 IP 和主机名跟凭证并列。落盘时不抹它们是刻意的
+/// （「这个模型在哪台从机上起不来」全靠它），但日志一旦要离开这台机器，那条理由
+/// 就不成立了。
+///
+/// 行首时间戳先摘出去再脱敏：`append` 盖的 RFC3339 毫秒章恰好 24 字符且含字母
+/// 数字，credential_store 的粗尺（≥24 含字母数字）100% 命中——不摘的话导出件的
+/// 时间列整列变 `[REDACTED]`（评审 P2 实测时间戳与正文"双灭"）。时间戳不含机密。
+pub fn sanitize_for_export(line: &str) -> String {
+    let (stamp, rest) = split_leading_timestamp(line);
+    let targeted = sanitize_for_disk(rest);
+    let broad = crate::platform::credential_store::redact_secret(&targeted);
+    let masked = redact_private_hosts(&broad);
+    if stamp.is_empty() {
+        masked
+    } else {
+        format!("{stamp}{masked}")
+    }
+}
+
+/// 把行首的 `2026-10-21T06:42:39.191Z ` 时间戳前缀（含尾随空格）摘出来。
+/// 形状不合（非本模块盖的章）就原样返回，脱敏继续从行首做。
+fn split_leading_timestamp(line: &str) -> (&str, &str) {
+    let bytes = line.as_bytes();
+    let shape_ok = bytes.len() > 25
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[19] == b'.'
+        && bytes[23] == b'Z'
+        && bytes[24] == b' '
+        && bytes[..23]
+            .iter()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b'T' | b':' | b'.' | b'Z'));
+    if shape_ok {
+        (&line[..25], &line[25..])
+    } else {
+        ("", line)
+    }
+}
+
+/// 隐藏 IPv4 / IPv6。**不区分公网私网**：公网 IP 一样是可定位信息，而区分
+/// 需要一张会过期的网段表——那张表漏一条就是一次泄漏。
+fn redact_private_hosts(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut first = true;
+    for word in line.split_whitespace() {
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        if contains_ip_address(word) {
+            out.push_str("[HOST]");
+        } else {
+            out.push_str(word);
+        }
+    }
+    out
+}
+
+/// 地址可能出现在 URL、端口、参数或中文标点中，不能只修剪整词两端。
+/// 找出 ASCII 地址候选后用标准库验证；含地址的整个词按导出的保守策略隐藏。
+/// IPv6 zone 在 `%` 处结束，地址部分仍可识别。不识别/猜测主机名。
+fn contains_ip_address(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    for ipv6 in [false, true] {
+        let candidate_byte = |byte: u8| {
+            if ipv6 {
+                byte.is_ascii_hexdigit() || matches!(byte, b':' | b'.')
+            } else {
+                byte.is_ascii_digit() || byte == b'.'
+            }
+        };
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if !candidate_byte(bytes[cursor]) {
+                cursor += 1;
+                continue;
+            }
+            let start = cursor;
+            while cursor < bytes.len() && candidate_byte(bytes[cursor]) {
+                cursor += 1;
+            }
+            // ASCII spans always begin/end at UTF-8 boundaries, including when
+            // non-ASCII log text surrounds them. A final full stop is prose.
+            let candidate = word[start..cursor].trim_end_matches('.');
+            if (!ipv6 && candidate.parse::<std::net::Ipv4Addr>().is_ok())
+                || (ipv6 && candidate.parse::<std::net::Ipv6Addr>().is_ok())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 单行截断 + 去掉换行/回车/制表（一行日志必须是一行）。
+fn clamp_line(line: &str) -> String {
+    let mut out: String = line
+        .chars()
+        .map(|c| {
+            if matches!(c, '\r' | '\n' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .take(MAX_LINE_CHARS)
+        .collect();
+    if line.chars().count() > MAX_LINE_CHARS {
+        out.push_str(" …（本行已截断）");
+    }
+    out
+}
+
+/// 把 run_id 收成单一、安全的文件名分量。
+///
+/// run_id 是服务端自己发的 base64url，本来就安全；仍然收一道是因为**这是一个会
+/// 拼进路径的外来标识**，而「安全来自调用方」这种约定迟早会被下一个调用方打破。
+fn safe_stem(run_id: &str) -> String {
+    let stem: String = run_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(64)
+        .collect();
+    if stem.is_empty() {
+        "unknown".to_string()
+    } else {
+        stem
+    }
+}
+
+/// 一次运行的日志文件。
+pub struct RunLogFile {
+    path: PathBuf,
+    state: Mutex<FileState>,
+}
+
+struct FileState {
+    /// 写到上限之后置 `true`：普通行不再落盘，但文件**保持打开**——
+    /// `finish` 的结局行是例外（r43 P2：终态必须可见，允许最后越预算几行）。
+    capped: bool,
+    file: Option<std::fs::File>,
+    written: u64,
+    /// 进度行的"日志省略"说明只留一次。
+    progress_notice_emitted: bool,
+    /// r31 P2-2：脱敏 pending 跨行延续——pretty JSON 的键行在行尾置位后，
+    /// 值在下一行；单行调用会让它以全新状态透传落盘。
+    carry: DiskCarry,
+}
+
+impl RunLogFile {
+    /// 为一次运行开一个日志文件。**开不出来就返回 `None`，绝不让操作本身失败**：
+    /// 日志是诊断手段，不是功能；为了记日志而让用户下不了模型是本末倒置。
+    pub fn open(run_id: &str, label: &str, active_run_ids: &[String]) -> Option<Self> {
+        let dir = logs_dir();
+        if {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(&dir)
+        }
+        .is_err()
+        {
+            return None;
+        }
+        prune_old_logs(&dir, active_run_ids);
+        let path = dir.join(format!("{}.log", safe_stem(run_id)));
+        // 0600，且每次打开都重新收紧权限——早先版本或外部工具留下的松权限文件
+        // 会一直松着（见 `filesystem::open_private_append_file` 的说明）。
+        let mut file = crate::platform::filesystem::open_private_append_file(&path).ok()?;
+        let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let header = format!(
+            "==== {} | {} | run={} | pid={} ====\n",
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            clamp_line(&sanitize_for_disk(label)),
+            safe_stem(run_id),
+            std::process::id(),
+        );
+        let _ = file.write_all(header.as_bytes());
+        Some(Self {
+            path,
+            state: Mutex::new(FileState {
+                capped: false,
+                file: Some(file),
+                written: written + header.len() as u64,
+                progress_notice_emitted: false,
+                carry: DiskCarry::default(),
+            }),
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// 落一行。入参是**已经 `strip_ansi` 过、已经切好行**的那条既有出口上的行
+    /// （`service::RunLog::push`）。
+    pub fn append(&self, line: &str) {
+        // 进度行不落盘（2026-10-20 评审 P2）：`LMM_PROGRESS_BYTES` 是高频单调计数器
+        // ——168GB 下载按 1MB 粒度 ≈ 16.8 万行，会把 4MiB 预算在下载中途吃光，之后
+        // 真正的报错不再落盘。界面实时显示进度；这里只留一次说明。
+        if line
+            .trim_start()
+            .starts_with(super::script_runner::PROGRESS_MARKER)
+        {
+            let mut state = self.state.lock();
+            if state.progress_notice_emitted {
+                return;
+            }
+            state.progress_notice_emitted = true;
+            drop(state);
+            self.append("…… 下载进度已在界面实时显示，日志省略重复的进度行 ……");
+            return;
+        }
+        // r31 P2-2：pending 跨行延续——先借出 carry，脱敏完再还回（锁外做字符串活）。
+        let mut carry = {
+            let mut state = self.state.lock();
+            std::mem::take(&mut state.carry)
+        };
+        let text = sanitize_line_with(line, &mut carry);
+        {
+            let mut state = self.state.lock();
+            state.carry = carry;
+        }
+        if text.trim().is_empty() {
+            return;
+        }
+        let stamped = format!(
+            "{} {}\n",
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            text
+        );
+        let mut state = self.state.lock();
+        if state.capped {
+            // r43 P2：封顶后普通行直接丢弃（说明行只在封顶那一刻写一次）。
+            return;
+        }
+        if state.written >= MAX_RUN_LOG_BYTES {
+            // 上限到了：留一句话说明为什么突然没了。**不再关闭文件**——
+            // `finish` 的结局行要越过预算落盘（终态是用户排障的第一行线索，
+            // 比 4MiB 的硬预算多几行是值得的）。
+            if let Some(file) = state.file.as_mut() {
+                let _ = file.write_all(
+                    format!(
+                        "…… 本次运行的日志已达 {} MiB 上限，后续行不再记录 ……\n",
+                        MAX_RUN_LOG_BYTES / 1024 / 1024
+                    )
+                    .as_bytes(),
+                );
+                let _ = file.flush();
+            }
+            state.capped = true;
+            return;
+        }
+        let Some(file) = state.file.as_mut() else {
+            return;
+        };
+        // 先把这一行写完、刷完，再动计数器：`state.written` 和 `state.file` 是同一个
+        // `FileState` 的两个字段，借用检查器不接受「文件的可变借用还活着的时候改计数」。
+        let wrote = file.write_all(stamped.as_bytes()).is_ok();
+        let _ = file.flush();
+        if wrote {
+            state.written += stamped.len() as u64;
+        }
+    }
+
+    /// 写结局那一行并收尾。
+    ///
+    /// r43 P2：结局行**无视封顶**——封顶只限制普通行；「失败原因/最终结果」
+    /// 是整份日志里最有价值的一行，绝不能因为前面的进度刷屏把它挤没了。
+    /// 代价是预算越界一个 clamp_line 的行宽，有界且值得。
+    pub fn finish(&self, outcome: &str) {
+        // r47 P1-2 + r49 P1-1：结局文本**必须过脱敏器**——失败链的 outcome 里嵌着
+        // 脚本最后 20 行原始输出（script_runner 的 ERROR_TAIL_LINES 摘要），set -x
+        // 回显的 token 恰好高概率在其中，此前本写点是全文件唯一不经脱敏管线的。
+        // 内嵌换行按行拆开——一行一条的文件结构是导出/轮转/截断的公共前提。
+        //
+        // r49 P1-1（次序修正）：**先脱敏、后拼时间戳**——append 主链的顺序是
+        // sanitize(原文) 再由外层盖章；此前本处先盖章再脱敏，跨行 pending 链的
+        // 续行被时间戳词抢先消费（`2026-…Z` 匹配到 auth_pending/redact_next 等
+        // 臂），真值原样落盘（评审 C1–C4 四形态字节探针全灭）。行间 carry 延续，
+        // 与主链同构。
+        let mut carry;
+        {
+            let mut state = self.state.lock();
+            carry = std::mem::take(&mut state.carry);
+        }
+        let mut sanitized: Vec<String> = outcome
+            .lines()
+            .map(|l| sanitize_line_with(l, &mut carry))
+            .collect();
+        sanitized.push(sanitize_line_with("==== 结束 ====", &mut carry));
+        {
+            let mut state = self.state.lock();
+            state.carry = carry;
+        }
+        for line in sanitized {
+            let stamped = format!(
+                "{} {line}",
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            );
+            let clamped = clamp_line(&stamped);
+            let mut state = self.state.lock();
+            if let Some(file) = state.file.as_mut() {
+                let _ = file.write_all(format!("{clamped}\n").as_bytes());
+                let _ = file.flush();
+                state.written = state.written.saturating_add(clamped.len() as u64 + 1);
+            }
+            drop(state);
+        }
+        let mut state = self.state.lock();
+        if let Some(mut file) = state.file.take() {
+            let _ = file.flush();
+        }
+    }
+}
+
+/// 只留最近 `MAX_RUN_FILES` 份。按 mtime 排，拿不到 mtime 的排最后（宁可留着
+/// 也不要因为读不到元数据就删掉一份可能有用的日志）。
+///
+/// 不能删的例外（2026-10-20 评审 P2）：
+/// - **活跃运行的日志**（`active_run_ids`）：脚本静默期（等输入最长 600s）里它的
+///   mtime 会变旧，下一次别的运行 open 触发轮转时它正落在删除线上——fd 还开着，
+///   删掉后写入全进孤儿 inode，「导出日志」从此读不到这次运行；
+///
+/// **`.export.log` 是用户手动导出的产物**：不吃运行日志的 20 份预算，但也不能
+/// 无限累积（r6 P2-5：源日志轮转掉之后，旧导出件成了没人引用的孤儿，只增不减）。
+/// 独立上界 `MAX_EXPORT_FILES`，同一次轮转里清更旧的。
+fn prune_old_logs(dir: &Path, active_run_ids: &[String]) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let active: std::collections::HashSet<String> =
+        active_run_ids.iter().map(|id| safe_stem(id)).collect();
+    let mut runs: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let mut exports: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|extension| extension == "log") {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if path
+            .file_stem()
+            .is_some_and(|stem| stem.to_string_lossy().ends_with(".export"))
+        {
+            exports.push((modified, path));
+        } else {
+            runs.push((modified, path));
+        }
+    }
+    if runs.len() >= MAX_RUN_FILES {
+        runs.sort_by(|a, b| b.0.cmp(&a.0));
+        for (modified, path) in runs.into_iter().skip(MAX_RUN_FILES - 1) {
+            // 活跃运行的日志宁可让预算临时超一份，也不能删。
+            if path
+                .file_stem()
+                .is_some_and(|stem| active.contains(stem.to_string_lossy().as_ref()))
+            {
+                continue;
+            }
+            // r43 P2：**跨进程租约**——`active` 只登记本进程的 run；另一应用
+            // 窗口/进程正在写的日志不在名单里，但它的 mtime 是新鲜的（心跳/
+            // 进度行持续刷）。mtime 在租约窗内的不删，宁可预算临时超份。窗
+            // 口取 1800s：覆盖提示等待 600s×心跳粒度的最坏静默，仍远小于
+            // 日志的自然老化周期。
+            if modified
+                .elapsed()
+                .is_ok_and(|age| age < std::time::Duration::from_secs(1800))
+            {
+                continue;
+            }
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    if exports.len() > MAX_EXPORT_FILES {
+        exports.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, path) in exports.into_iter().skip(MAX_EXPORT_FILES) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// 导出一次运行的日志：逐行过 [`sanitize_for_export`]，写到 `<run>.export.log`。
+///
+/// 为什么不直接把落盘那份给出去：落盘那份刻意保留了路径和内网地址（不保留就没法
+/// 诊断），而导出意味着这份内容会离开这台机器。
+pub fn export_run_log(run_id: &str) -> Result<(PathBuf, String), String> {
+    let source = logs_dir().join(format!("{}.log", safe_stem(run_id)));
+    let mut content = String::new();
+    std::fs::File::open(&source)
+        .and_then(|file| {
+            file.take(MAX_EXPORT_LOG_BYTES + 1)
+                .read_to_string(&mut content)
+        })
+        .map_err(|e| format!("读不到这次运行的日志（{}）：{e}", source.display()))?;
+    if content.len() as u64 > MAX_EXPORT_LOG_BYTES {
+        return Err("运行日志超过安全导出上限，未导出或复制；请在本机检查日志".into());
+    }
+    let mut snapshot = String::with_capacity(content.len());
+    for line in content.lines() {
+        snapshot.push_str(&sanitize_for_export(line));
+        snapshot.push('\n');
+    }
+    let target = logs_dir().join(format!("{}.export.log", safe_stem(run_id)));
+    // 导出文件同样 0600：它比原始日志更敏感（更容易被顺手发出去），不该更宽松。
+    // 先清空再追加——导出是"这一刻的快照"，追加到上一次的尾巴上只会让人拿错。
+    let _ = std::fs::remove_file(&target);
+    let mut file = crate::platform::filesystem::open_private_append_file(&target)
+        .map_err(|e| format!("创建导出文件失败：{e}"))?;
+    file.write_all(snapshot.as_bytes())
+        .map_err(|e| format!("写导出文件失败：{e}"))?;
+    file.flush().map_err(|e| format!("写导出文件失败：{e}"))?;
+    // Clipboard consumers receive these exact sanitized bytes, never a reread
+    // of the export path and never the less-redacted live frontend buffer.
+    Ok((target, snapshot))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// r43 P1-2：三种泄漏形态的对抗用例——断言**原值不落盘**（对齐本模块既有
+    /// 风格），外加跨行悬置态的接续与 Cookie 行末终止语义。
+    /// r49 P1-2/P1-3：无 scheme userinfo + 裸 query 黏连。
+    #[test]
+    fn disk_sanitizer_blocks_r49_userinfo_and_bare_query() {
+        // P1-2：无 scheme userinfo（curl/rsync 无 https:// 前缀形态）。
+        let u1 = sanitize_for_disk("curl admin:pass@internal.example.com/api");
+        assert!(!u1.contains("pass"), "无 scheme userinfo 泄漏: {u1}");
+        assert!(u1.contains("internal.example.com"), "host 过抹: {u1}");
+        let u2 = sanitize_for_disk("rsync admin:s3cr3tpw1@host.example.com:/x /y");
+        assert!(!u2.contains("s3cr3tpw1"), "rsync userinfo 泄漏: {u2}");
+        // 带带 scheme 负控（既有 URL 臂）。
+        let u3 = sanitize_for_disk("curl https://admin:pass@internal.example.com/api");
+        assert!(!u3.contains("pass"), "带 scheme userinfo 泄漏: {u3}");
+        // user@host 无冒号不受牵连。
+        let u4 = sanitize_for_disk("ssh user@host.example.com ls");
+        assert!(u4.contains("user@host.example.com"), "无密码地址误抹: {u4}");
+        // P1-3：裸 query 黏连（无 ? 断词）。
+        let q1 = sanitize_for_disk("curl -d 'a=1&password=x'");
+        assert!(!q1.contains("password=x"), "裸 query 泄漏: {q1}");
+        assert!(q1.contains("a=1"), "非机密对过抹: {q1}");
+        // 含空格普通句子不误伤。
+        let q2 = sanitize_for_disk("echo a=1 & password is set here");
+        assert!(q2.contains("password"), "普通句子过抹: {q2}");
+    }
+
+    /// r51 P1：**等号黏连**的无 scheme userinfo——`KEY=user:pass@host` 形态。
+    /// 此前等号臂 else 整词交 redact_url_secrets（无 `://` 原样返回），r49 裸词
+    /// 臂够不着带 `=` 的词，落盘+导出双泄漏（评审 6011075265 探针双跑确认）。
+    /// 修后与裸词臂同一形状门：键名保留，仅抹 `user:pass@`。
+    #[test]
+    fn disk_sanitizer_blocks_eq_glued_no_scheme_userinfo() {
+        let e1 = sanitize_for_disk("mount remote=user:pass@host.example.com:/x /mnt");
+        assert!(
+            !e1.contains("user:pass"),
+            "等号黏连无 scheme userinfo 泄漏: {e1}"
+        );
+        assert!(e1.contains("remote="), "键名被抹: {e1}");
+        assert!(e1.contains("@host.example.com"), "host 过抹: {e1}");
+        let e2 = sanitize_for_disk("connect key=user:pass@host now");
+        assert!(
+            !e2.contains("user:pass"),
+            "等号黏连无 scheme userinfo 泄漏: {e2}"
+        );
+        // 导出/复制与落盘同一道词级臂（460 行注释口径）。
+        let x1 = sanitize_for_export("mount remote=user:pass@host.example.com:/x");
+        assert!(!x1.contains("user:pass"), "导出臂等号黏连泄漏: {x1}");
+        // 负控一：带 scheme 的等号黏连仍走既有 URL 臂（形态不变）。
+        let n1 = sanitize_for_disk("git push https://user:pass@host.example.com/repo");
+        assert!(!n1.contains("pass"), "带 scheme userinfo 泄漏: {n1}");
+        // 负控二：@ 前无冒号的普通地址不受牵连（与裸词臂 user@host 同判据）。
+        let n2 = sanitize_for_disk("deploy server=web@host.example.com");
+        assert!(n2.contains("web@host.example.com"), "无密码地址误抹: {n2}");
+        // 负控三：普通 KEY=value（无 @、键不在机密名单）不误伤。
+        let n3 = sanitize_for_disk("export BUILD_ID=hello-world-plain");
+        assert!(
+            n3.contains("BUILD_ID=hello-world-plain"),
+            "普通赋值误抹: {n3}"
+        );
+    }
+
+    /// r49 P1-1：finish **先脱敏后盖章**的跨行 pending 链四形态——此前次序相反
+    /// 时时间戳词抢先消费 pending 态，续行真值全部存活（评审 C1-C4 探针）。
+    #[test]
+    fn finish_multiline_pending_chains_survive_stamp_order() {
+        let _ctx = config::TempHome::new();
+        let forms: Vec<(&str, &str, &str)> = vec![
+            // C1: Authorization: Basic ⏎ b64
+            (
+                "curl -v Authorization: Basic",
+                "YWRtaW46c3VjcmV0cGFzcw==",
+                "YWRtaW46c3VjcmV0cGFzcw==",
+            ),
+            // C2: pretty-JSON 键行 ⏎ 值行
+            (
+                "body={\"api_key\":",
+                "\"supersecretvalue123\"}",
+                "supersecretvalue123",
+            ),
+            // C3: --user ⏎ 凭据
+            ("curl --user", "admin:s3cr3tp4ssw0rd", "s3cr3tp4ssw0rd"),
+            // C4: -H 键半行 ⏎ 值
+            (
+                "curl -H 'X-Api-Key:",
+                "topsecret87654321'",
+                "topsecret87654321",
+            ),
+        ];
+        for (first, second, secret) in forms {
+            let file = RunLogFile::open("finish-multiline-test", "跨行测试", &[]).unwrap();
+            file.append(first);
+            file.finish(second);
+            let content = std::fs::read_to_string(file.path()).unwrap();
+            assert!(
+                !content.contains(secret),
+                "finish 跨行 pending 泄漏（r49 P1-1）: {first} ⏎ {second} -> {content}"
+            );
+        }
+    }
+
+    /// r47 P1-2：finish 结局行必须过脱敏——失败链 outcome 嵌着脚本最后 20 行
+    /// 原始输出（set -x 回显的 token 高概率在其中），此前 finish 是全文件唯一
+    /// 不经脱敏管线的写点。同时验内嵌换行按行拆开（一行一条结构）。
+    #[test]
+    fn finish_outcome_lines_are_sanitized_and_split() {
+        let _ctx = config::TempHome::new();
+        let file = RunLogFile::open("finish-sanitize-test", "脱敏测试", &[]).unwrap();
+        file.finish(
+            "脚本失败：curl -H 'Authorization: Bearer hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345' 失败\nset -x 回显 token=hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+        );
+        let content = std::fs::read_to_string(file.path()).unwrap();
+        assert!(
+            !content.contains("hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345"),
+            "finish 结局行绕过脱敏（r47 P1-2）: {content}"
+        );
+        // 内嵌换行拆行后每行都应有时间戳前缀（一行一条结构）；头行是 open
+        // 写的 ==== 横幅，跳过。
+        for line in content.lines().skip(1) {
+            assert!(
+                line.starts_with("20") || line.trim().is_empty(),
+                "结局行未按行拆开/无时间戳: {line}"
+            );
+        }
+    }
+
+    /// r45 P1-2：Cookie/Set-Cookie 四形态对抗——评审实证 r44 修复只覆盖了最罕见
+    /// 的紧凑黏连形态。session=y 是不在任何名单、无前缀、15 字符的裸键负控
+    /// （证明泄漏真实性的口径），四形态下它都不得存活；普通头不受影响。
+    #[test]
+    fn disk_sanitizer_blocks_r45_cookie_four_forms() {
+        let forms = [
+            // curl -v 回显（空值冒号+空格，非 -H 语境）
+            "> Set-Cookie: SID=x; session=y",
+            // -H 两段式 Name 臂冒号形态
+            "curl -H 'Set-Cookie: SID=x; session=y' https://x.example/api",
+            // -H 两段式 Name 臂等号形态
+            "curl -H 'Set-Cookie=SID=x; session=y' https://x.example/api",
+            // -H 紧凑黏连（r44 已修的形态，回归钉）
+            "curl -H 'Cookie: SID=x;session=y' https://x.example/api",
+        ];
+        for line in forms {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("session=y"),
+                "Cookie 多对泄漏（r45 四形态之一）: {line} -> {cleaned}"
+            );
+            // r47 P1-1：**首对值也不得存活**——r45 测试只断言第二对，首对
+            // SID=x 在等号形态经特判整词落盘（评审实证）。
+            assert!(
+                !cleaned.contains("SID=x"),
+                "Cookie 首对值泄漏（r47）: {line} -> {cleaned}"
+            );
+        }
+        // r47 P1-3：-uadmin:pass 短黏连。sudo -u root（无冒号）不受牵连。
+        let u_glued = sanitize_for_disk("curl -uadmin:s3cr3tp4ss https://x.example/api");
+        assert!(!u_glued.contains("s3cr3tp4ss"), "-u 短黏连泄漏: {u_glued}");
+        let sudo_u = sanitize_for_disk("sudo -u root whoami");
+        assert!(sudo_u.contains("root"), "sudo -u 误抹: {sudo_u}");
+        // r47 P1-4：带引号黏连 scheme 词——scheme 链启动，凭据词被抹。
+        let mut carry0 = DiskCarry::default();
+        let l1 = sanitize_line_with("+ echo 'Authorization:Basic'", &mut carry0);
+        let l2 = sanitize_line_with("YWRtaW46cGFzc3dvcmQxMjM='", &mut carry0);
+        assert!(
+            !l2.contains("YWRtaW46cGFzc3dvcmQxMjM"),
+            "带引号黏连 scheme 凭据词泄漏: {l1} / {l2}"
+        );
+        // 负控的边界：非 cookie 头的多对参数不受整段抹牵连。
+        let plain = sanitize_for_disk("curl -H 'Accept: text/html; q=0.9' https://x.example/api");
+        assert!(plain.contains("https://x.example/api"), "过抹越界: {plain}");
+    }
+
+    #[test]
+    fn disk_sanitizer_blocks_r43_leak_forms() {
+        // ① 紧凑 JSON：Bearer 后的真凭据不得存活（此前 `{"Authorization` 的
+        //    花括号让 is_auth 失配，scheme 链不启动）。
+        let json_compact = r#"body={"Authorization":"Bearer shortsecret12345"}"#;
+        let cleaned = sanitize_for_disk(json_compact);
+        assert!(
+            !cleaned.contains("shortsecret12345"),
+            "紧凑 JSON 凭据泄漏: {cleaned}"
+        );
+
+        // ② Cookie 分号多对：非名单 cookie 名（SID）的值不得存活，且行内
+        //    后续普通词不受影响（行末终止语义）。
+        let cookie_line = "curl -H 'Cookie: theme=dark; SID=abc123def456ghi' https://x.example/api";
+        let cleaned = sanitize_for_disk(cookie_line);
+        assert!(
+            !cleaned.contains("abc123def456ghi"),
+            "Cookie 多对泄漏: {cleaned}"
+        );
+        assert!(
+            cleaned.contains("https://x.example/api"),
+            "Cookie 过抹越界: {cleaned}"
+        );
+
+        // ③ 跨行 -H：值停在下一行时（行尾悬置），下一行的值不得存活。
+        let mut carry = DiskCarry::default();
+        let l1 = sanitize_line_with("+ curl -H 'X-Api-Key:", &mut carry);
+        let l2 = sanitize_line_with("topsecret87654321'", &mut carry);
+        assert!(
+            !l1.contains("topsecret") && !l2.contains("topsecret87654321"),
+            "跨行 -H 值泄漏: {l1} / {l2}"
+        );
+
+        // ③' 跨行 curl --user：取值分行的 user:pass 不得存活。
+        let mut carry = DiskCarry::default();
+        sanitize_line_with("+ curl --user", &mut carry);
+        let l2 = sanitize_line_with("admin:s3cr3tpassw0rd", &mut carry);
+        assert!(!l2.contains("s3cr3tpassw0rd"), "跨行 --user 泄漏: {l2}");
+
+        // Cookie 之后的新行不受行内整段抹除影响（cookie_rest 行末即清）。
+        let mut carry = DiskCarry::default();
+        sanitize_line_with("+ curl -H 'Cookie: a=1; b=2'", &mut carry);
+        let next = sanitize_line_with("echo harmless_value_ok", &mut carry);
+        assert!(
+            next.contains("harmless_value_ok"),
+            "Cookie 态跨行误伤: {next}"
+        );
+    }
+
+    /// 落盘路径上四种形状的机密都不许留下原值。
+    ///
+    /// 这条对齐 `codex_acp/diagnostics.rs` 和 `sessions/diagnostics.rs` 里同类断言的
+    /// 风格：**断言落盘内容不含原值**，而不是断言"调用了脱敏函数"。
+    #[test]
+    fn disk_sanitizer_removes_every_secret_shape() {
+        let cases = [
+            "+ export HF_TOKEN=hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+            "curl -H 'Authorization: Bearer hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345' https://hf-mirror.com/api",
+            "sk-proj-0123456789abcdefghijklmnop",
+            "hf download --token hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345 Qwen/Qwen3-8B",
+            "GET https://hf-mirror.com/file?token=hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345&x=1",
+            "https://someone:s3cr3tpassword@internal.example.com/pkg.tar",
+            "LMM_HF_TOKEN=hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+        ];
+        for case in cases {
+            let cleaned = sanitize_for_disk(case);
+            assert!(
+                !cleaned.contains("hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345"),
+                "HF Token 漏了：{cleaned}"
+            );
+            assert!(
+                !cleaned.contains("sk-proj-0123456789abcdefghijklmnop"),
+                "sk- 形状漏了：{cleaned}"
+            );
+            assert!(
+                !cleaned.contains("s3cr3tpassword"),
+                "URL userinfo 里的密码漏了：{cleaned}"
+            );
+            assert!(cleaned.contains(REDACTED), "整行一处都没脱敏：{cleaned}");
+        }
+    }
+
+    /// 登记过的字面量机密按**确切值**抹掉——哪怕它一点也不像凭证。
+    ///
+    /// HF Token 的 `hf_` 前缀是当前约定不是规范，而宿主恰好知道自己注进去的是什么。
+    #[test]
+    fn registered_literal_secrets_are_masked_even_without_a_telltale_prefix() {
+        register_secret("plain-looking-value-98765");
+        let cleaned = sanitize_for_disk("echo plain-looking-value-98765 > /tmp/x");
+        assert!(!cleaned.contains("plain-looking-value-98765"), "{cleaned}");
+        assert!(cleaned.contains(REDACTED), "{cleaned}");
+        // 太短的不登记：会把正常文本打成筛子。
+        register_secret("abc");
+        assert_eq!(sanitize_for_disk("abc def"), "abc def");
+    }
+
+    /// r5 评审 P2-3 对抗性盲区：--hf-token / 紧凑 JSON / SigV4 头与裸键值。
+    #[test]
+    fn sanitiser_covers_r5_adversarial_gaps() {
+        for line in [
+            "hf download --hf-token shortsecret123 repo",
+            "hf download --HF-TOKEN shortsecret123 repo",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret123"), "{line} -> {cleaned}");
+        }
+        let cleaned = sanitize_for_disk("cfg = {\"api_key\":\"sk-shortabc123xyz\"}");
+        assert!(
+            !cleaned.contains("sk-shortabc123xyz"),
+            "紧凑 JSON 值泄漏：{cleaned}"
+        );
+        for line in [
+            "Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20261022/s3/aws4_request",
+            "curl -H X-Amz-Signature=abcdef0123456789abcdef0123456789abcdef01 https://s3",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("AKIAIOSFODNN7EXAMPLE")
+                    && !cleaned.contains("abcdef0123456789abcdef0123456789abcdef01"),
+                "{line} -> {cleaned}"
+            );
+        }
+    }
+
+    /// r21 评审 P2-8/P2-9 的五个此前漏网的形态：
+    /// ① `MY_TOKEN=hf_…`——键不在名单、值带机密前缀（`=` 分支此前只查键）；
+    /// ② `api_key:plainsecret123` 冒号黏连 + `{"api_key":"plainsecret123"}`
+    ///    紧凑 JSON 无前缀裸值（bare 检查要求整词相等，两个分支都够不着）；
+    /// ③ `curl -u admin:s3cr3t` / `--user=admin:s3cr3t`（全文件零处理）；
+    /// ④ X-Goog- 签名 query 前缀族；
+    /// ⑤ Azure SAS 的 sig/se/sp query 参数。
+    #[test]
+    fn sanitiser_covers_r21_glued_and_signed_query_gaps() {
+        // ① 键陌生、值带前缀
+        for line in [
+            "+ export MY_TOKEN=hf_AbCdEfGhIjKlMnOpQrStUvWx",
+            "MODEL_KEY=sk-proj-0123456789abcdefghijklmnop",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("hf_AbCdEfGhIjKlMnOpQrStUvWx"),
+                "{line} -> {cleaned}"
+            );
+            assert!(
+                !cleaned.contains("sk-proj-0123456789abcdefghijklmnop"),
+                "{line} -> {cleaned}"
+            );
+            assert!(cleaned.contains('='), "键名要留着：{line} -> {cleaned}");
+        }
+        // ② 冒号黏连 / 紧凑 JSON 的无前缀裸值——键名是信号，值只要够长。
+        // 带机密前缀的黏连值（第三行）由 word_is_secret 的整词分支更先接住
+        // （r5 起的既有行为，整词抹比保键抹值更强），不要求键名保留。
+        for (line, keep_key) in [
+            ("resp: api_key:plainsecret1234 done", true),
+            ("body={\"api_key\":\"plainsecret1234\"}", true),
+            ("auth api_key:ghp_AbCdEfGhIjKlMnOpQrStUv", false),
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("plainsecret1234"), "{line} -> {cleaned}");
+            assert!(
+                !cleaned.contains("ghp_AbCdEfGhIjKlMnOpQrStUv"),
+                "{line} -> {cleaned}"
+            );
+            if keep_key {
+                assert!(
+                    cleaned.contains("api_key"),
+                    "键名不该一起抹掉：{line} -> {cleaned}"
+                );
+            }
+        }
+        // 形状门内的反例：黏连取值太短（Python 注解 `password:str`）不该抹。
+        // 注意分开写的 `password: str` 走的是 bare-键分支（r6 起），下一个词
+        // 本来就会被抹——这里钉的是黏连形态自己的长度门。
+        let cleaned = sanitize_for_disk("def f(password:str) -> None:");
+        assert_eq!(cleaned, "def f(password:str) -> None:");
+        // ③ curl -u / --user 的 user:password
+        for line in [
+            "curl -u admin:s3cr3tpassword123 https://example.com",
+            "curl --user admin:s3cr3tpassword123 https://example.com",
+            "curl --user=admin:s3cr3tpassword123 https://example.com",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("s3cr3tpassword123"),
+                "{line} -> {cleaned}"
+            );
+            assert!(
+                !cleaned.contains("admin:s3cr3tpassword123"),
+                "用户名+密码一起抹（与 URL userinfo 同口径）：{line} -> {cleaned}"
+            );
+        }
+        // ③ 的形状门反例：`sudo -u root` 的 -u 不是凭证开关，值无冒号不抹
+        let cleaned = sanitize_for_disk("sudo -u root systemctl restart ollama");
+        assert_eq!(
+            cleaned, "sudo -u root systemctl restart ollama",
+            "不带冒号的 -u 取值是普通用户名，不该抹：{cleaned}"
+        );
+        // ④ X-Goog- 前缀族
+        for line in [
+            "GET https://storage.googleapis.com/b?X-Goog-Signature=abcdef0123456789abcdef&x=1",
+            "GET https://storage.googleapis.com/b?x-goog-credential=goog-creds-0123456789&x=1",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("abcdef0123456789abcdef")
+                    && !cleaned.contains("goog-creds-0123456789"),
+                "{line} -> {cleaned}"
+            );
+        }
+        // ⑤ Azure SAS query
+        let cleaned = sanitize_for_disk(
+            "GET https://acct.blob.core.windows.net/c?sp=r&se=2026-10-21T06%3A00Z&sig=abcdef0123456789abcdef01&sv=2025-01-01",
+        );
+        assert!(
+            !cleaned.contains("sig=abcdef0123456789abcdef01"),
+            "Azure SAS 签名漏了：{cleaned}"
+        );
+    }
+
+    /// 2026-10-21 评审 P2 脱敏长尾四形态：
+    /// ① `--TOKEN <值>` 空格形态大小写敏感漏网；
+    /// ② `--header`/`-H` 的 `名字: 值` 两段式——名字留着（排查靠它认头），值抹掉；
+    /// ③ SigV4 的 `X-Amz-Signature` 整名匹配不上（前缀收）；
+    /// ④ 导出时行首时间戳被 ≥24 粗尺整列抹掉。
+    #[test]
+    fn sanitiser_covers_the_long_tails_the_review_found() {
+        // ① 空格形态 + 大小写
+        for line in [
+            "hf download --Token shortsecret123 Qwen/Qwen3-8B",
+            "hf download --TOKEN shortsecret123 Qwen/Qwen3-8B",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret123"), "{line} -> {cleaned}");
+        }
+        // ② 两段式 header：`名字:` 留、值抹；一段式 `名字:值` 同样只抹值
+        for (line, name) in [
+            (
+                "curl --header X-Api-Key: shortsecret123 https://x",
+                "X-Api-Key",
+            ),
+            ("curl -H X-Api-Key: shortsecret123 https://x", "X-Api-Key"),
+            ("curl -H X-Api-Key:shortsecret123 https://x", "X-Api-Key"),
+            (
+                "curl --header=X-Api-Key: shortsecret123 https://x",
+                "X-Api-Key",
+            ),
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret123"), "{line} -> {cleaned}");
+            assert!(
+                cleaned.contains(name),
+                "header 名字不该一起抹掉：{line} -> {cleaned}"
+            );
+        }
+        // ③ SigV4 签名参数：前缀匹配（大小写不敏感）
+        for line in [
+            "GET https://s3.example.com/?X-Amz-Signature=abcdef0123456789abcdef&X=1",
+            "GET https://s3.example.com/?x-amz-credential=AKIAIOSFODNN7EXAMPLE/20261021&X=1",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("abcdef0123456789abcdef")
+                    && !cleaned.contains("AKIAIOSFODNN7EXAMPLE/20261021"),
+                "{line} -> {cleaned}"
+            );
+            assert!(
+                cleaned.contains("s3.example.com"),
+                "主机路径留着才有诊断价值：{cleaned}"
+            );
+        }
+        // ④ 导出的时间戳列必须原样保留（粗尺会把 24 字符时间戳打成 [REDACTED]）
+        let exported = sanitize_for_export(
+            "2026-10-21T06:42:39.191Z curl --header X-Api-Key: shortsecret123 https://x",
+        );
+        assert!(
+            exported.starts_with("2026-10-21T06:42:39.191Z "),
+            "时间戳被抹掉了：{exported}"
+        );
+        assert!(!exported.contains("shortsecret123"), "{exported}");
+    }
+
+    /// r18 P1-3：`KEY=VALUE` 形态此前没并入 query 名单（bare 分支 r7 已并入、
+    /// `=` 分支漏了），`set -x` 痕迹 `+ export token=sk-xxx` 整值落盘+导出。
+    /// 两个分支共用同一张名单的行为由这里钉住。
+    #[test]
+    fn key_value_form_covers_the_query_key_list_too() {
+        for line in [
+            "+ export token=sk-live-abc123def456ghi789",
+            "+ ACCESS_TOKEN=ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+            "+ accesstoken=shortsecret123",
+            "+ passwd=s3cr3tValue2026",
+            "+ pwd=shortsecret123",
+            "+ secret=shortsecret123",
+            "+ apikey=shortsecret123",
+            "+ api_key=shortsecret123",
+            "+ X-Amz-Security-Token=FwoGZXIvYXdzEB",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            for secret in [
+                "sk-live-abc123def456ghi789",
+                "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+                "shortsecret123",
+                "s3cr3tValue2026",
+                "FwoGZXIvYXdzEB",
+            ] {
+                assert!(!cleaned.contains(secret), "{line} -> {cleaned}");
+            }
+            let exported = sanitize_for_export(line);
+            for secret in [
+                "sk-live-abc123def456ghi789",
+                "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+                "shortsecret123",
+                "s3cr3tValue2026",
+                "FwoGZXIvYXdzEB",
+            ] {
+                assert!(!exported.contains(secret), "{line} -> {exported}");
+            }
+        }
+        // 名字留着的诊断价值：键名本身不是机密。
+        assert!(
+            sanitize_for_disk("+ export token=sk-live-abc123def456ghi789").contains("token="),
+            "键名被一起抹掉了"
+        );
+    }
+
+    /// r38 P1-2：DB 密码族与 AWS 裸 KEY=VALUE 臂——整名精确匹配名单的第七次
+    /// 漏成员。这些值普遍短（<24 字符），导出侧广谱尺也不兜底，必须名字侧命中。
+    /// `declare -x` 引号回显形态同臂收口（键名解析后走同一谓词）。
+    /// 反证腿：PWD/OLDPWD（工作目录回显）不因 `_pwd` 子串被误抹。
+    #[test]
+    fn db_password_family_and_aws_bare_keys_redact_by_substring() {
+        // (整行形态, 该行里的机密值)：落盘与导出两道都必须抹掉该行的值。
+        for (line, secret) in [
+            ("+ export PGPASSWORD=mysecret123", "mysecret123"),
+            (
+                "declare -x AWS_SECRET_ACCESS_KEY=\"wJalrXUtnFEMI/K7MDENG\"",
+                "wJalrXUtnFEMI/K7MDENG",
+            ),
+            ("+ AWS_SESSION_TOKEN=shorttok123", "shorttok123"),
+            ("+ AWS_SECURITY_TOKEN=shorttok456", "shorttok456"),
+            ("+ POSTGRES_PASSWORD=pgpass998877", "pgpass998877"),
+            ("+ MYSQL_PWD=mysqlpwd4455", "mysqlpwd4455"),
+            ("+ MONGO_PASSWORD=mongopwd6677", "mongopwd6677"),
+            ("+ REDIS_PASSWORD=redispwd8899", "redispwd8899"),
+            ("+ MINIO_SECRET_KEY=miniokey3344", "miniokey3344"),
+            ("+ GITHUB_TOKEN=gho_abc123short", "gho_abc123short"),
+            // r39 P2-2：Cookie 族——`> Set-Cookie:`（curl -v 回显）与裸
+            // `cookie:`（服务器 dump）两种形态的会话凭据都得抹。
+            (
+                "> Set-Cookie: SID=abc123def456ghi; HttpOnly",
+                "abc123def456ghi",
+            ),
+            ("cookie: session=sess789xyzshort", "sess789xyzshort"),
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains(secret), "{line} -> {cleaned}");
+            let exported = sanitize_for_export(line);
+            assert!(!exported.contains(secret), "{line} -> {exported}");
+        }
+        // r39 修：原反证腿前提错误——「pwd」整名自 r18 起就在 SECRET_QUERY_KEYS，
+        // PWD=（工作目录回显）被有意脱敏（Linux CI 实证），非本批子串族误伤。
+        // 钉行为改用不受任何名单命中的形态：OLDPWD（非整名、无 _pwd 子串）与
+        // 中性路径键 WORKDIR 的值必须原样保留——证明子串族没有波及路径回显面。
+        let kept = sanitize_for_disk("+ OLDPWD=/root + WORKDIR=/opt/pinvou-model-store/data");
+        assert!(kept.contains("/root"), "{kept}");
+        assert!(kept.contains("/opt/pinvou-model-store/data"), "{kept}");
+    }
+
+    /// 落盘时**不能**上全量启发式。
+    ///
+    /// 这条钉的是本模块分两道脱敏的理由：`credential_store::redact_secret` 的通用
+    /// 判据是「≥24 字符且同时含字母和数字」，普通路径正好命中。落盘就用它的话，
+    /// 日志里每一条路径都变成 `[REDACTED]`——一份读不懂的日志比没有日志更糟。
+    #[test]
+    fn broad_redaction_would_eat_ordinary_paths() {
+        let path = "/home/l28756/.pinvou3/model-store/models/Qwen3-8B";
+        // 先证明"全量那把尺子确实会吃掉它"，这条理由才立得住。
+        assert!(
+            crate::platform::credential_store::redact_secret(path).contains(REDACTED),
+            "前提变了：全量脱敏不再吃普通路径，这个模块该合并成一道"
+        );
+        // 落盘这道原样保留。
+        assert_eq!(sanitize_for_disk(path), path);
+        // 导出那道按最严的来——路径被抹掉是**可以接受**的代价，因为那份内容要离开本机。
+        assert!(sanitize_for_export(path).contains(REDACTED));
+    }
+
+    /// 导出还要抹掉地址。`AGENTS.md` 的禁写清单里内网 IP / 主机名跟凭证并列。
+    #[test]
+    fn export_sanitizer_also_removes_addresses() {
+        let exported = sanitize_for_export("ssh 192.168.31.42 失败：连接超时");
+        assert!(!exported.contains("192.168.31.42"), "{exported}");
+        assert!(exported.contains("[HOST]"), "{exported}");
+        // 落盘那份要留着——「这个模型在哪台从机上起不来」全靠它。
+        assert!(sanitize_for_disk("ssh 192.168.31.42 失败").contains("192.168.31.42"));
+        // 版本号不能误伤
+        assert!(sanitize_for_export("vllm/vllm-openai:v0.8.5").contains("v0.8.5"));
+    }
+
+    #[test]
+    fn export_host_filter_covers_urls_ports_flags_and_ipv6() {
+        for address in [
+            "192.168.31.42:18080",
+            "http://192.168.31.42:18080/v1/models",
+            "--worker=192.168.31.42",
+            "连接192.168.31.42失败",
+            "[2001:db8::42]:18080",
+            "http://[2001:db8::42]:18080/v1",
+            "--host=fe80::42%eth0",
+            "::1",
+            "::ffff:192.168.31.42",
+        ] {
+            assert_eq!(redact_private_hosts(address), "[HOST]", "{address}");
+            assert!(
+                !contains_ip_address(&sanitize_for_export(address)),
+                "{address}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_host_filter_keeps_non_addresses() {
+        for text in [
+            "v0.8.5",
+            "256.168.31.42",
+            "dead:beef",
+            "12:34:56",
+            "中文正文",
+        ] {
+            assert_eq!(redact_private_hosts(text), text);
+        }
+        assert_eq!(
+            redact_private_hosts("worker=192.168.31.42:80 连接失败 code=70"),
+            "[HOST] 连接失败 code=70"
+        );
+    }
+
+    /// `mkdir -p <目录>` 的目录名不许被抹掉。
+    ///
+    /// 这条钉的是 `SECRET_FLAGS` 里**没有** `-p`。单字母开关歧义太大，收进来的代价是
+    /// 日志里每一个 `mkdir -p` 后面的路径变成 `[REDACTED]`。
+    #[test]
+    fn single_letter_flags_do_not_eat_the_next_word() {
+        assert_eq!(
+            sanitize_for_disk("mkdir -p /home/user/.pinvou3/model-store/staging"),
+            "mkdir -p /home/user/.pinvou3/model-store/staging"
+        );
+    }
+
+    /// r6 P1-5：pretty-JSON 的小写机密键。`  "api_key": "secret"` 分词后
+    /// 键词 bare=`api_key`——裸键检查此前是精确匹配 `API_KEY`，小写全漏
+    /// （值再短也没有长度下限兜底，导出侧的 ≥24 粗尺同样放过短值）。
+    /// 键命中即 redact-next，导出件同样先过这道定向层。
+    #[test]
+    fn pretty_json_secret_keys_redact_next_word_case_insensitively() {
+        for line in [
+            "  \"api_key\": \"short-secret\"",
+            "  \"Api_Key\": \"another-one\"",
+            "  \"password\": \"hunter2\"",
+        ] {
+            let disk = sanitize_for_disk(line);
+            assert!(!disk.contains("short-secret"), "{line} -> {disk}");
+            assert!(!disk.contains("another-one"), "{line} -> {disk}");
+            assert!(!disk.contains("hunter2"), "{line} -> {disk}");
+            assert!(disk.contains("[REDACTED]"), "{line} -> {disk}");
+            // 导出件先过同一道定向层再上通用尺子
+            let export = sanitize_for_export(line);
+            assert!(!export.contains("short-secret"), "{line} -> {export}");
+        }
+        // 对照：非机密键的普通 JSON 不受影响
+        assert_eq!(
+            sanitize_for_disk("  \"model_name\": \"qwen3.8-27b\""),
+            "  \"model_name\": \"qwen3.8-27b\""
+        );
+    }
+
+    /// r6 P1-5：`Authorization: Basic <凭据>` 的凭据词存活——scheme 词被抹了，
+    /// 它后面的 base64 凭据原样落盘。scheme 词连带标记下一个词。
+    #[test]
+    fn authorization_basic_scheme_redacts_following_credential() {
+        for line in [
+            "curl -s -H 'Authorization: Basic dXNlcjpwYXNzOndyb25n' https://example.internal/v1",
+            "curl -H \"Authorization: Basic dXNlcjpwYXNzOndyb25n\" http://10.0.0.8/api",
+            "curl --header=Authorization: Bearer eyJhbGciOi.very.long.token https://x",
+        ] {
+            let disk = sanitize_for_disk(line);
+            assert!(!disk.contains("dXNlcjpwYXNz"), "{line} -> {disk}");
+            assert!(!disk.contains("eyJhbGciOi"), "{line} -> {disk}");
+        }
+    }
+
+    /// r19 P2-8：没有 `-H` 上下文的裸 scheme 形态——脚本手动
+    /// `export Authorization: Basic <base64>` / `echo '… Basic <base64>'` 时，
+    /// bare 检查此前只认 bearer 不认 basic，base64 凭据整词落盘+导出
+    /// （它不够 24 位时导出侧的粗尺也拦不住）。
+    ///
+    /// 误伤面与 bearer 完全同款（"Basic usage" 会把 usage 抹掉）：redact-next
+    /// 本来就是「宁可错抹一个词、不放凭据过门」的取舍，两个 scheme 保持同一
+    /// 副作用比各持一套判据更可维护。
+    #[test]
+    fn bare_basic_scheme_redacts_following_credential_without_header_context() {
+        for line in [
+            "+ export Authorization: Basic dXNlcjpwYXNzOndyb25n",
+            "+ echo 'Authorization: Basic dXNlcjpwYXNzOndyb25n'",
+            "Authorization: basic 4oKk4oK0dXNlcjpwYXNz",
+        ] {
+            let disk = sanitize_for_disk(line);
+            assert!(!disk.contains("dXNlcjpwYXNz"), "{line} -> {disk}");
+            // 导出走 sanitize_for_disk 之后再上通用尺子，同一道定向层先拦
+            let export = sanitize_for_export(line);
+            assert!(!export.contains("dXNlcjpwYXNz"), "{line} -> {export}");
+        }
+    }
+
+    /// r22 P2-1：紧凑 JSON 的机密键不是首位键时，r21 的修复（只看第一个冒号）
+    /// 够不着它——`split_once` 切出的名字是 `user`，`api_key` 永远不被扫描。
+    /// 全词逐冒号扫描后这条必须双道（落盘+导出）都拦住。
+    #[test]
+    fn compact_json_with_secret_key_not_in_first_position_is_redacted() {
+        for line in [
+            r#"body={"user":"bob","api_key":"supersecretvalue"}"#,
+            r#"{"model":"qwen","token":"ab12cd34ef56"}"#,
+            r#"data={"a":1,"password":"plainsecret1234"}"#,
+        ] {
+            let disk = sanitize_for_disk(line);
+            assert!(
+                !disk.contains("supersecretvalue")
+                    && !disk.contains("ab12cd34ef56")
+                    && !disk.contains("plainsecret1234"),
+                "非首位机密键落盘泄漏：{line} -> {disk}"
+            );
+            let export = sanitize_for_export(line);
+            assert!(
+                !export.contains("supersecretvalue")
+                    && !export.contains("ab12cd34ef56")
+                    && !export.contains("plainsecret1234"),
+                "非首位机密键导出泄漏：{line} -> {export}"
+            );
+        }
+    }
+
+    /// r23 P1-2：`json.dumps` 默认分隔符是 `": "`——带空格的 JSON 形态拆词后
+    /// 键词带 `{` 前缀、值词带 `}` 后缀，旧 trim 集不含括号导致三道脱敏臂
+    /// （bare 键 / colon 黏连 / 导出粗尺）全绕过。补集后必须落盘+导出双脱敏。
+    #[test]
+    fn spaced_json_secret_form_with_braces_is_redacted() {
+        for line in [
+            r#"body={"api_key": "supersecret"}"#,
+            r#"data={"token": "ab12cd34ef56"}"#,
+            r#"payload={"password": "plainsecret1234"}"#,
+        ] {
+            let disk = sanitize_for_disk(line);
+            assert!(
+                !disk.contains("supersecret")
+                    && !disk.contains("ab12cd34ef56")
+                    && !disk.contains("plainsecret1234"),
+                "空格 JSON 机密键落盘泄漏：{line} -> {disk}"
+            );
+            let export = sanitize_for_export(line);
+            assert!(
+                !export.contains("supersecret")
+                    && !export.contains("ab12cd34ef56")
+                    && !export.contains("plainsecret1234"),
+                "空格 JSON 机密键导出泄漏：{line} -> {export}"
+            );
+        }
+    }
+
+    /// r22 P2-2：Azure SAS 键（se/sp/sig）**不得**进 bare 词表——`se`/`sp` 是
+    /// 常见普通词根，裸词形态会把无辜的下一个词抹掉（AZURE_SAS_QUERY_KEYS
+    /// 的注释一直这么承诺）。键名语境（URL query / `KEY=` / `-H KEY=值`）照收。
+    #[test]
+    fn azure_sas_keys_do_not_swallow_innocent_next_words_in_bare_form() {
+        // 裸词形态：`se` 后面的普通词必须原样保留
+        let disk = sanitize_for_disk("params: se 2026-01-01T00:00:00Z sp r");
+        assert!(
+            disk.contains("2026-01-01T00:00:00Z"),
+            "bare 语境的 Azure 键不得抹掉下一个词：{disk}"
+        );
+        // 键名语境照收：URL query 里的 se/sig 取值仍要抹
+        let url = "https://acct.blob.core.windows.net/c/b?se=2026-01-01&sp=r&sig=QUxFU0lHTUFURQ";
+        let redacted = sanitize_for_disk(url);
+        assert!(
+            !redacted.contains("QUxFU0lHTUFURQ"),
+            "query 语境的 sig 必须抹：{redacted}"
+        );
+    }
+
+    /// r22（10:21 分片 P2-1b）：`Authorization:Basic <b64>` 冒号黏连形态——
+    /// scheme 声明词本身不含机密，base64 凭证在下一个词；与空格分离形态
+    /// （上方 bare_basic_scheme 测试）同语义覆盖。
+    #[test]
+    fn authorization_glued_scheme_redacts_following_credential() {
+        for line in [
+            "+ export Authorization:Basic dXNlcjpwYXNzOndyb25n",
+            "Authorization:Bearer 4oKk4oK0dXNlcjpwYXNz",
+        ] {
+            let disk = sanitize_for_disk(line);
+            assert!(!disk.contains("dXNlcjpwYXNz"), "{line} -> {disk}");
+            let export = sanitize_for_export(line);
+            assert!(!export.contains("dXNlcjpwYXNz"), "{line} -> {export}");
+        }
+    }
+
+    /// 行首缩进必须留着。
+    ///
+    /// 脱敏是按空白分词重拼的，默认会把缩进一起压平。而 Python traceback 是这份日志里
+    /// 最有价值的形状，它全靠缩进才读得出调用层级；压平之后两层看起来一样深，
+    /// 一份读不顺的日志会让人放弃往下看。
+    #[test]
+    fn leading_indentation_survives_the_sanitizer() {
+        assert_eq!(
+            sanitize_for_disk("    raise ValueError(\"weights checksum mismatch\")"),
+            "    raise ValueError(\"weights checksum mismatch\")"
+        );
+        assert_eq!(
+            sanitize_for_disk("  File \"/opt/x.py\", line 3, in <module>"),
+            "  File \"/opt/x.py\", line 3, in <module>"
+        );
+        // 缩进里的机密照样要抹掉——留缩进不等于放过内容
+        assert!(
+            !sanitize_for_disk("    HF_TOKEN=hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345")
+                .contains("hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345")
+        );
+    }
+
+    #[test]
+    fn long_lines_are_clamped_and_single_line() {
+        let cleaned =
+            sanitize_for_disk(&format!("head\r\ntail {}", "x".repeat(MAX_LINE_CHARS * 2)));
+        assert!(!cleaned.contains('\n'));
+        assert!(!cleaned.contains('\r'));
+        assert!(cleaned.contains("已截断"));
+    }
+
+    /// **文件级**断言：落到磁盘上的那份不含任何一个机密的原值。
+    ///
+    /// 这是这个模块允许存在的前提条件。断言的对象刻意是**文件内容**而不是脱敏函数的
+    /// 返回值——中间任何一环（忘了调 sanitize、header 里漏了 label、结局行拼错）
+    /// 都会被这条抓住，而只断函数返回值的测试全都抓不到。
+    #[test]
+    fn nothing_secret_ever_reaches_the_file_on_disk() {
+        let _home = config::TempHome::new();
+        register_secret("literal-secret-value-42");
+        let file =
+            RunLogFile::open("run-TeStId_1", "下载 hf_HeaderTokenAbCdEf0123456789", &[]).unwrap();
+        file.append("+ export HF_TOKEN=hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345");
+        file.append("curl -H 'Authorization: Bearer hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345' https://hf-mirror.com");
+        file.append("openai key sk-proj-0123456789abcdefghijklmnop");
+        file.append(
+            "wget https://mirror.example.com/x.tar?token=hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+        );
+        file.append("echo literal-secret-value-42");
+        file.finish("失败：磁盘空间不足");
+
+        let content = std::fs::read_to_string(file.path()).unwrap();
+        for secret in [
+            "hf_AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+            "hf_HeaderTokenAbCdEf0123456789",
+            "sk-proj-0123456789abcdefghijklmnop",
+            "literal-secret-value-42",
+        ] {
+            assert!(!content.contains(secret), "{secret} 落盘了：\n{content}");
+        }
+        // 反面：正常内容必须还在，否则这份日志没有诊断价值
+        assert!(content.contains("hf-mirror.com"), "{content}");
+        assert!(content.contains("磁盘空间不足"), "{content}");
+        assert!(content.contains(REDACTED), "{content}");
+
+        // 落点必须是 `~/.pinvou3/model-store/logs/`（跟着 config.rs 的既有决策走）
+        let expected = config::data_dir().join("logs").join("run-TeStId_1.log");
+        assert_eq!(file.path(), expected.as_path());
+
+        // 0600：这份文件里有主机名、路径、有时还有用户名
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(file.path()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "日志文件权限不是 0600");
+        }
+    }
+
+    /// 单次运行的体积上限。日志目录跟用户的权重同盘，写满盘的后果是下载失败，
+    /// 而且是以一种完全看不懂的方式失败。
+    #[test]
+    fn a_single_run_log_stops_growing_at_the_cap() {
+        let _home = config::TempHome::new();
+        let file = RunLogFile::open("run-cap", "封顶测试", &[]).unwrap();
+        let line = "x".repeat(MAX_LINE_CHARS - 1);
+        // 略多于上限所需的行数，确保踩过界
+        for _ in 0..(MAX_RUN_LOG_BYTES as usize / MAX_LINE_CHARS + 4) {
+            file.append(&line);
+        }
+        let size = std::fs::metadata(file.path()).unwrap().len();
+        // 允许超出一行加一句说明的量：判定发生在写之前，不是写之中
+        assert!(
+            size < MAX_RUN_LOG_BYTES + 2 * MAX_LINE_CHARS as u64,
+            "封顶没生效，写了 {size} 字节"
+        );
+        let content = std::fs::read_to_string(file.path()).unwrap();
+        assert!(
+            content.contains("上限"),
+            "截断没留下说明，日志会像是凭空断掉"
+        );
+    }
+
+    /// 进度行不吃落盘预算（2026-10-20 评审 P2）：16.8 万行进度若逐行落盘，
+    /// 4MiB 预算在下载中途耗尽，之后真正的报错不再落盘。
+    #[test]
+    fn progress_lines_do_not_consume_the_disk_budget() {
+        let _home = config::TempHome::new();
+        let file = RunLogFile::open("run-progress", "进度测试", &[]).unwrap();
+        for i in 0..2_000 {
+            file.append(&format!("LMM_PROGRESS_BYTES={i}/999999"));
+        }
+        file.append("真实错误：磁盘空间不足");
+        file.finish("失败");
+
+        let content = std::fs::read_to_string(file.path()).unwrap();
+        assert!(
+            !content.contains("LMM_PROGRESS_BYTES"),
+            "进度行不该落盘：\n{}",
+            &content[..content.len().min(400)]
+        );
+        assert_eq!(
+            content.matches("省略重复的进度行").count(),
+            1,
+            "说明只留一次"
+        );
+        assert!(content.contains("真实错误"), "报错必须落盘：\n{content}");
+    }
+
+    /// 导出那份比落盘那份更严，而且是**重新生成**的快照。
+    #[test]
+    fn export_rewrites_the_log_through_the_stricter_sanitizer() {
+        let _home = config::TempHome::new();
+        let file = RunLogFile::open("run-export", "导出测试", &[]).unwrap();
+        file.append("ssh 192.168.31.42 连接超时，权重在 /home/l28756/.pinvou3/model-store/models");
+        file.finish("失败");
+
+        let (exported, snapshot) = export_run_log("run-export").unwrap();
+        let content = std::fs::read_to_string(&exported).unwrap();
+        assert_eq!(snapshot, content);
+        assert!(!content.contains("192.168.31.42"), "{content}");
+        assert!(content.contains("[HOST]"), "{content}");
+        // 连跑两次不许把内容叠起来——导出是"这一刻的快照"，叠加只会让人拿错
+        let (again, snapshot) = export_run_log("run-export").unwrap();
+        assert_eq!(snapshot, std::fs::read_to_string(&again).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&again).unwrap().len(),
+            content.len()
+        );
+        // 没有这次运行时给一句人话，而不是 panic
+        assert!(export_run_log("run-nope").is_err());
+    }
+
+    #[test]
+    fn oversized_logs_never_return_an_export_or_clipboard_snapshot() {
+        let _home = config::TempHome::new();
+        let file = RunLogFile::open("run-oversize", "测试", &[]).unwrap();
+        let source = std::fs::OpenOptions::new()
+            .write(true)
+            .open(file.path())
+            .unwrap();
+        source.set_len(MAX_EXPORT_LOG_BYTES + 1).unwrap();
+        assert!(export_run_log("run-oversize").is_err());
+        assert!(!logs_dir().join("run-oversize.export.log").exists());
+    }
+
+    /// 只留最近若干份，别让日志目录无限涨。
+    #[test]
+    fn old_run_logs_get_pruned() {
+        let _home = config::TempHome::new();
+        for index in 0..(MAX_RUN_FILES + 5) {
+            let file = RunLogFile::open(&format!("run-{index:03}"), "轮转测试", &[]).unwrap();
+            file.append("一行");
+            file.finish("成功");
+        }
+        // r43 P2：轮转带跨进程 mtime 租约（新鲜文件不删）——「老到该删」的
+        // 判据从「排位靠后」变成「排位靠后且 mtime 超租约窗」。把全部文件
+        // backdate 到两小时前，再触发一次轮转验证裁剪。
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        for entry in std::fs::read_dir(logs_dir()).unwrap().flatten() {
+            set_mtime(&entry.path(), old);
+        }
+        RunLogFile::open("run-trigger", "轮转触发", &[]).unwrap();
+        let count = std::fs::read_dir(logs_dir())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "log"))
+            .count();
+        assert!(count <= MAX_RUN_FILES, "轮转没生效，目录里有 {count} 份");
+    }
+
+    /// r43 P2：跨进程租约的另一面——mtime 新鲜（另一进程正在写）的日志
+    /// 即使排位落在删除线上也不删，预算宁可临时超份。
+    #[test]
+    fn fresh_mtime_logs_survive_rotation_via_cross_process_lease() {
+        let _home = config::TempHome::new();
+        for index in 0..(MAX_RUN_FILES + 3) {
+            let file = RunLogFile::open(&format!("fresh-{index:03}"), "租约测试", &[]).unwrap();
+            file.append("一行");
+            file.finish("成功");
+        }
+        RunLogFile::open("fresh-trigger", "租约触发", &[]).unwrap();
+        let count = std::fs::read_dir(logs_dir())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "log"))
+            .count();
+        assert!(
+            count > MAX_RUN_FILES,
+            "新鲜 mtime 的日志不该被删（租约失效？）目录里有 {count} 份"
+        );
+    }
+
+    fn set_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_accessed(when)
+                .set_modified(when),
+        )
+        .unwrap();
+    }
+
+    /// 活跃运行的日志不能被轮转删掉（2026-10-20 评审 P2）：等输入的静默期
+    /// （最长 600s）里它的 mtime 会变旧——下一次别的运行 open 触发轮转时，
+    /// 它恰好落在删除线上；fd 还开着，删掉后写入全进孤儿 inode，
+    /// 「导出日志」从此读不到这次运行。
+    #[test]
+    fn an_active_run_log_is_never_pruned_even_when_oldest() {
+        let _home = config::TempHome::new();
+        let dir = logs_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let ancient = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        for index in 0..(MAX_RUN_FILES + 3) {
+            let path = dir.join(format!("stale-{index:03}.log"));
+            std::fs::write(&path, "stale").unwrap();
+            set_mtime(
+                &path,
+                ancient + std::time::Duration::from_secs(1 + index as u64),
+            );
+        }
+        // 活跃那份的 mtime 最旧（等输入静默期的形态），没有保护必被删
+        let active_path = dir.join("run-waiting-input.log");
+        std::fs::write(&active_path, "waiting for input").unwrap();
+        set_mtime(&active_path, ancient);
+        RunLogFile::open("run-new", "新运行", &["run-waiting-input".to_string()]).unwrap();
+        assert!(active_path.exists(), "活跃运行的日志被轮转删掉了");
+        let count = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                let path = entry.path();
+                path.extension().is_some_and(|e| e == "log")
+                    && !path
+                        .file_stem()
+                        .is_some_and(|stem| stem.to_string_lossy().ends_with(".export"))
+            })
+            .count();
+        assert!(
+            count <= MAX_RUN_FILES + 1,
+            "其余陈旧日志照常轮转（活跃那份允许临时超一份），目录里有 {count} 份"
+        );
+    }
+
+    /// `.export.log` 是用户手动导出的产物：不吃 20 份预算，也不被静默删除。
+    #[test]
+    fn user_export_files_are_not_part_of_the_run_log_budget() {
+        let _home = config::TempHome::new();
+        let dir = logs_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let export = dir.join("run-old.export.log");
+        std::fs::write(&export, "exported snapshot").unwrap();
+        set_mtime(&export, std::time::SystemTime::UNIX_EPOCH);
+        for index in 0..(MAX_RUN_FILES + 5) {
+            let file = RunLogFile::open(&format!("run-e{index:03}"), "导出预算测试", &[]).unwrap();
+            file.append("一行");
+            file.finish("成功");
+        }
+        assert!(export.exists(), "用户导出的文件被轮转删掉了");
+    }
+
+    /// r6 P2-5：导出件不吃运行预算，但要有独立上界——源日志轮转掉之后，
+    /// 旧导出件是没人引用的孤儿，只增不减。超过 `MAX_EXPORT_FILES` 份时
+    /// 清最旧的，且不影响运行日志的预算。
+    #[test]
+    fn export_files_have_their_own_bounded_retention() {
+        let _home = config::TempHome::new();
+        let dir = logs_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        for index in 0..(MAX_EXPORT_FILES + 7) {
+            let path = dir.join(format!("run-x{index:03}.export.log"));
+            std::fs::write(&path, "exported snapshot").unwrap();
+            // mtime 递增：编号大的新
+            set_mtime(
+                &path,
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(index as u64),
+            );
+        }
+        // 一份运行日志触发轮转（prune 在 open 时执行）
+        let file = RunLogFile::open("run-x-trigger", "导出上界测试", &[]).unwrap();
+        file.append("一行");
+        file.finish("成功");
+        let remaining: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".export.log"))
+            .collect();
+        assert_eq!(
+            remaining.len(),
+            MAX_EXPORT_FILES,
+            "导出件应收敛到独立上界，实际剩 {remaining:?}"
+        );
+        assert!(
+            remaining.contains(&"run-x016.export.log".to_string()),
+            "最新的一份必须保留：{remaining:?}"
+        );
+        assert!(
+            !remaining.contains(&"run-x000.export.log".to_string()),
+            "最旧的一份应被清掉：{remaining:?}"
+        );
+    }
+
+    #[test]
+    fn run_id_is_reduced_to_a_single_safe_path_component() {
+        assert_eq!(safe_stem("../../etc/passwd"), "etcpasswd");
+        assert_eq!(safe_stem("run-AbC_1-2"), "run-AbC_1-2");
+        assert_eq!(safe_stem("///"), "unknown");
+    }
+
+    /// r30 P1×3 + P2-1 钉测试。半修三连（r27 P2-12 / r28 P2-14 / r29 P1×2）的
+    /// 共同教训：修复没有形状断言钉住，下一轮改判据就静默回归。这里每条都断言
+    /// **精确形状**（含负控与「无垃圾双推」），不是只断言原值不在。
+    #[test]
+    fn sanitiser_pins_r30_header_and_authorization_forms() {
+        // P1-1：-H KEY=VALUE 的键名判据必须是 query ∪ key 两表并集——SigV4 三员
+        // 里的 credential / security-token 只活在 key 表，r29 换单表即回归。
+        let cleaned = sanitize_for_disk(
+            "curl -H Credential=AKIAIOSFODNN7EXAMPLE/20261108/us-east-1/s3/aws4_request https://s3",
+        );
+        assert!(
+            !cleaned.contains("AKIAIOSFODNN7EXAMPLE/20261108"),
+            "{cleaned}"
+        );
+        assert!(cleaned.contains("Credential=[REDACTED]"), "{cleaned}");
+        let cleaned =
+            sanitize_for_disk("curl -H Security-Token=FwoGZXIvYXdzEBPaExample123456 https://x");
+        assert!(
+            !cleaned.contains("FwoGZXIvYXdzEBPaExample123456"),
+            "{cleaned}"
+        );
+        assert!(cleaned.contains("Security-Token=[REDACTED]"), "{cleaned}");
+        // P1-1 负控：普通键的 = 值不误伤。
+        let cleaned = sanitize_for_disk("curl -H X-Custom-Trace=abc123 https://x");
+        assert!(cleaned.contains("X-Custom-Trace=abc123"), "{cleaned}");
+
+        // P1-3：set -x 对带引号参数的回显必带引号——名字/值先剥引号再判。
+        let cleaned = sanitize_for_disk("+ curl -H 'X-Api-Key=shortsecret1' https://x");
+        assert!(!cleaned.contains("shortsecret1"), "{cleaned}");
+        assert!(cleaned.contains("'X-Api-Key=[REDACTED]"), "{cleaned}");
+
+        // P1-2：非 scheme 黏连（无 -H 语境）——原值不落盘，且不再有
+        // 「原词 + Authorization:[REDACTED] 垃圾」的双推形态。
+        let cleaned = sanitize_for_disk("config Authorization:plainsecret12345 tail");
+        assert!(!cleaned.contains("plainsecret12345"), "{cleaned}");
+        assert!(cleaned.contains("Authorization:[REDACTED]"), "{cleaned}");
+        assert!(
+            !cleaned.contains("Authorization:plainsecret"),
+            "双推回归：{cleaned}"
+        );
+        // P1-2：scheme 黏连此前同样双推（语义侥幸、行损坏）——钉住单份输出。
+        let cleaned = sanitize_for_disk("config Authorization:basic dXNlcjpwYXNzMTIzNA tail");
+        assert!(!cleaned.contains("dXNlcjpwYXNzMTIzNA"), "{cleaned}");
+        assert_eq!(
+            cleaned.matches("Authorization:basic").count(),
+            1,
+            "scheme 黏连词双推回归：{cleaned}"
+        );
+
+        // P2-1：两段式 -H 的 scheme 链——真凭据在下一个词；名字门保证
+        // URL（跟在后面的普通参数）不被误吞。
+        let cleaned = sanitize_for_disk("curl -H Authorization:basic dXNlcjpwYXNzMTIzNA https://x");
+        assert!(!cleaned.contains("dXNlcjpwYXNzMTIzNA"), "{cleaned}");
+        assert!(cleaned.contains("https://x"), "URL 被误吞：{cleaned}");
+        let cleaned = sanitize_for_disk("curl -H X-Custom:basic https://x");
+        assert!(cleaned.contains("https://x"), "名字门失效：{cleaned}");
+
+        // r29 阻断一回归钉：紧凑 XML 标签形态（词中部 <> 要当定界符切）。
+        let cleaned = sanitize_for_disk(
+            "echo '<AccessKey>AKIAIOSFODNN7EXAMPLE</AccessKey>' '<Key>sk-abcd1234</Key>'",
+        );
+        assert!(!cleaned.contains("AKIAIOSFODNN7EXAMPLE"), "{cleaned}");
+        assert!(!cleaned.contains("sk-abcd1234"), "{cleaned}");
+
+        // r30 同族扫荡：`--header=` 黏连的 = 形态此前直通透传。
+        let cleaned = sanitize_for_disk("curl --header='X-Api-Key=shortsecret2' https://x");
+        assert!(!cleaned.contains("shortsecret2"), "{cleaned}");
+        let cleaned =
+            sanitize_for_disk("curl --header=Authorization:basic dXNlcjpwYXNzMTIzNA https://x");
+        assert!(!cleaned.contains("dXNlcjpwYXNzMTIzNA"), "{cleaned}");
+    }
+
+    /// r31 P1-1 七形态钉：Authorization/Proxy-Authorization 非 -H 语境名字侧。
+    #[test]
+    fn sanitiser_pins_r31_authorization_name_side_forms() {
+        let cases = [
+            // ① 空格分离（此前 len>14 门恰好排除 14 字节裸词）
+            "debug Authorization: shortsecret12345 tail",
+            // ② curl -v 的 `> ` 回显
+            "> Authorization: shortsecret12345",
+            // ③ env `=` 形态
+            "Authorization=shortsecret12345",
+            // ④ Proxy-authorization 冒号黏连
+            "Proxy-Authorization:shortsecret12345",
+            // ⑤ 紧凑 JSON
+            "{\"Authorization\":\"shortsecret12345\"}",
+            // ⑥ python dict 双词
+            "headers={'Authorization': 'shortsecret12345'}",
+            // ⑦ set -x 整参数引号
+            "+ echo 'Authorization: shortsecret12345'",
+        ];
+        for line in cases {
+            let cleaned = sanitize_for_disk(line);
+            assert!(
+                !cleaned.contains("shortsecret12345"),
+                "形态泄漏：{line} -> {cleaned}"
+            );
+            assert!(
+                cleaned.contains(REDACTED),
+                "无脱敏输出：{line} -> {cleaned}"
+            );
+        }
+        // scheme 两步链不误伤：scheme 词保留语义、真凭据被抹。
+        let cleaned = sanitize_for_disk("Authorization: Basic dXNlcjpwYXNzMTIzNA tail");
+        assert!(!cleaned.contains("dXNlcjpwYXNzMTIzNA"), "{cleaned}");
+        assert!(cleaned.contains("Basic"), "scheme 词应保留：{cleaned}");
+        // 无冒号裸词（普通英语）不受影响。
+        let cleaned = sanitize_for_disk("authorization failed for user bob");
+        assert_eq!(cleaned, "authorization failed for user bob");
+    }
+
+    /// r31 P2-1：SigV4 三员名字侧进 colon/JSON 语境（两表分裂收口）。
+    #[test]
+    fn sanitiser_pins_r31_sigv4_colon_side_names() {
+        for line in [
+            "Security-Token:shortsecret12345",
+            "Credential:shortsecret12345",
+            "{\"security-token\":\"shortsecret12345\"}",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret12345"), "{line} -> {cleaned}");
+        }
+    }
+
+    /// r32 P1-1：api-key 连字形态三路钉 + 负控。
+    #[test]
+    fn sanitiser_pins_r32_api_key_hyphen_forms() {
+        for line in [
+            "curl -H api-key=shortsecret12345 https://x",
+            "config api-key:shortsecret12345 tail",
+            "curl 'https://host/v1?api-key=shortsecret12345'",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret12345"), "{line} -> {cleaned}");
+        }
+        // 负控：非机密的连字键不误伤。
+        let cleaned = sanitize_for_disk("curl 'https://host/v1?api-key-normal=abc' https://x");
+        assert!(cleaned.contains("api-key-normal=abc"), "{cleaned}");
+        // 尾部收：session_token / secret_key = 形态。
+        for line in [
+            "+ export session_token=shortsecret12345",
+            "config secret_key=shortsecret12345",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret12345"), "{line} -> {cleaned}");
+        }
+    }
+
+    /// r33 P2-2：query 语境接统一谓词——SigV4 裸名此前只在名字侧名单，
+    /// `?credential=`/`?session_token=`/`?security-token=` 以原值落盘（评审实测三漏）。
+    #[test]
+    fn sanitiser_pins_r33_query_sigv4_bare_names() {
+        for line in [
+            "curl 'https://host/v1?credential=AKIAIOSFODNN7EXAMPLE'",
+            "curl 'https://host/v1?session_token=shortsecret12345'",
+            "curl 'https://host/v1?security-token=shortsecret12345'",
+        ] {
+            let cleaned = sanitize_for_disk(line);
+            assert!(!cleaned.contains("shortsecret12345"), "{line} -> {cleaned}");
+            assert!(
+                !cleaned.contains("AKIAIOSFODNN7EXAMPLE"),
+                "{line} -> {cleaned}"
+            );
+        }
+        // 负控：普通 query 参数不受统一谓词牵连。
+        let cleaned = sanitize_for_disk("curl 'https://host/v1?page=2&size=10'");
+        assert!(cleaned.contains("page=2"), "{cleaned}");
+    }
+
+    /// r31 P2-2：redact_next 跨物理行延续（pretty JSON 两行形态）。
+    #[test]
+    fn sanitiser_carries_pending_across_lines() {
+        let mut carry = DiskCarry::default();
+        let l1 = sanitize_line_with("  \"api_key\":", &mut carry);
+        assert!(carry.redact_next, "键行行尾应置位：{l1}");
+        let l2 = sanitize_line_with("  \"supersecretvalue1234\"", &mut carry);
+        assert!(
+            !l2.contains("supersecretvalue1234"),
+            "跨行值词透传泄漏：{l2}"
+        );
+        assert!(!carry.redact_next, "消费后应复位");
+        // auth_pending 同样跨行。
+        let mut carry = DiskCarry::default();
+        let l1 = sanitize_line_with("Authorization:", &mut carry);
+        assert!(carry.auth_pending, "{l1}");
+        let l2 = sanitize_line_with("shortsecret12345", &mut carry);
+        assert!(!l2.contains("shortsecret12345"), "{l2}");
+    }
+}

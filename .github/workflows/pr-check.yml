@@ -434,6 +434,13 @@ jobs:
               - '**/build.rs'
               - 'scripts/ci-libpipewire-build.sh'
               - 'scripts/ci-cargo-dev-profile.py'
+              # r21 P2-10：permissions harness 的执行腿跑的是 shell 入口
+              # （tests/model-store-permissions/run.sh）——只改 run.sh/README 的
+              # PR 不触 '**/*.rs' 谓词（crate 根的 src/main.rs 会命中，但 shell
+              # 侧改动不碰它），会跳过执行腿而 required-gate 按 skipped 通过
+              # （本 workflow :271-280 自己记载过这类事故）。LAN harness 不需要
+              # 整目录登记：其 crate 根的 *.rs 天然命中上面的 '**/*.rs'。
+              - 'tests/model-store-permissions/**'
               - 'CodeWhale'
               - '.gitmodules'
               - '.github/workflows/pr-check.yml'
@@ -3483,6 +3490,14 @@ jobs:
       - name: Controller authentication and local safety regression
         working-directory: pinvou3-app/src-tauri
         run: cargo test --locked --manifest-path tests/controller-crypto-harness/Cargo.toml
+      # 模型商店两条独立门禁 harness（评审 B1，2026-10-21 接线）：lan_gateway 在
+      # 生产 crate 内零 #[cfg(test)]，这两个 crate 是它唯一可执行的测试；不接进
+      # CI，烂了/被测代码改了语义时所有门禁照样全绿。照抄上一条 harness 的先例
+      # （Draft 也跑），二者各自空 [workspace]，与主工程缓存互不污染。
+      - name: Model store LAN gateway security regression
+        run: cargo test --locked --manifest-path tests/model-store-lan/Cargo.toml
+      - name: Model store permissions harness (umask 0002/0022/0077)
+        run: bash tests/model-store-permissions/run.sh
 
       # clippy 需要 Tauri/WebKit 系统库；Draft 不安装，避免每次 push 消耗 ~70s。
       - name: 装 Tauri + pinvou3 Linux 系统依赖

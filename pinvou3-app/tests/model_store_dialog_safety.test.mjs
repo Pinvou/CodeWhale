@@ -87,13 +87,15 @@ test('保存失败不影响 loaded —— 用户要能改完再存一次', () =>
 // ——— 21. 详情页：标题栏常驻 + 重试 ———
 
 test('详情页的标题栏在 error/loading/正常三个分支之上，只有一处', () => {
-  const titles = DETAIL_DIALOG.match(/<MsDialogTitle/g) || [];
+  // The update confirmation has its own title; this contract guards the
+  // persistent detail title across error/loading/success branches.
+  const titles = DETAIL_DIALOG.match(/<MsDialogTitle id=\{TITLE_ID\}/g) || [];
   assert.equal(
     titles.length,
     1,
     '标题栏出现了多处或一处也没有 —— 它必须常驻在分支之上，右上角的关闭按钮就在里面'
   );
-  const titleAt = DETAIL_DIALOG.indexOf('<MsDialogTitle');
+  const titleAt = DETAIL_DIALOG.indexOf('<MsDialogTitle id={TITLE_ID}');
   const errorBranchAt = DETAIL_DIALOG.indexOf('{error ? (');
   assert.ok(errorBranchAt > 0, '找不到 error 分支');
   assert.ok(
@@ -124,13 +126,13 @@ test('详情页错误态同时留有关闭入口', () => {
 //
 // 复用与否**不由宿主决定**。宿主只答「去哪找」（LMM_IMPORT_DIRS 下发扫描根、
 // LMM_IMPORT_CANDIDATES 交出命中、两者都写进运行日志），卡片脚本答「这份对不对、
-// 要不要用」。而两套卡片行为不同：
-//   - 正式商店的远端卡片已消费 LMM_IMPORT_DIRS（2026-09-21 上架生产，在架 7 张全接）；
-//   - 内置测试商店的卡片（data/test-store/）没接，仍会联网下载。
+// 要不要用」——而卡片脚本只存在于商店服务器上，不随任何 git 仓库走，所以宿主这边
+// 在任何一个方向上都没有资格下断言（2026-09-21 在架那 7 张都接了 LMM_IMPORT_DIRS，
+// 但那是那一批的情况，不是对将来每一张卡的保证）。
 //
-// 所以这条文案在两个方向上各翻过一次车，两边都要钉死：
-//   - 「会被自动找到并复用」 -> 对内置测试卡片是假的；
-//   - 「当前版本不会自动复用」 -> 对正式商店的用户是假的。
+// 这条文案在两个方向上各翻过一次车，两边都要钉死：
+//   - 「会被自动找到并复用」 -> 对没接这个约定的卡片是假的；
+//   - 「当前版本不会自动复用」 -> 对接了的卡片是假的。
 // 唯一安全的写法是描述宿主做了什么，再把复用与否归给卡片。
 const BANNED = {
   zh: [
@@ -147,11 +149,15 @@ const BANNED = {
   ],
 };
 
-// 两套卡片都要点到名，否则又变成替其中一套下断言。
-const BOTH_TRACKS = {
-  zh: [/正式商店/, /测试商店/],
-  en: [/official store/i, /test store/i],
-  ja: [/正式ストア/, /テストストア/],
+// 必须把「谁来决定复用」这件事说出来，否则这句话读起来又像是宿主在承诺。
+//
+// 这里原来要求两套卡片（正式商店 / 内置测试商店）都点到名——那是因为当时真有两个
+// 数据源、行为还不一样。内置测试商店 2026-09-30 拿掉之后只剩一个数据源，"点名两套"
+// 已经无从谈起；约束改成钉住那句归属本身，它才是这条文案不撒谎的真正理由。
+const DEFERS_TO_THE_CARD = {
+  zh: /由卡片脚本决定，不由品悟决定/,
+  en: /up to the card script, not up to Pinvou/i,
+  ja: /品悟ではなくカードのスクリプトが決めます/,
 };
 
 // 换了权重目录之后，旧目录**不会**自动进扫描范围（`import_scan::roots()` 收的是
@@ -173,15 +179,17 @@ for (const lang of LANGS) {
         assert.ok(
           !value.includes(phrase),
           `${lang}.js 的 ${key} 里有绝对化措辞「${phrase}」：复用与否取决于卡片脚本，`
-            + '正式商店的卡片会复用、内置测试卡片不会，任何一边的断言都会对另一边撒谎'
+            + '而卡片脚本不在这个仓库里，任何一个方向的断言都可能对用户撒谎'
         );
       }
     }
 
-    const scanHint = literal(text, 'storageScanHint');
-    for (const re of BOTH_TRACKS[lang]) {
-      assert.match(scanHint, re, `${lang}.js 的 storageScanHint 没说清两套卡片的差别`);
-    }
+    assert.match(
+      literal(text, 'storageScanHint'),
+      DEFERS_TO_THE_CARD[lang],
+      `${lang}.js 的 storageScanHint 没把「复用与否由卡片脚本决定」说出来 —— `
+        + '不说清归属，这句话读起来就是宿主在承诺复用'
+    );
 
     assert.match(
       literal(text, 'storageModelsDirHint'),
@@ -202,11 +210,11 @@ test('新增的两个文案键三语齐全', () => {
   }
 });
 
-// 这里**刻意不去扫** `data/test-store/` 下的脚本有没有消费 LMM_IMPORT_DIRS。
-// 曾经写过那么一条，前提是错的：真正决定用户看到什么的是**正式商店服务器上那份
-// seed 脚本**（不在这两个 git 仓库里），仓库内置的那份只是测试商店用的旧副本，
-// 两者本来就不同步。拿仓库里的副本去推断线上行为，只会把文案又带回某一个方向的
-// 断言。上面那组「两边都不许断言」的约束不依赖任何一份脚本副本，才是稳的。
+// 这里**刻意不去扫任何一份卡片脚本副本**有没有消费 LMM_IMPORT_DIRS。
+// 曾经按 `data/test-store/`（内置测试商店的旧副本）写过那么一条，前提是错的：真正
+// 决定用户看到什么的是**正式商店服务器上那份 seed 脚本**，它不在任何 git 仓库里。
+// 内置那份副本 2026-09-30 已经整个删掉，连"拿它推断线上行为"这个诱惑都没了。
+// 上面那组「两个方向都不许断言」的约束不依赖任何一份脚本副本，才是稳的。
 
 
 // ——— 22. 权重校验档位：不达标的卡必须在详情页认得出来 ———
@@ -216,65 +224,14 @@ test('新增的两个文案键三语齐全', () => {
 // 的"下载完成"判据只是分片文件存不存在，revision 还是浮动的 main。在加这条黄条
 // 之前，两类卡在详情页长得一模一样——用户没有任何自我保护的依据。
 //
-// 判据落在纯逻辑里（weightVerificationOf / weightVerificationNotice，见
-// model_store_logic.test.mjs）；这里只钉"两个详情弹窗真的把它渲染出来了"，
-// 那是纯逻辑测不到、而且掉了也不会有人发现的一环。
-
-test('两个详情弹窗都渲染 WeightVerifyNotice', () => {
-  // 「我的模型」那个详情页：档位来自商店卡片，所以必须把 card 传进去。
-  // 传成 detail/record 的话永远是 undefined —— 于是每张卡都出黄条，等于没做。
-  assert.match(
-    DETAIL_DIALOG,
-    /<WeightVerifyNotice\s+card=\{card\}/,
-    'ModelDetailDialog 没把 card 传给 WeightVerifyNotice —— 库记录里没有档位这一列'
-  );
-  // 商店那个详情页更要紧：它是下载决策点。等下完几十 GB 再说就晚了。
-  assert.match(
-    CARD_DIALOG,
-    /<WeightVerifyNotice\s+card=\{card\}/,
-    'StoreCardDialog 不出这条提示的话，用户是在付出几十 GB 之后才知道的'
-  );
-});
-
-test('WeightVerifyNotice 对达标卡什么都不渲染，且用的是提示色不是危险色', () => {
-  assert.match(
-    STORE_UI,
-    /const notice = weightVerificationNotice\(card\);[\s\S]{0,40}?if \(!notice\) return null;/,
-    'WeightVerifyNotice 丢了"达标就不渲染"那一步 —— 每张卡都挂一条，黄条就成了背景噪音'
-  );
-  // 这是知情权不是恐吓：用户不该因为这条提示就不敢用几张完全正常的卡。
-  assert.match(STORE_UI, /#FEF7E0/, '黄条换掉了模块里既有的提示底色');
-  const start = STORE_UI.indexOf('function WeightVerifyNotice');
-  assert.ok(start >= 0, 'model-store-ui.jsx 里找不到 WeightVerifyNotice —— 改名了就把这条测试一起改');
-  assert.doesNotMatch(
-    STORE_UI.slice(start, STORE_UI.indexOf('function MsToast')),
-    /TEXT_DANGER|text-rose|#C5221F/,
-    '这条提示被做成了危险色。它说的是"这条下载链路上少了一道防线"，不是"这张卡有问题"'
-  );
-});
-
-test('黄条的三句话三语齐全，而且不止一句"未校验"', () => {
+test('权重校验黄条已按产品决定整体移除', () => {
+  // 2026-10-22 用户验证反馈：所有详情卡的黄色区块「一点存在的意义都没有」。
+  // 组件、逻辑函数、i18n 键全部删除；此测试钉住「不再回流」。
+  const STORE_UI = read('src', 'features', 'model-store', 'model-store-ui.jsx');
+  const LOGIC = read('src', 'features', 'model-store', 'model-store-logic.js');
+  assert.ok(!STORE_UI.includes('WeightVerifyNotice'), '组件不应回流');
+  assert.ok(!LOGIC.includes('weightVerificationNotice'), '判定函数不应回流');
   for (const key of ['weightVerifyTitle', 'weightVerifyNone', 'weightVerifyManifest', 'weightVerifyAdvice']) {
-    for (const lang of LANGS) {
-      assert.ok(
-        literal(DICTS.get(lang), key),
-        `${lang}.js 里缺 ${key} —— 缺的那一语会渲染成 undefined`
-      );
-    }
-  }
-  for (const lang of LANGS) {
-    const text = DICTS.get(lang);
-    // none 和 manifest 必须是两句不同的话：manifest 确实逐文件比对过摘要，
-    // 只是参照跟权重同源。把它也说成"没校验"是不实的。
-    assert.notEqual(
-      literal(text, 'weightVerifyNone'),
-      literal(text, 'weightVerifyManifest'),
-      `${lang}.js 把两档说成了同一句话`
-    );
-    // 只说"这意味着什么"不够，还得说"你可以怎么办"，否则留给用户的只有不安。
-    assert.ok(
-      literal(text, 'weightVerifyAdvice').length > 40,
-      `${lang}.js 的 weightVerifyAdvice 短得不像一条可操作的建议`
-    );
+    assert.ok(!read('src', 'shared', 'i18n', 'zh.js').includes(key), `i18n 键 ${key} 不应回流`);
   }
 });

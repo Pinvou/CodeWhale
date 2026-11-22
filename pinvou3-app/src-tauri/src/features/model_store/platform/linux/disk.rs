@@ -12,7 +12,13 @@ pub struct SpaceCheck {
 }
 
 pub fn disk_free_bytes(path: &Path) -> std::io::Result<u64> {
-    std::fs::create_dir_all(path)?;
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(path)
+    }?;
     let stat = nix::sys::statvfs::statvfs(path).map_err(std::io::Error::from)?;
     Ok(stat.blocks_available() as u64 * stat.fragment_size() as u64)
 }

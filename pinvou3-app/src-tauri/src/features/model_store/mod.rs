@@ -101,10 +101,12 @@ pub type ModelStoreService = platform::backend::ModelStoreService;
 // 解释」这件事收在 platform 里，命令层不必分支。
 pub use platform::backend::{
     active_runs, answer_run, api_keys, cancel_run, check_card_update, create_api_key,
-    disable_test_store, follow_deployment_context, force_remove, library, list_cards, model_detail,
-    run_log, run_startup_cleanup, run_startup_refresh, set_storage_settings, start_card_update,
-    start_deploy, start_download, start_lifecycle, start_version_action, startup_update_check,
-    storage_settings, take_startup_cleanup, test_store_state, unlock_test_store, versions,
+    delete_engine, export_run_log, follow_deployment_context, force_remove, installed_engines,
+    lan_status, library, list_cards, local_resources, memory_admission, model_detail,
+    reveal_run_logs_dir, revoke_api_key, run_log, run_startup_cleanup, set_lan_sharing,
+    set_storage_settings, start_card_scripts, start_card_update, start_deploy, start_download,
+    start_lifecycle, start_version_action, startup_update_check, storage_settings,
+    take_startup_cleanup, versions,
 };
 
 // 商店边界查询：供其他 feature（设备管理的外部模型登记/移除）判断某个名字
