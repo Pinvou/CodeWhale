@@ -36,13 +36,12 @@ const copy=dict.uiModelStore,h=React.createElement;
 window.__actions=[];const action=()=>window.__actions.push('unexpected action');
 if(params.has('poll')){
  window.__reads=[];window.__navigated=false;
- window.__library={models:[{card_id:'refresh-card',card_name:'Refresh model',status:'deployed',running:false,cmsd:{managed:true,status:'stopped'}}]};
+ window.__library={models:[{card_id:'refresh-card',card_name:'Refresh model',status:'deployed',running:false,weights_ready_at:'2026-11-01T00:00:00Z',cmsd:{managed:true,status:'stopped'}}]};
  window.__TAURI__={core:{invoke:async command=>{
   window.__reads.push(command);
   if(command==='model_store_availability')return {available:true};
   if(command==='model_store_library')return structuredClone(window.__library);
   if(command==='model_store_cards'||command==='model_store_active_runs')return [];
-  if(command==='model_store_test_store_state')return {enabled:false};
   if(command==='model_store_take_startup_cleanup')return {killed:[],skipped_root:[]};
   throw new Error('Fixture rejects '+command);
  }}};

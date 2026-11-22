@@ -59,7 +59,3 @@ pub(crate) use backend::{
     ollama_base_url_checked, store_model_name, store_model_name_checked, store_weights_roots,
     store_weights_roots_checked, with_weight_removal_boundary,
 };
-
-// lib.rs 启动路径直接调用的后台对账（r36 P2-1）：与上面边界函数同约定走
-// backend 转发，非 Linux 是 no-op——启动同步没有用户面，不适用「回不支持」话术。
-pub(crate) use backend::linked_models_startup_sync;

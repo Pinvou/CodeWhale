@@ -357,6 +357,11 @@ pub fn dispatch(
         "card_update" => {
             service::start_card_update(service, string("card_id")?, string("revision")?)
         }
+        "card_scripts" => service::start_card_scripts(
+            service,
+            string("card_id")?,
+            a["confirmed"].as_bool().unwrap_or(false),
+        ),
         "deploy" => tauri::async_runtime::block_on(service::start_deploy(
             service,
             string("card_id")?,

@@ -1377,18 +1377,10 @@ pub fn run() {
             // `migrate_legacy_builtin_scripts`）。r36 P2-1：原函数还顺带做了一次
             // linked-models 后台对账（sync_linked_models），随函数整体删除而丢失。
             // 这里补一句 fire-and-forget 启动同步——启动后不依赖用户打开商店视图
-            // 就能完成路由/上下文修复对账；失败只记 stderr 不弹（打开视图时会重试）。
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = tokio::task::spawn_blocking(
-                    features::model_store::platform::linked_models_startup_sync,
-                )
-                .await
-                .map_err(|e| e.to_string())
-                .and_then(|r| r)
-                {
-                    eprintln!("[startup] linked-models 同步失败（下次打开商店视图会重试）：{error}");
-                }
-            });
+            // 就能完成路由/上下文修复对账；失败只记日志不弹（打开视图时会重试）。
+            // 经服务入口而不是裸函数：这笔启动偏好事务要持有宿主受控的请求
+            // 守卫，cmsd 请求宿主退出时必须等它做完（见 run_startup_linked_sync）。
+            features::model_store::run_startup_linked_sync(&model_store);
             app.handle().manage(model_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();

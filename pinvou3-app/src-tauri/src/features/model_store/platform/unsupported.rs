@@ -264,9 +264,7 @@ pub fn set_storage_settings(
 pub fn run_startup_cleanup(_service: &Arc<ModelStoreService>) {}
 
 /// 非 Linux 无 linked-models 可对账：no-op 而非报错（同上，启动路径不冒错）。
-pub(crate) fn linked_models_startup_sync() -> Result<(), String> {
-    Ok(())
-}
+pub fn run_startup_linked_sync(_service: &Arc<ModelStoreService>) {}
 
 pub fn take_startup_cleanup(_service: &Arc<ModelStoreService>) -> Result<Value, String> {
     nope()

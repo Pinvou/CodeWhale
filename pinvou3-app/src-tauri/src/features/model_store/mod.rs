@@ -106,9 +106,9 @@ pub use platform::backend::{
     delete_engine, export_run_log, follow_deployment_context, force_remove, installed_engines,
     lan_status, library, list_cards, local_resources, memory_admission, model_detail,
     preview_incomplete, retry_incomplete, reveal_run_logs_dir, revoke_api_key, run_log,
-    run_startup_cleanup, set_lan_sharing, set_storage_settings, start_card_scripts,
-    start_card_update, start_deploy, start_download, start_lifecycle, start_version_action,
-    startup_update_check, storage_settings, take_startup_cleanup, versions,
+    run_startup_cleanup, run_startup_linked_sync, set_lan_sharing, set_storage_settings,
+    start_card_scripts, start_card_update, start_deploy, start_download, start_lifecycle,
+    start_version_action, startup_update_check, storage_settings, take_startup_cleanup, versions,
 };
 
 // 商店边界查询：供其他 feature（设备管理的外部模型登记/移除）判断某个名字

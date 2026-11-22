@@ -680,6 +680,23 @@ impl ModelStoreService {
     }
 }
 
+/// 启动时的 linked-models 后台对账：不等用户打开商店视图就把路由/上下文
+/// 修复对账做完，失败只记日志（打开视图时会重试）。
+///
+/// cmsd 请求宿主退出（retire）时必须等这笔启动偏好事务做完，所以整个事务
+/// 持有 `host_control` 的请求守卫；宿主已在排水就直接放弃这次对账。
+pub fn run_startup_linked_sync(service: &Arc<ModelStoreService>) {
+    let service = Arc::clone(service);
+    std::thread::spawn(move || {
+        let Ok(_request) = service.host_control.request() else {
+            return;
+        };
+        if let Err(error) = service.sync_linked_models(None) {
+            log::warn!("model-store linked model refresh failed: {error}");
+        }
+    });
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedRun {
     card_id: String,
@@ -1566,7 +1583,7 @@ pub fn start_version_action(
     if service.remote {
         return super::background::call(
             "version_action",
-            json!({"card_id":card_id,"action":action,"version_id":version_id}),
+            json!({"card_id":card_id,"action":action,"version_id":version_id,"memory_confirmed":memory_confirmed}),
         );
     }
     let op = match action.as_str() {
@@ -1953,6 +1970,13 @@ pub fn start_card_scripts(
     if !confirmed {
         return Err("更新卡片脚本需要明确确认；不会下载或删除模型权重。".into());
     }
+    if service.remote {
+        return super::background::call(
+            "card_scripts",
+            json!({"card_id":card_id,"confirmed":confirmed}),
+        );
+    }
+
     let card = card_id.clone();
     let op = CardOp {
         kind: "card_scripts",
@@ -1984,7 +2008,7 @@ pub async fn start_deploy(
         if service.remote {
             return super::background::call(
                 "deploy",
-                json!({"card_id":card_id,"profile_id":profile_id}),
+                json!({"card_id":card_id,"profile_id":profile_id,"memory_confirmed":memory_confirmed}),
             );
         }
         start_deploy_checked(&service, card_id, profile_id, memory_confirmed)
@@ -2085,7 +2109,7 @@ fn start_lifecycle_checked(
     if service.remote {
         return super::background::call(
             "lifecycle",
-            json!({"card_id":card_id,"action":action,"purge_weights":purge_weights}),
+            json!({"card_id":card_id,"action":action,"purge_weights":purge_weights,"memory_confirmed":memory_confirmed}),
         );
     }
 

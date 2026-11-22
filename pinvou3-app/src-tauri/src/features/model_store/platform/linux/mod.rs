@@ -57,7 +57,6 @@ mod lan_network;
 mod lan_store;
 pub mod lifecycle;
 mod linked_models;
-pub(crate) use linked_models::linked_models_startup_sync;
 pub mod local_service;
 mod log_page;
 pub mod maintenance;
@@ -86,9 +85,9 @@ pub use service::{
     create_api_key, delete_engine, export_run_log, follow_deployment_context, force_remove,
     installed_engines, library, list_cards, local_resources, memory_admission, model_detail,
     preview_incomplete, retry_incomplete, reveal_run_logs_dir, run_log, run_startup_cleanup,
-    set_storage_settings, start_card_scripts, start_card_update, start_deploy, start_download,
-    start_lifecycle, start_version_action, startup_update_check, storage_settings,
-    take_startup_cleanup, versions,
+    run_startup_linked_sync, set_storage_settings, start_card_scripts, start_card_update,
+    start_deploy, start_download, start_lifecycle, start_version_action, startup_update_check,
+    storage_settings, take_startup_cleanup, versions,
 };
 
 // 可见性契约：`installed_weight_paths_checked` 与 `installed_weight_candidate_names_checked`
